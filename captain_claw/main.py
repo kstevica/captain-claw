@@ -119,6 +119,9 @@ async def run_interactive() -> None:
     
     # Initialize agent
     await agent.initialize()
+    ui.set_monitor_mode(True)
+    if agent.session:
+        ui.load_monitor_tool_output_from_session(agent.session.messages)
     ui.set_runtime_status("user input")
     last_exec_seconds: float | None = None
     last_completed_at: datetime | None = None
@@ -148,14 +151,43 @@ async def run_interactive() -> None:
             elif result == "CLEAR":
                 if agent.session:
                     agent.session.messages = []
+                    await agent.session_manager.save_session(agent.session)
                     ui.clear_monitor_tool_output()
                     ui.print_success("Session cleared")
                 continue
-            elif result == "NEW":
-                agent.session = await agent.session_manager.get_or_create_session()
+            elif result == "NEW" or result.startswith("NEW:"):
+                session_name = "default"
+                if result.startswith("NEW:"):
+                    session_name = result.split(":", 1)[1].strip() or "default"
+                agent.session = await agent.session_manager.create_session(name=session_name)
                 if agent.session:
                     ui.load_monitor_tool_output_from_session(agent.session.messages)
+                    ui.print_session_info(agent.session)
                 ui.print_success("Started new session")
+                continue
+            elif result == "SESSIONS":
+                sessions = await agent.session_manager.list_sessions(limit=20)
+                ui.print_session_list(
+                    sessions,
+                    current_session_id=agent.session.id if agent.session else None,
+                )
+                continue
+            elif result == "SESSION_INFO":
+                if agent.session:
+                    ui.print_session_info(agent.session)
+                else:
+                    ui.print_error("No active session")
+                continue
+            elif result.startswith("SESSION_SELECT:"):
+                selector = result.split(":", 1)[1].strip()
+                selected = await agent.session_manager.select_session(selector)
+                if not selected:
+                    ui.print_error(f"Session not found: {selector}")
+                    continue
+                agent.session = selected
+                ui.load_monitor_tool_output_from_session(agent.session.messages)
+                ui.print_session_info(agent.session)
+                ui.print_success("Loaded session")
                 continue
             elif result == "CONFIG":
                 ui.print_config(get_config())

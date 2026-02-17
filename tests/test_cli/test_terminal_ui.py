@@ -118,6 +118,19 @@ def test_monitor_command_parsing():
     assert ui.handle_special_command("/monitor off") == "MONITOR_OFF"
 
 
+def test_session_commands_parsing():
+    ui = TerminalUI()
+    assert ui.handle_special_command("/sessions") == "SESSIONS"
+    assert ui.handle_special_command("/session") == "SESSION_INFO"
+    assert ui.handle_special_command("/session abc123") == "SESSION_SELECT:abc123"
+
+
+def test_new_command_supports_optional_name():
+    ui = TerminalUI()
+    assert ui.handle_special_command("/new") == "NEW"
+    assert ui.handle_special_command("/new investigation") == "NEW:investigation"
+
+
 def test_append_tool_output_formats_header_and_body():
     ui = TerminalUI()
     ui.append_tool_output("shell", {"command": "date"}, "Tue")

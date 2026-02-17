@@ -32,6 +32,8 @@ class TerminalUI:
             "/help",
             "/clear",
             "/new",
+            "/session",
+            "/sessions",
             "/config",
             "/history",
             "/monitor",
@@ -136,7 +138,10 @@ class TerminalUI:
 Commands:
   /help           - Show this help message
   /clear          - Clear current session
-  /new            - Start a new session
+  /new [name]     - Start a new session (optionally named)
+  /session <id>   - Switch to a session by ID
+  /session <name> - Switch to latest session by name
+  /sessions       - List recent sessions
   /config         - Show configuration
   /history        - Show conversation history
   /monitor on     - Enable split monitor view
@@ -680,6 +685,26 @@ Commands:
         print(f"Messages: {len(session.messages)}")
         print()
 
+    def print_session_list(self, sessions: list[Any], current_session_id: str | None = None) -> None:
+        """Print recent session list."""
+        lines = ["\n=== Sessions ==="]
+        if not sessions:
+            lines.append("(no sessions found)")
+        for idx, session in enumerate(sessions, start=1):
+            marker = "*" if session.id == current_session_id else " "
+            lines.append(
+                f"{marker} [{idx}] {session.name} | id={session.id} | messages={len(session.messages)} | updated={session.updated_at}"
+            )
+        lines.append("")
+
+        content = "\n".join(lines) + "\n"
+        if self._monitor_mode and self._sticky_footer:
+            self._append_chat_text(content)
+            self._render_monitor_view()
+            return
+        self._prepare_output()
+        print(content, end="")
+
     def prompt(self, prompt_text: str = "> ") -> str:
         """Prompt for input."""
         if self._monitor_mode and self._sticky_footer:
@@ -769,7 +794,17 @@ Commands:
         elif command == "/clear":
             return "CLEAR"
         elif command == "/new":
-            return "NEW"
+            name = args.strip()
+            if not name:
+                return "NEW"
+            return f"NEW:{name}"
+        elif command == "/sessions":
+            return "SESSIONS"
+        elif command == "/session":
+            selector = args.strip()
+            if not selector:
+                return "SESSION_INFO"
+            return f"SESSION_SELECT:{selector}"
         elif command == "/config":
             return "CONFIG"
         elif command == "/history":

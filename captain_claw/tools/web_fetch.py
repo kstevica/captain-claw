@@ -1,8 +1,10 @@
 """Web fetch tool for retrieving web page content."""
 
-import asyncio
+import re
 from typing import Any
+from urllib.parse import urljoin
 
+from bs4 import BeautifulSoup
 import httpx
 
 from captain_claw.logging import get_logger
@@ -29,7 +31,7 @@ class WebFetchTool(Tool):
             },
             "extract_mode": {
                 "type": "string",
-                "description": " Extraction mode: 'markdown' or 'text' (default: markdown)",
+                "description": "Extraction mode: 'text' (default, readable text) or 'html' (raw HTML)",
             },
         },
         "required": ["url"],
@@ -48,7 +50,7 @@ class WebFetchTool(Tool):
         self,
         url: str,
         max_chars: int = 10000,
-        extract_mode: str = "markdown",
+        extract_mode: str = "text",
         **kwargs: Any,
     ) -> ToolResult:
         """Fetch a web page.
@@ -67,16 +69,29 @@ class WebFetchTool(Tool):
             response = await self.client.get(url)
             response.raise_for_status()
             
-            content = response.text
-            
-            # Simple extraction - in production would use proper HTML parsing
-            # For now, just return raw content trimmed
+            mode = (extract_mode or "text").strip().lower()
+            if mode in {"markdown", "md"}:
+                mode = "text"
+            if mode in {"raw", "raw_html"}:
+                mode = "html"
+
+            if mode == "html":
+                content = response.text
+            elif mode == "text":
+                content = self._extract_readable_text(response.text, base_url=url)
+            else:
+                return ToolResult(
+                    success=False,
+                    error=f"Unsupported extract_mode '{extract_mode}'. Use 'text' or 'html'.",
+                )
+
             if len(content) > max_chars:
                 content = content[:max_chars] + "\n... [truncated]"
             
             # Add header with URL info
             output = f"[URL: {url}]\n"
             output += f"[Status: {response.status_code}]\n"
+            output += f"[Mode: {mode}]\n"
             output += f"[Size: {len(response.text)} chars]\n\n"
             output += content
             
@@ -101,3 +116,38 @@ class WebFetchTool(Tool):
     async def close(self):
         """Close the HTTP client."""
         await self.client.aclose()
+
+    def _extract_readable_text(self, html: str, base_url: str | None = None) -> str:
+        """Extract human-readable text from raw HTML."""
+        soup = BeautifulSoup(html, "html.parser")
+
+        for tag in soup(["script", "style", "noscript", "template", "svg", "canvas"]):
+            tag.decompose()
+
+        # Preserve links in readable text so later turns can reference sources.
+        for anchor in soup.find_all("a"):
+            href = (anchor.get("href") or "").strip()
+            label = anchor.get_text(" ", strip=True)
+            if not href:
+                continue
+            absolute = urljoin(base_url, href) if base_url else href
+            if label:
+                anchor.replace_with(f"{label} ({absolute})")
+            else:
+                anchor.replace_with(absolute)
+
+        title = ""
+        if soup.title and soup.title.string:
+            title = soup.title.string.strip()
+
+        raw_text = soup.get_text(separator="\n")
+        lines: list[str] = []
+        for line in raw_text.splitlines():
+            cleaned = re.sub(r"\s+", " ", line).strip()
+            if cleaned:
+                lines.append(cleaned)
+
+        text = "\n".join(lines)
+        if title and not text.startswith(title):
+            return f"{title}\n\n{text}" if text else title
+        return text

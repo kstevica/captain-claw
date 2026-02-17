@@ -16,7 +16,9 @@ captain-claw
 | `/config` | Show current configuration |
 | `/history` | Show conversation history |
 | `/clear` | Clear current session |
-| `/new` | Start new session |
+| `/new [name]` | Start a new session (optionally named) |
+| `/sessions` | List recent sessions |
+| `/session <id|name>` | Load session by ID or latest by name |
 | `/exit` or `/quit` | Exit |
 
 ## Interacting
@@ -25,6 +27,19 @@ Just type your message and press Enter. Captain Claw will:
 1. Process your request
 2. Use tools if needed (shell, read, write, glob, web_fetch)
 3. Return the response
+
+### Web Fetch Modes
+
+`web_fetch` supports two extraction modes:
+- Default (`extract_mode="text"`): parses page HTML with BeautifulSoup and returns human-readable text for the LLM, preserving links as `label (url)` for follow-up research.
+- Raw HTML (`extract_mode="html"`): returns the original HTML response.
+
+Examples:
+
+```
+Use web_fetch on https://example.com
+Use web_fetch on https://example.com with extract_mode="html"
+```
 
 ### Examples
 

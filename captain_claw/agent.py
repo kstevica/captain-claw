@@ -47,6 +47,7 @@ class Agent:
         self.max_iterations = 10  # Max tool calls per message
         self.last_usage: dict[str, int] = self._empty_usage()
         self.total_usage: dict[str, int] = self._empty_usage()
+        self.last_context_window: dict[str, int | float] = {}
 
     @staticmethod
     def _empty_usage() -> dict[str, int]:
@@ -90,6 +91,46 @@ class Agent:
             self.tool_output_callback(tool_name, arguments, output)
         except Exception:
             pass
+
+    def _count_tokens(self, text: str) -> int:
+        """Count tokens with provider support and safe fallback."""
+        if not text:
+            return 0
+        if self.provider:
+            try:
+                return max(0, int(self.provider.count_tokens(text)))
+            except Exception:
+                pass
+        return max(1, len(text) // 4)
+
+    def _ensure_message_token_count(self, msg: dict[str, Any]) -> int:
+        """Ensure persisted token_count exists on a session message."""
+        value = msg.get("token_count")
+        if isinstance(value, int) and value >= 0:
+            return value
+        count = self._count_tokens(str(msg.get("content", "")))
+        msg["token_count"] = count
+        return count
+
+    def _add_session_message(
+        self,
+        role: str,
+        content: str,
+        tool_call_id: str | None = None,
+        tool_name: str | None = None,
+        tool_arguments: dict[str, Any] | None = None,
+    ) -> None:
+        """Append message to session with per-message token metadata."""
+        if not self.session:
+            return
+        self.session.add_message(
+            role=role,
+            content=content,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            tool_arguments=tool_arguments,
+            token_count=self._count_tokens(content),
+        )
 
     async def initialize(self) -> None:
         """Initialize the agent."""
@@ -158,15 +199,14 @@ Instructions:
 
     def _build_messages(self, tool_messages_from_index: int | None = None) -> list[Message]:
         """Build message list for LLM."""
-        messages = []
-        
-        # System prompt
-        messages.append(Message(
-            role="system",
-            content=self._build_system_prompt(),
-        ))
-        
-        # Session messages
+        cfg = get_config()
+        system_prompt = self._build_system_prompt()
+        messages = [Message(role="system", content=system_prompt)]
+        system_tokens = self._count_tokens(system_prompt)
+        context_budget = max(1, int(cfg.context.max_tokens))
+        history_budget = max(0, context_budget - system_tokens)
+
+        candidate_messages: list[dict[str, Any]] = []
         if self.session:
             for idx, msg in enumerate(self.session.messages):
                 # Some Ollama cloud models return 500 when historical tool results are present.
@@ -177,13 +217,57 @@ Instructions:
                     and idx < tool_messages_from_index
                 ):
                     continue
-                messages.append(Message(
+                candidate_messages.append(msg)
+
+        selected_reversed: list[dict[str, Any]] = []
+        used_tokens = 0
+        dropped_messages = 0
+        for msg in reversed(candidate_messages):
+            msg_tokens = self._ensure_message_token_count(msg)
+            must_include_latest_user = (
+                len(selected_reversed) == 0 and str(msg.get("role", "")) == "user"
+            )
+            if used_tokens + msg_tokens <= history_budget or must_include_latest_user:
+                selected_reversed.append(msg)
+                used_tokens += msg_tokens
+            else:
+                dropped_messages += 1
+
+        selected_messages = list(reversed(selected_reversed))
+        for msg in selected_messages:
+            messages.append(
+                Message(
                     role=msg["role"],
                     content=msg["content"],
                     tool_call_id=msg.get("tool_call_id"),
                     tool_name=msg.get("tool_name"),
-                ))
-        
+                )
+            )
+
+        prompt_tokens = system_tokens + used_tokens
+        self.last_context_window = {
+            "context_budget_tokens": context_budget,
+            "system_tokens": system_tokens,
+            "history_budget_tokens": history_budget,
+            "history_tokens": used_tokens,
+            "prompt_tokens": prompt_tokens,
+            "total_messages": len(candidate_messages),
+            "included_messages": len(selected_messages),
+            "dropped_messages": dropped_messages,
+            "over_budget": 1 if prompt_tokens > context_budget else 0,
+            "utilization": (prompt_tokens / context_budget) if context_budget else 0.0,
+        }
+        if self.session:
+            self.session.metadata["context_window"] = dict(self.last_context_window)
+        if dropped_messages:
+            log.info(
+                "Context window pruned history",
+                dropped_messages=dropped_messages,
+                included_messages=len(selected_messages),
+                prompt_tokens=prompt_tokens,
+                budget=context_budget,
+            )
+
         return messages
 
     def _extract_command_from_response(self, content: str) -> str | None:
@@ -247,7 +331,7 @@ Instructions:
         """Persist assistant response for the current turn."""
         if not self.session:
             return
-        self.session.add_message("assistant", content)
+        self._add_session_message("assistant", content)
         await self.session_manager.save_session(self.session)
 
     async def _friendly_tool_output_response(
@@ -405,14 +489,13 @@ Instructions:
                 )
                 
                 # Add result to session
-                if self.session:
-                    self.session.add_message(
-                        role="tool",
-                        content=result.content if result.success else f"Error: {result.error}",
-                        tool_call_id=tc.id,
-                        tool_name=tc.name,
-                        tool_arguments=arguments if isinstance(arguments, dict) else None,
-                    )
+                self._add_session_message(
+                    role="tool",
+                    content=result.content if result.success else f"Error: {result.error}",
+                    tool_call_id=tc.id,
+                    tool_name=tc.name,
+                    tool_arguments=arguments if isinstance(arguments, dict) else None,
+                )
                 self._emit_tool_output(
                     tc.name,
                     arguments if isinstance(arguments, dict) else {},
@@ -429,14 +512,13 @@ Instructions:
             except Exception as e:
                 log.error("Tool execution failed", tool=tc.name, error=str(e))
                 
-                if self.session:
-                    self.session.add_message(
-                        role="tool",
-                        content=f"Error: {str(e)}",
-                        tool_call_id=tc.id,
-                        tool_name=tc.name,
-                        tool_arguments=arguments if isinstance(arguments, dict) else None,
-                    )
+                self._add_session_message(
+                    role="tool",
+                    content=f"Error: {str(e)}",
+                    tool_call_id=tc.id,
+                    tool_name=tc.name,
+                    tool_arguments=arguments if isinstance(arguments, dict) else None,
+                )
                 self._emit_tool_output(
                     tc.name,
                     arguments if isinstance(arguments, dict) else {},
@@ -475,8 +557,7 @@ Instructions:
         turn_start_idx = len(self.session.messages) if self.session else 0
 
         # Add user message to session
-        if self.session:
-            self.session.add_message("user", user_input)
+        self._add_session_message("user", user_input)
         
         # Send tool definitions so the model can issue structured tool calls.
         tool_defs = self.tools.get_definitions()
@@ -589,13 +670,12 @@ Instructions:
                 tool_result = result.content if result.success else f"Error: {result.error}"
                 
                 # Add tool result to session
-                if self.session:
-                    self.session.add_message(
-                        role="tool",
-                        content=tool_result,
-                        tool_name="shell",
-                        tool_arguments={"command": command},
-                    )
+                self._add_session_message(
+                    role="tool",
+                    content=tool_result,
+                    tool_name="shell",
+                    tool_arguments={"command": command},
+                )
                 self._emit_tool_output("shell", {"command": command}, tool_result)
                 if not self._supports_tool_result_followup():
                     final = await self._friendly_tool_output_response(
@@ -628,7 +708,7 @@ Instructions:
             
             # Add assistant response to session
             if self.session:
-                self.session.add_message("assistant", final_response)
+                self._add_session_message("assistant", final_response)
                 # Save session after each turn
                 await self.session_manager.save_session(self.session)
 
@@ -664,8 +744,7 @@ Instructions:
             return
         
         # Add user message to session
-        if self.session:
-            self.session.add_message("user", user_input)
+        self._add_session_message("user", user_input)
         
         # Get tool definitions
         tool_defs = self.tools.get_definitions()
@@ -686,11 +765,11 @@ Instructions:
         
         # Add assistant response to session
         if self.session:
-            self.session.add_message("assistant", full_content)
+            self._add_session_message("assistant", full_content)
             await self.session_manager.save_session(self.session)
 
-        prompt_tokens = sum(self.provider.count_tokens(m.content) for m in messages)
-        completion_tokens = self.provider.count_tokens(full_content)
+        prompt_tokens = sum(self._count_tokens(m.content) for m in messages)
+        completion_tokens = self._count_tokens(full_content)
         self._finalize_turn_usage({
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
