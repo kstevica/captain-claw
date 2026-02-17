@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -72,6 +72,21 @@ class ToolsConfig(BaseModel):
     require_confirmation: list[str] = ["shell", "write"]
 
 
+class GuardTypeConfig(BaseModel):
+    """Guard behavior for a single guard type."""
+
+    enabled: bool = False
+    level: Literal["stop_suspicious", "ask_for_approval"] = "stop_suspicious"
+
+
+class GuardConfig(BaseModel):
+    """Guarding configuration."""
+
+    input: GuardTypeConfig = Field(default_factory=GuardTypeConfig)
+    output: GuardTypeConfig = Field(default_factory=GuardTypeConfig)
+    script_tool: GuardTypeConfig = Field(default_factory=GuardTypeConfig)
+
+
 class SessionConfig(BaseModel):
     """Session configuration."""
 
@@ -102,6 +117,7 @@ class Config(BaseSettings):
     model: ModelConfig = Field(default_factory=ModelConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    guards: GuardConfig = Field(default_factory=GuardConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)

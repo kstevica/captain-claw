@@ -93,3 +93,11 @@ class ValidationError(CaptainClawError):
     """Validation errors."""
 
     pass
+
+
+class GuardBlockedError(CaptainClawError):
+    """Guard blocked a request/response/tool action."""
+
+    def __init__(self, guard_type: str, message: str):
+        super().__init__(message)
+        self.guard_type = guard_type

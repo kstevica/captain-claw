@@ -769,6 +769,9 @@ Commands:
                 f"Model: {config.model.model}\n"
                 f"Temperature: {config.model.temperature}\n"
                 f"Max tokens: {config.model.max_tokens}\n"
+                f"Guard input: enabled={config.guards.input.enabled}, level={config.guards.input.level}\n"
+                f"Guard output: enabled={config.guards.output.enabled}, level={config.guards.output.level}\n"
+                f"Guard script/tool: enabled={config.guards.script_tool.enabled}, level={config.guards.script_tool.level}\n"
                 f"Streaming: {config.ui.streaming}\n"
                 f"Show tokens: {config.ui.show_tokens}\n"
                 f"Enabled tools: {', '.join(config.tools.enabled)}\n\n"
@@ -782,6 +785,9 @@ Commands:
         print(f"Model: {config.model.model}")
         print(f"Temperature: {config.model.temperature}")
         print(f"Max tokens: {config.model.max_tokens}")
+        print(f"Guard input: enabled={config.guards.input.enabled}, level={config.guards.input.level}")
+        print(f"Guard output: enabled={config.guards.output.enabled}, level={config.guards.output.level}")
+        print(f"Guard script/tool: enabled={config.guards.script_tool.enabled}, level={config.guards.script_tool.level}")
         print(f"Streaming: {config.ui.streaming}")
         print(f"Show tokens: {config.ui.show_tokens}")
         print(f"Enabled tools: {', '.join(config.tools.enabled)}")

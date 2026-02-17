@@ -1,39 +1,226 @@
 # Captain Claw
 
-A powerful console-based AI agent built with Python.
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Interface](https://img.shields.io/badge/interface-terminal%20CLI-black)](#quick-start)
+[![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20Ollama-orange)](#multi-model-ai-agent)
+[![Guardrails](https://img.shields.io/badge/guardrails-input%20%7C%20output%20%7C%20script%2Ftool-red)](#built-in-guardrails)
 
-## Features
+Captain Claw is a terminal-first AI agent for developers and operators who want fast, practical automation with strong control. It combines multi-model LLM support, persistent multi-session workflows, built-in safety guards, and tool execution in one CLI.
 
-- **Multi-provider LLM support** via LiteLLM (OpenAI, Anthropic, Ollama, Google, etc.)
-- **Tool system** with shell, file operations, glob, and web fetch
-- **Session management** with SQLite persistence
-- **Interactive CLI** with streaming responses
-- **Token tracking** and automatic context compaction
+If you are looking for a powerful open-source AI coding agent for terminal workflows, Captain Claw is built for that exact use case.
+
+## First 5 Minutes
+
+1. Install Captain Claw in a virtual environment.
+2. Set one API key (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`) or use Ollama.
+3. Start with `captain-claw`.
+4. Run `/models` and pick a model with `/session model <id>`.
+5. Create a second session (`/new incident-hotfix`) and switch models per session.
+6. Enable guards in `config.yaml` when you want stricter safety behavior.
+
+In under five minutes, you can have a multi-model terminal AI assistant with persistent sessions and guardrails.
+
+## Demo Section (GIF/Asciinema Ready)
+
+Use this sequence to record a short demo that highlights Captain Claw strengths (multimodel, multisession, guards).
+
+### 60-Second Demo Flow
+
+```text
+captain-claw
+/models
+/session model chatgpt-fast
+> Analyze this repo structure and suggest 3 improvements.
+/new incident-triage
+/session model claude-sonnet
+> Investigate likely root causes for flaky tests and propose steps.
+/session switch #1
+/session description auto
+/config
+```
+
+### Suggested Recording Commands
+
+```bash
+# Asciinema cast
+asciinema rec -c "captain-claw" docs/demo.cast
+
+# Optional GIF conversion (requires agg)
+agg docs/demo.cast docs/demo.gif
+```
+
+Keep the recording focused on:
+
+- fast model switching per session
+- visible session isolation for different tasks
+- guard settings shown in `/config`
+
+## Why Captain Claw
+
+- Multi-model AI in one CLI: ChatGPT/OpenAI, Claude/Anthropic, Gemini/Google, and Ollama.
+- Parallel work across sessions: keep separate short-term contexts per task while preserving long-term session history.
+- Live per-session model switching: use different models for different threads without restarting.
+- Built-in safety guards: input, output, and script/tool checks with configurable enforcement.
+- Real tool execution: shell, file read/write, glob, and web fetch with persistent session traces.
+- Practical for production-like workflows: monitor view, planning mode, context compaction, and resumable sessions.
+
+## Feature Snapshot
+
+| Capability | Why it matters |
+|---|---|
+| Multi-model routing | Pick the best model for each task (quality, speed, cost). |
+| Per-session model selection | Keep one session on GPT, another on Claude, another on Ollama. |
+| Persistent multi-session state | Resume work exactly where you left off. |
+| Built-in guard system | Reduce risky prompts, outputs, and command execution. |
+| Built-in tools | Move from chat to action: shell, file ops, web fetch. |
+| Planning + monitor modes | Better visibility for longer, multi-step agent runs. |
+| Context compaction | Keep long threads usable without losing continuity. |
+
+## Why Captain Claw vs Alternatives
+
+| Criteria | Captain Claw | Typical Single-Model CLI | Chat-Only Web UI | Script-Only Automation Tool |
+|---|---|---|---|---|
+| Multi-provider support | Yes (OpenAI, Claude, Gemini, Ollama) | Usually limited | Usually single provider | Not applicable |
+| Per-session model routing | Yes | Rare | No | No |
+| Persistent multi-session memory | Yes | Limited | Usually tab-based, shallow | No conversational memory |
+| Built-in input/output/script guards | Yes | Rare | Partial/moderation-only | No LLM guard layer |
+| Tool execution in same loop | Yes | Varies | Usually no local execution | Yes, but no LLM orchestration |
+| Terminal-first workflow | Yes | Yes | No | Yes |
+| Designed for iterative human+agent ops | Yes | Partial | Partial | Partial |
+
+## Core Strengths
+
+### Multi-Model AI Agent
+
+Captain Claw lets you route work to the right model for the job:
+
+- `openai` / `chatgpt`
+- `anthropic` / `claude`
+- `gemini` / `google`
+- `ollama`
+
+This makes it easy to compare quality, cost, latency, and tool-calling behavior across providers from the same interface.
+
+### Built for Real Work
+
+Captain Claw is designed for real developer and operations workflows, not just toy chat interactions.
+
+- Code investigation and patching across multiple repositories.
+- Incident response sessions with isolated contexts.
+- Automated script generation with controlled execution.
+- Fast web research and local file updates in one loop.
+- Session handoff via persisted context and descriptions.
+
+### Multi-Session Workflow
+
+Sessions are first-class:
+
+- Create named sessions for separate projects or incidents.
+- Switch instantly between sessions.
+- Rename sessions and set descriptions (manual or auto-generated from context).
+- Run a prompt in another session and return to your current one.
+- Persist model selection per session so each session can use a different model.
+
+### Built-In Guardrails
+
+Captain Claw includes three built-in guard types:
+
+- `input` guard: checks content before requests go to an LLM.
+- `output` guard: checks model output before it is used or displayed.
+- `script_tool` guard: checks scripts, commands, and tool payloads before execution.
+
+Each guard supports:
+
+- `enabled: false|true` (default is `false`)
+- `level: stop_suspicious|ask_for_approval`
+
+This allows strict blocking for sensitive environments or interactive approval for high-velocity usage.
+
+## Common Use Cases
+
+- AI coding assistant in terminal for Python, JS, shell, and infra tasks.
+- Multi-model evaluation workspace for OpenAI vs Claude vs Gemini vs Ollama.
+- DevOps and SRE runbook execution with command guardrails.
+- Security-conscious automation where suspicious actions require approval.
+- Long-running project work split into dedicated sessions by feature or incident.
+
+## Installation
+
+### Requirements
+
+- Python `>=3.11`
+
+### Install From Source
+
+```bash
+git clone <your-repo-url>
+cd captain-claw-dev
+python -m venv venv
+source venv/bin/activate
+pip install -e .
+```
+
+### Install Development Dependencies
+
+```bash
+pip install -e ".[dev]"
+```
 
 ## Quick Start
 
+### 1) Configure API keys
+
 ```bash
-# Install
-cd captain-claw-dev
-pip install -e .
+export OPENAI_API_KEY="your-openai-key"
+export ANTHROPIC_API_KEY="your-anthropic-key"
+export GOOGLE_API_KEY="your-google-key"
+```
 
-# Set API key
-export OPENAI_API_KEY="your-key-here"
+Use only the keys you need for your active providers.
 
-# Run
+### 2) Start Captain Claw
+
+```bash
 captain-claw
+```
+
+### 3) Try model selection
+
+```text
+/models
+/session model chatgpt-fast
+/session model claude-sonnet
+/session model default
+```
+
+### 4) Create multiple live sessions
+
+```text
+/new feature-a
+/new bugfix-b
+/sessions
+/session switch #1
+/session run #2 summarize current blockers
 ```
 
 ## Configuration
 
-Edit `config.yaml` or use environment variables.
-By default Captain Claw loads `./config.yaml` (current working directory) first, then falls back to `~/.captain-claw/config.yaml`.
+Captain Claw configuration is YAML-driven with env override support.
+
+Load precedence:
+
+1. `./config.yaml` (current working directory)
+2. `~/.captain-claw/config.yaml` (fallback)
+
+### Example `config.yaml`
 
 ```yaml
 model:
-  provider: "openai"
+  provider: "openai" # ollama, openai/chatgpt, anthropic/claude, gemini/google
   model: "gpt-4o-mini"
   temperature: 0.7
+  max_tokens: 32000
   allowed:
     - id: "chatgpt-fast"
       provider: "openai"
@@ -47,35 +234,211 @@ model:
     - id: "ollama-cloud"
       provider: "ollama"
       model: "minimax-m2.5:cloud"
+
+guards:
+  input:
+    enabled: false
+    level: "stop_suspicious" # or ask_for_approval
+  output:
+    enabled: false
+    level: "stop_suspicious" # or ask_for_approval
+  script_tool:
+    enabled: false
+    level: "stop_suspicious" # or ask_for_approval
+
+tools:
+  enabled: ["shell", "read", "write", "glob", "web_fetch"]
 ```
 
-Provider examples:
+### Useful Environment Overrides
 
-- ChatGPT: `provider: "openai"` (or `"chatgpt"`), `model: "gpt-4o-mini"`
-- Claude: `provider: "anthropic"` (or `"claude"`), `model: "claude-3-5-sonnet-latest"`
-- Gemini: `provider: "gemini"` (or `"google"`), `model: "gemini-2.0-flash"`
-- Ollama: `provider: "ollama"`, `model: "llama3.2"` (or any local/remote Ollama model)
+```bash
+CLAW_MODEL__PROVIDER="openai"
+CLAW_MODEL__MODEL="gpt-4o-mini"
+CLAW_GUARDS__INPUT__ENABLED="true"
+CLAW_GUARDS__INPUT__LEVEL="ask_for_approval"
+```
 
-Per-session live selection is available in the CLI:
+## CLI Commands
 
-- `/models` to list allowlisted models
-- `/session model <id>` to switch model for the active session
-- `/session model default` to revert the session to config defaults
+### Global Commands
 
-## Commands
+| Command | Description |
+|---|---|
+| `/help` | Show command help |
+| `/config` | Show active configuration |
+| `/history` | Show conversation history |
+| `/compact` | Manually compact older session history |
+| `/planning on\|off` | Enable/disable planning mode |
+| `/monitor on\|off` | Enable/disable monitor split view |
+| `/clear` | Clear current session messages |
+| `/exit` or `/quit` | Exit Captain Claw |
 
-- `captain-claw` - Start interactive session
-- `captain-claw --model gpt-4o` - Override model
-- `captain-claw --no-stream` - Disable streaming
-- `captain-claw --verbose` - Enable debug logging
-- `captain-claw version` - Show version
+### Session Commands
+
+| Command | Description |
+|---|---|
+| `/session` | Show active session info |
+| `/sessions` or `/session list` | List recent sessions |
+| `/new [name]` | Create and switch to a new session |
+| `/session new [name]` | Create and switch to a new session |
+| `/session switch <id\|name\|#index>` | Switch to another session |
+| `/session rename <new-name>` | Rename active session |
+| `/session description <text>` | Set session description |
+| `/session description auto` | Auto-generate description from session context |
+| `/session run <id\|name\|#index> <prompt>` | Run one prompt in another session, then return |
+| `/runin <id\|name\|#index> <prompt>` | Alias for `/session run` |
+
+### Model Commands
+
+| Command | Description |
+|---|---|
+| `/models` | List allowed models |
+| `/session model` | Show active session model |
+| `/session model list` | List allowed models |
+| `/session model <id\|#index\|provider:model\|default>` | Set model for active session |
+
+## Example Workflow
+
+```text
+> Investigate failing integration tests and propose a fix.
+/session description auto
+/models
+/session model claude-sonnet
+> Apply the patch and run tests.
+/new release-notes
+/session model chatgpt-fast
+> Draft release notes from the previous session updates.
+```
+
+This workflow shows why Captain Claw works well as a terminal AI agent for engineering teams: each thread can use its own model and maintain its own short-term context while staying persistent.
+
+## Tooling and Execution Model
+
+Captain Claw can use:
+
+- `shell`: run commands
+- `read`: read files
+- `write`: write files
+- `glob`: search files by pattern
+- `web_fetch`: fetch and parse web content
+
+### File Output Policy
+
+- Tool-generated files are written under `<launch-dir>/saved`.
+- Relative paths are resolved within `saved/`.
+- Unsafe absolute/traversal paths are remapped for safety.
+
+### Script Workflow
+
+- Explicit script requests trigger script generation and execution workflow.
+- Generated scripts are saved under `saved/scripts/<session>/`.
+- Reusable tool helpers are saved under `saved/tools/<session>/`.
+
+### Web Fetch Modes
+
+- `extract_mode="text"` (default): parsed readable content with preserved links.
+- `extract_mode="html"`: raw HTML response.
+
+## Monitoring, Planning, and Context Management
+
+- Monitor mode provides split output for chat and tool/system traces.
+- Planning mode adds lightweight task pipeline orchestration per turn.
+- Long sessions auto-compact based on context thresholds and preserve continuity summary.
+
+## Security and Guarding Behavior
+
+When guards are enabled, checks run across interactions:
+
+- Before LLM requests (`input`)
+- After LLM responses (`output`)
+- Before script/tool execution (`script_tool`)
+
+Enforcement options:
+
+- `stop_suspicious`: block immediately.
+- `ask_for_approval`: ask for explicit user approval before continuing.
+
+This makes Captain Claw suitable for teams that need a terminal AI assistant with stronger operational control.
+
+## SEO-Friendly Summary
+
+Captain Claw is an open-source terminal AI agent for coding, operations, and automation. It supports ChatGPT, Claude, Gemini, and Ollama in one CLI, provides persistent multi-session context, enables per-session model routing, and includes built-in safety guards for input/output/command execution. If you need a practical AI CLI agent for real workflows with safety controls, Captain Claw is designed to be installed and used immediately.
+
+## FAQ
+
+### Is Captain Claw only for coding?
+
+No. It is strong for coding, but also effective for ops automation, web research, scripting, and multi-session task orchestration in terminal workflows.
+
+### Can I use local models only?
+
+Yes. Set provider/model to Ollama and run fully local where your model setup allows it.
+
+### Can I run different models at the same time?
+
+Yes. Model selection is per session. Different sessions can run different providers/models in parallel workflow.
+
+### Do I need guards enabled?
+
+No. Guards are off by default. Enable them when you want stronger safety behavior for prompts, model outputs, and command/script execution.
+
+## Launch Copy Kit (Product Hunt + Hacker News)
+
+### Product Hunt
+
+Title:
+
+```text
+Captain Claw — Multi-model terminal AI agent with sessions and guardrails
+```
+
+Tagline:
+
+```text
+Run ChatGPT, Claude, Gemini, and Ollama in one CLI with per-session model routing and built-in safety guards.
+```
+
+Description:
+
+```text
+Captain Claw is an open-source terminal AI agent built for real developer and ops workflows. It supports OpenAI, Claude, Gemini, and Ollama, lets you run multiple persistent sessions in parallel, and gives each session its own model selection. Built-in input/output/script guards help control risky actions with either hard blocking or approval flow. If you want a practical AI CLI for coding and automation, Captain Claw is ready to install.
+```
+
+### Hacker News
+
+Title option A:
+
+```text
+Show HN: Captain Claw – Multi-model terminal AI agent with session-level model routing
+```
+
+Title option B:
+
+```text
+Show HN: Captain Claw – Open-source AI CLI with OpenAI/Claude/Gemini/Ollama + guardrails
+```
+
+Post body:
+
+```text
+I built Captain Claw, a terminal-first AI agent for developer and ops workflows.
+
+What it does:
+- Multi-model support in one CLI (OpenAI, Claude, Gemini, Ollama)
+- Multi-session workflow with persistent context
+- Different model per session (live switching)
+- Built-in guard system (input/output/script-tool with block or approval mode)
+- Tool execution loop (shell, read/write, glob, web_fetch)
+
+I wanted something practical for daily terminal work where I could split tasks across sessions and still keep safety controls when running commands/scripts.
+
+Feedback is welcome, especially on model routing, guard policies, and session orchestration.
+```
 
 ## Development
 
 ```bash
-# Install with dev dependencies
-pip install -e ".[dev]"
-
 # Run tests
 pytest
 
@@ -85,9 +448,10 @@ ruff check captain_claw/
 
 ## Architecture
 
-- `agent.py` - Main agent orchestrator
-- `llm/` - LLM provider abstraction
-- `tools/` - Tool registry and implementations
-- `session/` - SQLite session storage
-- `cli.py` - Terminal UI
-- `config.py` - Configuration management
+- `captain_claw/agent.py`: main orchestration logic
+- `captain_claw/llm/`: provider abstraction and adapters
+- `captain_claw/tools/`: tool registry and tool implementations
+- `captain_claw/session/`: SQLite-backed session persistence
+- `captain_claw/cli.py`: terminal UI
+- `captain_claw/config.py`: configuration and env overrides
+- `instructions/`: externalized prompt/instruction templates

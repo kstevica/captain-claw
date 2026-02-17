@@ -53,6 +53,18 @@ tools:
     - shell
     - write
 
+# Guard Configuration
+guards:
+  input:
+    enabled: false
+    level: "ask_for_approval"  # stop_suspicious | ask_for_approval
+  output:
+    enabled: false
+    level: "ask_for_approval"  # stop_suspicious | ask_for_approval
+  script_tool:
+    enabled: false
+    level: "stop_suspicious"  # stop_suspicious | ask_for_approval
+
 # Session Settings
 session:
   storage: "sqlite"

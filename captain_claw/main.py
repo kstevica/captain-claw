@@ -113,6 +113,7 @@ async def run_interactive() -> None:
     agent = Agent(
         status_callback=ui.set_runtime_status,
         tool_output_callback=ui.append_tool_output,
+        approval_callback=ui.confirm,
     )
     
     # Show welcome

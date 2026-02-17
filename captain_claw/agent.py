@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator
 from typing import Callable
 
 from captain_claw.config import get_config
+from captain_claw.exceptions import GuardBlockedError
 from captain_claw.instructions import InstructionLoader
 from captain_claw.llm import (
     LLMProvider,
@@ -36,16 +37,19 @@ class Agent:
         provider: LLMProvider | None = None,
         status_callback: Callable[[str], None] | None = None,
         tool_output_callback: Callable[[str, dict[str, Any], str], None] | None = None,
+        approval_callback: Callable[[str], bool] | None = None,
     ):
         """Initialize the agent.
         
         Args:
             provider: Optional LLM provider override
             status_callback: Optional runtime status callback
+            approval_callback: Optional callback for guard approval prompts
         """
         self.provider = provider
         self.status_callback = status_callback
         self.tool_output_callback = tool_output_callback
+        self.approval_callback = approval_callback
         self.tools = get_tool_registry()
         self.runtime_base_path = Path.cwd().resolve()
         self.tools.set_runtime_base_path(self.runtime_base_path)
@@ -105,6 +109,254 @@ class Agent:
             self.tool_output_callback(tool_name, arguments, output)
         except Exception:
             pass
+
+    @staticmethod
+    def _truncate_guard_text(text: str, max_chars: int = 12000) -> str:
+        """Trim guard payloads to bounded size."""
+        cleaned = (text or "").strip()
+        if len(cleaned) <= max_chars:
+            return cleaned
+        return cleaned[:max_chars].rstrip() + "\n...[truncated for guard evaluation]"
+
+    def _guard_settings(self, guard_type: str) -> tuple[bool, str]:
+        """Return (enabled, level) for a guard type."""
+        cfg = get_config()
+        guards = getattr(cfg, "guards", None)
+        if guards is None:
+            return False, "stop_suspicious"
+        raw = getattr(guards, guard_type, None)
+        if raw is None:
+            return False, "stop_suspicious"
+        enabled = bool(getattr(raw, "enabled", False))
+        level = str(getattr(raw, "level", "stop_suspicious") or "stop_suspicious").strip().lower()
+        if level not in {"stop_suspicious", "ask_for_approval"}:
+            level = "stop_suspicious"
+        return enabled, level
+
+    def guards_enabled(self) -> bool:
+        """Whether any guard type is enabled."""
+        return any(self._guard_settings(kind)[0] for kind in ("input", "output", "script_tool"))
+
+    def _serialize_messages_for_guard(self, messages: list[Message], max_chars: int = 12000) -> str:
+        """Serialize outbound prompt messages for input guard checks."""
+        lines: list[str] = []
+        for idx, msg in enumerate(messages, start=1):
+            role = str(getattr(msg, "role", "")).strip().lower() or "unknown"
+            content = re.sub(r"\s+", " ", str(getattr(msg, "content", "")).strip())
+            if len(content) > 800:
+                content = content[:800].rstrip() + "... [truncated]"
+            lines.append(f"{idx}. {role}: {content}")
+        return self._truncate_guard_text("\n".join(lines), max_chars=max_chars)
+
+    @staticmethod
+    def _parse_guard_decision(raw_text: str) -> dict[str, Any]:
+        """Parse guard classifier output into a normalized decision payload."""
+        text = (raw_text or "").strip()
+        if not text:
+            return {"allow": False, "reason": "Guard model returned empty output."}
+
+        payload: dict[str, Any] | None = None
+        try:
+            value = json.loads(text)
+            if isinstance(value, dict):
+                payload = value
+        except Exception:
+            match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+            if match:
+                try:
+                    value = json.loads(match.group(0))
+                    if isinstance(value, dict):
+                        payload = value
+                except Exception:
+                    payload = None
+
+        if payload is None:
+            lowered = text.lower()
+            if "allow" in lowered and not any(word in lowered for word in ("suspicious", "malicious", "deny", "block")):
+                return {"allow": True, "reason": "Allowed by non-JSON guard output."}
+            return {"allow": False, "reason": "Could not parse guard output as JSON."}
+
+        verdict = str(payload.get("verdict") or payload.get("decision") or "").strip().lower()
+        reason = str(payload.get("reason") or payload.get("explanation") or "").strip()
+        if verdict in {"allow", "safe", "ok", "pass"}:
+            return {"allow": True, "reason": reason or "Guard allowed."}
+        if verdict in {"suspicious", "block", "blocked", "deny", "denied", "malicious"}:
+            return {"allow": False, "reason": reason or "Guard flagged suspicious content."}
+
+        # Conservative fallback when model output shape is unexpected.
+        return {"allow": False, "reason": reason or "Guard decision was inconclusive."}
+
+    async def _run_guard_decision(
+        self,
+        guard_type: str,
+        interaction_label: str,
+        content: str,
+        turn_usage: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
+        """Evaluate guard decision using prompt templates."""
+        system_template = f"guard_{guard_type}_system_prompt.md"
+        user_template = f"guard_{guard_type}_user_prompt.md"
+        rendered_content = self._truncate_guard_text(content)
+        messages = [
+            Message(role="system", content=self.instructions.load(system_template)),
+            Message(
+                role="user",
+                content=self.instructions.render(
+                    user_template,
+                    interaction_label=interaction_label,
+                    content=rendered_content,
+                ),
+            ),
+        ]
+        try:
+            response = await self.provider.complete(
+                messages=messages,
+                tools=None,
+                max_tokens=400,
+            )
+            if turn_usage is not None:
+                self._accumulate_usage(turn_usage, response.usage or {})
+            parsed = self._parse_guard_decision(response.content or "")
+            parsed["raw"] = response.content or ""
+            return parsed
+        except Exception as e:
+            return {"allow": False, "reason": f"Guard evaluation failed: {e}", "raw": ""}
+
+    def _request_guard_approval(self, question: str) -> bool:
+        """Request user approval when guard level is ask_for_approval."""
+        if not self.approval_callback:
+            return False
+        try:
+            return bool(self.approval_callback(question))
+        except Exception:
+            return False
+
+    async def _enforce_guard(
+        self,
+        guard_type: str,
+        interaction_label: str,
+        content: str,
+        turn_usage: dict[str, int] | None = None,
+    ) -> tuple[bool, str]:
+        """Run one guard type and enforce configured policy."""
+        enabled, level = self._guard_settings(guard_type)
+        if not enabled:
+            return True, ""
+        if guard_type == "output" and not (content or "").strip():
+            return True, ""
+
+        decision = await self._run_guard_decision(
+            guard_type=guard_type,
+            interaction_label=interaction_label,
+            content=content,
+            turn_usage=turn_usage,
+        )
+        allow = bool(decision.get("allow", False))
+        reason = str(decision.get("reason", "")).strip() or "Suspicious content detected."
+        raw = str(decision.get("raw", "")).strip()
+
+        if allow:
+            self._emit_tool_output(
+                f"guard_{guard_type}",
+                {"interaction": interaction_label, "decision": "allow", "level": level},
+                reason,
+            )
+            return True, ""
+
+        if level == "ask_for_approval":
+            question = (
+                f"{guard_type} guard flagged suspicious content for {interaction_label}. "
+                f"Reason: {reason} Approve anyway?"
+            )
+            approved = self._request_guard_approval(question)
+            self._emit_tool_output(
+                f"guard_{guard_type}",
+                {
+                    "interaction": interaction_label,
+                    "decision": "suspicious",
+                    "level": level,
+                    "approved": approved,
+                },
+                reason if not raw else f"{reason}\nRaw guard output: {raw}",
+            )
+            if approved:
+                return True, ""
+            return False, f"Blocked by {guard_type} guard (approval denied): {reason}"
+
+        self._emit_tool_output(
+            f"guard_{guard_type}",
+            {"interaction": interaction_label, "decision": "suspicious", "level": level},
+            reason if not raw else f"{reason}\nRaw guard output: {raw}",
+        )
+        return False, f"Blocked by {guard_type} guard: {reason}"
+
+    async def _complete_with_guards(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]] | None = None,
+        interaction_label: str = "conversation",
+        turn_usage: dict[str, int] | None = None,
+        max_tokens: int | None = None,
+    ):
+        """Run guarded LLM completion (input + output guards)."""
+        guard_payload = self._serialize_messages_for_guard(messages)
+        allowed_input, input_error = await self._enforce_guard(
+            guard_type="input",
+            interaction_label=interaction_label,
+            content=guard_payload,
+            turn_usage=turn_usage,
+        )
+        if not allowed_input:
+            raise GuardBlockedError("input", input_error)
+
+        response = await self.provider.complete(
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens,
+        )
+        if turn_usage is not None:
+            self._accumulate_usage(turn_usage, response.usage or {})
+
+        allowed_output, output_error = await self._enforce_guard(
+            guard_type="output",
+            interaction_label=interaction_label,
+            content=str(response.content or ""),
+            turn_usage=turn_usage,
+        )
+        if not allowed_output:
+            raise GuardBlockedError("output", output_error)
+
+        return response
+
+    async def _execute_tool_with_guard(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        interaction_label: str,
+        turn_usage: dict[str, int] | None = None,
+    ):
+        """Execute a tool after script/tool guard policy check."""
+        guard_payload = json.dumps(
+            {
+                "tool_name": name,
+                "arguments": arguments,
+                "interaction": interaction_label,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+        allowed, guard_error = await self._enforce_guard(
+            guard_type="script_tool",
+            interaction_label=interaction_label,
+            content=guard_payload,
+            turn_usage=turn_usage,
+        )
+        if not allowed:
+            raise GuardBlockedError("script_tool", guard_error)
+        return await self.tools.execute(
+            name=name,
+            arguments=arguments,
+        )
 
     def _count_tokens(self, text: str) -> int:
         """Count tokens with provider support and safe fallback."""
@@ -206,9 +458,10 @@ class Agent:
         ]
         try:
             max_tokens = min(2048, int(get_config().model.max_tokens))
-            response = await self.provider.complete(
+            response = await self._complete_with_guards(
                 messages=rewrite_messages,
                 tools=None,
+                interaction_label="compaction_summary",
                 max_tokens=max_tokens,
             )
             summary = (response.content or "").strip()
@@ -309,9 +562,10 @@ class Agent:
         try:
             max_tokens = min(400, int(get_config().model.max_tokens))
             self._set_runtime_status("thinking")
-            response = await self.provider.complete(
+            response = await self._complete_with_guards(
                 messages=messages,
                 tools=None,
+                interaction_label="session_description",
                 max_tokens=max_tokens,
             )
             generated = self._limit_description_sentences(
@@ -1343,8 +1597,12 @@ class Agent:
         ]
         try:
             self._set_runtime_status("thinking")
-            response = await self.provider.complete(messages=synth_messages, tools=None)
-            self._accumulate_usage(turn_usage, response.usage or {})
+            response = await self._complete_with_guards(
+                messages=synth_messages,
+                tools=None,
+                interaction_label="script_synthesis",
+                turn_usage=turn_usage,
+            )
             language, code = self._extract_code_block(response.content or "")
             if code:
                 return code, self._infer_script_extension(language, code)
@@ -1396,7 +1654,12 @@ class Agent:
             write_args = {"path": script_rel_path, "content": code}
             write_args_for_log = {"path": script_rel_path, "content_chars": len(code), "append": False}
             try:
-                write_result = await self.tools.execute(name="write", arguments=write_args)
+                write_result = await self._execute_tool_with_guard(
+                    name="write",
+                    arguments=write_args,
+                    interaction_label="auto_script_write",
+                    turn_usage=turn_usage,
+                )
                 write_output = (
                     write_result.content if write_result.success else f"Error: {write_result.error}"
                 )
@@ -1455,7 +1718,12 @@ class Agent:
             ).strip()
 
         try:
-            shell_result = await self.tools.execute(name="shell", arguments={"command": run_command})
+            shell_result = await self._execute_tool_with_guard(
+                name="shell",
+                arguments={"command": run_command},
+                interaction_label="auto_script_run",
+                turn_usage=turn_usage,
+            )
             shell_output = (
                 shell_result.content if shell_result.success else f"Error: {shell_result.error}"
             )
@@ -1533,7 +1801,12 @@ class Agent:
         write_args_for_log = {"path": requested_path, "content_chars": len(text), "append": False}
 
         try:
-            result = await self.tools.execute(name="write", arguments=write_args)
+            result = await self._execute_tool_with_guard(
+                name="write",
+                arguments=write_args,
+                interaction_label="auto_write_output",
+                turn_usage=turn_usage,
+            )
             tool_output = result.content if result.success else f"Error: {result.error}"
         except Exception as e:
             result = None
@@ -1596,8 +1869,12 @@ class Agent:
 
         self._set_runtime_status("thinking")
         try:
-            response = await self.provider.complete(messages=rewrite_messages, tools=None)
-            self._accumulate_usage(turn_usage, response.usage or {})
+            response = await self._complete_with_guards(
+                messages=rewrite_messages,
+                tools=None,
+                interaction_label="tool_output_rewrite",
+                turn_usage=turn_usage,
+            )
             friendly = (response.content or "").strip()
             if friendly:
                 return friendly
@@ -1683,7 +1960,11 @@ class Agent:
         
         return tool_calls
 
-    async def _handle_tool_calls(self, tool_calls: list[ToolCall]) -> list[dict[str, Any]]:
+    async def _handle_tool_calls(
+        self,
+        tool_calls: list[ToolCall],
+        turn_usage: dict[str, int] | None = None,
+    ) -> list[dict[str, Any]]:
         """Handle tool calls from LLM.
         
         Args:
@@ -1708,9 +1989,11 @@ class Agent:
             
             try:
                 # Execute tool
-                result = await self.tools.execute(
+                result = await self._execute_tool_with_guard(
                     name=tc.name,
                     arguments=arguments,
+                    interaction_label=f"tool_call:{tc.name}",
+                    turn_usage=turn_usage,
                 )
                 
                 # Add result to session
@@ -1784,6 +2067,14 @@ class Agent:
             return text
 
         turn_start_idx = len(self.session.messages) if self.session else 0
+        allowed_user_input, input_guard_error = await self._enforce_guard(
+            guard_type="input",
+            interaction_label="user_turn",
+            content=user_input,
+            turn_usage=turn_usage,
+        )
+        if not allowed_user_input:
+            return finish(input_guard_error, success=False)
 
         # Add user message to session
         self._add_session_message("user", user_input)
@@ -1809,11 +2100,16 @@ class Agent:
             # Call LLM
             log.info("Calling LLM", iteration=iteration + 1, message_count=len(messages))
             try:
-                response = await self.provider.complete(
+                response = await self._complete_with_guards(
                     messages=messages,
                     tools=tool_defs if tool_defs else None,
+                    interaction_label=f"turn_{iteration + 1}",
+                    turn_usage=turn_usage,
                 )
-                self._accumulate_usage(turn_usage, response.usage or {})
+            except GuardBlockedError as e:
+                final = str(e)
+                await self._persist_assistant_response(final)
+                return finish(final, success=False)
             except Exception as e:
                 # Check if this is a 500 error after tool execution
                 error_str = str(e)
@@ -1843,7 +2139,7 @@ class Agent:
             # Check for explicit tool calls (for models that support it)
             if response.tool_calls:
                 log.info("Tool calls detected", count=len(response.tool_calls), calls=response.tool_calls)
-                await self._handle_tool_calls(response.tool_calls)
+                await self._handle_tool_calls(response.tool_calls, turn_usage=turn_usage)
                 if planning_pipeline is not None:
                     self._advance_pipeline(planning_pipeline, event="tool_calls_completed")
                 if not self._supports_tool_result_followup():
@@ -1868,8 +2164,16 @@ class Agent:
                     planning_pipeline=planning_pipeline,
                 )
                 try:
-                    response = await self.provider.complete(messages=messages, tools=None)
-                    self._accumulate_usage(turn_usage, response.usage or {})
+                    response = await self._complete_with_guards(
+                        messages=messages,
+                        tools=None,
+                        interaction_label="tool_followup",
+                        turn_usage=turn_usage,
+                    )
+                except GuardBlockedError as e:
+                    final = str(e)
+                    await self._persist_assistant_response(final)
+                    return finish(final, success=False)
                 except Exception as e:
                     # Model doesn't support tool results - return tool output
                     log.warning("Model doesn't support tool results", error=str(e))
@@ -1894,7 +2198,7 @@ class Agent:
             embedded_calls = self._extract_tool_calls_from_content(response.content)
             if embedded_calls:
                 log.info("Tool calls found in response text", count=len(embedded_calls))
-                await self._handle_tool_calls(embedded_calls)
+                await self._handle_tool_calls(embedded_calls, turn_usage=turn_usage)
                 if planning_pipeline is not None:
                     self._advance_pipeline(planning_pipeline, event="embedded_tool_calls_completed")
                 if not self._supports_tool_result_followup():
@@ -1919,8 +2223,16 @@ class Agent:
                     planning_pipeline=planning_pipeline,
                 )
                 try:
-                    response = await self.provider.complete(messages=messages, tools=None)
-                    self._accumulate_usage(turn_usage, response.usage or {})
+                    response = await self._complete_with_guards(
+                        messages=messages,
+                        tools=None,
+                        interaction_label="embedded_tool_followup",
+                        turn_usage=turn_usage,
+                    )
+                except GuardBlockedError as e:
+                    final = str(e)
+                    await self._persist_assistant_response(final)
+                    return finish(final, success=False)
                 except Exception as e:
                     log.warning("Model doesn't support tool results", error=str(e))
                     output = self._collect_turn_tool_output(turn_start_idx)
@@ -1952,8 +2264,17 @@ class Agent:
             command = self._extract_command_from_response(response.content)
             if command:
                 log.info("Executing inline command", command=command)
-                result = await self.tools.execute(name="shell", arguments={"command": command})
-                tool_result = result.content if result.success else f"Error: {result.error}"
+                try:
+                    result = await self._execute_tool_with_guard(
+                        name="shell",
+                        arguments={"command": command},
+                        interaction_label="inline_command",
+                        turn_usage=turn_usage,
+                    )
+                    tool_result = result.content if result.success else f"Error: {result.error}"
+                except Exception as e:
+                    result = None
+                    tool_result = f"Error: {str(e)}"
                 
                 # Add tool result to session
                 self._add_session_message(
@@ -1987,11 +2308,15 @@ class Agent:
                     planning_pipeline=planning_pipeline,
                 )
                 try:
-                    response = await self.provider.complete(messages=messages, tools=None)
-                    self._accumulate_usage(turn_usage, response.usage or {})
+                    response = await self._complete_with_guards(
+                        messages=messages,
+                        tools=None,
+                        interaction_label="inline_command_followup",
+                        turn_usage=turn_usage,
+                    )
                 # If successful, continue to process the response
                     continue
-                except:
+                except Exception:
                     # Return tool output directly
                     final = await self._friendly_tool_output_response(
                         user_input=user_input,
@@ -2042,8 +2367,9 @@ class Agent:
         self.last_usage = self._empty_usage()
 
         # Tool-calling and streaming over a single pass is currently limited.
-        # Preserve tool behavior by using complete() and yielding chunked output.
-        if self.tools.list_tools():
+        # Preserve tool behavior and guard checks by using complete() and
+        # yielding chunked output when tools/guards are enabled.
+        if self.tools.list_tools() or self.guards_enabled():
             self._set_runtime_status("thinking")
             content = await self.complete(user_input)
             chunk_size = 24
