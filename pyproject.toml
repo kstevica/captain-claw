@@ -5,7 +5,7 @@ description = "A powerful console-based AI agent"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
-license-files = ["README.md"]
+license-files = ["LICENSE"]
 authors = [
     { name = "Stevica Kuharski", email = "kstevica@gmail.com" }
 ]
@@ -13,7 +13,6 @@ keywords = ["ai", "agent", "cli", "terminal", "llm"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
