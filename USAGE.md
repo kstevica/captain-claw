@@ -15,6 +15,7 @@ captain-claw
 | `/help` | Show help |
 | `/config` | Show current configuration |
 | `/history` | Show conversation history |
+| `/compact` | Manually compact old session history |
 | `/clear` | Clear current session |
 | `/new [name]` | Start a new session (optionally named) |
 | `/sessions` | List recent sessions |
@@ -33,6 +34,7 @@ Just type your message and press Enter. Captain Claw will:
 `web_fetch` supports two extraction modes:
 - Default (`extract_mode="text"`): parses page HTML with BeautifulSoup and returns human-readable text for the LLM, preserving links as `label (url)` for follow-up research.
 - Raw HTML (`extract_mode="html"`): returns the original HTML response.
+- Output length defaults to `tools.web_fetch.max_chars` in `config.yaml` (default `100000` chars) and can be overridden per call with `max_chars`.
 
 Examples:
 

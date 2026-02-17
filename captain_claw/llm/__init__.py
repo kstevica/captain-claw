@@ -91,7 +91,8 @@ class OllamaProvider(LLMProvider):
         model: str = "llama3.2",
         base_url: str = OLLAMA_NATIVE_BASE_URL,
         temperature: float = 0.7,
-        max_tokens: int = 4096,
+        max_tokens: int = 32000,
+        num_ctx: int = 160000,
         api_key: str | None = None,
     ):
         """Initialize Ollama provider.
@@ -101,12 +102,14 @@ class OllamaProvider(LLMProvider):
             base_url: Ollama API base URL
             temperature: Sampling temperature
             max_tokens: Max tokens to generate
+            num_ctx: Context window tokens sent to provider
             api_key: Optional API key (Ollama usually doesn't need one locally)
         """
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.num_ctx = max(1, int(num_ctx))
         self.api_key = api_key
         
         self.client = httpx.AsyncClient(
@@ -183,7 +186,7 @@ class OllamaProvider(LLMProvider):
         
         # Build options
         options: dict[str, Any] = {
-            "num_ctx": 65536,  # Large context window
+            "num_ctx": self.num_ctx,
             "temperature": temperature or self.temperature,
         }
         if max_tokens or self.max_tokens:
@@ -267,7 +270,7 @@ class OllamaProvider(LLMProvider):
         ollama_tools = self._convert_tools(tools) if tools else None
         
         options: dict[str, Any] = {
-            "num_ctx": 65536,
+            "num_ctx": self.num_ctx,
             "temperature": temperature or self.temperature,
         }
         if max_tokens or self.max_tokens:
@@ -332,7 +335,8 @@ def create_provider(
     api_key: str | None = None,
     base_url: str | None = None,
     temperature: float = 0.7,
-    max_tokens: int = 4096,
+    max_tokens: int = 32000,
+    num_ctx: int = 160000,
 ) -> LLMProvider:
     """Create an LLM provider.
     
@@ -343,6 +347,7 @@ def create_provider(
         base_url: Optional base URL
         temperature: Default temperature
         max_tokens: Default max tokens
+        num_ctx: Default context tokens
     
     Returns:
         Configured LLMProvider instance
@@ -355,6 +360,7 @@ def create_provider(
             base_url=default_base,
             temperature=temperature,
             max_tokens=max_tokens,
+            num_ctx=num_ctx,
             api_key=api_key,
         )
     else:
@@ -378,6 +384,7 @@ def get_provider() -> LLMProvider:
             model=cfg.model.model,
             temperature=cfg.model.temperature,
             max_tokens=cfg.model.max_tokens,
+            num_ctx=cfg.context.max_tokens,
             api_key=cfg.model.api_key or None,
         )
     return _provider

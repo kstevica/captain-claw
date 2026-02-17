@@ -129,12 +129,20 @@ async def run_interactive() -> None:
     # Main loop
     while True:
         try:
+            cfg = get_config()
             ui.print_status_line(
                 last_usage=agent.last_usage,
                 total_usage=agent.total_usage,
                 last_exec_seconds=last_exec_seconds,
                 last_completed_at=last_completed_at,
                 session_id=agent.session.id if agent.session else None,
+                context_window=agent.last_context_window,
+                model_details={
+                    "provider": cfg.model.provider,
+                    "model": cfg.model.model,
+                    "temperature": cfg.model.temperature,
+                    "max_tokens": cfg.model.max_tokens,
+                },
             )
             ui.set_runtime_status("user input")
             # Get user input
@@ -195,6 +203,19 @@ async def run_interactive() -> None:
             elif result == "HISTORY":
                 if agent.session:
                     ui.print_history(agent.session.messages)
+                continue
+            elif result == "COMPACT":
+                compacted, stats = await agent.compact_session(force=True, trigger="manual")
+                if compacted:
+                    if agent.session:
+                        ui.load_monitor_tool_output_from_session(agent.session.messages)
+                    ui.print_success(
+                        "Session compacted "
+                        f"({int(stats.get('before_tokens', 0))} -> {int(stats.get('after_tokens', 0))} tokens)"
+                    )
+                else:
+                    reason = str(stats.get("reason", "not_needed"))
+                    ui.print_warning(f"Compaction skipped: {reason}")
                 continue
             elif result == "MONITOR_ON":
                 ui.set_monitor_mode(True)

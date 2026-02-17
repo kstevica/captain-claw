@@ -7,6 +7,7 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 import httpx
 
+from captain_claw.config import get_config
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 
@@ -27,7 +28,7 @@ class WebFetchTool(Tool):
             },
             "max_chars": {
                 "type": "number",
-                "description": "Maximum characters to return (default: 10000)",
+                "description": "Maximum characters to return (default from config, typically 100000)",
             },
             "extract_mode": {
                 "type": "string",
@@ -49,7 +50,7 @@ class WebFetchTool(Tool):
     async def execute(
         self,
         url: str,
-        max_chars: int = 10000,
+        max_chars: int | None = None,
         extract_mode: str = "text",
         **kwargs: Any,
     ) -> ToolResult:
@@ -65,6 +66,10 @@ class WebFetchTool(Tool):
         """
         try:
             log.info("Fetching URL", url=url)
+            cfg = get_config()
+            configured_max = int(getattr(cfg.tools.web_fetch, "max_chars", 100000))
+            effective_max_chars = configured_max if max_chars is None else int(max_chars)
+            effective_max_chars = max(1, effective_max_chars)
             
             response = await self.client.get(url)
             response.raise_for_status()
@@ -85,8 +90,8 @@ class WebFetchTool(Tool):
                     error=f"Unsupported extract_mode '{extract_mode}'. Use 'text' or 'html'.",
                 )
 
-            if len(content) > max_chars:
-                content = content[:max_chars] + "\n... [truncated]"
+            if len(content) > effective_max_chars:
+                content = content[:effective_max_chars] + "\n... [truncated]"
             
             # Add header with URL info
             output = f"[URL: {url}]\n"

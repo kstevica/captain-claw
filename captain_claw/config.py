@@ -20,14 +20,14 @@ class ModelConfig(BaseModel):
     provider: str = "ollama"
     model: str = "minimax-m2.5:cloud"
     temperature: float = 0.7
-    max_tokens: int = 4096
+    max_tokens: int = 32000
     api_key: str = ""
 
 
 class ContextConfig(BaseModel):
     """Context window configuration."""
 
-    max_tokens: int = 100000
+    max_tokens: int = 160000
     compaction_threshold: float = 0.8
     compaction_ratio: float = 0.4
 
@@ -44,11 +44,18 @@ class ShellToolConfig(BaseModel):
     allowed_commands: list[str] = []
 
 
+class WebFetchToolConfig(BaseModel):
+    """Web fetch tool configuration."""
+
+    max_chars: int = 100000
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
 
     enabled: list[str] = ["shell", "read", "write", "glob", "web_fetch"]
     shell: ShellToolConfig = Field(default_factory=ShellToolConfig)
+    web_fetch: WebFetchToolConfig = Field(default_factory=WebFetchToolConfig)
     require_confirmation: list[str] = ["shell", "write"]
 
 

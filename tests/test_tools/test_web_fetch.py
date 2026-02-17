@@ -1,5 +1,6 @@
 import pytest
 
+from captain_claw.config import get_config, set_config
 from captain_claw.tools.web_fetch import WebFetchTool
 
 
@@ -91,3 +92,23 @@ async def test_web_fetch_rejects_unsupported_extract_mode():
 
     assert result.success is False
     assert "Unsupported extract_mode" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_uses_configurable_default_max_chars():
+    old_cfg = get_config().model_copy(deep=True)
+    cfg = old_cfg.model_copy(deep=True)
+    cfg.tools.web_fetch.max_chars = 20
+    set_config(cfg)
+    try:
+        html = "<html><body><p>abcdefghijklmnopqrstuvwxyz</p></body></html>"
+        tool = WebFetchTool()
+        tool.client = _FakeClient(_FakeResponse(html))
+
+        result = await tool.execute(url="https://example.com")
+
+        assert result.success is True
+        assert "... [truncated]" in result.content
+        assert "abcdefghijklmnopqrst" in result.content
+    finally:
+        set_config(old_cfg)

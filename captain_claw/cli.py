@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import termios
@@ -36,6 +37,7 @@ class TerminalUI:
             "/sessions",
             "/config",
             "/history",
+            "/compact",
             "/monitor",
             "/exit",
             "/quit",
@@ -144,6 +146,7 @@ Commands:
   /sessions       - List recent sessions
   /config         - Show configuration
   /history        - Show conversation history
+  /compact        - Manually compact long session history
   /monitor on     - Enable split monitor view
   /monitor off    - Disable split monitor view
   /exit, /quit    - Exit the application
@@ -160,7 +163,8 @@ Commands:
     def print_message(self, role: str, content: str) -> None:
         """Print a message with styling."""
         if self._monitor_mode and self._sticky_footer:
-            self._append_chat_text(f"[{role.upper()}] {content}\n")
+            prefix = self._monitor_role_prefix(role)
+            self._append_chat_text(f"{prefix}{content}\n")
             self._render_monitor_view()
             return
         self._prepare_output()
@@ -174,10 +178,10 @@ Commands:
         
         try:
             colors = {
-                "user": lambda x: f"[USER] {x}",
-                "assistant": lambda x: f"[ASSISTANT] {x}",
-                "system": lambda x: f"[SYSTEM] {x}",
-                "tool": lambda x: f"[TOOL] {x}",
+                "user": lambda x: f"> {x}",
+                "assistant": lambda x: f":) {x}",
+                "system": lambda x: f"! {x}",
+                "tool": lambda x: f"$ {x}",
             }
             color_fn = colors.get(role, lambda x: f"[{role.upper()}] {x}")
             print(color_fn(content))
@@ -293,6 +297,21 @@ Commands:
         """Trim and pad a line to terminal width."""
         return text[:width].ljust(width)
 
+    @staticmethod
+    def _compose_footer_line(left: str, right: str, width: int) -> str:
+        """Compose a footer line with right-aligned metadata."""
+        left_text = left.rstrip()
+        right_text = right.strip()
+        if not right_text:
+            return left_text
+        min_gap = 3
+        free = width - len(left_text) - len(right_text)
+        if free >= min_gap:
+            return f"{left_text}{' ' * free}{right_text}"
+        keep_left = max(0, width - len(right_text) - min_gap)
+        clipped_left = left_text[:keep_left].rstrip() if keep_left > 0 else ""
+        return f"{clipped_left}{' ' * min_gap}{right_text}"
+
     def is_monitor_enabled(self) -> bool:
         """Whether split monitor mode is enabled."""
         return self._monitor_mode
@@ -357,16 +376,37 @@ Commands:
         left_lines = self._wrap_plain_text(self._chat_output_text, left_width)
         right_lines = self._wrap_plain_text(self._tool_output_text, right_width) if right_width > 0 else []
 
-        left_view = left_lines[-output_rows:]
-        right_view = right_lines[-output_rows:] if right_width > 0 else []
+        content_rows = max(0, output_rows - 1)
+        left_view = left_lines[-content_rows:] if content_rows > 0 else []
+        right_view = right_lines[-content_rows:] if (right_width > 0 and content_rows > 0) else []
 
         sep = "\033[90m|\033[0m" if self._ansi_enabled else "|"
+        if self._ansi_enabled:
+            left_header = f"\033[30;42m{self._fit_line(' Chat ', left_width)}\033[0m"
+            if right_width > 0:
+                right_header = f"\033[30;42m{self._fit_line(' Monitor ', right_width)}\033[0m"
+                header_line = f"{left_header} {sep} {right_header}"
+            else:
+                header_line = left_header
+        else:
+            left_header = self._fit_line(" Chat ", left_width)
+            if right_width > 0:
+                right_header = self._fit_line(" Monitor ", right_width)
+                header_line = f"{left_header} | {right_header}"
+            else:
+                header_line = left_header
+
         sys.stdout.write("\0337")
         sys.stdout.write(f"\033[1;{m['output_bottom']}r")
         for row in range(1, output_rows + 1):
-            left = left_view[row - 1] if row - 1 < len(left_view) else ""
+            if row == 1:
+                line = header_line
+                sys.stdout.write(f"\033[{row};1H\033[2K{line}")
+                continue
+            content_idx = row - 2
+            left = left_view[content_idx] if content_idx < len(left_view) else ""
             if right_width > 0:
-                right = right_view[row - 1] if row - 1 < len(right_view) else ""
+                right = right_view[content_idx] if content_idx < len(right_view) else ""
                 line = f"{left[:left_width].ljust(left_width)} {sep} {right[:right_width].ljust(right_width)}"
             else:
                 line = left[:left_width].ljust(left_width)
@@ -395,6 +435,45 @@ Commands:
         self._tool_output_text = ""
         self._render_monitor_view()
 
+    @staticmethod
+    def _split_web_fetch_payload(raw_output: str) -> str:
+        """Return extracted content portion from web_fetch output."""
+        lines = (raw_output or "").splitlines()
+        idx = 0
+        while idx < len(lines):
+            if re.match(r"^\[[^:\]]+:\s*.*\]$", lines[idx].strip()):
+                idx += 1
+                continue
+            break
+        if idx < len(lines) and not lines[idx].strip():
+            idx += 1
+        content = "\n".join(lines[idx:]).strip()
+        return content or (raw_output or "").strip()
+
+    @staticmethod
+    def _summarize_text(text: str, max_sentences: int = 2, max_chars: int = 320) -> str:
+        """Build a short summary from first 1-2 sentences."""
+        cleaned = re.sub(r"\s+", " ", (text or "").strip())
+        if not cleaned:
+            return "No readable text extracted."
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", cleaned) if s.strip()]
+        picked = sentences[:max_sentences] if sentences else [cleaned]
+        summary = " ".join(picked)
+        if len(summary) > max_chars:
+            summary = summary[:max_chars].rstrip() + "..."
+        return summary
+
+    def _format_monitor_tool_body(self, tool_name: str, raw_output: str) -> str:
+        """Render monitor body text for a tool output."""
+        text = raw_output if raw_output else "[no output]"
+        if tool_name != "web_fetch":
+            return text
+
+        used_text = self._split_web_fetch_payload(text)
+        summary = self._summarize_text(used_text)
+        used_kb = len(used_text.encode("utf-8")) / 1024.0
+        return f"Summary: {summary}\nUsed text: {used_kb:.1f} kB"
+
     def append_tool_output(
         self,
         tool_name: str,
@@ -411,7 +490,7 @@ Commands:
             except Exception:
                 args_text = str(args)
         header = f"{tool_name} {args_text}".strip()
-        body = raw_output if raw_output else "[no output]"
+        body = self._format_monitor_tool_body(tool_name, raw_output).rstrip("\n")
         self._append_tool_text(f"{header}\n{body}\n\n")
         if render:
             self._render_monitor_view()
@@ -530,17 +609,30 @@ Commands:
             sys.stdout.write(f"\033[{row};1H\033[2K{content}")
         sys.stdout.flush()
 
+    def _monitor_role_prefix(self, role: str) -> str:
+        """Return compact role prefix for monitor chat pane."""
+        normalized = role.lower()
+        if normalized == "user":
+            return "> "
+        if normalized == "assistant":
+            return ":) "
+        if normalized == "system":
+            return "! "
+        if normalized == "tool":
+            return "$ "
+        return f"[{role.upper()}] "
+
     def _styled_role_prefix(self, role: str) -> str | None:
         """Return colored role prefix when ANSI output is enabled."""
         if not self._ansi_enabled:
             return None
         styles = {
-            "user": "\033[97;44m [USER] \033[0m",
-            "assistant": "\033[30;102m [ASSISTANT] \033[0m",
-            "system": "\033[30;103m [SYSTEM] \033[0m",
-            "tool": "\033[30;106m [TOOL] \033[0m",
+            "user": "\033[32m>\033[0m",
+            "assistant": "\033[96m:)\033[0m",
+            "system": "\033[30;103m ! \033[0m",
+            "tool": "\033[30;106m $ \033[0m",
         }
-        return styles.get(role.lower(), f"[{role.upper()}]")
+        return styles.get(role.lower(), f"[{role.upper()}] ")
 
     def _render_footer(self, force: bool = False) -> None:
         """Render fixed system + status footer with FPS limit."""
@@ -585,11 +677,17 @@ Commands:
         last_exec_seconds: float | None,
         last_completed_at: datetime | None,
         session_id: str | None,
+        context_window: dict[str, int | float] | None = None,
+        model_details: dict[str, Any] | None = None,
     ) -> None:
         """Print a two-line status footer above the input prompt."""
+        m = self._layout_metrics()
+        width = m["width"]
         now_str = datetime.now().strftime("%H:%M:%S")
         last = last_usage or {}
         total = total_usage or {}
+        ctx = context_window or {}
+        model = model_details or {}
         last_prompt = int(last.get("prompt_tokens", 0))
         last_completion = int(last.get("completion_tokens", 0))
         last_total = int(last.get("total_tokens", 0))
@@ -598,22 +696,48 @@ Commands:
         last_time = last_completed_at.strftime("%H:%M:%S") if last_completed_at else "--"
         sid = session_id or "-"
 
-        line1 = (
+        ctx_budget = int(ctx.get("context_budget_tokens", 0)) if ctx.get("context_budget_tokens") is not None else 0
+        ctx_used = int(ctx.get("prompt_tokens", 0)) if ctx.get("prompt_tokens") is not None else 0
+        if ctx_budget > 0:
+            util = float(ctx.get("utilization", (ctx_used / ctx_budget)))
+            util_pct = max(0.0, util * 100.0)
+            ctx_text = f"CTX {ctx_used:,}/{ctx_budget:,} ({util_pct:.1f}%)"
+        else:
+            ctx_text = "CTX n/a"
+
+        provider = str(model.get("provider", "")).strip()
+        model_name = str(model.get("model", "")).strip()
+        temperature = model.get("temperature")
+        gen_max = model.get("max_tokens")
+        if model_name or provider:
+            pieces = [p for p in [provider, model_name] if p]
+            detail_bits: list[str] = []
+            if temperature is not None:
+                detail_bits.append(f"t={temperature}")
+            if gen_max is not None:
+                detail_bits.append(f"gen={int(gen_max):,}")
+            suffix = f" [{' '.join(detail_bits)}]" if detail_bits else ""
+            model_text = f"MODEL {'/'.join(pieces)}{suffix}"
+        else:
+            model_text = "MODEL n/a"
+
+        line1_left = (
             f" TOKENS  last(p/c/t): {last_prompt}/{last_completion}/{last_total}"
             f"   total(t): {all_total}"
             f"   session: {sid} "
         )
-        line2 = (
+        line2_left = (
             f" TIME    last task at: {last_time}"
             f"   duration: {exec_str}"
             f"   now: {now_str} "
         )
+        line1 = self._compose_footer_line(line1_left, ctx_text, width)
+        line2 = self._compose_footer_line(line2_left, model_text, width)
         self._status_line_1 = line1
         self._status_line_2 = line2
 
         if not self._sticky_footer:
             # Green background + dark text for readability.
-            m = self._layout_metrics()
             print(f"\033[30;42m{self._fit_line(line1, m['width'])}\033[0m")
             print(f"\033[30;42m{self._fit_line(line2, m['width'])}\033[0m")
             return
@@ -725,7 +849,7 @@ Commands:
         """Start assistant streaming in the output area."""
         self._assistant_output_active = True
         if self._monitor_mode and self._sticky_footer:
-            self._append_chat_text("[ASSISTANT] ")
+            self._append_chat_text(self._monitor_role_prefix("assistant"))
             self._render_monitor_view()
             return
         self._prepare_output()
@@ -733,7 +857,7 @@ Commands:
         if prefix:
             print(f"{prefix} ", end="", flush=True)
         else:
-            print("[ASSISTANT] ", end="", flush=True)
+            print(":) ", end="", flush=True)
 
     def end_assistant_stream(self) -> None:
         """Finish assistant streaming and flush deferred footer updates."""
@@ -809,6 +933,8 @@ Commands:
             return "CONFIG"
         elif command == "/history":
             return "HISTORY"
+        elif command == "/compact":
+            return "COMPACT"
         elif command == "/monitor":
             monitor_arg = args.strip().lower()
             if monitor_arg == "on":

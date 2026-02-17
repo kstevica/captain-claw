@@ -6,12 +6,12 @@ model:
   provider: "ollama"  # ollama, openai, anthropic
   model: "minimax-m2.5:cloud"  # model name (check 'ollama list' for available)
   temperature: 0.7  # creativity (0-1)
-  max_tokens: 4096  # max response length
+  max_tokens: 32000  # max response length
   # api_key: ""  # set via environment variable or here
 
 # Context Settings
 context:
-  max_tokens: 100000  # leave room for response
+  max_tokens: 160000  # leave room for response
   compaction_threshold: 0.8  # trigger compaction at 80%
   compaction_ratio: 0.4  # keep 40% after compaction
 
@@ -23,6 +23,8 @@ tools:
     - write
     - glob
     - web_fetch
+  web_fetch:
+    max_chars: 100000  # default returned characters (can override per call)
   shell:
     timeout: 30  # seconds
     blocked:
