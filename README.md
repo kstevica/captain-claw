@@ -120,7 +120,7 @@ This allows strict blocking for sensitive environments or interactive approval f
 
 ```bash
 git clone https://github.com/kstevica/captain-claw
-cd captain-claw-dev
+cd captain-claw
 python -m venv venv
 source venv/bin/activate
 pip install -e .
