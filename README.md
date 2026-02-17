@@ -21,10 +21,6 @@ If you are looking for a powerful open-source agentic system for day-to-day term
 
 In under five minutes, you can have a multi-model terminal agentic system with persistent sessions and guardrails.
 
-## Demo Section (GIF/Asciinema Ready)
-
-Use this sequence to record a short demo that highlights Captain Claw strengths (multimodel, multisession, guards).
-
 ## Why Captain Claw
 
 - Multi-model AI in one CLI: ChatGPT/OpenAI, Claude/Anthropic, Gemini/Google, and Ollama.
