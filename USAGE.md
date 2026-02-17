@@ -16,6 +16,7 @@ captain-claw
 | `/config` | Show current configuration |
 | `/history` | Show conversation history |
 | `/compact` | Manually compact old session history |
+| `/planning on|off` | Toggle planning mode and task pipeline orchestration |
 | `/clear` | Clear current session |
 | `/new [name]` | Start a new session (optionally named) |
 | `/sessions` | List recent sessions |
@@ -28,6 +29,13 @@ Just type your message and press Enter. Captain Claw will:
 1. Process your request
 2. Use tools if needed (shell, read, write, glob, web_fetch)
 3. Return the response
+
+### File Output Policy
+
+- Tool-generated files are saved under `<captain-claw launch directory>/saved`.
+- If `saved/` does not exist, Captain Claw creates it automatically.
+- Relative paths are written under `saved/`.
+- Absolute or traversal paths are remapped under `saved/` for safety.
 
 ### Web Fetch Modes
 

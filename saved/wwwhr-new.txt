@@ -1,0 +1,12 @@
+Here's what I found from fetching www.hr:
+
+**Summary:**
+The website appears to be a minimal "coming soon" page for **dot.hr** (a Croatian portal). The content is very brief and largely repetitive:
+
+- **Main message:** "dot.hr – Spajamo točke na novi način" (Croatian for "Connecting dots in a new way")
+- **Additional text:** "dot portal • uskoro online" (meaning "coming soon")
+- **Interactive element:** "Pritisni R za replay" (Press R for replay)
+
+The page is essentially a placeholder with minimal content — likely a pre-launch landing page.
+
+**File status:** No file has been saved yet. If you'd like me to save this summary to **wwwhr-new.txt**, let me know and I'll create it for you.

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from captain_claw.agent import Agent
@@ -5,6 +7,7 @@ from captain_claw.config import get_config, set_config
 from captain_claw.exceptions import LLMAPIError
 from captain_claw.llm import LLMProvider, LLMResponse, Message, ToolCall, ToolDefinition
 from captain_claw.session import Session
+from captain_claw.tools.write import WriteTool
 from captain_claw.tools.registry import Tool, ToolRegistry, ToolResult
 
 
@@ -187,6 +190,55 @@ class ToolThenFinalProvider(LLMProvider):
         return len(text)
 
 
+class DummyWebFetchTool(Tool):
+    name = "web_fetch"
+    description = "Dummy web fetch"
+    parameters = {
+        "type": "object",
+        "properties": {"url": {"type": "string"}},
+        "required": ["url"],
+    }
+
+    async def execute(self, **kwargs) -> ToolResult:
+        return ToolResult(
+            success=True,
+            content="[URL: https://www.hr]\n[Status: 200]\n[Mode: text]\n\nhr landing page content",
+        )
+
+
+class CloudWebFetchThenSummaryProvider(LLMProvider):
+    def __init__(self):
+        self.calls = 0
+
+    async def complete(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="wf1", name="web_fetch", arguments={"url": "https://www.hr"})],
+            )
+        return LLMResponse(content="Summary: www.hr is currently a minimal landing page.")
+
+    async def complete_streaming(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ):
+        if False:
+            yield ""
+
+    def count_tokens(self, text: str) -> int:
+        return len(text)
+
+
 @pytest.mark.asyncio
 async def test_complete_sends_tool_definitions_to_provider():
     provider = DummyProvider()
@@ -336,5 +388,46 @@ async def test_ollama_cloud_skips_tool_result_followup_call():
         assert result == "Friendly: done"
         assert provider.calls == 2
         assert provider.calls_payloads[1]["tools"] is None
+    finally:
+        set_config(old_cfg)
+
+
+@pytest.mark.asyncio
+async def test_cloud_mode_auto_runs_write_when_user_requested_file_output(tmp_path: Path):
+    old_cfg = get_config().model_copy(deep=True)
+    cfg = old_cfg.model_copy(deep=True)
+    cfg.model.provider = "ollama"
+    cfg.model.model = "minimax-m2.5:cloud"
+    set_config(cfg)
+    try:
+        provider = CloudWebFetchThenSummaryProvider()
+        outputs: list[str] = []
+
+        def cb(name: str, args: dict, output: str) -> None:
+            outputs.append(name)
+
+        agent = Agent(provider=provider, tool_output_callback=cb)
+        agent._initialized = True
+        agent.session = Session(id="s1", name="default")
+        agent.session_manager = DummySessionManager()
+        registry = ToolRegistry(base_path=tmp_path)
+        registry.register(DummyWebFetchTool())
+        registry.register(WriteTool())
+        agent.tools = registry
+
+        result = await agent.complete(
+            "fetch website www.hr, summarize the content and write it to file wwwhr.txt"
+        )
+
+        expected = tmp_path / "saved" / "wwwhr.txt"
+        assert expected.exists()
+        saved_content = expected.read_text(encoding="utf-8")
+        assert "Summary: www.hr is currently a minimal landing page." in saved_content
+        assert "Written" in result
+        assert "write" in outputs
+        assert any(
+            msg.get("role") == "tool" and msg.get("tool_name") == "write"
+            for msg in agent.session.messages
+        )
     finally:
         set_config(old_cfg)

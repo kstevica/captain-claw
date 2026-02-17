@@ -1,0 +1,13 @@
+## Summary of www.hr
+
+The website appears to be a minimal landing page for **dot.hr** (the Croatian country code top-level domain). Here's what was found:
+
+- **Main heading:** "dot.hr – Spajamo točke na novi način" (Croatian for "Connecting dots in a new way")
+- **Status:** "dot portal • uskoro online" (meaning "coming soon online")
+- **Interactive element:** "Pritisni R za replay" ("Press R for replay")
+
+The page is essentially a "coming soon" or under-construction page for a Croatian domain portal.
+
+---
+
+**No file was saved yet.** The raw tool output shows the fetch was successful, but there's no indication that the content was written to **wwwhr.txt**. If you'd like me to save this summary to that file, let me know and I can proceed with that action.

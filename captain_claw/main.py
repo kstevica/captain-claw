@@ -167,7 +167,11 @@ async def run_interactive() -> None:
                 session_name = "default"
                 if result.startswith("NEW:"):
                     session_name = result.split(":", 1)[1].strip() or "default"
+                planning_enabled_before = agent.planning_enabled
                 agent.session = await agent.session_manager.create_session(name=session_name)
+                agent.refresh_session_runtime_flags()
+                if planning_enabled_before and not agent.planning_enabled:
+                    await agent.set_planning_mode(True)
                 if agent.session:
                     ui.load_monitor_tool_output_from_session(agent.session.messages)
                     ui.print_session_info(agent.session)
@@ -193,6 +197,7 @@ async def run_interactive() -> None:
                     ui.print_error(f"Session not found: {selector}")
                     continue
                 agent.session = selected
+                agent.refresh_session_runtime_flags()
                 ui.load_monitor_tool_output_from_session(agent.session.messages)
                 ui.print_session_info(agent.session)
                 ui.print_success("Loaded session")
@@ -216,6 +221,14 @@ async def run_interactive() -> None:
                 else:
                     reason = str(stats.get("reason", "not_needed"))
                     ui.print_warning(f"Compaction skipped: {reason}")
+                continue
+            elif result == "PLANNING_ON":
+                await agent.set_planning_mode(True)
+                ui.print_success("Planning mode enabled")
+                continue
+            elif result == "PLANNING_OFF":
+                await agent.set_planning_mode(False)
+                ui.print_success("Planning mode disabled")
                 continue
             elif result == "MONITOR_ON":
                 ui.set_monitor_mode(True)

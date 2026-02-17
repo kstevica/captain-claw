@@ -3,6 +3,7 @@
 import asyncio
 import json
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -79,8 +80,31 @@ class Tool(ABC):
 class ToolRegistry:
     """Registry for managing available tools."""
 
-    def __init__(self):
+    def __init__(self, base_path: Path | str | None = None, saved_dir_name: str = "saved"):
         self._tools: dict[str, Tool] = {}
+        self._saved_dir_name = (saved_dir_name or "saved").strip() or "saved"
+        self._runtime_base_path = Path.cwd()
+        self.set_runtime_base_path(base_path or Path.cwd())
+
+    def set_runtime_base_path(self, base_path: Path | str) -> None:
+        """Set runtime base path used by tools for local file output."""
+        self._runtime_base_path = Path(base_path).expanduser().resolve()
+
+    @property
+    def runtime_base_path(self) -> Path:
+        """Runtime base path from which Captain Claw was launched."""
+        return self._runtime_base_path
+
+    def get_saved_base_path(self, create: bool = False) -> Path:
+        """Return `<runtime_base>/saved` (or custom save dir name)."""
+        saved_root = (self._runtime_base_path / self._saved_dir_name).resolve()
+        try:
+            saved_root.relative_to(self._runtime_base_path)
+        except ValueError:
+            saved_root = (self._runtime_base_path / "saved").resolve()
+        if create:
+            saved_root.mkdir(parents=True, exist_ok=True)
+        return saved_root
 
     def register(self, tool: Tool) -> None:
         """Register a tool.
@@ -181,7 +205,11 @@ class ToolRegistry:
         try:
             log.info("Executing tool", tool=name, args=arguments)
             result = await asyncio.wait_for(
-                tool.execute(**arguments),
+                tool.execute(
+                    **arguments,
+                    _runtime_base_path=self.runtime_base_path,
+                    _saved_base_path=self.get_saved_base_path(create=False),
+                ),
                 timeout=config.tools.shell.timeout if name == "shell" else 30,
             )
             log.info("Tool executed", tool=name, success=result.success)

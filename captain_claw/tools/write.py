@@ -34,6 +34,46 @@ class WriteTool(Tool):
         "required": ["path", "content"],
     }
 
+    @staticmethod
+    def _resolve_saved_root(kwargs: dict[str, Any]) -> Path:
+        """Resolve `<runtime_base>/saved` for tool-managed outputs."""
+        saved_root_raw = kwargs.get("_saved_base_path")
+        runtime_base_raw = kwargs.get("_runtime_base_path")
+        if saved_root_raw is not None:
+            saved_root = Path(saved_root_raw).expanduser().resolve()
+        elif runtime_base_raw is not None:
+            saved_root = (Path(runtime_base_raw).expanduser().resolve() / "saved").resolve()
+        else:
+            saved_root = (Path.cwd().resolve() / "saved").resolve()
+        saved_root.mkdir(parents=True, exist_ok=True)
+        return saved_root
+
+    @staticmethod
+    def _normalize_under_saved(path: str, saved_root: Path) -> Path:
+        """Map any requested path into the saved root."""
+        requested = Path(path).expanduser()
+        if requested.is_absolute():
+            absolute = requested.resolve()
+            try:
+                absolute.relative_to(saved_root)
+                return absolute
+            except ValueError:
+                relative_hint = Path(*absolute.parts[1:])
+        else:
+            relative_hint = requested
+
+        safe_parts = [part for part in relative_hint.parts if part not in ("", ".", "..")]
+        if not safe_parts:
+            safe_parts = ["output.txt"]
+
+        candidate = (saved_root.joinpath(*safe_parts)).resolve()
+        try:
+            candidate.relative_to(saved_root)
+            return candidate
+        except ValueError:
+            fallback = (saved_root / safe_parts[-1]).resolve()
+            return fallback
+
     async def execute(self, path: str, content: str, append: bool = False, **kwargs: Any) -> ToolResult:
         """Write content to a file.
         
@@ -46,7 +86,8 @@ class WriteTool(Tool):
             ToolResult with status
         """
         try:
-            file_path = Path(path).expanduser().resolve()
+            saved_root = self._resolve_saved_root(kwargs)
+            file_path = self._normalize_under_saved(path, saved_root)
             
             # Ensure parent directory exists
             file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -55,10 +96,15 @@ class WriteTool(Tool):
             mode = "a" if append else "w"
             with open(file_path, mode, encoding="utf-8") as f:
                 f.write(content)
+
+            redirect_note = ""
+            requested = Path(path).expanduser()
+            if str(requested) != str(file_path):
+                redirect_note = f" (requested: {path})"
             
             return ToolResult(
                 success=True,
-                content=f"Written {len(content)} chars to {file_path}",
+                content=f"Written {len(content)} chars to {file_path}{redirect_note}",
             )
             
         except Exception as e:

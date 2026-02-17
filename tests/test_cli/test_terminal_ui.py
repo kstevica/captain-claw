@@ -165,6 +165,12 @@ def test_compact_command_parsing():
     assert ui.handle_special_command("/compact") == "COMPACT"
 
 
+def test_planning_command_parsing():
+    ui = TerminalUI()
+    assert ui.handle_special_command("/planning on") == "PLANNING_ON"
+    assert ui.handle_special_command("/planning off") == "PLANNING_OFF"
+
+
 def test_new_command_supports_optional_name():
     ui = TerminalUI()
     assert ui.handle_special_command("/new") == "NEW"

@@ -1,4 +1,5 @@
 import pytest
+from typing import Any
 
 from captain_claw.agent import Agent
 from captain_claw.config import get_config, set_config
@@ -194,14 +195,58 @@ def test_system_prompt_includes_workspace_folder_policy_with_session_subfolders(
     prompt = agent._build_system_prompt()
 
     assert "Workspace folder policy:" in prompt
+    assert "All tool-generated files must be written inside:" in prompt
     assert 'Current session subfolder name: "phase-3".' in prompt
-    assert "scripts/phase-3/" in prompt
-    assert "tools/phase-3/" in prompt
-    assert "downloads/phase-3/" in prompt
-    assert "media/phase-3/" in prompt
-    assert "showcase/phase-3/" in prompt
-    assert "skills/phase-3/" in prompt
-    assert "tmp/phase-3/" in prompt
+    assert "saved/scripts/phase-3/" in prompt
+    assert "saved/tools/phase-3/" in prompt
+    assert "saved/downloads/phase-3/" in prompt
+    assert "saved/media/phase-3/" in prompt
+    assert "saved/showcase/phase-3/" in prompt
+    assert "saved/skills/phase-3/" in prompt
+    assert "saved/tmp/phase-3/" in prompt
+
+
+def test_build_messages_includes_planning_pipeline_note():
+    agent = Agent(provider=TokenAwareProvider())
+    agent.session = Session(id="s1", name="default")
+    agent.session.add_message("user", "help me plan deployment")
+    pipeline = {
+        "tasks": [
+            {"id": "task_1", "title": "Gather deployment constraints", "status": "in_progress"},
+            {"id": "task_2", "title": "Prepare rollout steps", "status": "pending"},
+        ],
+        "current_index": 0,
+        "state": "active",
+    }
+
+    messages = agent._build_messages(query="deployment", planning_pipeline=pipeline)
+
+    notes = [m.content for m in messages if "Planning mode is ON" in m.content]
+    assert notes
+    assert "[IN_PROGRESS] Gather deployment constraints" in notes[0]
+
+
+@pytest.mark.asyncio
+async def test_complete_emits_planning_pipeline_updates_when_enabled():
+    outputs: list[dict[str, Any]] = []
+
+    def cb(name: str, args: dict, output: str) -> None:
+        outputs.append({"name": name, "args": args, "output": output})
+
+    agent = Agent(provider=TokenAwareProvider(), tool_output_callback=cb)
+    agent._initialized = True
+    agent.session = Session(id="s1", name="default")
+    agent.session_manager = DummySessionManager()
+    agent.tools = ToolRegistry()
+    agent.planning_enabled = True
+
+    result = await agent.complete("plan and answer this request")
+
+    assert result == "ok"
+    planning_logs = [entry for entry in outputs if entry["name"] == "planning"]
+    assert planning_logs
+    assert any("event" in entry["args"] and entry["args"]["event"] == "created" for entry in planning_logs)
+    assert any("event" in entry["args"] and entry["args"]["event"] == "completed" for entry in planning_logs)
 
 
 @pytest.mark.asyncio

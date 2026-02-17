@@ -3,6 +3,7 @@
 import asyncio
 from datetime import UTC, datetime
 import json
+from pathlib import Path
 import re
 import sys
 from typing import Any, AsyncIterator
@@ -43,6 +44,8 @@ class Agent:
         self.status_callback = status_callback
         self.tool_output_callback = tool_output_callback
         self.tools = get_tool_registry()
+        self.runtime_base_path = Path.cwd().resolve()
+        self.tools.set_runtime_base_path(self.runtime_base_path)
         self.session_manager = get_session_manager()
         self.session: Session | None = None
         self._initialized = False
@@ -51,6 +54,7 @@ class Agent:
         self.total_usage: dict[str, int] = self._empty_usage()
         self.last_context_window: dict[str, int | float] = {}
         self._last_memory_debug_signature: str | None = None
+        self.planning_enabled: bool = False
 
     @staticmethod
     def _empty_usage() -> dict[str, int]:
@@ -337,6 +341,165 @@ class Agent:
                 compacted_messages=stats.get("compacted_messages"),
             )
 
+    def _sync_runtime_flags_from_session(self) -> None:
+        """Load runtime feature flags from active session metadata."""
+        enabled = False
+        if self.session and isinstance(self.session.metadata, dict):
+            planning_meta = self.session.metadata.get("planning")
+            if isinstance(planning_meta, dict):
+                enabled = bool(planning_meta.get("enabled", False))
+        self.planning_enabled = enabled
+
+    def refresh_session_runtime_flags(self) -> None:
+        """Public helper to reload runtime flags after session switch."""
+        self._sync_runtime_flags_from_session()
+
+    async def set_planning_mode(self, enabled: bool, persist: bool = True) -> None:
+        """Enable or disable planning mode for current session/runtime."""
+        self.planning_enabled = bool(enabled)
+        if not self.session:
+            return
+        planning_meta = self.session.metadata.setdefault("planning", {})
+        planning_meta["enabled"] = self.planning_enabled
+        planning_meta["updated_at"] = datetime.now(UTC).isoformat()
+        if persist:
+            await self.session_manager.save_session(self.session)
+
+    def _build_task_pipeline(self, user_input: str, max_tasks: int = 6) -> dict[str, Any]:
+        """Build a lightweight task pipeline from user input."""
+        cleaned = re.sub(r"\s+", " ", (user_input or "").strip())
+        parts = [
+            piece.strip(" -")
+            for piece in re.split(
+                r"(?:\n+|;|\. |\band then\b|\bthen\b|\bnext\b)",
+                cleaned,
+                flags=re.IGNORECASE,
+            )
+            if piece.strip(" -")
+        ]
+        tasks: list[dict[str, Any]] = []
+        for idx, part in enumerate(parts[:max_tasks], start=1):
+            tasks.append({
+                "id": f"task_{idx}",
+                "title": part[:180],
+                "status": "pending",
+            })
+
+        if not tasks:
+            tasks = [
+                {"id": "task_1", "title": "Understand the request and constraints", "status": "pending"},
+                {"id": "task_2", "title": "Execute required actions/tools", "status": "pending"},
+                {"id": "task_3", "title": "Return concise final answer", "status": "pending"},
+            ]
+
+        pipeline = {
+            "created_at": datetime.now(UTC).isoformat(),
+            "request": cleaned[:500],
+            "tasks": tasks,
+            "current_index": 0,
+            "state": "active",
+        }
+        self._set_pipeline_progress(pipeline, current_index=0, current_status="in_progress")
+        return pipeline
+
+    @staticmethod
+    def _set_pipeline_progress(
+        pipeline: dict[str, Any],
+        current_index: int,
+        current_status: str = "in_progress",
+    ) -> None:
+        """Set pipeline task statuses around current index."""
+        tasks = pipeline.get("tasks", [])
+        if not isinstance(tasks, list) or not tasks:
+            return
+        bounded = max(0, min(current_index, len(tasks) - 1))
+        pipeline["current_index"] = bounded
+        for idx, task in enumerate(tasks):
+            if not isinstance(task, dict):
+                continue
+            if idx < bounded:
+                task["status"] = "completed"
+            elif idx == bounded:
+                task["status"] = current_status
+            else:
+                task["status"] = "pending"
+
+    @staticmethod
+    def _build_pipeline_note(pipeline: dict[str, Any]) -> str:
+        """Build planning note injected into model context."""
+        tasks = pipeline.get("tasks", [])
+        if not isinstance(tasks, list) or not tasks:
+            return ""
+        lines = [
+            "Planning mode is ON. Follow this task pipeline and execute step-by-step:"
+        ]
+        for idx, task in enumerate(tasks, start=1):
+            if not isinstance(task, dict):
+                continue
+            title = str(task.get("title", "")).strip()
+            status = str(task.get("status", "pending")).strip().upper()
+            lines.append(f"{idx}. [{status}] {title}")
+        lines.append("If tools are needed, use them for the current in-progress task.")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_pipeline_monitor_output(event: str, pipeline: dict[str, Any]) -> str:
+        """Format pipeline state for monitor output."""
+        lines = [f"Planning event={event}"]
+        lines.append(f"state={pipeline.get('state', 'active')}")
+        tasks = pipeline.get("tasks", [])
+        for idx, task in enumerate(tasks, start=1):
+            if not isinstance(task, dict):
+                continue
+            lines.append(
+                f"- {idx}. status={task.get('status', 'pending')} title={task.get('title', '')}"
+            )
+        return "\n".join(lines)
+
+    def _emit_pipeline_update(self, event: str, pipeline: dict[str, Any]) -> None:
+        """Emit planning pipeline state into monitor output stream."""
+        self._emit_tool_output(
+            "planning",
+            {
+                "event": event,
+                "enabled": self.planning_enabled,
+                "current_index": int(pipeline.get("current_index", 0)),
+            },
+            self._format_pipeline_monitor_output(event, pipeline),
+        )
+
+    def _advance_pipeline(self, pipeline: dict[str, Any], event: str = "advance") -> None:
+        """Advance pipeline to next task if possible."""
+        tasks = pipeline.get("tasks", [])
+        if not isinstance(tasks, list) or not tasks:
+            return
+        current_index = int(pipeline.get("current_index", 0))
+        if current_index >= len(tasks) - 1:
+            self._set_pipeline_progress(pipeline, current_index=current_index, current_status="in_progress")
+            self._emit_pipeline_update(event, pipeline)
+            return
+        self._set_pipeline_progress(pipeline, current_index=current_index + 1, current_status="in_progress")
+        self._emit_pipeline_update(event, pipeline)
+
+    def _finalize_pipeline(self, pipeline: dict[str, Any], success: bool = True) -> None:
+        """Finalize pipeline statuses at turn completion."""
+        tasks = pipeline.get("tasks", [])
+        if not isinstance(tasks, list):
+            return
+        if success:
+            for task in tasks:
+                if isinstance(task, dict):
+                    task["status"] = "completed"
+            pipeline["state"] = "completed"
+            self._emit_pipeline_update("completed", pipeline)
+            return
+
+        current_index = int(pipeline.get("current_index", 0))
+        if 0 <= current_index < len(tasks) and isinstance(tasks[current_index], dict):
+            tasks[current_index]["status"] = "failed"
+        pipeline["state"] = "failed"
+        self._emit_pipeline_update("failed", pipeline)
+
     def _add_session_message(
         self,
         role: str,
@@ -416,6 +579,7 @@ class Agent:
         
         # Load or create session
         self.session = await self.session_manager.get_or_create_session()
+        self._sync_runtime_flags_from_session()
         
         # Register default tools
         self._register_default_tools()
@@ -457,6 +621,19 @@ class Agent:
             if normalized:
                 session_name = normalized
 
+        planning_block = ""
+        if self.planning_enabled:
+            planning_block = """
+
+Planning mode instructions (enabled):
+- Create and follow a clear plan before solving.
+- Execute tasks step-by-step in order.
+- Prefer showing progress implicitly by completing one task at a time.
+- Use tools deliberately to complete the current planned task.
+- Conclude with a concise completion summary."""
+
+        saved_root = self.tools.get_saved_base_path(create=False)
+
         return f"""You are Captain Claw, a powerful AI assistant that can use tools to help the user.
 
 Available tools:
@@ -467,19 +644,23 @@ Available tools:
 - web_fetch: Fetch web page content
 
 Workspace folder policy:
-- Organize generated artifacts using these folders: downloads, media, scripts, showcase, skills, tmp, tools.
+- Runtime base path: "{self.runtime_base_path}".
+- All tool-generated files must be written inside: "{saved_root}".
+- If a save target folder does not exist, create it first.
+- Organize generated artifacts using these folders under saved root: downloads, media, scripts, showcase, skills, tmp, tools.
 - Why: keep outputs predictable, easy to review, and easy to clean up by type and session.
 - Session scope: if a session exists, write generated files under a session subfolder.
 - Current session subfolder name: "{session_name}".
 - Placement rules:
-  - scripts: generated scripts and runnable automation snippets -> scripts/{session_name}/
-  - tools: reusable helper programs/CLIs -> tools/{session_name}/
-  - downloads: fetched external files/data dumps -> downloads/{session_name}/
-  - media: images/audio/video and converted media assets -> media/{session_name}/
-  - showcase: polished demos/reports/shareable outputs -> showcase/{session_name}/
-  - skills: created or edited skill assets -> skills/{session_name}/
-  - tmp: disposable scratch intermediates -> tmp/{session_name}/
-- If user explicitly requests another location, follow the user.
+  - scripts: generated scripts and runnable automation snippets -> saved/scripts/{session_name}/
+  - tools: reusable helper programs/CLIs -> saved/tools/{session_name}/
+  - downloads: fetched external files/data dumps -> saved/downloads/{session_name}/
+  - media: images/audio/video and converted media assets -> saved/media/{session_name}/
+  - showcase: polished demos/reports/shareable outputs -> saved/showcase/{session_name}/
+  - skills: created or edited skill assets -> saved/skills/{session_name}/
+  - tmp: disposable scratch intermediates -> saved/tmp/{session_name}/
+- Never write outside saved root; if user asks another path, mirror it as a subpath under saved/.
+{planning_block}
 
 Instructions:
 - Use tools when you need to access files, run commands, or get information
@@ -557,6 +738,7 @@ Instructions:
         self,
         tool_messages_from_index: int | None = None,
         query: str | None = None,
+        planning_pipeline: dict[str, Any] | None = None,
     ) -> list[Message]:
         """Build message list for LLM."""
         cfg = get_config()
@@ -602,6 +784,15 @@ Instructions:
                 )
                 self._last_memory_debug_signature = signature
 
+        planning_note = self._build_pipeline_note(planning_pipeline or {})
+        if planning_note:
+            candidate_messages.append({
+                "role": "assistant",
+                "content": planning_note,
+                "tool_name": "planning_context",
+                "token_count": self._count_tokens(planning_note),
+            })
+
         selected_reversed: list[dict[str, Any]] = []
         used_tokens = 0
         dropped_messages = 0
@@ -642,6 +833,7 @@ Instructions:
             "dropped_messages": dropped_messages,
             "historical_tool_messages_filtered": len(skipped_historical_tools),
             "memory_note_used": 1 if memory_note else 0,
+            "planning_note_used": 1 if planning_note else 0,
             "over_budget": 1 if prompt_tokens > context_budget else 0,
             "utilization": (prompt_tokens / context_budget) if context_budget else 0.0,
         }
@@ -715,6 +907,86 @@ Instructions:
                 outputs.append(content)
         return "\n\n".join(outputs)
 
+    def _turn_has_successful_tool(self, turn_start_idx: int, tool_name: str) -> bool:
+        """Check whether a successful tool result exists in current turn."""
+        if not self.session:
+            return False
+        target = (tool_name or "").strip().lower()
+        for msg in self.session.messages[turn_start_idx:]:
+            if msg.get("role") != "tool":
+                continue
+            if str(msg.get("tool_name", "")).strip().lower() != target:
+                continue
+            content = str(msg.get("content", "")).strip().lower()
+            if not content.startswith("error:"):
+                return True
+        return False
+
+    @staticmethod
+    def _extract_requested_write_path(user_input: str) -> str | None:
+        """Extract requested target file path from user input."""
+        text = (user_input or "").strip()
+        if not text:
+            return None
+        if not re.search(r"\b(write|save|store|export|dump)\b", text, flags=re.IGNORECASE):
+            return None
+
+        patterns = [
+            r"(?:to|into|as)\s+(?:a\s+)?(?:file\s+)?[`\"']?([A-Za-z0-9_./-]+\.[A-Za-z0-9]{1,16})",
+            r"(?:file\s+|named\s+|name\s+it\s+)[`\"']?([A-Za-z0-9_./-]+\.[A-Za-z0-9]{1,16})",
+        ]
+        for pattern in patterns:
+            matches = re.findall(pattern, text, flags=re.IGNORECASE)
+            if not matches:
+                continue
+            candidate = matches[-1].strip().rstrip(".,;:!?)]}>")
+            lowered = candidate.lower()
+            if lowered.startswith(("http://", "https://")):
+                continue
+            if candidate:
+                return candidate
+        return None
+
+    async def _maybe_auto_write_requested_output(
+        self,
+        user_input: str,
+        output_text: str,
+        turn_start_idx: int,
+    ) -> str:
+        """Auto-run write tool when user explicitly requested file output."""
+        text = (output_text or "").strip()
+        requested_path = self._extract_requested_write_path(user_input)
+        if not requested_path:
+            return text
+        if self._turn_has_successful_tool(turn_start_idx, "write"):
+            return text
+
+        write_args = {"path": requested_path, "content": text}
+        write_args_for_log = {"path": requested_path, "content_chars": len(text), "append": False}
+
+        try:
+            result = await self.tools.execute(name="write", arguments=write_args)
+            tool_output = result.content if result.success else f"Error: {result.error}"
+        except Exception as e:
+            result = None
+            tool_output = f"Error: {str(e)}"
+
+        self._add_session_message(
+            role="tool",
+            content=tool_output,
+            tool_name="write",
+            tool_arguments=write_args_for_log,
+        )
+        self._emit_tool_output("write", write_args_for_log, tool_output)
+
+        if result and result.success:
+            return f"{text}\n\n{tool_output}".strip()
+        return (
+            f"{text}\n\n"
+            f"Note: requested file save to '{requested_path}' failed.\n"
+            f"{tool_output}"
+        ).strip()
+
     async def _persist_assistant_response(self, content: str) -> None:
         """Persist assistant response for the current turn."""
         if not self.session:
@@ -744,7 +1016,9 @@ Instructions:
                 content=(
                     "You are Captain Claw. Rewrite raw tool output into a friendly final "
                     "answer for the user. Be concise, clear, and practical. Do not mention "
-                    "internal tool-calling mechanics."
+                    "internal tool-calling mechanics. Only claim actions that are explicitly "
+                    "present in the raw tool output. If raw output does not show a file write/save, "
+                    "state clearly that no file was saved yet."
                 ),
             ),
             Message(
@@ -938,8 +1212,11 @@ Instructions:
 
         turn_usage = self._empty_usage()
         self.last_usage = self._empty_usage()
+        planning_pipeline: dict[str, Any] | None = None
 
-        def finish(text: str) -> str:
+        def finish(text: str, success: bool = True) -> str:
+            if planning_pipeline is not None:
+                self._finalize_pipeline(planning_pipeline, success=success)
             self._finalize_turn_usage(turn_usage)
             return text
 
@@ -948,6 +1225,9 @@ Instructions:
         # Add user message to session
         self._add_session_message("user", user_input)
         await self._auto_compact_if_needed()
+        if self.planning_enabled:
+            planning_pipeline = self._build_task_pipeline(user_input)
+            self._emit_pipeline_update("created", planning_pipeline)
         
         # Send tool definitions so the model can issue structured tool calls.
         tool_defs = self.tools.get_definitions()
@@ -960,6 +1240,7 @@ Instructions:
             messages = self._build_messages(
                 tool_messages_from_index=turn_start_idx,
                 query=user_input,
+                planning_pipeline=planning_pipeline,
             )
             
             # Call LLM
@@ -984,8 +1265,13 @@ Instructions:
                         tool_output=tool_output,
                         turn_usage=turn_usage,
                     )
+                    final = await self._maybe_auto_write_requested_output(
+                        user_input=user_input,
+                        output_text=final,
+                        turn_start_idx=turn_start_idx,
+                    )
                     await self._persist_assistant_response(final)
-                    return finish(final)
+                    return finish(final, success=False)
                 
                 log.error("LLM call failed", error=str(e), exc_info=True)
                 raise
@@ -994,6 +1280,8 @@ Instructions:
             if response.tool_calls:
                 log.info("Tool calls detected", count=len(response.tool_calls), calls=response.tool_calls)
                 await self._handle_tool_calls(response.tool_calls)
+                if planning_pipeline is not None:
+                    self._advance_pipeline(planning_pipeline, event="tool_calls_completed")
                 if not self._supports_tool_result_followup():
                     output = self._collect_turn_tool_output(turn_start_idx)
                     final = await self._friendly_tool_output_response(
@@ -1001,12 +1289,18 @@ Instructions:
                         tool_output=output,
                         turn_usage=turn_usage,
                     )
+                    final = await self._maybe_auto_write_requested_output(
+                        user_input=user_input,
+                        output_text=final,
+                        turn_start_idx=turn_start_idx,
+                    )
                     await self._persist_assistant_response(final)
                     return finish(final)
                 # Try to get final response
                 messages = self._build_messages(
                     tool_messages_from_index=turn_start_idx,
                     query=user_input,
+                    planning_pipeline=planning_pipeline,
                 )
                 try:
                     response = await self.provider.complete(messages=messages, tools=None)
@@ -1020,8 +1314,13 @@ Instructions:
                         tool_output=output,
                         turn_usage=turn_usage,
                     )
+                    final = await self._maybe_auto_write_requested_output(
+                        user_input=user_input,
+                        output_text=final,
+                        turn_start_idx=turn_start_idx,
+                    )
                     await self._persist_assistant_response(final)
-                    return finish(final)
+                    return finish(final, success=False)
                 continue
             
             # Check for tool calls embedded in response text (fallback)
@@ -1030,6 +1329,8 @@ Instructions:
             if embedded_calls:
                 log.info("Tool calls found in response text", count=len(embedded_calls))
                 await self._handle_tool_calls(embedded_calls)
+                if planning_pipeline is not None:
+                    self._advance_pipeline(planning_pipeline, event="embedded_tool_calls_completed")
                 if not self._supports_tool_result_followup():
                     output = self._collect_turn_tool_output(turn_start_idx)
                     final = await self._friendly_tool_output_response(
@@ -1037,12 +1338,18 @@ Instructions:
                         tool_output=output,
                         turn_usage=turn_usage,
                     )
+                    final = await self._maybe_auto_write_requested_output(
+                        user_input=user_input,
+                        output_text=final,
+                        turn_start_idx=turn_start_idx,
+                    )
                     await self._persist_assistant_response(final)
                     return finish(final)
                 # Try to get final response
                 messages = self._build_messages(
                     tool_messages_from_index=turn_start_idx,
                     query=user_input,
+                    planning_pipeline=planning_pipeline,
                 )
                 try:
                     response = await self.provider.complete(messages=messages, tools=None)
@@ -1055,10 +1362,21 @@ Instructions:
                         tool_output=output,
                         turn_usage=turn_usage,
                     )
+                    final = await self._maybe_auto_write_requested_output(
+                        user_input=user_input,
+                        output_text=final,
+                        turn_start_idx=turn_start_idx,
+                    )
                     await self._persist_assistant_response(final)
-                    return finish(final)
+                    return finish(final, success=False)
                 # If successful, return the response normally
-                return finish(response.content)
+                final_response = await self._maybe_auto_write_requested_output(
+                    user_input=user_input,
+                    output_text=response.content,
+                    turn_start_idx=turn_start_idx,
+                )
+                await self._persist_assistant_response(final_response)
+                return finish(final_response)
             
             # Check for inline commands in response (fallback for models without tool calling)
             # This works by extracting commands from markdown code blocks in the response
@@ -1076,11 +1394,18 @@ Instructions:
                     tool_arguments={"command": command},
                 )
                 self._emit_tool_output("shell", {"command": command}, tool_result)
+                if planning_pipeline is not None:
+                    self._advance_pipeline(planning_pipeline, event="inline_command_completed")
                 if not self._supports_tool_result_followup():
                     final = await self._friendly_tool_output_response(
                         user_input=user_input,
                         tool_output=tool_result,
                         turn_usage=turn_usage,
+                    )
+                    final = await self._maybe_auto_write_requested_output(
+                        user_input=user_input,
+                        output_text=final,
+                        turn_start_idx=turn_start_idx,
                     )
                     await self._persist_assistant_response(final)
                     return finish(final)
@@ -1089,6 +1414,7 @@ Instructions:
                 messages = self._build_messages(
                     tool_messages_from_index=turn_start_idx,
                     query=user_input,
+                    planning_pipeline=planning_pipeline,
                 )
                 try:
                     response = await self.provider.complete(messages=messages, tools=None)
@@ -1102,11 +1428,20 @@ Instructions:
                         tool_output=tool_result,
                         turn_usage=turn_usage,
                     )
+                    final = await self._maybe_auto_write_requested_output(
+                        user_input=user_input,
+                        output_text=final,
+                        turn_start_idx=turn_start_idx,
+                    )
                     await self._persist_assistant_response(final)
-                    return finish(final)
+                    return finish(final, success=False)
             
             # No tool calls - this is the final response
-            final_response = response.content
+            final_response = await self._maybe_auto_write_requested_output(
+                user_input=user_input,
+                output_text=response.content,
+                turn_start_idx=turn_start_idx,
+            )
             
             # Add assistant response to session
             if self.session:
@@ -1118,7 +1453,7 @@ Instructions:
         
         # Max iterations reached
         self._set_runtime_status("waiting")
-        return finish("Max iterations reached. Could not complete the request.")
+        return finish("Max iterations reached. Could not complete the request.", success=False)
 
     async def stream(self, user_input: str) -> AsyncIterator[str]:
         """Stream response for user input.
@@ -1149,13 +1484,17 @@ Instructions:
         # Add user message to session
         self._add_session_message("user", user_input)
         await self._auto_compact_if_needed()
+        planning_pipeline: dict[str, Any] | None = None
+        if self.planning_enabled:
+            planning_pipeline = self._build_task_pipeline(user_input)
+            self._emit_pipeline_update("created", planning_pipeline)
         
         # Get tool definitions
         tool_defs = self.tools.get_definitions()
         
         # For streaming, we currently don't support tool calling
         # This is a limitation - full streaming with tools needs more work
-        messages = self._build_messages(query=user_input)
+        messages = self._build_messages(query=user_input, planning_pipeline=planning_pipeline)
         
         # Stream the response
         full_content = ""
@@ -1171,6 +1510,9 @@ Instructions:
         if self.session:
             self._add_session_message("assistant", full_content)
             await self.session_manager.save_session(self.session)
+
+        if planning_pipeline is not None:
+            self._finalize_pipeline(planning_pipeline, success=True)
 
         prompt_tokens = sum(self._count_tokens(m.content) for m in messages)
         completion_tokens = self._count_tokens(full_content)

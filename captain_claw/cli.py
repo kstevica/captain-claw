@@ -38,6 +38,7 @@ class TerminalUI:
             "/config",
             "/history",
             "/compact",
+            "/planning",
             "/monitor",
             "/exit",
             "/quit",
@@ -147,6 +148,8 @@ Commands:
   /config         - Show configuration
   /history        - Show conversation history
   /compact        - Manually compact long session history
+  /planning on    - Enable planning mode
+  /planning off   - Disable planning mode
   /monitor on     - Enable split monitor view
   /monitor off    - Disable split monitor view
   /exit, /quit    - Exit the application
@@ -935,6 +938,14 @@ Commands:
             return "HISTORY"
         elif command == "/compact":
             return "COMPACT"
+        elif command == "/planning":
+            planning_arg = args.strip().lower()
+            if planning_arg == "on":
+                return "PLANNING_ON"
+            if planning_arg == "off":
+                return "PLANNING_OFF"
+            self.print_error("Usage: /planning on|off")
+            return None
         elif command == "/monitor":
             monitor_arg = args.strip().lower()
             if monitor_arg == "on":
