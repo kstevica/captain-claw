@@ -6,9 +6,9 @@
 [![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20Ollama-orange)](#multi-model-ai-agent)
 [![Guardrails](https://img.shields.io/badge/guardrails-input%20%7C%20output%20%7C%20script%2Ftool-red)](#built-in-guardrails)
 
-Captain Claw is a terminal-first AI agent for developers and operators who want fast, practical automation with strong control. It combines multi-model LLM support, persistent multi-session workflows, built-in safety guards, and tool execution in one CLI.
+Captain Claw is a terminal-first agentic system for everyday work. It helps developers, operators, and technical teams automate tasks with strong control using multi-model LLM support, persistent multi-session workflows, built-in safety guards, and tool execution in one CLI.
 
-If you are looking for a powerful open-source AI coding agent for terminal workflows, Captain Claw is built for that exact use case.
+If you are looking for a powerful open-source agentic system for day-to-day terminal workflows, Captain Claw is built for that exact use case.
 
 ## First 5 Minutes
 
@@ -19,7 +19,7 @@ If you are looking for a powerful open-source AI coding agent for terminal workf
 5. Create a second session (`/new incident-hotfix`) and switch models per session.
 6. Enable guards in `config.yaml` when you want stricter safety behavior.
 
-In under five minutes, you can have a multi-model terminal AI assistant with persistent sessions and guardrails.
+In under five minutes, you can have a multi-model terminal agentic system with persistent sessions and guardrails.
 
 ## Demo Section (GIF/Asciinema Ready)
 
@@ -71,9 +71,9 @@ Captain Claw lets you route work to the right model for the job:
 
 This makes it easy to compare quality, cost, latency, and tool-calling behavior across providers from the same interface.
 
-### Built for Real Work
+### Built for Everyday Work
 
-Captain Claw is designed for real developer and operations workflows, not just toy chat interactions.
+Captain Claw is designed for practical everyday workflows, not just toy chat interactions.
 
 - Code investigation and patching across multiple repositories.
 - Incident response sessions with isolated contexts.
@@ -108,7 +108,7 @@ This allows strict blocking for sensitive environments or interactive approval f
 
 ## Common Use Cases
 
-- AI coding assistant in terminal for Python, JS, shell, and infra tasks.
+- Agentic assistant in terminal for coding, operations, research, and automation tasks.
 - Multi-model evaluation workspace for OpenAI vs Claude vs Gemini vs Ollama.
 - DevOps and SRE runbook execution with command guardrails.
 - Security-conscious automation where suspicious actions require approval.
@@ -280,7 +280,7 @@ CLAW_GUARDS__INPUT__LEVEL="ask_for_approval"
 > Draft release notes from the previous session updates.
 ```
 
-This workflow shows why Captain Claw works well as a terminal AI agent for engineering teams: each thread can use its own model and maintain its own short-term context while staying persistent.
+This workflow shows why Captain Claw works well as an agentic system for everyday engineering work: each thread can use its own model and maintain its own short-term context while staying persistent.
 
 ## Tooling and Execution Model
 
@@ -328,13 +328,13 @@ Enforcement options:
 - `stop_suspicious`: block immediately.
 - `ask_for_approval`: ask for explicit user approval before continuing.
 
-This makes Captain Claw suitable for teams that need a terminal AI assistant with stronger operational control.
+This makes Captain Claw suitable for teams that need a terminal agentic system with stronger operational control.
 
 ## FAQ
 
-### Is Captain Claw only for coding?
+### Is Captain Claw only for coding tasks?
 
-No. It is strong for coding, but also effective for ops automation, web research, scripting, and multi-session task orchestration in terminal workflows.
+No. It is strong for coding, and equally useful for ops automation, web research, scripting, and multi-session task orchestration in everyday terminal workflows.
 
 ### Can I use local models only?
 
