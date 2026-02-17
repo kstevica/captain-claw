@@ -5,7 +5,7 @@ description = "A powerful console-based AI agent"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENCE"]
 authors = [
     { name = "Stevica Kuharski", email = "kstevica@gmail.com" }
 ]
