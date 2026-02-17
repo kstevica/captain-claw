@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import datetime
+import json
 import os
 import sys
 import time
@@ -125,6 +126,54 @@ async def run_interactive() -> None:
     ui.set_runtime_status("user input")
     last_exec_seconds: float | None = None
     last_completed_at: datetime | None = None
+
+    async def _run_prompt_in_active_session(prompt_text: str) -> None:
+        """Execute one user prompt using the currently selected session."""
+        nonlocal last_exec_seconds
+        nonlocal last_completed_at
+
+        if not prompt_text.strip():
+            return
+
+        ui.print_message("user", prompt_text)
+        ui.print_blank_line()
+
+        try:
+            started = time.perf_counter()
+            ui.set_runtime_status("thinking")
+            if get_config().ui.streaming:
+                ui.begin_assistant_stream()
+                ui.set_runtime_status("streaming")
+
+                async def _consume_stream() -> None:
+                    async for chunk in agent.stream(prompt_text):
+                        ui.print_streaming(chunk)
+                    ui.complete_stream_line()
+
+                try:
+                    _, cancelled = await _run_cancellable(ui, _consume_stream())
+                finally:
+                    ui.end_assistant_stream()
+                if cancelled:
+                    ui.print_blank_line()
+                    return
+            else:
+                response, cancelled = await _run_cancellable(ui, agent.complete(prompt_text))
+                if cancelled:
+                    ui.print_blank_line()
+                    return
+                ui.print_message("assistant", response)
+                ui.print_blank_line()
+
+            last_exec_seconds = time.perf_counter() - started
+            last_completed_at = datetime.now()
+            ui.set_runtime_status("waiting")
+        except Exception as e:
+            last_exec_seconds = time.perf_counter() - started
+            last_completed_at = datetime.now()
+            ui.set_runtime_status("waiting")
+            ui.print_error(str(e))
+            log.error("Error in agent", error=str(e))
     
     # Main loop
     while True:
@@ -202,6 +251,107 @@ async def run_interactive() -> None:
                 ui.print_session_info(agent.session)
                 ui.print_success("Loaded session")
                 continue
+            elif result.startswith("SESSION_RENAME:"):
+                new_name = result.split(":", 1)[1].strip()
+                if not new_name:
+                    ui.print_error("Usage: /session rename <new-name>")
+                    continue
+                if not agent.session:
+                    ui.print_error("No active session")
+                    continue
+                old_name = agent.session.name
+                agent.session.name = new_name
+                await agent.session_manager.save_session(agent.session)
+                ui.print_session_info(agent.session)
+                ui.print_success(f'Session renamed: "{old_name}" -> "{new_name}"')
+                continue
+            elif result == "SESSION_DESCRIPTION_INFO":
+                if not agent.session:
+                    ui.print_error("No active session")
+                    continue
+                description = str(agent.session.metadata.get("description", "")).strip()
+                if description:
+                    ui.print_success(f"Session description: {description}")
+                else:
+                    ui.print_warning("Session has no description yet")
+                continue
+            elif result == "SESSION_DESCRIPTION_AUTO":
+                if not agent.session:
+                    ui.print_error("No active session")
+                    continue
+                generated = await agent.generate_session_description(agent.session, max_sentences=5)
+                description = agent.sanitize_session_description(generated, max_sentences=5)
+                if not description:
+                    ui.print_error("Could not generate a session description")
+                    continue
+                agent.session.metadata["description"] = description
+                agent.session.metadata["description_source"] = "auto"
+                agent.session.metadata["description_updated_at"] = datetime.now().isoformat()
+                await agent.session_manager.save_session(agent.session)
+                ui.print_session_info(agent.session)
+                ui.print_success("Session description auto-generated")
+                continue
+            elif result.startswith("SESSION_DESCRIPTION_SET:"):
+                if not agent.session:
+                    ui.print_error("No active session")
+                    continue
+                payload_raw = result.split(":", 1)[1].strip()
+                try:
+                    payload = json.loads(payload_raw)
+                except Exception:
+                    ui.print_error("Invalid /session description payload")
+                    continue
+                raw_description = str(payload.get("description", "")).strip()
+                description = agent.sanitize_session_description(raw_description, max_sentences=5)
+                if not description:
+                    ui.print_error("Usage: /session description <text> | /session description auto")
+                    continue
+                agent.session.metadata["description"] = description
+                agent.session.metadata["description_source"] = "manual"
+                agent.session.metadata["description_updated_at"] = datetime.now().isoformat()
+                await agent.session_manager.save_session(agent.session)
+                ui.print_session_info(agent.session)
+                ui.print_success("Session description updated")
+                continue
+            elif result.startswith("SESSION_RUN:"):
+                payload_raw = result.split(":", 1)[1].strip()
+                try:
+                    payload = json.loads(payload_raw)
+                except Exception:
+                    ui.print_error("Invalid /session run payload")
+                    continue
+
+                selector = str(payload.get("selector", "")).strip()
+                prompt = str(payload.get("prompt", "")).strip()
+                if not selector or not prompt:
+                    ui.print_error("Usage: /session run <id|name|#index> <prompt>")
+                    continue
+
+                selected = await agent.session_manager.select_session(selector)
+                if not selected:
+                    ui.print_error(f"Session not found: {selector}")
+                    continue
+
+                previous_session = agent.session
+                previous_session_id = previous_session.id if previous_session else None
+                switched_temporarily = previous_session_id != selected.id
+
+                if switched_temporarily:
+                    agent.session = selected
+                    agent.refresh_session_runtime_flags()
+                    ui.load_monitor_tool_output_from_session(agent.session.messages)
+                    ui.print_success(f'Running in session "{agent.session.name}"')
+
+                try:
+                    await _run_prompt_in_active_session(prompt)
+                finally:
+                    if switched_temporarily and previous_session is not None:
+                        restored = await agent.session_manager.load_session(previous_session_id)
+                        agent.session = restored or previous_session
+                        agent.refresh_session_runtime_flags()
+                        ui.load_monitor_tool_output_from_session(agent.session.messages)
+                        ui.print_success(f'Restored session "{agent.session.name}"')
+                continue
             elif result == "CONFIG":
                 ui.print_config(get_config())
                 continue
@@ -244,48 +394,8 @@ async def run_interactive() -> None:
             # Skip empty input
             if not user_input.strip():
                 continue
-            
-            # Process through agent
-            ui.print_message("user", user_input)
-            ui.print_blank_line()
-            
-            # Get response
-            try:
-                started = time.perf_counter()
-                ui.set_runtime_status("thinking")
-                if get_config().ui.streaming:
-                    ui.begin_assistant_stream()
-                    ui.set_runtime_status("streaming")
 
-                    async def _consume_stream() -> None:
-                        async for chunk in agent.stream(user_input):
-                            ui.print_streaming(chunk)
-                        ui.complete_stream_line()
-
-                    try:
-                        _, cancelled = await _run_cancellable(ui, _consume_stream())
-                    finally:
-                        ui.end_assistant_stream()
-                    if cancelled:
-                        ui.print_blank_line()
-                        continue
-                else:
-                    response, cancelled = await _run_cancellable(ui, agent.complete(user_input))
-                    if cancelled:
-                        ui.print_blank_line()
-                        continue
-                    ui.print_message("assistant", response)
-                    ui.print_blank_line()
-
-                last_exec_seconds = time.perf_counter() - started
-                last_completed_at = datetime.now()
-                ui.set_runtime_status("waiting")
-            except Exception as e:
-                last_exec_seconds = time.perf_counter() - started
-                last_completed_at = datetime.now()
-                ui.set_runtime_status("waiting")
-                ui.print_error(str(e))
-                log.error("Error in agent", error=str(e))
+            await _run_prompt_in_active_session(user_input)
             
         except KeyboardInterrupt:
             log.info("Interrupted by user")

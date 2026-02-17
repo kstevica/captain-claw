@@ -206,6 +206,23 @@ class DummyWebFetchTool(Tool):
         )
 
 
+class DummyShellTool(Tool):
+    name = "shell"
+    description = "Dummy shell"
+    parameters = {
+        "type": "object",
+        "properties": {"command": {"type": "string"}},
+        "required": ["command"],
+    }
+
+    def __init__(self):
+        self.commands: list[str] = []
+
+    async def execute(self, **kwargs) -> ToolResult:
+        self.commands.append(str(kwargs.get("command", "")))
+        return ToolResult(success=True, content="script executed")
+
+
 class CloudWebFetchThenSummaryProvider(LLMProvider):
     def __init__(self):
         self.calls = 0
@@ -224,6 +241,37 @@ class CloudWebFetchThenSummaryProvider(LLMProvider):
                 tool_calls=[ToolCall(id="wf1", name="web_fetch", arguments={"url": "https://www.hr"})],
             )
         return LLMResponse(content="Summary: www.hr is currently a minimal landing page.")
+
+    async def complete_streaming(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ):
+        if False:
+            yield ""
+
+    def count_tokens(self, text: str) -> int:
+        return len(text)
+
+
+class CodeBlockOnlyProvider(LLMProvider):
+    async def complete(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        return LLMResponse(
+            content=(
+                "Use this script:\n"
+                "```python\n"
+                "print('hello from generated script')\n"
+                "```\n"
+            )
+        )
 
     async def complete_streaming(
         self,
@@ -431,3 +479,35 @@ async def test_cloud_mode_auto_runs_write_when_user_requested_file_output(tmp_pa
         )
     finally:
         set_config(old_cfg)
+
+
+@pytest.mark.asyncio
+async def test_explicit_generate_script_forces_write_and_run_from_scripts_dir(tmp_path: Path):
+    provider = CodeBlockOnlyProvider()
+    outputs: list[dict[str, str]] = []
+
+    def cb(name: str, args: dict, output: str) -> None:
+        outputs.append({"name": name, "output": output, "args": str(args)})
+
+    agent = Agent(provider=provider, tool_output_callback=cb)
+    agent._initialized = True
+    agent.session = Session(id="s1", name="default")
+    agent.session_manager = DummySessionManager()
+    registry = ToolRegistry(base_path=tmp_path)
+    shell_tool = DummyShellTool()
+    registry.register(WriteTool())
+    registry.register(shell_tool)
+    agent.tools = registry
+
+    result = await agent.complete("generate script that prints hello")
+
+    scripts_dir = tmp_path / "saved" / "scripts" / "default"
+    created_files = list(scripts_dir.glob("generated_script_*.py"))
+    assert created_files
+    assert "hello from generated script" in created_files[0].read_text(encoding="utf-8")
+    assert any(entry["name"] == "write" for entry in outputs)
+    assert any(entry["name"] == "shell" for entry in outputs)
+    assert shell_tool.commands
+    assert str(scripts_dir) in shell_tool.commands[0]
+    assert "&& python3" in shell_tool.commands[0]
+    assert "Script saved and executed from" in result

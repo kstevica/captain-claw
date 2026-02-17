@@ -20,7 +20,15 @@ captain-claw
 | `/clear` | Clear current session |
 | `/new [name]` | Start a new session (optionally named) |
 | `/sessions` | List recent sessions |
-| `/session <id|name>` | Load session by ID or latest by name |
+| `/session` | Show active session info |
+| `/session list` | List recent sessions |
+| `/session new [name]` | Create and switch to a new session |
+| `/session switch <id|name|#index>` | Switch to another session |
+| `/session rename <new-name>` | Rename the active session |
+| `/session description <text>` | Set active session description (stored in metadata) |
+| `/session description auto` | Auto-generate description from session context/tasks |
+| `/session run <id|name|#index> <prompt>` | Run one prompt in another session, then return |
+| `/runin <id|name|#index> <prompt>` | Alias for `/session run` |
 | `/exit` or `/quit` | Exit |
 
 ## Interacting
@@ -36,6 +44,13 @@ Just type your message and press Enter. Captain Claw will:
 - If `saved/` does not exist, Captain Claw creates it automatically.
 - Relative paths are written under `saved/`.
 - Absolute or traversal paths are remapped under `saved/` for safety.
+
+### Script Workflow
+
+- Captain Claw can decide to generate and run scripts for automation-style tasks.
+- If you explicitly ask to generate/create/build a script or tool, script workflow is mandatory.
+- Generated scripts are saved under `saved/scripts/<session>/` and executed from that directory.
+- Reusable helper tools are saved under `saved/tools/<session>/`.
 
 ### Web Fetch Modes
 

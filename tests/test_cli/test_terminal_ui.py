@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 
 from captain_claw.cli import TerminalUI
 
@@ -156,8 +157,49 @@ def test_monitor_command_parsing():
 def test_session_commands_parsing():
     ui = TerminalUI()
     assert ui.handle_special_command("/sessions") == "SESSIONS"
+    assert ui.handle_special_command("/session list") == "SESSIONS"
     assert ui.handle_special_command("/session") == "SESSION_INFO"
     assert ui.handle_special_command("/session abc123") == "SESSION_SELECT:abc123"
+    assert ui.handle_special_command("/session switch abc123") == "SESSION_SELECT:abc123"
+
+
+def test_session_new_subcommand_parsing():
+    ui = TerminalUI()
+    assert ui.handle_special_command("/session new") == "NEW"
+    assert ui.handle_special_command("/session new investigation") == "NEW:investigation"
+    assert ui.handle_special_command("/session new phase 2") == "NEW:phase 2"
+
+
+def test_session_rename_subcommand_parsing():
+    ui = TerminalUI()
+    assert ui.handle_special_command("/session rename focus-mode") == "SESSION_RENAME:focus-mode"
+    assert ui.handle_special_command("/session rename release prep") == "SESSION_RENAME:release prep"
+
+
+def test_session_description_subcommand_parsing():
+    ui = TerminalUI()
+    assert ui.handle_special_command("/session description") == "SESSION_DESCRIPTION_INFO"
+    assert ui.handle_special_command("/session description auto") == "SESSION_DESCRIPTION_AUTO"
+    manual = ui.handle_special_command('/session description "This is user description"')
+    assert manual is not None
+    assert manual.startswith("SESSION_DESCRIPTION_SET:")
+    payload = json.loads(manual.split(":", 1)[1])
+    assert payload == {"description": "This is user description"}
+
+
+def test_session_run_and_runin_parsing():
+    ui = TerminalUI()
+    session_run = ui.handle_special_command("/session run abc123 summarize status")
+    assert session_run is not None
+    assert session_run.startswith("SESSION_RUN:")
+    session_payload = json.loads(session_run.split(":", 1)[1])
+    assert session_payload == {"selector": "abc123", "prompt": "summarize status"}
+
+    runin = ui.handle_special_command("/runin #2 check failures")
+    assert runin is not None
+    assert runin.startswith("SESSION_RUN:")
+    runin_payload = json.loads(runin.split(":", 1)[1])
+    assert runin_payload == {"selector": "#2", "prompt": "check failures"}
 
 
 def test_compact_command_parsing():

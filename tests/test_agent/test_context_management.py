@@ -38,6 +38,39 @@ class TokenAwareProvider(LLMProvider):
         return len([part for part in text.split() if part]) or 1
 
 
+class DescriptionProvider(LLMProvider):
+    async def complete(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        return LLMResponse(
+            content=(
+                "Primary goal is API integration hardening. "
+                "The session includes debugging auth failures and retries. "
+                "It uses shell and file operations to validate fixes. "
+                "Current focus is stabilizing edge-case error handling. "
+                "Pending work includes regression verification. "
+                "This sentence should be trimmed."
+            )
+        )
+
+    async def complete_streaming(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ):
+        if False:
+            yield ""
+
+    def count_tokens(self, text: str) -> int:
+        return len([part for part in text.split() if part]) or 1
+
+
 def test_build_messages_prunes_history_to_context_budget():
     old_cfg = get_config().model_copy(deep=True)
     cfg = old_cfg.model_copy(deep=True)
@@ -204,6 +237,7 @@ def test_system_prompt_includes_workspace_folder_policy_with_session_subfolders(
     assert "saved/showcase/phase-3/" in prompt
     assert "saved/skills/phase-3/" in prompt
     assert "saved/tmp/phase-3/" in prompt
+    assert "Script/tool generation workflow:" in prompt
 
 
 def test_build_messages_includes_planning_pipeline_note():
@@ -303,3 +337,29 @@ async def test_complete_triggers_auto_compaction_when_over_threshold():
         assert agent.session.metadata["compaction"]["auto_count"] >= 1
     finally:
         set_config(old_cfg)
+
+
+@pytest.mark.asyncio
+async def test_generate_session_description_uses_context_and_limits_to_five_sentences():
+    agent = Agent(provider=DescriptionProvider())
+    agent.session = Session(id="s1", name="debug-thread")
+    agent.session.add_message("user", "Fix auth timeout failures and flaky retries.")
+    agent.session.add_message("tool", "stack trace output", tool_name="shell")
+    agent.session.add_message("assistant", "I will patch retry behavior and run tests.")
+
+    description = await agent.generate_session_description(max_sentences=5)
+
+    assert description
+    # 5 sentences max.
+    sentence_count = len([s for s in description.split(". ") if s.strip()])
+    assert sentence_count <= 5
+    assert "API integration hardening" in description
+    assert "auth failures" in description
+
+
+def test_sanitize_session_description_limits_sentences():
+    agent = Agent(provider=TokenAwareProvider())
+    raw = "One. Two. Three. Four. Five. Six."
+    cleaned = agent.sanitize_session_description(raw, max_sentences=5)
+    assert cleaned.endswith("Five.")
+    assert "Six." not in cleaned

@@ -5,11 +5,13 @@ from datetime import UTC, datetime
 import json
 from pathlib import Path
 import re
+import shlex
 import sys
 from typing import Any, AsyncIterator
 from typing import Callable
 
 from captain_claw.config import get_config
+from captain_claw.instructions import InstructionLoader
 from captain_claw.llm import (
     LLMProvider,
     Message,
@@ -55,6 +57,7 @@ class Agent:
         self.last_context_window: dict[str, int | float] = {}
         self._last_memory_debug_signature: str | None = None
         self.planning_enabled: bool = False
+        self.instructions = InstructionLoader()
 
     @staticmethod
     def _empty_usage() -> dict[str, int]:
@@ -186,23 +189,14 @@ class Agent:
         if not formatted.strip():
             return self._fallback_compaction_summary(messages)
 
-        prompt = (
-            "Summarize the earlier conversation for continued work.\n"
-            "Keep it concise and factual. Include:\n"
-            "- user goals and constraints\n"
-            "- important outputs/results\n"
-            "- open questions or pending tasks\n"
-            "- key links, file paths, and commands if present\n"
-            "Use short bullet points.\n\n"
-            f"Conversation excerpt:\n{formatted}"
+        prompt = self.instructions.render(
+            "compaction_summary_user_prompt.md",
+            formatted=formatted,
         )
         rewrite_messages = [
             Message(
                 role="system",
-                content=(
-                    "You produce compact conversation memory for an AI coding assistant. "
-                    "Return only the summary."
-                ),
+                content=self.instructions.load("compaction_summary_system_prompt.md"),
             ),
             Message(role="user", content=prompt),
         ]
@@ -219,6 +213,113 @@ class Agent:
         except Exception as e:
             log.warning("Compaction summarization failed, using fallback", error=str(e))
         return self._fallback_compaction_summary(messages)
+
+    @staticmethod
+    def _limit_description_sentences(text: str, max_sentences: int = 5) -> str:
+        """Normalize description text and cap sentence count."""
+        cleaned = re.sub(r"\s+", " ", (text or "").strip())
+        if not cleaned:
+            return ""
+        if max_sentences <= 0:
+            return cleaned
+        parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", cleaned) if p.strip()]
+        if not parts:
+            return cleaned
+        return " ".join(parts[:max_sentences]).strip()
+
+    def sanitize_session_description(self, text: str, max_sentences: int = 5) -> str:
+        """Public helper to normalize session descriptions."""
+        return self._limit_description_sentences(text, max_sentences=max_sentences)
+
+    def _fallback_session_description(self, target_session: Session) -> str:
+        """Build deterministic description when LLM description generation fails."""
+        user_messages = [
+            re.sub(r"\s+", " ", str(msg.get("content", "")).strip())
+            for msg in target_session.messages
+            if str(msg.get("role", "")).strip().lower() == "user"
+        ]
+        tool_names = [
+            str(msg.get("tool_name", "")).strip()
+            for msg in target_session.messages
+            if str(msg.get("role", "")).strip().lower() == "tool" and str(msg.get("tool_name", "")).strip()
+        ]
+
+        pieces: list[str] = []
+        if user_messages:
+            latest = user_messages[-1]
+            if len(latest) > 180:
+                latest = latest[:180].rstrip() + "..."
+            pieces.append(f"Active focus: {latest}")
+        if tool_names:
+            unique_tools: list[str] = []
+            for tool_name in tool_names:
+                if tool_name in unique_tools:
+                    continue
+                unique_tools.append(tool_name)
+            pieces.append(f"Common tools used: {', '.join(unique_tools[:5])}.")
+        pieces.append(
+            f'Session "{target_session.name}" has {len(target_session.messages)} messages and captures an ongoing task thread.'
+        )
+
+        raw = " ".join(pieces).strip()
+        return self._limit_description_sentences(raw, max_sentences=5)
+
+    async def generate_session_description(
+        self,
+        target_session: Session | None = None,
+        max_sentences: int = 5,
+    ) -> str:
+        """Generate a short session description from session context and tasks."""
+        session = target_session or self.session
+        if not session:
+            return ""
+        if not session.messages:
+            return self._limit_description_sentences(
+                f'Session "{session.name}" has no conversation history yet.',
+                max_sentences=max_sentences,
+            )
+
+        formatted = self._format_compaction_messages(
+            session.messages,
+            max_total_chars=18000,
+            max_item_chars=500,
+        )
+        if not formatted.strip():
+            return self._fallback_session_description(session)
+
+        messages = [
+            Message(
+                role="system",
+                content=self.instructions.load("session_description_system_prompt.md"),
+            ),
+            Message(
+                role="user",
+                content=self.instructions.render(
+                    "session_description_user_prompt.md",
+                    session_name=session.name,
+                    max_sentences=max_sentences,
+                    conversation_excerpt=formatted,
+                ),
+            ),
+        ]
+        try:
+            max_tokens = min(400, int(get_config().model.max_tokens))
+            self._set_runtime_status("thinking")
+            response = await self.provider.complete(
+                messages=messages,
+                tools=None,
+                max_tokens=max_tokens,
+            )
+            generated = self._limit_description_sentences(
+                response.content or "",
+                max_sentences=max_sentences,
+            )
+            if generated:
+                return generated
+        except Exception as e:
+            log.warning("Session description generation failed, using fallback", error=str(e))
+
+        return self._fallback_session_description(session)
 
     async def compact_session(
         self,
@@ -424,22 +525,19 @@ class Agent:
             else:
                 task["status"] = "pending"
 
-    @staticmethod
-    def _build_pipeline_note(pipeline: dict[str, Any]) -> str:
+    def _build_pipeline_note(self, pipeline: dict[str, Any]) -> str:
         """Build planning note injected into model context."""
         tasks = pipeline.get("tasks", [])
         if not isinstance(tasks, list) or not tasks:
             return ""
-        lines = [
-            "Planning mode is ON. Follow this task pipeline and execute step-by-step:"
-        ]
+        lines = [self.instructions.load("planning_pipeline_header.md")]
         for idx, task in enumerate(tasks, start=1):
             if not isinstance(task, dict):
                 continue
             title = str(task.get("title", "")).strip()
             status = str(task.get("status", "pending")).strip().upper()
             lines.append(f"{idx}. [{status}] {title}")
-        lines.append("If tools are needed, use them for the current in-progress task.")
+        lines.append(self.instructions.load("planning_pipeline_footer.md"))
         return "\n".join(lines)
 
     @staticmethod
@@ -614,60 +712,23 @@ class Agent:
 
     def _build_system_prompt(self) -> str:
         """Build the system prompt."""
-        session_name = "default"
-        if self.session and self.session.name:
-            raw_name = str(self.session.name).strip()
-            normalized = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw_name).strip("-")
-            if normalized:
-                session_name = normalized
+        session_name = self._current_session_slug()
 
         planning_block = ""
         if self.planning_enabled:
-            planning_block = """
-
-Planning mode instructions (enabled):
-- Create and follow a clear plan before solving.
-- Execute tasks step-by-step in order.
-- Prefer showing progress implicitly by completing one task at a time.
-- Use tools deliberately to complete the current planned task.
-- Conclude with a concise completion summary."""
+            planning_block = (
+                "\n\n" + self.instructions.load("planning_mode_instructions.md")
+            )
 
         saved_root = self.tools.get_saved_base_path(create=False)
 
-        return f"""You are Captain Claw, a powerful AI assistant that can use tools to help the user.
-
-Available tools:
-- shell: Execute shell commands in the terminal
-- read: Read file contents from the filesystem
-- write: Write content to files
-- glob: Find files by pattern
-- web_fetch: Fetch web page content
-
-Workspace folder policy:
-- Runtime base path: "{self.runtime_base_path}".
-- All tool-generated files must be written inside: "{saved_root}".
-- If a save target folder does not exist, create it first.
-- Organize generated artifacts using these folders under saved root: downloads, media, scripts, showcase, skills, tmp, tools.
-- Why: keep outputs predictable, easy to review, and easy to clean up by type and session.
-- Session scope: if a session exists, write generated files under a session subfolder.
-- Current session subfolder name: "{session_name}".
-- Placement rules:
-  - scripts: generated scripts and runnable automation snippets -> saved/scripts/{session_name}/
-  - tools: reusable helper programs/CLIs -> saved/tools/{session_name}/
-  - downloads: fetched external files/data dumps -> saved/downloads/{session_name}/
-  - media: images/audio/video and converted media assets -> saved/media/{session_name}/
-  - showcase: polished demos/reports/shareable outputs -> saved/showcase/{session_name}/
-  - skills: created or edited skill assets -> saved/skills/{session_name}/
-  - tmp: disposable scratch intermediates -> saved/tmp/{session_name}/
-- Never write outside saved root; if user asks another path, mirror it as a subpath under saved/.
-{planning_block}
-
-Instructions:
-- Use tools when you need to access files, run commands, or get information
-- Think step by step
-- Provide clear, concise responses
-- If a tool fails, explain the error and try again if possible
-- Always confirm before executing potentially dangerous commands"""
+        return self.instructions.render(
+            "system_prompt.md",
+            runtime_base_path=self.runtime_base_path,
+            saved_root=saved_root,
+            session_name=session_name,
+            planning_block=planning_block,
+        )
 
     def _build_tool_memory_note(
         self,
@@ -703,9 +764,7 @@ Instructions:
         if not selected:
             return "", ""
 
-        lines = [
-            "Continuity note from earlier tool outputs (use only if relevant to user request):"
-        ]
+        lines = [self.instructions.load("memory_continuity_header.md")]
         debug_lines = ["Memory selection details:"]
         selection_mode = "term_overlap" if any(score > 0 for score, *_ in selected) else "fallback_latest"
         debug_lines.append(f"selection_mode={selection_mode}")
@@ -923,6 +982,286 @@ Instructions:
         return False
 
     @staticmethod
+    def _is_explicit_script_request(user_input: str) -> bool:
+        """Detect explicit user requests to generate/build a script."""
+        text = (user_input or "").strip().lower()
+        if not text:
+            return False
+        return bool(
+            re.search(
+                r"\b(generate|create|build|write|make)\b.{0,40}\bscript\b"
+                r"|\bscript\b.{0,40}\b(generate|create|build|write|make)\b",
+                text,
+            )
+        )
+
+    @staticmethod
+    def _extract_code_block(text: str) -> tuple[str | None, str | None]:
+        """Extract first fenced code block as (language, code)."""
+        if not text:
+            return None, None
+        match = re.search(r"```([A-Za-z0-9_+\-]*)\n(.*?)```", text, flags=re.DOTALL)
+        if not match:
+            return None, None
+        language = (match.group(1) or "").strip().lower() or None
+        code = (match.group(2) or "").strip()
+        if not code:
+            return language, None
+        return language, code
+
+    @staticmethod
+    def _infer_script_extension(language: str | None, code: str) -> str:
+        """Infer script extension from language tag or content."""
+        lang = (language or "").strip().lower()
+        mapping = {
+            "python": ".py",
+            "py": ".py",
+            "bash": ".sh",
+            "sh": ".sh",
+            "shell": ".sh",
+            "zsh": ".sh",
+            "javascript": ".js",
+            "js": ".js",
+            "node": ".js",
+            "ruby": ".rb",
+            "rb": ".rb",
+        }
+        if lang in mapping:
+            return mapping[lang]
+        stripped = (code or "").lstrip()
+        if stripped.startswith("#!/usr/bin/env python") or stripped.startswith("#!/usr/bin/python"):
+            return ".py"
+        if stripped.startswith("#!/usr/bin/env bash") or stripped.startswith("#!/bin/bash"):
+            return ".sh"
+        if stripped.startswith("#!/usr/bin/env sh") or stripped.startswith("#!/bin/sh"):
+            return ".sh"
+        return ".py"
+
+    @staticmethod
+    def _supported_script_extension(ext: str) -> bool:
+        """Return whether extension can be executed with built-in runner mapping."""
+        return (ext or "").lower() in {".py", ".sh", ".js", ".rb"}
+
+    @staticmethod
+    def _build_script_runner_command(script_path: Path) -> str | None:
+        """Build shell command that runs script from its own directory."""
+        ext = script_path.suffix.lower()
+        filename = shlex.quote(script_path.name)
+        if ext == ".py":
+            runner = f"python3 {filename}"
+        elif ext == ".sh":
+            runner = f"bash {filename}"
+        elif ext == ".js":
+            runner = f"node {filename}"
+        elif ext == ".rb":
+            runner = f"ruby {filename}"
+        else:
+            return None
+        script_dir = shlex.quote(str(script_path.parent))
+        return f"cd {script_dir} && {runner}"
+
+    def _current_session_slug(self) -> str:
+        """Return normalized session name used for folder scoping."""
+        session_name = "default"
+        if self.session and self.session.name:
+            raw_name = str(self.session.name).strip()
+            normalized = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw_name).strip("-")
+            if normalized:
+                session_name = normalized
+        return session_name
+
+    def _build_script_relative_path(
+        self,
+        user_input: str,
+        extension: str,
+    ) -> str:
+        """Build script path under scripts/<session>/."""
+        ext = extension if extension.startswith(".") else f".{extension}"
+        requested = self._extract_requested_write_path(user_input)
+        filename: str
+        if requested:
+            candidate = Path(requested).name
+            if "." in candidate:
+                base = Path(candidate).stem or "generated_script"
+                req_ext = Path(candidate).suffix.lower()
+                filename = base + (req_ext if self._supported_script_extension(req_ext) else ext)
+            else:
+                filename = candidate + ext
+        else:
+            stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+            filename = f"generated_script_{stamp}{ext}"
+        return f"scripts/{self._current_session_slug()}/{filename}"
+
+    @staticmethod
+    def _parse_written_path_from_tool_output(tool_output: str) -> Path | None:
+        """Parse final path from write tool output."""
+        text = (tool_output or "").strip()
+        match = re.search(r"\bto\s+(.+?)(?:\s+\(requested:|\s*$)", text)
+        if not match:
+            return None
+        raw_path = match.group(1).strip()
+        if not raw_path:
+            return None
+        try:
+            return Path(raw_path)
+        except Exception:
+            return None
+
+    async def _synthesize_script_content(
+        self,
+        user_input: str,
+        turn_usage: dict[str, int],
+    ) -> tuple[str, str]:
+        """Generate script content when model answer omitted code block."""
+        synth_messages = [
+            Message(
+                role="system",
+                content=self.instructions.load("script_synthesis_system_prompt.md"),
+            ),
+            Message(role="user", content=user_input),
+        ]
+        try:
+            self._set_runtime_status("thinking")
+            response = await self.provider.complete(messages=synth_messages, tools=None)
+            self._accumulate_usage(turn_usage, response.usage or {})
+            language, code = self._extract_code_block(response.content or "")
+            if code:
+                return code, self._infer_script_extension(language, code)
+            raw = (response.content or "").strip()
+            if raw:
+                return raw, self._infer_script_extension(language, raw)
+        except Exception as e:
+            log.warning("Script synthesis fallback failed", error=str(e))
+
+        # Deterministic fallback scaffold.
+        safe_request = re.sub(r"\s+", " ", (user_input or "").strip())[:240]
+        scaffold = (
+            "#!/usr/bin/env python3\n"
+            "\"\"\"Auto-generated script scaffold.\"\"\"\n\n"
+            "def main() -> None:\n"
+            f"    print({safe_request!r})\n\n"
+            "if __name__ == '__main__':\n"
+            "    main()\n"
+        )
+        return scaffold, ".py"
+
+    async def _maybe_auto_script_requested_output(
+        self,
+        user_input: str,
+        output_text: str,
+        turn_start_idx: int,
+        turn_usage: dict[str, int],
+    ) -> str:
+        """Guarantee explicit script requests produce write+run tool actions."""
+        text = (output_text or "").strip()
+        if not self._is_explicit_script_request(user_input):
+            return text
+
+        has_write = self._turn_has_successful_tool(turn_start_idx, "write")
+        has_shell = self._turn_has_successful_tool(turn_start_idx, "shell")
+        if has_write and has_shell:
+            return text
+
+        written_script_path: Path | None = None
+
+        if not has_write:
+            language, code = self._extract_code_block(text)
+            if not code:
+                code, inferred_ext = await self._synthesize_script_content(user_input, turn_usage)
+            else:
+                inferred_ext = self._infer_script_extension(language, code)
+
+            script_rel_path = self._build_script_relative_path(user_input, inferred_ext)
+            write_args = {"path": script_rel_path, "content": code}
+            write_args_for_log = {"path": script_rel_path, "content_chars": len(code), "append": False}
+            try:
+                write_result = await self.tools.execute(name="write", arguments=write_args)
+                write_output = (
+                    write_result.content if write_result.success else f"Error: {write_result.error}"
+                )
+            except Exception as e:
+                write_result = None
+                write_output = f"Error: {str(e)}"
+
+            self._add_session_message(
+                role="tool",
+                content=write_output,
+                tool_name="write",
+                tool_arguments=write_args_for_log,
+            )
+            self._emit_tool_output("write", write_args_for_log, write_output)
+
+            if not (write_result and write_result.success):
+                return (
+                    f"{text}\n\n"
+                    "Note: explicit script request could not be completed because write failed.\n"
+                    f"{write_output}"
+                ).strip()
+
+            parsed_written = self._parse_written_path_from_tool_output(write_output)
+            written_script_path = parsed_written or (
+                self.tools.get_saved_base_path(create=True) / script_rel_path
+            )
+        else:
+            # Reuse existing write result path from this turn when available.
+            if self.session:
+                for msg in reversed(self.session.messages[turn_start_idx:]):
+                    if msg.get("role") != "tool" or str(msg.get("tool_name")) != "write":
+                        continue
+                    content = str(msg.get("content", "")).strip()
+                    if content.lower().startswith("error:"):
+                        continue
+                    parsed = self._parse_written_path_from_tool_output(content)
+                    if parsed:
+                        written_script_path = parsed
+                        break
+
+        if has_shell:
+            return text
+
+        if not written_script_path:
+            return (
+                f"{text}\n\n"
+                "Note: script was requested but executable path could not be resolved for run."
+            ).strip()
+
+        run_command = self._build_script_runner_command(written_script_path)
+        if not run_command:
+            return (
+                f"{text}\n\n"
+                f"Note: script saved to {written_script_path}, but auto-run is unsupported for extension "
+                f"'{written_script_path.suffix or '(none)'}'."
+            ).strip()
+
+        try:
+            shell_result = await self.tools.execute(name="shell", arguments={"command": run_command})
+            shell_output = (
+                shell_result.content if shell_result.success else f"Error: {shell_result.error}"
+            )
+        except Exception as e:
+            shell_result = None
+            shell_output = f"Error: {str(e)}"
+
+        self._add_session_message(
+            role="tool",
+            content=shell_output,
+            tool_name="shell",
+            tool_arguments={"command": run_command},
+        )
+        self._emit_tool_output("shell", {"command": run_command}, shell_output)
+
+        if shell_result and shell_result.success:
+            return (
+                f"{text}\n\n"
+                f"Script saved and executed from {written_script_path.parent}."
+            ).strip()
+        return (
+            f"{text}\n\n"
+            f"Script saved to {written_script_path}, but execution failed.\n"
+            f"{shell_output}"
+        ).strip()
+
+    @staticmethod
     def _extract_requested_write_path(user_input: str) -> str | None:
         """Extract requested target file path from user input."""
         text = (user_input or "").strip()
@@ -952,9 +1291,17 @@ Instructions:
         user_input: str,
         output_text: str,
         turn_start_idx: int,
+        turn_usage: dict[str, int],
     ) -> str:
         """Auto-run write tool when user explicitly requested file output."""
         text = (output_text or "").strip()
+        if self._is_explicit_script_request(user_input):
+            return await self._maybe_auto_script_requested_output(
+                user_input=user_input,
+                output_text=text,
+                turn_start_idx=turn_start_idx,
+                turn_usage=turn_usage,
+            )
         requested_path = self._extract_requested_write_path(user_input)
         if not requested_path:
             return text
@@ -1013,20 +1360,15 @@ Instructions:
         rewrite_messages = [
             Message(
                 role="system",
-                content=(
-                    "You are Captain Claw. Rewrite raw tool output into a friendly final "
-                    "answer for the user. Be concise, clear, and practical. Do not mention "
-                    "internal tool-calling mechanics. Only claim actions that are explicitly "
-                    "present in the raw tool output. If raw output does not show a file write/save, "
-                    "state clearly that no file was saved yet."
-                ),
+                content=self.instructions.load("tool_output_rewrite_system_prompt.md"),
             ),
             Message(
                 role="user",
-                content=(
-                    f"User request:\n{user_input}\n\n"
-                    f"Raw tool output:\n{clipped}{clipped_note}\n\n"
-                    "Produce a helpful final response."
+                content=self.instructions.render(
+                    "tool_output_rewrite_user_prompt.md",
+                    user_input=user_input,
+                    tool_output=clipped,
+                    clipped_note=clipped_note,
                 ),
             ),
         ]
@@ -1269,6 +1611,7 @@ Instructions:
                         user_input=user_input,
                         output_text=final,
                         turn_start_idx=turn_start_idx,
+                        turn_usage=turn_usage,
                     )
                     await self._persist_assistant_response(final)
                     return finish(final, success=False)
@@ -1293,6 +1636,7 @@ Instructions:
                         user_input=user_input,
                         output_text=final,
                         turn_start_idx=turn_start_idx,
+                        turn_usage=turn_usage,
                     )
                     await self._persist_assistant_response(final)
                     return finish(final)
@@ -1318,6 +1662,7 @@ Instructions:
                         user_input=user_input,
                         output_text=final,
                         turn_start_idx=turn_start_idx,
+                        turn_usage=turn_usage,
                     )
                     await self._persist_assistant_response(final)
                     return finish(final, success=False)
@@ -1342,6 +1687,7 @@ Instructions:
                         user_input=user_input,
                         output_text=final,
                         turn_start_idx=turn_start_idx,
+                        turn_usage=turn_usage,
                     )
                     await self._persist_assistant_response(final)
                     return finish(final)
@@ -1366,6 +1712,7 @@ Instructions:
                         user_input=user_input,
                         output_text=final,
                         turn_start_idx=turn_start_idx,
+                        turn_usage=turn_usage,
                     )
                     await self._persist_assistant_response(final)
                     return finish(final, success=False)
@@ -1374,6 +1721,7 @@ Instructions:
                     user_input=user_input,
                     output_text=response.content,
                     turn_start_idx=turn_start_idx,
+                    turn_usage=turn_usage,
                 )
                 await self._persist_assistant_response(final_response)
                 return finish(final_response)
@@ -1406,6 +1754,7 @@ Instructions:
                         user_input=user_input,
                         output_text=final,
                         turn_start_idx=turn_start_idx,
+                        turn_usage=turn_usage,
                     )
                     await self._persist_assistant_response(final)
                     return finish(final)
@@ -1432,6 +1781,7 @@ Instructions:
                         user_input=user_input,
                         output_text=final,
                         turn_start_idx=turn_start_idx,
+                        turn_usage=turn_usage,
                     )
                     await self._persist_assistant_response(final)
                     return finish(final, success=False)
@@ -1441,6 +1791,7 @@ Instructions:
                 user_input=user_input,
                 output_text=response.content,
                 turn_start_idx=turn_start_idx,
+                turn_usage=turn_usage,
             )
             
             # Add assistant response to session

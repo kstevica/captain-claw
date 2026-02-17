@@ -35,6 +35,7 @@ class TerminalUI:
             "/new",
             "/session",
             "/sessions",
+            "/runin",
             "/config",
             "/history",
             "/compact",
@@ -142,8 +143,15 @@ Commands:
   /help           - Show this help message
   /clear          - Clear current session
   /new [name]     - Start a new session (optionally named)
-  /session <id>   - Switch to a session by ID
-  /session <name> - Switch to latest session by name
+  /session        - Show active session info
+  /session list   - List recent sessions
+  /session new [name] - Create and switch to a new session
+  /session switch <id|name|#index> - Switch to a session
+  /session rename <new-name> - Rename the active session
+  /session description <text> - Set active session description
+  /session description auto - Auto-generate description from session context
+  /session run <id|name|#index> <prompt> - Run one prompt in another session, then return
+  /runin <id|name|#index> <prompt> - Alias for /session run
   /sessions       - List recent sessions
   /config         - Show configuration
   /history        - Show conversation history
@@ -800,9 +808,12 @@ Commands:
 
     def print_session_info(self, session) -> None:
         """Print session info."""
+        metadata = session.metadata if isinstance(getattr(session, "metadata", None), dict) else {}
+        description = str(metadata.get("description", "")).strip()
+        desc_line = f"Description: {description}\n" if description else ""
         if self._monitor_mode and self._sticky_footer:
             self._append_chat_text(
-                f"\nSession: {session.name}\nID: {session.id}\nMessages: {len(session.messages)}\n\n"
+                f"\nSession: {session.name}\nID: {session.id}\nMessages: {len(session.messages)}\n{desc_line}\n"
             )
             self._render_monitor_view()
             return
@@ -810,6 +821,8 @@ Commands:
         print(f"\nSession: {session.name}")
         print(f"ID: {session.id}")
         print(f"Messages: {len(session.messages)}")
+        if description:
+            print(f"Description: {description}")
         print()
 
     def print_session_list(self, sessions: list[Any], current_session_id: str | None = None) -> None:
@@ -819,8 +832,13 @@ Commands:
             lines.append("(no sessions found)")
         for idx, session in enumerate(sessions, start=1):
             marker = "*" if session.id == current_session_id else " "
+            metadata = session.metadata if isinstance(getattr(session, "metadata", None), dict) else {}
+            description = str(metadata.get("description", "")).strip()
+            if len(description) > 90:
+                description = description[:90].rstrip() + "..."
+            description_part = f" | desc={description}" if description else ""
             lines.append(
-                f"{marker} [{idx}] {session.name} | id={session.id} | messages={len(session.messages)} | updated={session.updated_at}"
+                f"{marker} [{idx}] {session.name} | id={session.id} | messages={len(session.messages)} | updated={session.updated_at}{description_part}"
             )
         lines.append("")
 
@@ -931,7 +949,69 @@ Commands:
             selector = args.strip()
             if not selector:
                 return "SESSION_INFO"
+            session_parts = selector.split(None, 2)
+            subcommand = session_parts[0].lower()
+            if subcommand in ("list", "ls"):
+                return "SESSIONS"
+            if subcommand in ("new", "create"):
+                name = selector[len(session_parts[0]) :].strip()
+                if not name:
+                    return "NEW"
+                return f"NEW:{name}"
+            if subcommand in ("switch", "use", "load"):
+                selector_arg = selector[len(session_parts[0]) :].strip()
+                if not selector_arg:
+                    self.print_error("Usage: /session switch <id|name|#index>")
+                    return None
+                return f"SESSION_SELECT:{selector_arg}"
+            if subcommand in ("rename", "name"):
+                new_name = selector[len(session_parts[0]) :].strip()
+                if not new_name:
+                    self.print_error("Usage: /session rename <new-name>")
+                    return None
+                return f"SESSION_RENAME:{new_name}"
+            if subcommand in ("description", "desc"):
+                description_arg = selector[len(session_parts[0]) :].strip()
+                if not description_arg:
+                    return "SESSION_DESCRIPTION_INFO"
+                parsed = description_arg.strip()
+                if parsed.lower() == "auto":
+                    return "SESSION_DESCRIPTION_AUTO"
+                if (
+                    len(parsed) >= 2
+                    and parsed[0] == parsed[-1]
+                    and parsed[0] in {"'", '"'}
+                ):
+                    parsed = parsed[1:-1].strip()
+                if not parsed:
+                    self.print_error("Usage: /session description <text> | /session description auto")
+                    return None
+                payload = json.dumps({"description": parsed}, ensure_ascii=True)
+                return f"SESSION_DESCRIPTION_SET:{payload}"
+            if subcommand in ("run", "exec"):
+                run_args = selector[len(session_parts[0]) :].strip()
+                run_parts = run_args.split(None, 1)
+                if len(run_parts) < 2:
+                    self.print_error("Usage: /session run <id|name|#index> <prompt>")
+                    return None
+                selector_arg = run_parts[0].strip()
+                prompt_arg = run_parts[1].strip()
+                if not selector_arg or not prompt_arg:
+                    self.print_error("Usage: /session run <id|name|#index> <prompt>")
+                    return None
+                payload = json.dumps({"selector": selector_arg, "prompt": prompt_arg}, ensure_ascii=True)
+                return f"SESSION_RUN:{payload}"
             return f"SESSION_SELECT:{selector}"
+        elif command == "/runin":
+            run_parts = args.strip().split(None, 1)
+            if len(run_parts) < 2 or not run_parts[0].strip() or not run_parts[1].strip():
+                self.print_error("Usage: /runin <id|name|#index> <prompt>")
+                return None
+            payload = json.dumps(
+                {"selector": run_parts[0].strip(), "prompt": run_parts[1].strip()},
+                ensure_ascii=True,
+            )
+            return f"SESSION_RUN:{payload}"
         elif command == "/config":
             return "CONFIG"
         elif command == "/history":

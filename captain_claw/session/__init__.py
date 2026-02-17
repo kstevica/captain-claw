@@ -222,7 +222,13 @@ class SessionManager:
         })
 
     async def select_session(self, selector: str) -> Session | None:
-        """Select a session by ID first, then by name."""
+        """Select a session by ID, name, or recent-list index.
+
+        Resolution order:
+        1. Exact ID
+        2. Latest session with matching name
+        3. Numeric index from recent session list (`#<n>` or `<n>`, 1-based)
+        """
         key = selector.strip()
         if not key:
             return None
@@ -231,7 +237,22 @@ class SessionManager:
         if by_id:
             return by_id
 
-        return await self.load_session_by_name(key)
+        by_name = await self.load_session_by_name(key)
+        if by_name:
+            return by_name
+
+        index_text = key[1:] if key.startswith("#") else key
+        if not index_text.isdigit():
+            return None
+
+        index = int(index_text)
+        if index <= 0:
+            return None
+
+        sessions = await self.list_sessions(limit=max(20, index))
+        if index > len(sessions):
+            return None
+        return sessions[index - 1]
 
     async def save_session(self, session: Session) -> None:
         """Save a session.

@@ -68,3 +68,38 @@ async def test_delete_session_returns_status(tmp_path):
         assert await manager.delete_session(session.id) is False
     finally:
         await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_select_session_supports_recent_index_selector(tmp_path):
+    manager = SessionManager(db_path=tmp_path / "sessions.db")
+    try:
+        first = await manager.create_session(name="alpha")
+        second = await manager.create_session(name="beta")
+
+        first.add_message("user", "touch")
+        await manager.save_session(first)
+
+        by_hash = await manager.select_session("#1")
+        assert by_hash is not None
+        assert by_hash.id == first.id
+
+        by_numeric = await manager.select_session("2")
+        assert by_numeric is not None
+        assert by_numeric.id == second.id
+    finally:
+        await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_select_session_prefers_name_before_numeric_index(tmp_path):
+    manager = SessionManager(db_path=tmp_path / "sessions.db")
+    try:
+        named_numeric = await manager.create_session(name="1")
+        await manager.create_session(name="other")
+
+        selected = await manager.select_session("1")
+        assert selected is not None
+        assert selected.id == named_numeric.id
+    finally:
+        await manager.close()
