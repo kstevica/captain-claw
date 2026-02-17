@@ -24,6 +24,7 @@ class Message:
     content: str
     tool_call_id: str | None = None
     tool_name: str | None = None
+    tool_arguments: dict[str, Any] | None = None
     timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
 
@@ -44,6 +45,7 @@ class Session:
         content: str,
         tool_call_id: str | None = None,
         tool_name: str | None = None,
+        tool_arguments: dict[str, Any] | None = None,
     ) -> None:
         """Add a message to the session."""
         self.messages.append({
@@ -51,6 +53,7 @@ class Session:
             "content": content,
             "tool_call_id": tool_call_id,
             "tool_name": tool_name,
+            "tool_arguments": tool_arguments,
             "timestamp": datetime.utcnow().isoformat(),
         })
         self.updated_at = datetime.utcnow().isoformat()

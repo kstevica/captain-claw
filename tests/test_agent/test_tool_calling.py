@@ -1,6 +1,7 @@
 import pytest
 
 from captain_claw.agent import Agent
+from captain_claw.config import get_config, set_config
 from captain_claw.exceptions import LLMAPIError
 from captain_claw.llm import LLMProvider, LLMResponse, Message, ToolCall, ToolDefinition
 from captain_claw.session import Session
@@ -99,8 +100,78 @@ class TwoTurnProvider(LLMProvider):
         if self.call_count == 2:
             raise LLMAPIError("Ollama API error 500: Internal Server Error")
         if self.call_count == 3:
+            return LLMResponse(content="friendly first turn")
+        if self.call_count == 4:
             return LLMResponse(content="second turn ok")
         return LLMResponse(content="unexpected")
+
+    async def complete_streaming(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ):
+        if False:
+            yield ""
+
+    def count_tokens(self, text: str) -> int:
+        return len(text)
+
+
+class SingleToolCallProvider(LLMProvider):
+    def __init__(self):
+        self.calls = 0
+        self.calls_payloads: list[dict] = []
+
+    async def complete(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        self.calls += 1
+        self.calls_payloads.append({"messages": messages, "tools": tools})
+        if self.calls == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="c1", name="dummy", arguments={"value": "v"})],
+            )
+        return LLMResponse(content="Friendly: done")
+
+    async def complete_streaming(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ):
+        if False:
+            yield ""
+
+    def count_tokens(self, text: str) -> int:
+        return len(text)
+
+
+class ToolThenFinalProvider(LLMProvider):
+    def __init__(self):
+        self.calls = 0
+
+    async def complete(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[ToolCall(id="c1", name="dummy", arguments={"value": "v"})],
+            )
+        return LLMResponse(content="final")
 
     async def complete_streaming(
         self,
@@ -190,8 +261,41 @@ async def test_complete_does_not_return_stale_tool_output_on_fresh_500():
 
 @pytest.mark.asyncio
 async def test_two_turn_flow_does_not_reuse_previous_tool_output_after_500():
-    provider = TwoTurnProvider()
-    agent = Agent(provider=provider)
+    old_cfg = get_config().model_copy(deep=True)
+    cfg = old_cfg.model_copy(deep=True)
+    cfg.model.provider = "ollama"
+    cfg.model.model = "llama3.2"
+    set_config(cfg)
+    try:
+        provider = TwoTurnProvider()
+        agent = Agent(provider=provider)
+        agent._initialized = True
+        agent.session = Session(id="s1", name="default")
+        agent.session_manager = DummySessionManager()
+        registry = ToolRegistry()
+        registry.register(DummyTool())
+        agent.tools = registry
+
+        first = await agent.complete("first request")
+        second = await agent.complete("second request")
+
+        assert first == "friendly first turn"
+        assert second == "second turn ok"
+        # Fourth call is the second turn's first model request.
+        assert all(msg.role != "tool" for msg in provider.messages_per_call[3])
+    finally:
+        set_config(old_cfg)
+
+
+@pytest.mark.asyncio
+async def test_tool_output_callback_receives_raw_output():
+    provider = ToolThenFinalProvider()
+    outputs: list[dict] = []
+
+    def cb(name: str, args: dict, output: str) -> None:
+        outputs.append({"name": name, "args": args, "output": output})
+
+    agent = Agent(provider=provider, tool_output_callback=cb)
     agent._initialized = True
     agent.session = Session(id="s1", name="default")
     agent.session_manager = DummySessionManager()
@@ -199,10 +303,38 @@ async def test_two_turn_flow_does_not_reuse_previous_tool_output_after_500():
     registry.register(DummyTool())
     agent.tools = registry
 
-    first = await agent.complete("first request")
-    second = await agent.complete("second request")
+    result = await agent.complete("run tool")
 
-    assert first == "Tool executed:\ndone"
-    assert second == "second turn ok"
-    # Third call is the second turn's first model request.
-    assert all(msg.role != "tool" for msg in provider.messages_per_call[2])
+    assert result == "final"
+    assert outputs
+    assert outputs[0]["name"] == "dummy"
+    assert outputs[0]["args"] == {"value": "v"}
+    assert outputs[0]["output"] == "done"
+    tool_messages = [m for m in agent.session.messages if m.get("role") == "tool"]
+    assert tool_messages[0]["tool_arguments"] == {"value": "v"}
+
+
+@pytest.mark.asyncio
+async def test_ollama_cloud_skips_tool_result_followup_call():
+    old_cfg = get_config().model_copy(deep=True)
+    cfg = old_cfg.model_copy(deep=True)
+    cfg.model.provider = "ollama"
+    cfg.model.model = "minimax-m2.5:cloud"
+    set_config(cfg)
+    try:
+        provider = SingleToolCallProvider()
+        agent = Agent(provider=provider)
+        agent._initialized = True
+        agent.session = Session(id="s1", name="default")
+        agent.session_manager = DummySessionManager()
+        registry = ToolRegistry()
+        registry.register(DummyTool())
+        agent.tools = registry
+
+        result = await agent.complete("run tool")
+
+        assert result == "Friendly: done"
+        assert provider.calls == 2
+        assert provider.calls_payloads[1]["tools"] is None
+    finally:
+        set_config(old_cfg)

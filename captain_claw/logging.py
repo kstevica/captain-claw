@@ -2,11 +2,41 @@
 
 import logging
 import sys
+from typing import Callable
 from typing import Any
 
 import structlog
 
 from captain_claw.config import get_config
+
+_system_log_sink: Callable[[str], None] | None = None
+
+
+class _SinkWriter:
+    """File-like sink for structlog that forwards lines to a callback."""
+
+    def __init__(self, sink: Callable[[str], None]):
+        self._sink = sink
+        self._buffer = ""
+
+    def write(self, text: str) -> int:
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            if line:
+                self._sink(line)
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buffer:
+            self._sink(self._buffer)
+            self._buffer = ""
+
+
+def set_system_log_sink(sink: Callable[[str], None] | None) -> None:
+    """Set optional sink for system logs (used by fixed UI system panel)."""
+    global _system_log_sink
+    _system_log_sink = sink
 
 
 def configure_logging() -> None:
@@ -35,7 +65,9 @@ def configure_logging() -> None:
         processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(log_level),
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        logger_factory=structlog.PrintLoggerFactory(
+            file=_SinkWriter(_system_log_sink) if _system_log_sink else sys.stderr
+        ),
         cache_logger_on_first_use=True,
     )
 
