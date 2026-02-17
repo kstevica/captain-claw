@@ -35,6 +35,7 @@ class TerminalUI:
             "/new",
             "/session",
             "/sessions",
+            "/models",
             "/runin",
             "/config",
             "/history",
@@ -150,7 +151,11 @@ Commands:
   /session rename <new-name> - Rename the active session
   /session description <text> - Set active session description
   /session description auto - Auto-generate description from session context
+  /session model - Show active session model selection
+  /session model list - List allowed models from config
+  /session model <id|#index|provider:model|default> - Set session model
   /session run <id|name|#index> <prompt> - Run one prompt in another session, then return
+  /models         - List allowed models from config
   /runin <id|name|#index> <prompt> - Alias for /session run
   /sessions       - List recent sessions
   /config         - Show configuration
@@ -811,9 +816,18 @@ Commands:
         metadata = session.metadata if isinstance(getattr(session, "metadata", None), dict) else {}
         description = str(metadata.get("description", "")).strip()
         desc_line = f"Description: {description}\n" if description else ""
+        model_selection = metadata.get("model_selection") if isinstance(metadata.get("model_selection"), dict) else None
+        model_line = ""
+        if model_selection:
+            model_provider = str(model_selection.get("provider", "")).strip()
+            model_name = str(model_selection.get("model", "")).strip()
+            model_id = str(model_selection.get("id", "")).strip()
+            id_part = f" [{model_id}]" if model_id else ""
+            if model_provider and model_name:
+                model_line = f"Model: {model_provider}/{model_name}{id_part}\n"
         if self._monitor_mode and self._sticky_footer:
             self._append_chat_text(
-                f"\nSession: {session.name}\nID: {session.id}\nMessages: {len(session.messages)}\n{desc_line}\n"
+                f"\nSession: {session.name}\nID: {session.id}\nMessages: {len(session.messages)}\n{model_line}{desc_line}\n"
             )
             self._render_monitor_view()
             return
@@ -821,6 +835,8 @@ Commands:
         print(f"\nSession: {session.name}")
         print(f"ID: {session.id}")
         print(f"Messages: {len(session.messages)}")
+        if model_line:
+            print(model_line.strip())
         if description:
             print(f"Description: {description}")
         print()
@@ -839,6 +855,46 @@ Commands:
             description_part = f" | desc={description}" if description else ""
             lines.append(
                 f"{marker} [{idx}] {session.name} | id={session.id} | messages={len(session.messages)} | updated={session.updated_at}{description_part}"
+            )
+        lines.append("")
+
+        content = "\n".join(lines) + "\n"
+        if self._monitor_mode and self._sticky_footer:
+            self._append_chat_text(content)
+            self._render_monitor_view()
+            return
+        self._prepare_output()
+        print(content, end="")
+
+    def print_model_list(
+        self,
+        models: list[dict[str, Any]],
+        active_model: dict[str, Any] | None = None,
+    ) -> None:
+        """Print allowed model list with active marker."""
+        lines = ["\n=== Allowed Models ==="]
+        active_provider = str((active_model or {}).get("provider", "")).strip().lower()
+        active_model_name = str((active_model or {}).get("model", "")).strip().lower()
+        active_id = str((active_model or {}).get("id", "")).strip().lower()
+
+        if not models:
+            lines.append("(no models configured)")
+        for idx, model in enumerate(models, start=1):
+            model_id = str(model.get("id", "")).strip()
+            provider = str(model.get("provider", "")).strip()
+            model_name = str(model.get("model", "")).strip()
+            source = str((active_model or {}).get("source", "")).strip()
+            is_active = (
+                (model_id and model_id.lower() == active_id)
+                or (
+                    provider.lower() == active_provider
+                    and model_name.lower() == active_model_name
+                )
+            )
+            marker = "*" if is_active else " "
+            source_part = f" | active_source={source}" if is_active and source else ""
+            lines.append(
+                f"{marker} [{idx}] {model_id} | provider={provider} | model={model_name}{source_part}"
             )
         lines.append("")
 
@@ -945,6 +1001,8 @@ Commands:
             return f"NEW:{name}"
         elif command == "/sessions":
             return "SESSIONS"
+        elif command == "/models":
+            return "MODELS"
         elif command == "/session":
             selector = args.strip()
             if not selector:
@@ -988,6 +1046,14 @@ Commands:
                     return None
                 payload = json.dumps({"description": parsed}, ensure_ascii=True)
                 return f"SESSION_DESCRIPTION_SET:{payload}"
+            if subcommand == "model":
+                model_arg = selector[len(session_parts[0]) :].strip()
+                if not model_arg:
+                    return "SESSION_MODEL_INFO"
+                lowered_arg = model_arg.lower()
+                if lowered_arg in {"list", "ls"}:
+                    return "MODELS"
+                return f"SESSION_MODEL_SET:{model_arg}"
             if subcommand in ("run", "exec"):
                 run_args = selector[len(session_parts[0]) :].strip()
                 run_parts = run_args.split(None, 1)

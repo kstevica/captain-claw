@@ -178,7 +178,6 @@ async def run_interactive() -> None:
     # Main loop
     while True:
         try:
-            cfg = get_config()
             ui.print_status_line(
                 last_usage=agent.last_usage,
                 total_usage=agent.total_usage,
@@ -186,12 +185,7 @@ async def run_interactive() -> None:
                 last_completed_at=last_completed_at,
                 session_id=agent.session.id if agent.session else None,
                 context_window=agent.last_context_window,
-                model_details={
-                    "provider": cfg.model.provider,
-                    "model": cfg.model.model,
-                    "temperature": cfg.model.temperature,
-                    "max_tokens": cfg.model.max_tokens,
-                },
+                model_details=agent.get_runtime_model_details(),
             )
             ui.set_runtime_status("user input")
             # Get user input
@@ -233,11 +227,35 @@ async def run_interactive() -> None:
                     current_session_id=agent.session.id if agent.session else None,
                 )
                 continue
+            elif result == "MODELS":
+                ui.print_model_list(
+                    agent.get_allowed_models(),
+                    active_model=agent.get_runtime_model_details(),
+                )
+                continue
             elif result == "SESSION_INFO":
                 if agent.session:
                     ui.print_session_info(agent.session)
                 else:
                     ui.print_error("No active session")
+                continue
+            elif result == "SESSION_MODEL_INFO":
+                details = agent.get_runtime_model_details()
+                ui.print_success(
+                    "Active model: "
+                    f"{details.get('provider')}/{details.get('model')} "
+                    f"(source={details.get('source') or 'unknown'}, id={details.get('id') or '-'})"
+                )
+                continue
+            elif result.startswith("SESSION_MODEL_SET:"):
+                selector = result.split(":", 1)[1].strip()
+                ok, message = await agent.set_session_model(selector, persist=True)
+                if ok:
+                    if agent.session:
+                        ui.print_session_info(agent.session)
+                    ui.print_success(message)
+                else:
+                    ui.print_error(message)
                 continue
             elif result.startswith("SESSION_SELECT:"):
                 selector = result.split(":", 1)[1].strip()

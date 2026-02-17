@@ -3,11 +3,28 @@
 
 # Model Configuration
 model:
-  provider: "ollama"  # ollama, openai, anthropic
-  model: "minimax-m2.5:cloud"  # model name (check 'ollama list' for available)
+  provider: "ollama"  # ollama, openai/chatgpt, anthropic/claude, gemini/google
+  model: "minimax-m2.5:cloud"  # model name (provider-native name or prefixed like openai/gpt-4o-mini)
   temperature: 0.7  # creativity (0-1)
   max_tokens: 32000  # max response length
-  # api_key: ""  # set via environment variable or here
+  # api_key: ""  # optional; can also be set via env (OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY)
+  # base_url: ""  # optional API base URL override (for hosted gateways / custom endpoints)
+  allowed:
+    - id: "ollama-cloud"
+      provider: "ollama"
+      model: "minimax-m2.5:cloud"
+    - id: "gpt-5-mini"
+      provider: "openai"
+      model: "gpt-5-mini"
+    - id: "gpt-5.1-codex"
+      provider: "openai"
+      model: "gpt-5.1-codex"
+    - id: "claude-sonnet"
+      provider: "anthropic"
+      model: "claude-3-5-sonnet-latest"
+    - id: "gemini-flash"
+      provider: "gemini"
+      model: "gemini-2.0-flash"
 
 # Context Settings
 context:

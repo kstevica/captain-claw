@@ -26,14 +26,41 @@ captain-claw
 
 ## Configuration
 
-Edit `config.yaml` or use environment variables:
+Edit `config.yaml` or use environment variables.
+By default Captain Claw loads `./config.yaml` (current working directory) first, then falls back to `~/.captain-claw/config.yaml`.
 
 ```yaml
 model:
   provider: "openai"
   model: "gpt-4o-mini"
   temperature: 0.7
+  allowed:
+    - id: "chatgpt-fast"
+      provider: "openai"
+      model: "gpt-4o-mini"
+    - id: "claude-sonnet"
+      provider: "anthropic"
+      model: "claude-3-5-sonnet-latest"
+    - id: "gemini-flash"
+      provider: "gemini"
+      model: "gemini-2.0-flash"
+    - id: "ollama-cloud"
+      provider: "ollama"
+      model: "minimax-m2.5:cloud"
 ```
+
+Provider examples:
+
+- ChatGPT: `provider: "openai"` (or `"chatgpt"`), `model: "gpt-4o-mini"`
+- Claude: `provider: "anthropic"` (or `"claude"`), `model: "claude-3-5-sonnet-latest"`
+- Gemini: `provider: "gemini"` (or `"google"`), `model: "gemini-2.0-flash"`
+- Ollama: `provider: "ollama"`, `model: "llama3.2"` (or any local/remote Ollama model)
+
+Per-session live selection is available in the CLI:
+
+- `/models` to list allowlisted models
+- `/session model <id>` to switch model for the active session
+- `/session model default` to revert the session to config defaults
 
 ## Commands
 

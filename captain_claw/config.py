@@ -12,16 +12,29 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Paths
 DEFAULT_CONFIG_PATH = Path("~/.captain-claw/config.yaml").expanduser()
 DEFAULT_DB_PATH = Path("~/.captain-claw/sessions.db").expanduser()
+LOCAL_CONFIG_FILENAME = "config.yaml"
 
 
 class ModelConfig(BaseModel):
     """Model configuration."""
+
+    class AllowedModelConfig(BaseModel):
+        """Allowed model entry for live per-session selection."""
+
+        id: str
+        provider: str
+        model: str
+        base_url: str = ""
+        temperature: float | None = None
+        max_tokens: int | None = None
 
     provider: str = "ollama"
     model: str = "minimax-m2.5:cloud"
     temperature: float = 0.7
     max_tokens: int = 32000
     api_key: str = ""
+    base_url: str = ""
+    allowed: list[AllowedModelConfig] = Field(default_factory=list)
 
 
 class ContextConfig(BaseModel):
@@ -100,9 +113,17 @@ class Config(BaseSettings):
     )
 
     @classmethod
+    def resolve_default_config_path(cls) -> Path:
+        """Resolve default config path with local-first precedence."""
+        local_path = Path.cwd() / LOCAL_CONFIG_FILENAME
+        if local_path.exists():
+            return local_path
+        return DEFAULT_CONFIG_PATH
+
+    @classmethod
     def from_yaml(cls, path: Path | str | None = None) -> "Config":
         """Load configuration from YAML file."""
-        config_path = Path(path) if path else DEFAULT_CONFIG_PATH
+        config_path = Path(path).expanduser() if path else cls.resolve_default_config_path()
         
         if not config_path.exists():
             return cls()

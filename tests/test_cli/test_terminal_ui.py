@@ -157,10 +157,14 @@ def test_monitor_command_parsing():
 def test_session_commands_parsing():
     ui = TerminalUI()
     assert ui.handle_special_command("/sessions") == "SESSIONS"
+    assert ui.handle_special_command("/models") == "MODELS"
     assert ui.handle_special_command("/session list") == "SESSIONS"
     assert ui.handle_special_command("/session") == "SESSION_INFO"
     assert ui.handle_special_command("/session abc123") == "SESSION_SELECT:abc123"
     assert ui.handle_special_command("/session switch abc123") == "SESSION_SELECT:abc123"
+    assert ui.handle_special_command("/session model") == "SESSION_MODEL_INFO"
+    assert ui.handle_special_command("/session model list") == "MODELS"
+    assert ui.handle_special_command("/session model claude-sonnet") == "SESSION_MODEL_SET:claude-sonnet"
 
 
 def test_session_new_subcommand_parsing():

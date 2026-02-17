@@ -363,3 +363,62 @@ def test_sanitize_session_description_limits_sentences():
     cleaned = agent.sanitize_session_description(raw, max_sentences=5)
     assert cleaned.endswith("Five.")
     assert "Six." not in cleaned
+
+
+@pytest.mark.asyncio
+async def test_set_session_model_uses_allowed_models_and_updates_metadata():
+    old_cfg = get_config().model_copy(deep=True)
+    cfg = old_cfg.model_copy(deep=True)
+    cfg.model.provider = "ollama"
+    cfg.model.model = "minimax-m2.5:cloud"
+    cfg.model.allowed = [
+        {
+            "id": "ollama-cloud",
+            "provider": "ollama",
+            "model": "minimax-m2.5:cloud",
+        },
+        {
+            "id": "chatgpt-fast",
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+        },
+    ]
+    set_config(cfg)
+    try:
+        agent = Agent(provider=TokenAwareProvider())
+        agent.session = Session(id="s1", name="default")
+        agent.session_manager = DummySessionManager()
+
+        ok, message = await agent.set_session_model("chatgpt-fast", persist=True)
+        assert ok is True
+        assert "openai" in message
+        selection = agent.session.metadata.get("model_selection")
+        assert isinstance(selection, dict)
+        assert selection.get("id") == "chatgpt-fast"
+        assert str(selection.get("provider", "")).startswith("openai")
+        assert "gpt-4o-mini" in str(selection.get("model", ""))
+
+        details = agent.get_runtime_model_details()
+        assert str(details.get("provider", "")).startswith("openai")
+        assert "gpt-4o-mini" in str(details.get("model", ""))
+
+        ok_default, message_default = await agent.set_session_model("default", persist=True)
+        assert ok_default is True
+        assert "default config" in message_default
+        assert "model_selection" not in agent.session.metadata
+    finally:
+        set_config(old_cfg)
+
+
+def test_supports_tool_followup_uses_runtime_model_details():
+    old_cfg = get_config().model_copy(deep=True)
+    cfg = old_cfg.model_copy(deep=True)
+    cfg.model.provider = "openai"
+    cfg.model.model = "gpt-4o-mini"
+    set_config(cfg)
+    try:
+        agent = Agent(provider=TokenAwareProvider())
+        agent._runtime_model_details = {"provider": "ollama", "model": "minimax-m2.5:cloud"}
+        assert agent._supports_tool_result_followup() is False
+    finally:
+        set_config(old_cfg)

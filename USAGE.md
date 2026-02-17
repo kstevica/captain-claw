@@ -27,7 +27,11 @@ captain-claw
 | `/session rename <new-name>` | Rename the active session |
 | `/session description <text>` | Set active session description (stored in metadata) |
 | `/session description auto` | Auto-generate description from session context/tasks |
+| `/session model` | Show active model for current session |
+| `/session model list` | List allowed models from config |
+| `/session model <id|#index|provider:model|default>` | Select per-session model live |
 | `/session run <id|name|#index> <prompt>` | Run one prompt in another session, then return |
+| `/models` | List allowed models from config |
 | `/runin <id|name|#index> <prompt>` | Alias for `/session run` |
 | `/exit` or `/quit` | Exit |
 
