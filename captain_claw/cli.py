@@ -46,6 +46,8 @@ class TerminalUI:
             "/pipeline",
             "/monitor",
             "/scroll",
+            "/skills",
+            "/skill",
             "/exit",
             "/quit",
         ]
@@ -191,6 +193,9 @@ Commands:
   /cron remove <job-id|#index> - Remove cron job
   /pipeline loop|contracts - Set execution pipeline mode (simple loop vs contract gate)
   /planning on|off - Legacy alias for /pipeline contracts|loop
+  /skills         - List currently available user-invocable skills
+  /skill <name> [args] - Run a specific skill manually
+  /<skill-command> [args] - Direct alias for a discovered skill command
   /monitor on     - Enable split monitor view
   /monitor off    - Disable split monitor view
   /monitor trace on|off - Enable/disable full intermediate LLM trace logging
@@ -1580,6 +1585,31 @@ Commands:
                     return None
             payload = {"pane": pane, "action": action, "amount": amount}
             return f"MONITOR_SCROLL:{json.dumps(payload, ensure_ascii=True)}"
+        elif command == "/skills":
+            return "SKILLS_LIST"
+        elif command == "/skill":
+            raw = args.strip()
+            if not raw:
+                self.print_error("Usage: /skill <name> [args] | /skill list")
+                return None
+            if raw.lower() == "list":
+                return "SKILLS_LIST"
+            parts = raw.split(None, 1)
+            skill_name = parts[0].strip()
+            skill_args = parts[1].strip() if len(parts) > 1 else ""
+            if not skill_name:
+                self.print_error("Usage: /skill <name> [args] | /skill list")
+                return None
+            payload = json.dumps({"name": skill_name, "args": skill_args}, ensure_ascii=True)
+            return f"SKILL_INVOKE:{payload}"
+        elif command.startswith("/") and len(command) > 1 and command not in {"/exit", "/quit", "/q"}:
+            # Dynamic skill alias, e.g. "/example-source-brief ...".
+            alias_name = command[1:].strip()
+            if not alias_name:
+                self.print_error(f"Unknown command: {command}")
+                return None
+            payload = json.dumps({"name": alias_name, "args": args.strip()}, ensure_ascii=True)
+            return f"SKILL_ALIAS_INVOKE:{payload}"
         elif command in ("/exit", "/quit", "/q"):
             return "EXIT"
         else:

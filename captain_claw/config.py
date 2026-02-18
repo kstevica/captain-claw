@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -95,6 +95,43 @@ class ToolsConfig(BaseModel):
     require_confirmation: list[str] = ["shell", "write"]
 
 
+class SkillEntryConfig(BaseModel):
+    """Per-skill config overrides."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    enabled: bool | None = None
+    api_key: str = Field(default="", alias="apiKey")
+    env: dict[str, str] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class SkillsLoadConfig(BaseModel):
+    """Skill loading settings."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    extra_dirs: list[str] = Field(default_factory=list, alias="extraDirs")
+    watch: bool = True
+    watch_debounce_ms: int = Field(default=250, alias="watchDebounceMs")
+
+
+class SkillsConfig(BaseModel):
+    """Skills subsystem configuration."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    managed_dir: str = "~/.captain-claw/skills"
+    allow_bundled: list[str] = Field(default_factory=list, alias="allowBundled")
+    entries: dict[str, SkillEntryConfig] = Field(default_factory=dict)
+    load: SkillsLoadConfig = Field(default_factory=SkillsLoadConfig)
+    max_skills_in_prompt: int = 64
+    max_skills_prompt_chars: int = 16000
+    max_skill_file_bytes: int = 131072
+    max_candidates_per_root: int = 2048
+    max_skills_loaded_per_source: int = 256
+
+
 class GuardTypeConfig(BaseModel):
     """Guard behavior for a single guard type."""
 
@@ -158,6 +195,7 @@ class Config(BaseSettings):
     model: ModelConfig = Field(default_factory=ModelConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    skills: SkillsConfig = Field(default_factory=SkillsConfig)
     guards: GuardConfig = Field(default_factory=GuardConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)

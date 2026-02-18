@@ -24,6 +24,8 @@ class AgentOrchestrationMixin:
         if not self._initialized:
             await self.initialize()
         self._last_memory_debug_signature = None
+        restore_skill_env = self._apply_skill_env_overrides_for_run()
+        skill_env_restored = False
 
         turn_usage = self._empty_usage()
         self.last_usage = self._empty_usage()
@@ -53,10 +55,21 @@ class AgentOrchestrationMixin:
         completion_requirements: list[dict[str, Any]] = []
         completion_feedback: str = ""
 
+        def _restore_skill_env_once() -> None:
+            nonlocal skill_env_restored
+            if skill_env_restored:
+                return
+            skill_env_restored = True
+            try:
+                restore_skill_env()
+            except Exception:
+                pass
+
         def finish(text: str, success: bool = True) -> str:
             if planning_pipeline is not None:
                 self._finalize_pipeline(planning_pipeline, success=success)
             self._finalize_turn_usage(turn_usage)
+            _restore_skill_env_once()
             return text
 
         async def attempt_finalize_response(
@@ -72,6 +85,14 @@ class AgentOrchestrationMixin:
                 turn_start_idx=turn_start_idx,
                 turn_usage=turn_usage,
             )
+            if not str(final_response or "").strip():
+                tool_output_fallback = self._collect_turn_tool_output(turn_start_idx)
+                if str(tool_output_fallback or "").strip():
+                    final_response = await self._friendly_tool_output_response(
+                        user_input=effective_user_input,
+                        tool_output=tool_output_fallback,
+                        turn_usage=turn_usage,
+                    )
             if enforce_python_worker_mode:
                 worker_ran_this_iteration = False
                 has_write = self._turn_has_successful_tool(turn_start_idx, "write")
@@ -492,6 +513,7 @@ class AgentOrchestrationMixin:
                     continue
                 
                 log.error("LLM call failed", error=str(e), exc_info=True)
+                _restore_skill_env_once()
                 raise
             
             # Check for explicit tool calls (for models that support it)

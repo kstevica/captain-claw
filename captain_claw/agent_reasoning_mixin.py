@@ -260,7 +260,9 @@ class AgentReasoningMixin:
         if mode == "contracts":
             return True
         if mode == "loop":
-            return False
+            # Backward compatibility: some call sites/tests toggle planning_enabled
+            # directly without updating pipeline_mode.
+            return bool(planning_enabled)
         # Backward-compat fallback for call sites/session metadata not yet migrated.
         return bool(planning_enabled)
 

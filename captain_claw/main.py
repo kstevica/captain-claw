@@ -1854,6 +1854,54 @@ async def run_interactive() -> None:
                         "(loop=fast/simple, contracts=planner+completion gate)"
                     )
                     continue
+                elif result == "SKILLS_LIST":
+                    skills = agent.list_user_invocable_skills()
+                    if not skills:
+                        ui.print_warning("No user-invocable skills available.")
+                        continue
+                    lines = ["Available skills:"]
+                    for command in skills:
+                        lines.append(
+                            f"- /skill {command.name} (alias: /{command.name}) - {command.description}"
+                        )
+                    ui.print_message("system", "\n".join(lines))
+                    continue
+                elif result.startswith("SKILL_INVOKE:") or result.startswith("SKILL_ALIAS_INVOKE:"):
+                    payload_raw = result.split(":", 1)[1].strip()
+                    try:
+                        payload = json.loads(payload_raw)
+                    except Exception:
+                        ui.print_error("Invalid /skill payload")
+                        continue
+                    skill_name = str(payload.get("name", "")).strip()
+                    skill_args = str(payload.get("args", "")).strip()
+                    if not skill_name:
+                        ui.print_error("Usage: /skill <name> [args]")
+                        continue
+                    invocation = await agent.invoke_skill_command(skill_name, args=skill_args)
+                    if not bool(invocation.get("ok", False)):
+                        if result.startswith("SKILL_ALIAS_INVOKE:"):
+                            ui.print_error(f"Unknown command: /{skill_name}")
+                        else:
+                            ui.print_error(str(invocation.get("error", "Skill invocation failed.")))
+                        continue
+                    mode = str(invocation.get("mode", "")).strip().lower()
+                    if mode == "dispatch":
+                        text = str(invocation.get("text", "")).strip() or "Done."
+                        ui.print_message("assistant", text)
+                        continue
+                    rewritten_prompt = str(invocation.get("prompt", "")).strip()
+                    if not rewritten_prompt:
+                        ui.print_error("Skill invocation did not return a prompt.")
+                        continue
+                    display_prompt = f"/skill {skill_name}"
+                    if skill_args:
+                        display_prompt += f" {skill_args}"
+                    await _run_prompt_in_active_session(
+                        rewritten_prompt,
+                        display_prompt=display_prompt,
+                    )
+                    continue
                 elif result == "MONITOR_ON":
                     ui.set_monitor_mode(True)
                     if agent.session:

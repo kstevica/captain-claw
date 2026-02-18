@@ -65,6 +65,21 @@ tools:
     - shell
     - write
 
+# Skills subsystem (OpenClaw-style discovery and invocation)
+skills:
+  managed_dir: "~/.captain-claw/skills"
+  allow_bundled: []  # optional allowlist for bundled skills only
+  entries: {}  # optional per-skill overrides: enabled/apiKey/env/config
+  load:
+    extra_dirs: []
+    watch: true
+    watch_debounce_ms: 250
+  max_skills_in_prompt: 64
+  max_skills_prompt_chars: 16000
+  max_skill_file_bytes: 131072
+  max_candidates_per_root: 2048
+  max_skills_loaded_per_source: 256
+
 # Guard Configuration
 guards:
   input:

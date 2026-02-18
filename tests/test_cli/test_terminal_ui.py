@@ -325,6 +325,18 @@ def test_planning_command_parsing():
     assert ui.handle_special_command("/pipeline simple") == "PIPELINE_MODE:loop"
     assert ui.handle_special_command("/pipeline contracts") == "PIPELINE_MODE:contracts"
     assert ui.handle_special_command("/pipeline complex") == "PIPELINE_MODE:contracts"
+    assert ui.handle_special_command("/skills") == "SKILLS_LIST"
+    assert ui.handle_special_command("/skill list") == "SKILLS_LIST"
+    invoke = ui.handle_special_command("/skill docs summarize release notes")
+    assert invoke is not None
+    assert invoke.startswith("SKILL_INVOKE:")
+    payload = json.loads(invoke.split(":", 1)[1])
+    assert payload == {"name": "docs", "args": "summarize release notes"}
+    alias = ui.handle_special_command("/example-source-brief index.hr")
+    assert alias is not None
+    assert alias.startswith("SKILL_ALIAS_INVOKE:")
+    alias_payload = json.loads(alias.split(":", 1)[1])
+    assert alias_payload == {"name": "example-source-brief", "args": "index.hr"}
 
 
 def test_new_command_supports_optional_name():

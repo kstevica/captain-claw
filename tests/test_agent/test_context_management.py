@@ -1,5 +1,6 @@
 import copy
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -88,6 +89,20 @@ class DescriptionProvider(LLMProvider):
 
     def count_tokens(self, text: str) -> int:
         return len([part for part in text.split() if part]) or 1
+
+
+def _write_skill(skill_dir: Path, name: str, description: str, extra_frontmatter: str = "") -> None:
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    frontmatter = (
+        "---\n"
+        f"name: {name}\n"
+        f"description: {description}\n"
+        f"{extra_frontmatter}"
+        "---\n\n"
+        f"# {name}\n\n"
+        "Use this skill.\n"
+    )
+    (skill_dir / "SKILL.md").write_text(frontmatter, encoding="utf-8")
 
 
 def test_build_messages_prunes_history_to_context_budget():
@@ -258,6 +273,80 @@ def test_system_prompt_includes_workspace_folder_policy_with_session_subfolders(
     assert "saved/skills/s1/" in prompt
     assert "saved/tmp/s1/" in prompt
     assert "Script/tool generation workflow:" in prompt
+
+
+def test_system_prompt_includes_available_skills_block(tmp_path: Path):
+    old_cfg = get_config().model_copy(deep=True)
+    cfg = old_cfg.model_copy(deep=True)
+    cfg.workspace.path = str(tmp_path)
+    set_config(cfg)
+    try:
+        _write_skill(
+            tmp_path / "skills" / "demo-skill",
+            "demo-skill",
+            "Demo skill for testing prompt injection.",
+        )
+        agent = Agent(provider=TokenAwareProvider())
+        agent.session = Session(id="s1", name="default")
+
+        prompt = agent._build_system_prompt()
+
+        assert "## Skills (mandatory)" in prompt
+        assert "<available_skills>" in prompt
+        assert "<name>demo-skill</name>" in prompt
+    finally:
+        set_config(old_cfg)
+
+
+def test_disable_model_invocation_skill_hidden_from_prompt_but_still_invocable(tmp_path: Path):
+    old_cfg = get_config().model_copy(deep=True)
+    cfg = old_cfg.model_copy(deep=True)
+    cfg.workspace.path = str(tmp_path)
+    set_config(cfg)
+    try:
+        _write_skill(
+            tmp_path / "skills" / "hidden-skill",
+            "hidden-skill",
+            "Hidden from model prompt but manually invocable.",
+            extra_frontmatter="disable-model-invocation: true\nuser-invocable: true\n",
+        )
+        agent = Agent(provider=TokenAwareProvider())
+        agent.session = Session(id="s1", name="default")
+
+        prompt = agent._build_system_prompt()
+        assert "<name>hidden-skill</name>" not in prompt
+
+        commands = agent.list_user_invocable_skills()
+        assert any(cmd.skill_name == "hidden-skill" for cmd in commands)
+    finally:
+        set_config(old_cfg)
+
+
+@pytest.mark.asyncio
+async def test_invoke_skill_command_rewrites_prompt(tmp_path: Path):
+    old_cfg = get_config().model_copy(deep=True)
+    cfg = old_cfg.model_copy(deep=True)
+    cfg.workspace.path = str(tmp_path)
+    set_config(cfg)
+    try:
+        _write_skill(
+            tmp_path / "skills" / "docs",
+            "docs",
+            "Documentation writing support.",
+        )
+        agent = Agent(provider=TokenAwareProvider())
+        agent._initialized = True
+        agent.session = Session(id="s1", name="default")
+        agent.session_manager = DummySessionManager()
+
+        invocation = await agent.invoke_skill_command("docs", args="draft release notes")
+
+        assert invocation["ok"] is True
+        assert invocation["mode"] == "rewrite"
+        assert 'Use the "docs" skill for this request.' in str(invocation["prompt"])
+        assert "draft release notes" in str(invocation["prompt"])
+    finally:
+        set_config(old_cfg)
 
 
 def test_build_messages_includes_planning_pipeline_note():

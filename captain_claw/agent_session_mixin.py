@@ -592,6 +592,7 @@ class AgentSessionMixin:
         self.planning_enabled = self.pipeline_mode == "contracts"
         self.monitor_trace_llm = monitor_trace_llm
         self.monitor_trace_pipeline = monitor_trace_pipeline
+        self._skills_snapshot_cache = None
         selection = self._session_model_selection()
         if selection:
             model_id = str(selection.get("id", "")).strip()

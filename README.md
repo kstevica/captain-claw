@@ -251,6 +251,9 @@ CLAW_TOOLS__WEB_SEARCH__API_KEY="your_brave_api_key"
 | `/compact` | Manually compact older session history |
 | `/pipeline loop\|contracts` | Select pipeline mode (`loop` for fast/simple, `contracts` for planner+completion gate) |
 | `/planning on\|off` | Legacy alias for `/pipeline contracts\|loop` |
+| `/skills` | List user-invocable skills discovered for the current workspace/session |
+| `/skill <name> [args]` | Manually invoke a skill (rewrite to skill-guided prompt or direct tool dispatch if configured in skill frontmatter) |
+| `/<skill-command> [args]` | Direct alias for a discovered skill command (same behavior as `/skill <name> [args]`) |
 | `/monitor on\|off` | Enable/disable monitor split view |
 | `/monitor trace on\|off` | Enable/disable full intermediate LLM response trace logging into monitor/session history |
 | `/monitor pipeline on\|off` | Enable/disable compact pipeline-only trace logging into session history |
@@ -303,6 +306,14 @@ CLAW_TOOLS__WEB_SEARCH__API_KEY="your_brave_api_key"
 | `/cron pause <job-id\|#index>` | Pause a cron job |
 | `/cron resume <job-id\|#index>` | Resume a paused cron job |
 | `/cron remove <job-id\|#index>` | Delete a cron job |
+
+## Skills
+
+- Captain Claw now loads OpenClaw-style `SKILL.md` skills from these roots (precedence low -> high): extra dirs, bundled, managed (`~/.captain-claw/skills`), `~/.agents/skills`, `<workspace>/.agents/skills`, `<workspace>/skills`.
+- Eligible skills are injected into the system prompt as `<available_skills>...</available_skills>`.
+- `metadata.openclaw.requires` gates skills by binaries, env vars, and config paths.
+- Frontmatter supports `user-invocable`, `disable-model-invocation`, `command-dispatch: tool`, and `command-tool`.
+- Use `/skills` to inspect available manual skill commands, then run one via `/skill <name> [args]`.
 
 ## Example Workflow
 

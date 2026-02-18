@@ -157,7 +157,7 @@ class AgentContextMixin:
 
         saved_root = self.tools.get_saved_base_path(create=False)
 
-        return self.instructions.render(
+        base_prompt = self.instructions.render(
             "system_prompt.md",
             runtime_base_path=self.runtime_base_path,
             workspace_root=self.workspace_base_path,
@@ -165,6 +165,16 @@ class AgentContextMixin:
             session_id=session_id,
             planning_block=planning_block,
         )
+        skills_section = ""
+        build_skills = getattr(self, "_build_skills_system_prompt_section", None)
+        if callable(build_skills):
+            try:
+                skills_section = str(build_skills() or "").strip()
+            except Exception:
+                skills_section = ""
+        if skills_section:
+            return f"{base_prompt.strip()}\n\n{skills_section}\n"
+        return base_prompt
 
     def _build_tool_memory_note(
         self,

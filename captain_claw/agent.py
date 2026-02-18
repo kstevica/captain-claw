@@ -13,6 +13,7 @@ from captain_claw.agent_orchestration_mixin import AgentOrchestrationMixin
 from captain_claw.agent_pipeline_mixin import AgentPipelineMixin
 from captain_claw.agent_reasoning_mixin import AgentReasoningMixin
 from captain_claw.agent_session_mixin import AgentSessionMixin
+from captain_claw.agent_skills_mixin import AgentSkillsMixin
 from captain_claw.agent_tool_loop_mixin import AgentToolLoopMixin
 from captain_claw.config import get_config
 from captain_claw.instructions import InstructionLoader
@@ -30,6 +31,7 @@ class Agent(
     AgentPipelineMixin,
     AgentReasoningMixin,
     AgentSessionMixin,
+    AgentSkillsMixin,
     AgentToolLoopMixin,
 ):
     """Main agent orchestrator."""
@@ -72,6 +74,7 @@ class Agent(
         self.instructions = InstructionLoader()
         self._provider_override = provider is not None
         self._runtime_model_details: dict[str, Any] = {}
+        self._skills_snapshot_cache = None
         self._refresh_runtime_model_details(source="startup")
 
     @staticmethod
