@@ -45,6 +45,7 @@ class TerminalUI:
             "/planning",
             "/pipeline",
             "/monitor",
+            "/scroll",
             "/exit",
             "/quit",
         ]
@@ -72,6 +73,8 @@ class TerminalUI:
         self._tool_output_text = ""
         self._max_monitor_buffer_chars = 200_000
         self._monitor_full_output = bool(getattr(self.config.ui, "monitor_full_output", False))
+        self._monitor_chat_scroll_offset = 0
+        self._monitor_tool_scroll_offset = 0
         
         # For now, just disable colors to avoid terminal capability issues
         # Can enable later with proper terminal detection
@@ -193,6 +196,8 @@ Commands:
   /monitor trace on|off - Enable/disable full intermediate LLM trace logging
   /monitor pipeline on|off - Enable/disable compact pipeline-only trace logging
   /monitor full on|off - Enable/disable raw monitor tool output rendering
+  /scroll <chat|monitor> <up|down|pageup|pagedown|top|bottom> [n] - Scroll one monitor pane independently
+  /scroll status - Show monitor pane scroll positions
   /exit, /quit    - Exit the application
   
   Just type your message to chat with Captain Claw!
@@ -374,6 +379,127 @@ Commands:
         """Append text to tool pane buffer."""
         self._tool_output_text = self._clip_monitor_buffer(self._tool_output_text + text)
 
+    def _monitor_pane_layout(self) -> tuple[int, int, int]:
+        """Return left pane width, right pane width, and content rows."""
+        m = self._layout_metrics()
+        width = m["width"]
+        output_rows = m["output_bottom"]
+        if width < 60:
+            left_width = max(10, width)
+            right_width = 0
+        else:
+            left_width = (width - 3) // 2
+            right_width = width - left_width - 3
+        content_rows = max(0, output_rows - 1)
+        return left_width, right_width, content_rows
+
+    @staticmethod
+    def _slice_scrolled_lines(
+        lines: list[str],
+        content_rows: int,
+        offset_from_bottom: int,
+    ) -> tuple[list[str], int, int]:
+        """Slice a pane view with an explicit offset from latest output."""
+        if content_rows <= 0:
+            return [], 0, 0
+        max_offset = max(0, len(lines) - content_rows)
+        clamped_offset = min(max(0, offset_from_bottom), max_offset)
+        end = len(lines) - clamped_offset
+        start = max(0, end - content_rows)
+        return lines[start:end], clamped_offset, max_offset
+
+    def _monitor_scroll_limits(self) -> tuple[int, int]:
+        """Return max scroll offsets for chat and monitor panes."""
+        left_width, right_width, content_rows = self._monitor_pane_layout()
+        if content_rows <= 0:
+            return 0, 0
+        chat_lines = self._wrap_plain_text(self._chat_output_text, left_width)
+        chat_max = max(0, len(chat_lines) - content_rows)
+        if right_width <= 0:
+            return chat_max, 0
+        tool_lines = self._wrap_plain_text(self._tool_output_text, right_width)
+        tool_max = max(0, len(tool_lines) - content_rows)
+        return chat_max, tool_max
+
+    def _clamp_monitor_scroll_offsets(self) -> tuple[int, int]:
+        """Clamp pane scroll offsets to current buffer/viewport bounds."""
+        chat_max, tool_max = self._monitor_scroll_limits()
+        self._monitor_chat_scroll_offset = min(max(0, self._monitor_chat_scroll_offset), chat_max)
+        self._monitor_tool_scroll_offset = min(max(0, self._monitor_tool_scroll_offset), tool_max)
+        return chat_max, tool_max
+
+    def get_monitor_scroll_state(self) -> dict[str, int | bool]:
+        """Return monitor pane scroll offsets and maximums."""
+        left_width, right_width, _ = self._monitor_pane_layout()
+        chat_max, tool_max = self._clamp_monitor_scroll_offsets()
+        return {
+            "chat_offset": self._monitor_chat_scroll_offset,
+            "chat_max_offset": chat_max,
+            "monitor_offset": self._monitor_tool_scroll_offset,
+            "monitor_max_offset": tool_max,
+            "monitor_visible": right_width > 0 and left_width > 0,
+        }
+
+    def describe_monitor_scroll(self) -> str:
+        """Human-readable monitor pane scroll status."""
+        state = self.get_monitor_scroll_state()
+        chat_status = f"chat={state['chat_offset']}/{state['chat_max_offset']}"
+        if not bool(state["monitor_visible"]):
+            return f"{chat_status}; monitor pane hidden (narrow terminal)"
+        return (
+            f"{chat_status}; monitor={state['monitor_offset']}/{state['monitor_max_offset']}"
+        )
+
+    def scroll_monitor_pane(self, pane: str, action: str, amount: int = 1) -> tuple[bool, str]:
+        """Adjust scroll offset for one monitor pane."""
+        if not self._monitor_mode:
+            return False, "Enable monitor mode first: /monitor on"
+
+        normalized_pane = pane.strip().lower()
+        if normalized_pane in {"tool", "right"}:
+            normalized_pane = "monitor"
+        if normalized_pane not in {"chat", "monitor"}:
+            return False, "Invalid pane. Use chat or monitor."
+
+        normalized_action = action.strip().lower()
+        if normalized_action not in {"up", "down", "pageup", "pagedown", "top", "bottom"}:
+            return False, "Invalid action. Use up|down|pageup|pagedown|top|bottom."
+
+        step = max(1, int(amount))
+        _, _, content_rows = self._monitor_pane_layout()
+        if normalized_action in {"pageup", "pagedown"}:
+            step = max(1, content_rows) * step
+
+        if normalized_pane == "chat":
+            current = self._monitor_chat_scroll_offset
+            max_offset, _ = self._monitor_scroll_limits()
+        else:
+            current = self._monitor_tool_scroll_offset
+            _, max_offset = self._monitor_scroll_limits()
+
+        if normalized_action in {"up", "pageup"}:
+            new_offset = current + step
+        elif normalized_action in {"down", "pagedown"}:
+            new_offset = current - step
+        elif normalized_action == "top":
+            new_offset = max_offset
+        else:
+            new_offset = 0
+
+        clamped_offset = min(max(0, new_offset), max_offset)
+        if normalized_pane == "chat":
+            self._monitor_chat_scroll_offset = clamped_offset
+        else:
+            self._monitor_tool_scroll_offset = clamped_offset
+
+        if self._monitor_mode and self._sticky_footer:
+            self._render_monitor_view()
+
+        return True, (
+            f"Monitor scroll updated ({normalized_pane}={clamped_offset}/{max_offset}); "
+            f"{self.describe_monitor_scroll()}"
+        )
+
     @staticmethod
     def _wrap_plain_text(text: str, width: int) -> list[str]:
         """Wrap plain text to fit pane width."""
@@ -407,35 +533,48 @@ Commands:
             return
 
         m = self._layout_metrics()
-        width = m["width"]
         output_rows = m["output_bottom"]
-
-        if width < 60:
-            left_width = max(10, width)
-            right_width = 0
-        else:
-            left_width = (width - 3) // 2
-            right_width = width - left_width - 3
+        left_width, right_width, content_rows = self._monitor_pane_layout()
 
         left_lines = self._wrap_plain_text(self._chat_output_text, left_width)
         right_lines = self._wrap_plain_text(self._tool_output_text, right_width) if right_width > 0 else []
 
-        content_rows = max(0, output_rows - 1)
-        left_view = left_lines[-content_rows:] if content_rows > 0 else []
-        right_view = right_lines[-content_rows:] if (right_width > 0 and content_rows > 0) else []
+        left_view, self._monitor_chat_scroll_offset, _ = self._slice_scrolled_lines(
+            left_lines, content_rows, self._monitor_chat_scroll_offset
+        )
+        if right_width > 0:
+            (
+                right_view,
+                self._monitor_tool_scroll_offset,
+                _,
+            ) = self._slice_scrolled_lines(right_lines, content_rows, self._monitor_tool_scroll_offset)
+        else:
+            right_view = []
+            self._monitor_tool_scroll_offset = 0
+
+        chat_header_label = (
+            f" Chat ^{self._monitor_chat_scroll_offset} "
+            if self._monitor_chat_scroll_offset > 0
+            else " Chat "
+        )
+        monitor_header_label = (
+            f" Monitor ^{self._monitor_tool_scroll_offset} "
+            if self._monitor_tool_scroll_offset > 0
+            else " Monitor "
+        )
 
         sep = "\033[90m|\033[0m" if self._ansi_enabled else "|"
         if self._ansi_enabled:
-            left_header = f"\033[30;42m{self._fit_line(' Chat ', left_width)}\033[0m"
+            left_header = f"\033[30;42m{self._fit_line(chat_header_label, left_width)}\033[0m"
             if right_width > 0:
-                right_header = f"\033[30;42m{self._fit_line(' Monitor ', right_width)}\033[0m"
+                right_header = f"\033[30;42m{self._fit_line(monitor_header_label, right_width)}\033[0m"
                 header_line = f"{left_header} {sep} {right_header}"
             else:
                 header_line = left_header
         else:
-            left_header = self._fit_line(" Chat ", left_width)
+            left_header = self._fit_line(chat_header_label, left_width)
             if right_width > 0:
-                right_header = self._fit_line(" Monitor ", right_width)
+                right_header = self._fit_line(monitor_header_label, right_width)
                 header_line = f"{left_header} | {right_header}"
             else:
                 header_line = left_header
@@ -461,6 +600,9 @@ Commands:
     def set_monitor_mode(self, enabled: bool) -> None:
         """Enable or disable split monitor view."""
         self._monitor_mode = enabled
+        if enabled:
+            self._monitor_chat_scroll_offset = 0
+            self._monitor_tool_scroll_offset = 0
         if not self._sticky_footer:
             return
         if not enabled:
@@ -483,6 +625,7 @@ Commands:
     def clear_monitor_tool_output(self) -> None:
         """Clear tool output pane content."""
         self._tool_output_text = ""
+        self._monitor_tool_scroll_offset = 0
         self._render_monitor_view()
 
     @staticmethod
@@ -552,6 +695,7 @@ Commands:
     def load_monitor_tool_output_from_session(self, messages: list[dict[str, Any]]) -> None:
         """Rebuild monitor tool pane from session history."""
         self._tool_output_text = ""
+        self._monitor_tool_scroll_offset = 0
         for msg in messages:
             if msg.get("role") != "tool":
                 continue
@@ -1412,6 +1556,30 @@ Commands:
                 "Usage: /monitor on|off | /monitor trace on|off | /monitor pipeline on|off | /monitor full on|off"
             )
             return None
+        elif command == "/scroll":
+            scroll_arg = args.strip().lower()
+            if scroll_arg == "status":
+                return "MONITOR_SCROLL_STATUS"
+            parts = scroll_arg.split()
+            if len(parts) < 2 or len(parts) > 3:
+                self.print_error(
+                    "Usage: /scroll <chat|monitor> <up|down|pageup|pagedown|top|bottom> [n] | /scroll status"
+                )
+                return None
+            pane = parts[0].strip().lower()
+            action = parts[1].strip().lower()
+            amount = 1
+            if len(parts) == 3:
+                try:
+                    amount = int(parts[2])
+                except Exception:
+                    self.print_error("Scroll amount must be a positive integer")
+                    return None
+                if amount <= 0:
+                    self.print_error("Scroll amount must be a positive integer")
+                    return None
+            payload = {"pane": pane, "action": action, "amount": amount}
+            return f"MONITOR_SCROLL:{json.dumps(payload, ensure_ascii=True)}"
         elif command in ("/exit", "/quit", "/q"):
             return "EXIT"
         else:

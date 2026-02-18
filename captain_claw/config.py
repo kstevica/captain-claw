@@ -77,7 +77,18 @@ class WebSearchToolConfig(BaseModel):
 class ToolsConfig(BaseModel):
     """Tools configuration."""
 
-    enabled: list[str] = ["shell", "read", "write", "glob", "web_fetch", "web_search"]
+    enabled: list[str] = [
+        "shell",
+        "read",
+        "write",
+        "glob",
+        "web_fetch",
+        "web_search",
+        "pdf_extract",
+        "docx_extract",
+        "xlsx_extract",
+        "pptx_extract",
+    ]
     shell: ShellToolConfig = Field(default_factory=ShellToolConfig)
     web_fetch: WebFetchToolConfig = Field(default_factory=WebFetchToolConfig)
     web_search: WebSearchToolConfig = Field(default_factory=WebSearchToolConfig)

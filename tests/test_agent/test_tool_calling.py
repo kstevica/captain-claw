@@ -1356,8 +1356,8 @@ async def test_list_requests_force_python_worker_tool_execution(tmp_path: Path):
     agent.tools = registry
 
     result = await agent.complete(
-        "fetch netokracija.com, extract startup names, summarize each company in 5 sentences, "
-        "and write each summary to file <company-name>-netokracija-summary.md"
+        "generate a python script that fetches netokracija.com, extracts startup names, summarizes "
+        "each company in 5 sentences, and writes each summary to file <company-name>-netokracija-summary.md"
     )
 
     assert provider.script_calls >= 1
@@ -1366,9 +1366,18 @@ async def test_list_requests_force_python_worker_tool_execution(tmp_path: Path):
     assert any(name == "shell" for name in outputs)
     assert shell_tool.commands
     assert "python" in shell_tool.commands[0]
-    worker_scripts = list((tmp_path / "saved" / "tools" / "s1").glob("*.py"))
-    assert worker_scripts
-    assert "Done. Processed list and saved outputs." in result
+    generated_scripts = list((tmp_path / "saved" / "scripts" / "s1").glob("*.py"))
+    assert generated_scripts
+    assert "Script saved and executed from" in result
+
+
+def test_choose_list_execution_strategy_prefers_direct_without_explicit_script_request():
+    strategy = Agent._choose_list_execution_strategy(
+        user_input="fetch many sources and summarize each one into a file",
+        members_count=20,
+        recommended="script",
+    )
+    assert strategy == "direct"
 
 
 @pytest.mark.asyncio

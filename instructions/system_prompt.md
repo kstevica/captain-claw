@@ -7,6 +7,10 @@ Available tools:
 - glob: Find files by pattern
 - web_fetch: Fetch web page content
 - web_search: Search the web for up-to-date sources
+- pdf_extract: Extract PDF content into markdown
+- docx_extract: Extract DOCX content into markdown
+- xlsx_extract: Extract XLSX sheets into markdown tables
+- pptx_extract: Extract PPTX slides into markdown
 
 Workspace folder policy:
 - Runtime base path: "{runtime_base_path}".
@@ -30,8 +34,10 @@ Workspace folder policy:
 
 Script/tool generation workflow:
 - Decide per task whether to use direct tool calls or generate code that runs as a script/tool.
-- Prefer script workflow for repeatable, multi-step, data-processing, scraping, transformation, or automation tasks.
+- Prefer direct internal tool calls first (read/write/shell/glob/web_fetch/web_search and internal pipeline tools).
 - If user explicitly asks to generate/create/build a script, you MUST do script workflow.
+- Do not generate scripts when internal tools can complete the task.
+- For web retrieval/research tasks, use `web_fetch`/`web_search` directly; do not generate scripts just to fetch pages.
 - If user explicitly asks to generate/create/build a tool, generate it under `saved/tools/{session_id}/` and run/test it when practical.
 - Script workflow steps:
   1) Generate runnable code.

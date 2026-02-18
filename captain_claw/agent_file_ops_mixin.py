@@ -1,0 +1,693 @@
+"""File/script output helpers for Agent."""
+
+from datetime import UTC, datetime
+from pathlib import Path
+import re
+import shlex
+import sys
+from typing import Any
+
+from captain_claw.llm import Message
+from captain_claw.logging import get_logger
+
+log = get_logger(__name__)
+
+class AgentFileOpsMixin:
+    @staticmethod
+    def _extract_code_block(text: str) -> tuple[str | None, str | None]:
+        """Extract first fenced code block as (language, code)."""
+        if not text:
+            return None, None
+        match = re.search(r"```([A-Za-z0-9_+\-]*)\n(.*?)```", text, flags=re.DOTALL)
+        if not match:
+            return None, None
+        language = (match.group(1) or "").strip().lower() or None
+        code = (match.group(2) or "").strip()
+        if not code:
+            return language, None
+        return language, code
+
+    @staticmethod
+    def _infer_script_extension(language: str | None, code: str) -> str:
+        """Infer script extension from language tag or content."""
+        lang = (language or "").strip().lower()
+        mapping = {
+            "python": ".py",
+            "py": ".py",
+            "bash": ".sh",
+            "sh": ".sh",
+            "shell": ".sh",
+            "zsh": ".sh",
+            "javascript": ".js",
+            "js": ".js",
+            "node": ".js",
+            "ruby": ".rb",
+            "rb": ".rb",
+        }
+        if lang in mapping:
+            return mapping[lang]
+        stripped = (code or "").lstrip()
+        if stripped.startswith("#!/usr/bin/env python") or stripped.startswith("#!/usr/bin/python"):
+            return ".py"
+        if stripped.startswith("#!/usr/bin/env bash") or stripped.startswith("#!/bin/bash"):
+            return ".sh"
+        if stripped.startswith("#!/usr/bin/env sh") or stripped.startswith("#!/bin/sh"):
+            return ".sh"
+        return ".py"
+
+    @staticmethod
+    def _supported_script_extension(ext: str) -> bool:
+        """Return whether extension can be executed with built-in runner mapping."""
+        return (ext or "").lower() in {".py", ".sh", ".js", ".rb"}
+
+    @staticmethod
+    def _build_script_runner_command(script_path: Path) -> str | None:
+        """Build shell command that runs script from its own directory."""
+        ext = script_path.suffix.lower()
+        filename = shlex.quote(script_path.name)
+        if ext == ".py":
+            runner = f"python3 {filename}"
+        elif ext == ".sh":
+            runner = f"bash {filename}"
+        elif ext == ".js":
+            runner = f"node {filename}"
+        elif ext == ".rb":
+            runner = f"ruby {filename}"
+        else:
+            return None
+        script_dir = shlex.quote(str(script_path.parent))
+        return f"cd {script_dir} && {runner}"
+
+    @staticmethod
+    def _build_python_runner_command(script_path: Path) -> str:
+        """Build shell command using the active Python interpreter."""
+        interpreter = shlex.quote(str(Path(sys.executable).resolve()))
+        script_dir = shlex.quote(str(script_path.parent))
+        filename = shlex.quote(script_path.name)
+        return f"cd {script_dir} && {interpreter} {filename}"
+
+    def _current_session_slug(self) -> str:
+        """Return normalized session id used for folder scoping."""
+        session_key = "default"
+        if self.session and self.session.id:
+            raw_id = str(self.session.id).strip()
+            normalized = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw_id).strip("-")
+            if normalized:
+                session_key = normalized
+        return session_key
+
+    def _build_script_relative_path(
+        self,
+        user_input: str,
+        extension: str,
+    ) -> str:
+        """Build script path under scripts/<session-id>/."""
+        ext = extension if extension.startswith(".") else f".{extension}"
+        requested = self._extract_requested_write_path(user_input)
+        filename: str
+        if requested:
+            candidate = Path(requested).name
+            if "." in candidate:
+                base = Path(candidate).stem or "generated_script"
+                req_ext = Path(candidate).suffix.lower()
+                filename = base + (req_ext if self._supported_script_extension(req_ext) else ext)
+            else:
+                filename = candidate + ext
+        else:
+            stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+            filename = f"generated_script_{stamp}{ext}"
+        return f"scripts/{self._current_session_slug()}/{filename}"
+
+    @staticmethod
+    def _parse_written_path_from_tool_output(tool_output: str) -> Path | None:
+        """Parse final path from write tool output."""
+        text = (tool_output or "").strip()
+        match = re.search(r"\bto\s+(.+?)(?:\s+\(requested:|\s*$)", text)
+        if not match:
+            return None
+        raw_path = match.group(1).strip()
+        if not raw_path:
+            return None
+        try:
+            return Path(raw_path)
+        except Exception:
+            return None
+
+    async def _synthesize_script_content(
+        self,
+        user_input: str,
+        turn_usage: dict[str, int],
+    ) -> tuple[str, str]:
+        """Generate script content when model answer omitted code block."""
+        synth_messages = [
+            Message(
+                role="system",
+                content=self.instructions.load("script_synthesis_system_prompt.md"),
+            ),
+            Message(role="user", content=user_input),
+        ]
+        try:
+            self._set_runtime_status("thinking")
+            response = await self._complete_with_guards(
+                messages=synth_messages,
+                tools=None,
+                interaction_label="script_synthesis",
+                turn_usage=turn_usage,
+            )
+            language, code = self._extract_code_block(response.content or "")
+            if code:
+                return code, self._infer_script_extension(language, code)
+            raw = (response.content or "").strip()
+            if raw:
+                return raw, self._infer_script_extension(language, raw)
+        except Exception as e:
+            log.warning("Script synthesis fallback failed", error=str(e))
+
+        # Deterministic fallback scaffold.
+        safe_request = re.sub(r"\s+", " ", (user_input or "").strip())[:240]
+        scaffold = (
+            "#!/usr/bin/env python3\n"
+            "\"\"\"Auto-generated script scaffold.\"\"\"\n\n"
+            "def main() -> None:\n"
+            f"    print({safe_request!r})\n\n"
+            "if __name__ == '__main__':\n"
+            "    main()\n"
+        )
+        return scaffold, ".py"
+
+    def _build_python_worker_prompt(
+        self,
+        user_input: str,
+        list_task_plan: dict[str, Any] | None = None,
+    ) -> str:
+        """Build synthesis prompt for batch/list worker script generation."""
+        session_id = self._current_session_slug()
+        members_block = ""
+        per_member_action = ""
+        if isinstance(list_task_plan, dict):
+            members = list_task_plan.get("members")
+            if isinstance(members, list) and members:
+                rendered = "\n".join(f"- {str(item)}" for item in members[:80])
+                members_block = f"\nList members to process:\n{rendered}\n"
+            per_member_action = str(list_task_plan.get("per_member_action", "")).strip()
+        return (
+            "Create one runnable Python 3 script for this task.\n"
+            "Requirements:\n"
+            "- Complete the full task end-to-end.\n"
+            "- If a list of entities/items is discovered, iterate ALL items; never stop after the first item.\n"
+            "- Use text extraction by default when parsing fetched pages.\n"
+            f"- Save per-item outputs under saved/showcase/{session_id}/.\n"
+            "- Use deterministic filenames based on item names where requested.\n"
+            "- Print concise progress logs so monitor output shows progress.\n"
+            f"- Per-member action focus: {per_member_action or 'Follow user request for each member.'}\n"
+            "- Return code only.\n\n"
+            f"{members_block}"
+            f"User request:\n{user_input}"
+        )
+
+    async def _run_python_worker_for_list_task(
+        self,
+        user_input: str,
+        turn_usage: dict[str, int],
+        list_task_plan: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Generate/write/run a temporary Python worker for list-style tasks."""
+        worker_prompt = self._build_python_worker_prompt(user_input, list_task_plan=list_task_plan)
+        code, extension = await self._synthesize_script_content(worker_prompt, turn_usage)
+        if extension.lower() != ".py":
+            extension = ".py"
+        script_rel_path = self._build_script_relative_path(
+            f"generate script {datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}{extension}",
+            extension,
+        ).replace("scripts/", "tools/", 1)
+        write_state = await self._write_file_with_verification(
+            path=script_rel_path,
+            content=code,
+            turn_usage=turn_usage,
+            interaction_label="list_worker_write",
+            max_attempts=2,
+        )
+        if not bool(write_state.get("success", False)):
+            return {"success": False, "step": "write_failed", "error": str(write_state.get("output", ""))}
+
+        written_script_path = Path(str(write_state.get("path", script_rel_path)))
+        run_command = self._build_python_runner_command(written_script_path)
+        try:
+            shell_result = await self._execute_tool_with_guard(
+                name="shell",
+                arguments={"command": run_command},
+                interaction_label="list_worker_run",
+                turn_usage=turn_usage,
+            )
+            shell_output = shell_result.content if shell_result.success else f"Error: {shell_result.error}"
+        except Exception as e:
+            shell_result = None
+            shell_output = f"Error: {str(e)}"
+
+        self._add_session_message(
+            role="tool",
+            content=shell_output,
+            tool_name="shell",
+            tool_arguments={"command": run_command},
+        )
+        self._emit_tool_output("shell", {"command": run_command}, shell_output)
+        if not (shell_result and shell_result.success):
+            return {
+                "success": False,
+                "step": "run_failed",
+                "path": str(written_script_path),
+                "error": shell_output,
+            }
+        return {"success": True, "step": "completed", "path": str(written_script_path)}
+
+    async def _maybe_auto_script_requested_output(
+        self,
+        user_input: str,
+        output_text: str,
+        turn_start_idx: int,
+        turn_usage: dict[str, int],
+    ) -> str:
+        """Guarantee explicit script requests produce write+run tool actions."""
+        text = (output_text or "").strip()
+        if not self._is_explicit_script_request(user_input):
+            return text
+
+        has_write = self._turn_has_successful_tool(turn_start_idx, "write")
+        has_shell = self._turn_has_successful_tool(turn_start_idx, "shell")
+        if has_write and has_shell:
+            return text
+
+        written_script_path: Path | None = None
+
+        if not has_write:
+            language, code = self._extract_code_block(text)
+            if not code:
+                code, inferred_ext = await self._synthesize_script_content(user_input, turn_usage)
+            else:
+                inferred_ext = self._infer_script_extension(language, code)
+
+            script_rel_path = self._build_script_relative_path(user_input, inferred_ext)
+            write_state = await self._write_file_with_verification(
+                path=script_rel_path,
+                content=code,
+                turn_usage=turn_usage,
+                interaction_label="auto_script_write",
+                max_attempts=2,
+            )
+            if not bool(write_state.get("success", False)):
+                return (
+                    f"{text}\n\n"
+                    "Note: explicit script request could not be completed because write failed.\n"
+                    f"{str(write_state.get('output', ''))}"
+                ).strip()
+
+            written_script_path = Path(str(write_state.get("path", script_rel_path)))
+        else:
+            # Reuse existing write result path from this turn when available.
+            if self.session:
+                for msg in reversed(self.session.messages[turn_start_idx:]):
+                    if msg.get("role") != "tool" or str(msg.get("tool_name")) != "write":
+                        continue
+                    content = str(msg.get("content", "")).strip()
+                    if content.lower().startswith("error:"):
+                        continue
+                    parsed = self._parse_written_path_from_tool_output(content)
+                    if parsed:
+                        written_script_path = parsed
+                        break
+
+        if has_shell:
+            return text
+
+        if not written_script_path:
+            return (
+                f"{text}\n\n"
+                "Note: script was requested but executable path could not be resolved for run."
+            ).strip()
+
+        run_command = self._build_script_runner_command(written_script_path)
+        if not run_command:
+            return (
+                f"{text}\n\n"
+                f"Note: script saved to {written_script_path}, but auto-run is unsupported for extension "
+                f"'{written_script_path.suffix or '(none)'}'."
+            ).strip()
+
+        try:
+            shell_result = await self._execute_tool_with_guard(
+                name="shell",
+                arguments={"command": run_command},
+                interaction_label="auto_script_run",
+                turn_usage=turn_usage,
+            )
+            shell_output = (
+                shell_result.content if shell_result.success else f"Error: {shell_result.error}"
+            )
+        except Exception as e:
+            shell_result = None
+            shell_output = f"Error: {str(e)}"
+
+        self._add_session_message(
+            role="tool",
+            content=shell_output,
+            tool_name="shell",
+            tool_arguments={"command": run_command},
+        )
+        self._emit_tool_output("shell", {"command": run_command}, shell_output)
+
+        if shell_result and shell_result.success:
+            return (
+                f"{text}\n\n"
+                f"Script saved and executed from {written_script_path.parent}."
+            ).strip()
+        return (
+            f"{text}\n\n"
+            f"Script saved to {written_script_path}, but execution failed.\n"
+            f"{shell_output}"
+        ).strip()
+
+    @staticmethod
+    def _extract_requested_write_paths(user_input: str) -> list[str]:
+        """Extract requested target file paths from user input."""
+        text = (user_input or "").strip()
+        if not text:
+            return []
+        if not re.search(r"\b(write|save|store|export|dump)\b", text, flags=re.IGNORECASE):
+            return []
+
+        patterns = [
+            r"(?:to|into|as)\s+(?:a\s+)?(?:file\s+)?[`\"']?([A-Za-z0-9_./-]+\.[A-Za-z0-9]{1,16})",
+            r"(?:file\s+|named\s+|name\s+it\s+)[`\"']?([A-Za-z0-9_./-]+\.[A-Za-z0-9]{1,16})",
+        ]
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for pattern in patterns:
+            matches = re.findall(pattern, text, flags=re.IGNORECASE)
+            if not matches:
+                continue
+            for match in matches:
+                candidate = match.strip().rstrip(".,;:!?)]}>")
+                lowered = candidate.lower()
+                if lowered.startswith(("http://", "https://")):
+                    continue
+                if not candidate:
+                    continue
+                key = lowered
+                if key in seen:
+                    continue
+                seen.add(key)
+                ordered.append(candidate)
+        return ordered
+
+    @staticmethod
+    def _extract_requested_write_path(user_input: str) -> str | None:
+        """Extract last requested target file path from user input."""
+        paths = AgentFileOpsMixin._extract_requested_write_paths(user_input)
+        if not paths:
+            return None
+        return paths[-1]
+
+    @staticmethod
+    def _is_explicit_file_save_request(user_input: str) -> bool:
+        """Detect whether user explicitly asked for file creation/saving."""
+        text = (user_input or "").strip().lower()
+        if not text:
+            return False
+        has_write_action = bool(re.search(r"\b(write|save|store|export|dump|create)\b", text))
+        has_file_target = bool(re.search(r"\bfile\b|\bfiles\b", text))
+        return has_write_action and has_file_target
+
+    @staticmethod
+    def _extract_named_file_blocks(output_text: str) -> list[tuple[str, str]]:
+        """Extract `(filename, content)` pairs from assistant text blocks."""
+        text = (output_text or "").strip()
+        if not text:
+            return []
+        header_re = re.compile(r"^\s*filename\s*:\s*(.+?)\s*$", flags=re.IGNORECASE | re.MULTILINE)
+        matches = list(header_re.finditer(text))
+        if not matches:
+            return []
+
+        blocks: list[tuple[str, str]] = []
+        seen_paths: set[str] = set()
+        for idx, match in enumerate(matches):
+            raw_path = (match.group(1) or "").strip().strip("`\"'")
+            raw_path = raw_path.rstrip(".,;:!?)]}>")
+            if not raw_path:
+                continue
+            if not re.search(r"\.[A-Za-z0-9]{1,16}$", raw_path):
+                continue
+
+            start = match.end()
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+            chunk = text[start:end].strip()
+            if not chunk:
+                continue
+            chunk_lines = chunk.splitlines()
+            if chunk_lines and chunk_lines[0].strip() == "---":
+                chunk = "\n".join(chunk_lines[1:]).strip()
+            if not chunk:
+                continue
+            key = raw_path.lower()
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            blocks.append((raw_path, chunk))
+        return blocks
+
+    def _collect_recent_file_blocks_from_session(
+        self,
+        max_assistant_messages: int = 12,
+    ) -> list[tuple[str, str]]:
+        """Collect most recent assistant `Filename:` blocks from session history."""
+        if not self.session:
+            return []
+
+        checked = 0
+        for msg in reversed(self.session.messages):
+            if str(msg.get("role", "")).strip().lower() != "assistant":
+                continue
+            checked += 1
+            blocks = self._extract_named_file_blocks(str(msg.get("content", "")))
+            if blocks:
+                return blocks
+            if checked >= max_assistant_messages:
+                break
+        return []
+
+    def _candidate_write_paths_for_verification(
+        self,
+        requested_path: str,
+        parsed_written: Path | None = None,
+    ) -> list[Path]:
+        """Build candidate on-disk paths to verify file was actually saved."""
+        candidates: list[Path] = []
+        seen: set[str] = set()
+
+        def _add(path: Path) -> None:
+            try:
+                resolved = path.expanduser().resolve()
+            except Exception:
+                return
+            key = str(resolved)
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(resolved)
+
+        if parsed_written is not None:
+            _add(parsed_written)
+
+        raw = str(requested_path or "").strip()
+        if not raw:
+            return candidates
+
+        requested = Path(raw).expanduser()
+        if requested.is_absolute():
+            _add(requested)
+        else:
+            _add(self.runtime_base_path / requested)
+            _add(self.tools.get_saved_base_path(create=False) / requested)
+            parts = requested.parts
+            if parts and parts[0].lower() == "saved":
+                tail = Path(*parts[1:]) if len(parts) > 1 else Path("output.txt")
+                _add(self.tools.get_saved_base_path(create=False) / tail)
+        return candidates
+
+    async def _write_file_with_verification(
+        self,
+        path: str,
+        content: str,
+        turn_usage: dict[str, int],
+        interaction_label: str,
+        max_attempts: int = 2,
+    ) -> dict[str, Any]:
+        """Write file, verify it exists, and retry once when not persisted."""
+        attempts = max(1, int(max_attempts))
+        last_output = ""
+        last_written_path: Path | None = None
+
+        for attempt in range(1, attempts + 1):
+            write_args = {"path": path, "content": content}
+            write_args_for_log = {
+                "path": path,
+                "content_chars": len(content),
+                "append": False,
+                "attempt": attempt,
+            }
+            try:
+                result = await self._execute_tool_with_guard(
+                    name="write",
+                    arguments=write_args,
+                    interaction_label=interaction_label,
+                    turn_usage=turn_usage,
+                )
+                tool_output = result.content if result.success else f"Error: {result.error}"
+            except Exception as e:
+                result = None
+                tool_output = f"Error: {str(e)}"
+
+            self._add_session_message(
+                role="tool",
+                content=tool_output,
+                tool_name="write",
+                tool_arguments=write_args_for_log,
+            )
+            self._emit_tool_output("write", write_args_for_log, tool_output)
+
+            parsed_written = self._parse_written_path_from_tool_output(tool_output)
+            if parsed_written is not None:
+                last_written_path = parsed_written
+
+            verified_path: Path | None = None
+            for candidate in self._candidate_write_paths_for_verification(path, parsed_written):
+                try:
+                    if candidate.is_file():
+                        verified_path = candidate
+                        break
+                except Exception:
+                    continue
+
+            if verified_path is not None:
+                return {
+                    "success": True,
+                    "attempts": attempt,
+                    "output": tool_output,
+                    "path": str(verified_path),
+                }
+
+            last_output = tool_output
+            if attempt < attempts:
+                self._emit_tool_output(
+                    "completion_gate",
+                    {
+                        "step": "write_verify_retry",
+                        "path": path,
+                        "attempt": attempt + 1,
+                    },
+                    (
+                        f"step=write_verify_retry\n"
+                        f"path={path}\n"
+                        f"attempt={attempt + 1}\n"
+                        "reason=file_missing_after_write"
+                    ),
+                )
+
+        return {
+            "success": False,
+            "attempts": attempts,
+            "output": last_output or "Error: write verification failed",
+            "path": str(last_written_path) if last_written_path is not None else path,
+        }
+
+    async def _maybe_auto_write_requested_output(
+        self,
+        user_input: str,
+        output_text: str,
+        turn_start_idx: int,
+        turn_usage: dict[str, int],
+    ) -> str:
+        """Auto-run write tool when user explicitly requested file output."""
+        text = (output_text or "").strip()
+        if self._is_explicit_script_request(user_input):
+            return await self._maybe_auto_script_requested_output(
+                user_input=user_input,
+                output_text=text,
+                turn_start_idx=turn_start_idx,
+                turn_usage=turn_usage,
+            )
+        requested_paths = self._extract_requested_write_paths(user_input)
+        requested_path = requested_paths[-1] if requested_paths else None
+        explicit_file_request = self._is_explicit_file_save_request(user_input)
+
+        file_blocks = self._extract_named_file_blocks(text)
+        if (
+            not file_blocks
+            and explicit_file_request
+            and re.search(r"\b(all|those)\s+files\b", user_input, flags=re.IGNORECASE)
+        ):
+            file_blocks = self._collect_recent_file_blocks_from_session()
+
+        if file_blocks:
+            saved_entries: list[str] = []
+            failed_entries: list[str] = []
+            for raw_path, raw_content in file_blocks:
+                target_path = raw_path
+                if "/" not in raw_path and "\\" not in raw_path:
+                    target_path = f"showcase/{self._current_session_slug()}/{raw_path}"
+                write_state = await self._write_file_with_verification(
+                    path=target_path,
+                    content=raw_content,
+                    turn_usage=turn_usage,
+                    interaction_label="auto_write_output_multi",
+                    max_attempts=2,
+                )
+                tool_output = str(write_state.get("output", "")).strip()
+                attempts = int(write_state.get("attempts", 1) or 1)
+                if bool(write_state.get("success", False)):
+                    retry_note = " (retried)" if attempts > 1 else ""
+                    saved_entries.append(f"{raw_path}: {tool_output}{retry_note}")
+                else:
+                    failed_entries.append(f"{raw_path}: {tool_output}")
+
+            if saved_entries and not failed_entries:
+                summary = "\n".join(f"- {entry}" for entry in saved_entries)
+                return f"{text}\n\nSaved {len(saved_entries)} files:\n{summary}".strip()
+            if saved_entries or failed_entries:
+                ok_summary = "\n".join(f"- {entry}" for entry in saved_entries) or "- (none)"
+                fail_summary = "\n".join(f"- {entry}" for entry in failed_entries) or "- (none)"
+                return (
+                    f"{text}\n\n"
+                    f"Auto file-save summary:\n"
+                    f"Saved ({len(saved_entries)}):\n{ok_summary}\n"
+                    f"Failed ({len(failed_entries)}):\n{fail_summary}"
+                ).strip()
+            return text
+
+        if not requested_path:
+            return text
+        if self._turn_has_successful_tool(turn_start_idx, "write"):
+            return text
+
+        write_state = await self._write_file_with_verification(
+            path=requested_path,
+            content=text,
+            turn_usage=turn_usage,
+            interaction_label="auto_write_output",
+            max_attempts=2,
+        )
+        tool_output = str(write_state.get("output", "")).strip()
+        if bool(write_state.get("success", False)):
+            return f"{text}\n\n{tool_output}".strip()
+        return (
+            f"{text}\n\n"
+            f"Note: requested file save to '{requested_path}' failed.\n"
+            f"{tool_output}"
+        ).strip()
+
+    async def _persist_assistant_response(self, content: str) -> None:
+        """Persist assistant response for the current turn."""
+        if not self.session:
+            return
+        self._add_session_message("assistant", content)
+        await self.session_manager.save_session(self.session)

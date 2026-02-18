@@ -7,6 +7,12 @@ from captain_claw.tools.write import WriteTool
 from captain_claw.tools.glob import GlobTool
 from captain_claw.tools.web_fetch import WebFetchTool
 from captain_claw.tools.web_search import WebSearchTool
+from captain_claw.tools.document_extract import (
+    DocxExtractTool,
+    PdfExtractTool,
+    PptxExtractTool,
+    XlsxExtractTool,
+)
 
 __all__ = [
     "Tool",
@@ -19,4 +25,8 @@ __all__ = [
     "GlobTool",
     "WebFetchTool",
     "WebSearchTool",
+    "PdfExtractTool",
+    "DocxExtractTool",
+    "XlsxExtractTool",
+    "PptxExtractTool",
 ]

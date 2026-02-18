@@ -1270,13 +1270,10 @@ async def run_interactive() -> None:
                     session_name = "default"
                     if result.startswith("NEW:"):
                         session_name = result.split(":", 1)[1].strip() or "default"
-                    pipeline_mode_before = str(getattr(agent, "pipeline_mode", "loop")).strip().lower() or "loop"
                     agent.session = await agent.session_manager.create_session(name=session_name)
                     agent.refresh_session_runtime_flags()
                     if agent.session:
                         await agent.session_manager.set_last_active_session(agent.session.id)
-                    if pipeline_mode_before in {"loop", "contracts"} and agent.pipeline_mode != pipeline_mode_before:
-                        await agent.set_pipeline_mode(pipeline_mode_before)
                     if agent.session:
                         ui.load_monitor_tool_output_from_session(agent.session.messages)
                         ui.print_session_info(agent.session)
@@ -1890,6 +1887,30 @@ async def run_interactive() -> None:
                 elif result == "MONITOR_FULL_OFF":
                     ui.set_monitor_full_output(False)
                     ui.print_success("Monitor compact output rendering enabled")
+                    continue
+                elif result == "MONITOR_SCROLL_STATUS":
+                    ui.print_success(f"Monitor scroll: {ui.describe_monitor_scroll()}")
+                    continue
+                elif result.startswith("MONITOR_SCROLL:"):
+                    payload_raw = result.split(":", 1)[1].strip()
+                    try:
+                        payload = json.loads(payload_raw)
+                    except Exception:
+                        ui.print_error("Invalid /monitor scroll payload")
+                        continue
+                    pane = str(payload.get("pane", "")).strip().lower()
+                    action = str(payload.get("action", "")).strip().lower()
+                    amount_raw = payload.get("amount", 1)
+                    try:
+                        amount = int(amount_raw)
+                    except Exception:
+                        ui.print_error("Invalid scroll amount")
+                        continue
+                    ok, message = ui.scroll_monitor_pane(pane=pane, action=action, amount=amount)
+                    if ok:
+                        ui.print_success(message)
+                    else:
+                        ui.print_error(message)
                     continue
             
                 # Skip empty input

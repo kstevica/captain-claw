@@ -255,6 +255,8 @@ CLAW_TOOLS__WEB_SEARCH__API_KEY="your_brave_api_key"
 | `/monitor trace on\|off` | Enable/disable full intermediate LLM response trace logging into monitor/session history |
 | `/monitor pipeline on\|off` | Enable/disable compact pipeline-only trace logging into session history |
 | `/monitor full on\|off` | Enable/disable raw full tool output rendering in monitor pane |
+| `/scroll <chat\|monitor> <up\|down\|pageup\|pagedown\|top\|bottom> [n]` | Scroll one monitor pane independently |
+| `/scroll status` | Show current monitor/chat pane scroll positions |
 | `/clear` | Clear current session messages (blocked when `/session protect on`) |
 | `/exit` or `/quit` | Exit Captain Claw |
 
@@ -385,6 +387,8 @@ Captain Claw can use:
 - `/monitor trace on` records full intermediate LLM responses (`llm_trace`) in monitor/session history for export and analysis.
 - `/monitor pipeline on` records compact pipeline-only events (`pipeline_trace`) for low-noise diagnostics and smaller exports.
 - `/monitor full on` disables compact monitor summarization (for example `web_fetch`) and renders raw tool output.
+- `/scroll <chat|monitor> ...` scrolls chat and monitor panes independently while monitor mode is enabled.
+- `/scroll status` prints current scroll offsets and limits.
 - Planning mode adds task pipeline orchestration per turn, including nested task trees with leaf-based progress tracking.
 - Long sessions auto-compact based on context thresholds and preserve continuity summary.
 

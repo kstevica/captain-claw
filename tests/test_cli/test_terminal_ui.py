@@ -158,6 +158,47 @@ def test_monitor_command_parsing():
     assert ui.handle_special_command("/monitor pipeline off") == "MONITOR_PIPELINE_OFF"
     assert ui.handle_special_command("/monitor full on") == "MONITOR_FULL_ON"
     assert ui.handle_special_command("/monitor full off") == "MONITOR_FULL_OFF"
+    assert ui.handle_special_command("/scroll status") == "MONITOR_SCROLL_STATUS"
+    scroll = ui.handle_special_command("/scroll chat up 7")
+    assert scroll is not None
+    assert scroll.startswith("MONITOR_SCROLL:")
+    payload = json.loads(scroll.split(":", 1)[1])
+    assert payload == {"pane": "chat", "action": "up", "amount": 7}
+
+
+def test_monitor_scroll_offsets_are_independent():
+    ui = TerminalUI()
+    ui._monitor_mode = True
+    ui._sticky_footer = False
+    ui._chat_output_text = "\n".join(f"chat-{i}" for i in range(120))
+    ui._tool_output_text = "\n".join(f"tool-{i}" for i in range(120))
+
+    ok_chat, _ = ui.scroll_monitor_pane("chat", "up", 5)
+    assert ok_chat is True
+    assert ui._monitor_chat_scroll_offset == 5
+    assert ui._monitor_tool_scroll_offset == 0
+
+    ok_tool, _ = ui.scroll_monitor_pane("monitor", "up", 3)
+    assert ok_tool is True
+    assert ui._monitor_chat_scroll_offset == 5
+    assert ui._monitor_tool_scroll_offset == 3
+
+    ok_bottom, _ = ui.scroll_monitor_pane("chat", "bottom", 1)
+    assert ok_bottom is True
+    assert ui._monitor_chat_scroll_offset == 0
+    assert ui._monitor_tool_scroll_offset == 3
+
+
+def test_monitor_scroll_top_moves_to_oldest_visible_chunk():
+    ui = TerminalUI()
+    ui._monitor_mode = True
+    ui._sticky_footer = False
+    ui._chat_output_text = "\n".join(f"chat-{i}" for i in range(180))
+
+    ok, _ = ui.scroll_monitor_pane("chat", "top", 1)
+    assert ok is True
+    state = ui.get_monitor_scroll_state()
+    assert state["chat_offset"] == state["chat_max_offset"]
 
 
 def test_session_commands_parsing():

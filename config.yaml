@@ -41,6 +41,10 @@ tools:
     - glob
     - web_fetch
     - web_search
+    - pdf_extract
+    - docx_extract
+    - xlsx_extract
+    - pptx_extract
   web_fetch:
     max_chars: 100000  # default returned characters (can override per call)
   web_search:
@@ -81,7 +85,7 @@ session:
 
 # Workspace output root
 workspace:
-  path: "./workspace"
+  path: "./workspace/"
 
 # UI Settings
 ui:
