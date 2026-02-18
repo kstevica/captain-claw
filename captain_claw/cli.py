@@ -41,7 +41,9 @@ class TerminalUI:
             "/config",
             "/history",
             "/compact",
+            "/cron",
             "/planning",
+            "/pipeline",
             "/monitor",
             "/exit",
             "/quit",
@@ -69,6 +71,7 @@ class TerminalUI:
         self._chat_output_text = ""
         self._tool_output_text = ""
         self._max_monitor_buffer_chars = 200_000
+        self._monitor_full_output = bool(getattr(self.config.ui, "monitor_full_output", False))
         
         # For now, just disable colors to avoid terminal capability issues
         # Can enable later with proper terminal detection
@@ -152,22 +155,44 @@ Commands:
   /session rename <new-name> - Rename the active session
   /session description <text> - Set active session description
   /session description auto - Auto-generate description from session context
+  /session export [chat|monitor|pipeline|pipeline-summary|all] - Export active session history views to files
   /session protect on|off - Protect/unprotect current session memory reset
   /session model - Show active session model selection
   /session model list - List allowed models from config
   /session model <id|#index|provider:model|default> - Set session model
   /session procreate <id|name|#index> <id|name|#index> <new-name> - Merge two sessions into a new one
   /session run <id|name|#index> <prompt> - Run one prompt in another session, then return
+  /session queue - Show active session follow-up queue settings
+  /session queue mode <steer|followup|collect|steer-backlog|interrupt|queue> - Set queue mode
+  /session queue debounce <ms> - Set queue debounce in milliseconds
+  /session queue cap <n> - Set max queued follow-ups per session
+  /session queue drop <old|new|summarize> - Set queue overflow policy
+  /session queue clear - Clear pending queued follow-ups for active session
   /models         - List allowed models from config
   /runin <id|name|#index> <prompt> - Alias for /session run
   /sessions       - List recent sessions
   /config         - Show configuration
   /history        - Show conversation history
   /compact        - Manually compact long session history
-  /planning on    - Enable planning mode
-  /planning off   - Disable planning mode
+  /cron "<task>"  - Run one-off task through Captain Claw runtime/guards
+  /cron run script <path> - Run existing script file with guards
+  /cron run tool <path> - Run existing tool file with guards
+  /cron add every <Nm|Nh> <task|script|tool ...> - Schedule recurring pseudo-cron job
+  /cron add daily <HH:MM> <task|script|tool ...> - Schedule daily pseudo-cron job
+  /cron add weekly <day> <HH:MM> <task|script|tool ...> - Schedule weekly pseudo-cron job
+  /cron run <job-id|#index> - Run existing cron job immediately
+  /cron list      - List active cron jobs
+  /cron history <job-id|#index> - Show stored cron chat/monitor history
+  /cron pause <job-id|#index> - Pause cron job
+  /cron resume <job-id|#index> - Resume cron job
+  /cron remove <job-id|#index> - Remove cron job
+  /pipeline loop|contracts - Set execution pipeline mode (simple loop vs contract gate)
+  /planning on|off - Legacy alias for /pipeline contracts|loop
   /monitor on     - Enable split monitor view
   /monitor off    - Disable split monitor view
+  /monitor trace on|off - Enable/disable full intermediate LLM trace logging
+  /monitor pipeline on|off - Enable/disable compact pipeline-only trace logging
+  /monitor full on|off - Enable/disable raw monitor tool output rendering
   /exit, /quit    - Exit the application
   
   Just type your message to chat with Captain Claw!
@@ -449,6 +474,12 @@ Commands:
         self._render_monitor_view()
         self._render_footer(force=True)
 
+    def set_monitor_full_output(self, enabled: bool) -> None:
+        """Enable/disable raw full tool output rendering in monitor pane."""
+        self._monitor_full_output = bool(enabled)
+        if self._monitor_mode:
+            self._render_monitor_view()
+
     def clear_monitor_tool_output(self) -> None:
         """Clear tool output pane content."""
         self._tool_output_text = ""
@@ -485,6 +516,8 @@ Commands:
     def _format_monitor_tool_body(self, tool_name: str, raw_output: str) -> str:
         """Render monitor body text for a tool output."""
         text = raw_output if raw_output else "[no output]"
+        if self._monitor_full_output:
+            return text
         if tool_name != "web_fetch":
             return text
 
@@ -509,6 +542,8 @@ Commands:
             except Exception:
                 args_text = str(args)
         header = f"{tool_name} {args_text}".strip()
+        if tool_name == "cron" or bool(args.get("cron")):
+            header = f"[CRON] {header}"
         body = self._format_monitor_tool_body(tool_name, raw_output).rstrip("\n")
         self._append_tool_text(f"{header}\n{body}\n\n")
         if render:
@@ -884,6 +919,100 @@ Commands:
         self._prepare_output()
         print(content, end="")
 
+    def print_cron_jobs(self, jobs: list[Any]) -> None:
+        """Print pseudo-cron jobs."""
+        lines = ["\n=== Active Cron Jobs ==="]
+        if not jobs:
+            lines.append("(no jobs found)")
+        for idx, job in enumerate(jobs, start=1):
+            enabled = bool(getattr(job, "enabled", False))
+            marker = "*" if enabled else "x"
+            job_id = str(getattr(job, "id", ""))
+            kind = str(getattr(job, "kind", "prompt"))
+            session_id = str(getattr(job, "session_id", ""))
+            next_run_at = str(getattr(job, "next_run_at", ""))
+            last_status = str(getattr(job, "last_status", ""))
+            schedule = getattr(job, "schedule", {})
+            schedule_text = str(schedule.get("_text", "")) if isinstance(schedule, dict) else ""
+            payload = getattr(job, "payload", {})
+            chat_history = getattr(job, "chat_history", [])
+            monitor_history = getattr(job, "monitor_history", [])
+            chat_count = len(chat_history) if isinstance(chat_history, list) else 0
+            monitor_count = len(monitor_history) if isinstance(monitor_history, list) else 0
+            preview = ""
+            if isinstance(payload, dict):
+                preview = str(payload.get("text") or payload.get("path") or "")[:80].strip()
+            preview_part = f" | payload={preview}" if preview else ""
+            schedule_part = f" | schedule={schedule_text}" if schedule_text else ""
+            history_part = f" | history(chat={chat_count},monitor={monitor_count})"
+            lines.append(
+                f"{marker} [{idx}] id={job_id} | kind={kind} | session={session_id}{schedule_part} | next={next_run_at} | status={last_status}{history_part}{preview_part}"
+            )
+        lines.append("")
+
+        content = "\n".join(lines) + "\n"
+        if self._monitor_mode and self._sticky_footer:
+            self._append_chat_text(content)
+            self._render_monitor_view()
+            return
+        self._prepare_output()
+        print(content, end="")
+
+    def print_cron_job_history(self, job: Any) -> None:
+        """Print stored cron history for one job."""
+        job_id = str(getattr(job, "id", ""))
+        kind = str(getattr(job, "kind", "prompt"))
+        session_id = str(getattr(job, "session_id", ""))
+        chat_history = getattr(job, "chat_history", [])
+        monitor_history = getattr(job, "monitor_history", [])
+        llm_outputs: list[dict[str, Any]] = []
+        if isinstance(chat_history, list):
+            llm_outputs = [item for item in chat_history if str(item.get("role", "")).lower() == "assistant"]
+        lines = [
+            "",
+            "=== Cron Job History ===",
+            f"id={job_id} | kind={kind} | session={session_id}",
+            "",
+            "--- LLM Chat Output ---",
+        ]
+        if not llm_outputs:
+            lines.append("(no assistant output recorded)")
+        else:
+            for idx, item in enumerate(llm_outputs, start=1):
+                ts = str(item.get("timestamp", ""))
+                content = str(item.get("content", ""))
+                lines.append(f"[{idx}] {ts}")
+                lines.append(content if content else "(empty)")
+                lines.append("")
+        lines.extend(["--- Monitor Output ---"])
+        if not isinstance(monitor_history, list) or not monitor_history:
+            lines.append("(empty)")
+        else:
+            for idx, item in enumerate(monitor_history, start=1):
+                ts = str(item.get("timestamp", ""))
+                step = str(item.get("step", ""))
+                output = str(item.get("output", ""))
+                rest = {k: v for k, v in item.items() if k not in {"timestamp", "step", "output"}}
+                rest_text = ""
+                if rest:
+                    try:
+                        rest_text = json.dumps(rest, ensure_ascii=True, sort_keys=True)
+                    except Exception:
+                        rest_text = str(rest)
+                lines.append(f"[{idx}] {ts} step={step} {rest_text}".rstrip())
+                if output:
+                    lines.append(output)
+                    lines.append("")
+        lines.append("")
+
+        content = "\n".join(lines) + "\n"
+        if self._monitor_mode and self._sticky_footer:
+            self._append_chat_text(content)
+            self._render_monitor_view()
+            return
+        self._prepare_output()
+        print(content, end="")
+
     def print_model_list(
         self,
         models: list[dict[str, Any]],
@@ -1064,6 +1193,14 @@ Commands:
                     return None
                 payload = json.dumps({"description": parsed}, ensure_ascii=True)
                 return f"SESSION_DESCRIPTION_SET:{payload}"
+            if subcommand in ("export", "dump"):
+                export_arg = selector[len(session_parts[0]) :].strip().lower()
+                if not export_arg:
+                    return "SESSION_EXPORT:all"
+                if export_arg in {"chat", "monitor", "pipeline", "pipeline-summary", "all"}:
+                    return f"SESSION_EXPORT:{export_arg}"
+                self.print_error("Usage: /session export [chat|monitor|pipeline|pipeline-summary|all]")
+                return None
             if subcommand == "protect":
                 protect_arg = selector[len(session_parts[0]) :].strip().lower()
                 if protect_arg == "on":
@@ -1111,6 +1248,43 @@ Commands:
                 if lowered_arg in {"list", "ls"}:
                     return "MODELS"
                 return f"SESSION_MODEL_SET:{model_arg}"
+            if subcommand == "queue":
+                queue_arg = selector[len(session_parts[0]) :].strip()
+                if not queue_arg:
+                    return "SESSION_QUEUE_INFO"
+                queue_parts = queue_arg.split(None, 1)
+                queue_sub = queue_parts[0].lower()
+                queue_rest = queue_parts[1].strip() if len(queue_parts) > 1 else ""
+                if queue_sub == "clear":
+                    return "SESSION_QUEUE_CLEAR"
+                if queue_sub == "mode":
+                    if not queue_rest:
+                        self.print_error(
+                            "Usage: /session queue mode <steer|followup|collect|steer-backlog|interrupt|queue>"
+                        )
+                        return None
+                    return f"SESSION_QUEUE_MODE:{queue_rest}"
+                if queue_sub == "debounce":
+                    if not queue_rest:
+                        self.print_error("Usage: /session queue debounce <ms>")
+                        return None
+                    return f"SESSION_QUEUE_DEBOUNCE:{queue_rest}"
+                if queue_sub == "cap":
+                    if not queue_rest:
+                        self.print_error("Usage: /session queue cap <n>")
+                        return None
+                    return f"SESSION_QUEUE_CAP:{queue_rest}"
+                if queue_sub == "drop":
+                    if not queue_rest:
+                        self.print_error("Usage: /session queue drop <old|new|summarize>")
+                        return None
+                    return f"SESSION_QUEUE_DROP:{queue_rest}"
+                if queue_sub in {"steer", "followup", "collect", "steer-backlog", "interrupt", "queue"}:
+                    return f"SESSION_QUEUE_MODE:{queue_sub}"
+                self.print_error(
+                    "Usage: /session queue | /session queue mode <mode> | /session queue debounce <ms> | /session queue cap <n> | /session queue drop <old|new|summarize> | /session queue clear"
+                )
+                return None
             if subcommand in ("run", "exec"):
                 run_args = selector[len(session_parts[0]) :].strip()
                 run_parts = run_args.split(None, 1)
@@ -1141,6 +1315,63 @@ Commands:
             return "HISTORY"
         elif command == "/compact":
             return "COMPACT"
+        elif command == "/cron":
+            cron_arg = args.strip()
+            if not cron_arg:
+                self.print_error(
+                    "Usage: /cron \"<task>\" | /cron add ... | /cron run ... | /cron list | /cron history <job-id|#index>"
+                )
+                return None
+            cron_parts = cron_arg.split(None, 1)
+            subcommand = cron_parts[0].lower()
+            if subcommand in {"list", "ls"}:
+                return "CRON_LIST"
+            if subcommand in {"history", "log", "logs"}:
+                job_id = cron_arg[len(cron_parts[0]) :].strip()
+                if not job_id:
+                    self.print_error("Usage: /cron history <job-id|#index>")
+                    return None
+                return f"CRON_HISTORY:{job_id}"
+            if subcommand == "add":
+                add_args = cron_arg[len(cron_parts[0]) :].strip()
+                if not add_args:
+                    self.print_error("Usage: /cron add every <Nm|Nh> <task|script|tool ...>")
+                    return None
+                return f"CRON_ADD:{add_args}"
+            if subcommand in {"remove", "rm", "delete", "del"}:
+                job_id = cron_arg[len(cron_parts[0]) :].strip()
+                if not job_id:
+                    self.print_error("Usage: /cron remove <job-id|#index>")
+                    return None
+                return f"CRON_REMOVE:{job_id}"
+            if subcommand in {"pause", "disable"}:
+                job_id = cron_arg[len(cron_parts[0]) :].strip()
+                if not job_id:
+                    self.print_error("Usage: /cron pause <job-id|#index>")
+                    return None
+                return f"CRON_PAUSE:{job_id}"
+            if subcommand in {"resume", "enable"}:
+                job_id = cron_arg[len(cron_parts[0]) :].strip()
+                if not job_id:
+                    self.print_error("Usage: /cron resume <job-id|#index>")
+                    return None
+                return f"CRON_RESUME:{job_id}"
+            if subcommand == "run":
+                run_args = cron_arg[len(cron_parts[0]) :].strip()
+                if not run_args:
+                    self.print_error("Usage: /cron run <job-id|#index> | /cron run script <path> | /cron run tool <path>")
+                    return None
+                payload = json.dumps({"args": run_args}, ensure_ascii=True)
+                return f"CRON_RUN:{payload}"
+            # One-off prompt mode: /cron "some task"
+            prompt = cron_arg
+            if len(prompt) >= 2 and prompt[0] == prompt[-1] and prompt[0] in {"'", '"'}:
+                prompt = prompt[1:-1].strip()
+            if not prompt:
+                self.print_error("Usage: /cron \"<task>\"")
+                return None
+            payload = json.dumps({"prompt": prompt}, ensure_ascii=True)
+            return f"CRON_ONEOFF:{payload}"
         elif command == "/planning":
             planning_arg = args.strip().lower()
             if planning_arg == "on":
@@ -1149,13 +1380,37 @@ Commands:
                 return "PLANNING_OFF"
             self.print_error("Usage: /planning on|off")
             return None
+        elif command == "/pipeline":
+            pipeline_arg = args.strip().lower()
+            if not pipeline_arg:
+                return "PIPELINE_INFO"
+            if pipeline_arg in {"loop", "simple"}:
+                return "PIPELINE_MODE:loop"
+            if pipeline_arg in {"contracts", "contract", "complex"}:
+                return "PIPELINE_MODE:contracts"
+            self.print_error("Usage: /pipeline loop|contracts")
+            return None
         elif command == "/monitor":
             monitor_arg = args.strip().lower()
             if monitor_arg == "on":
                 return "MONITOR_ON"
             if monitor_arg == "off":
                 return "MONITOR_OFF"
-            self.print_error("Usage: /monitor on|off")
+            if monitor_arg == "trace on":
+                return "MONITOR_TRACE_ON"
+            if monitor_arg == "trace off":
+                return "MONITOR_TRACE_OFF"
+            if monitor_arg == "pipeline on":
+                return "MONITOR_PIPELINE_ON"
+            if monitor_arg == "pipeline off":
+                return "MONITOR_PIPELINE_OFF"
+            if monitor_arg == "full on":
+                return "MONITOR_FULL_ON"
+            if monitor_arg == "full off":
+                return "MONITOR_FULL_OFF"
+            self.print_error(
+                "Usage: /monitor on|off | /monitor trace on|off | /monitor pipeline on|off | /monitor full on|off"
+            )
             return None
         elif command in ("/exit", "/quit", "/q"):
             return "EXIT"

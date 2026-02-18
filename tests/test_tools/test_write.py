@@ -87,3 +87,20 @@ async def test_registry_session_id_routes_write_into_session_folder(tmp_path: Pa
     assert result.success is True
     assert expected.exists()
     assert expected.read_text(encoding="utf-8") == "ok"
+
+
+@pytest.mark.asyncio
+async def test_write_tool_accepts_saved_prefix_without_tmp_nesting(tmp_path: Path):
+    tool = WriteTool()
+
+    result = await tool.execute(
+        path="saved/showcase/session-42/Zagreb-details.md",
+        content="# Zagreb\n",
+        _saved_base_path=tmp_path / "saved",
+        _session_id="session-42",
+    )
+
+    expected = tmp_path / "saved" / "showcase" / "session-42" / "Zagreb-details.md"
+    assert result.success is True
+    assert expected.exists()
+    assert expected.read_text(encoding="utf-8") == "# Zagreb\n"

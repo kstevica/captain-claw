@@ -40,8 +40,16 @@ tools:
     - write
     - glob
     - web_fetch
+    - web_search
   web_fetch:
     max_chars: 100000  # default returned characters (can override per call)
+  web_search:
+    provider: "brave"
+    api_key: ""  # optional; can also use BRAVE_API_KEY env var
+    base_url: "https://api.search.brave.com/res/v1/web/search"
+    max_results: 5
+    timeout: 20
+    safesearch: "moderate"  # off | moderate | strict
   shell:
     timeout: 30  # seconds
     blocked:
@@ -81,6 +89,16 @@ ui:
   show_tokens: true  # show token count
   streaming: true  # stream responses
   colors: true  # use colors
+  monitor_trace_llm: false  # log full intermediate LLM responses into monitor/session history
+  monitor_trace_pipeline: true  # log compact pipeline-only trace events for export/debugging
+  monitor_full_output: false  # show raw full tool output in monitor pane (no compact summaries)
+
+# Follow-up queue behavior when a session is busy
+execution_queue:
+  mode: "collect"  # steer | followup | collect | steer-backlog | interrupt | queue
+  debounce_ms: 1000
+  cap: 20
+  drop: "summarize"  # old | new | summarize
 
 # Logging
 logging:

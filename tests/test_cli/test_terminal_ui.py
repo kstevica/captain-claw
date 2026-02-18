@@ -152,6 +152,12 @@ def test_monitor_command_parsing():
     ui = TerminalUI()
     assert ui.handle_special_command("/monitor on") == "MONITOR_ON"
     assert ui.handle_special_command("/monitor off") == "MONITOR_OFF"
+    assert ui.handle_special_command("/monitor trace on") == "MONITOR_TRACE_ON"
+    assert ui.handle_special_command("/monitor trace off") == "MONITOR_TRACE_OFF"
+    assert ui.handle_special_command("/monitor pipeline on") == "MONITOR_PIPELINE_ON"
+    assert ui.handle_special_command("/monitor pipeline off") == "MONITOR_PIPELINE_OFF"
+    assert ui.handle_special_command("/monitor full on") == "MONITOR_FULL_ON"
+    assert ui.handle_special_command("/monitor full off") == "MONITOR_FULL_OFF"
 
 
 def test_session_commands_parsing():
@@ -165,8 +171,19 @@ def test_session_commands_parsing():
     assert ui.handle_special_command("/session model") == "SESSION_MODEL_INFO"
     assert ui.handle_special_command("/session model list") == "MODELS"
     assert ui.handle_special_command("/session model claude-sonnet") == "SESSION_MODEL_SET:claude-sonnet"
+    assert ui.handle_special_command("/session export") == "SESSION_EXPORT:all"
+    assert ui.handle_special_command("/session export chat") == "SESSION_EXPORT:chat"
+    assert ui.handle_special_command("/session export monitor") == "SESSION_EXPORT:monitor"
+    assert ui.handle_special_command("/session export pipeline") == "SESSION_EXPORT:pipeline"
+    assert ui.handle_special_command("/session export pipeline-summary") == "SESSION_EXPORT:pipeline-summary"
     assert ui.handle_special_command("/session protect on") == "SESSION_PROTECT_ON"
     assert ui.handle_special_command("/session protect off") == "SESSION_PROTECT_OFF"
+    assert ui.handle_special_command("/session queue") == "SESSION_QUEUE_INFO"
+    assert ui.handle_special_command("/session queue mode collect") == "SESSION_QUEUE_MODE:collect"
+    assert ui.handle_special_command("/session queue debounce 250") == "SESSION_QUEUE_DEBOUNCE:250"
+    assert ui.handle_special_command("/session queue cap 12") == "SESSION_QUEUE_CAP:12"
+    assert ui.handle_special_command("/session queue drop summarize") == "SESSION_QUEUE_DROP:summarize"
+    assert ui.handle_special_command("/session queue clear") == "SESSION_QUEUE_CLEAR"
 
 
 def test_session_new_subcommand_parsing():
@@ -226,10 +243,47 @@ def test_compact_command_parsing():
     assert ui.handle_special_command("/compact") == "COMPACT"
 
 
+def test_cron_command_parsing():
+    ui = TerminalUI()
+    assert ui.handle_special_command("/cron list") == "CRON_LIST"
+    assert ui.handle_special_command("/cron add every 15m \"check status\"") == 'CRON_ADD:every 15m "check status"'
+    assert ui.handle_special_command("/cron pause job-1") == "CRON_PAUSE:job-1"
+    assert ui.handle_special_command("/cron pause #1") == "CRON_PAUSE:#1"
+    assert ui.handle_special_command("/cron resume job-1") == "CRON_RESUME:job-1"
+    assert ui.handle_special_command("/cron resume #1") == "CRON_RESUME:#1"
+    assert ui.handle_special_command("/cron remove job-1") == "CRON_REMOVE:job-1"
+    assert ui.handle_special_command("/cron remove #1") == "CRON_REMOVE:#1"
+    assert ui.handle_special_command("/cron history job-1") == "CRON_HISTORY:job-1"
+    assert ui.handle_special_command("/cron history #1") == "CRON_HISTORY:#1"
+
+    oneoff = ui.handle_special_command('/cron "run health check"')
+    assert oneoff is not None
+    assert oneoff.startswith("CRON_ONEOFF:")
+    oneoff_payload = json.loads(oneoff.split(":", 1)[1])
+    assert oneoff_payload == {"prompt": "run health check"}
+
+    run_cmd = ui.handle_special_command("/cron run script scripts/s1/health.sh")
+    assert run_cmd is not None
+    assert run_cmd.startswith("CRON_RUN:")
+    run_payload = json.loads(run_cmd.split(":", 1)[1])
+    assert run_payload == {"args": "script scripts/s1/health.sh"}
+
+    run_job = ui.handle_special_command("/cron run #2")
+    assert run_job is not None
+    assert run_job.startswith("CRON_RUN:")
+    run_job_payload = json.loads(run_job.split(":", 1)[1])
+    assert run_job_payload == {"args": "#2"}
+
+
 def test_planning_command_parsing():
     ui = TerminalUI()
     assert ui.handle_special_command("/planning on") == "PLANNING_ON"
     assert ui.handle_special_command("/planning off") == "PLANNING_OFF"
+    assert ui.handle_special_command("/pipeline") == "PIPELINE_INFO"
+    assert ui.handle_special_command("/pipeline loop") == "PIPELINE_MODE:loop"
+    assert ui.handle_special_command("/pipeline simple") == "PIPELINE_MODE:loop"
+    assert ui.handle_special_command("/pipeline contracts") == "PIPELINE_MODE:contracts"
+    assert ui.handle_special_command("/pipeline complex") == "PIPELINE_MODE:contracts"
 
 
 def test_new_command_supports_optional_name():
@@ -244,6 +298,14 @@ def test_append_tool_output_formats_header_and_body():
     assert "shell" in ui._tool_output_text
     assert '"command": "date"' in ui._tool_output_text
     assert "Tue" in ui._tool_output_text
+
+
+def test_append_tool_output_marks_cron_entries():
+    ui = TerminalUI()
+    ui.append_tool_output("cron", {"step": "job_start"}, "starting")
+    ui.append_tool_output("shell", {"command": "echo ok", "cron": True}, "ok")
+    assert "[CRON] cron" in ui._tool_output_text
+    assert "[CRON] shell" in ui._tool_output_text
 
 
 def test_append_tool_output_web_fetch_is_summarized_with_kb():
@@ -263,6 +325,20 @@ def test_append_tool_output_web_fetch_is_summarized_with_kb():
     assert "kB" in ui._tool_output_text
     assert "concise summaries with source context." in ui._tool_output_text
     assert "This third sentence should not be included." not in ui._tool_output_text
+
+
+def test_append_tool_output_web_fetch_full_mode_shows_raw():
+    ui = TerminalUI()
+    raw = (
+        "[URL: https://example.com]\n"
+        "[Status: 200]\n"
+        "[Mode: text]\n\n"
+        "First sentence. Second sentence. Third sentence remains visible."
+    )
+    ui.set_monitor_full_output(True)
+    ui.append_tool_output("web_fetch", {"url": "https://example.com"}, raw)
+    assert "Summary:" not in ui._tool_output_text
+    assert "Third sentence remains visible." in ui._tool_output_text
 
 
 def test_append_tool_output_separates_items_with_one_blank_line():

@@ -28,7 +28,7 @@ In under five minutes, you can have a multi-model terminal agentic system with p
 - Live per-session model switching: use different models for different threads without restarting.
 - Built-in safety guards: input, output, and script/tool checks with configurable enforcement.
 - Real tool execution: shell, file read/write, glob, and web fetch with persistent session traces.
-- Practical for production-like workflows: monitor view, planning mode, context compaction, and resumable sessions.
+- Practical for production-like workflows: monitor view, selectable pipeline modes, context compaction, and resumable sessions.
 
 ## Feature Snapshot
 
@@ -88,6 +88,7 @@ Sessions are first-class:
 - Persist model selection per session so each session can use a different model.
 - Protect session memory from accidental reset with `/session protect on`.
 - Procreate a new session from two parent sessions with compacted merged memory while keeping parents unchanged.
+- Schedule recurring tasks with Captain Claw pseudo-cron (`/cron ...`) managed inside the app runtime.
 
 ### Built-In Guardrails
 
@@ -216,7 +217,12 @@ guards:
     level: "stop_suspicious" # or ask_for_approval
 
 tools:
-  enabled: ["shell", "read", "write", "glob", "web_fetch"]
+  enabled: ["shell", "read", "write", "glob", "web_fetch", "web_search"]
+  web_search:
+    provider: "brave"
+    api_key: "" # or BRAVE_API_KEY env var
+    max_results: 5
+    safesearch: "moderate"
 
 workspace:
   path: "./workspace" # local artifact root; tool outputs go under ./workspace/saved
@@ -229,6 +235,8 @@ CLAW_MODEL__PROVIDER="openai"
 CLAW_MODEL__MODEL="gpt-4o-mini"
 CLAW_GUARDS__INPUT__ENABLED="true"
 CLAW_GUARDS__INPUT__LEVEL="ask_for_approval"
+CLAW_TOOLS__WEB_SEARCH__API_KEY="your_brave_api_key"
+# or use BRAVE_API_KEY="your_brave_api_key"
 ```
 
 ## CLI Commands
@@ -241,8 +249,12 @@ CLAW_GUARDS__INPUT__LEVEL="ask_for_approval"
 | `/config` | Show active configuration |
 | `/history` | Show conversation history |
 | `/compact` | Manually compact older session history |
-| `/planning on\|off` | Enable/disable planning mode |
+| `/pipeline loop\|contracts` | Select pipeline mode (`loop` for fast/simple, `contracts` for planner+completion gate) |
+| `/planning on\|off` | Legacy alias for `/pipeline contracts\|loop` |
 | `/monitor on\|off` | Enable/disable monitor split view |
+| `/monitor trace on\|off` | Enable/disable full intermediate LLM response trace logging into monitor/session history |
+| `/monitor pipeline on\|off` | Enable/disable compact pipeline-only trace logging into session history |
+| `/monitor full on\|off` | Enable/disable raw full tool output rendering in monitor pane |
 | `/clear` | Clear current session messages (blocked when `/session protect on`) |
 | `/exit` or `/quit` | Exit Captain Claw |
 
@@ -258,6 +270,7 @@ CLAW_GUARDS__INPUT__LEVEL="ask_for_approval"
 | `/session rename <new-name>` | Rename active session |
 | `/session description <text>` | Set session description |
 | `/session description auto` | Auto-generate description from session context |
+| `/session export [chat\|monitor\|pipeline\|pipeline-summary\|all]` | Export active session chat/monitor history and compact pipeline trace files |
 | `/session protect on\|off` | Enable/disable active-session memory reset protection |
 | `/session procreate <id\|name\|#index> <id\|name\|#index> <new-name>` | Create a new session by merging compacted memory from two parent sessions |
 | `/session run <id\|name\|#index> <prompt>` | Run one prompt in another session, then return |
@@ -271,6 +284,23 @@ CLAW_GUARDS__INPUT__LEVEL="ask_for_approval"
 | `/session model` | Show active session model |
 | `/session model list` | List allowed models |
 | `/session model <id\|#index\|provider:model\|default>` | Set model for active session |
+
+### Captain Claw Cron Commands
+
+| Command | Description |
+|---|---|
+| `/cron "<task>"` | Run one-off task through Captain Claw (same runtime + guards as manual input) |
+| `/cron run script <path>` | Run an existing script from the active session folder (validated before run) |
+| `/cron run tool <path>` | Run an existing tool helper from the active session folder (validated before run) |
+| `/cron add every <Nm\|Nh> <task\|script\|tool ...>` | Add interval pseudo-cron job |
+| `/cron add daily <HH:MM> <task\|script\|tool ...>` | Add daily pseudo-cron job |
+| `/cron add weekly <day> <HH:MM> <task\|script\|tool ...>` | Add weekly pseudo-cron job |
+| `/cron list` | List active pseudo-cron jobs |
+| `/cron history <job-id\|#index>` | Show persisted per-job cron chat history and monitor history |
+| `/cron run <job-id\|#index>` | Run a saved cron job immediately |
+| `/cron pause <job-id\|#index>` | Pause a cron job |
+| `/cron resume <job-id\|#index>` | Resume a paused cron job |
+| `/cron remove <job-id\|#index>` | Delete a cron job |
 
 ## Example Workflow
 
@@ -293,6 +323,27 @@ This workflow shows why Captain Claw works well as an agentic system for everyda
 - `/session protect off` re-enables normal `/clear` behavior.
 - `/session procreate ...` compacts each parent session memory snapshot before merging into the child session.
 - Parent sessions are not compacted or modified during procreation.
+- Session procreate writes progress steps to monitor output while resolving, compacting, merging, and creating the child session.
+
+### Session Export Notes
+
+- `/session export chat` writes a chat-only history export.
+- `/session export monitor` writes a tool/monitor history export.
+- `/session export pipeline` writes a compact pipeline trace export (`.jsonl`) without fetched/tool content bodies.
+- `/session export pipeline-summary` writes a markdown digest of pipeline trace events (counts + compact timeline).
+- `/session export` (or `/session export all`) writes all exports.
+- With `/monitor trace on`, monitor exports include full intermediate `llm_trace` entries for planner/critic/main LLM calls.
+- With `/monitor pipeline on`, session history stores compact `pipeline_trace` events intended for debugging instruction/pipeline behavior with minimal noise.
+- Exports are session-scoped and saved under `saved/showcase/<session-id>/exports/`.
+
+### Captain Claw Cron Notes
+
+- Cron here is Captain Claw managed pseudo-cron, not system `cron`.
+- Guardrails remain active before every cron-triggered prompt/script/tool run.
+- Scheduled jobs are persisted and executed inside the Captain Claw runtime loop.
+- Cron output is visually tagged (`[CRON ...]`) in chat and monitor panes for quick differentiation.
+- Cron monitor output logs each execution step (`job_start`, `run_script_tool_start`, `job_done`, failures, and status updates).
+- Each cron job stores its own chat history and monitor history; inspect with `/cron history <job-id|#index>`.
 
 ## Tooling and Execution Model
 
@@ -303,6 +354,7 @@ Captain Claw can use:
 - `write`: write files
 - `glob`: search files by pattern
 - `web_fetch`: fetch and parse web content
+- `web_search`: search the web (Brave API-backed) for current sources and links
 
 ### File Output Policy
 
@@ -310,12 +362,17 @@ Captain Claw can use:
 - Relative paths are resolved within that saved root.
 - Writes are always session-scoped: category paths are normalized to `saved/<category>/<session-id>/...`; uncategorized paths are normalized to `saved/tmp/<session-id>/...`.
 - Unsafe absolute/traversal paths are remapped for safety.
+- Session-scoped paths always use stable session IDs, not mutable session names.
 
 ### Script Workflow
 
 - Explicit script requests trigger script generation and execution workflow.
 - Generated scripts are saved under `saved/scripts/<session-id>/`.
 - Reusable tool helpers are saved under `saved/tools/<session-id>/`.
+- For list-heavy requests (for example `for each`, `top N`, `all <items>`), Captain Claw first extracts list members from request/context, then chooses strategy:
+  - direct loop mode: keeps member list in task memory and loops through pending members in completion guidance
+  - script mode: auto-generates a temporary Python worker under `saved/tools/<session-id>/`, executes it with the active Python interpreter, then continues response completion
+- This prevents premature stop after the first member and improves consistency for per-member tasks.
 
 ### Web Fetch Modes
 
@@ -325,7 +382,10 @@ Captain Claw can use:
 ## Monitoring, Planning, and Context Management
 
 - Monitor mode provides split output for chat and tool/system traces.
-- Planning mode adds lightweight task pipeline orchestration per turn.
+- `/monitor trace on` records full intermediate LLM responses (`llm_trace`) in monitor/session history for export and analysis.
+- `/monitor pipeline on` records compact pipeline-only events (`pipeline_trace`) for low-noise diagnostics and smaller exports.
+- `/monitor full on` disables compact monitor summarization (for example `web_fetch`) and renders raw tool output.
+- Planning mode adds task pipeline orchestration per turn, including nested task trees with leaf-based progress tracking.
 - Long sessions auto-compact based on context thresholds and preserve continuity summary.
 
 ## Security and Guarding Behavior

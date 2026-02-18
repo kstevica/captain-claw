@@ -1,4 +1,5 @@
 import copy
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -279,6 +280,153 @@ def test_build_messages_includes_planning_pipeline_note():
     assert "[IN_PROGRESS] Gather deployment constraints" in notes[0]
 
 
+def test_normalize_contract_tasks_supports_nested_children():
+    raw_tasks = [
+        {
+            "title": "Phase 1",
+            "children": [
+                {"title": "Subtask A"},
+                {"title": "Subtask B"},
+            ],
+        },
+        {"title": "Phase 2"},
+    ]
+
+    normalized = Agent._normalize_contract_tasks(raw_tasks, max_tasks=8)
+
+    assert len(normalized) == 2
+    assert normalized[0]["title"] == "Phase 1"
+    assert isinstance(normalized[0].get("children"), list)
+    assert len(normalized[0]["children"]) == 2
+    assert normalized[0]["children"][0]["title"] == "Subtask A"
+    assert normalized[0]["children"][1]["title"] == "Subtask B"
+
+
+def test_nested_pipeline_progress_tracks_leaf_order_and_parent_rollup():
+    agent = Agent(provider=TokenAwareProvider())
+    pipeline = agent._build_task_pipeline(
+        "do nested work",
+        tasks_override=[
+            {
+                "title": "Phase 1",
+                "children": [
+                    {"title": "Collect"},
+                    {"title": "Analyze"},
+                ],
+            },
+            {"title": "Phase 2"},
+        ],
+    )
+
+    task_order = list(pipeline.get("task_order", []))
+    assert len(task_order) == 3
+    assert pipeline.get("current_task_id") == task_order[0]
+
+    agent._advance_pipeline(pipeline, event="test_advance_1")
+    assert pipeline.get("current_task_id") == task_order[1]
+    assert pipeline["tasks"][0]["status"] == "in_progress"
+    assert pipeline["tasks"][0]["children"][0]["status"] == "completed"
+    assert pipeline["tasks"][0]["children"][1]["status"] == "in_progress"
+
+    agent._advance_pipeline(pipeline, event="test_advance_2")
+    assert pipeline.get("current_task_id") == task_order[2]
+    assert pipeline["tasks"][0]["status"] == "completed"
+    assert pipeline["tasks"][1]["status"] == "in_progress"
+
+
+def test_pipeline_progress_details_include_nested_scope_remaining_counts():
+    agent = Agent(provider=TokenAwareProvider())
+    pipeline = agent._build_task_pipeline(
+        "do nested work",
+        tasks_override=[
+            {
+                "id": "task_1",
+                "title": "Phase 1",
+                "children": [
+                    {"id": "task_1_1", "title": "Collect"},
+                    {
+                        "id": "task_1_2",
+                        "title": "Analyze",
+                        "children": [
+                            {"id": "task_1_2_1", "title": "Model"},
+                            {"id": "task_1_2_2", "title": "Validate"},
+                        ],
+                    },
+                ],
+            },
+            {"id": "task_2", "title": "Phase 2"},
+        ],
+    )
+    agent._set_pipeline_progress(pipeline, current_index=1, current_status="in_progress")
+    pipeline["created_at"] = (datetime.now(UTC) - timedelta(seconds=120)).isoformat()
+
+    progress = Agent._build_pipeline_progress_details(pipeline)
+
+    assert progress["leaf_index"] == 2
+    assert progress["leaf_total"] == 4
+    assert progress["leaf_remaining"] == 2
+    assert progress["current_path"] == "1.2.1"
+    scopes = progress["scope_progress"]
+    assert len(scopes) == 3
+    assert scopes[0]["path"] == "1"
+    assert scopes[0]["scope_leaf_total"] == 4
+    assert scopes[0]["scope_leaf_remaining"] == 2
+    assert scopes[1]["path"] == "1.2"
+    assert scopes[1]["scope_leaf_total"] == 3
+    assert scopes[1]["scope_leaf_remaining"] == 1
+    assert scopes[2]["path"] == "1.2.1"
+    assert scopes[2]["scope_leaf_total"] == 2
+    assert scopes[2]["scope_leaf_remaining"] == 1
+    assert progress["eta_seconds"] is not None
+    assert float(progress["eta_seconds"]) > 0
+    assert progress["eta_text"] != "unknown"
+    assert scopes[0]["eta_text"] != "unknown"
+
+
+def test_build_pipeline_note_renders_nested_numbering():
+    agent = Agent(provider=TokenAwareProvider())
+    pipeline = {
+        "tasks": [
+            {
+                "id": "task_1",
+                "title": "Phase 1",
+                "status": "in_progress",
+                "children": [
+                    {"id": "task_2", "title": "Collect data", "status": "completed"},
+                    {"id": "task_3", "title": "Analyze data", "status": "in_progress"},
+                ],
+            },
+            {"id": "task_4", "title": "Phase 2", "status": "pending"},
+        ],
+        "current_index": 1,
+        "state": "active",
+    }
+
+    note = agent._build_pipeline_note(pipeline)
+
+    assert "1. [IN_PROGRESS] Phase 1" in note
+    assert "1.1. [COMPLETED] Collect data" in note
+    assert "1.2. [IN_PROGRESS] Analyze data" in note
+    assert "2. [PENDING] Phase 2" in note
+
+
+def test_build_messages_excludes_llm_trace_tool_messages():
+    agent = Agent(provider=TokenAwareProvider())
+    agent.session = Session(id="s1", name="default")
+    agent.session.add_message("user", "previous request")
+    agent.session.add_message(
+        role="tool",
+        content="interaction=turn_1\n[assistant_response]\ninternal draft",
+        tool_name="llm_trace",
+        tool_arguments={"interaction": "turn_1"},
+    )
+    agent.session.add_message("assistant", "previous answer")
+
+    messages = agent._build_messages(query="new request")
+
+    assert all((m.tool_name or "") != "llm_trace" for m in messages)
+
+
 @pytest.mark.asyncio
 async def test_complete_emits_planning_pipeline_updates_when_enabled():
     outputs: list[dict[str, Any]] = []
@@ -300,6 +448,15 @@ async def test_complete_emits_planning_pipeline_updates_when_enabled():
     assert planning_logs
     assert any("event" in entry["args"] and entry["args"]["event"] == "created" for entry in planning_logs)
     assert any("event" in entry["args"] and entry["args"]["event"] == "completed" for entry in planning_logs)
+    created = next(entry for entry in planning_logs if entry["args"].get("event") == "created")
+    assert "leaf_index" in created["args"]
+    assert "leaf_remaining" in created["args"]
+    assert "eta_seconds" in created["args"]
+    assert "eta_text" in created["args"]
+    assert "scope_progress" in created["args"]
+    assert "progress=" in created["output"]
+    assert "eta=" in created["output"]
+    assert "scope_progress:" in created["output"]
 
 
 @pytest.mark.asyncio

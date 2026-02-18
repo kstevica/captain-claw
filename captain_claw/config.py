@@ -63,12 +63,24 @@ class WebFetchToolConfig(BaseModel):
     max_chars: int = 100000
 
 
+class WebSearchToolConfig(BaseModel):
+    """Web search tool configuration."""
+
+    provider: str = "brave"
+    api_key: str = ""
+    base_url: str = "https://api.search.brave.com/res/v1/web/search"
+    max_results: int = 5
+    timeout: int = 20
+    safesearch: str = "moderate"
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
 
-    enabled: list[str] = ["shell", "read", "write", "glob", "web_fetch"]
+    enabled: list[str] = ["shell", "read", "write", "glob", "web_fetch", "web_search"]
     shell: ShellToolConfig = Field(default_factory=ShellToolConfig)
     web_fetch: WebFetchToolConfig = Field(default_factory=WebFetchToolConfig)
+    web_search: WebSearchToolConfig = Field(default_factory=WebSearchToolConfig)
     require_confirmation: list[str] = ["shell", "write"]
 
 
@@ -108,6 +120,18 @@ class UIConfig(BaseModel):
     show_tokens: bool = True
     streaming: bool = True
     colors: bool = True
+    monitor_trace_llm: bool = False
+    monitor_trace_pipeline: bool = True
+    monitor_full_output: bool = False
+
+
+class ExecutionQueueConfig(BaseModel):
+    """Follow-up queue behavior while sessions are busy."""
+
+    mode: str = "collect"
+    debounce_ms: int = 1000
+    cap: int = 20
+    drop: str = "summarize"
 
 
 class LoggingConfig(BaseModel):
@@ -127,6 +151,7 @@ class Config(BaseSettings):
     session: SessionConfig = Field(default_factory=SessionConfig)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
+    execution_queue: ExecutionQueueConfig = Field(default_factory=ExecutionQueueConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
     model_config = SettingsConfigDict(

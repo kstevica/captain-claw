@@ -103,3 +103,38 @@ async def test_select_session_prefers_name_before_numeric_index(tmp_path):
         assert selected.id == named_numeric.id
     finally:
         await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_last_active_session_round_trip(tmp_path):
+    manager = SessionManager(db_path=tmp_path / "sessions.db")
+    try:
+        one = await manager.create_session(name="one")
+        two = await manager.create_session(name="two")
+
+        assert await manager.set_last_active_session(two.id) is True
+        assert await manager.get_last_active_session_id() == two.id
+
+        loaded = await manager.load_last_active_session()
+        assert loaded is not None
+        assert loaded.id == two.id
+
+        assert await manager.set_last_active_session("missing-id") is False
+        assert await manager.get_last_active_session_id() == two.id
+    finally:
+        await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_deleting_last_active_session_clears_pointer(tmp_path):
+    manager = SessionManager(db_path=tmp_path / "sessions.db")
+    try:
+        one = await manager.create_session(name="one")
+        await manager.set_last_active_session(one.id)
+        assert await manager.get_last_active_session_id() == one.id
+
+        assert await manager.delete_session(one.id) is True
+        assert await manager.get_last_active_session_id() is None
+        assert await manager.load_last_active_session() is None
+    finally:
+        await manager.close()

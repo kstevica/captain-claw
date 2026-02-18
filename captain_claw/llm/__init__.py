@@ -27,6 +27,7 @@ class Message:
     content: str
     tool_call_id: str | None = None
     tool_name: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -181,15 +182,49 @@ def _convert_messages_for_openai_style(messages: list[Message]) -> list[dict[str
             content = str(msg.get("content", ""))
             tool_call_id = msg.get("tool_call_id")
             tool_name = msg.get("tool_name")
+            tool_calls = msg.get("tool_calls")
         else:
             role = str(getattr(msg, "role", ""))
             content = str(getattr(msg, "content", ""))
             tool_call_id = getattr(msg, "tool_call_id", None)
             tool_name = getattr(msg, "tool_name", None)
+            tool_calls = getattr(msg, "tool_calls", None)
 
         if role not in {"system", "user", "assistant", "tool"}:
             continue
         entry: dict[str, Any] = {"role": role, "content": content}
+        if role == "assistant" and isinstance(tool_calls, list) and tool_calls:
+            normalized_calls: list[dict[str, Any]] = []
+            for idx, raw in enumerate(tool_calls, start=1):
+                if not isinstance(raw, dict):
+                    continue
+                call_id = str(_obj_get(raw, "id", "") or f"call_{idx}")
+                call_type = str(_obj_get(raw, "type", "") or "function")
+                function_obj = _obj_get(raw, "function", None)
+                if isinstance(function_obj, dict):
+                    fn_name = str(_obj_get(function_obj, "name", "") or "")
+                    fn_args = _obj_get(function_obj, "arguments", "")
+                else:
+                    fn_name = str(_obj_get(raw, "name", "") or "")
+                    fn_args = _obj_get(raw, "arguments", {})
+                if not fn_name:
+                    continue
+                if isinstance(fn_args, str):
+                    fn_args_text = fn_args
+                elif isinstance(fn_args, dict):
+                    fn_args_text = json.dumps(fn_args, ensure_ascii=True)
+                else:
+                    fn_args_text = "{}"
+                normalized_calls.append({
+                    "id": call_id,
+                    "type": call_type,
+                    "function": {
+                        "name": fn_name,
+                        "arguments": fn_args_text,
+                    },
+                })
+            if normalized_calls:
+                entry["tool_calls"] = normalized_calls
         if role == "tool" and tool_call_id:
             entry["tool_call_id"] = tool_call_id
         if role == "tool" and tool_name:

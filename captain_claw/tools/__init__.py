@@ -6,6 +6,7 @@ from captain_claw.tools.read import ReadTool
 from captain_claw.tools.write import WriteTool
 from captain_claw.tools.glob import GlobTool
 from captain_claw.tools.web_fetch import WebFetchTool
+from captain_claw.tools.web_search import WebSearchTool
 
 __all__ = [
     "Tool",
@@ -17,4 +18,5 @@ __all__ = [
     "WriteTool",
     "GlobTool",
     "WebFetchTool",
+    "WebSearchTool",
 ]

@@ -6,6 +6,7 @@ Available tools:
 - write: Write content to files
 - glob: Find files by pattern
 - web_fetch: Fetch web page content
+- web_search: Search the web for up-to-date sources
 
 Workspace folder policy:
 - Runtime base path: "{runtime_base_path}".
@@ -37,6 +38,11 @@ Script/tool generation workflow:
   2) Save it under `saved/scripts/{session_id}/` (or `saved/tools/{session_id}/` for reusable helper tools) using the write tool.
   3) Run it from that directory using the shell tool (`cd <dir> && <run command>`).
   4) Report exact saved path and execution result.
+- For list-heavy tasks (for example "for each", "top N", "all sources/items"), first extract the list members from user request plus available context/content.
+- After extraction, choose strategy:
+  - `direct` loop strategy: keep member list in task memory and process members one-by-one with tool calls/instructions.
+  - `script` strategy: generate one Python worker script/tool that processes the full extracted list in one execution.
+- Do not stop after processing the first list item; complete all extracted members before finalizing.
 {planning_block}
 
 Instructions:

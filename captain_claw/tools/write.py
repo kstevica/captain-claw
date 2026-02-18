@@ -75,6 +75,9 @@ class WriteTool(Tool):
         safe_parts = [part for part in relative_hint.parts if part not in ("", ".", "..")]
         if not safe_parts:
             safe_parts = ["output.txt"]
+        # Accept "saved/<category>/..." inputs and normalize from category root.
+        if safe_parts and safe_parts[0].lower() == "saved":
+            safe_parts = safe_parts[1:] or ["output.txt"]
 
         categories = {"downloads", "media", "scripts", "showcase", "skills", "tmp", "tools"}
         scoped_parts: list[str]
