@@ -165,6 +165,8 @@ def test_session_commands_parsing():
     assert ui.handle_special_command("/session model") == "SESSION_MODEL_INFO"
     assert ui.handle_special_command("/session model list") == "MODELS"
     assert ui.handle_special_command("/session model claude-sonnet") == "SESSION_MODEL_SET:claude-sonnet"
+    assert ui.handle_special_command("/session protect on") == "SESSION_PROTECT_ON"
+    assert ui.handle_special_command("/session protect off") == "SESSION_PROTECT_OFF"
 
 
 def test_session_new_subcommand_parsing():
@@ -204,6 +206,19 @@ def test_session_run_and_runin_parsing():
     assert runin.startswith("SESSION_RUN:")
     runin_payload = json.loads(runin.split(":", 1)[1])
     assert runin_payload == {"selector": "#2", "prompt": "check failures"}
+
+
+def test_session_procreate_parsing():
+    ui = TerminalUI()
+    command = ui.handle_special_command('/session procreate #1 #2 "combined memory"')
+    assert command is not None
+    assert command.startswith("SESSION_PROCREATE:")
+    payload = json.loads(command.split(":", 1)[1])
+    assert payload == {
+        "parent_one": "#1",
+        "parent_two": "#2",
+        "new_name": "combined memory",
+    }
 
 
 def test_compact_command_parsing():

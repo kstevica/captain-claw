@@ -164,6 +164,7 @@ class ToolRegistry:
         name: str,
         arguments: dict[str, Any],
         confirm: bool = False,
+        session_id: str | None = None,
     ) -> ToolResult:
         """Execute a tool by name.
         
@@ -209,6 +210,7 @@ class ToolRegistry:
                     **arguments,
                     _runtime_base_path=self.runtime_base_path,
                     _saved_base_path=self.get_saved_base_path(create=False),
+                    _session_id=(session_id or "").strip(),
                 ),
                 timeout=config.tools.shell.timeout if name == "shell" else 30,
             )

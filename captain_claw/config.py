@@ -95,6 +95,12 @@ class SessionConfig(BaseModel):
     auto_save: bool = True
 
 
+class WorkspaceConfig(BaseModel):
+    """Workspace/output root configuration."""
+
+    path: str = "./workspace"
+
+
 class UIConfig(BaseModel):
     """UI configuration."""
 
@@ -119,6 +125,7 @@ class Config(BaseSettings):
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     guards: GuardConfig = Field(default_factory=GuardConfig)
     session: SessionConfig = Field(default_factory=SessionConfig)
+    workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
@@ -171,6 +178,14 @@ class Config(BaseSettings):
         
         with open(config_path, "w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+    def resolved_workspace_path(self, runtime_base: Path | str | None = None) -> Path:
+        """Resolve workspace path, anchoring relative paths to runtime base/cwd."""
+        raw = Path(self.workspace.path).expanduser()
+        if raw.is_absolute():
+            return raw.resolve()
+        anchor = Path(runtime_base).expanduser().resolve() if runtime_base is not None else Path.cwd().resolve()
+        return (anchor / raw).resolve()
 
 
 # Global config instance

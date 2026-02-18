@@ -35,6 +35,16 @@ class WriteTool(Tool):
     }
 
     @staticmethod
+    def _normalize_session_id(raw: str | None) -> str:
+        """Return filesystem-safe session identifier for path scoping."""
+        value = (raw or "").strip()
+        if not value:
+            return "default"
+        safe_parts = [c if c.isalnum() or c in "._-" else "-" for c in value]
+        normalized = "".join(safe_parts).strip("-")
+        return normalized or "default"
+
+    @staticmethod
     def _resolve_saved_root(kwargs: dict[str, Any]) -> Path:
         """Resolve `<runtime_base>/saved` for tool-managed outputs."""
         saved_root_raw = kwargs.get("_saved_base_path")
@@ -49,14 +59,14 @@ class WriteTool(Tool):
         return saved_root
 
     @staticmethod
-    def _normalize_under_saved(path: str, saved_root: Path) -> Path:
-        """Map any requested path into the saved root."""
+    def _normalize_under_saved(path: str, saved_root: Path, session_id: str) -> Path:
+        """Map any requested path into the saved root and enforce session scoping."""
         requested = Path(path).expanduser()
         if requested.is_absolute():
             absolute = requested.resolve()
             try:
                 absolute.relative_to(saved_root)
-                return absolute
+                relative_hint = absolute.relative_to(saved_root)
             except ValueError:
                 relative_hint = Path(*absolute.parts[1:])
         else:
@@ -66,12 +76,22 @@ class WriteTool(Tool):
         if not safe_parts:
             safe_parts = ["output.txt"]
 
-        candidate = (saved_root.joinpath(*safe_parts)).resolve()
+        categories = {"downloads", "media", "scripts", "showcase", "skills", "tmp", "tools"}
+        scoped_parts: list[str]
+        if safe_parts[0] in categories:
+            if len(safe_parts) >= 2 and safe_parts[1] == session_id:
+                scoped_parts = safe_parts
+            else:
+                scoped_parts = [safe_parts[0], session_id, *safe_parts[1:]]
+        else:
+            scoped_parts = ["tmp", session_id, *safe_parts]
+
+        candidate = (saved_root.joinpath(*scoped_parts)).resolve()
         try:
             candidate.relative_to(saved_root)
             return candidate
         except ValueError:
-            fallback = (saved_root / safe_parts[-1]).resolve()
+            fallback = (saved_root / "tmp" / session_id / safe_parts[-1]).resolve()
             return fallback
 
     async def execute(self, path: str, content: str, append: bool = False, **kwargs: Any) -> ToolResult:
@@ -87,7 +107,8 @@ class WriteTool(Tool):
         """
         try:
             saved_root = self._resolve_saved_root(kwargs)
-            file_path = self._normalize_under_saved(path, saved_root)
+            session_id = self._normalize_session_id(str(kwargs.get("_session_id", "")))
+            file_path = self._normalize_under_saved(path, saved_root, session_id)
             
             # Ensure parent directory exists
             file_path.parent.mkdir(parents=True, exist_ok=True)

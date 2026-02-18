@@ -71,6 +71,10 @@ session:
   path: "~/.captain-claw/sessions.db"
   auto_save: true
 
+# Workspace output root
+workspace:
+  path: "./workspace"
+
 # UI Settings
 ui:
   theme: "dark"  # dark or light

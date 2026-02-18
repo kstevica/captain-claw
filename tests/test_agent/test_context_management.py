@@ -1,5 +1,7 @@
-import pytest
+import copy
 from typing import Any
+
+import pytest
 
 from captain_claw.agent import Agent
 from captain_claw.config import get_config, set_config
@@ -9,6 +11,22 @@ from captain_claw.tools.registry import ToolRegistry
 
 
 class DummySessionManager:
+    async def save_session(self, session: Session) -> None:
+        return None
+
+
+class ProcreateSessionManager:
+    def __init__(self):
+        self._counter = 0
+
+    async def create_session(self, name: str, metadata: dict[str, Any] | None = None) -> Session:
+        self._counter += 1
+        return Session(
+            id=f"child-{self._counter}",
+            name=name,
+            metadata=metadata or {},
+        )
+
     async def save_session(self, session: Session) -> None:
         return None
 
@@ -228,15 +246,16 @@ def test_system_prompt_includes_workspace_folder_policy_with_session_subfolders(
     prompt = agent._build_system_prompt()
 
     assert "Workspace folder policy:" in prompt
+    assert "Workspace root path:" in prompt
     assert "All tool-generated files must be written inside:" in prompt
-    assert 'Current session subfolder name: "phase-3".' in prompt
-    assert "saved/scripts/phase-3/" in prompt
-    assert "saved/tools/phase-3/" in prompt
-    assert "saved/downloads/phase-3/" in prompt
-    assert "saved/media/phase-3/" in prompt
-    assert "saved/showcase/phase-3/" in prompt
-    assert "saved/skills/phase-3/" in prompt
-    assert "saved/tmp/phase-3/" in prompt
+    assert 'Current session subfolder id: "s1".' in prompt
+    assert "saved/scripts/s1/" in prompt
+    assert "saved/tools/s1/" in prompt
+    assert "saved/downloads/s1/" in prompt
+    assert "saved/media/s1/" in prompt
+    assert "saved/showcase/s1/" in prompt
+    assert "saved/skills/s1/" in prompt
+    assert "saved/tmp/s1/" in prompt
     assert "Script/tool generation workflow:" in prompt
 
 
@@ -420,5 +439,74 @@ def test_supports_tool_followup_uses_runtime_model_details():
         agent = Agent(provider=TokenAwareProvider())
         agent._runtime_model_details = {"provider": "ollama", "model": "minimax-m2.5:cloud"}
         assert agent._supports_tool_result_followup() is False
+    finally:
+        set_config(old_cfg)
+
+
+@pytest.mark.asyncio
+async def test_set_session_memory_protection_updates_metadata():
+    agent = Agent(provider=TokenAwareProvider())
+    agent.session = Session(id="s1", name="default")
+    agent.session_manager = DummySessionManager()
+
+    assert agent.is_session_memory_protected() is False
+
+    ok_on, message_on = await agent.set_session_memory_protection(True, persist=True)
+    assert ok_on is True
+    assert "enabled" in message_on
+    assert agent.is_session_memory_protected() is True
+
+    ok_off, message_off = await agent.set_session_memory_protection(False, persist=True)
+    assert ok_off is True
+    assert "disabled" in message_off
+    assert agent.is_session_memory_protected() is False
+
+
+@pytest.mark.asyncio
+async def test_procreate_sessions_compacts_and_keeps_parent_memory_unchanged():
+    old_cfg = get_config().model_copy(deep=True)
+    cfg = old_cfg.model_copy(deep=True)
+    cfg.context.max_tokens = 40
+    cfg.context.compaction_ratio = 0.2
+    set_config(cfg)
+    try:
+        monitor_outputs: list[dict[str, Any]] = []
+
+        def cb(name: str, args: dict, output: str) -> None:
+            monitor_outputs.append({"name": name, "args": args, "output": output})
+
+        agent = Agent(provider=TokenAwareProvider(), tool_output_callback=cb)
+        agent.session_manager = ProcreateSessionManager()
+
+        parent_one = Session(id="parent-1", name="alpha")
+        parent_two = Session(id="parent-2", name="beta")
+        for idx in range(10):
+            parent_one.add_message("user", f"alpha msg {idx} one two three four")
+            parent_two.add_message("assistant", f"beta msg {idx} one two three four")
+
+        parent_one_before = copy.deepcopy(parent_one.messages)
+        parent_two_before = copy.deepcopy(parent_two.messages)
+
+        child, stats = await agent.procreate_sessions(
+            parent_one=parent_one,
+            parent_two=parent_two,
+            new_name="child memory",
+            persist=True,
+        )
+
+        assert child.name == "child memory"
+        assert stats["merged_messages"] == len(child.messages)
+        assert stats["parent_one_compacted"] > 0
+        assert stats["parent_two_compacted"] > 0
+        assert any(msg.get("tool_name") == "compaction_summary" for msg in child.messages)
+        assert parent_one.messages == parent_one_before
+        assert parent_two.messages == parent_two_before
+        procreate_logs = [entry for entry in monitor_outputs if entry["name"] == "session_procreate"]
+        assert procreate_logs
+        steps = [str(entry.get("args", {}).get("step", "")) for entry in procreate_logs]
+        assert "start" in steps
+        assert "done" in steps
+        assert any("compact_parent_one" in step for step in steps)
+        assert any("compact_parent_two" in step for step in steps)
     finally:
         set_config(old_cfg)

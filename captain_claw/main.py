@@ -95,6 +95,8 @@ def main(
     # Ensure session directory exists
     session_path = Path(cfg.session.path).expanduser()
     session_path.parent.mkdir(parents=True, exist_ok=True)
+    workspace_path = cfg.resolved_workspace_path(Path.cwd())
+    workspace_path.mkdir(parents=True, exist_ok=True)
     
     # Run the interactive loop
     try:
@@ -202,6 +204,11 @@ async def run_interactive() -> None:
                 break
             elif result == "CLEAR":
                 if agent.session:
+                    if agent.is_session_memory_protected():
+                        ui.print_error(
+                            "Session memory is protected. Disable it with '/session protect off' first."
+                        )
+                        continue
                     agent.session.messages = []
                     await agent.session_manager.save_session(agent.session)
                     ui.clear_monitor_tool_output()
@@ -247,6 +254,16 @@ async def run_interactive() -> None:
                     f"{details.get('provider')}/{details.get('model')} "
                     f"(source={details.get('source') or 'unknown'}, id={details.get('id') or '-'})"
                 )
+                continue
+            elif result in {"SESSION_PROTECT_ON", "SESSION_PROTECT_OFF"}:
+                enabled = result.endswith("_ON")
+                ok, message = await agent.set_session_memory_protection(enabled, persist=True)
+                if ok:
+                    if agent.session:
+                        ui.print_session_info(agent.session)
+                    ui.print_success(message)
+                else:
+                    ui.print_error(message)
                 continue
             elif result.startswith("SESSION_MODEL_SET:"):
                 selector = result.split(":", 1)[1].strip()
@@ -370,6 +387,80 @@ async def run_interactive() -> None:
                         agent.refresh_session_runtime_flags()
                         ui.load_monitor_tool_output_from_session(agent.session.messages)
                         ui.print_success(f'Restored session "{agent.session.name}"')
+                continue
+            elif result.startswith("SESSION_PROCREATE:"):
+                payload_raw = result.split(":", 1)[1].strip()
+                try:
+                    payload = json.loads(payload_raw)
+                except Exception:
+                    ui.print_error("Invalid /session procreate payload")
+                    continue
+
+                parent_one_selector = str(payload.get("parent_one", "")).strip()
+                parent_two_selector = str(payload.get("parent_two", "")).strip()
+                new_name = str(payload.get("new_name", "")).strip()
+                if not parent_one_selector or not parent_two_selector or not new_name:
+                    ui.print_error(
+                        "Usage: /session procreate <id|name|#index> <id|name|#index> <new-name>"
+                    )
+                    continue
+
+                ui.append_tool_output(
+                    "session_procreate",
+                    {"step": "resolve_parents", "parent_one_selector": parent_one_selector, "parent_two_selector": parent_two_selector},
+                    "step=resolve_parents\nstatus=locating_parent_sessions",
+                )
+                parent_one = await agent.session_manager.select_session(parent_one_selector)
+                if not parent_one:
+                    ui.print_error(f"Session not found: {parent_one_selector}")
+                    continue
+                parent_two = await agent.session_manager.select_session(parent_two_selector)
+                if not parent_two:
+                    ui.print_error(f"Session not found: {parent_two_selector}")
+                    continue
+
+                if parent_one.id == parent_two.id:
+                    ui.print_error("Choose two different sessions for /session procreate")
+                    continue
+
+                try:
+                    child_session, stats = await agent.procreate_sessions(
+                        parent_one=parent_one,
+                        parent_two=parent_two,
+                        new_name=new_name,
+                        persist=True,
+                    )
+                except ValueError as e:
+                    ui.print_error(str(e))
+                    continue
+
+                ui.append_tool_output(
+                    "session_procreate",
+                    {"step": "switch_to_child", "session_id": child_session.id},
+                    (
+                        "step=switch_to_child\n"
+                        f'session_id="{child_session.id}"\n'
+                        f'session_name="{child_session.name}"'
+                    ),
+                )
+                agent.session = child_session
+                agent.refresh_session_runtime_flags()
+                ui.load_monitor_tool_output_from_session(agent.session.messages)
+                ui.append_tool_output(
+                    "session_procreate",
+                    {"step": "complete", "session_id": child_session.id},
+                    (
+                        "step=complete\n"
+                        f'session_id="{child_session.id}"\n'
+                        f"merged_messages={stats.get('merged_messages', 0)}"
+                    ),
+                )
+                ui.print_session_info(agent.session)
+                ui.print_success(
+                    f'Procreated session "{child_session.name}" '
+                    f"(merged_messages={stats.get('merged_messages', 0)}, "
+                    f"compacted={stats.get('parent_one_compacted', 0)}+{stats.get('parent_two_compacted', 0)})"
+                )
                 continue
             elif result == "CONFIG":
                 ui.print_config(get_config())

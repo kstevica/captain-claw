@@ -86,6 +86,8 @@ Sessions are first-class:
 - Rename sessions and set descriptions (manual or auto-generated from context).
 - Run a prompt in another session and return to your current one.
 - Persist model selection per session so each session can use a different model.
+- Protect session memory from accidental reset with `/session protect on`.
+- Procreate a new session from two parent sessions with compacted merged memory while keeping parents unchanged.
 
 ### Built-In Guardrails
 
@@ -167,6 +169,8 @@ captain-claw
 /sessions
 /session switch #1
 /session run #2 summarize current blockers
+/session protect on
+/session procreate #1 #2 "release merged context"
 ```
 
 ## Configuration
@@ -213,6 +217,9 @@ guards:
 
 tools:
   enabled: ["shell", "read", "write", "glob", "web_fetch"]
+
+workspace:
+  path: "./workspace" # local artifact root; tool outputs go under ./workspace/saved
 ```
 
 ### Useful Environment Overrides
@@ -236,7 +243,7 @@ CLAW_GUARDS__INPUT__LEVEL="ask_for_approval"
 | `/compact` | Manually compact older session history |
 | `/planning on\|off` | Enable/disable planning mode |
 | `/monitor on\|off` | Enable/disable monitor split view |
-| `/clear` | Clear current session messages |
+| `/clear` | Clear current session messages (blocked when `/session protect on`) |
 | `/exit` or `/quit` | Exit Captain Claw |
 
 ### Session Commands
@@ -251,6 +258,8 @@ CLAW_GUARDS__INPUT__LEVEL="ask_for_approval"
 | `/session rename <new-name>` | Rename active session |
 | `/session description <text>` | Set session description |
 | `/session description auto` | Auto-generate description from session context |
+| `/session protect on\|off` | Enable/disable active-session memory reset protection |
+| `/session procreate <id\|name\|#index> <id\|name\|#index> <new-name>` | Create a new session by merging compacted memory from two parent sessions |
 | `/session run <id\|name\|#index> <prompt>` | Run one prompt in another session, then return |
 | `/runin <id\|name\|#index> <prompt>` | Alias for `/session run` |
 
@@ -278,6 +287,13 @@ CLAW_GUARDS__INPUT__LEVEL="ask_for_approval"
 
 This workflow shows why Captain Claw works well as an agentic system for everyday engineering work: each thread can use its own model and maintain its own short-term context while staying persistent.
 
+### Session Protection and Procreate Notes
+
+- `/session protect on` prevents `/clear` from resetting the current session memory.
+- `/session protect off` re-enables normal `/clear` behavior.
+- `/session procreate ...` compacts each parent session memory snapshot before merging into the child session.
+- Parent sessions are not compacted or modified during procreation.
+
 ## Tooling and Execution Model
 
 Captain Claw can use:
@@ -290,15 +306,16 @@ Captain Claw can use:
 
 ### File Output Policy
 
-- Tool-generated files are written under `<launch-dir>/saved`.
-- Relative paths are resolved within `saved/`.
+- Tool-generated files are written under `<workspace-root>/saved` (default: `./workspace/saved`).
+- Relative paths are resolved within that saved root.
+- Writes are always session-scoped: category paths are normalized to `saved/<category>/<session-id>/...`; uncategorized paths are normalized to `saved/tmp/<session-id>/...`.
 - Unsafe absolute/traversal paths are remapped for safety.
 
 ### Script Workflow
 
 - Explicit script requests trigger script generation and execution workflow.
-- Generated scripts are saved under `saved/scripts/<session>/`.
-- Reusable tool helpers are saved under `saved/tools/<session>/`.
+- Generated scripts are saved under `saved/scripts/<session-id>/`.
+- Reusable tool helpers are saved under `saved/tools/<session-id>/`.
 
 ### Web Fetch Modes
 

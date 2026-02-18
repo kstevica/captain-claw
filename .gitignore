@@ -50,3 +50,4 @@ Thumbs.db
 # Captain Claw specific
 .captain-claw/
 sessions.db
+workspace/

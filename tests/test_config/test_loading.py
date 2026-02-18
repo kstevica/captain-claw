@@ -51,3 +51,15 @@ def test_load_falls_back_to_default_path_when_no_local(monkeypatch, tmp_path: Pa
 
     assert cfg.model.provider == "anthropic"
     assert cfg.model.model == "claude-3-5-sonnet-latest"
+
+
+def test_workspace_defaults_to_relative_workspace_folder():
+    cfg = Config()
+    assert cfg.workspace.path == "./workspace"
+
+
+def test_resolved_workspace_path_anchors_relative_to_runtime_base(tmp_path: Path):
+    cfg = Config()
+    cfg.workspace.path = "./workspace"
+    resolved = cfg.resolved_workspace_path(tmp_path)
+    assert resolved == (tmp_path / "workspace").resolve()

@@ -16,7 +16,7 @@ async def test_write_tool_uses_runtime_saved_root_for_relative_paths(tmp_path: P
         _runtime_base_path=tmp_path,
     )
 
-    expected = tmp_path / "saved" / "scripts" / "example.sh"
+    expected = tmp_path / "saved" / "scripts" / "default" / "example.sh"
     assert result.success is True
     assert expected.exists()
     assert expected.read_text(encoding="utf-8") == "echo hi\n"
@@ -50,7 +50,7 @@ async def test_write_tool_blocks_parent_traversal_outside_saved_root(tmp_path: P
         _saved_base_path=tmp_path / "saved",
     )
 
-    expected = tmp_path / "saved" / "escape.txt"
+    expected = tmp_path / "saved" / "tmp" / "default" / "escape.txt"
     assert result.success is True
     assert expected.exists()
     assert expected.read_text(encoding="utf-8") == "safe"
@@ -66,7 +66,24 @@ async def test_registry_injects_saved_root_for_write_tool(tmp_path: Path):
         arguments={"path": "report.txt", "content": "ready"},
     )
 
-    expected = tmp_path / "saved" / "report.txt"
+    expected = tmp_path / "saved" / "tmp" / "default" / "report.txt"
     assert result.success is True
     assert expected.exists()
     assert expected.read_text(encoding="utf-8") == "ready"
+
+
+@pytest.mark.asyncio
+async def test_registry_session_id_routes_write_into_session_folder(tmp_path: Path):
+    registry = ToolRegistry(base_path=tmp_path)
+    registry.register(WriteTool())
+
+    result = await registry.execute(
+        name="write",
+        arguments={"path": "downloads/file.txt", "content": "ok"},
+        session_id="session-42",
+    )
+
+    expected = tmp_path / "saved" / "downloads" / "session-42" / "file.txt"
+    assert result.success is True
+    assert expected.exists()
+    assert expected.read_text(encoding="utf-8") == "ok"

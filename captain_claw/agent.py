@@ -1,6 +1,7 @@
 """Agent orchestration for Captain Claw."""
 
 import asyncio
+import copy
 from datetime import UTC, datetime
 import json
 from pathlib import Path
@@ -52,7 +53,9 @@ class Agent:
         self.approval_callback = approval_callback
         self.tools = get_tool_registry()
         self.runtime_base_path = Path.cwd().resolve()
-        self.tools.set_runtime_base_path(self.runtime_base_path)
+        cfg = get_config()
+        self.workspace_base_path = cfg.resolved_workspace_path(self.runtime_base_path)
+        self.tools.set_runtime_base_path(self.workspace_base_path)
         self.session_manager = get_session_manager()
         self.session: Session | None = None
         self._initialized = False
@@ -356,6 +359,7 @@ class Agent:
         return await self.tools.execute(
             name=name,
             arguments=arguments,
+            session_id=self._current_session_slug(),
         )
 
     def _count_tokens(self, text: str) -> int:
@@ -687,6 +691,216 @@ class Agent:
             "compacted_messages": len(old_messages),
             "kept_messages": len(recent_messages),
             "trigger": trigger,
+        }
+
+    async def _compact_messages_snapshot(
+        self,
+        messages: list[dict[str, Any]],
+        trigger: str = "procreate",
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Compact a copied message list without mutating source session messages."""
+        snapshot = copy.deepcopy(messages)
+        if len(snapshot) < 3:
+            return snapshot, {"reason": "too_few_messages", "message_count": len(snapshot)}
+
+        cfg = get_config()
+        max_tokens = max(1, int(cfg.context.max_tokens))
+        ratio = float(cfg.context.compaction_ratio)
+        ratio = min(max(ratio, 0.05), 0.95)
+        target_recent_tokens = max(1, int(max_tokens * ratio))
+
+        max_keep_if_compacting = max(1, len(snapshot) - 1)
+        min_keep_messages = min(4, max_keep_if_compacting)
+        keep_count = 0
+        kept_tokens = 0
+        for msg in reversed(snapshot):
+            token_count = self._ensure_message_token_count(msg)
+            if keep_count < min_keep_messages or kept_tokens + token_count <= target_recent_tokens:
+                keep_count += 1
+                kept_tokens += token_count
+                continue
+            break
+
+        if keep_count >= len(snapshot):
+            if len(snapshot) > 1:
+                keep_count = len(snapshot) - 1
+            else:
+                return snapshot, {"reason": "nothing_to_compact", "message_count": len(snapshot)}
+
+        old_messages = snapshot[:-keep_count]
+        recent_messages = snapshot[-keep_count:]
+        summary_text = await self._summarize_for_compaction(old_messages)
+        summary_content = (
+            "Conversation summary of earlier messages (compacted memory):\n"
+            f"{summary_text.strip()}"
+        )
+        now_iso = datetime.now(UTC).isoformat()
+        summary_message = {
+            "role": "assistant",
+            "content": summary_content,
+            "tool_call_id": None,
+            "tool_name": "compaction_summary",
+            "tool_arguments": {
+                "trigger": trigger,
+                "compacted_messages": len(old_messages),
+                "kept_messages": len(recent_messages),
+            },
+            "token_count": self._count_tokens(summary_content),
+            "timestamp": now_iso,
+        }
+        compacted_messages = [summary_message, *recent_messages]
+        return compacted_messages, {
+            "compacted_messages": len(old_messages),
+            "kept_messages": len(recent_messages),
+            "before_messages": len(snapshot),
+            "after_messages": len(compacted_messages),
+            "trigger": trigger,
+        }
+
+    def is_session_memory_protected(self) -> bool:
+        """Return whether current session blocks memory reset operations."""
+        if not self.session or not isinstance(self.session.metadata, dict):
+            return False
+
+        protection_meta = self.session.metadata.get("memory_protection")
+        if isinstance(protection_meta, dict):
+            return bool(protection_meta.get("enabled", False))
+
+        legacy_value = self.session.metadata.get("memory_protected")
+        if isinstance(legacy_value, bool):
+            return legacy_value
+        return False
+
+    async def set_session_memory_protection(
+        self,
+        enabled: bool,
+        persist: bool = True,
+    ) -> tuple[bool, str]:
+        """Enable or disable memory reset protection for the active session."""
+        if not self.session:
+            return False, "No active session"
+
+        protection_meta = self.session.metadata.setdefault("memory_protection", {})
+        protection_meta["enabled"] = bool(enabled)
+        protection_meta["updated_at"] = datetime.now(UTC).isoformat()
+        if persist:
+            await self.session_manager.save_session(self.session)
+        if enabled:
+            return True, "Session memory protection enabled"
+        return True, "Session memory protection disabled"
+
+    async def procreate_sessions(
+        self,
+        parent_one: Session,
+        parent_two: Session,
+        new_name: str,
+        persist: bool = True,
+    ) -> tuple[Session, dict[str, Any]]:
+        """Create a child session by merging compacted memory from two parent sessions."""
+        if parent_one.id == parent_two.id:
+            raise ValueError("Choose two different parent sessions for /session procreate")
+
+        name = new_name.strip()
+        if not name:
+            raise ValueError("Usage: /session procreate <id|name|#index> <id|name|#index> <new-name>")
+
+        self._emit_tool_output(
+            "session_procreate",
+            {
+                "step": "start",
+                "parent_one_id": parent_one.id,
+                "parent_two_id": parent_two.id,
+                "new_name": name,
+            },
+            (
+                "step=start\n"
+                f'parent_one="{parent_one.name}" ({parent_one.id})\n'
+                f'parent_two="{parent_two.name}" ({parent_two.id})\n'
+                f'child_name="{name}"'
+            ),
+        )
+        self._emit_tool_output(
+            "session_procreate",
+            {"step": "compact_parent_one", "session_id": parent_one.id, "session_name": parent_one.name},
+            f'step=compact_parent_one\nworking_on="{parent_one.name}" ({parent_one.id})',
+        )
+        compacted_one, stats_one = await self._compact_messages_snapshot(
+            parent_one.messages,
+            trigger="procreate_parent_one",
+        )
+        self._emit_tool_output(
+            "session_procreate",
+            {"step": "compact_parent_one_done", "session_id": parent_one.id},
+            (
+                "step=compact_parent_one_done\n"
+                f"compacted_messages={int(stats_one.get('compacted_messages', 0))}\n"
+                f"kept_messages={int(stats_one.get('kept_messages', 0))}"
+            ),
+        )
+        self._emit_tool_output(
+            "session_procreate",
+            {"step": "compact_parent_two", "session_id": parent_two.id, "session_name": parent_two.name},
+            f'step=compact_parent_two\nworking_on="{parent_two.name}" ({parent_two.id})',
+        )
+        compacted_two, stats_two = await self._compact_messages_snapshot(
+            parent_two.messages,
+            trigger="procreate_parent_two",
+        )
+        self._emit_tool_output(
+            "session_procreate",
+            {"step": "compact_parent_two_done", "session_id": parent_two.id},
+            (
+                "step=compact_parent_two_done\n"
+                f"compacted_messages={int(stats_two.get('compacted_messages', 0))}\n"
+                f"kept_messages={int(stats_two.get('kept_messages', 0))}"
+            ),
+        )
+
+        self._emit_tool_output(
+            "session_procreate",
+            {"step": "merge_memory"},
+            "step=merge_memory\nstatus=combining_compacted_parent_memories",
+        )
+        merged_messages = [*compacted_one, *compacted_two]
+        now_iso = datetime.now(UTC).isoformat()
+        metadata = {
+            "procreate": {
+                "created_at": now_iso,
+                "parent_one": {"id": parent_one.id, "name": parent_one.name, "stats": stats_one},
+                "parent_two": {"id": parent_two.id, "name": parent_two.name, "stats": stats_two},
+                "merged_messages": len(merged_messages),
+            }
+        }
+
+        self._emit_tool_output(
+            "session_procreate",
+            {"step": "create_child_session", "new_name": name},
+            f'step=create_child_session\nchild_name="{name}"',
+        )
+        child = await self.session_manager.create_session(name=name, metadata=metadata)
+        child.messages = merged_messages
+        child.updated_at = now_iso
+        if persist:
+            self._emit_tool_output(
+                "session_procreate",
+                {"step": "save_child_session", "session_id": child.id},
+                f'step=save_child_session\nsession_id="{child.id}"',
+            )
+            await self.session_manager.save_session(child)
+
+        self._emit_tool_output(
+            "session_procreate",
+            {"step": "done", "session_id": child.id, "merged_messages": len(merged_messages)},
+            (
+                "step=done\n"
+                f'session_id="{child.id}"\n'
+                f"merged_messages={len(merged_messages)}"
+            ),
+        )
+        return child, {
+            "parent_one_compacted": int(stats_one.get("compacted_messages", 0)),
+            "parent_two_compacted": int(stats_two.get("compacted_messages", 0)),
+            "merged_messages": len(merged_messages),
         }
 
     async def _auto_compact_if_needed(self) -> None:
@@ -1187,7 +1401,7 @@ class Agent:
 
     def _build_system_prompt(self) -> str:
         """Build the system prompt."""
-        session_name = self._current_session_slug()
+        session_id = self._current_session_slug()
 
         planning_block = ""
         if self.planning_enabled:
@@ -1200,8 +1414,9 @@ class Agent:
         return self.instructions.render(
             "system_prompt.md",
             runtime_base_path=self.runtime_base_path,
+            workspace_root=self.workspace_base_path,
             saved_root=saved_root,
-            session_name=session_name,
+            session_id=session_id,
             planning_block=planning_block,
         )
 
@@ -1536,21 +1751,21 @@ class Agent:
         return f"cd {script_dir} && {runner}"
 
     def _current_session_slug(self) -> str:
-        """Return normalized session name used for folder scoping."""
-        session_name = "default"
-        if self.session and self.session.name:
-            raw_name = str(self.session.name).strip()
-            normalized = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw_name).strip("-")
+        """Return normalized session id used for folder scoping."""
+        session_key = "default"
+        if self.session and self.session.id:
+            raw_id = str(self.session.id).strip()
+            normalized = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw_id).strip("-")
             if normalized:
-                session_name = normalized
-        return session_name
+                session_key = normalized
+        return session_key
 
     def _build_script_relative_path(
         self,
         user_input: str,
         extension: str,
     ) -> str:
-        """Build script path under scripts/<session>/."""
+        """Build script path under scripts/<session-id>/."""
         ext = extension if extension.startswith(".") else f".{extension}"
         requested = self._extract_requested_write_path(user_input)
         filename: str

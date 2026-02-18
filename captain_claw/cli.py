@@ -1,19 +1,20 @@
 """CLI framework for Captain Claw."""
 
 import atexit
+import asyncio
 from collections import deque
 from datetime import datetime
 import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import sys
 import termios
 import textwrap
-import tty
-import asyncio
 import time
+import tty
 from typing import Any
 
 from captain_claw.config import get_config
@@ -151,9 +152,11 @@ Commands:
   /session rename <new-name> - Rename the active session
   /session description <text> - Set active session description
   /session description auto - Auto-generate description from session context
+  /session protect on|off - Protect/unprotect current session memory reset
   /session model - Show active session model selection
   /session model list - List allowed models from config
   /session model <id|#index|provider:model|default> - Set session model
+  /session procreate <id|name|#index> <id|name|#index> <new-name> - Merge two sessions into a new one
   /session run <id|name|#index> <prompt> - Run one prompt in another session, then return
   /models         - List allowed models from config
   /runin <id|name|#index> <prompt> - Alias for /session run
@@ -823,6 +826,12 @@ Commands:
         description = str(metadata.get("description", "")).strip()
         desc_line = f"Description: {description}\n" if description else ""
         model_selection = metadata.get("model_selection") if isinstance(metadata.get("model_selection"), dict) else None
+        protection_meta = (
+            metadata.get("memory_protection")
+            if isinstance(metadata.get("memory_protection"), dict)
+            else None
+        )
+        protection_line = "Protection: on\n" if protection_meta and protection_meta.get("enabled") else ""
         model_line = ""
         if model_selection:
             model_provider = str(model_selection.get("provider", "")).strip()
@@ -833,7 +842,8 @@ Commands:
                 model_line = f"Model: {model_provider}/{model_name}{id_part}\n"
         if self._monitor_mode and self._sticky_footer:
             self._append_chat_text(
-                f"\nSession: {session.name}\nID: {session.id}\nMessages: {len(session.messages)}\n{model_line}{desc_line}\n"
+                f"\nSession: {session.name}\nID: {session.id}\nMessages: {len(session.messages)}\n"
+                f"{model_line}{protection_line}{desc_line}\n"
             )
             self._render_monitor_view()
             return
@@ -843,6 +853,8 @@ Commands:
         print(f"Messages: {len(session.messages)}")
         if model_line:
             print(model_line.strip())
+        if protection_line:
+            print(protection_line.strip())
         if description:
             print(f"Description: {description}")
         print()
@@ -1052,6 +1064,45 @@ Commands:
                     return None
                 payload = json.dumps({"description": parsed}, ensure_ascii=True)
                 return f"SESSION_DESCRIPTION_SET:{payload}"
+            if subcommand == "protect":
+                protect_arg = selector[len(session_parts[0]) :].strip().lower()
+                if protect_arg == "on":
+                    return "SESSION_PROTECT_ON"
+                if protect_arg == "off":
+                    return "SESSION_PROTECT_OFF"
+                self.print_error("Usage: /session protect on|off")
+                return None
+            if subcommand == "procreate":
+                procreate_arg = selector[len(session_parts[0]) :].strip()
+                try:
+                    parsed_args = shlex.split(procreate_arg)
+                except ValueError:
+                    self.print_error(
+                        "Usage: /session procreate <id|name|#index> <id|name|#index> <new-name>"
+                    )
+                    return None
+                if len(parsed_args) < 3:
+                    self.print_error(
+                        "Usage: /session procreate <id|name|#index> <id|name|#index> <new-name>"
+                    )
+                    return None
+                parent_one = parsed_args[0].strip()
+                parent_two = parsed_args[1].strip()
+                new_name = " ".join(parsed_args[2:]).strip()
+                if not parent_one or not parent_two or not new_name:
+                    self.print_error(
+                        "Usage: /session procreate <id|name|#index> <id|name|#index> <new-name>"
+                    )
+                    return None
+                payload = json.dumps(
+                    {
+                        "parent_one": parent_one,
+                        "parent_two": parent_two,
+                        "new_name": new_name,
+                    },
+                    ensure_ascii=True,
+                )
+                return f"SESSION_PROCREATE:{payload}"
             if subcommand == "model":
                 model_arg = selector[len(session_parts[0]) :].strip()
                 if not model_arg:

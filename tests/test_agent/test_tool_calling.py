@@ -467,7 +467,7 @@ async def test_cloud_mode_auto_runs_write_when_user_requested_file_output(tmp_pa
             "fetch website www.hr, summarize the content and write it to file wwwhr.txt"
         )
 
-        expected = tmp_path / "saved" / "wwwhr.txt"
+        expected = tmp_path / "saved" / "tmp" / "s1" / "wwwhr.txt"
         assert expected.exists()
         saved_content = expected.read_text(encoding="utf-8")
         assert "Summary: www.hr is currently a minimal landing page." in saved_content
@@ -501,7 +501,7 @@ async def test_explicit_generate_script_forces_write_and_run_from_scripts_dir(tm
 
     result = await agent.complete("generate script that prints hello")
 
-    scripts_dir = tmp_path / "saved" / "scripts" / "default"
+    scripts_dir = tmp_path / "saved" / "scripts" / "s1"
     created_files = list(scripts_dir.glob("generated_script_*.py"))
     assert created_files
     assert "hello from generated script" in created_files[0].read_text(encoding="utf-8")
