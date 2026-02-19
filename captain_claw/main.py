@@ -38,6 +38,8 @@ from captain_claw.execution_queue import (
     resolve_session_lane,
 )
 from captain_claw.logging import configure_logging, log, set_system_log_sink
+from captain_claw.discord_bridge import DiscordBridge, DiscordMessage
+from captain_claw.slack_bridge import SlackBridge, SlackMessage
 from captain_claw.telegram_bridge import TelegramBridge, TelegramMessage
 
 T = TypeVar("T")
@@ -157,14 +159,32 @@ async def run_interactive() -> None:
     cron_running_job_ids: set[str] = set()
     cron_poll_seconds = 2.0
     telegram_cfg = get_config().telegram
+    slack_cfg = get_config().slack
+    discord_cfg = get_config().discord
     telegram_enabled = bool(telegram_cfg.enabled or telegram_cfg.bot_token.strip())
+    slack_enabled = bool(slack_cfg.enabled or slack_cfg.bot_token.strip())
+    discord_enabled = bool(discord_cfg.enabled or discord_cfg.bot_token.strip())
     telegram_bridge: TelegramBridge | None = None
+    slack_bridge: SlackBridge | None = None
+    discord_bridge: DiscordBridge | None = None
     telegram_poll_task: asyncio.Task[None] | None = None
+    slack_poll_task: asyncio.Task[None] | None = None
+    discord_poll_task: asyncio.Task[None] | None = None
     telegram_offset: int | None = None
+    slack_offsets: dict[str, str] = {}
+    discord_offsets: dict[str, str] = {}
     approved_telegram_users: dict[str, dict[str, object]] = {}
     pending_telegram_pairings: dict[str, dict[str, object]] = {}
+    approved_slack_users: dict[str, dict[str, object]] = {}
+    pending_slack_pairings: dict[str, dict[str, object]] = {}
+    approved_discord_users: dict[str, dict[str, object]] = {}
+    pending_discord_pairings: dict[str, dict[str, object]] = {}
     telegram_state_key_approved = "telegram_approved_users"
     telegram_state_key_pending = "telegram_pending_pairings"
+    slack_state_key_approved = "slack_approved_users"
+    slack_state_key_pending = "slack_pending_pairings"
+    discord_state_key_approved = "discord_approved_users"
+    discord_state_key_pending = "discord_pending_pairings"
     telegram_command_specs: list[tuple[str, str]] = [
         ("start", "Start Captain Claw in Telegram"),
         ("help", "Show Telegram command guide"),
@@ -211,11 +231,31 @@ async def run_interactive() -> None:
             json.dumps(pending_telegram_pairings, ensure_ascii=True, sort_keys=True),
         )
 
-    def _generate_pairing_token() -> str:
+    async def _save_slack_state() -> None:
+        await agent.session_manager.set_app_state(
+            slack_state_key_approved,
+            json.dumps(approved_slack_users, ensure_ascii=True, sort_keys=True),
+        )
+        await agent.session_manager.set_app_state(
+            slack_state_key_pending,
+            json.dumps(pending_slack_pairings, ensure_ascii=True, sort_keys=True),
+        )
+
+    async def _save_discord_state() -> None:
+        await agent.session_manager.set_app_state(
+            discord_state_key_approved,
+            json.dumps(approved_discord_users, ensure_ascii=True, sort_keys=True),
+        )
+        await agent.session_manager.set_app_state(
+            discord_state_key_pending,
+            json.dumps(pending_discord_pairings, ensure_ascii=True, sort_keys=True),
+        )
+
+    def _generate_pairing_token(pending_map: dict[str, dict[str, object]]) -> str:
         alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         while True:
             token = "".join(secrets.choice(alphabet) for _ in range(8))
-            if token not in pending_telegram_pairings:
+            if token not in pending_map:
                 return token
 
     async def _telegram_send(chat_id: int, text: str, *, reply_to_message_id: int | None = None) -> None:
@@ -263,11 +303,94 @@ async def run_interactive() -> None:
         except Exception as e:
             ui.append_system_line(f"Telegram mark-read failed: {str(e)}")
 
-    def _truncate_telegram_text(text: str, max_chars: int = 220) -> str:
+    async def _slack_send(
+        channel_id: str,
+        text: str,
+        *,
+        reply_to_message_ts: str = "",
+    ) -> None:
+        if not slack_bridge:
+            return
+        try:
+            await slack_bridge.send_message(
+                channel_id=channel_id,
+                text=text,
+                reply_to_message_ts=reply_to_message_ts,
+            )
+            await _slack_monitor_event(
+                "outgoing_message",
+                channel_id=channel_id,
+                reply_to_message_ts=reply_to_message_ts,
+                chars=len(str(text or "")),
+                text_preview=_truncate_chat_text(text),
+            )
+        except Exception as e:
+            ui.append_system_line(f"Slack send failed: {str(e)}")
+
+    async def _slack_send_chat_action(channel_id: str, action: str = "typing") -> None:
+        if not slack_bridge:
+            return
+        try:
+            await slack_bridge.send_chat_action(channel_id=channel_id, action=action)
+        except Exception as e:
+            ui.append_system_line(f"Slack chat action failed: {str(e)}")
+
+    async def _slack_mark_read(message: SlackMessage) -> None:
+        if not slack_bridge:
+            return
+        try:
+            await slack_bridge.mark_read(channel_id=message.channel_id, message_ts=message.message_ts)
+        except Exception as e:
+            ui.append_system_line(f"Slack mark-read failed: {str(e)}")
+
+    async def _discord_send(
+        channel_id: str,
+        text: str,
+        *,
+        reply_to_message_id: str = "",
+    ) -> None:
+        if not discord_bridge:
+            return
+        try:
+            await discord_bridge.send_message(
+                channel_id=channel_id,
+                text=text,
+                reply_to_message_id=reply_to_message_id,
+            )
+            await _discord_monitor_event(
+                "outgoing_message",
+                channel_id=channel_id,
+                reply_to_message_id=reply_to_message_id,
+                chars=len(str(text or "")),
+                text_preview=_truncate_chat_text(text),
+            )
+        except Exception as e:
+            ui.append_system_line(f"Discord send failed: {str(e)}")
+
+    async def _discord_send_chat_action(channel_id: str, action: str = "typing") -> None:
+        if not discord_bridge:
+            return
+        try:
+            await discord_bridge.send_chat_action(channel_id=channel_id, action=action)
+        except Exception as e:
+            ui.append_system_line(f"Discord chat action failed: {str(e)}")
+
+    async def _discord_mark_read(message: DiscordMessage) -> None:
+        if not discord_bridge:
+            return
+        try:
+            await discord_bridge.mark_read(channel_id=message.channel_id, message_id=message.id)
+        except Exception as e:
+            ui.append_system_line(f"Discord mark-read failed: {str(e)}")
+
+    def _truncate_chat_text(text: str, max_chars: int = 220) -> str:
         compact = str(text or "").strip().replace("\n", " ")
         if len(compact) <= max_chars:
             return compact
         return compact[:max_chars].rstrip() + "..."
+
+    def _truncate_telegram_text(text: str, max_chars: int = 220) -> str:
+        return _truncate_chat_text(text, max_chars=max_chars)
 
     async def _telegram_monitor_event(step: str, **args: object) -> None:
         payload: dict[str, object] = {"step": step}
@@ -282,6 +405,42 @@ async def run_interactive() -> None:
                 role="tool",
                 content=body_text,
                 tool_name="telegram",
+                tool_arguments=payload,
+                token_count=agent._count_tokens(body_text),
+            )
+            await agent.session_manager.save_session(agent.session)
+
+    async def _slack_monitor_event(step: str, **args: object) -> None:
+        payload: dict[str, object] = {"step": step}
+        payload.update(args)
+        body_lines = [f"step={step}"]
+        for key, value in args.items():
+            body_lines.append(f"{key}={value}")
+        body_text = "\n".join(body_lines)
+        ui.append_tool_output("slack", payload, body_text)
+        if agent.session:
+            agent.session.add_message(
+                role="tool",
+                content=body_text,
+                tool_name="slack",
+                tool_arguments=payload,
+                token_count=agent._count_tokens(body_text),
+            )
+            await agent.session_manager.save_session(agent.session)
+
+    async def _discord_monitor_event(step: str, **args: object) -> None:
+        payload: dict[str, object] = {"step": step}
+        payload.update(args)
+        body_lines = [f"step={step}"]
+        for key, value in args.items():
+            body_lines.append(f"{key}={value}")
+        body_text = "\n".join(body_lines)
+        ui.append_tool_output("discord", payload, body_text)
+        if agent.session:
+            agent.session.add_message(
+                role="tool",
+                content=body_text,
+                tool_name="discord",
                 tool_arguments=payload,
                 token_count=agent._count_tokens(body_text),
             )
@@ -337,8 +496,8 @@ async def run_interactive() -> None:
                 paths.append(path)
         return paths
 
-    def _telegram_user_requested_audio(text: str) -> bool:
-        """Heuristic check for Telegram audio/TTS request intent."""
+    def _remote_user_requested_audio(text: str) -> bool:
+        """Heuristic check for remote audio/TTS request intent."""
         lowered = str(text or "").strip().lower()
         if not lowered:
             return False
@@ -355,6 +514,9 @@ async def run_interactive() -> None:
             "spoken overview",
         )
         return any(hint in lowered for hint in audio_hints)
+
+    def _telegram_user_requested_audio(text: str) -> bool:
+        return _remote_user_requested_audio(text)
 
     async def _telegram_send_audio_file(
         chat_id: int,
@@ -480,6 +642,199 @@ async def run_interactive() -> None:
             )
             ui.append_system_line(f"Telegram auto TTS failed: {str(e)}")
 
+    async def _slack_send_audio_file(
+        channel_id: str,
+        path: Path,
+        *,
+        caption: str = "",
+    ) -> bool:
+        if not slack_bridge:
+            return False
+        try:
+            await slack_bridge.send_audio_file(
+                channel_id=channel_id,
+                file_path=path,
+                caption=caption,
+            )
+            size_bytes = 0
+            try:
+                size_bytes = int(path.stat().st_size)
+            except Exception:
+                size_bytes = 0
+            await _slack_monitor_event(
+                "outgoing_audio",
+                channel_id=channel_id,
+                path=str(path),
+                size_bytes=size_bytes,
+            )
+            return True
+        except Exception as e:
+            await _slack_monitor_event(
+                "outgoing_audio_error",
+                channel_id=channel_id,
+                path=str(path),
+                error=str(e),
+            )
+            ui.append_system_line(f"Slack audio send failed: {str(e)}")
+            return False
+
+    async def _discord_send_audio_file(
+        channel_id: str,
+        path: Path,
+        *,
+        caption: str = "",
+        reply_to_message_id: str = "",
+    ) -> bool:
+        if not discord_bridge:
+            return False
+        try:
+            await discord_bridge.send_audio_file(
+                channel_id=channel_id,
+                file_path=path,
+                caption=caption,
+                reply_to_message_id=reply_to_message_id,
+            )
+            size_bytes = 0
+            try:
+                size_bytes = int(path.stat().st_size)
+            except Exception:
+                size_bytes = 0
+            await _discord_monitor_event(
+                "outgoing_audio",
+                channel_id=channel_id,
+                reply_to_message_id=reply_to_message_id,
+                path=str(path),
+                size_bytes=size_bytes,
+            )
+            return True
+        except Exception as e:
+            await _discord_monitor_event(
+                "outgoing_audio_error",
+                channel_id=channel_id,
+                reply_to_message_id=reply_to_message_id,
+                path=str(path),
+                error=str(e),
+            )
+            ui.append_system_line(f"Discord audio send failed: {str(e)}")
+            return False
+
+    async def _maybe_send_audio_for_turn(
+        *,
+        user_prompt: str,
+        assistant_text: str,
+        turn_start_idx: int,
+        interaction_label: str,
+        send_audio: Callable[[Path, str], Awaitable[bool]],
+        send_error_text: Callable[[str], Awaitable[None]],
+        monitor_error: Callable[[str], Awaitable[None]],
+    ) -> None:
+        generated_paths = _collect_turn_generated_audio_paths(turn_start_idx)
+        if generated_paths:
+            for path in generated_paths:
+                await send_audio(path, "Requested audio output")
+            return
+        if not _remote_user_requested_audio(user_prompt):
+            return
+        if "pocket_tts" not in agent.tools.list_tools():
+            return
+
+        source_text = str(assistant_text or "").strip()
+        if not source_text and agent.session:
+            for msg in reversed(agent.session.messages):
+                if str(msg.get("role", "")).strip().lower() != "assistant":
+                    continue
+                candidate = str(msg.get("content", "")).strip()
+                if candidate:
+                    source_text = candidate
+                    break
+        if not source_text:
+            return
+
+        cfg = get_config()
+        max_chars = max(1, int(getattr(cfg.tools.pocket_tts, "max_chars", 4000)))
+        tts_text = source_text[:max_chars]
+        tool_args: dict[str, object] = {"text": tts_text}
+        try:
+            result = await agent._execute_tool_with_guard(
+                name="pocket_tts",
+                arguments=tool_args,
+                interaction_label=interaction_label,
+            )
+            tool_output = result.content if result.success else f"Error: {result.error}"
+            agent._add_session_message(
+                role="tool",
+                content=tool_output,
+                tool_name="pocket_tts",
+                tool_arguments=tool_args,
+            )
+            agent._emit_tool_output("pocket_tts", tool_args, tool_output)
+            if agent.session:
+                await agent.session_manager.save_session(agent.session)
+
+            if not result.success:
+                await send_error_text(f"Audio generation failed: {str(result.error or 'unknown error')}")
+                return
+
+            for path in _extract_audio_paths_from_tool_output(tool_output):
+                await send_audio(path, "Audio summary")
+        except Exception as e:
+            await monitor_error(str(e))
+
+    async def _slack_maybe_send_audio_for_turn(
+        channel_id: str,
+        user_prompt: str,
+        assistant_text: str,
+        turn_start_idx: int,
+    ) -> None:
+        await _maybe_send_audio_for_turn(
+            user_prompt=user_prompt,
+            assistant_text=assistant_text,
+            turn_start_idx=turn_start_idx,
+            interaction_label="slack_auto_tts",
+            send_audio=lambda path, caption: _slack_send_audio_file(
+                channel_id=channel_id,
+                path=path,
+                caption=caption,
+            ),
+            send_error_text=lambda text: _slack_send(channel_id=channel_id, text=text),
+            monitor_error=lambda error: _slack_monitor_event(
+                "auto_tts_error",
+                channel_id=channel_id,
+                error=error,
+            ),
+        )
+
+    async def _discord_maybe_send_audio_for_turn(
+        channel_id: str,
+        reply_to_message_id: str,
+        user_prompt: str,
+        assistant_text: str,
+        turn_start_idx: int,
+    ) -> None:
+        await _maybe_send_audio_for_turn(
+            user_prompt=user_prompt,
+            assistant_text=assistant_text,
+            turn_start_idx=turn_start_idx,
+            interaction_label="discord_auto_tts",
+            send_audio=lambda path, caption: _discord_send_audio_file(
+                channel_id=channel_id,
+                path=path,
+                caption=caption,
+                reply_to_message_id=reply_to_message_id,
+            ),
+            send_error_text=lambda text: _discord_send(
+                channel_id=channel_id,
+                text=text,
+                reply_to_message_id=reply_to_message_id,
+            ),
+            monitor_error=lambda error: _discord_monitor_event(
+                "auto_tts_error",
+                channel_id=channel_id,
+                reply_to_message_id=reply_to_message_id,
+                error=error,
+            ),
+        )
+
     async def _run_with_telegram_typing(
         chat_id: int,
         work: Awaitable[T],
@@ -512,7 +867,67 @@ async def run_interactive() -> None:
             except asyncio.CancelledError:
                 pass
 
-    def _telegram_user_display(record: dict[str, object]) -> str:
+    async def _run_with_slack_typing(
+        channel_id: str,
+        work: Awaitable[T],
+        *,
+        heartbeat_seconds: float = 4.0,
+    ) -> T:
+        if not slack_bridge:
+            return await work
+        stop = asyncio.Event()
+
+        async def _typing_heartbeat() -> None:
+            interval = max(1.0, float(heartbeat_seconds))
+            while not stop.is_set():
+                await _slack_send_chat_action(channel_id, action="typing")
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=interval)
+                except TimeoutError:
+                    continue
+
+        heartbeat = asyncio.create_task(_typing_heartbeat())
+        try:
+            return await work
+        finally:
+            stop.set()
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
+
+    async def _run_with_discord_typing(
+        channel_id: str,
+        work: Awaitable[T],
+        *,
+        heartbeat_seconds: float = 4.0,
+    ) -> T:
+        if not discord_bridge:
+            return await work
+        stop = asyncio.Event()
+
+        async def _typing_heartbeat() -> None:
+            interval = max(1.0, float(heartbeat_seconds))
+            while not stop.is_set():
+                await _discord_send_chat_action(channel_id, action="typing")
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=interval)
+                except TimeoutError:
+                    continue
+
+        heartbeat = asyncio.create_task(_typing_heartbeat())
+        try:
+            return await work
+        finally:
+            stop.set()
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
+
+    def _chat_user_display(record: dict[str, object]) -> str:
         user_id = str(record.get("user_id", "")).strip()
         username = str(record.get("username", "")).strip()
         first_name = str(record.get("first_name", "")).strip()
@@ -522,12 +937,15 @@ async def run_interactive() -> None:
             return f"{first_name} ({user_id})"
         return user_id or "unknown"
 
-    def _cleanup_expired_pairings() -> None:
-        if not pending_telegram_pairings:
+    def _telegram_user_display(record: dict[str, object]) -> str:
+        return _chat_user_display(record)
+
+    def _cleanup_expired_pairings(pending_map: dict[str, dict[str, object]]) -> None:
+        if not pending_map:
             return
         now_ts = now_utc().timestamp()
         expired = []
-        for token, payload in pending_telegram_pairings.items():
+        for token, payload in pending_map.items():
             expires_at_raw = str(payload.get("expires_at", "")).strip()
             if not expires_at_raw:
                 continue
@@ -538,13 +956,13 @@ async def run_interactive() -> None:
             except Exception:
                 expired.append(token)
         for token in expired:
-            pending_telegram_pairings.pop(token, None)
+            pending_map.pop(token, None)
 
     async def _approve_telegram_pairing_token(raw_token: str) -> tuple[bool, str]:
         token = str(raw_token or "").strip().upper()
         if not token:
             return False, "Usage: /approve user telegram <token>"
-        _cleanup_expired_pairings()
+        _cleanup_expired_pairings(pending_telegram_pairings)
         record = pending_telegram_pairings.get(token)
         if not isinstance(record, dict):
             return False, f"Telegram pairing token not found or expired: {token}"
@@ -574,10 +992,92 @@ async def run_interactive() -> None:
                     "All chat and supported slash commands are available."
                 ),
             )
-        return True, f"Approved Telegram user: {_telegram_user_display(approved_telegram_users[user_id])}"
+        return True, f"Approved Telegram user: {_chat_user_display(approved_telegram_users[user_id])}"
+
+    async def _approve_slack_pairing_token(raw_token: str) -> tuple[bool, str]:
+        token = str(raw_token or "").strip().upper()
+        if not token:
+            return False, "Usage: /approve user slack <token>"
+        _cleanup_expired_pairings(pending_slack_pairings)
+        record = pending_slack_pairings.get(token)
+        if not isinstance(record, dict):
+            return False, f"Slack pairing token not found or expired: {token}"
+        user_id = str(record.get("user_id", "")).strip()
+        if not user_id:
+            pending_slack_pairings.pop(token, None)
+            await _save_slack_state()
+            return False, f"Slack pairing token invalid: {token}"
+
+        approved_slack_users[user_id] = {
+            "user_id": user_id,
+            "channel_id": str(record.get("channel_id", "")).strip(),
+            "username": str(record.get("username", "")).strip(),
+            "first_name": "",
+            "approved_at": _utc_now_iso(),
+            "token": token,
+        }
+        pending_slack_pairings.pop(token, None)
+        await _save_slack_state()
+
+        channel_id = str(approved_slack_users[user_id].get("channel_id", "")).strip()
+        if channel_id and slack_bridge:
+            await _slack_send(
+                channel_id,
+                (
+                    "Pairing approved. You can now use Captain Claw.\n"
+                    "All chat and supported slash-style commands are available."
+                ),
+            )
+        return True, f"Approved Slack user: {_chat_user_display(approved_slack_users[user_id])}"
+
+    async def _approve_discord_pairing_token(raw_token: str) -> tuple[bool, str]:
+        token = str(raw_token or "").strip().upper()
+        if not token:
+            return False, "Usage: /approve user discord <token>"
+        _cleanup_expired_pairings(pending_discord_pairings)
+        record = pending_discord_pairings.get(token)
+        if not isinstance(record, dict):
+            return False, f"Discord pairing token not found or expired: {token}"
+        user_id = str(record.get("user_id", "")).strip()
+        if not user_id:
+            pending_discord_pairings.pop(token, None)
+            await _save_discord_state()
+            return False, f"Discord pairing token invalid: {token}"
+
+        approved_discord_users[user_id] = {
+            "user_id": user_id,
+            "channel_id": str(record.get("channel_id", "")).strip(),
+            "username": str(record.get("username", "")).strip(),
+            "first_name": "",
+            "approved_at": _utc_now_iso(),
+            "token": token,
+        }
+        pending_discord_pairings.pop(token, None)
+        await _save_discord_state()
+
+        channel_id = str(approved_discord_users[user_id].get("channel_id", "")).strip()
+        if channel_id and discord_bridge:
+            await _discord_send(
+                channel_id,
+                (
+                    "Pairing approved. You can now use Captain Claw.\n"
+                    "All chat and supported slash-style commands are available."
+                ),
+            )
+        return True, f"Approved Discord user: {_chat_user_display(approved_discord_users[user_id])}"
+
+    async def _approve_chat_pairing_token(platform: str, raw_token: str) -> tuple[bool, str]:
+        target = str(platform or "").strip().lower()
+        if target == "telegram":
+            return await _approve_telegram_pairing_token(raw_token)
+        if target == "slack":
+            return await _approve_slack_pairing_token(raw_token)
+        if target == "discord":
+            return await _approve_discord_pairing_token(raw_token)
+        return False, "Usage: /approve user <telegram|slack|discord> <token>"
 
     async def _pair_unknown_telegram_user(message: TelegramMessage) -> None:
-        _cleanup_expired_pairings()
+        _cleanup_expired_pairings(pending_telegram_pairings)
         user_id_key = str(message.user_id)
         if user_id_key in approved_telegram_users:
             return
@@ -587,7 +1087,7 @@ async def run_interactive() -> None:
                 existing_token = token
                 break
         if not existing_token:
-            existing_token = _generate_pairing_token()
+            existing_token = _generate_pairing_token(pending_telegram_pairings)
             ttl_minutes = max(1, int(telegram_cfg.pairing_ttl_minutes))
             expires = datetime.fromtimestamp(now_utc().timestamp() + ttl_minutes * 60, tz=now_utc().tzinfo)
             pending_telegram_pairings[existing_token] = {
@@ -609,6 +1109,76 @@ async def run_interactive() -> None:
                 f"/approve user telegram {existing_token}"
             ),
             reply_to_message_id=message.message_id,
+        )
+
+    async def _pair_unknown_slack_user(message: SlackMessage) -> None:
+        _cleanup_expired_pairings(pending_slack_pairings)
+        user_id_key = str(message.user_id).strip()
+        if user_id_key in approved_slack_users:
+            return
+        existing_token = ""
+        for token, payload in pending_slack_pairings.items():
+            if str(payload.get("user_id", "")).strip() == user_id_key:
+                existing_token = token
+                break
+        if not existing_token:
+            existing_token = _generate_pairing_token(pending_slack_pairings)
+            ttl_minutes = max(1, int(slack_cfg.pairing_ttl_minutes))
+            expires = datetime.fromtimestamp(now_utc().timestamp() + ttl_minutes * 60, tz=now_utc().tzinfo)
+            pending_slack_pairings[existing_token] = {
+                "user_id": user_id_key,
+                "channel_id": message.channel_id,
+                "username": message.username,
+                "first_name": "",
+                "created_at": _utc_now_iso(),
+                "expires_at": expires.isoformat(),
+            }
+            await _save_slack_state()
+
+        await _slack_send(
+            message.channel_id,
+            (
+                "Pairing required.\n"
+                f"Your pairing token: `{existing_token}`\n\n"
+                "Ask the Captain Claw operator to approve you with:\n"
+                f"/approve user slack {existing_token}"
+            ),
+            reply_to_message_ts=message.message_ts,
+        )
+
+    async def _pair_unknown_discord_user(message: DiscordMessage) -> None:
+        _cleanup_expired_pairings(pending_discord_pairings)
+        user_id_key = str(message.user_id).strip()
+        if user_id_key in approved_discord_users:
+            return
+        existing_token = ""
+        for token, payload in pending_discord_pairings.items():
+            if str(payload.get("user_id", "")).strip() == user_id_key:
+                existing_token = token
+                break
+        if not existing_token:
+            existing_token = _generate_pairing_token(pending_discord_pairings)
+            ttl_minutes = max(1, int(discord_cfg.pairing_ttl_minutes))
+            expires = datetime.fromtimestamp(now_utc().timestamp() + ttl_minutes * 60, tz=now_utc().tzinfo)
+            pending_discord_pairings[existing_token] = {
+                "user_id": user_id_key,
+                "channel_id": message.channel_id,
+                "username": message.username,
+                "first_name": "",
+                "created_at": _utc_now_iso(),
+                "expires_at": expires.isoformat(),
+            }
+            await _save_discord_state()
+
+        await _discord_send(
+            message.channel_id,
+            (
+                "Pairing required.\n"
+                f"Your pairing token: `{existing_token}`\n\n"
+                "Ask the Captain Claw operator to approve you with:\n"
+                f"/approve user discord {existing_token}"
+            ),
+            reply_to_message_id=message.id,
         )
 
     async def _enqueue_agent_task(
@@ -1750,11 +2320,8 @@ async def run_interactive() -> None:
             ]
         )
 
-    def _telegram_help_text() -> str:
-        lines = [
-            "Captain Claw Telegram commands:",
-            "",
-        ]
+    def _remote_help_text(platform_label: str) -> str:
+        lines = [f"Captain Claw {platform_label} commands:", ""]
         for command, description in telegram_command_specs:
             lines.append(f"/{command} - {description}")
         lines.extend(
@@ -1764,6 +2331,9 @@ async def run_interactive() -> None:
             ]
         )
         return "\n".join(lines)
+
+    def _telegram_help_text() -> str:
+        return _remote_help_text("Telegram")
 
     async def _register_telegram_commands() -> None:
         if not telegram_bridge:
@@ -1777,14 +2347,18 @@ async def run_interactive() -> None:
         except Exception as e:
             ui.append_system_line(f"Telegram command registration failed: {str(e)}")
 
-    async def _handle_telegram_command(message: TelegramMessage) -> bool:
-        """Handle Telegram slash command. Returns True when handled."""
-        raw_text = message.text.strip()
-        lowered_text = raw_text.lower()
-        chat_id = message.chat_id
+    async def _handle_remote_command(
+        *,
+        platform: str,
+        raw_text: str,
+        help_label: str,
+        sender_label: str,
+        send_text: Callable[[str], Awaitable[None]],
+        execute_prompt: Callable[[str, str], Awaitable[None]],
+    ) -> bool:
+        lowered_text = raw_text.strip().lower()
         if lowered_text == "/start" or lowered_text.startswith("/start "):
-            await _telegram_send(
-                chat_id,
+            await send_text(
                 (
                     "Captain Claw connected.\n"
                     "Use /help to see available commands.\n"
@@ -1793,23 +2367,22 @@ async def run_interactive() -> None:
             )
             return True
         if lowered_text == "/help" or lowered_text.startswith("/help "):
-            await _telegram_send(chat_id, _telegram_help_text())
+            await send_text(_remote_help_text(help_label))
             return True
 
-        result = ui.handle_special_command(message.text)
+        result = ui.handle_special_command(raw_text)
         if result is None:
             # Includes /help output and parser errors already shown in console.
-            await _telegram_send(chat_id, "Command processed.")
+            await send_text("Command processed.")
             return True
         if result == "EXIT":
-            await _telegram_send(chat_id, "`/exit` is only available in local console.")
+            await send_text("`/exit` is only available in local console.")
             return True
-        if result.startswith("APPROVE_TELEGRAM_USER:"):
-            await _telegram_send(chat_id, "This command is operator-only in local console.")
+        if result.startswith("APPROVE_CHAT_USER:") or result.startswith("APPROVE_TELEGRAM_USER:"):
+            await send_text("This command is operator-only in local console.")
             return True
         if result == "PIPELINE_INFO":
-            await _telegram_send(
-                chat_id,
+            await send_text(
                 (
                     "Pipeline mode: "
                     f"{agent.pipeline_mode} "
@@ -1819,67 +2392,66 @@ async def run_interactive() -> None:
             return True
         if result == "PLANNING_ON":
             await agent.set_pipeline_mode("contracts")
-            await _telegram_send(chat_id, "Pipeline mode set to contracts.")
+            await send_text("Pipeline mode set to contracts.")
             return True
         if result == "PLANNING_OFF":
             await agent.set_pipeline_mode("loop")
-            await _telegram_send(chat_id, "Pipeline mode set to loop.")
+            await send_text("Pipeline mode set to loop.")
             return True
         if result.startswith("PIPELINE_MODE:"):
             mode = result.split(":", 1)[1].strip().lower()
             try:
                 await agent.set_pipeline_mode(mode)
             except Exception:
-                await _telegram_send(chat_id, "Invalid pipeline mode. Use /pipeline loop|contracts")
+                await send_text("Invalid pipeline mode. Use /pipeline loop|contracts")
                 return True
-            await _telegram_send(chat_id, f"Pipeline mode set to {agent.pipeline_mode}.")
+            await send_text(f"Pipeline mode set to {agent.pipeline_mode}.")
             return True
         if result == "SKILLS_LIST":
             skills = agent.list_user_invocable_skills()
             if not skills:
-                await _telegram_send(chat_id, "No user-invocable skills available.")
+                await send_text("No user-invocable skills available.")
                 return True
             lines = ["Available skills:", "Use `/skill <name> [args]` to run one:"]
             for command in skills:
                 lines.append(f"- /skill {command.name}")
-            await _telegram_send(chat_id, "\n".join(lines))
+            await send_text("\n".join(lines))
             return True
         if result.startswith("SKILL_INVOKE:") or result.startswith("SKILL_ALIAS_INVOKE:"):
-            payload = json.loads(result.split(":", 1)[1].strip())
+            payload_raw = result.split(":", 1)[1].strip()
+            try:
+                payload = json.loads(payload_raw)
+            except Exception:
+                await send_text("Invalid /skill payload.")
+                return True
             skill_name = str(payload.get("name", "")).strip()
             skill_args = str(payload.get("args", "")).strip()
+            if not skill_name:
+                await send_text("Usage: /skill <name> [args]")
+                return True
             invocation = await agent.invoke_skill_command(skill_name, args=skill_args)
             if not bool(invocation.get("ok", False)):
-                await _telegram_send(chat_id, str(invocation.get("error", "Skill invocation failed.")))
+                if result.startswith("SKILL_ALIAS_INVOKE:"):
+                    await send_text(f"Unknown command: /{skill_name}")
+                else:
+                    await send_text(str(invocation.get("error", "Skill invocation failed.")))
                 return True
             mode = str(invocation.get("mode", "")).strip().lower()
             if mode == "dispatch":
-                await _telegram_send(chat_id, str(invocation.get("text", "")).strip() or "Done.")
+                await send_text(str(invocation.get("text", "")).strip() or "Done.")
                 return True
             prompt = str(invocation.get("prompt", "")).strip()
             if not prompt:
-                await _telegram_send(chat_id, "Skill invocation returned empty prompt.")
+                await send_text("Skill invocation returned empty prompt.")
                 return True
-            await _run_prompt_in_active_session(
-                prompt,
-                display_prompt=f"[TG skill:{skill_name}] {skill_args}".strip(),
-                on_assistant_text=lambda text: _telegram_send(chat_id, text),
-                after_turn=lambda turn_start_idx, user_prompt, assistant_text: _telegram_maybe_send_audio_for_turn(
-                    chat_id=chat_id,
-                    reply_to_message_id=message.message_id,
-                    user_prompt=user_prompt,
-                    assistant_text=assistant_text,
-                    turn_start_idx=turn_start_idx,
-                ),
-            )
+            await execute_prompt(prompt, f"[{sender_label} skill:{skill_name}] {skill_args}".strip())
             return True
         if result == "SESSION_INFO":
             if not agent.session:
-                await _telegram_send(chat_id, "No active session.")
+                await send_text("No active session.")
             else:
                 details = agent.get_runtime_model_details()
-                await _telegram_send(
-                    chat_id,
+                await send_text(
                     (
                         f"Session: {agent.session.name}\n"
                         f"ID: {agent.session.id}\n"
@@ -1891,7 +2463,7 @@ async def run_interactive() -> None:
         if result == "SESSIONS":
             sessions = await agent.session_manager.list_sessions(limit=20)
             if not sessions:
-                await _telegram_send(chat_id, "No sessions found.")
+                await send_text("No sessions found.")
                 return True
             lines = ["Sessions:"]
             for idx, session in enumerate(sessions, start=1):
@@ -1899,7 +2471,7 @@ async def run_interactive() -> None:
                 lines.append(
                     f"{marker} [{idx}] {session.name} ({session.id}) messages={len(session.messages)}"
                 )
-            await _telegram_send(chat_id, "\n".join(lines))
+            await send_text("\n".join(lines))
             return True
         if result == "MODELS":
             models = agent.get_allowed_models()
@@ -1915,42 +2487,40 @@ async def run_interactive() -> None:
                 lines.append(
                     f"[{idx}] {model.get('id')} -> {model.get('provider')}/{model.get('model')}{marker}"
                 )
-            await _telegram_send(chat_id, "\n".join(lines))
+            await send_text("\n".join(lines))
             return True
         if result == "CLEAR":
             if agent.session:
                 if agent.is_session_memory_protected():
-                    await _telegram_send(chat_id, "Session memory is protected. Disable with /session protect off.")
+                    await send_text("Session memory is protected. Disable with /session protect off.")
                     return True
                 agent.session.messages = []
                 await agent.session_manager.save_session(agent.session)
-                await _telegram_send(chat_id, "Session cleared.")
+                await send_text("Session cleared.")
             else:
-                await _telegram_send(chat_id, "No active session.")
+                await send_text("No active session.")
             return True
         if result == "COMPACT":
             compacted, stats = await agent.compact_session(force=True, trigger="manual")
             if compacted:
-                await _telegram_send(
-                    chat_id,
+                await send_text(
                     (
                         "Session compacted "
                         f"({int(stats.get('before_tokens', 0))} -> {int(stats.get('after_tokens', 0))} tokens)"
                     ),
                 )
             else:
-                await _telegram_send(chat_id, f"Compaction skipped: {str(stats.get('reason', 'not_needed'))}")
+                await send_text(f"Compaction skipped: {str(stats.get('reason', 'not_needed'))}")
             return True
         if result == "CONFIG":
-            await _telegram_send(chat_id, _format_active_configuration_text())
+            await send_text(_format_active_configuration_text())
             return True
         if result == "HISTORY":
-            await _telegram_send(chat_id, _format_recent_history(limit=30))
+            await send_text(_format_recent_history(limit=30))
             return True
         if result == "SESSION_MODEL_INFO":
             details = agent.get_runtime_model_details()
-            await _telegram_send(
-                chat_id,
+            await send_text(
                 (
                     "Active model: "
                     f"{details.get('provider')}/{details.get('model')} "
@@ -1961,7 +2531,7 @@ async def run_interactive() -> None:
         if result.startswith("SESSION_MODEL_SET:"):
             selector = result.split(":", 1)[1].strip()
             ok, message = await agent.set_session_model_by_selector(selector, persist=True)
-            await _telegram_send(chat_id, message)
+            await send_text(message)
             return True
         if result == "NEW" or result.startswith("NEW:"):
             session_name = "default"
@@ -1971,42 +2541,57 @@ async def run_interactive() -> None:
             agent.refresh_session_runtime_flags()
             if agent.session:
                 await agent.session_manager.set_last_active_session(agent.session.id)
-                await _telegram_send(chat_id, f"Started new session: {agent.session.name} ({agent.session.id})")
+                await send_text(f"Started new session: {agent.session.name} ({agent.session.id})")
             return True
         if result.startswith("SESSION_SELECT:"):
             selector = result.split(":", 1)[1].strip()
             selected = await agent.session_manager.select_session(selector)
             if not selected:
-                await _telegram_send(chat_id, f"Session not found: {selector}")
+                await send_text(f"Session not found: {selector}")
                 return True
             agent.session = selected
             agent.refresh_session_runtime_flags()
             await agent.session_manager.set_last_active_session(selected.id)
-            await _telegram_send(chat_id, f"Switched session: {selected.name} ({selected.id})")
+            await send_text(f"Switched session: {selected.name} ({selected.id})")
             return True
         if result.startswith("SESSION_RENAME:"):
             new_name = result.split(":", 1)[1].strip()
             if not agent.session:
-                await _telegram_send(chat_id, "No active session.")
+                await send_text("No active session.")
                 return True
             ok = await agent.session_manager.rename_session(agent.session.id, new_name)
             if not ok:
-                await _telegram_send(chat_id, "Failed to rename session.")
+                await send_text("Failed to rename session.")
                 return True
             updated = await agent.session_manager.load_session(agent.session.id)
             if updated:
                 agent.session = updated
-            await _telegram_send(chat_id, f"Session renamed to: {new_name}")
+            await send_text(f"Session renamed to: {new_name}")
             return True
         if result.startswith("CRON_ONEOFF:"):
-            payload = json.loads(result.split(":", 1)[1].strip())
+            payload_raw = result.split(":", 1)[1].strip()
+            try:
+                payload = json.loads(payload_raw)
+            except Exception:
+                await send_text("Invalid /cron payload.")
+                return True
             prompt = str(payload.get("prompt", "")).strip()
             if not prompt:
-                await _telegram_send(chat_id, "Usage: /cron \"<task>\"")
+                await send_text("Usage: /cron \"<task>\"")
                 return True
+            await execute_prompt(prompt, f"[{sender_label} cron oneoff] {prompt}")
+            return True
+        _ = platform
+        await send_text("Command requires local console in this version.")
+        return True
+
+    async def _handle_telegram_command(message: TelegramMessage) -> bool:
+        chat_id = message.chat_id
+
+        async def _execute_prompt(prompt: str, display_prompt: str) -> None:
             await _run_prompt_in_active_session(
                 prompt,
-                display_prompt=f"[TG cron oneoff] {prompt}",
+                display_prompt=display_prompt,
                 on_assistant_text=lambda text: _telegram_send(chat_id, text),
                 after_turn=lambda turn_start_idx, user_prompt, assistant_text: _telegram_maybe_send_audio_for_turn(
                     chat_id=chat_id,
@@ -2016,9 +2601,70 @@ async def run_interactive() -> None:
                     turn_start_idx=turn_start_idx,
                 ),
             )
-            return True
-        await _telegram_send(chat_id, "Command requires local console in this version.")
-        return True
+
+        return await _handle_remote_command(
+            platform="telegram",
+            raw_text=message.text,
+            help_label="Telegram",
+            sender_label="TG",
+            send_text=lambda text: _telegram_send(chat_id, text),
+            execute_prompt=_execute_prompt,
+        )
+
+    async def _handle_slack_command(message: SlackMessage) -> bool:
+        channel_id = message.channel_id
+
+        async def _execute_prompt(prompt: str, display_prompt: str) -> None:
+            await _run_prompt_in_active_session(
+                prompt,
+                display_prompt=display_prompt,
+                on_assistant_text=lambda text: _slack_send(channel_id, text, reply_to_message_ts=message.message_ts),
+                after_turn=lambda turn_start_idx, user_prompt, assistant_text: _slack_maybe_send_audio_for_turn(
+                    channel_id=channel_id,
+                    user_prompt=user_prompt,
+                    assistant_text=assistant_text,
+                    turn_start_idx=turn_start_idx,
+                ),
+            )
+
+        return await _handle_remote_command(
+            platform="slack",
+            raw_text=message.text,
+            help_label="Slack",
+            sender_label="SLACK",
+            send_text=lambda text: _slack_send(channel_id, text, reply_to_message_ts=message.message_ts),
+            execute_prompt=_execute_prompt,
+        )
+
+    async def _handle_discord_command(message: DiscordMessage) -> bool:
+        channel_id = message.channel_id
+
+        async def _execute_prompt(prompt: str, display_prompt: str) -> None:
+            await _run_prompt_in_active_session(
+                prompt,
+                display_prompt=display_prompt,
+                on_assistant_text=lambda text: _discord_send(
+                    channel_id,
+                    text,
+                    reply_to_message_id=message.id,
+                ),
+                after_turn=lambda turn_start_idx, user_prompt, assistant_text: _discord_maybe_send_audio_for_turn(
+                    channel_id=channel_id,
+                    reply_to_message_id=message.id,
+                    user_prompt=user_prompt,
+                    assistant_text=assistant_text,
+                    turn_start_idx=turn_start_idx,
+                ),
+            )
+
+        return await _handle_remote_command(
+            platform="discord",
+            raw_text=message.text,
+            help_label="Discord",
+            sender_label="DISCORD",
+            send_text=lambda text: _discord_send(channel_id, text, reply_to_message_id=message.id),
+            execute_prompt=_execute_prompt,
+        )
 
     async def _handle_telegram_message(message: TelegramMessage) -> None:
         try:
@@ -2086,6 +2732,143 @@ async def run_interactive() -> None:
             except Exception:
                 pass
 
+    async def _handle_slack_message(message: SlackMessage) -> None:
+        try:
+            await _slack_mark_read(message)
+            await _slack_monitor_event(
+                "incoming_message",
+                channel_id=message.channel_id,
+                user_id=message.user_id,
+                username=message.username or "",
+                message_ts=message.message_ts,
+                is_command=bool(message.text.strip().startswith("/")),
+                text_preview=_truncate_chat_text(message.text),
+            )
+            user_id_key = str(message.user_id).strip()
+            if user_id_key not in approved_slack_users:
+                await _pair_unknown_slack_user(message)
+                return
+            text = message.text.strip()
+            if not text:
+                return
+            if text.startswith("/"):
+                await _run_with_slack_typing(
+                    message.channel_id,
+                    _handle_slack_command(message),
+                )
+                return
+            user_label = message.username or str(message.user_id)
+            await _run_with_slack_typing(
+                message.channel_id,
+                _run_prompt_in_active_session(
+                    text,
+                    display_prompt=f"[SLACK {user_label}] {text}",
+                    on_assistant_text=lambda out: _slack_send(
+                        message.channel_id,
+                        out,
+                        reply_to_message_ts=message.message_ts,
+                    ),
+                    after_turn=lambda turn_start_idx, user_prompt, assistant_text: _slack_maybe_send_audio_for_turn(
+                        channel_id=message.channel_id,
+                        user_prompt=user_prompt,
+                        assistant_text=assistant_text,
+                        turn_start_idx=turn_start_idx,
+                    ),
+                ),
+            )
+        except Exception as e:
+            log.error("Slack message handler failed", error=str(e))
+            try:
+                await _slack_monitor_event(
+                    "handler_error",
+                    channel_id=message.channel_id,
+                    user_id=message.user_id,
+                    message_ts=message.message_ts,
+                    error=str(e),
+                )
+            except Exception:
+                pass
+            try:
+                await _slack_send(
+                    message.channel_id,
+                    f"Error while processing your request: {str(e)}",
+                    reply_to_message_ts=message.message_ts,
+                )
+            except Exception:
+                pass
+
+    async def _handle_discord_message(message: DiscordMessage) -> None:
+        try:
+            is_guild_message = bool(str(message.guild_id or "").strip())
+            requires_mention = bool(getattr(discord_cfg, "require_mention_in_guild", True))
+            if is_guild_message and requires_mention and not bool(message.mentioned_bot):
+                return
+            await _discord_mark_read(message)
+            await _discord_monitor_event(
+                "incoming_message",
+                channel_id=message.channel_id,
+                guild_id=message.guild_id or "",
+                user_id=message.user_id,
+                username=message.username or "",
+                message_id=message.id,
+                mentioned_bot=bool(message.mentioned_bot),
+                is_command=bool(message.text.strip().startswith("/")),
+                text_preview=_truncate_chat_text(message.text),
+            )
+            user_id_key = str(message.user_id).strip()
+            if user_id_key not in approved_discord_users:
+                await _pair_unknown_discord_user(message)
+                return
+            text = message.text.strip()
+            if not text:
+                return
+            if text.startswith("/"):
+                await _run_with_discord_typing(
+                    message.channel_id,
+                    _handle_discord_command(message),
+                )
+                return
+            user_label = message.username or str(message.user_id)
+            await _run_with_discord_typing(
+                message.channel_id,
+                _run_prompt_in_active_session(
+                    text,
+                    display_prompt=f"[DISCORD {user_label}] {text}",
+                    on_assistant_text=lambda out: _discord_send(
+                        message.channel_id,
+                        out,
+                        reply_to_message_id=message.id,
+                    ),
+                    after_turn=lambda turn_start_idx, user_prompt, assistant_text: _discord_maybe_send_audio_for_turn(
+                        channel_id=message.channel_id,
+                        reply_to_message_id=message.id,
+                        user_prompt=user_prompt,
+                        assistant_text=assistant_text,
+                        turn_start_idx=turn_start_idx,
+                    ),
+                ),
+            )
+        except Exception as e:
+            log.error("Discord message handler failed", error=str(e))
+            try:
+                await _discord_monitor_event(
+                    "handler_error",
+                    channel_id=message.channel_id,
+                    user_id=message.user_id,
+                    message_id=message.id,
+                    error=str(e),
+                )
+            except Exception:
+                pass
+            try:
+                await _discord_send(
+                    message.channel_id,
+                    f"Error while processing your request: {str(e)}",
+                    reply_to_message_id=message.id,
+                )
+            except Exception:
+                pass
+
     async def _telegram_poll_loop() -> None:
         """Background Telegram polling and message dispatch."""
         nonlocal telegram_offset
@@ -2106,19 +2889,79 @@ async def run_interactive() -> None:
                 ui.append_system_line(f"Telegram poll error: {str(e)}")
                 await asyncio.sleep(2.0)
 
+    async def _slack_poll_loop() -> None:
+        """Background Slack polling and message dispatch."""
+        nonlocal slack_offsets
+        assert slack_bridge is not None
+        while True:
+            try:
+                updates, next_offsets = await slack_bridge.get_updates(slack_offsets)
+                slack_offsets = dict(next_offsets)
+                for update in updates:
+                    asyncio.create_task(_handle_slack_message(update))
+                await asyncio.sleep(max(1, int(slack_cfg.poll_timeout_seconds)))
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                ui.append_system_line(f"Slack poll error: {str(e)}")
+                await asyncio.sleep(2.0)
+
+    async def _discord_poll_loop() -> None:
+        """Background Discord polling and message dispatch."""
+        nonlocal discord_offsets
+        assert discord_bridge is not None
+        while True:
+            try:
+                updates, next_offsets = await discord_bridge.get_updates(discord_offsets)
+                discord_offsets = dict(next_offsets)
+                for update in updates:
+                    asyncio.create_task(_handle_discord_message(update))
+                await asyncio.sleep(max(1, int(discord_cfg.poll_timeout_seconds)))
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                ui.append_system_line(f"Discord poll error: {str(e)}")
+                await asyncio.sleep(2.0)
+
     if telegram_enabled:
         token = telegram_cfg.bot_token.strip()
         if token:
             telegram_bridge = TelegramBridge(token=token, api_base_url=telegram_cfg.api_base_url)
             approved_telegram_users = await _load_json_state(telegram_state_key_approved)
             pending_telegram_pairings = await _load_json_state(telegram_state_key_pending)
-            _cleanup_expired_pairings()
+            _cleanup_expired_pairings(pending_telegram_pairings)
             await _save_telegram_state()
             await _register_telegram_commands()
             telegram_poll_task = asyncio.create_task(_telegram_poll_loop())
             ui.append_system_line("Telegram UI enabled (long polling started).")
         else:
             ui.append_system_line("Telegram enabled but bot_token is empty; skipping Telegram startup.")
+
+    if slack_enabled:
+        token = slack_cfg.bot_token.strip()
+        if token:
+            slack_bridge = SlackBridge(token=token, api_base_url=slack_cfg.api_base_url)
+            approved_slack_users = await _load_json_state(slack_state_key_approved)
+            pending_slack_pairings = await _load_json_state(slack_state_key_pending)
+            _cleanup_expired_pairings(pending_slack_pairings)
+            await _save_slack_state()
+            slack_poll_task = asyncio.create_task(_slack_poll_loop())
+            ui.append_system_line("Slack UI enabled (polling started).")
+        else:
+            ui.append_system_line("Slack enabled but bot_token is empty; skipping Slack startup.")
+
+    if discord_enabled:
+        token = discord_cfg.bot_token.strip()
+        if token:
+            discord_bridge = DiscordBridge(token=token, api_base_url=discord_cfg.api_base_url)
+            approved_discord_users = await _load_json_state(discord_state_key_approved)
+            pending_discord_pairings = await _load_json_state(discord_state_key_pending)
+            _cleanup_expired_pairings(pending_discord_pairings)
+            await _save_discord_state()
+            discord_poll_task = asyncio.create_task(_discord_poll_loop())
+            ui.append_system_line("Discord UI enabled (polling started).")
+        else:
+            ui.append_system_line("Discord enabled but bot_token is empty; skipping Discord startup.")
 
     cron_worker = asyncio.create_task(_cron_scheduler_loop())
     try:
@@ -2146,12 +2989,27 @@ async def run_interactive() -> None:
                 elif result == "EXIT":
                     log.info("User requested exit")
                     break
-                elif result.startswith("APPROVE_TELEGRAM_USER:"):
-                    if not telegram_enabled:
-                        ui.print_error("Telegram integration is not enabled.")
+                elif result.startswith("APPROVE_CHAT_USER:"):
+                    parts = result.split(":", 2)
+                    platform = parts[1].strip().lower() if len(parts) > 1 else ""
+                    token = parts[2].strip() if len(parts) > 2 else ""
+                    enabled_map = {
+                        "telegram": telegram_enabled,
+                        "slack": slack_enabled,
+                        "discord": discord_enabled,
+                    }
+                    if not enabled_map.get(platform, False):
+                        ui.print_error(f"{platform.title() if platform else 'Target'} integration is not enabled.")
                         continue
+                    ok, message = await _approve_chat_pairing_token(platform, token)
+                    if ok:
+                        ui.print_success(message)
+                    else:
+                        ui.print_error(message)
+                    continue
+                elif result.startswith("APPROVE_TELEGRAM_USER:"):
                     token = result.split(":", 1)[1].strip()
-                    ok, message = await _approve_telegram_pairing_token(token)
+                    ok, message = await _approve_chat_pairing_token("telegram", token)
                     if ok:
                         ui.print_success(message)
                     else:
@@ -2884,9 +3742,31 @@ async def run_interactive() -> None:
                 await telegram_poll_task
             except asyncio.CancelledError:
                 pass
+        if slack_poll_task is not None:
+            slack_poll_task.cancel()
+            try:
+                await slack_poll_task
+            except asyncio.CancelledError:
+                pass
+        if discord_poll_task is not None:
+            discord_poll_task.cancel()
+            try:
+                await discord_poll_task
+            except asyncio.CancelledError:
+                pass
         if telegram_bridge is not None:
             try:
                 await telegram_bridge.close()
+            except Exception:
+                pass
+        if slack_bridge is not None:
+            try:
+                await slack_bridge.close()
+            except Exception:
+                pass
+        if discord_bridge is not None:
+            try:
+                await discord_bridge.close()
             except Exception:
                 pass
         cron_worker.cancel()

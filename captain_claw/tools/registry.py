@@ -209,7 +209,7 @@ class ToolRegistry:
             if name == "shell":
                 timeout_seconds = int(config.tools.shell.timeout)
             elif name == "pocket_tts":
-                timeout_seconds = int(getattr(config.tools.pocket_tts, "timeout_seconds", 180))
+                timeout_seconds = int(getattr(config.tools.pocket_tts, "timeout_seconds", 600))
             result = await asyncio.wait_for(
                 tool.execute(
                     **arguments,

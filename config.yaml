@@ -60,7 +60,7 @@ tools:
     default_voice: ""  # optional; defaults to model default voice
     sample_rate: 24000  # output sample rate when model does not provide one
     mp3_bitrate_kbps: 128  # output MP3 bitrate
-    timeout_seconds: 180  # synthesis timeout
+    timeout_seconds: 600  # synthesis timeout (10 minutes)
   shell:
     timeout: 30  # seconds
     blocked:
@@ -138,3 +138,22 @@ telegram:
   api_base_url: "https://api.telegram.org"
   poll_timeout_seconds: 25
   pairing_ttl_minutes: 30
+
+# Slack Bot UI (optional, DM polling)
+slack:
+  enabled: false
+  # bot_token: ""  # or SLACK_BOT_TOKEN / CLAW_SLACK__BOT_TOKEN
+  # app_token: ""  # optional (reserved for future socket mode)
+  api_base_url: "https://slack.com/api"
+  poll_timeout_seconds: 25
+  pairing_ttl_minutes: 30
+
+# Discord Bot UI (optional, DM polling)
+discord:
+  enabled: false
+  # bot_token: ""  # or DISCORD_BOT_TOKEN / CLAW_DISCORD__BOT_TOKEN
+  # application_id: 0  # optional command registration id
+  api_base_url: "https://discord.com/api/v10"
+  poll_timeout_seconds: 25
+  pairing_ttl_minutes: 30
+  require_mention_in_guild: true

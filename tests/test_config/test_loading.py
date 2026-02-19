@@ -196,3 +196,40 @@ def test_load_prefers_brave_api_key_from_dotenv(monkeypatch, tmp_path: Path):
     cfg = Config.load()
 
     assert cfg.tools.web_search.api_key == "secure-dotenv-brave-key"
+
+
+def test_load_prefers_slack_bot_token_from_env_var(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    local_cfg = tmp_path / "config.yaml"
+    local_cfg.write_text(
+        (
+            "slack:\n"
+            "  enabled: true\n"
+            "  bot_token: insecure-yaml-slack-token\n"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "secure-env-slack-token")
+
+    cfg = Config.load()
+
+    assert cfg.slack.bot_token == "secure-env-slack-token"
+
+
+def test_load_prefers_discord_bot_token_from_dotenv(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    local_cfg = tmp_path / "config.yaml"
+    local_cfg.write_text(
+        (
+            "discord:\n"
+            "  enabled: true\n"
+            "  bot_token: insecure-yaml-discord-token\n"
+        ),
+        encoding="utf-8",
+    )
+    dotenv_file = tmp_path / ".env"
+    dotenv_file.write_text("DISCORD_BOT_TOKEN=secure-dotenv-discord-token\n", encoding="utf-8")
+
+    cfg = Config.load()
+
+    assert cfg.discord.bot_token == "secure-dotenv-discord-token"

@@ -81,7 +81,7 @@ class PocketTTSToolConfig(BaseModel):
     default_voice: str = ""
     sample_rate: int = 24000
     mp3_bitrate_kbps: int = 128
-    timeout_seconds: int = 180
+    timeout_seconds: int = 600
 
 
 class ToolsConfig(BaseModel):
@@ -211,6 +211,29 @@ class TelegramConfig(BaseModel):
     pairing_ttl_minutes: int = 30
 
 
+class SlackConfig(BaseModel):
+    """Slack bot UI configuration."""
+
+    enabled: bool = False
+    bot_token: str = ""
+    app_token: str = ""
+    api_base_url: str = "https://slack.com/api"
+    poll_timeout_seconds: int = 25
+    pairing_ttl_minutes: int = 30
+
+
+class DiscordConfig(BaseModel):
+    """Discord bot UI configuration."""
+
+    enabled: bool = False
+    bot_token: str = ""
+    application_id: int = 0
+    api_base_url: str = "https://discord.com/api/v10"
+    poll_timeout_seconds: int = 25
+    pairing_ttl_minutes: int = 30
+    require_mention_in_guild: bool = True
+
+
 class Config(BaseSettings):
     """Main configuration for Captain Claw."""
 
@@ -225,6 +248,8 @@ class Config(BaseSettings):
     execution_queue: ExecutionQueueConfig = Field(default_factory=ExecutionQueueConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    slack: SlackConfig = Field(default_factory=SlackConfig)
+    discord: DiscordConfig = Field(default_factory=DiscordConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="CLAW_",
@@ -330,6 +355,51 @@ class Config(BaseSettings):
             )
         if env_token:
             config.telegram.bot_token = env_token
+
+        # Security-sensitive override: prefer Slack tokens from env/.env when present.
+        slack_bot_token = str(getattr(env_overlay.slack, "bot_token", "")).strip()
+        if not slack_bot_token:
+            slack_bot_token = (
+                str(os.getenv("SLACK_BOT_TOKEN", "")).strip()
+                or str(dotenv_values.get("SLACK_BOT_TOKEN", "")).strip()
+            )
+        if slack_bot_token:
+            config.slack.bot_token = slack_bot_token
+        slack_app_token = str(getattr(env_overlay.slack, "app_token", "")).strip()
+        if not slack_app_token:
+            slack_app_token = (
+                str(os.getenv("SLACK_APP_TOKEN", "")).strip()
+                or str(dotenv_values.get("SLACK_APP_TOKEN", "")).strip()
+            )
+        if slack_app_token:
+            config.slack.app_token = slack_app_token
+
+        # Security-sensitive override: prefer Discord bot token from env/.env when present.
+        discord_bot_token = str(getattr(env_overlay.discord, "bot_token", "")).strip()
+        if not discord_bot_token:
+            discord_bot_token = (
+                str(os.getenv("DISCORD_BOT_TOKEN", "")).strip()
+                or str(dotenv_values.get("DISCORD_BOT_TOKEN", "")).strip()
+            )
+        if discord_bot_token:
+            config.discord.bot_token = discord_bot_token
+        raw_app_id = getattr(env_overlay.discord, "application_id", 0)
+        discord_application_id = ""
+        try:
+            if int(raw_app_id) > 0:
+                discord_application_id = str(int(raw_app_id))
+        except Exception:
+            discord_application_id = ""
+        if not discord_application_id:
+            discord_application_id = (
+                str(os.getenv("DISCORD_APPLICATION_ID", "")).strip()
+                or str(dotenv_values.get("DISCORD_APPLICATION_ID", "")).strip()
+            )
+        if discord_application_id:
+            try:
+                config.discord.application_id = int(discord_application_id)
+            except Exception:
+                pass
 
         # Security-sensitive override: prefer Brave API key from env/.env when present.
         env_brave_key = str(getattr(env_overlay.tools.web_search, "api_key", "")).strip()

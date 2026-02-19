@@ -197,7 +197,7 @@ Commands:
   /skills         - List currently available user-invocable skills
   /skill <name> [args] - Run a specific skill manually
   /<skill-command> [args] - Direct alias for a discovered skill command
-  /approve user telegram <token> - Approve pending Telegram user pairing token
+  /approve user <telegram|slack|discord> <token> - Approve pending chat user pairing token
   /monitor on     - Enable split monitor view
   /monitor off    - Disable split monitor view
   /monitor trace on|off - Enable/disable full intermediate LLM trace logging
@@ -1607,13 +1607,12 @@ Commands:
         elif command == "/approve":
             raw = args.strip()
             parts = raw.split()
-            if len(parts) == 3 and parts[0].lower() == "user" and parts[1].lower() == "telegram":
+            if len(parts) == 3 and parts[0].lower() == "user":
+                platform = parts[1].strip().lower()
                 token = parts[2].strip()
-                if not token:
-                    self.print_error("Usage: /approve user telegram <token>")
-                    return None
-                return f"APPROVE_TELEGRAM_USER:{token}"
-            self.print_error("Usage: /approve user telegram <token>")
+                if platform in {"telegram", "slack", "discord"} and token:
+                    return f"APPROVE_CHAT_USER:{platform}:{token}"
+            self.print_error("Usage: /approve user <telegram|slack|discord> <token>")
             return None
         elif command.startswith("/") and len(command) > 1 and command not in {"/exit", "/quit", "/q"}:
             # Dynamic skill alias, e.g. "/example-source-brief ...".

@@ -228,10 +228,31 @@ tools:
     default_voice: "" # optional; fallback is model default voice
     sample_rate: 24000
     mp3_bitrate_kbps: 128
-    timeout_seconds: 180
+    timeout_seconds: 600
 
 workspace:
   path: "./workspace" # local artifact root; tool outputs go under ./workspace/saved
+
+telegram:
+  enabled: false
+  bot_token: "" # or TELEGRAM_BOT_TOKEN / CLAW_TELEGRAM__BOT_TOKEN
+  api_base_url: "https://api.telegram.org"
+  poll_timeout_seconds: 25
+  pairing_ttl_minutes: 30
+
+slack:
+  enabled: false
+  bot_token: "" # or SLACK_BOT_TOKEN / CLAW_SLACK__BOT_TOKEN
+  api_base_url: "https://slack.com/api"
+  poll_timeout_seconds: 25
+  pairing_ttl_minutes: 30
+
+discord:
+  enabled: false
+  bot_token: "" # or DISCORD_BOT_TOKEN / CLAW_DISCORD__BOT_TOKEN
+  api_base_url: "https://discord.com/api/v10"
+  poll_timeout_seconds: 25
+  pairing_ttl_minutes: 30
 ```
 
 ### Useful Environment Overrides
@@ -243,7 +264,16 @@ CLAW_GUARDS__INPUT__ENABLED="true"
 CLAW_GUARDS__INPUT__LEVEL="ask_for_approval"
 CLAW_TOOLS__WEB_SEARCH__API_KEY="your_brave_api_key"
 # or use BRAVE_API_KEY="your_brave_api_key"
+TELEGRAM_BOT_TOKEN="your_telegram_bot_token"
+SLACK_BOT_TOKEN="your_slack_bot_token"
+DISCORD_BOT_TOKEN="your_discord_bot_token"
 ```
+
+### Remote Chat Integrations
+
+- Telegram, Slack, and Discord can run alongside local CLI.
+- Unknown remote users get a pairing token; operator approves in local CLI with `/approve user <telegram|slack|discord> <token>`.
+- After approval, remote users can send normal prompts plus supported slash-style commands (`/help`, `/session`, `/pipeline`, `/config`, `/skills`, `/skill`, `/cron`, etc.).
 
 ## CLI Commands
 
@@ -260,6 +290,7 @@ CLAW_TOOLS__WEB_SEARCH__API_KEY="your_brave_api_key"
 | `/skills` | List user-invocable skills discovered for the current workspace/session |
 | `/skill <name> [args]` | Manually invoke a skill (rewrite to skill-guided prompt or direct tool dispatch if configured in skill frontmatter) |
 | `/<skill-command> [args]` | Direct alias for a discovered skill command (same behavior as `/skill <name> [args]`) |
+| `/approve user <telegram\|slack\|discord> <token>` | Approve a pending remote user pairing token |
 | `/monitor on\|off` | Enable/disable monitor split view |
 | `/monitor trace on\|off` | Enable/disable full intermediate LLM response trace logging into monitor/session history |
 | `/monitor pipeline on\|off` | Enable/disable compact pipeline-only trace logging into session history |
