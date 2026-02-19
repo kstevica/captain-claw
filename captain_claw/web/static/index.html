@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Captain Claw</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="icon" href="/favicon.ico" type="image/svg+xml">
+</head>
+<body>
+    <!-- Header -->
+    <header id="header">
+        <div class="header-left">
+            <span class="logo" title="Captain Claw - AI Agent">&#x1F980; Captain Claw</span>
+            <span class="divider"></span>
+            <span class="session-badge" id="sessionBadge" title="Click to manage sessions">
+                <span class="session-icon">&#9679;</span>
+                <span id="sessionName">loading...</span>
+            </span>
+        </div>
+        <div class="header-center">
+            <span class="model-badge" id="modelBadge" title="Active model">
+                <span id="modelName">-</span>
+            </span>
+        </div>
+        <div class="header-right">
+            <span class="status-indicator" id="statusIndicator" title="Agent status">
+                <span class="status-dot" id="statusDot"></span>
+                <span id="statusText">connecting</span>
+            </span>
+            <button class="icon-btn" id="sidebarToggle" title="Sidebar: Sessions, Instructions, Help (Ctrl+B)">&#9776;</button>
+        </div>
+    </header>
+
+    <!-- Main content -->
+    <div id="main">
+        <!-- Chat + Monitor split pane -->
+        <div id="panes">
+            <!-- Chat pane -->
+            <div id="chatPane">
+                <div class="pane-header">
+                    <span class="pane-title">Chat</span>
+                    <span class="pane-hint" id="chatCount">0 messages</span>
+                </div>
+                <div id="chatMessages" class="messages-area">
+                    <div class="empty-state" id="chatEmpty">
+                        <div class="empty-icon">&#x1F980;</div>
+                        <div class="empty-title">Welcome to Captain Claw</div>
+                        <div class="empty-text">
+                            Type a message to start a conversation, or use a <code>/command</code>.<br>
+                            Press <kbd>Ctrl+K</kbd> for the command palette. Press <kbd>?</kbd> button for help.
+                        </div>
+                        <div class="quick-actions">
+                            <button class="quick-btn" data-command="/help">&#x2753; Help</button>
+                            <button class="quick-btn" data-command="/models">&#x1F916; Models</button>
+                            <button class="quick-btn" data-command="/sessions">&#x1F4CB; Sessions</button>
+                            <button class="quick-btn" data-command="/skills">&#x26A1; Skills</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Resize handle -->
+            <div id="resizeHandle" title="Drag to resize panes"></div>
+
+            <!-- Monitor pane -->
+            <div id="monitorPane">
+                <div class="pane-header">
+                    <span class="pane-title">Monitor</span>
+                    <button class="pane-btn" id="clearMonitor" title="Clear monitor">Clear</button>
+                </div>
+                <div id="monitorMessages" class="messages-area monitor-area">
+                    <div class="empty-state" id="monitorEmpty">
+                        <div class="empty-icon">&#x1F4CA;</div>
+                        <div class="empty-text">Tool outputs and traces will appear here</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Input area -->
+        <div id="inputArea">
+            <!-- Command suggestions dropdown -->
+            <div id="commandSuggestions" class="suggestions-dropdown hidden"></div>
+            <div class="input-row">
+                <textarea id="messageInput"
+                    placeholder="Type a message or /command... (Ctrl+K command palette)"
+                    rows="1"
+                    autocomplete="off"
+                    spellcheck="true"></textarea>
+                <div class="input-buttons">
+                    <button class="icon-btn send-btn" id="sendBtn" title="Send message (Enter)">&#x27A4;</button>
+                    <button class="icon-btn" id="paletteBtn" title="Command palette (Ctrl+K)">&#x2318;K</button>
+                    <button class="icon-btn" id="helpBtn" title="Help & commands reference">?</button>
+                </div>
+            </div>
+            <div class="input-hints">
+                <span><kbd>Enter</kbd> send</span>
+                <span><kbd>Shift+Enter</kbd> new line</span>
+                <span><kbd>Ctrl+K</kbd> commands</span>
+                <span><kbd>Ctrl+N</kbd> new session</span>
+                <span><kbd>Esc</kbd> cancel</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Sidebar -->
+    <div id="sidebar" class="sidebar hidden">
+        <div class="sidebar-header">
+            <div class="sidebar-tabs">
+                <button class="sidebar-tab active" data-tab="sessions">Sessions</button>
+                <button class="sidebar-tab" data-tab="instructions">Instructions</button>
+                <button class="sidebar-tab" data-tab="help">Help</button>
+            </div>
+            <button class="icon-btn sidebar-close" id="sidebarClose" title="Close sidebar">&times;</button>
+        </div>
+
+        <!-- Sessions tab -->
+        <div class="sidebar-content active" id="tabSessions">
+            <div class="sidebar-actions">
+                <button class="action-btn" id="newSessionBtn">+ New Session</button>
+            </div>
+            <div id="sessionsList" class="sidebar-list">
+                <div class="loading">Loading sessions...</div>
+            </div>
+        </div>
+
+        <!-- Instructions tab -->
+        <div class="sidebar-content" id="tabInstructions">
+            <div class="sidebar-actions">
+                <p class="sidebar-hint">Edit LLM instruction templates (.md files)</p>
+            </div>
+            <div id="instructionsList" class="sidebar-list"></div>
+            <!-- Instruction editor -->
+            <div id="instructionEditor" class="instruction-editor hidden">
+                <div class="editor-header">
+                    <span id="editorFileName">-</span>
+                    <div>
+                        <button class="action-btn" id="saveInstructionBtn">Save</button>
+                        <button class="action-btn secondary" id="closeEditorBtn">Close</button>
+                    </div>
+                </div>
+                <textarea id="instructionContent" class="editor-textarea" spellcheck="false"></textarea>
+            </div>
+        </div>
+
+        <!-- Help tab -->
+        <div class="sidebar-content" id="tabHelp">
+            <div id="helpContent" class="help-content">
+                <h3>Keyboard Shortcuts</h3>
+                <table class="help-table">
+                    <tr><td><kbd>Enter</kbd></td><td>Send message</td></tr>
+                    <tr><td><kbd>Shift+Enter</kbd></td><td>New line</td></tr>
+                    <tr><td><kbd>Ctrl+K</kbd></td><td>Command palette</td></tr>
+                    <tr><td><kbd>Ctrl+N</kbd></td><td>New session</td></tr>
+                    <tr><td><kbd>Ctrl+B</kbd></td><td>Toggle sidebar</td></tr>
+                    <tr><td><kbd>Esc</kbd></td><td>Cancel / close</td></tr>
+                </table>
+                <h3>Tips</h3>
+                <ul>
+                    <li>Type <code>/</code> to see command suggestions</li>
+                    <li>Use <code>/help</code> for a full command reference</li>
+                    <li>Commands like <code>/new</code>, <code>/session switch</code> manage sessions</li>
+                    <li>Use <code>/models</code> to see and switch AI models</li>
+                    <li>The monitor panel shows tool execution details</li>
+                    <li>Edit instruction templates in the Instructions tab</li>
+                </ul>
+                <div id="commandReference"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Command palette overlay -->
+    <div id="commandPalette" class="palette-overlay hidden">
+        <div class="palette-dialog">
+            <input type="text" id="paletteInput" placeholder="Search commands..." autocomplete="off">
+            <div id="paletteResults" class="palette-results"></div>
+        </div>
+    </div>
+
+    <!-- Approval modal -->
+    <div id="approvalModal" class="modal-overlay hidden">
+        <div class="modal-dialog">
+            <div class="modal-icon">&#x1F512;</div>
+            <h3>Approval Required</h3>
+            <p id="approvalMessage">-</p>
+            <div class="modal-buttons">
+                <button class="action-btn" id="approveBtn">Approve</button>
+                <button class="action-btn danger" id="denyBtn">Deny</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

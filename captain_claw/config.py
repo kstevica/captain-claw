@@ -338,6 +338,14 @@ class DiscordConfig(BaseModel):
     require_mention_in_guild: bool = True
 
 
+class WebConfig(BaseModel):
+    """Web UI configuration."""
+
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 8340
+
+
 class Config(BaseSettings):
     """Main configuration for Captain Claw."""
 
@@ -355,6 +363,7 @@ class Config(BaseSettings):
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     slack: SlackConfig = Field(default_factory=SlackConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
+    web: WebConfig = Field(default_factory=WebConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="CLAW_",

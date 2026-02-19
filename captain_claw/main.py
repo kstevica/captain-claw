@@ -98,6 +98,7 @@ def _build_runtime_arg_parser() -> argparse.ArgumentParser:
         help="Run interactive onboarding wizard before starting",
     )
     parser.add_argument("--version", action="store_true", help="Show version information and exit")
+    parser.add_argument("--web", action="store_true", help="Start the web UI instead of the terminal UI")
     parser.add_argument("-h", "--help", action="store_true", help="Show this help message and exit")
     return parser
 
@@ -109,8 +110,9 @@ def _should_parse_runtime_cli_from_argv(
     no_stream: bool,
     verbose: bool,
     onboarding: bool,
+    web: bool = False,
 ) -> bool:
-    if config or model or provider or no_stream or verbose or onboarding:
+    if config or model or provider or no_stream or verbose or onboarding or web:
         return False
     if len(sys.argv) <= 1:
         return False
@@ -128,6 +130,7 @@ def main(
     no_stream: bool = False,
     verbose: bool = False,
     onboarding: bool = False,
+    web: bool = False,
 ) -> None:
     """Start Captain Claw interactive session."""
     if _should_parse_runtime_cli_from_argv(
@@ -137,6 +140,7 @@ def main(
         no_stream=no_stream,
         verbose=verbose,
         onboarding=onboarding,
+        web=web,
     ):
         runtime_args = list(sys.argv[1:])
         if runtime_args and runtime_args[0].strip().lower() == "run":
@@ -158,6 +162,7 @@ def main(
         no_stream = bool(parsed.no_stream)
         verbose = bool(parsed.verbose)
         onboarding = bool(parsed.onboarding)
+        web = bool(parsed.web)
         if unknown:
             print(f"Warning: ignoring unsupported arguments: {' '.join(unknown)}")
 
@@ -208,14 +213,29 @@ def main(
 
     # Set global config
     set_config(cfg)
-    ui = get_ui()
-    set_system_log_sink(ui.append_system_line if ui.has_sticky_layout() else None)
 
     # Ensure session directory exists
     session_path = Path(cfg.session.path).expanduser()
     session_path.parent.mkdir(parents=True, exist_ok=True)
     workspace_path = cfg.resolved_workspace_path(Path.cwd())
     workspace_path.mkdir(parents=True, exist_ok=True)
+
+    # Web UI mode
+    if web or cfg.web.enabled:
+        from captain_claw.web_server import run_web_server
+
+        try:
+            run_web_server(cfg)
+        except KeyboardInterrupt:
+            log.info("Web server shutting down...")
+            sys.exit(0)
+        except Exception as e:
+            log.error("Web server fatal error", error=str(e))
+            sys.exit(1)
+        return
+
+    ui = get_ui()
+    set_system_log_sink(ui.append_system_line if ui.has_sticky_layout() else None)
 
     # Run the interactive loop
     try:

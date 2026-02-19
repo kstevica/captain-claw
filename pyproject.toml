@@ -35,6 +35,7 @@ dependencies = [
     "glob2>=0.7",
     "tenacity>=8.0.0",
     "pocket-tts>=1.0.3",
+    "aiohttp>=3.9.0",
 ]
 
 [project.optional-dependencies]
@@ -52,6 +53,7 @@ vector = [
 
 [project.scripts]
 captain-claw = "captain_claw.main:main"
+captain-claw-web = "captain_claw.web_server:main"
 
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
@@ -76,4 +78,7 @@ warn_unused_configs = true
 disallow_untyped_defs = false
 
 [tool.setuptools]
-packages = ["captain_claw"]
+packages = ["captain_claw", "captain_claw.web"]
+
+[tool.setuptools.package-data]
+captain_claw = ["web/static/**/*"]

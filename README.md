@@ -2,7 +2,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Interface](https://img.shields.io/badge/interface-terminal%20CLI-black)](#quick-start)
+[![Interface](https://img.shields.io/badge/interface-terminal%20%7C%20web%20UI-black)](#quick-start)
 [![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20Ollama-orange)](#multi-model-ai-agent)
 [![Guardrails](https://img.shields.io/badge/guardrails-input%20%7C%20output%20%7C%20script%2Ftool-red)](#built-in-guardrails)
 
@@ -41,6 +41,7 @@ In under five minutes, you can have a multi-model terminal agentic system with p
 | Built-in tools | Move from chat to action: shell, file ops, web, doc extraction, local TTS. |
 | Planning + monitor modes | Better visibility for longer, multi-step agent runs. |
 | Context compaction | Keep long threads usable without losing continuity. |
+| Web UI | Full browser interface with chat, monitor pane, instruction editor, and command palette. |
 
 ## Why Captain Claw vs Alternatives
 
@@ -168,6 +169,22 @@ captain-claw --onboarding
 /session model default
 ```
 
+### 3b) Start the Web UI (optional)
+
+Captain Claw also ships with a local browser UI. Use it instead of the terminal when you prefer a graphical interface, want to edit instruction files visually, or simply find the browser more comfortable.
+
+```bash
+captain-claw --web
+```
+
+Or use the dedicated entry point:
+
+```bash
+captain-claw-web
+```
+
+Both open the web interface at **http://127.0.0.1:8340** by default. You can change host and port in `config.yaml` (see the `web:` section below).
+
 ### 4) Create multiple live sessions
 
 ```text
@@ -259,6 +276,11 @@ discord:
   api_base_url: "https://discord.com/api/v10"
   poll_timeout_seconds: 25
   pairing_ttl_minutes: 30
+
+web:
+  enabled: false     # set to true to start web UI automatically on launch
+  host: "127.0.0.1"  # bind address (use 0.0.0.0 to expose on LAN)
+  port: 8340         # port for the browser UI
 ```
 
 ### Useful Environment Overrides
@@ -273,6 +295,9 @@ CLAW_TOOLS__WEB_SEARCH__API_KEY="your_brave_api_key"
 TELEGRAM_BOT_TOKEN="your_telegram_bot_token"
 SLACK_BOT_TOKEN="your_slack_bot_token"
 DISCORD_BOT_TOKEN="your_discord_bot_token"
+CLAW_WEB__ENABLED="true"
+CLAW_WEB__HOST="127.0.0.1"
+CLAW_WEB__PORT="8340"
 ```
 
 ### Remote Chat Integrations
@@ -280,6 +305,84 @@ DISCORD_BOT_TOKEN="your_discord_bot_token"
 - Telegram, Slack, and Discord can run alongside local CLI.
 - Unknown remote users get a pairing token; operator approves in local CLI with `/approve user <telegram|slack|discord> <token>`.
 - After approval, remote users can send normal prompts plus supported slash-style commands (`/help`, `/session`, `/pipeline`, `/config`, `/skills`, `/skill`, `/cron`, etc.).
+
+## Web UI
+
+Captain Claw includes a full browser-based interface that runs locally. It provides the same core capabilities as the terminal UI: chat, streaming responses, tool monitor output, session management, and slash commands — all in a clean dark-themed web app.
+
+### Starting the Web UI
+
+```bash
+# Start web UI instead of terminal UI
+captain-claw --web
+
+# Or use the standalone entry point
+captain-claw-web
+```
+
+Open your browser at **http://127.0.0.1:8340** (or the host/port configured in `config.yaml`).
+
+To start the web UI automatically on every launch, set `web.enabled: true` in `config.yaml`.
+
+### Layout
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  🦀 Captain Claw  │ Session: default │ gpt-4o │ ● Ready │
+├────────────────────────────┬────────────────────────────┤
+│                            │  📊 Monitor                │
+│  💬 Chat                   │                            │
+│                            │  Tool outputs, traces,     │
+│  [message history]         │  and pipeline events       │
+│                            │  appear here in real-time  │
+│                            │                            │
+├────────────────────────────┴────────────────────────────┤
+│  > Type a message or /command...      [Send] [⌘K] [?]  │
+└─────────────────────────────────────────────────────────┘
+```
+
+- **Chat pane**: Full message history with streaming support and markdown rendering.
+- **Monitor pane**: Real-time tool output and pipeline traces, terminal-style.
+- **Resize handle**: Drag the divider between panes to resize.
+- **Header**: Shows active session name, model, and connection status.
+- **Sidebar** (toggle with `Ctrl+B` or `?` button): Sessions, Instructions, and Help tabs.
+
+### Sidebar Tabs
+
+| Tab | What you can do |
+|---|---|
+| **Sessions** | View and switch between sessions; create new sessions. |
+| **Instructions** | Browse all `.md` instruction files; click to open, edit in-place, and save. Changes take effect immediately without restarting. |
+| **Help** | Full command reference table and keyboard shortcut list. |
+
+### Keyboard Shortcuts
+
+| Shortcut | Action |
+|---|---|
+| `Enter` | Send message |
+| `Shift+Enter` | Insert newline |
+| `Ctrl+K` | Open command palette (fuzzy-search all commands) |
+| `Ctrl+B` | Toggle sidebar |
+| `Ctrl+N` | New session |
+| `Escape` | Close palette / sidebar |
+
+### Command Suggestions
+
+- Type `/` in the input box to see an inline dropdown of all available commands with descriptions.
+- Press `Ctrl+K` to open the full command palette with fuzzy search.
+- All slash commands that work in the terminal also work in the web UI.
+
+### Instruction File Editor
+
+The **Instructions** sidebar tab lets you edit any `.md` file in the `instructions/` folder directly in the browser. Changes are saved to disk and the agent picks them up on the next request — no restart needed.
+
+### Tool Approvals
+
+When a guardrail requires approval before running a tool, a modal dialog appears in the browser with the tool call details. Approval and denial flow back to the agent in real time.
+
+### Session Replay
+
+When you connect (or reconnect), the browser automatically replays the existing session's message history so you see full conversation context from the moment you open the page.
 
 ## CLI Commands
 
@@ -484,6 +587,10 @@ Yes. Model selection is per session. Different sessions can run different provid
 
 No. Guards are off by default. Enable them when you want stronger safety behavior for prompts, model outputs, and command/script execution.
 
+### Is there a web interface?
+
+Yes. Run `captain-claw --web` or `captain-claw-web` to start the local web UI. Open `http://127.0.0.1:8340` in your browser. The web UI shares the same agent, sessions, tools, and guardrails as the terminal interface. You can edit instruction files, switch sessions, run all slash commands, and see tool output in real time — all in the browser. The port is configurable in `config.yaml` under `web.port`.
+
 ## Development
 
 ```bash
@@ -501,5 +608,7 @@ ruff check captain_claw/
 - `captain_claw/tools/`: tool registry and tool implementations
 - `captain_claw/session/`: SQLite-backed session persistence
 - `captain_claw/cli.py`: terminal UI
+- `captain_claw/web_server.py`: aiohttp-based web server (WebSocket + REST + static serving)
+- `captain_claw/web/static/`: browser frontend (HTML, CSS, vanilla JS — zero build step)
 - `captain_claw/config.py`: configuration and env overrides
 - `instructions/`: externalized prompt/instruction templates
