@@ -71,20 +71,24 @@ class ReadTool(Tool):
             
             # Read file
             content = file_path.read_text(encoding="utf-8")
-            
+
             # Apply offset and limit
-            lines = content.splitlines()
-            if offset:
-                lines = lines[offset - 1:]  # Convert to 0-indexed
-            if limit:
-                lines = lines[:limit]
-            
-            content = "\n".join(lines)
-            
+            all_lines = content.splitlines()
+            start_line = max(1, int(offset)) if offset is not None else 1
+            selected_lines = all_lines[start_line - 1 :]
+            if limit is not None:
+                selected_lines = selected_lines[: max(0, int(limit))]
+
+            content = "\n".join(selected_lines)
+
             # Add metadata
             info = f"[{file_path} {len(content)} chars]"
-            if offset or limit:
-                info += f" [lines {offset or 1}-{offset + limit if limit else len(lines)}]"
+            if offset is not None or limit is not None:
+                if selected_lines:
+                    end_line = start_line + len(selected_lines) - 1
+                else:
+                    end_line = start_line - 1
+                info += f" [lines {start_line}-{end_line}]"
             
             return ToolResult(
                 success=True,

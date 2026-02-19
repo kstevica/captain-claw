@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from captain_claw.config import get_config
 from captain_claw.exceptions import (
@@ -25,6 +25,14 @@ class ToolResult(BaseModel):
     success: bool = True
     content: str = ""
     error: str | None = None
+
+    @model_validator(mode="after")
+    def _normalize_failure_error(self) -> "ToolResult":
+        """Ensure failed results always provide an error message."""
+        if not self.success and not (self.error or "").strip():
+            fallback = (self.content or "").strip()
+            self.error = fallback or "Tool execution failed"
+        return self
 
 
 class Tool(ABC):
