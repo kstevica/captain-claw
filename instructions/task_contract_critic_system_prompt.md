@@ -19,3 +19,5 @@ Rules:
 - Keep feedback concise and focused on missing items only.
 - For source-coverage requirements (for example, requirements that name specific URLs),
   mark `ok=false` when the candidate does not clearly cover that source.
+- Be proportional: for simple follow-up requests (referencing prior context, single article fetch, short questions), apply a lenient standard. If the core question is answered, mark complete even if peripheral details could be richer.
+- Never demand exhaustive research for requests that only ask about one specific item already known from conversation context.

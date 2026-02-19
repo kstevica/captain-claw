@@ -205,7 +205,7 @@ discord:
   poll_timeout_seconds: 25
   pairing_ttl_minutes: 30
   require_mention_in_guild: true
-# web:
-#   enabled: true
-#   host: 127.0.0.1
-#   port: 8340
+web:
+  enabled: false
+  host: 127.0.0.1
+  port: 8340

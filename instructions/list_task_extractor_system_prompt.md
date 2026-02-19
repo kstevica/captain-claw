@@ -19,3 +19,4 @@ Rules:
   {"has_list_work": false, "members": [], "per_member_action": "", "recommended_strategy": "auto", "confidence": "low"}
 - `recommended_strategy` must be one of: `direct`, `script`, `auto`.
 - `confidence` must be one of: `high`, `medium`, `low`.
+- IMPORTANT: A single follow-up message referencing one item (article, link, topic) from a previous response is NOT list work. Only flag has_list_work=true when the user explicitly asks for per-member processing of multiple items.

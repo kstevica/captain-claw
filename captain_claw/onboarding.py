@@ -177,7 +177,7 @@ def run_onboarding_wizard(
 
     intro = Panel(
         "[bold cyan]Captain Claw Onboarding[/bold cyan]\n"
-        "This wizard configures your default model provider, workspace, safety settings, and Telegram integration.",
+        "This wizard configures your default model provider, workspace, safety settings, web search, and Telegram integration.",
         border_style="cyan",
     )
     console.print(intro)
@@ -233,6 +233,24 @@ def run_onboarding_wizard(
         default=guards_default,
     )
 
+    existing_brave_key = cfg.tools.web_search.api_key.strip()
+    configure_brave = Confirm.ask(
+        "Configure Brave Search API key for web search?",
+        default=bool(existing_brave_key),
+    )
+    brave_api_key = existing_brave_key
+    if configure_brave:
+        brave_api_key = (
+            Prompt.ask(
+                "Brave Search API key",
+                default=existing_brave_key,
+                password=True,
+            ).strip()
+            or existing_brave_key
+        )
+    else:
+        brave_api_key = ""
+
     existing_telegram_token = cfg.telegram.bot_token.strip()
     telegram_enabled_default = bool(cfg.telegram.enabled or existing_telegram_token)
     configure_telegram = Confirm.ask(
@@ -276,6 +294,10 @@ def run_onboarding_wizard(
         "enabled (ask_for_approval)" if enable_guards else "disabled",
     )
     summary.add_row(
+        "Brave Search API key",
+        "stored" if bool(brave_api_key) else "no (env var BRAVE_API_KEY recommended)",
+    )
+    summary.add_row(
         "Telegram integration",
         "enabled" if telegram_enabled else "disabled",
     )
@@ -294,6 +316,7 @@ def run_onboarding_wizard(
     cfg.model.api_key = api_key
     cfg.model.base_url = base_url
     cfg.workspace.path = workspace_path
+    cfg.tools.web_search.api_key = brave_api_key
     if configure_telegram:
         cfg.telegram.enabled = telegram_enabled
         cfg.telegram.bot_token = telegram_token

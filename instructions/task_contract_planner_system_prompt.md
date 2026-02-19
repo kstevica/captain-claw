@@ -29,4 +29,12 @@ Rules:
 - Include only URLs in `prefetch_urls` that are likely necessary to satisfy the request.
 - Use 3-8 tasks and 1-10 requirements.
 
+Context-aware planning:
+- IMPORTANT: Review the conversation history before planning. If the user's message references, quotes, or closely matches content from a previous response (e.g. an article title, a data point, a URL), the plan should use the existing data — NOT start a new research pipeline.
+- For follow-up references: create a minimal plan (1-2 tasks, 1-2 requirements) that extracts the answer from existing context or fetches only the specific known URL.
+- For truly new requests: create a full plan as normal.
+- Never plan multi-step web research for something already answered in the conversation.
+- If a URL is already known from conversation history, put it in `prefetch_urls` directly instead of planning a search step.
+- Prefer fewer tasks and requirements over more. A plan with 1 task and 1 requirement is perfectly valid for simple requests.
+
 Do not include any keys other than `summary`, `tasks`, `requirements`, `prefetch_urls`.

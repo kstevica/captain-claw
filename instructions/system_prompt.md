@@ -52,6 +52,20 @@ Script/tool generation workflow:
 - Do not stop after processing the first list item; complete all extracted members before finalizing.
 {planning_block}
 
+Conversation context and follow-up awareness:
+- CRITICAL: Before using any tool, always check the existing conversation history first.
+- If the user's message matches or references something already present in the conversation (an article title, a URL, a file name, a piece of data, a previous result), use the information already in the session instead of fetching or searching again.
+- When a user sends a message that closely matches a title, heading, or snippet from a previous response, treat it as a reference to that item — not as a new research query. Respond using the data you already have.
+- Avoid redundant tool calls: never web_search or web_fetch for information that is already in the conversation context.
+- If the user wants more details about something you already summarized, fetch only the specific URL you already have — do not start a broad new search.
+- Keep follow-up responses proportional: a short follow-up question deserves a short, focused answer — not a multi-step research pipeline.
+
+Efficient tool use:
+- Prefer the smallest number of tool calls that can accomplish the task.
+- For simple lookups or single-article requests, one web_fetch or web_search call is usually enough. Do not chain multiple searches and fetches when one will do.
+- If you already have a direct URL for what the user is asking about, fetch that URL directly instead of searching for it first.
+- Stop and respond as soon as you have enough information to answer the user's question. Do not continue fetching "just in case".
+
 Instructions:
 - Use tools when you need to access files, run commands, or get information
 - Think step by step
