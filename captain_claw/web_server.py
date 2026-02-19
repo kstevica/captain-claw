@@ -567,20 +567,27 @@ class WebServer:
         return web.json_response({"name": name, "content": content})
 
     async def put_instruction(self, request: web.Request) -> web.Response:
-        """Save an instruction file."""
+        """Save or create an instruction file."""
         name = request.match_info["name"]
-        if ".." in name or "/" in name or not name.endswith(".md"):
+        # Security: no path traversal, no subdirectories, .md only
+        if ".." in name or "/" in name or "\\" in name or not name.endswith(".md"):
             return web.json_response({"error": "Invalid file name"}, status=400)
         path = self._instructions_dir / name
-        if not path.parent.resolve().samefile(self._instructions_dir.resolve()):
+        # Ensure the resolved path stays inside the instructions directory
+        try:
+            path.resolve().relative_to(self._instructions_dir.resolve())
+        except ValueError:
             return web.json_response({"error": "Invalid path"}, status=400)
         body = await request.json()
         content = body.get("content", "")
+        is_new = not path.exists()
+        self._instructions_dir.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
-        # Clear instruction cache so changes take effect
+        # Clear instruction cache so changes take effect on next agent request
         if self.agent:
             self.agent.instructions._cache.pop(name, None)
-        return web.json_response({"status": "saved", "name": name})
+        status = "created" if is_new else "saved"
+        return web.json_response({"status": status, "name": name, "size": path.stat().st_size})
 
     async def get_config_summary(self, request: web.Request) -> web.Response:
         """Return a safe config summary (no secrets)."""

@@ -3,56 +3,44 @@
   <rect width="64" height="64" rx="12" fill="#0d1117"/>
 
   <!-- Captain's hat (peaked cap) -->
-  <!-- Hat brim - wide flat base -->
   <ellipse cx="32" cy="36" rx="22" ry="5" fill="#1a2a4a"/>
   <ellipse cx="32" cy="35.5" rx="22" ry="4.5" fill="#1e3a6e"/>
-  <!-- Hat brim highlight edge -->
   <ellipse cx="32" cy="35" rx="21" ry="3.5" fill="none" stroke="#58a6ff" stroke-width="0.8" opacity="0.6"/>
 
   <!-- Hat body -->
   <path d="M14 35 Q14 18 32 16 Q50 18 50 35 Z" fill="#1a2a4a"/>
-  <!-- Hat body gradient overlay -->
   <path d="M16 35 Q16 20 32 18 Q48 20 48 35 Z" fill="#1e3a6e"/>
-  <!-- Hat body shading -->
   <path d="M16 35 Q16 20 32 18 Q40 20 42 30 Q38 27 32 26 Q26 27 22 30 Q18 28 16 35Z" fill="#243d73" opacity="0.5"/>
 
   <!-- Gold band on hat -->
   <path d="M15.5 34 Q15.5 30 32 29 Q48.5 30 48.5 34" fill="none" stroke="#d4a017" stroke-width="2.5" stroke-linecap="round"/>
-  <!-- Gold band highlight -->
   <path d="M16.5 33.5 Q17 31 32 30 Q47 31 47.5 33.5" fill="none" stroke="#f0c040" stroke-width="0.8" stroke-linecap="round" opacity="0.7"/>
 
-  <!-- Hat peak (visor) - front -->
+  <!-- Hat peak (visor) -->
   <path d="M20 36 Q20 39 32 40 Q44 39 44 36" fill="#162040"/>
   <path d="M20 36 Q22 38.5 32 39.5 Q42 38.5 44 36" fill="#1a2a5a"/>
-  <!-- Peak edge highlight -->
   <path d="M20 36 Q22 39 32 40 Q42 39 44 36" fill="none" stroke="#58a6ff" stroke-width="0.6" opacity="0.5"/>
 
-  <!-- Emblem on hat: stylized anchor/badge circle -->
+  <!-- Emblem circle on hat -->
   <circle cx="32" cy="26" r="5.5" fill="#0d1117" stroke="#d4a017" stroke-width="1.2"/>
   <circle cx="32" cy="26" r="4.2" fill="none" stroke="#f0c040" stroke-width="0.5" opacity="0.6"/>
 
-  <!-- CLAW marks inside emblem (3 slash marks like a claw strike) -->
-  <!-- Claw slash 1 -->
+  <!-- Claw marks inside emblem -->
   <path d="M29 23.5 Q30.5 25.5 29.5 28.5" fill="none" stroke="#f85149" stroke-width="1.4" stroke-linecap="round"/>
-  <!-- Claw slash 2 -->
   <path d="M31.5 23 Q33 25 32 28" fill="none" stroke="#f85149" stroke-width="1.4" stroke-linecap="round"/>
-  <!-- Claw slash 3 -->
   <path d="M34 23.5 Q35.5 25.5 34.5 28.5" fill="none" stroke="#f85149" stroke-width="1.4" stroke-linecap="round"/>
 
-  <!-- Small claw / pincers peeking below the hat brim (like a crab lurking) -->
   <!-- Left pincer -->
   <path d="M10 42 Q8 38 11 36 Q13 37 12 39" fill="none" stroke="#58a6ff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M12 39 Q14 37 13 41" fill="none" stroke="#58a6ff" stroke-width="1.4" stroke-linecap="round"/>
-  <!-- Left claw tip -->
   <circle cx="10.5" cy="42" r="1" fill="#58a6ff" opacity="0.8"/>
 
   <!-- Right pincer -->
   <path d="M54 42 Q56 38 53 36 Q51 37 52 39" fill="none" stroke="#58a6ff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M52 39 Q50 37 51 41" fill="none" stroke="#58a6ff" stroke-width="1.4" stroke-linecap="round"/>
-  <!-- Right claw tip -->
   <circle cx="53.5" cy="42" r="1" fill="#58a6ff" opacity="0.8"/>
 
-  <!-- Tiny star on hat top -->
+  <!-- Star on hat top -->
   <polygon points="32,10 32.9,12.8 35.9,12.8 33.5,14.5 34.4,17.3 32,15.6 29.6,17.3 30.5,14.5 28.1,12.8 31.1,12.8"
            fill="#f0c040" opacity="0.85"/>
 </svg>

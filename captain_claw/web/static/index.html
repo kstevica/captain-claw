@@ -5,13 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Captain Claw</title>
     <link rel="stylesheet" href="/static/style.css">
-    <link rel="icon" href="/favicon.ico" type="image/svg+xml">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 </head>
 <body>
     <!-- Header -->
     <header id="header">
         <div class="header-left">
-            <span class="logo" title="Captain Claw - AI Agent">&#x1F980; Captain Claw</span>
+            <span class="logo" title="Captain Claw - AI Agent">
+                <img src="/static/logo.svg" width="24" height="24" alt="" style="vertical-align:middle;margin-right:6px;border-radius:5px;">Captain Claw
+            </span>
             <span class="divider"></span>
             <span class="session-badge" id="sessionBadge" title="Click to manage sessions">
                 <span class="session-icon">&#9679;</span>
@@ -126,21 +128,33 @@
         </div>
 
         <!-- Instructions tab -->
-        <div class="sidebar-content" id="tabInstructions">
-            <div class="sidebar-actions">
-                <p class="sidebar-hint">Edit LLM instruction templates (.md files)</p>
+        <div class="sidebar-content instructions-tab" id="tabInstructions">
+            <!-- File list panel -->
+            <div class="instr-files-panel" id="instrFilesPanel">
+                <div class="instr-files-header">
+                    <span class="instr-files-title">Instruction Files</span>
+                    <button class="action-btn small" id="newInstructionBtn" title="Create a new instruction file">+ New</button>
+                </div>
+                <p class="sidebar-hint">Click a file to view and edit it.</p>
+                <div id="instructionsList" class="sidebar-list instr-file-list"></div>
             </div>
-            <div id="instructionsList" class="sidebar-list"></div>
-            <!-- Instruction editor -->
+            <!-- Editor panel (always visible once a file is opened) -->
             <div id="instructionEditor" class="instruction-editor hidden">
                 <div class="editor-header">
-                    <span id="editorFileName">-</span>
-                    <div>
-                        <button class="action-btn" id="saveInstructionBtn">Save</button>
-                        <button class="action-btn secondary" id="closeEditorBtn">Close</button>
+                    <div class="editor-file-info">
+                        <span class="editor-file-icon">&#x1F4DD;</span>
+                        <span id="editorFileName">-</span>
+                        <span id="editorDirtyMark" class="editor-dirty hidden" title="Unsaved changes">●</span>
+                    </div>
+                    <div class="editor-actions">
+                        <span id="editorSaveStatus" class="editor-save-status"></span>
+                        <button class="action-btn small" id="saveInstructionBtn" title="Save (Ctrl+S)">Save</button>
+                        <button class="action-btn small secondary" id="closeEditorBtn" title="Close editor">✕</button>
                     </div>
                 </div>
-                <textarea id="instructionContent" class="editor-textarea" spellcheck="false"></textarea>
+                <div class="editor-body">
+                    <textarea id="instructionContent" class="editor-textarea" spellcheck="false" placeholder="File content will appear here..."></textarea>
+                </div>
             </div>
         </div>
 

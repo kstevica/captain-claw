@@ -618,8 +618,20 @@ html, body {
     overflow-y: auto;
     padding: 12px;
     display: none;
+    min-height: 0;
 }
 .sidebar-content.active { display: block; }
+
+/* Instructions tab needs a column flex layout so the editor can fill available space */
+.sidebar-content.instructions-tab {
+    display: none;
+    flex-direction: column;
+    padding: 0;
+    overflow: hidden;
+}
+.sidebar-content.instructions-tab.active {
+    display: flex;
+}
 
 .sidebar-actions {
     margin-bottom: 12px;
@@ -679,10 +691,65 @@ html, body {
 .instruction-item-name { font-family: var(--font-mono); font-size: 12px; }
 .instruction-item-size { font-size: 11px; color: var(--text-muted); }
 
+/* ─── Instructions File List Panel ──────────────────── */
+
+.instr-files-panel {
+    padding: 12px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.instr-files-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+}
+
+.instr-files-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+}
+
+.instr-file-list {
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.instruction-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all 0.15s;
+    font-size: 13px;
+}
+.instruction-item:hover {
+    border-color: var(--accent);
+    background: var(--bg-tertiary);
+}
+.instruction-item.active-file {
+    border-color: var(--accent);
+    background: var(--accent-subtle);
+}
+.instruction-item-name { font-family: var(--font-mono); font-size: 12px; }
+.instruction-item-size { font-size: 11px; color: var(--text-muted); white-space: nowrap; margin-left: 8px; }
+
 /* ─── Instruction Editor ─────────────────────────────── */
 
 .instruction-editor {
-    margin-top: 12px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-top: 1px solid var(--border);
 }
 .instruction-editor.hidden { display: none; }
 
@@ -690,28 +757,84 @@ html, body {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 8px 0;
-    font-size: 13px;
-    font-family: var(--font-mono);
-    color: var(--accent);
+    padding: 8px 12px;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    gap: 8px;
 }
-.editor-header > div { display: flex; gap: 6px; }
 
-.editor-textarea {
-    width: 100%;
-    height: 400px;
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    padding: 12px;
+.editor-file-info {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+}
+.editor-file-icon { font-size: 14px; flex-shrink: 0; }
+#editorFileName {
     font-family: var(--font-mono);
     font-size: 12px;
-    line-height: 1.6;
-    resize: vertical;
-    outline: none;
+    color: var(--accent);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
-.editor-textarea:focus { border-color: var(--accent); }
+.editor-dirty {
+    color: var(--orange);
+    font-size: 18px;
+    line-height: 1;
+    flex-shrink: 0;
+}
+.editor-dirty.hidden { display: none; }
+
+.editor-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+.editor-save-status {
+    font-size: 11px;
+    color: var(--green);
+    white-space: nowrap;
+    min-width: 40px;
+    text-align: right;
+}
+
+.action-btn.small {
+    padding: 4px 10px;
+    font-size: 12px;
+}
+
+.editor-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: 0;
+}
+
+.editor-textarea {
+    flex: 1;
+    width: 100%;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    border: none;
+    border-radius: 0;
+    padding: 12px 14px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.7;
+    resize: none;
+    outline: none;
+    min-height: 0;
+}
+.editor-textarea:focus {
+    outline: none;
+    box-shadow: inset 0 0 0 1px var(--accent);
+}
 
 /* ─── Command Palette ────────────────────────────────── */
 

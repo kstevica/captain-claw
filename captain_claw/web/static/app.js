@@ -418,11 +418,16 @@
         sidebar.classList.toggle('hidden');
         if (!sidebar.classList.contains('hidden')) {
             loadSessions();
-            loadInstructions();
+            loadInstructions(); // always refresh file list (sizes may have changed)
         }
     }
 
     function switchTab(tabName) {
+        // Warn if leaving instructions tab with unsaved changes
+        if (tabName !== 'instructions' && instructionDirty) {
+            if (!confirm('You have unsaved changes in the instruction editor. Discard and switch tabs?')) return;
+            markDirty(false);
+        }
         $$('.sidebar-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tabName));
         $$('.sidebar-content').forEach(c => c.classList.remove('active'));
         $(`#tab${tabName.charAt(0).toUpperCase() + tabName.slice(1)}`).classList.add('active');
@@ -456,21 +461,54 @@
     }
 
     // Instructions
+    let currentInstructionName = null;
+    let instructionDirty = false;
+    const editorDirtyMark = $('#editorDirtyMark');
+    const editorSaveStatus = $('#editorSaveStatus');
+
+    function markDirty(dirty) {
+        instructionDirty = dirty;
+        if (dirty) {
+            editorDirtyMark.classList.remove('hidden');
+            editorSaveStatus.textContent = '';
+        } else {
+            editorDirtyMark.classList.add('hidden');
+        }
+    }
+
+    function highlightActiveFile(name) {
+        instructionsList.querySelectorAll('.instruction-item').forEach(el => {
+            el.classList.toggle('active-file', el.dataset.name === name);
+        });
+    }
+
     async function loadInstructions() {
         try {
             const res = await fetch('/api/instructions');
             const files = await res.json();
+            if (!files.length) {
+                instructionsList.innerHTML = '<div class="loading">No instruction files found.</div>';
+                return;
+            }
             instructionsList.innerHTML = files.map(f => {
                 const sizeKb = (f.size / 1024).toFixed(1);
-                return `<div class="instruction-item" data-name="${escapeHtml(f.name)}" title="Click to edit ${f.name}">
+                return `<div class="instruction-item" data-name="${escapeHtml(f.name)}" title="${escapeHtml(f.name)} — ${sizeKb} KB — click to edit">
                     <span class="instruction-item-name">${escapeHtml(f.name)}</span>
                     <span class="instruction-item-size">${sizeKb} KB</span>
                 </div>`;
             }).join('');
 
             instructionsList.querySelectorAll('.instruction-item').forEach(el => {
-                el.addEventListener('click', () => openInstruction(el.dataset.name));
+                el.addEventListener('click', () => {
+                    if (instructionDirty && currentInstructionName && currentInstructionName !== el.dataset.name) {
+                        if (!confirm(`You have unsaved changes in "${currentInstructionName}". Discard and open "${el.dataset.name}"?`)) return;
+                    }
+                    openInstruction(el.dataset.name);
+                });
             });
+
+            // Re-highlight active file if one is open
+            if (currentInstructionName) highlightActiveFile(currentInstructionName);
         } catch (e) {
             instructionsList.innerHTML = '<div class="loading">Failed to load instructions</div>';
         }
@@ -479,32 +517,68 @@
     async function openInstruction(name) {
         try {
             const res = await fetch(`/api/instructions/${encodeURIComponent(name)}`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
+            currentInstructionName = name;
             editorFileName.textContent = name;
             instructionContent.value = data.content;
-            instructionEditor.classList.remove('hidden');
             instructionEditor.dataset.name = name;
+            instructionEditor.classList.remove('hidden');
+            markDirty(false);
+            highlightActiveFile(name);
+            instructionContent.focus();
         } catch (e) {
-            alert('Failed to load instruction file');
+            alert(`Failed to load "${name}": ${e.message}`);
         }
     }
 
     async function saveInstruction() {
         const name = instructionEditor.dataset.name;
+        if (!name) return;
         const content = instructionContent.value;
+        const btn = $('#saveInstructionBtn');
+        btn.disabled = true;
+        btn.textContent = 'Saving…';
         try {
-            await fetch(`/api/instructions/${encodeURIComponent(name)}`, {
+            const res = await fetch(`/api/instructions/${encodeURIComponent(name)}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ content }),
             });
-            // Flash saved feedback
-            const btn = $('#saveInstructionBtn');
-            const orig = btn.textContent;
-            btn.textContent = 'Saved!';
-            setTimeout(() => { btn.textContent = orig; }, 1500);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            markDirty(false);
+            editorSaveStatus.textContent = 'Saved ✓';
+            setTimeout(() => { editorSaveStatus.textContent = ''; }, 2000);
+            // Refresh file list to show updated size
+            loadInstructions();
         } catch (e) {
-            alert('Failed to save instruction');
+            alert(`Failed to save "${name}": ${e.message}`);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Save';
+        }
+    }
+
+    async function createNewInstruction() {
+        const name = prompt('New instruction file name (will add .md if needed):');
+        if (!name) return;
+        const filename = name.endsWith('.md') ? name : name + '.md';
+        // Validate: no slashes, no dots except the .md suffix
+        if (/[/\\]/.test(filename) || filename.split('.').length > 2) {
+            alert('Invalid file name. Use simple names like "my-instructions.md".');
+            return;
+        }
+        try {
+            const res = await fetch(`/api/instructions/${encodeURIComponent(filename)}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: `# ${filename}\n\n` }),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            await loadInstructions();
+            openInstruction(filename);
+        } catch (e) {
+            alert(`Failed to create "${filename}": ${e.message}`);
         }
     }
 
@@ -769,11 +843,30 @@
         // Instruction editor
         $('#saveInstructionBtn').addEventListener('click', saveInstruction);
         $('#closeEditorBtn').addEventListener('click', () => {
+            if (instructionDirty) {
+                if (!confirm('You have unsaved changes. Discard and close?')) return;
+            }
             instructionEditor.classList.add('hidden');
+            currentInstructionName = null;
+            markDirty(false);
+            highlightActiveFile(null);
+        });
+        $('#newInstructionBtn').addEventListener('click', createNewInstruction);
+
+        // Mark dirty on content change
+        instructionContent.addEventListener('input', () => {
+            if (!instructionDirty) markDirty(true);
         });
 
-        // Tab support in instruction editor textarea
+        // Tab support + Ctrl+S in instruction editor textarea
         instructionContent.addEventListener('keydown', (e) => {
+            // Ctrl+S / Cmd+S to save
+            if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+                e.preventDefault();
+                saveInstruction();
+                return;
+            }
+            // Tab inserts 4 spaces
             if (e.key === 'Tab') {
                 e.preventDefault();
                 const start = instructionContent.selectionStart;
