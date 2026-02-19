@@ -1,5 +1,6 @@
 """Main entry point for Captain Claw."""
 
+import argparse
 import asyncio
 import json
 import os
@@ -26,6 +27,7 @@ from captain_claw.cron import (
     schedule_to_text,
     to_utc_iso,
 )
+from captain_claw.discord_bridge import DiscordBridge, DiscordMessage
 from captain_claw.execution_queue import (
     CommandLane,
     CommandQueueManager,
@@ -38,7 +40,7 @@ from captain_claw.execution_queue import (
     resolve_session_lane,
 )
 from captain_claw.logging import configure_logging, log, set_system_log_sink
-from captain_claw.discord_bridge import DiscordBridge, DiscordMessage
+from captain_claw.onboarding import run_onboarding_wizard, should_run_onboarding
 from captain_claw.slack_bridge import SlackBridge, SlackMessage
 from captain_claw.telegram_bridge import TelegramBridge, TelegramMessage
 
@@ -79,21 +81,112 @@ async def _run_cancellable(ui: TerminalUI, work: Awaitable[T]) -> tuple[T | None
             esc_task.cancel()
 
 
+def _build_runtime_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="captain-claw",
+        add_help=False,
+        description="Captain Claw - A powerful console-based AI agent",
+    )
+    parser.add_argument("-c", "--config", default="", help="Path to config file")
+    parser.add_argument("-m", "--model", default="", help="Override model")
+    parser.add_argument("-p", "--provider", default="", help="Override provider")
+    parser.add_argument("--no-stream", action="store_true", help="Disable streaming")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
+    parser.add_argument(
+        "--onboarding",
+        action="store_true",
+        help="Run interactive onboarding wizard before starting",
+    )
+    parser.add_argument("--version", action="store_true", help="Show version information and exit")
+    parser.add_argument("-h", "--help", action="store_true", help="Show this help message and exit")
+    return parser
+
+
+def _should_parse_runtime_cli_from_argv(
+    config: str,
+    model: str,
+    provider: str,
+    no_stream: bool,
+    verbose: bool,
+    onboarding: bool,
+) -> bool:
+    if config or model or provider or no_stream or verbose or onboarding:
+        return False
+    if len(sys.argv) <= 1:
+        return False
+    program = Path(sys.argv[0]).name.lower()
+    return (
+        "captain-claw" in program
+        or program in {"captain_claw", "captain_claw.py", "main.py"}
+    )
+
+
 def main(
     config: str = "",
     model: str = "",
     provider: str = "",
     no_stream: bool = False,
     verbose: bool = False,
+    onboarding: bool = False,
 ) -> None:
     """Start Captain Claw interactive session."""
-    ui = get_ui()
-    set_system_log_sink(ui.append_system_line if ui.has_sticky_layout() else None)
+    if _should_parse_runtime_cli_from_argv(
+        config=config,
+        model=model,
+        provider=provider,
+        no_stream=no_stream,
+        verbose=verbose,
+        onboarding=onboarding,
+    ):
+        runtime_args = list(sys.argv[1:])
+        if runtime_args and runtime_args[0].strip().lower() == "run":
+            runtime_args = runtime_args[1:]
+        if runtime_args and runtime_args[0].strip().lower() in {"ver", "version"}:
+            version()
+            return
+        parser = _build_runtime_arg_parser()
+        parsed, unknown = parser.parse_known_args(runtime_args)
+        if parsed.help:
+            parser.print_help()
+            return
+        if parsed.version:
+            version()
+            return
+        config = str(parsed.config or "")
+        model = str(parsed.model or "")
+        provider = str(parsed.provider or "")
+        no_stream = bool(parsed.no_stream)
+        verbose = bool(parsed.verbose)
+        onboarding = bool(parsed.onboarding)
+        if unknown:
+            print(f"Warning: ignoring unsupported arguments: {' '.join(unknown)}")
+
+    set_system_log_sink(None)
 
     # Configure logging first
     if verbose:
         os.environ["CLAW_LOGGING__LEVEL"] = "DEBUG"
     configure_logging()
+
+    if should_run_onboarding(
+        force=onboarding,
+        config_path=(config or None),
+    ):
+        try:
+            selected_config_path = run_onboarding_wizard(
+                config_path=(config or None),
+                require_interactive=onboarding,
+            )
+            if selected_config_path is not None:
+                config = str(selected_config_path)
+        except KeyboardInterrupt:
+            print("\nOnboarding cancelled.")
+            if onboarding:
+                sys.exit(1)
+        except RuntimeError as e:
+            log.error("Onboarding failed", error=str(e))
+            print(f"Error: {e}")
+            sys.exit(1)
 
     # Load configuration
     if config:
@@ -115,6 +208,8 @@ def main(
 
     # Set global config
     set_config(cfg)
+    ui = get_ui()
+    set_system_log_sink(ui.append_system_line if ui.has_sticky_layout() else None)
 
     # Ensure session directory exists
     session_path = Path(cfg.session.path).expanduser()
@@ -199,7 +294,10 @@ async def run_interactive() -> None:
         ("pipeline", "Set pipeline mode (loop/contracts)"),
         ("planning", "Legacy alias for pipeline"),
         ("skills", "List available skills"),
-        ("skill", "Run a skill: /skill <name> [args]"),
+        (
+            "skill",
+            "Run/search/install skill: /skill <name> [args] | /skill search <criteria> | /skill install <github-url> | /skill install <skill-name> [install-id]",
+        ),
         ("cron", "Run one-off cron prompt"),
     ]
 
@@ -2415,6 +2513,84 @@ async def run_interactive() -> None:
             lines = ["Available skills:", "Use `/skill <name> [args]` to run one:"]
             for command in skills:
                 lines.append(f"- /skill {command.name}")
+            lines.append("Search catalog: `/skill search <criteria>`")
+            lines.append("Install from GitHub: `/skill install <github-url>`")
+            lines.append("Install skill deps: `/skill install <skill-name> [install-id]`")
+            await send_text("\n".join(lines))
+            return True
+        if result.startswith("SKILL_SEARCH:"):
+            payload_raw = result.split(":", 1)[1].strip()
+            try:
+                payload = json.loads(payload_raw)
+            except Exception:
+                await send_text("Invalid /skill search payload.")
+                return True
+            query = str(payload.get("query", "")).strip()
+            if not query:
+                await send_text("Usage: /skill search <criteria>")
+                return True
+            search_result = await agent.search_skill_catalog(query)
+            if not bool(search_result.get("ok", False)):
+                await send_text(str(search_result.get("error", "Skill search failed.")))
+                return True
+            source = str(search_result.get("source", "")).strip()
+            items = list(search_result.get("results", []))
+            lines = [f'Top skills for "{query}":']
+            if source:
+                lines.append(f"Source: {source}")
+            if not items:
+                lines.append("No matching skills found.")
+            for idx, item in enumerate(items, start=1):
+                name = str(item.get("name", "")).strip() or "Unnamed"
+                desc = str(item.get("description", "")).strip()
+                url = str(item.get("url", "")).strip()
+                line = f"{idx}. {name}"
+                if desc:
+                    line += f" - {desc}"
+                lines.append(line)
+                if url:
+                    lines.append(f"   {url}")
+            await send_text("\n".join(lines))
+            return True
+        if result.startswith("SKILL_INSTALL:"):
+            payload_raw = result.split(":", 1)[1].strip()
+            try:
+                payload = json.loads(payload_raw)
+            except Exception:
+                await send_text("Invalid /skill install payload.")
+                return True
+            skill_url = str(payload.get("url", "")).strip()
+            skill_name = str(payload.get("name", "")).strip()
+            install_id = str(payload.get("install_id", "")).strip()
+            if skill_url:
+                install_result = await agent.install_skill_from_github(skill_url)
+                if not bool(install_result.get("ok", False)):
+                    await send_text(str(install_result.get("error", "Skill install failed.")))
+                    return True
+                skill_name = str(install_result.get("skill_name", "")).strip() or "unknown"
+                destination = str(install_result.get("destination", "")).strip()
+                alias_list = list(install_result.get("aliases", []))
+                lines = [f'Installed skill "{skill_name}".']
+                if destination:
+                    lines.append(f"Path: {destination}")
+                if alias_list:
+                    lines.append(f"Invoke with: /skill {alias_list[0]}")
+                await send_text("\n".join(lines))
+                return True
+            if not skill_name:
+                await send_text("Usage: /skill install <github-url> | /skill install <skill-name> [install-id]")
+                return True
+            install_result = await agent.install_skill_dependencies(
+                skill_name=skill_name,
+                install_id=install_id or None,
+            )
+            if not bool(install_result.get("ok", False)):
+                await send_text(str(install_result.get("error", "Skill dependency install failed.")))
+                return True
+            lines = [str(install_result.get("message", "Dependencies installed.")).strip()]
+            command = str(install_result.get("command", "")).strip()
+            if command:
+                lines.append(f"Command: {command}")
             await send_text("\n".join(lines))
             return True
         if result.startswith("SKILL_INVOKE:") or result.startswith("SKILL_ALIAS_INVOKE:"):
@@ -2427,7 +2603,9 @@ async def run_interactive() -> None:
             skill_name = str(payload.get("name", "")).strip()
             skill_args = str(payload.get("args", "")).strip()
             if not skill_name:
-                await send_text("Usage: /skill <name> [args]")
+                await send_text(
+                    "Usage: /skill <name> [args] | /skill search <criteria> | /skill install <github-url> | /skill install <skill-name> [install-id]"
+                )
                 return True
             invocation = await agent.invoke_skill_command(skill_name, args=skill_args)
             if not bool(invocation.get("ok", False)):
@@ -3623,7 +3801,86 @@ async def run_interactive() -> None:
                     lines = ["Available skills:", "Use `/skill <name> [args]` to run one:"]
                     for command in skills:
                         lines.append(f"- /skill {command.name} - {command.description}")
+                    lines.append("Search catalog: `/skill search <criteria>`")
+                    lines.append("Install from GitHub: `/skill install <github-url>`")
+                    lines.append("Install skill deps: `/skill install <skill-name> [install-id]`")
                     ui.print_message("system", "\n".join(lines))
+                    continue
+                elif result.startswith("SKILL_SEARCH:"):
+                    payload_raw = result.split(":", 1)[1].strip()
+                    try:
+                        payload = json.loads(payload_raw)
+                    except Exception:
+                        ui.print_error("Invalid /skill search payload")
+                        continue
+                    query = str(payload.get("query", "")).strip()
+                    if not query:
+                        ui.print_error("Usage: /skill search <criteria>")
+                        continue
+                    ui.print_message("system", f'Searching skills catalog for: "{query}"')
+                    search_result = await agent.search_skill_catalog(query)
+                    if not bool(search_result.get("ok", False)):
+                        ui.print_error(str(search_result.get("error", "Skill search failed.")))
+                        continue
+                    source = str(search_result.get("source", "")).strip()
+                    items = list(search_result.get("results", []))
+                    lines = [f'Top skills for "{query}":']
+                    if source:
+                        lines.append(f"Source: {source}")
+                    if not items:
+                        lines.append("No matching skills found.")
+                    for idx, item in enumerate(items, start=1):
+                        name = str(item.get("name", "")).strip() or "Unnamed"
+                        desc = str(item.get("description", "")).strip()
+                        url = str(item.get("url", "")).strip()
+                        line = f"{idx}. {name}"
+                        if desc:
+                            line += f" - {desc}"
+                        lines.append(line)
+                        if url:
+                            lines.append(f"   {url}")
+                    ui.print_message("system", "\n".join(lines))
+                    continue
+                elif result.startswith("SKILL_INSTALL:"):
+                    payload_raw = result.split(":", 1)[1].strip()
+                    try:
+                        payload = json.loads(payload_raw)
+                    except Exception:
+                        ui.print_error("Invalid /skill install payload")
+                        continue
+                    skill_url = str(payload.get("url", "")).strip()
+                    skill_name = str(payload.get("name", "")).strip()
+                    install_id = str(payload.get("install_id", "")).strip()
+                    if skill_url:
+                        ui.print_message("system", f"Installing skill from GitHub: {skill_url}")
+                        install_result = await agent.install_skill_from_github(skill_url)
+                        if not bool(install_result.get("ok", False)):
+                            ui.print_error(str(install_result.get("error", "Skill install failed.")))
+                            continue
+                        skill_name = str(install_result.get("skill_name", "")).strip() or "unknown"
+                        destination = str(install_result.get("destination", "")).strip()
+                        aliases = list(install_result.get("aliases", []))
+                        ui.print_success(f'Installed skill "{skill_name}"')
+                        if destination:
+                            ui.print_message("system", f"Path: {destination}")
+                        if aliases:
+                            ui.print_message("system", f"Invoke with: /skill {aliases[0]}")
+                        continue
+                    if not skill_name:
+                        ui.print_error("Usage: /skill install <github-url> | /skill install <skill-name> [install-id]")
+                        continue
+                    ui.print_message("system", f'Installing dependencies for skill "{skill_name}"')
+                    install_result = await agent.install_skill_dependencies(
+                        skill_name=skill_name,
+                        install_id=install_id or None,
+                    )
+                    if not bool(install_result.get("ok", False)):
+                        ui.print_error(str(install_result.get("error", "Skill dependency install failed.")))
+                        continue
+                    ui.print_success(str(install_result.get("message", "Dependencies installed.")))
+                    command = str(install_result.get("command", "")).strip()
+                    if command:
+                        ui.print_message("system", f"Command: {command}")
                     continue
                 elif result.startswith("SKILL_INVOKE:") or result.startswith("SKILL_ALIAS_INVOKE:"):
                     payload_raw = result.split(":", 1)[1].strip()
@@ -3635,7 +3892,9 @@ async def run_interactive() -> None:
                     skill_name = str(payload.get("name", "")).strip()
                     skill_args = str(payload.get("args", "")).strip()
                     if not skill_name:
-                        ui.print_error("Usage: /skill <name> [args]")
+                        ui.print_error(
+                            "Usage: /skill <name> [args] | /skill search <criteria> | /skill install <github-url> | /skill install <skill-name> [install-id]"
+                        )
                         continue
                     invocation = await agent.invoke_skill_command(skill_name, args=skill_args)
                     if not bool(invocation.get("ok", False)):
@@ -3794,8 +4053,13 @@ if __name__ == "__main__":
         provider: str = typer.Option("", "-p", "--provider", help="Override provider"),
         no_stream: bool = typer.Option(False, "--no-stream", help="Disable streaming"),
         verbose: bool = typer.Option(False, "-v", "--verbose", help="Debug logging"),
+        onboarding: bool = typer.Option(
+            False,
+            "--onboarding",
+            help="Run interactive onboarding wizard before starting",
+        ),
     ) -> None:
-        main(config, model, provider, no_stream, verbose)
+        main(config, model, provider, no_stream, verbose, onboarding)
 
     @cli.command()
     def ver() -> None:

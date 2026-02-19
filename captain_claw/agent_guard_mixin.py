@@ -385,6 +385,7 @@ class AgentGuardMixin:
         session_policy: dict[str, Any] | None = None,
         task_policy: dict[str, Any] | None = None,
         abort_event: asyncio.Event | None = None,
+        session_id_override: str | None = None,
     ):
         """Execute a tool after script/tool guard policy check."""
         guard_payload = json.dumps(
@@ -407,7 +408,7 @@ class AgentGuardMixin:
         return await self.tools.execute(
             name=name,
             arguments=arguments,
-            session_id=self._current_session_slug(),
+            session_id=str(session_id_override or "").strip() or self._current_session_slug(),
             session_policy=session_policy,
             task_policy=task_policy,
             abort_event=abort_event,

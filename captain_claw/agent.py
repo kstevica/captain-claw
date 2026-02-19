@@ -55,6 +55,7 @@ class Agent(
         self.tool_output_callback = tool_output_callback
         self.approval_callback = approval_callback
         self.tools = get_tool_registry()
+        self.tools.set_approval_callback(self.approval_callback)
         self.runtime_base_path = Path.cwd().resolve()
         cfg = get_config()
         self.workspace_base_path = cfg.resolved_workspace_path(self.runtime_base_path)

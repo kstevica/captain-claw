@@ -196,6 +196,9 @@ Commands:
   /planning on|off - Legacy alias for /pipeline contracts|loop
   /skills         - List currently available user-invocable skills
   /skill <name> [args] - Run a specific skill manually
+  /skill search <criteria> - Search public OpenClaw skills catalog (top 10)
+  /skill install <github-url> - Install a skill from GitHub into managed skills
+  /skill install <skill-name> [install-id] - Install dependencies declared by a skill
   /<skill-command> [args] - Direct alias for a discovered skill command
   /approve user <telegram|slack|discord> <token> - Approve pending chat user pairing token
   /monitor on     - Enable split monitor view
@@ -1592,15 +1595,46 @@ Commands:
         elif command == "/skill":
             raw = args.strip()
             if not raw:
-                self.print_error("Usage: /skill <name> [args] | /skill list")
+                self.print_error(
+                    "Usage: /skill <name> [args] | /skill list | /skill search <criteria> | /skill install <github-url> | /skill install <skill-name> [install-id]"
+                )
                 return None
             if raw.lower() == "list":
                 return "SKILLS_LIST"
+            parts = raw.split(None, 2)
+            if parts and parts[0].lower() == "search":
+                query = raw[len(parts[0]) :].strip()
+                if len(query) >= 2 and query[0] == query[-1] and query[0] in {"'", '"'}:
+                    query = query[1:-1].strip()
+                if not query:
+                    self.print_error("Usage: /skill search <criteria>")
+                    return None
+                payload = json.dumps({"query": query}, ensure_ascii=True)
+                return f"SKILL_SEARCH:{payload}"
+            if parts and parts[0].lower() == "install":
+                if len(parts) < 2 or not parts[1].strip():
+                    self.print_error("Usage: /skill install <github-url> | /skill install <skill-name> [install-id]")
+                    return None
+                target = parts[1].strip()
+                install_id = parts[2].strip() if len(parts) > 2 else ""
+                if target.startswith(("http://", "https://")):
+                    if install_id:
+                        self.print_error("Usage: /skill install <github-url>")
+                        return None
+                    payload = json.dumps({"url": target}, ensure_ascii=True)
+                else:
+                    payload = json.dumps(
+                        {"name": target, "install_id": install_id},
+                        ensure_ascii=True,
+                    )
+                return f"SKILL_INSTALL:{payload}"
             parts = raw.split(None, 1)
             skill_name = parts[0].strip()
             skill_args = parts[1].strip() if len(parts) > 1 else ""
             if not skill_name:
-                self.print_error("Usage: /skill <name> [args] | /skill list")
+                self.print_error(
+                    "Usage: /skill <name> [args] | /skill list | /skill search <criteria> | /skill install <github-url> | /skill install <skill-name> [install-id]"
+                )
                 return None
             payload = json.dumps({"name": skill_name, "args": skill_args}, ensure_ascii=True)
             return f"SKILL_INVOKE:{payload}"

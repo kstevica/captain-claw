@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
-import re
 from typing import Any
 
 from captain_claw.logging import get_logger
 from captain_claw.semantic_memory import SemanticMemoryIndex, create_semantic_memory_index
-
 
 log = get_logger(__name__)
 
@@ -122,6 +121,8 @@ class LayeredMemory:
 
     def set_active_session(self, session_id: str | None) -> None:
         self.active_session_id = (session_id or "").strip() or None
+        if self.semantic is not None:
+            self.semantic.set_active_session(self.active_session_id)
 
     def record_message(self, role: str, content: str) -> None:
         self.working.add_message(role, content)

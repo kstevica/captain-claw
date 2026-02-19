@@ -99,6 +99,8 @@ class AgentOrchestrationMixin:
                 output_text=output_text,
                 turn_start_idx=turn_start_idx,
                 turn_usage=turn_usage,
+                session_policy=session_tool_policy,
+                task_policy=self._active_task_tool_policy_payload(planning_pipeline),
             )
             if not str(final_response or "").strip():
                 tool_output_fallback = self._collect_turn_tool_output(turn_start_idx)
@@ -118,6 +120,9 @@ class AgentOrchestrationMixin:
                         user_input=effective_user_input,
                         turn_usage=turn_usage,
                         list_task_plan=list_task_plan,
+                        planning_pipeline=planning_pipeline,
+                        session_policy=session_tool_policy,
+                        task_policy=self._active_task_tool_policy_payload(planning_pipeline),
                     )
                     self._emit_tool_output(
                         "task_contract",

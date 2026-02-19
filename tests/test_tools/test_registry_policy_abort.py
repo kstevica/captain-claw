@@ -121,6 +121,9 @@ async def test_shell_blocking_uses_parsed_base_command_not_substring_matches():
     old_cfg = get_config().model_copy(deep=True)
     cfg = old_cfg.model_copy(deep=True)
     cfg.tools.shell.blocked = ["rm"]
+    cfg.tools.shell.allow_patterns = []
+    cfg.tools.shell.deny_patterns = []
+    cfg.tools.shell.default_policy = "allow"
     set_config(cfg)
     try:
         registry = ToolRegistry()
@@ -159,3 +162,72 @@ async def test_registry_abort_event_cancels_running_tool_execution():
     with pytest.raises(ToolExecutionError, match="aborted"):
         await execution
     assert tool.cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_shell_exec_policy_deny_pattern_blocks_command():
+    old_cfg = get_config().model_copy(deep=True)
+    cfg = old_cfg.model_copy(deep=True)
+    cfg.tools.shell.blocked = []
+    cfg.tools.shell.allow_patterns = []
+    cfg.tools.shell.deny_patterns = ["echo blocked*"]
+    cfg.tools.shell.default_policy = "allow"
+    set_config(cfg)
+    try:
+        registry = ToolRegistry()
+        registry.register(DummyShellTool())
+        with pytest.raises(ToolBlockedError, match="deny pattern"):
+            await registry.execute("shell", {"command": "echo blocked now"})
+    finally:
+        set_config(old_cfg)
+
+
+@pytest.mark.asyncio
+async def test_shell_exec_policy_allow_pattern_overrides_default_deny():
+    old_cfg = get_config().model_copy(deep=True)
+    cfg = old_cfg.model_copy(deep=True)
+    cfg.tools.shell.blocked = []
+    cfg.tools.shell.allow_patterns = ["echo *"]
+    cfg.tools.shell.deny_patterns = []
+    cfg.tools.shell.default_policy = "deny"
+    set_config(cfg)
+    try:
+        registry = ToolRegistry()
+        registry.register(DummyShellTool())
+        allowed = await registry.execute("shell", {"command": "echo hello"})
+        assert allowed.success is True
+
+        with pytest.raises(ToolBlockedError, match="Default shell execution policy denies command"):
+            await registry.execute("shell", {"command": "printf 'nope'"})
+    finally:
+        set_config(old_cfg)
+
+
+@pytest.mark.asyncio
+async def test_shell_exec_policy_ask_uses_approval_callback():
+    old_cfg = get_config().model_copy(deep=True)
+    cfg = old_cfg.model_copy(deep=True)
+    cfg.tools.shell.blocked = []
+    cfg.tools.shell.allow_patterns = []
+    cfg.tools.shell.deny_patterns = []
+    cfg.tools.shell.default_policy = "ask"
+    set_config(cfg)
+    try:
+        registry = ToolRegistry()
+        registry.register(DummyShellTool())
+        prompts: list[str] = []
+
+        def deny_callback(question: str) -> bool:
+            prompts.append(question)
+            return False
+
+        registry.set_approval_callback(deny_callback)
+        with pytest.raises(ToolBlockedError, match="approval policy"):
+            await registry.execute("shell", {"command": "echo hello"})
+
+        registry.set_approval_callback(lambda _: True)
+        result = await registry.execute("shell", {"command": "echo hello"})
+        assert result.success is True
+        assert prompts
+    finally:
+        set_config(old_cfg)

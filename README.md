@@ -14,7 +14,7 @@ If you are looking for a powerful open-source agentic system for day-to-day term
 
 1. Install Captain Claw in a virtual environment.
 2. Set one API key (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`) or use Ollama.
-3. Start with `captain-claw`.
+3. Start with `captain-claw` (first run starts interactive onboarding automatically).
 4. Run `/models` and pick a model with `/session model <id>`.
 5. Create a second session (`/new incident-hotfix`) and switch models per session.
 6. Enable guards in `config.yaml` when you want stricter safety behavior.
@@ -151,6 +151,12 @@ Use only the keys you need for your active providers.
 
 ```bash
 captain-claw
+```
+
+To rerun setup at any time:
+
+```bash
+captain-claw --onboarding
 ```
 
 ### 3) Try model selection
@@ -346,7 +352,7 @@ DISCORD_BOT_TOKEN="your_discord_bot_token"
 
 ## Skills
 
-- Captain Claw now loads OpenClaw-style `SKILL.md` skills from these roots (precedence low -> high): extra dirs, bundled, managed (`~/.captain-claw/skills`), `~/.agents/skills`, `<workspace>/.agents/skills`, `<workspace>/skills`.
+- Captain Claw now loads OpenClaw-style `SKILL.md` skills from these roots (precedence low -> high): extra dirs, bundled (`./skills` beside `./instructions`), managed (`~/.captain-claw/skills`), `~/.agents/skills`, `<workspace>/.agents/skills`, `<workspace>/skills`.
 - Eligible skills are injected into the system prompt as `<available_skills>...</available_skills>`.
 - `metadata.openclaw.requires` gates skills by binaries, env vars, and config paths.
 - Frontmatter supports `user-invocable`, `disable-model-invocation`, `command-dispatch: tool`, and `command-tool`.

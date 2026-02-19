@@ -2,24 +2,23 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from dataclasses import dataclass
-from datetime import UTC, datetime
 import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import re
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Protocol
 
 import httpx
 
 from captain_claw.logging import get_logger
-
 
 log = get_logger(__name__)
 
@@ -303,6 +302,7 @@ class SemanticMemoryIndex:
         workspace_path: Path,
         index_workspace: bool = True,
         index_sessions: bool = True,
+        cross_session_retrieval: bool = False,
         max_workspace_files: int = 400,
         max_file_bytes: int = 262_144,
         include_extensions: list[str] | None = None,
@@ -326,6 +326,8 @@ class SemanticMemoryIndex:
         self.workspace_path = Path(workspace_path).resolve()
         self.index_workspace = bool(index_workspace)
         self.index_sessions = bool(index_sessions)
+        self.cross_session_retrieval = bool(cross_session_retrieval)
+        self._active_session_reference: str | None = None
         self.max_workspace_files = max(1, int(max_workspace_files))
         self.max_file_bytes = max(1024, int(max_file_bytes))
         self.include_extensions = {
@@ -364,6 +366,14 @@ class SemanticMemoryIndex:
         self._closed = False
         self._ensure_db()
         self.schedule_sync("startup")
+
+    def set_active_session(self, session_reference: str | None) -> None:
+        """Set active session reference used to scope session-memory retrieval."""
+        normalized = str(session_reference or "").strip() or None
+        if normalized == self._active_session_reference:
+            return
+        self._active_session_reference = normalized
+        self._clear_cache()
 
     def close(self) -> None:
         """Close SQLite resources."""
@@ -424,7 +434,12 @@ class SemanticMemoryIndex:
         if self._closed:
             return []
         effective_max = max(1, int(max_results or self.max_results))
-        key = f"{cleaned}::{effective_max}"
+        scope = (
+            "all_sessions"
+            if self.cross_session_retrieval
+            else (self._active_session_reference or "workspace_only")
+        )
+        key = f"{cleaned}::{effective_max}::{scope}"
         now = time.time()
         cached = self._cache.get(key)
         if cached and cached[0] > now:
@@ -435,8 +450,18 @@ class SemanticMemoryIndex:
             if stale or self._dirty:
                 self.schedule_sync("search")
 
-        keyword_hits = self._keyword_search(cleaned, limit=self.candidate_limit)
-        vector_hits = self._vector_search(cleaned, limit=self.candidate_limit)
+        keyword_hits = self._keyword_search(
+            cleaned,
+            limit=self.candidate_limit,
+            active_session_reference=self._active_session_reference,
+            include_all_sessions=self.cross_session_retrieval,
+        )
+        vector_hits = self._vector_search(
+            cleaned,
+            limit=self.candidate_limit,
+            active_session_reference=self._active_session_reference,
+            include_all_sessions=self.cross_session_retrieval,
+        )
         merged = self._merge_hybrid(keyword_hits, vector_hits, max_results=effective_max)
         self._cache[key] = (time.time() + self.cache_ttl_seconds, merged)
         return list(merged)
@@ -452,7 +477,10 @@ class SemanticMemoryIndex:
         results = self.search(query=query, max_results=max_items)
         if not results:
             return "", "semantic_memory: no results"
-        lines = ["Semantic memory matches (prior sessions + workspace):"]
+        if self.cross_session_retrieval:
+            lines = ["Semantic memory matches (all sessions + workspace):"]
+        else:
+            lines = ["Semantic memory matches (active session + workspace):"]
         debug = [f"semantic_memory query={query!r}", f"result_count={len(results)}"]
         for item in results[:max_items]:
             snippet = re.sub(r"\s+", " ", item.snippet).strip()
@@ -872,14 +900,31 @@ class SemanticMemoryIndex:
                 payload,
             )
 
-    def _keyword_search(self, query: str, limit: int) -> list[dict[str, Any]]:
+    def _keyword_search(
+        self,
+        query: str,
+        limit: int,
+        *,
+        active_session_reference: str | None,
+        include_all_sessions: bool,
+    ) -> list[dict[str, Any]]:
         conn = self._conn_or_raise()
         fts_query = _build_fts_query(query)
         if not fts_query:
             return []
+        session_reference = str(active_session_reference or "").strip()
+        if include_all_sessions:
+            where_clause = ""
+            params: tuple[Any, ...] = (fts_query, limit)
+        elif session_reference:
+            where_clause = "AND (c.source != 'session' OR c.reference = ?)"
+            params = (fts_query, session_reference, limit)
+        else:
+            where_clause = "AND c.source != 'session'"
+            params = (fts_query, limit)
         try:
             rows = conn.execute(
-                """
+                f"""
                 SELECT
                     c.chunk_id,
                     c.source,
@@ -893,25 +938,36 @@ class SemanticMemoryIndex:
                 FROM memory_chunks_fts
                 JOIN memory_chunks c ON c.chunk_id = memory_chunks_fts.chunk_id
                 WHERE memory_chunks_fts MATCH ?
+                {where_clause}
                 ORDER BY rank ASC
                 LIMIT ?
                 """,
-                (fts_query, limit),
+                params,
             ).fetchall()
         except Exception as exc:
             log.debug("FTS search failed; fallbacking to LIKE search", error=str(exc))
             like = f"%{query.strip()}%"
+            if include_all_sessions:
+                like_where = ""
+                like_params: tuple[Any, ...] = (like, limit)
+            elif session_reference:
+                like_where = "AND (source != 'session' OR reference = ?)"
+                like_params = (like, session_reference, limit)
+            else:
+                like_where = "AND source != 'session'"
+                like_params = (like, limit)
             rows = conn.execute(
-                """
+                f"""
                 SELECT
                     chunk_id, source, reference, path, start_line, end_line, text, updated_at,
                     999.0 AS rank
                 FROM memory_chunks
                 WHERE text LIKE ?
+                {like_where}
                 ORDER BY updated_at DESC
                 LIMIT ?
                 """,
-                (like, limit),
+                like_params,
             ).fetchall()
         hits: list[dict[str, Any]] = []
         for row in rows:
@@ -931,7 +987,14 @@ class SemanticMemoryIndex:
             )
         return hits
 
-    def _vector_search(self, query: str, limit: int) -> list[dict[str, Any]]:
+    def _vector_search(
+        self,
+        query: str,
+        limit: int,
+        *,
+        active_session_reference: str | None,
+        include_all_sessions: bool,
+    ) -> list[dict[str, Any]]:
         if not self.embedding_chain.enabled:
             return []
         conn = self._conn_or_raise()
@@ -946,8 +1009,18 @@ class SemanticMemoryIndex:
         dims = len(query_vec)
         if dims <= 0:
             return []
+        session_reference = str(active_session_reference or "").strip()
+        if include_all_sessions:
+            extra_where = ""
+            params: tuple[Any, ...] = (provider_key, dims)
+        elif session_reference:
+            extra_where = "AND (c.source != 'session' OR c.reference = ?)"
+            params = (provider_key, dims, session_reference)
+        else:
+            extra_where = "AND c.source != 'session'"
+            params = (provider_key, dims)
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 e.chunk_id,
                 c.source,
@@ -961,8 +1034,9 @@ class SemanticMemoryIndex:
             FROM memory_embeddings e
             JOIN memory_chunks c ON c.chunk_id = e.chunk_id
             WHERE e.provider_key = ? AND e.dims = ?
+            {extra_where}
             """,
-            (provider_key, dims),
+            params,
         ).fetchall()
         if not rows:
             # Index may still be stale for the active provider.
@@ -1128,6 +1202,7 @@ def create_semantic_memory_index(
         workspace_path=workspace_path,
         index_workspace=bool(getattr(memory_cfg, "index_workspace", True)),
         index_sessions=bool(getattr(memory_cfg, "index_sessions", True)),
+        cross_session_retrieval=bool(getattr(memory_cfg, "cross_session_retrieval", False)),
         max_workspace_files=int(getattr(memory_cfg, "max_workspace_files", 400)),
         max_file_bytes=int(getattr(memory_cfg, "max_file_bytes", 262_144)),
         include_extensions=include_extensions,

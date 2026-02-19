@@ -1,15 +1,14 @@
 """Session memory/compaction/runtime-flag helpers for Agent."""
 
 import copy
-from datetime import UTC, datetime
 import re
+from datetime import UTC, datetime
 from typing import Any
 
 from captain_claw.config import get_config
 from captain_claw.llm import Message
 from captain_claw.logging import get_logger
 from captain_claw.session import Session
-
 
 log = get_logger(__name__)
 
@@ -623,8 +622,12 @@ class AgentSessionMixin:
             execution_context.setdefault("token_usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
             execution_context.setdefault("compaction_count", 0)
             execution_context.setdefault("history", [])
+            execution_context.setdefault("artifacts", [])
+            execution_context.setdefault("variables", {})
             execution_context.setdefault("allow_agents", allow_agents)
             execution_context.setdefault("max_children", max_active_children)
+            execution_context.setdefault("tool_allowlist", ["shell", "write", "read"])
+            execution_context.setdefault("timeout_seconds", 120)
 
             existing_session_id = str(execution_context.get("session_id", "")).strip()
             if existing_session_id:
@@ -707,6 +710,9 @@ class AgentSessionMixin:
         self.planning_enabled = self.pipeline_mode == "contracts"
         self.monitor_trace_llm = monitor_trace_llm
         self.monitor_trace_pipeline = monitor_trace_pipeline
+        memory = getattr(self, "memory", None)
+        if memory is not None:
+            memory.set_active_session(self.session.id if self.session else None)
         self._skills_snapshot_cache = None
         selection = self._session_model_selection()
         if selection:

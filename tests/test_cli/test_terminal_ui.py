@@ -327,6 +327,30 @@ def test_planning_command_parsing():
     assert ui.handle_special_command("/pipeline complex") == "PIPELINE_MODE:contracts"
     assert ui.handle_special_command("/skills") == "SKILLS_LIST"
     assert ui.handle_special_command("/skill list") == "SKILLS_LIST"
+    install = ui.handle_special_command("/skill install https://github.com/openai/skills/tree/main/skills/.curated/source-brief")
+    assert install is not None
+    assert install.startswith("SKILL_INSTALL:")
+    install_payload = json.loads(install.split(":", 1)[1])
+    assert install_payload == {
+        "url": "https://github.com/openai/skills/tree/main/skills/.curated/source-brief"
+    }
+    assert ui.handle_special_command("/skill install https://github.com/openai/skills extra") is None
+    deps_install = ui.handle_special_command("/skill install event-planner")
+    assert deps_install is not None
+    assert deps_install.startswith("SKILL_INSTALL:")
+    deps_payload = json.loads(deps_install.split(":", 1)[1])
+    assert deps_payload == {"name": "event-planner", "install_id": ""}
+    deps_install_id = ui.handle_special_command("/skill install event-planner uv-brew")
+    assert deps_install_id is not None
+    assert deps_install_id.startswith("SKILL_INSTALL:")
+    deps_id_payload = json.loads(deps_install_id.split(":", 1)[1])
+    assert deps_id_payload == {"name": "event-planner", "install_id": "uv-brew"}
+    search = ui.handle_special_command('/skill search "summarize web sources"')
+    assert search is not None
+    assert search.startswith("SKILL_SEARCH:")
+    search_payload = json.loads(search.split(":", 1)[1])
+    assert search_payload == {"query": "summarize web sources"}
+    assert ui.handle_special_command("/skill search") is None
     invoke = ui.handle_special_command("/skill docs summarize release notes")
     assert invoke is not None
     assert invoke.startswith("SKILL_INVOKE:")

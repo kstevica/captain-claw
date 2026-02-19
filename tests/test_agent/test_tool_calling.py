@@ -1329,11 +1329,13 @@ async def test_explicit_generate_script_forces_write_and_run_from_scripts_dir(tm
     created_files = list(scripts_dir.glob("generated_script_*.py"))
     assert created_files
     assert "hello from generated script" in created_files[0].read_text(encoding="utf-8")
+    assert "structured-result-protocol-v1" in created_files[0].read_text(encoding="utf-8")
     assert any(entry["name"] == "write" for entry in outputs)
     assert any(entry["name"] == "shell" for entry in outputs)
     assert shell_tool.commands
     assert str(scripts_dir) in shell_tool.commands[0]
-    assert "&& python3" in shell_tool.commands[0]
+    assert ".result.json" in shell_tool.commands[0]
+    assert "python" in shell_tool.commands[0]
     assert "Script saved and executed from" in result
 
 
@@ -1369,6 +1371,55 @@ async def test_list_requests_force_python_worker_tool_execution(tmp_path: Path):
     generated_scripts = list((tmp_path / "saved" / "scripts" / "s1").glob("*.py"))
     assert generated_scripts
     assert "Script saved and executed from" in result
+
+
+@pytest.mark.asyncio
+async def test_python_worker_persists_structured_result_into_execution_context(tmp_path: Path):
+    provider = DummyProvider()
+    agent = Agent(provider=provider)
+    agent._initialized = True
+    agent.session = Session(id="s1", name="default")
+    agent.session_manager = DummySessionManager()
+    registry = ToolRegistry(base_path=tmp_path)
+    registry.register(WriteTool())
+    registry.register(ExecutingShellTool())
+    agent.tools = registry
+
+    async def fake_synthesize(user_input: str, turn_usage: dict[str, int]) -> tuple[str, str]:
+        return ("def main():\n    return {'items_processed': 2}\n", ".py")
+
+    agent._synthesize_script_content = fake_synthesize  # type: ignore[assignment]
+    pipeline = {
+        "task_graph": {
+            "task_1": {
+                "id": "task_1",
+                "execution_context": {
+                    "session_id": "child-ctx-1",
+                    "history": [],
+                    "artifacts": [],
+                    "variables": {},
+                    "tool_allowlist": ["shell", "write", "read"],
+                    "timeout_seconds": 30,
+                },
+            }
+        },
+        "current_task_id": "task_1",
+        "active_task_ids": ["task_1"],
+    }
+
+    worker_result = await agent._run_python_worker_for_list_task(
+        user_input="generate worker",
+        turn_usage=agent._empty_usage(),
+        planning_pipeline=pipeline,
+    )
+
+    assert worker_result.get("success") is True
+    assert worker_result.get("result", {}).get("data", {}).get("items_processed") == 2
+    node = pipeline["task_graph"]["task_1"]
+    context = node["execution_context"]
+    assert context.get("variables", {}).get("output", {}).get("items_processed") == 2
+    assert any(str(item).endswith(".result.json") for item in context.get("artifacts", []))
+    assert node.get("result", {}).get("data", {}).get("items_processed") == 2
 
 
 def test_choose_list_execution_strategy_prefers_direct_without_explicit_script_request():

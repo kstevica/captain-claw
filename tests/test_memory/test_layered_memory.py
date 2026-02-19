@@ -71,6 +71,7 @@ def test_semantic_memory_indexes_and_searches_keyword_hits(tmp_path: Path):
             path="sessions/analysis.txt",
             text="CSV analysis from yesterday found a spike in conversion rates.",
         )
+        index.set_active_session("session-1")
         results = index.search("csv analysis yesterday", max_results=3)
     finally:
         index.close()
@@ -78,6 +79,85 @@ def test_semantic_memory_indexes_and_searches_keyword_hits(tmp_path: Path):
     assert results
     assert results[0].source == "session"
     assert "CSV analysis" in results[0].snippet
+
+
+def test_semantic_memory_scopes_session_results_to_active_session_by_default(tmp_path: Path):
+    db_path = tmp_path / "memory.db"
+    session_db = tmp_path / "sessions.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    session_db.touch()
+
+    index = SemanticMemoryIndex(
+        db_path=db_path,
+        session_db_path=session_db,
+        workspace_path=workspace,
+        index_workspace=False,
+        index_sessions=False,
+        min_score=0.0,
+        temporal_decay_enabled=False,
+    )
+    try:
+        index.upsert_text(
+            source="session",
+            reference="session-old",
+            path="sessions/old.txt",
+            text="hello from prior session context",
+        )
+        index.upsert_text(
+            source="session",
+            reference="session-new",
+            path="sessions/new.txt",
+            text="hello from active session context",
+        )
+        index.set_active_session("session-new")
+        results = index.search("hello", max_results=10)
+    finally:
+        index.close()
+
+    session_refs = {r.reference for r in results if r.source == "session"}
+    assert "session-new" in session_refs
+    assert "session-old" not in session_refs
+
+
+def test_semantic_memory_can_opt_in_to_cross_session_retrieval(tmp_path: Path):
+    db_path = tmp_path / "memory.db"
+    session_db = tmp_path / "sessions.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    session_db.touch()
+
+    index = SemanticMemoryIndex(
+        db_path=db_path,
+        session_db_path=session_db,
+        workspace_path=workspace,
+        index_workspace=False,
+        index_sessions=False,
+        cross_session_retrieval=True,
+        min_score=0.0,
+        temporal_decay_enabled=False,
+    )
+    try:
+        index.upsert_text(
+            source="session",
+            reference="session-old",
+            path="sessions/old.txt",
+            text="hello from prior session context",
+        )
+        index.upsert_text(
+            source="session",
+            reference="session-new",
+            path="sessions/new.txt",
+            text="hello from active session context",
+        )
+        index.set_active_session("session-new")
+        results = index.search("hello", max_results=10)
+    finally:
+        index.close()
+
+    session_refs = {r.reference for r in results if r.source == "session"}
+    assert "session-new" in session_refs
+    assert "session-old" in session_refs
 
 
 def test_build_messages_includes_semantic_memory_note(tmp_path: Path):

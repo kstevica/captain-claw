@@ -1,13 +1,14 @@
 """Configuration management for Captain Claw."""
 
 import os
+import re
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
 
 # Paths
 DEFAULT_CONFIG_PATH = Path("~/.captain-claw/config.yaml").expanduser()
@@ -77,6 +78,7 @@ class MemoryConfig(BaseModel):
     path: str = "~/.captain-claw/memory.db"
     index_workspace: bool = True
     index_sessions: bool = True
+    cross_session_retrieval: bool = False
     auto_sync_on_search: bool = True
     max_workspace_files: int = 400
     max_file_bytes: int = 262144
@@ -121,6 +123,13 @@ class MemoryConfig(BaseModel):
 class ShellToolConfig(BaseModel):
     """Shell tool configuration."""
 
+    class ExecPolicy(StrEnum):
+        """Default shell execution behavior when no pattern matches."""
+
+        ASK = "ask"
+        ALLOW = "allow"
+        DENY = "deny"
+
     timeout: int = 30
     blocked: list[str] = [
         "rm -rf /",
@@ -128,6 +137,9 @@ class ShellToolConfig(BaseModel):
         ":(){:|:&};:",
     ]
     allowed_commands: list[str] = []
+    default_policy: ExecPolicy = ExecPolicy.ASK
+    allow_patterns: list[str] = ["python *", "pip install *"]
+    deny_patterns: list[str] = ["rm -rf *", "sudo *"]
 
 
 class WebFetchToolConfig(BaseModel):
@@ -178,6 +190,7 @@ class ToolsConfig(BaseModel):
     web_search: WebSearchToolConfig = Field(default_factory=WebSearchToolConfig)
     pocket_tts: PocketTTSToolConfig = Field(default_factory=PocketTTSToolConfig)
     require_confirmation: list[str] = ["shell", "write"]
+    plugin_dirs: list[str] = ["skills/tools"]
 
 
 class SkillEntryConfig(BaseModel):
@@ -197,8 +210,21 @@ class SkillsLoadConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     extra_dirs: list[str] = Field(default_factory=list, alias="extraDirs")
+    plugin_dirs: list[str] = Field(default_factory=list, alias="pluginDirs")
     watch: bool = True
     watch_debounce_ms: int = Field(default=250, alias="watchDebounceMs")
+
+
+class SkillsInstallConfig(BaseModel):
+    """Skill dependency install preferences."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    prefer_brew: bool = Field(default=True, alias="preferBrew")
+    node_manager: Literal["npm", "pnpm", "yarn", "bun"] = Field(
+        default="npm",
+        alias="nodeManager",
+    )
 
 
 class SkillsConfig(BaseModel):
@@ -210,11 +236,16 @@ class SkillsConfig(BaseModel):
     allow_bundled: list[str] = Field(default_factory=list, alias="allowBundled")
     entries: dict[str, SkillEntryConfig] = Field(default_factory=dict)
     load: SkillsLoadConfig = Field(default_factory=SkillsLoadConfig)
+    install: SkillsInstallConfig = Field(default_factory=SkillsInstallConfig)
     max_skills_in_prompt: int = 64
     max_skills_prompt_chars: int = 16000
     max_skill_file_bytes: int = 131072
     max_candidates_per_root: int = 2048
     max_skills_loaded_per_source: int = 256
+    search_source_url: str = "https://github.com/VoltAgent/awesome-openclaw-skills"
+    search_limit: int = 10
+    search_max_candidates: int = 5000
+    search_http_timeout_seconds: int = 20
 
 
 class GuardTypeConfig(BaseModel):
@@ -400,12 +431,30 @@ class Config(BaseSettings):
     def from_yaml(cls, path: Path | str | None = None) -> "Config":
         """Load configuration from YAML file."""
         config_path = Path(path).expanduser() if path else cls.resolve_default_config_path()
-        
+
         if not config_path.exists():
             return cls()
-        
-        with open(config_path) as f:
-            data = yaml.safe_load(f) or {}
+
+        raw_text = config_path.read_text(encoding="utf-8")
+        try:
+            data = yaml.safe_load(raw_text) or {}
+        except yaml.constructor.ConstructorError as e:
+            message = str(e)
+            if "python/object/apply:captain_claw.config." not in message:
+                raise
+            # Legacy configs could serialize enums as python/object/apply tags.
+            # Convert these to plain scalar values so safe_load can parse the file.
+            sanitized = re.sub(
+                r"(?m)^(\s*[\w_]+:\s*)!!python/object/apply:captain_claw\.config\.[^\n]+\n\s*-\s*([^\n]+)\s*$",
+                r"\1\2",
+                raw_text,
+            )
+            data = yaml.safe_load(sanitized) or {}
+            if sanitized != raw_text:
+                try:
+                    config_path.write_text(sanitized, encoding="utf-8")
+                except Exception:
+                    pass
         data = cls._apply_legacy_top_level_config(data)
 
         return cls(**data)
@@ -518,15 +567,15 @@ class Config(BaseSettings):
     def save(self, path: Path | str | None = None) -> None:
         """Save configuration to YAML file."""
         config_path = Path(path) if path else DEFAULT_CONFIG_PATH
-        
+
         # Ensure directory exists
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Convert to dict, excluding defaults
-        data = self.model_dump(exclude_none=True)
-        
-        with open(config_path, "w") as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+        # Convert to JSON-safe dict so enums/complex objects are plain scalars.
+        data = self.model_dump(mode="json", exclude_none=True)
+
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
 
     def resolved_workspace_path(self, runtime_base: Path | str | None = None) -> Path:
         """Resolve workspace path, anchoring relative paths to runtime base/cwd."""

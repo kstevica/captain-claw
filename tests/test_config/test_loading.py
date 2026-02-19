@@ -33,6 +33,22 @@ def test_load_prefers_local_config_yaml(monkeypatch, tmp_path: Path):
     assert cfg.model.allowed[0].id == "chatgpt-fast"
 
 
+def test_load_reads_skill_search_source_url_from_yaml(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    local_cfg = tmp_path / "config.yaml"
+    local_cfg.write_text(
+        (
+            "skills:\n"
+            "  search_source_url: https://github.com/example/custom-openclaw-skills\n"
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = Config.load()
+
+    assert cfg.skills.search_source_url == "https://github.com/example/custom-openclaw-skills"
+
+
 def test_load_falls_back_to_default_path_when_no_local(monkeypatch, tmp_path: Path):
     monkeypatch.chdir(tmp_path)
 
@@ -233,3 +249,35 @@ def test_load_prefers_discord_bot_token_from_dotenv(monkeypatch, tmp_path: Path)
     cfg = Config.load()
 
     assert cfg.discord.bot_token == "secure-dotenv-discord-token"
+
+
+def test_load_handles_legacy_python_object_apply_enum_tag(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    local_cfg = tmp_path / "config.yaml"
+    local_cfg.write_text(
+        (
+            "tools:\n"
+            "  shell:\n"
+            "    default_policy: !!python/object/apply:captain_claw.config.ExecPolicy\n"
+            "    - ask\n"
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = Config.load()
+
+    assert cfg.tools.shell.default_policy == "ask"
+    assert "python/object/apply" not in local_cfg.read_text(encoding="utf-8")
+
+
+def test_save_uses_safe_yaml_scalars_for_enum(tmp_path: Path):
+    config_path = tmp_path / "saved-config.yaml"
+    cfg = Config()
+    cfg.tools.shell.default_policy = cfg.tools.shell.ExecPolicy.DENY
+
+    cfg.save(config_path)
+
+    raw = config_path.read_text(encoding="utf-8")
+    assert "python/object/apply" not in raw
+    reloaded = Config.from_yaml(config_path)
+    assert reloaded.tools.shell.default_policy == "deny"

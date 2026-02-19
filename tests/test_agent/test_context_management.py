@@ -349,6 +349,72 @@ async def test_invoke_skill_command_rewrites_prompt(tmp_path: Path):
         set_config(old_cfg)
 
 
+@pytest.mark.asyncio
+async def test_invoke_skill_command_dispatches_script_via_shell(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    old_cfg = get_config().model_copy(deep=True)
+    cfg = old_cfg.model_copy(deep=True)
+    cfg.workspace.path = str(tmp_path)
+    set_config(cfg)
+    try:
+        skill_dir = tmp_path / "skills" / "scripted"
+        _write_skill(
+            skill_dir,
+            "scripted",
+            "Run a bundled script.",
+            extra_frontmatter=(
+                "command-dispatch: script\n"
+                "command-script: scripts/run.sh\n"
+                "command-script-interpreter: uv run\n"
+            ),
+        )
+        script_dir = skill_dir / "scripts"
+        script_dir.mkdir(parents=True, exist_ok=True)
+        script_path = script_dir / "run.sh"
+        script_path.write_text("#!/usr/bin/env bash\necho script\n", encoding="utf-8")
+
+        agent = Agent(provider=TokenAwareProvider())
+        agent._initialized = True
+        agent.session = Session(id="s1", name="default")
+        agent.session_manager = DummySessionManager()
+
+        captured: dict[str, Any] = {}
+
+        class _Result:
+            success = True
+            content = "script-ok"
+            error = None
+
+        async def _fake_execute_tool_with_guard(
+            name: str,
+            arguments: dict[str, Any],
+            interaction_label: str,
+            turn_usage: dict[str, int] | None = None,
+            **kwargs: Any,
+        ):
+            captured["name"] = name
+            captured["arguments"] = dict(arguments)
+            captured["interaction_label"] = interaction_label
+            return _Result()
+
+        monkeypatch.setattr(agent, "_execute_tool_with_guard", _fake_execute_tool_with_guard)
+
+        invocation = await agent.invoke_skill_command("scripted", args="--flag value")
+
+        assert invocation["ok"] is True
+        assert invocation["mode"] == "dispatch"
+        assert invocation["text"] == "script-ok"
+        assert captured["name"] == "shell"
+        command_text = str(captured["arguments"]["command"])
+        assert command_text.startswith("uv run ")
+        assert str(script_path.resolve()) in command_text
+        assert "--flag value" in command_text
+    finally:
+        set_config(old_cfg)
+
+
 def test_build_messages_includes_planning_pipeline_note():
     agent = Agent(provider=TokenAwareProvider())
     agent.session = Session(id="s1", name="default")

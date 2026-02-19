@@ -1,6 +1,7 @@
 """File/script output helpers for Agent."""
 
 from datetime import UTC, datetime
+import json
 from pathlib import Path
 import re
 import shlex
@@ -11,6 +12,8 @@ from captain_claw.llm import Message
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
+
+_STRUCTURED_RESULT_MARKER = "# captain-claw: structured-result-protocol-v1"
 
 class AgentFileOpsMixin:
     @staticmethod
@@ -79,27 +82,115 @@ class AgentFileOpsMixin:
         return f"cd {script_dir} && {runner}"
 
     @staticmethod
-    def _build_python_runner_command(script_path: Path) -> str:
+    def _build_python_runner_command(script_path: Path, result_path: Path | None = None) -> str:
         """Build shell command using the active Python interpreter."""
         interpreter = shlex.quote(str(Path(sys.executable).resolve()))
         script_dir = shlex.quote(str(script_path.parent))
         filename = shlex.quote(script_path.name)
-        return f"cd {script_dir} && {interpreter} {filename}"
+        result_arg = f" {shlex.quote(str(result_path))}" if result_path is not None else ""
+        return f"cd {script_dir} && {interpreter} {filename}{result_arg}"
+
+    @staticmethod
+    def _normalize_session_slug(raw_id: str | None) -> str:
+        """Normalize arbitrary id into safe folder slug."""
+        normalized = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(raw_id or "").strip()).strip("-")
+        return normalized or "default"
+
+    @staticmethod
+    def _build_structured_result_wrapper(code: str) -> str:
+        """Wrap Python code so execution writes structured JSON result payload."""
+        raw = (code or "").strip()
+        if not raw:
+            raw = "def main():\n    return {}\n"
+        if _STRUCTURED_RESULT_MARKER in raw:
+            return raw if raw.endswith("\n") else f"{raw}\n"
+        encoded_code = json.dumps(raw, ensure_ascii=True)
+        return (
+            "#!/usr/bin/env python3\n"
+            "\"\"\"Captain Claw structured script wrapper.\"\"\"\n\n"
+            "import contextlib\n"
+            "import io\n"
+            "import json\n"
+            "import pathlib\n"
+            "import sys\n\n"
+            f"{_STRUCTURED_RESULT_MARKER}\n"
+            f"_CAPTAIN_CLAW_USER_CODE = {encoded_code}\n\n"
+            "def _captain_claw_user_main() -> object:\n"
+            "    user_globals = {\n"
+            "        '__name__': '__captain_claw_user_script__',\n"
+            "        '__file__': __file__,\n"
+            "    }\n"
+            "    exec(compile(_CAPTAIN_CLAW_USER_CODE, __file__, 'exec'), user_globals, user_globals)\n"
+            "    main_fn = user_globals.get('main')\n"
+            "    if callable(main_fn):\n"
+            "        return main_fn()\n"
+            "    return user_globals.get('RESULT')\n\n"
+            "def main() -> int:\n"
+            "    result_path = pathlib.Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else None\n"
+            "    payload: dict[str, object] = {'success': True, 'data': None}\n"
+            "    stdout_buffer = io.StringIO()\n"
+            "    try:\n"
+            "        with contextlib.redirect_stdout(stdout_buffer):\n"
+            "            data = _captain_claw_user_main()\n"
+            "        if data is None:\n"
+            "            captured = stdout_buffer.getvalue().strip()\n"
+            "            payload['data'] = {'stdout': captured} if captured else {}\n"
+            "        else:\n"
+            "            payload['data'] = data\n"
+            "    except Exception as exc:\n"
+            "        payload = {'success': False, 'error': str(exc)}\n"
+            "    if result_path is not None:\n"
+            "        result_path.parent.mkdir(parents=True, exist_ok=True)\n"
+            "        result_path.write_text(json.dumps(payload), encoding='utf-8')\n"
+            "    return 0 if bool(payload.get('success')) else 1\n\n"
+            "if __name__ == '__main__':\n"
+            "    raise SystemExit(main())\n"
+        )
+
+    def _build_structured_result_path(
+        self,
+        script_path: Path,
+        *,
+        session_slug: str | None = None,
+    ) -> Path:
+        """Build deterministic JSON result path for script execution payloads."""
+        slug = self._normalize_session_slug(session_slug or self._current_session_slug())
+        stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
+        result_name = f"{script_path.stem}_{stamp}.result.json"
+        return (
+            self.tools.get_saved_base_path(create=True)
+            / "tmp"
+            / slug
+            / "script_results"
+            / result_name
+        )
+
+    @staticmethod
+    def _read_structured_result_payload(path: Path) -> dict[str, Any] | None:
+        """Load structured script result payload from JSON file."""
+        try:
+            if not path.is_file():
+                return None
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(parsed, dict):
+                return None
+            return parsed
+        except Exception:
+            return None
 
     def _current_session_slug(self) -> str:
         """Return normalized session id used for folder scoping."""
         session_key = "default"
         if self.session and self.session.id:
-            raw_id = str(self.session.id).strip()
-            normalized = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw_id).strip("-")
-            if normalized:
-                session_key = normalized
+            session_key = self._normalize_session_slug(str(self.session.id))
         return session_key
 
     def _build_script_relative_path(
         self,
         user_input: str,
         extension: str,
+        *,
+        session_slug: str | None = None,
     ) -> str:
         """Build script path under scripts/<session-id>/."""
         ext = extension if extension.startswith(".") else f".{extension}"
@@ -116,7 +207,7 @@ class AgentFileOpsMixin:
         else:
             stamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
             filename = f"generated_script_{stamp}{ext}"
-        return f"scripts/{self._current_session_slug()}/{filename}"
+        return f"scripts/{self._normalize_session_slug(session_slug or self._current_session_slug())}/{filename}"
 
     @staticmethod
     def _parse_written_path_from_tool_output(tool_output: str) -> Path | None:
@@ -179,9 +270,11 @@ class AgentFileOpsMixin:
         self,
         user_input: str,
         list_task_plan: dict[str, Any] | None = None,
+        *,
+        session_slug: str | None = None,
     ) -> str:
         """Build synthesis prompt for batch/list worker script generation."""
-        session_id = self._current_session_slug()
+        session_id = self._normalize_session_slug(session_slug or self._current_session_slug())
         members_block = ""
         per_member_action = ""
         if isinstance(list_task_plan, dict):
@@ -199,6 +292,7 @@ class AgentFileOpsMixin:
             f"- Save per-item outputs under saved/showcase/{session_id}/.\n"
             "- Use deterministic filenames based on item names where requested.\n"
             "- Print concise progress logs so monitor output shows progress.\n"
+            "- Define `main()` and return a JSON-serializable summary object for downstream steps.\n"
             f"- Per-member action focus: {per_member_action or 'Follow user request for each member.'}\n"
             "- Return code only.\n\n"
             f"{members_block}"
@@ -210,15 +304,41 @@ class AgentFileOpsMixin:
         user_input: str,
         turn_usage: dict[str, int],
         list_task_plan: dict[str, Any] | None = None,
+        planning_pipeline: dict[str, Any] | None = None,
+        session_policy: dict[str, Any] | None = None,
+        task_policy: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Generate/write/run a temporary Python worker for list-style tasks."""
-        worker_prompt = self._build_python_worker_prompt(user_input, list_task_plan=list_task_plan)
+        execution_context: dict[str, Any] | None = None
+        active_task_node: dict[str, Any] | None = None
+        active_task_id = ""
+        active_context = self._resolve_active_execution_context(planning_pipeline)
+        if active_context is not None:
+            active_task_id, active_task_node, execution_context = active_context
+        child_session_id = str((execution_context or {}).get("session_id", "")).strip()
+        child_session_slug = self._normalize_session_slug(child_session_id) if child_session_id else ""
+        target_session_slug = child_session_slug or self._current_session_slug()
+
+        effective_task_policy: dict[str, Any] | None = dict(task_policy or {})
+        allowlist = (execution_context or {}).get("tool_allowlist", [])
+        if isinstance(allowlist, list) and allowlist:
+            effective_task_policy["allow"] = [str(item).strip() for item in allowlist if str(item).strip()]
+        if not effective_task_policy:
+            effective_task_policy = task_policy
+
+        worker_prompt = self._build_python_worker_prompt(
+            user_input,
+            list_task_plan=list_task_plan,
+            session_slug=target_session_slug,
+        )
         code, extension = await self._synthesize_script_content(worker_prompt, turn_usage)
         if extension.lower() != ".py":
             extension = ".py"
+        code = self._build_structured_result_wrapper(code)
         script_rel_path = self._build_script_relative_path(
             f"generate script {datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}{extension}",
             extension,
+            session_slug=target_session_slug,
         ).replace("scripts/", "tools/", 1)
         write_state = await self._write_file_with_verification(
             path=script_rel_path,
@@ -226,23 +346,60 @@ class AgentFileOpsMixin:
             turn_usage=turn_usage,
             interaction_label="list_worker_write",
             max_attempts=2,
+            session_policy=session_policy,
+            task_policy=effective_task_policy,
+            session_id_override=child_session_id or None,
         )
         if not bool(write_state.get("success", False)):
             return {"success": False, "step": "write_failed", "error": str(write_state.get("output", ""))}
 
         written_script_path = Path(str(write_state.get("path", script_rel_path)))
-        run_command = self._build_python_runner_command(written_script_path)
+        result_path = self._build_structured_result_path(
+            written_script_path,
+            session_slug=target_session_slug,
+        )
+        run_command = self._build_python_runner_command(written_script_path, result_path=result_path)
+        shell_arguments: dict[str, Any] = {"command": run_command}
+        timeout_seconds = (execution_context or {}).get("timeout_seconds")
+        if timeout_seconds is not None:
+            try:
+                shell_arguments["timeout"] = int(float(timeout_seconds))
+            except Exception:
+                pass
         try:
             shell_result = await self._execute_tool_with_guard(
                 name="shell",
-                arguments={"command": run_command},
+                arguments=shell_arguments,
                 interaction_label="list_worker_run",
                 turn_usage=turn_usage,
+                session_policy=session_policy,
+                task_policy=effective_task_policy,
+                session_id_override=child_session_id or None,
             )
             shell_output = shell_result.content if shell_result.success else f"Error: {shell_result.error}"
         except Exception as e:
             shell_result = None
             shell_output = f"Error: {str(e)}"
+
+        structured_result = self._read_structured_result_payload(result_path)
+        if structured_result is None:
+            structured_result = {
+                "success": bool(shell_result and shell_result.success),
+                "data": {"stdout": shell_output},
+            }
+        structured_data = structured_result.get("data")
+        if isinstance(structured_data, dict):
+            captured_stdout = str(structured_data.get("stdout", "")).strip()
+            if captured_stdout:
+                shell_output = f"{shell_output}\n[structured_stdout]\n{captured_stdout}".strip()
+            elif structured_data:
+                try:
+                    compact = json.dumps(structured_data, ensure_ascii=True)
+                except Exception:
+                    compact = str(structured_data)
+                shell_output = f"{shell_output}\n[structured_data] {compact}".strip()
+        elif structured_data is not None and structured_data != "":
+            shell_output = f"{shell_output}\n[structured_data] {structured_data}".strip()
 
         self._add_session_message(
             role="tool",
@@ -251,14 +408,57 @@ class AgentFileOpsMixin:
             tool_arguments={"command": run_command},
         )
         self._emit_tool_output("shell", {"command": run_command}, shell_output)
-        if not (shell_result and shell_result.success):
+
+        if execution_context is not None:
+            artifacts = execution_context.setdefault("artifacts", [])
+            if isinstance(artifacts, list):
+                script_artifact = str(written_script_path)
+                result_artifact = str(result_path)
+                if script_artifact not in artifacts:
+                    artifacts.append(script_artifact)
+                if result_artifact not in artifacts:
+                    artifacts.append(result_artifact)
+            variables = execution_context.setdefault("variables", {})
+            if isinstance(variables, dict):
+                if bool(structured_result.get("success", False)):
+                    variables["output"] = structured_result.get("data")
+                else:
+                    variables["output_error"] = structured_result.get("error")
+            self._record_execution_context_event(
+                execution_context,
+                "python_worker_run",
+                {
+                    "task_id": active_task_id,
+                    "script_path": str(written_script_path),
+                    "result_path": str(result_path),
+                    "success": bool(structured_result.get("success", False)),
+                },
+            )
+            if isinstance(active_task_node, dict):
+                active_task_node["result"] = {
+                    "success": bool(structured_result.get("success", False)),
+                    "data": structured_result.get("data"),
+                    "error": str(structured_result.get("error", "") or ""),
+                    "artifacts": list(execution_context.get("artifacts", [])),
+                    "completed_at": datetime.now(UTC).isoformat(),
+                }
+
+        if not bool(structured_result.get("success", False)):
             return {
                 "success": False,
                 "step": "run_failed",
                 "path": str(written_script_path),
-                "error": shell_output,
+                "error": str(structured_result.get("error", shell_output)),
+                "result_path": str(result_path),
+                "result": structured_result,
             }
-        return {"success": True, "step": "completed", "path": str(written_script_path)}
+        return {
+            "success": True,
+            "step": "completed",
+            "path": str(written_script_path),
+            "result_path": str(result_path),
+            "result": structured_result,
+        }
 
     async def _maybe_auto_script_requested_output(
         self,
@@ -266,6 +466,8 @@ class AgentFileOpsMixin:
         output_text: str,
         turn_start_idx: int,
         turn_usage: dict[str, int],
+        session_policy: dict[str, Any] | None = None,
+        task_policy: dict[str, Any] | None = None,
     ) -> str:
         """Guarantee explicit script requests produce write+run tool actions."""
         text = (output_text or "").strip()
@@ -285,6 +487,8 @@ class AgentFileOpsMixin:
                 code, inferred_ext = await self._synthesize_script_content(user_input, turn_usage)
             else:
                 inferred_ext = self._infer_script_extension(language, code)
+            if inferred_ext.lower() == ".py":
+                code = self._build_structured_result_wrapper(code)
 
             script_rel_path = self._build_script_relative_path(user_input, inferred_ext)
             write_state = await self._write_file_with_verification(
@@ -293,6 +497,8 @@ class AgentFileOpsMixin:
                 turn_usage=turn_usage,
                 interaction_label="auto_script_write",
                 max_attempts=2,
+                session_policy=session_policy,
+                task_policy=task_policy,
             )
             if not bool(write_state.get("success", False)):
                 return (
@@ -325,7 +531,12 @@ class AgentFileOpsMixin:
                 "Note: script was requested but executable path could not be resolved for run."
             ).strip()
 
-        run_command = self._build_script_runner_command(written_script_path)
+        result_path: Path | None = None
+        if written_script_path.suffix.lower() == ".py":
+            result_path = self._build_structured_result_path(written_script_path)
+            run_command = self._build_python_runner_command(written_script_path, result_path=result_path)
+        else:
+            run_command = self._build_script_runner_command(written_script_path)
         if not run_command:
             return (
                 f"{text}\n\n"
@@ -339,6 +550,8 @@ class AgentFileOpsMixin:
                 arguments={"command": run_command},
                 interaction_label="auto_script_run",
                 turn_usage=turn_usage,
+                session_policy=session_policy,
+                task_policy=task_policy,
             )
             shell_output = (
                 shell_result.content if shell_result.success else f"Error: {shell_result.error}"
@@ -346,6 +559,24 @@ class AgentFileOpsMixin:
         except Exception as e:
             shell_result = None
             shell_output = f"Error: {str(e)}"
+
+        structured_result = (
+            self._read_structured_result_payload(result_path) if result_path is not None else None
+        )
+        if isinstance(structured_result, dict):
+            structured_data = structured_result.get("data")
+            if isinstance(structured_data, dict):
+                captured_stdout = str(structured_data.get("stdout", "")).strip()
+                if captured_stdout:
+                    shell_output = f"{shell_output}\n[structured_stdout]\n{captured_stdout}".strip()
+                elif structured_data:
+                    try:
+                        compact = json.dumps(structured_data, ensure_ascii=True)
+                    except Exception:
+                        compact = str(structured_data)
+                    shell_output = f"{shell_output}\n[structured_data] {compact}".strip()
+            elif structured_data is not None and structured_data != "":
+                shell_output = f"{shell_output}\n[structured_data] {structured_data}".strip()
 
         self._add_session_message(
             role="tool",
@@ -355,15 +586,30 @@ class AgentFileOpsMixin:
         )
         self._emit_tool_output("shell", {"command": run_command}, shell_output)
 
-        if shell_result and shell_result.success:
+        success = bool(shell_result and shell_result.success)
+        if isinstance(structured_result, dict):
+            success = bool(structured_result.get("success", False))
+
+        if success:
+            structured_suffix = ""
+            if isinstance(structured_result, dict):
+                structured_suffix = (
+                    f"\nStructured result saved to {result_path}."
+                    if result_path is not None
+                    else ""
+                )
             return (
                 f"{text}\n\n"
-                f"Script saved and executed from {written_script_path.parent}."
+                f"Script saved and executed from {written_script_path.parent}.{structured_suffix}"
             ).strip()
+
+        structured_error = ""
+        if isinstance(structured_result, dict):
+            structured_error = str(structured_result.get("error", "")).strip()
         return (
             f"{text}\n\n"
             f"Script saved to {written_script_path}, but execution failed.\n"
-            f"{shell_output}"
+            f"{structured_error or shell_output}"
         ).strip()
 
     @staticmethod
@@ -521,6 +767,9 @@ class AgentFileOpsMixin:
         turn_usage: dict[str, int],
         interaction_label: str,
         max_attempts: int = 2,
+        session_policy: dict[str, Any] | None = None,
+        task_policy: dict[str, Any] | None = None,
+        session_id_override: str | None = None,
     ) -> dict[str, Any]:
         """Write file, verify it exists, and retry once when not persisted."""
         attempts = max(1, int(max_attempts))
@@ -541,6 +790,9 @@ class AgentFileOpsMixin:
                     arguments=write_args,
                     interaction_label=interaction_label,
                     turn_usage=turn_usage,
+                    session_policy=session_policy,
+                    task_policy=task_policy,
+                    session_id_override=session_id_override,
                 )
                 tool_output = result.content if result.success else f"Error: {result.error}"
             except Exception as e:
@@ -606,6 +858,8 @@ class AgentFileOpsMixin:
         output_text: str,
         turn_start_idx: int,
         turn_usage: dict[str, int],
+        session_policy: dict[str, Any] | None = None,
+        task_policy: dict[str, Any] | None = None,
     ) -> str:
         """Auto-run write tool when user explicitly requested file output."""
         text = (output_text or "").strip()
@@ -615,6 +869,8 @@ class AgentFileOpsMixin:
                 output_text=text,
                 turn_start_idx=turn_start_idx,
                 turn_usage=turn_usage,
+                session_policy=session_policy,
+                task_policy=task_policy,
             )
         requested_paths = self._extract_requested_write_paths(user_input)
         requested_path = requested_paths[-1] if requested_paths else None
@@ -641,6 +897,8 @@ class AgentFileOpsMixin:
                     turn_usage=turn_usage,
                     interaction_label="auto_write_output_multi",
                     max_attempts=2,
+                    session_policy=session_policy,
+                    task_policy=task_policy,
                 )
                 tool_output = str(write_state.get("output", "")).strip()
                 attempts = int(write_state.get("attempts", 1) or 1)
@@ -675,6 +933,8 @@ class AgentFileOpsMixin:
             turn_usage=turn_usage,
             interaction_label="auto_write_output",
             max_attempts=2,
+            session_policy=session_policy,
+            task_policy=task_policy,
         )
         tool_output = str(write_state.get("output", "")).strip()
         if bool(write_state.get("success", False)):

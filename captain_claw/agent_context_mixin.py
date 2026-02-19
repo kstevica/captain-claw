@@ -1,12 +1,17 @@
 """Prompt/message context assembly helpers for Agent."""
 
+import importlib.util
+import inspect
 import json
+import hashlib
 import re
+from pathlib import Path
 from typing import Any
 
 from captain_claw.config import get_config
 from captain_claw.llm import Message, ToolCall, get_provider, set_provider
 from captain_claw.logging import get_logger
+from captain_claw.tools.registry import Tool
 
 
 log = get_logger(__name__)
@@ -267,6 +272,133 @@ class AgentContextMixin:
                 self.tools.register(PptxExtractTool())
             elif tool_name == "pocket_tts":
                 self.tools.register(PocketTTSTool())
+        self._register_plugin_tools()
+
+    def _discover_plugin_tool_files(self) -> list[Path]:
+        """Discover plugin Python files from configured tool plugin directories."""
+        cfg = get_config()
+        candidates: list[Path] = []
+        seen: set[str] = set()
+
+        def _add_dir(path: Path) -> None:
+            try:
+                resolved = path.expanduser().resolve()
+            except Exception:
+                return
+            key = str(resolved)
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(resolved)
+
+        configured_dirs = list(getattr(cfg.tools, "plugin_dirs", []) or [])
+        for raw in configured_dirs:
+            path = Path(str(raw)).expanduser()
+            if not path.is_absolute():
+                path = (self.workspace_base_path / path).resolve()
+            _add_dir(path)
+
+        _add_dir(self.workspace_base_path / "skills" / "tools")
+        _add_dir(self.tools.get_saved_base_path(create=True) / "tools")
+
+        plugin_files: list[Path] = []
+        added_files: set[str] = set()
+        for directory in candidates:
+            if not directory.exists() or not directory.is_dir():
+                continue
+            for file_path in sorted(directory.glob("*.py")):
+                file_key = str(file_path.resolve())
+                if file_key in added_files:
+                    continue
+                added_files.add(file_key)
+                plugin_files.append(file_path.resolve())
+        return plugin_files
+
+    def _register_plugin_tools(self) -> None:
+        """Load and register tools from plugin files."""
+        plugin_files = self._discover_plugin_tool_files()
+        if not plugin_files:
+            return
+
+        for file_path in plugin_files:
+            module_name = f"captain_claw_plugin_{hashlib.sha1(str(file_path).encode('utf-8')).hexdigest()[:12]}"
+            try:
+                spec = importlib.util.spec_from_file_location(module_name, file_path)
+                if spec is None or spec.loader is None:
+                    log.warning("Skipping plugin tool file with missing loader", path=str(file_path))
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+            except Exception as e:
+                log.warning("Failed to import plugin tool file", path=str(file_path), error=str(e))
+                continue
+
+            registered_count = 0
+            register_tools_fn = getattr(module, "register_tools", None)
+            if callable(register_tools_fn):
+                before_names = set(self.tools.list_tools())
+                try:
+                    register_tools_fn(self.tools)
+                    after_names = set(self.tools.list_tools())
+                    for tool_name in sorted(after_names - before_names):
+                        existing_meta = self.tools.get_tool_metadata(tool_name)
+                        existing_meta.update(
+                            {
+                                "source": "plugin",
+                                "path": str(file_path),
+                                "module": module_name,
+                            }
+                        )
+                        tool = self.tools.get(tool_name)
+                        self.tools.register(tool, metadata=existing_meta)
+                    registered_count = len(after_names - before_names)
+                except Exception as e:
+                    log.warning(
+                        "Plugin register_tools() failed",
+                        path=str(file_path),
+                        error=str(e),
+                    )
+                    continue
+            else:
+                for _, obj in inspect.getmembers(module, inspect.isclass):
+                    if not issubclass(obj, Tool) or obj is Tool:
+                        continue
+                    if getattr(obj, "__module__", "") != module.__name__:
+                        continue
+                    try:
+                        instance = obj()
+                    except Exception as e:
+                        log.warning(
+                            "Failed to initialize plugin tool class",
+                            path=str(file_path),
+                            class_name=getattr(obj, "__name__", "<unknown>"),
+                            error=str(e),
+                        )
+                        continue
+                    if self.tools.has_tool(instance.name):
+                        log.warning(
+                            "Skipping plugin tool with duplicate name",
+                            path=str(file_path),
+                            tool=instance.name,
+                        )
+                        continue
+                    self.tools.register(
+                        instance,
+                        metadata={
+                            "source": "plugin",
+                            "path": str(file_path),
+                            "module": module_name,
+                            "class_name": getattr(obj, "__name__", ""),
+                        },
+                    )
+                    registered_count += 1
+
+            if registered_count > 0:
+                log.info(
+                    "Registered plugin tools",
+                    path=str(file_path),
+                    count=registered_count,
+                )
 
     def _build_system_prompt(self) -> str:
         """Build the system prompt."""

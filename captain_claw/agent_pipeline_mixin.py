@@ -219,7 +219,70 @@ class AgentPipelineMixin:
             "token_usage": dict(context.token_usage),
             "compaction_count": context.compaction_count,
             "history": list(context.history),
+            "timeout_seconds": 120,
+            "tool_allowlist": ["shell", "write", "read"],
+            "variables": {},
+            "artifacts": [],
         }
+
+    def _resolve_active_execution_context(
+        self,
+        pipeline: dict[str, Any] | None,
+    ) -> tuple[str, dict[str, Any], dict[str, Any]] | None:
+        """Return `(task_id, node, execution_context)` for the currently active task."""
+        if not isinstance(pipeline, dict):
+            return None
+        graph = pipeline.get("task_graph")
+        if not isinstance(graph, dict):
+            return None
+
+        candidate_ids: list[str] = []
+        current_id = str(pipeline.get("current_task_id", "")).strip()
+        if current_id:
+            candidate_ids.append(current_id)
+        active_ids = pipeline.get("active_task_ids")
+        if isinstance(active_ids, list):
+            for item in active_ids:
+                task_id = str(item).strip()
+                if task_id and task_id not in candidate_ids:
+                    candidate_ids.append(task_id)
+
+        for task_id in candidate_ids:
+            node = graph.get(task_id)
+            if not isinstance(node, dict):
+                continue
+            execution_context = node.get("execution_context")
+            if not isinstance(execution_context, dict):
+                execution_context = self._build_default_execution_context(task_id)
+                node["execution_context"] = execution_context
+            execution_context.setdefault("history", [])
+            execution_context.setdefault("artifacts", [])
+            execution_context.setdefault("variables", {})
+            execution_context.setdefault("tool_allowlist", ["shell", "write", "read"])
+            execution_context.setdefault("timeout_seconds", 120)
+            return task_id, node, execution_context
+        return None
+
+    @staticmethod
+    def _record_execution_context_event(
+        execution_context: dict[str, Any],
+        event: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """Append bounded execution-context history event."""
+        history = execution_context.setdefault("history", [])
+        if not isinstance(history, list):
+            execution_context["history"] = []
+            history = execution_context["history"]
+        history.append(
+            {
+                "at": datetime.now(UTC).isoformat(),
+                "event": str(event or "").strip() or "event",
+                "payload": payload if isinstance(payload, dict) else {},
+            }
+        )
+        if len(history) > 80:
+            del history[:-80]
 
     def _sanitize_pipeline_nodes(
         self,
@@ -272,9 +335,22 @@ class AgentPipelineMixin:
             )
             raw_context = node.get("execution_context")
             if isinstance(raw_context, dict):
-                for key in ("session_id", "spawned_by", "parent_task_id", "spawn_depth"):
+                for key in (
+                    "session_id",
+                    "spawned_by",
+                    "parent_task_id",
+                    "spawn_depth",
+                    "timeout_seconds",
+                ):
                     if key in raw_context:
                         execution_context[key] = raw_context[key]
+                for key in ("tool_allowlist", "artifacts", "history"):
+                    value = raw_context.get(key)
+                    if isinstance(value, list):
+                        execution_context[key] = list(value)
+                variables = raw_context.get("variables")
+                if isinstance(variables, dict):
+                    execution_context["variables"] = dict(variables)
                 token_usage = raw_context.get("token_usage")
                 if isinstance(token_usage, dict):
                     bucket = execution_context.setdefault(
@@ -1150,6 +1226,7 @@ class AgentPipelineMixin:
                     continue
                 current_prefix = [*prefix, idx]
                 label = ".".join(str(part) for part in current_prefix)
+                node_id = str(node.get("id", "")).strip()
                 title = str(node.get("title", "")).strip()
                 status = self._normalize_task_status(node.get("status", TaskStatus.PENDING.value)).upper()
                 depends = node.get("depends_on", [])
@@ -1157,6 +1234,18 @@ class AgentPipelineMixin:
                 if isinstance(depends, list) and depends:
                     depends_suffix = f" (deps: {', '.join(str(dep) for dep in depends[:4])})"
                 rendered.append(f"{label}. [{status}] {title}{depends_suffix}")
+                result = node.get("result")
+                if isinstance(result, dict):
+                    data = result.get("data")
+                    if data is not None and data != "" and data != [] and data != {}:
+                        try:
+                            serialized_data = json.dumps(data, ensure_ascii=True)
+                        except Exception:
+                            serialized_data = str(data)
+                        if len(serialized_data) > 280:
+                            serialized_data = serialized_data[:280] + "... [truncated]"
+                        result_ref = node_id or label
+                        rendered.append(f"    task[{result_ref}].result.data = {serialized_data}")
                 children = node.get("children")
                 if isinstance(children, list) and children:
                     rendered.extend(_render(children, current_prefix))

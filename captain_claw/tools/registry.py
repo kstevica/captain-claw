@@ -1,11 +1,12 @@
 """Tool registry and base tool class."""
 
 import asyncio
+import fnmatch
 import re
 import shlex
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -272,10 +273,12 @@ class ToolRegistry:
 
     def __init__(self, base_path: Path | str | None = None, saved_dir_name: str = "saved"):
         self._tools: dict[str, Tool] = {}
+        self._tool_metadata: dict[str, dict[str, Any]] = {}
         self._saved_dir_name = (saved_dir_name or "saved").strip() or "saved"
         self._runtime_base_path = Path.cwd()
         self._global_policy: ToolPolicy | None = None
         self._session_policies: dict[str, ToolPolicy] = {}
+        self._approval_callback: Callable[[str], bool] | None = None
         self.set_runtime_base_path(base_path or Path.cwd())
 
     @staticmethod
@@ -309,7 +312,11 @@ class ToolRegistry:
             saved_root.mkdir(parents=True, exist_ok=True)
         return saved_root
 
-    def register(self, tool: Tool) -> None:
+    def set_approval_callback(self, callback: Callable[[str], bool] | None) -> None:
+        """Set approval callback used by ask-mode execution policies."""
+        self._approval_callback = callback
+
+    def register(self, tool: Tool, metadata: dict[str, Any] | None = None) -> None:
         """Register a tool.
 
         Args:
@@ -320,6 +327,10 @@ class ToolRegistry:
 
         log.debug("Registering tool", tool=tool.name)
         self._tools[tool.name] = tool
+        if isinstance(metadata, dict):
+            self._tool_metadata[tool.name] = dict(metadata)
+        elif tool.name not in self._tool_metadata:
+            self._tool_metadata[tool.name] = {}
 
     def unregister(self, name: str) -> None:
         """Unregister a tool.
@@ -329,6 +340,15 @@ class ToolRegistry:
         """
         if name in self._tools:
             del self._tools[name]
+        self._tool_metadata.pop(name, None)
+
+    def has_tool(self, name: str) -> bool:
+        """Return whether a tool name is currently registered."""
+        return name in self._tools
+
+    def get_tool_metadata(self, name: str) -> dict[str, Any]:
+        """Return metadata associated with a registered tool."""
+        return dict(self._tool_metadata.get(name, {}))
 
     def set_global_policy(self, policy: ToolPolicy | dict[str, Any] | None) -> None:
         """Set global tool policy step."""
@@ -510,6 +530,27 @@ class ToolRegistry:
         # Check if tool is blocked
         config = get_config()
 
+        if name == "shell":
+            command = str(arguments.get("command", "")).strip()
+            policy_decision, policy_reason = self._evaluate_shell_exec_policy(command)
+            if policy_decision == "deny":
+                raise ToolBlockedError(name, policy_reason)
+            if policy_decision == "ask":
+                question = (
+                    "Allow shell command execution?\n"
+                    f"Command: {command}\n"
+                    f"Reason: {policy_reason}"
+                )
+                if callable(self._approval_callback):
+                    approved = bool(self._approval_callback(question))
+                    if not approved:
+                        raise ToolBlockedError(name, "Blocked by shell execution approval policy")
+                else:
+                    log.warning(
+                        "Shell execution policy requires approval but no callback is configured; allowing",
+                        command=command,
+                    )
+
         # Check shell-specific blocked commands
         if name == "shell" and hasattr(config.tools.shell, "blocked"):
             blocked_cmds = config.tools.shell.blocked or []
@@ -594,6 +635,53 @@ class ToolRegistry:
         finally:
             await self._cancel_task(abort_wait_task)
             await self._cancel_task(bridge_task)
+
+    def _evaluate_shell_exec_policy(self, command: str) -> tuple[str, str]:
+        """Evaluate allow/deny/ask policy for a shell command."""
+        cleaned = str(command or "").strip()
+        if not cleaned:
+            return "deny", "Command is empty"
+
+        cfg = get_config()
+        shell_cfg = cfg.tools.shell
+        deny_patterns = [str(item).strip() for item in getattr(shell_cfg, "deny_patterns", []) if str(item).strip()]
+        allow_patterns = [str(item).strip() for item in getattr(shell_cfg, "allow_patterns", []) if str(item).strip()]
+        default_policy = str(getattr(shell_cfg, "default_policy", "ask") or "ask").strip().lower()
+
+        for pattern in deny_patterns:
+            if self._shell_pattern_matches(cleaned, pattern):
+                return "deny", f"Command matches deny pattern: {pattern}"
+
+        for pattern in allow_patterns:
+            if self._shell_pattern_matches(cleaned, pattern):
+                return "allow", f"Command matches allow pattern: {pattern}"
+
+        if default_policy == "allow":
+            return "allow", "Default shell execution policy allows command"
+        if default_policy == "deny":
+            return "deny", "Default shell execution policy denies command"
+        return "ask", "Default shell execution policy requires approval"
+
+    @staticmethod
+    def _shell_pattern_matches(command: str, pattern: str) -> bool:
+        """Match shell command against glob-like policy pattern."""
+        cleaned_command = str(command or "").strip()
+        cleaned_pattern = str(pattern or "").strip()
+        if not cleaned_command or not cleaned_pattern:
+            return False
+
+        lowered_pattern = cleaned_pattern.lower()
+        targets: list[str] = [cleaned_command.lower()]
+        try:
+            segments = _split_shell_segments(cleaned_command)
+            targets.extend(" ".join(segment).strip().lower() for segment in segments if segment)
+        except Exception:
+            pass
+        base_commands = [item.lower() for item in extract_shell_base_commands(cleaned_command)]
+        targets.extend(base_commands)
+        targets.extend(Path(item).name.lower() for item in base_commands if item)
+
+        return any(fnmatch.fnmatchcase(target, lowered_pattern) for target in targets if target)
 
 
 # Global registry

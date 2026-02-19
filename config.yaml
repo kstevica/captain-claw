@@ -1,159 +1,207 @@
-# Captain Claw Configuration
-# https://github.com/captain-claw/captain-claw
-
-# Model Configuration
 model:
-  provider: "ollama"  # ollama, openai/chatgpt, anthropic/claude, gemini/google
-  model: "minimax-m2.5:cloud"  # model name (provider-native name or prefixed like openai/gpt-4o-mini)
-  temperature: 0.7  # creativity (0-1)
-  max_tokens: 32000  # max response length
-  # api_key: ""  # optional; can also be set via env (OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY)
-  # base_url: ""  # optional API base URL override (for hosted gateways / custom endpoints)
+  provider: openai
+  model: gpt-5-mini
+  temperature: 0.7
+  max_tokens: 32000
+  api_key: ''
+  base_url: ''
   allowed:
-    - id: "ollama-cloud"
-      provider: "ollama"
-      model: "minimax-m2.5:cloud"
-    - id: "gpt-5-mini"
-      provider: "openai"
-      model: "gpt-5-mini"
-    - id: "gpt-5.1-codex"
-      provider: "openai"
-      model: "gpt-5.1-codex"
-    - id: "claude-sonnet"
-      provider: "anthropic"
-      model: "claude-3-5-sonnet-latest"
-    - id: "gemini-flash"
-      provider: "gemini"
-      model: "gemini-2.0-flash"
-
-# Context Settings
+  - id: ollama-cloud
+    provider: ollama
+    model: minimax-m2.5:cloud
+    base_url: ''
+  - id: gpt-5-mini
+    provider: openai
+    model: gpt-5-mini
+    base_url: ''
+  - id: gpt-5.1-codex
+    provider: openai
+    model: gpt-5.1-codex
+    base_url: ''
+  - id: claude-sonnet
+    provider: anthropic
+    model: claude-3-5-sonnet-latest
+    base_url: ''
+  - id: gemini-flash
+    provider: gemini
+    model: gemini-2.0-flash
+    base_url: ''
 context:
-  max_tokens: 160000  # leave room for response
-  compaction_threshold: 0.8  # trigger compaction at 80%
-  compaction_ratio: 0.4  # keep 40% after compaction
-
-# Tool Configuration
+  max_tokens: 160000
+  compaction_threshold: 0.8
+  compaction_ratio: 0.4
+memory:
+  enabled: true
+  path: ~/.captain-claw/memory.db
+  index_workspace: true
+  index_sessions: true
+  cross_session_retrieval: false
+  auto_sync_on_search: true
+  max_workspace_files: 400
+  max_file_bytes: 262144
+  chunk_chars: 1400
+  chunk_overlap_chars: 200
+  cache_ttl_seconds: 45
+  stale_after_seconds: 120
+  include_extensions:
+  - .txt
+  - .md
+  - .markdown
+  - .py
+  - .js
+  - .ts
+  - .tsx
+  - .jsx
+  - .json
+  - .yaml
+  - .yml
+  - .toml
+  - .sql
+  - .csv
+  - .sh
+  exclude_dirs:
+  - .git
+  - .hg
+  - .svn
+  - node_modules
+  - __pycache__
+  - .venv
+  - venv
+  embeddings:
+    provider: auto
+    litellm_model: text-embedding-3-small
+    litellm_api_key: ''
+    litellm_base_url: ''
+    ollama_model: nomic-embed-text
+    ollama_base_url: http://127.0.0.1:11434
+    request_timeout_seconds: 4
+    fallback_to_local_hash: true
+  search:
+    max_results: 6
+    candidate_limit: 80
+    min_score: 0.1
+    vector_weight: 0.65
+    text_weight: 0.35
+    temporal_decay_enabled: true
+    temporal_half_life_days: 21.0
 tools:
   enabled:
-    - shell
-    - read
-    - write
-    - glob
-    - web_fetch
-    - web_search
-    - pdf_extract
-    - docx_extract
-    - xlsx_extract
-    - pptx_extract
-    - pocket_tts
+  - shell
+  - read
+  - write
+  - glob
+  - web_fetch
+  - web_search
+  - pdf_extract
+  - docx_extract
+  - xlsx_extract
+  - pptx_extract
+  - pocket_tts
+  shell:
+    timeout: 30
+    blocked:
+    - rm -rf /
+    - mkfs
+    - ':(){:|:&};:'
+    allowed_commands: []
+    default_policy: ask
+    allow_patterns:
+    - python *
+    - pip install *
+    deny_patterns:
+    - rm -rf *
+    - sudo *
   web_fetch:
-    max_chars: 100000  # default returned characters (can override per call)
+    max_chars: 100000
   web_search:
-    provider: "brave"
-    api_key: ""  # optional; can also use BRAVE_API_KEY env var
-    base_url: "https://api.search.brave.com/res/v1/web/search"
+    provider: brave
+    api_key: ''
+    base_url: https://api.search.brave.com/res/v1/web/search
     max_results: 5
     timeout: 20
-    safesearch: "moderate"  # off | moderate | strict
+    safesearch: moderate
   pocket_tts:
-    max_chars: 4000  # max text length accepted by pocket_tts tool
-    default_voice: ""  # optional; defaults to model default voice
-    sample_rate: 24000  # output sample rate when model does not provide one
-    mp3_bitrate_kbps: 128  # output MP3 bitrate
-    timeout_seconds: 600  # synthesis timeout (10 minutes)
-  shell:
-    timeout: 30  # seconds
-    blocked:
-      - "rm -rf /"
-      - "mkfs"
-      - ":(){:|:&};:"
-    allowed_commands: []  # empty = all allowed (except blocked)
+    max_chars: 4000
+    default_voice: ''
+    sample_rate: 24000
+    mp3_bitrate_kbps: 128
+    timeout_seconds: 600
   require_confirmation:
-    - shell
-    - write
-
-# Skills subsystem (OpenClaw-style discovery and invocation)
+  - shell
+  - write
+  plugin_dirs:
+  - skills/tools
 skills:
-  managed_dir: "~/.captain-claw/skills"
-  allow_bundled: []  # optional allowlist for bundled skills only
-  entries: {}  # optional per-skill overrides: enabled/apiKey/env/config
+  managed_dir: ~/.captain-claw/skills
+  allow_bundled: []
+  entries: {}
   load:
     extra_dirs: []
+    plugin_dirs: []
     watch: true
     watch_debounce_ms: 250
+  install:
+    prefer_brew: true
+    node_manager: npm
   max_skills_in_prompt: 64
   max_skills_prompt_chars: 16000
   max_skill_file_bytes: 131072
   max_candidates_per_root: 2048
   max_skills_loaded_per_source: 256
-
-# Guard Configuration
+  search_source_url: https://raw.githubusercontent.com/VoltAgent/awesome-openclaw-skills/refs/heads/main/README.md
+  search_limit: 10
+  search_max_candidates: 5000
+  search_http_timeout_seconds: 20
 guards:
   input:
     enabled: false
-    level: "ask_for_approval"  # stop_suspicious | ask_for_approval
+    level: ask_for_approval
   output:
     enabled: false
-    level: "ask_for_approval"  # stop_suspicious | ask_for_approval
+    level: ask_for_approval
   script_tool:
     enabled: false
-    level: "stop_suspicious"  # stop_suspicious | ask_for_approval
-
-# Session Settings
+    level: stop_suspicious
 session:
-  storage: "sqlite"
-  path: "~/.captain-claw/sessions.db"
+  storage: sqlite
+  path: ~/.captain-claw/sessions.db
   auto_save: true
-
-# Workspace output root
 workspace:
-  path: "./workspace/"
-
-# UI Settings
+  path: ./workspace/
 ui:
-  theme: "dark"  # dark or light
-  show_tokens: true  # show token count
-  streaming: true  # stream responses
-  colors: true  # use colors
-  monitor_trace_llm: false  # log full intermediate LLM responses into monitor/session history
-  monitor_trace_pipeline: true  # log compact pipeline-only trace events for export/debugging
-  monitor_full_output: false  # show raw full tool output in monitor pane (no compact summaries)
-
-# Follow-up queue behavior when a session is busy
+  theme: dark
+  show_tokens: true
+  streaming: true
+  colors: true
+  monitor_trace_llm: false
+  monitor_trace_pipeline: true
+  monitor_full_output: false
 execution_queue:
-  mode: "collect"  # steer | followup | collect | steer-backlog | interrupt | queue
+  mode: collect
   debounce_ms: 1000
   cap: 20
-  drop: "summarize"  # old | new | summarize
-
-# Logging
+  drop: summarize
 logging:
-  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
-  format: "console"  # console, json
-
-# Telegram Bot UI (optional)
+  level: INFO
+  format: console
 telegram:
   enabled: true
-  # bot_token: ""  # set BotFather token to enable Telegram long-polling UI
-  api_base_url: "https://api.telegram.org"
+  bot_token: ''
+  api_base_url: https://api.telegram.org
   poll_timeout_seconds: 25
   pairing_ttl_minutes: 30
-
-# Slack Bot UI (optional, DM polling)
 slack:
   enabled: false
-  # bot_token: ""  # or SLACK_BOT_TOKEN / CLAW_SLACK__BOT_TOKEN
-  # app_token: ""  # optional (reserved for future socket mode)
-  api_base_url: "https://slack.com/api"
+  bot_token: ''
+  app_token: ''
+  api_base_url: https://slack.com/api
   poll_timeout_seconds: 25
   pairing_ttl_minutes: 30
-
-# Discord Bot UI (optional, DM polling)
 discord:
   enabled: false
-  # bot_token: ""  # or DISCORD_BOT_TOKEN / CLAW_DISCORD__BOT_TOKEN
-  # application_id: 0  # optional command registration id
-  api_base_url: "https://discord.com/api/v10"
+  bot_token: ''
+  application_id: 0
+  api_base_url: https://discord.com/api/v10
   poll_timeout_seconds: 25
   pairing_ttl_minutes: 30
   require_mention_in_guild: true
