@@ -63,3 +63,136 @@ def test_resolved_workspace_path_anchors_relative_to_runtime_base(tmp_path: Path
     cfg.workspace.path = "./workspace"
     resolved = cfg.resolved_workspace_path(tmp_path)
     assert resolved == (tmp_path / "workspace").resolve()
+
+
+def test_load_prefers_telegram_token_from_env_var(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    local_cfg = tmp_path / "config.yaml"
+    local_cfg.write_text(
+        (
+            "telegram:\n"
+            "  enabled: true\n"
+            "  bot_token: insecure-yaml-token\n"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAW_TELEGRAM__BOT_TOKEN", "secure-env-token")
+
+    cfg = Config.load()
+
+    assert cfg.telegram.bot_token == "secure-env-token"
+
+
+def test_load_prefers_telegram_token_from_dotenv(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    local_cfg = tmp_path / "config.yaml"
+    local_cfg.write_text(
+        (
+            "telegram:\n"
+            "  enabled: true\n"
+            "  bot_token: insecure-yaml-token\n"
+        ),
+        encoding="utf-8",
+    )
+    dotenv_file = tmp_path / ".env"
+    dotenv_file.write_text("CLAW_TELEGRAM__BOT_TOKEN=secure-dotenv-token\n", encoding="utf-8")
+
+    cfg = Config.load()
+
+    assert cfg.telegram.bot_token == "secure-dotenv-token"
+
+
+def test_load_prefers_telegram_token_from_plain_dotenv_key(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    local_cfg = tmp_path / "config.yaml"
+    local_cfg.write_text(
+        (
+            "telegram:\n"
+            "  enabled: true\n"
+            "  bot_token: insecure-yaml-token\n"
+        ),
+        encoding="utf-8",
+    )
+    dotenv_file = tmp_path / ".env"
+    dotenv_file.write_text("TELEGRAM_BOT_TOKEN=secure-plain-dotenv-token\n", encoding="utf-8")
+
+    cfg = Config.load()
+
+    assert cfg.telegram.bot_token == "secure-plain-dotenv-token"
+
+
+def test_load_maps_legacy_flat_yaml_model_keys(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    local_cfg = tmp_path / "config.yaml"
+    local_cfg.write_text(
+        (
+            "model:\n"
+            "  provider: openai\n"
+            "  model: gpt-5-mini\n"
+            "openai_api_key: legacy-openai-key\n"
+            "ollama_base_url: http://localhost:11434\n"
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = Config.load()
+
+    assert cfg.model.api_key == "legacy-openai-key"
+    assert cfg.model.base_url == "http://localhost:11434"
+
+
+def test_load_uses_common_openai_env_key_when_model_api_key_missing(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    local_cfg = tmp_path / "config.yaml"
+    local_cfg.write_text(
+        (
+            "model:\n"
+            "  provider: openai\n"
+            "  model: gpt-5-mini\n"
+            "  api_key: \"\"\n"
+        ),
+        encoding="utf-8",
+    )
+    dotenv_file = tmp_path / ".env"
+    dotenv_file.write_text("OPENAI_API_KEY=env-openai-key\n", encoding="utf-8")
+
+    cfg = Config.load()
+
+    assert cfg.model.api_key == "env-openai-key"
+
+
+def test_load_prefers_brave_api_key_from_env_var(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    local_cfg = tmp_path / "config.yaml"
+    local_cfg.write_text(
+        (
+            "tools:\n"
+            "  web_search:\n"
+            "    api_key: insecure-yaml-brave-key\n"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BRAVE_API_KEY", "secure-env-brave-key")
+
+    cfg = Config.load()
+
+    assert cfg.tools.web_search.api_key == "secure-env-brave-key"
+
+
+def test_load_prefers_brave_api_key_from_dotenv(monkeypatch, tmp_path: Path):
+    monkeypatch.chdir(tmp_path)
+    local_cfg = tmp_path / "config.yaml"
+    local_cfg.write_text(
+        (
+            "tools:\n"
+            "  web_search:\n"
+            "    api_key: insecure-yaml-brave-key\n"
+        ),
+        encoding="utf-8",
+    )
+    dotenv_file = tmp_path / ".env"
+    dotenv_file.write_text("BRAVE_API_KEY=secure-dotenv-brave-key\n", encoding="utf-8")
+
+    cfg = Config.load()
+
+    assert cfg.tools.web_search.api_key == "secure-dotenv-brave-key"

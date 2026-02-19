@@ -45,6 +45,7 @@ tools:
     - docx_extract
     - xlsx_extract
     - pptx_extract
+    - pocket_tts
   web_fetch:
     max_chars: 100000  # default returned characters (can override per call)
   web_search:
@@ -54,6 +55,12 @@ tools:
     max_results: 5
     timeout: 20
     safesearch: "moderate"  # off | moderate | strict
+  pocket_tts:
+    max_chars: 4000  # max text length accepted by pocket_tts tool
+    default_voice: ""  # optional; defaults to model default voice
+    sample_rate: 24000  # output sample rate when model does not provide one
+    mp3_bitrate_kbps: 128  # output MP3 bitrate
+    timeout_seconds: 180  # synthesis timeout
   shell:
     timeout: 30  # seconds
     blocked:
@@ -123,3 +130,11 @@ execution_queue:
 logging:
   level: "INFO"  # DEBUG, INFO, WARNING, ERROR
   format: "console"  # console, json
+
+# Telegram Bot UI (optional)
+telegram:
+  enabled: true
+  # bot_token: ""  # set BotFather token to enable Telegram long-polling UI
+  api_base_url: "https://api.telegram.org"
+  poll_timeout_seconds: 25
+  pairing_ttl_minutes: 30

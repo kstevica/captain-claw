@@ -111,6 +111,7 @@ class AgentContextMixin:
             DocxExtractTool,
             GlobTool,
             PdfExtractTool,
+            PocketTTSTool,
             PptxExtractTool,
             ReadTool,
             ShellTool,
@@ -144,6 +145,8 @@ class AgentContextMixin:
                 self.tools.register(XlsxExtractTool())
             elif tool_name == "pptx_extract":
                 self.tools.register(PptxExtractTool())
+            elif tool_name == "pocket_tts":
+                self.tools.register(PocketTTSTool())
 
     def _build_system_prompt(self) -> str:
         """Build the system prompt."""

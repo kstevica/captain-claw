@@ -74,6 +74,16 @@ class WebSearchToolConfig(BaseModel):
     safesearch: str = "moderate"
 
 
+class PocketTTSToolConfig(BaseModel):
+    """Pocket TTS tool configuration."""
+
+    max_chars: int = 4000
+    default_voice: str = ""
+    sample_rate: int = 24000
+    mp3_bitrate_kbps: int = 128
+    timeout_seconds: int = 180
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
 
@@ -88,10 +98,12 @@ class ToolsConfig(BaseModel):
         "docx_extract",
         "xlsx_extract",
         "pptx_extract",
+        "pocket_tts",
     ]
     shell: ShellToolConfig = Field(default_factory=ShellToolConfig)
     web_fetch: WebFetchToolConfig = Field(default_factory=WebFetchToolConfig)
     web_search: WebSearchToolConfig = Field(default_factory=WebSearchToolConfig)
+    pocket_tts: PocketTTSToolConfig = Field(default_factory=PocketTTSToolConfig)
     require_confirmation: list[str] = ["shell", "write"]
 
 
@@ -189,6 +201,16 @@ class LoggingConfig(BaseModel):
     format: str = "console"
 
 
+class TelegramConfig(BaseModel):
+    """Telegram bot UI configuration."""
+
+    enabled: bool = False
+    bot_token: str = ""
+    api_base_url: str = "https://api.telegram.org"
+    poll_timeout_seconds: int = 25
+    pairing_ttl_minutes: int = 30
+
+
 class Config(BaseSettings):
     """Main configuration for Captain Claw."""
 
@@ -202,12 +224,70 @@ class Config(BaseSettings):
     ui: UIConfig = Field(default_factory=UIConfig)
     execution_queue: ExecutionQueueConfig = Field(default_factory=ExecutionQueueConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="CLAW_",
         env_file=".env",
         env_nested_delimiter="__",
+        extra="ignore",
     )
+
+    @staticmethod
+    def _apply_legacy_top_level_config(data: dict[str, Any]) -> dict[str, Any]:
+        """Map legacy flat config keys into nested model structure."""
+        payload = dict(data or {})
+        model_payload = payload.get("model")
+        if isinstance(model_payload, dict):
+            model_data: dict[str, Any] = dict(model_payload)
+        else:
+            model_data = {}
+
+        legacy_openai_key = str(payload.get("openai_api_key", "")).strip()
+        legacy_ollama_base = str(payload.get("ollama_base_url", "")).strip()
+        if legacy_openai_key and not str(model_data.get("api_key", "")).strip():
+            model_data["api_key"] = legacy_openai_key
+        if legacy_ollama_base and not str(model_data.get("base_url", "")).strip():
+            model_data["base_url"] = legacy_ollama_base
+        if model_data:
+            payload["model"] = model_data
+
+        payload.pop("openai_api_key", None)
+        payload.pop("ollama_base_url", None)
+        return payload
+
+    @staticmethod
+    def _read_dotenv_file(path: Path | str = ".env") -> dict[str, str]:
+        """Read simple KEY=VALUE pairs from .env (best-effort, no interpolation)."""
+        env_path = Path(path).expanduser()
+        if not env_path.exists() or not env_path.is_file():
+            return {}
+        values: dict[str, str] = {}
+        try:
+            lines = env_path.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            return {}
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            env_key = str(key).strip()
+            env_value = str(value).strip()
+            if not env_key:
+                continue
+            if (
+                len(env_value) >= 2
+                and env_value[0] == env_value[-1]
+                and env_value[0] in {'"', "'"}
+            ):
+                env_value = env_value[1:-1]
+            values[env_key] = env_value
+        return values
 
     @classmethod
     def resolve_default_config_path(cls) -> Path:
@@ -227,7 +307,8 @@ class Config(BaseSettings):
         
         with open(config_path) as f:
             data = yaml.safe_load(f) or {}
-        
+        data = cls._apply_legacy_top_level_config(data)
+
         return cls(**data)
 
     @classmethod
@@ -235,9 +316,59 @@ class Config(BaseSettings):
         """Load configuration, preferring env vars over YAML."""
         # First load from YAML
         config = cls.from_yaml()
-        
-        # Override with environment variables if set
-        # Pydantic-settings handles this automatically via BaseSettings
+        dotenv_values = cls._read_dotenv_file(".env")
+
+        # Security-sensitive override: prefer Telegram token from env/.env when present.
+        # (YAML init kwargs otherwise take precedence over settings sources.)
+        env_overlay = cls()
+        env_token = str(getattr(env_overlay.telegram, "bot_token", "")).strip()
+        if not env_token:
+            # Also support a direct non-prefixed variable for operator convenience.
+            env_token = (
+                str(os.getenv("TELEGRAM_BOT_TOKEN", "")).strip()
+                or str(dotenv_values.get("TELEGRAM_BOT_TOKEN", "")).strip()
+            )
+        if env_token:
+            config.telegram.bot_token = env_token
+
+        # Security-sensitive override: prefer Brave API key from env/.env when present.
+        env_brave_key = str(getattr(env_overlay.tools.web_search, "api_key", "")).strip()
+        if not env_brave_key:
+            env_brave_key = (
+                str(os.getenv("BRAVE_API_KEY", "")).strip()
+                or str(dotenv_values.get("BRAVE_API_KEY", "")).strip()
+            )
+        if env_brave_key:
+            config.tools.web_search.api_key = env_brave_key
+
+        # Compatibility fallbacks for common provider env vars.
+        provider = str(config.model.provider or "").strip().lower()
+        if not str(config.model.api_key or "").strip():
+            if provider in {"openai", "chatgpt"}:
+                config.model.api_key = (
+                    str(os.getenv("OPENAI_API_KEY", "")).strip()
+                    or str(dotenv_values.get("OPENAI_API_KEY", "")).strip()
+                )
+            elif provider in {"anthropic", "claude"}:
+                config.model.api_key = (
+                    str(os.getenv("ANTHROPIC_API_KEY", "")).strip()
+                    or str(dotenv_values.get("ANTHROPIC_API_KEY", "")).strip()
+                )
+            elif provider in {"gemini", "google"}:
+                config.model.api_key = (
+                    str(os.getenv("GEMINI_API_KEY", "")).strip()
+                    or str(dotenv_values.get("GEMINI_API_KEY", "")).strip()
+                    or str(os.getenv("GOOGLE_API_KEY", "")).strip()
+                    or str(dotenv_values.get("GOOGLE_API_KEY", "")).strip()
+                )
+        if provider == "ollama" and not str(config.model.base_url or "").strip():
+            base_url = (
+                str(os.getenv("OLLAMA_BASE_URL", "")).strip()
+                or str(dotenv_values.get("OLLAMA_BASE_URL", "")).strip()
+            )
+            if base_url:
+                config.model.base_url = base_url
+
         return config
 
     def save(self, path: Path | str | None = None) -> None:

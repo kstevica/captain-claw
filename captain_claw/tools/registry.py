@@ -205,6 +205,11 @@ class ToolRegistry:
         # Execute with timeout
         try:
             log.info("Executing tool", tool=name, args=arguments)
+            timeout_seconds = 30
+            if name == "shell":
+                timeout_seconds = int(config.tools.shell.timeout)
+            elif name == "pocket_tts":
+                timeout_seconds = int(getattr(config.tools.pocket_tts, "timeout_seconds", 180))
             result = await asyncio.wait_for(
                 tool.execute(
                     **arguments,
@@ -212,7 +217,7 @@ class ToolRegistry:
                     _saved_base_path=self.get_saved_base_path(create=False),
                     _session_id=(session_id or "").strip(),
                 ),
-                timeout=config.tools.shell.timeout if name == "shell" else 30,
+                timeout=max(1, timeout_seconds),
             )
             log.info("Tool executed", tool=name, success=result.success)
             return result

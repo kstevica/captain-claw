@@ -13,6 +13,7 @@ from captain_claw.tools.document_extract import (
     PptxExtractTool,
     XlsxExtractTool,
 )
+from captain_claw.tools.pocket_tts import PocketTTSTool
 
 __all__ = [
     "Tool",
@@ -29,4 +30,5 @@ __all__ = [
     "DocxExtractTool",
     "XlsxExtractTool",
     "PptxExtractTool",
+    "PocketTTSTool",
 ]

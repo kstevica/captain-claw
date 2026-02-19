@@ -48,6 +48,7 @@ class TerminalUI:
             "/scroll",
             "/skills",
             "/skill",
+            "/approve",
             "/exit",
             "/quit",
         ]
@@ -196,6 +197,7 @@ Commands:
   /skills         - List currently available user-invocable skills
   /skill <name> [args] - Run a specific skill manually
   /<skill-command> [args] - Direct alias for a discovered skill command
+  /approve user telegram <token> - Approve pending Telegram user pairing token
   /monitor on     - Enable split monitor view
   /monitor off    - Disable split monitor view
   /monitor trace on|off - Enable/disable full intermediate LLM trace logging
@@ -1602,6 +1604,17 @@ Commands:
                 return None
             payload = json.dumps({"name": skill_name, "args": skill_args}, ensure_ascii=True)
             return f"SKILL_INVOKE:{payload}"
+        elif command == "/approve":
+            raw = args.strip()
+            parts = raw.split()
+            if len(parts) == 3 and parts[0].lower() == "user" and parts[1].lower() == "telegram":
+                token = parts[2].strip()
+                if not token:
+                    self.print_error("Usage: /approve user telegram <token>")
+                    return None
+                return f"APPROVE_TELEGRAM_USER:{token}"
+            self.print_error("Usage: /approve user telegram <token>")
+            return None
         elif command.startswith("/") and len(command) > 1 and command not in {"/exit", "/quit", "/q"}:
             # Dynamic skill alias, e.g. "/example-source-brief ...".
             alias_name = command[1:].strip()

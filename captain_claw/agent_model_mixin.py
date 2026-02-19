@@ -9,6 +9,17 @@ from captain_claw.llm import create_provider, set_provider
 
 class AgentModelMixin:
     """Runtime model resolution and session model selection."""
+    @staticmethod
+    def _normalize_provider_key(provider: str) -> str:
+        raw = str(provider or "").strip().lower()
+        aliases = {
+            "chatgpt": "openai",
+            "claude": "anthropic",
+            "google": "gemini",
+            "googleai": "gemini",
+        }
+        return aliases.get(raw, raw)
+
     def _refresh_runtime_model_details(
         self,
         source: str = "config",
@@ -114,10 +125,21 @@ class AgentModelMixin:
         """Instantiate provider for chosen model and switch runtime."""
         provider = str(option.get("provider", "")).strip()
         model = str(option.get("model", "")).strip()
-        base_url = str(option.get("base_url", "") or "").strip() or None
+        base_url_raw = str(option.get("base_url", "") or "").strip()
+        base_url = base_url_raw or None
         temperature = option.get("temperature")
         max_tokens = option.get("max_tokens")
         cfg = get_config()
+        normalized_provider = self._normalize_provider_key(provider)
+        normalized_cfg_provider = self._normalize_provider_key(str(cfg.model.provider))
+        cfg_base_url = str(cfg.model.base_url or "").strip()
+
+        # Prevent default-provider base_url (e.g. Ollama localhost) from leaking
+        # into a different selected provider via persisted session metadata.
+        if base_url and normalized_provider != normalized_cfg_provider and cfg_base_url and base_url == cfg_base_url:
+            base_url = None
+
+        fallback_base_url = cfg_base_url if normalized_provider == normalized_cfg_provider else ""
         resolved_temperature = float(cfg.model.temperature if temperature is None else temperature)
         resolved_max_tokens = int(cfg.model.max_tokens if max_tokens is None else max_tokens)
 
@@ -125,7 +147,7 @@ class AgentModelMixin:
             provider=provider,
             model=model,
             api_key=cfg.model.api_key or None,
-            base_url=base_url or cfg.model.base_url or None,
+            base_url=base_url or fallback_base_url or None,
             temperature=resolved_temperature,
             max_tokens=resolved_max_tokens,
             num_ctx=cfg.context.max_tokens,
@@ -212,4 +234,3 @@ class AgentModelMixin:
         if persist:
             await self.session_manager.save_session(self.session)
         return True, f"Session model set to {details.get('provider')}/{details.get('model')}"
-

@@ -1,13 +1,14 @@
 """Main entry point for Captain Claw."""
 
 import asyncio
-from collections.abc import Awaitable, Callable
-from datetime import datetime
 import json
 import os
+import secrets
 import shlex
 import sys
 import time
+from collections.abc import Awaitable, Callable
+from datetime import datetime
 from pathlib import Path
 from typing import TypeVar
 
@@ -15,10 +16,16 @@ from typing import TypeVar
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from captain_claw.config import Config, get_config, set_config
-from captain_claw.cron import compute_next_run, now_utc, parse_schedule_tokens, schedule_to_text, to_utc_iso
-from captain_claw.logging import configure_logging, log, set_system_log_sink
+from captain_claw.agent import Agent
 from captain_claw.cli import TerminalUI, get_ui
+from captain_claw.config import Config, get_config, set_config
+from captain_claw.cron import (
+    compute_next_run,
+    now_utc,
+    parse_schedule_tokens,
+    schedule_to_text,
+    to_utc_iso,
+)
 from captain_claw.execution_queue import (
     CommandLane,
     CommandQueueManager,
@@ -30,7 +37,8 @@ from captain_claw.execution_queue import (
     resolve_global_lane,
     resolve_session_lane,
 )
-from captain_claw.agent import Agent
+from captain_claw.logging import configure_logging, log, set_system_log_sink
+from captain_claw.telegram_bridge import TelegramBridge, TelegramMessage
 
 T = TypeVar("T")
 
@@ -84,7 +92,7 @@ def main(
     if verbose:
         os.environ["CLAW_LOGGING__LEVEL"] = "DEBUG"
     configure_logging()
-    
+
     # Load configuration
     if config:
         try:
@@ -94,7 +102,7 @@ def main(
             cfg = Config.load()
     else:
         cfg = Config.load()
-    
+
     # Apply CLI overrides
     if model:
         cfg.model.model = model
@@ -102,16 +110,16 @@ def main(
         cfg.model.provider = provider
     if no_stream:
         cfg.ui.streaming = False
-    
+
     # Set global config
     set_config(cfg)
-    
+
     # Ensure session directory exists
     session_path = Path(cfg.session.path).expanduser()
     session_path.parent.mkdir(parents=True, exist_ok=True)
     workspace_path = cfg.resolved_workspace_path(Path.cwd())
     workspace_path.mkdir(parents=True, exist_ok=True)
-    
+
     # Run the interactive loop
     try:
         asyncio.run(run_interactive())
@@ -132,10 +140,10 @@ async def run_interactive() -> None:
         tool_output_callback=ui.append_tool_output,
         approval_callback=ui.confirm,
     )
-    
+
     # Show welcome
     ui.print_welcome()
-    
+
     # Initialize agent
     await agent.initialize()
     ui.set_monitor_mode(True)
@@ -148,11 +156,460 @@ async def run_interactive() -> None:
     followup_queue = FollowupQueueManager()
     cron_running_job_ids: set[str] = set()
     cron_poll_seconds = 2.0
+    telegram_cfg = get_config().telegram
+    telegram_enabled = bool(telegram_cfg.enabled or telegram_cfg.bot_token.strip())
+    telegram_bridge: TelegramBridge | None = None
+    telegram_poll_task: asyncio.Task[None] | None = None
+    telegram_offset: int | None = None
+    approved_telegram_users: dict[str, dict[str, object]] = {}
+    pending_telegram_pairings: dict[str, dict[str, object]] = {}
+    telegram_state_key_approved = "telegram_approved_users"
+    telegram_state_key_pending = "telegram_pending_pairings"
+    telegram_command_specs: list[tuple[str, str]] = [
+        ("start", "Start Captain Claw in Telegram"),
+        ("help", "Show Telegram command guide"),
+        ("new", "Create a new session"),
+        ("sessions", "List recent sessions"),
+        ("session", "Inspect/switch session"),
+        ("models", "List allowed models"),
+        ("config", "Show active configuration"),
+        ("history", "Show recent message history"),
+        ("clear", "Clear active session messages"),
+        ("compact", "Compact active session memory"),
+        ("pipeline", "Set pipeline mode (loop/contracts)"),
+        ("planning", "Legacy alias for pipeline"),
+        ("skills", "List available skills"),
+        ("skill", "Run a skill: /skill <name> [args]"),
+        ("cron", "Run one-off cron prompt"),
+    ]
 
     def _normalize_session_id(raw: str) -> str:
         safe = "".join(c if c.isalnum() or c in "._-" else "-" for c in (raw or "").strip())
         safe = safe.strip("-")
         return safe or "default"
+
+    def _utc_now_iso() -> str:
+        return to_utc_iso(now_utc())
+
+    async def _load_json_state(key: str) -> dict[str, dict[str, object]]:
+        raw = await agent.session_manager.get_app_state(key)
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    async def _save_telegram_state() -> None:
+        await agent.session_manager.set_app_state(
+            telegram_state_key_approved,
+            json.dumps(approved_telegram_users, ensure_ascii=True, sort_keys=True),
+        )
+        await agent.session_manager.set_app_state(
+            telegram_state_key_pending,
+            json.dumps(pending_telegram_pairings, ensure_ascii=True, sort_keys=True),
+        )
+
+    def _generate_pairing_token() -> str:
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        while True:
+            token = "".join(secrets.choice(alphabet) for _ in range(8))
+            if token not in pending_telegram_pairings:
+                return token
+
+    async def _telegram_send(chat_id: int, text: str, *, reply_to_message_id: int | None = None) -> None:
+        if not telegram_bridge:
+            return
+        try:
+            await telegram_bridge.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_to_message_id=reply_to_message_id,
+            )
+            await _telegram_monitor_event(
+                "outgoing_message",
+                chat_id=chat_id,
+                reply_to_message_id=reply_to_message_id or 0,
+                chars=len(str(text or "")),
+                text_preview=_truncate_telegram_text(text),
+            )
+        except Exception as e:
+            ui.append_system_line(f"Telegram send failed: {str(e)}")
+
+    async def _telegram_send_chat_action(chat_id: int, action: str = "typing") -> None:
+        if not telegram_bridge:
+            return
+        try:
+            await telegram_bridge.send_chat_action(chat_id=chat_id, action=action)
+        except Exception as e:
+            ui.append_system_line(f"Telegram chat action failed: {str(e)}")
+
+    async def _telegram_mark_read(message: TelegramMessage) -> None:
+        """Best-effort read mark for Business chats (Bot API limitation)."""
+        if not telegram_bridge:
+            return
+        connection_id = str(message.business_connection_id or "").strip()
+        if not connection_id:
+            return
+        if int(message.message_id) <= 0:
+            return
+        try:
+            await telegram_bridge.read_business_message(
+                business_connection_id=connection_id,
+                chat_id=message.chat_id,
+                message_id=message.message_id,
+            )
+        except Exception as e:
+            ui.append_system_line(f"Telegram mark-read failed: {str(e)}")
+
+    def _truncate_telegram_text(text: str, max_chars: int = 220) -> str:
+        compact = str(text or "").strip().replace("\n", " ")
+        if len(compact) <= max_chars:
+            return compact
+        return compact[:max_chars].rstrip() + "..."
+
+    async def _telegram_monitor_event(step: str, **args: object) -> None:
+        payload: dict[str, object] = {"step": step}
+        payload.update(args)
+        body_lines = [f"step={step}"]
+        for key, value in args.items():
+            body_lines.append(f"{key}={value}")
+        body_text = "\n".join(body_lines)
+        ui.append_tool_output("telegram", payload, body_text)
+        if agent.session:
+            agent.session.add_message(
+                role="tool",
+                content=body_text,
+                tool_name="telegram",
+                tool_arguments=payload,
+                token_count=agent._count_tokens(body_text),
+            )
+            await agent.session_manager.save_session(agent.session)
+
+    def _extract_audio_paths_from_tool_output(content: str) -> list[Path]:
+        """Extract resolved MP3 paths from pocket_tts tool output text."""
+        text = str(content or "")
+        paths: list[Path] = []
+        seen: set[str] = set()
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped.lower().startswith("path:"):
+                continue
+            raw_path = stripped.split(":", 1)[1].strip()
+            if " (requested:" in raw_path:
+                raw_path = raw_path.split(" (requested:", 1)[0].strip()
+            if not raw_path:
+                continue
+            try:
+                resolved = Path(raw_path).expanduser().resolve()
+            except Exception:
+                continue
+            if not resolved.exists() or not resolved.is_file():
+                continue
+            if resolved.suffix.lower() != ".mp3":
+                continue
+            key = str(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            paths.append(resolved)
+        return paths
+
+    def _collect_turn_generated_audio_paths(turn_start_idx: int) -> list[Path]:
+        """Collect pocket_tts generated MP3 files from current turn tool outputs."""
+        if not agent.session:
+            return []
+        paths: list[Path] = []
+        seen: set[str] = set()
+        for msg in agent.session.messages[max(0, int(turn_start_idx)) :]:
+            if str(msg.get("role", "")).strip().lower() != "tool":
+                continue
+            if str(msg.get("tool_name", "")).strip().lower() != "pocket_tts":
+                continue
+            if str(msg.get("content", "")).strip().lower().startswith("error:"):
+                continue
+            for path in _extract_audio_paths_from_tool_output(str(msg.get("content", ""))):
+                key = str(path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                paths.append(path)
+        return paths
+
+    def _telegram_user_requested_audio(text: str) -> bool:
+        """Heuristic check for Telegram audio/TTS request intent."""
+        lowered = str(text or "").strip().lower()
+        if not lowered:
+            return False
+        audio_hints = (
+            "tts",
+            "text to speech",
+            "text-to-speech",
+            "voice",
+            "audio",
+            "voice note",
+            "read aloud",
+            "mp3",
+            "audio overview",
+            "spoken overview",
+        )
+        return any(hint in lowered for hint in audio_hints)
+
+    async def _telegram_send_audio_file(
+        chat_id: int,
+        path: Path,
+        *,
+        caption: str = "",
+        reply_to_message_id: int | None = None,
+    ) -> bool:
+        """Send audio file to Telegram chat and mirror monitor event."""
+        if not telegram_bridge:
+            return False
+        try:
+            await _telegram_send_chat_action(chat_id, action="upload_document")
+            await telegram_bridge.send_audio_file(
+                chat_id=chat_id,
+                file_path=path,
+                caption=caption,
+                reply_to_message_id=reply_to_message_id,
+            )
+            size_bytes = 0
+            try:
+                size_bytes = int(path.stat().st_size)
+            except Exception:
+                size_bytes = 0
+            await _telegram_monitor_event(
+                "outgoing_audio",
+                chat_id=chat_id,
+                reply_to_message_id=reply_to_message_id or 0,
+                path=str(path),
+                size_bytes=size_bytes,
+            )
+            return True
+        except Exception as e:
+            await _telegram_monitor_event(
+                "outgoing_audio_error",
+                chat_id=chat_id,
+                reply_to_message_id=reply_to_message_id or 0,
+                path=str(path),
+                error=str(e),
+            )
+            ui.append_system_line(f"Telegram audio send failed: {str(e)}")
+            return False
+
+    async def _telegram_maybe_send_audio_for_turn(
+        chat_id: int,
+        reply_to_message_id: int | None,
+        user_prompt: str,
+        assistant_text: str,
+        turn_start_idx: int,
+    ) -> None:
+        """Auto-deliver generated/synthesized audio for Telegram TTS-like prompts."""
+        generated_paths = _collect_turn_generated_audio_paths(turn_start_idx)
+        if generated_paths:
+            for path in generated_paths:
+                await _telegram_send_audio_file(
+                    chat_id=chat_id,
+                    path=path,
+                    caption="Requested audio output",
+                    reply_to_message_id=reply_to_message_id,
+                )
+            return
+
+        if not _telegram_user_requested_audio(user_prompt):
+            return
+        if "pocket_tts" not in agent.tools.list_tools():
+            return
+
+        source_text = str(assistant_text or "").strip()
+        if not source_text and agent.session:
+            for msg in reversed(agent.session.messages):
+                if str(msg.get("role", "")).strip().lower() != "assistant":
+                    continue
+                candidate = str(msg.get("content", "")).strip()
+                if candidate:
+                    source_text = candidate
+                    break
+        if not source_text:
+            return
+
+        cfg = get_config()
+        max_chars = max(1, int(getattr(cfg.tools.pocket_tts, "max_chars", 4000)))
+        tts_text = source_text[:max_chars]
+        tool_args: dict[str, object] = {"text": tts_text}
+        try:
+            result = await agent._execute_tool_with_guard(
+                name="pocket_tts",
+                arguments=tool_args,
+                interaction_label="telegram_auto_tts",
+            )
+            tool_output = result.content if result.success else f"Error: {result.error}"
+            agent._add_session_message(
+                role="tool",
+                content=tool_output,
+                tool_name="pocket_tts",
+                tool_arguments=tool_args,
+            )
+            agent._emit_tool_output("pocket_tts", tool_args, tool_output)
+            if agent.session:
+                await agent.session_manager.save_session(agent.session)
+
+            if not result.success:
+                await _telegram_send(
+                    chat_id,
+                    f"Audio generation failed: {str(result.error or 'unknown error')}",
+                    reply_to_message_id=reply_to_message_id,
+                )
+                return
+
+            paths = _extract_audio_paths_from_tool_output(tool_output)
+            for path in paths:
+                await _telegram_send_audio_file(
+                    chat_id=chat_id,
+                    path=path,
+                    caption="Audio summary",
+                    reply_to_message_id=reply_to_message_id,
+                )
+        except Exception as e:
+            await _telegram_monitor_event(
+                "auto_tts_error",
+                chat_id=chat_id,
+                reply_to_message_id=reply_to_message_id or 0,
+                error=str(e),
+            )
+            ui.append_system_line(f"Telegram auto TTS failed: {str(e)}")
+
+    async def _run_with_telegram_typing(
+        chat_id: int,
+        work: Awaitable[T],
+        *,
+        heartbeat_seconds: float = 4.0,
+    ) -> T:
+        """Emit Telegram `typing` indicator while async work is running."""
+        if not telegram_bridge:
+            return await work
+
+        stop = asyncio.Event()
+
+        async def _typing_heartbeat() -> None:
+            interval = max(1.0, float(heartbeat_seconds))
+            while not stop.is_set():
+                await _telegram_send_chat_action(chat_id, action="typing")
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=interval)
+                except TimeoutError:
+                    continue
+
+        heartbeat = asyncio.create_task(_typing_heartbeat())
+        try:
+            return await work
+        finally:
+            stop.set()
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
+
+    def _telegram_user_display(record: dict[str, object]) -> str:
+        user_id = str(record.get("user_id", "")).strip()
+        username = str(record.get("username", "")).strip()
+        first_name = str(record.get("first_name", "")).strip()
+        if username:
+            return f"@{username} ({user_id})"
+        if first_name:
+            return f"{first_name} ({user_id})"
+        return user_id or "unknown"
+
+    def _cleanup_expired_pairings() -> None:
+        if not pending_telegram_pairings:
+            return
+        now_ts = now_utc().timestamp()
+        expired = []
+        for token, payload in pending_telegram_pairings.items():
+            expires_at_raw = str(payload.get("expires_at", "")).strip()
+            if not expires_at_raw:
+                continue
+            try:
+                expires_at = datetime.fromisoformat(expires_at_raw.replace("Z", "+00:00"))
+                if expires_at.timestamp() <= now_ts:
+                    expired.append(token)
+            except Exception:
+                expired.append(token)
+        for token in expired:
+            pending_telegram_pairings.pop(token, None)
+
+    async def _approve_telegram_pairing_token(raw_token: str) -> tuple[bool, str]:
+        token = str(raw_token or "").strip().upper()
+        if not token:
+            return False, "Usage: /approve user telegram <token>"
+        _cleanup_expired_pairings()
+        record = pending_telegram_pairings.get(token)
+        if not isinstance(record, dict):
+            return False, f"Telegram pairing token not found or expired: {token}"
+        user_id = str(record.get("user_id", "")).strip()
+        if not user_id:
+            pending_telegram_pairings.pop(token, None)
+            await _save_telegram_state()
+            return False, f"Telegram pairing token invalid: {token}"
+
+        approved_telegram_users[user_id] = {
+            "user_id": int(record.get("user_id", 0) or 0),
+            "chat_id": int(record.get("chat_id", 0) or 0),
+            "username": str(record.get("username", "")).strip(),
+            "first_name": str(record.get("first_name", "")).strip(),
+            "approved_at": _utc_now_iso(),
+            "token": token,
+        }
+        pending_telegram_pairings.pop(token, None)
+        await _save_telegram_state()
+
+        chat_id = int(approved_telegram_users[user_id].get("chat_id", 0) or 0)
+        if chat_id and telegram_bridge:
+            await _telegram_send(
+                chat_id,
+                (
+                    "Pairing approved. You can now use Captain Claw.\n"
+                    "All chat and supported slash commands are available."
+                ),
+            )
+        return True, f"Approved Telegram user: {_telegram_user_display(approved_telegram_users[user_id])}"
+
+    async def _pair_unknown_telegram_user(message: TelegramMessage) -> None:
+        _cleanup_expired_pairings()
+        user_id_key = str(message.user_id)
+        if user_id_key in approved_telegram_users:
+            return
+        existing_token = ""
+        for token, payload in pending_telegram_pairings.items():
+            if str(payload.get("user_id", "")).strip() == str(message.user_id):
+                existing_token = token
+                break
+        if not existing_token:
+            existing_token = _generate_pairing_token()
+            ttl_minutes = max(1, int(telegram_cfg.pairing_ttl_minutes))
+            expires = datetime.fromtimestamp(now_utc().timestamp() + ttl_minutes * 60, tz=now_utc().tzinfo)
+            pending_telegram_pairings[existing_token] = {
+                "user_id": message.user_id,
+                "chat_id": message.chat_id,
+                "username": message.username,
+                "first_name": message.first_name,
+                "created_at": _utc_now_iso(),
+                "expires_at": expires.isoformat(),
+            }
+            await _save_telegram_state()
+
+        await _telegram_send(
+            message.chat_id,
+            (
+                "Pairing required.\n"
+                f"Your pairing token: `{existing_token}`\n\n"
+                "Ask the Captain Claw operator to approve you with:\n"
+                f"/approve user telegram {existing_token}"
+            ),
+            reply_to_message_id=message.message_id,
+        )
 
     async def _enqueue_agent_task(
         session_id: str | None,
@@ -896,6 +1353,8 @@ async def run_interactive() -> None:
         raise_on_error: bool = False,
         lane: str = CommandLane.MAIN,
         queue: bool = True,
+        on_assistant_text: Callable[[str], Awaitable[None]] | None = None,
+        after_turn: Callable[[int, str, str], Awaitable[None]] | None = None,
     ) -> None:
         """Execute one user prompt using the currently selected session."""
         nonlocal last_exec_seconds
@@ -905,9 +1364,12 @@ async def run_interactive() -> None:
             return
 
         async def _execute() -> None:
+            nonlocal last_exec_seconds
+            nonlocal last_completed_at
             shown_prompt = display_prompt if display_prompt is not None else prompt_text
             ui.print_message("user", shown_prompt)
             ui.print_blank_line()
+            turn_start_idx = len(agent.session.messages) if agent.session else 0
             if cron_job_id:
                 await _cron_chat_event(
                     cron_job_id,
@@ -980,6 +1442,21 @@ async def run_interactive() -> None:
                         source=cron_source or "",
                         output=_truncate_history_text(assistant_text),
                     )
+                if on_assistant_text:
+                    outbound_text = assistant_text.strip()
+                    if not outbound_text and agent.session:
+                        for msg in reversed(agent.session.messages):
+                            if str(msg.get("role", "")).strip().lower() != "assistant":
+                                continue
+                            candidate = str(msg.get("content", "")).strip()
+                            if candidate:
+                                outbound_text = candidate
+                                break
+                    if not outbound_text:
+                        outbound_text = "Task completed. Check monitor output for details."
+                    await on_assistant_text(outbound_text)
+                if after_turn:
+                    await after_turn(turn_start_idx, prompt_text, assistant_text)
                 last_exec_seconds = time.perf_counter() - started
                 last_completed_at = datetime.now()
                 ui.set_runtime_status("waiting")
@@ -997,6 +1474,11 @@ async def run_interactive() -> None:
                     )
                 ui.print_error(str(e))
                 log.error("Error in agent", error=str(e))
+                if on_assistant_text:
+                    try:
+                        await on_assistant_text(f"Error: {str(e)}")
+                    except Exception:
+                        pass
                 if raise_on_error:
                     raise
 
@@ -1228,6 +1710,416 @@ async def run_interactive() -> None:
             for job in due_jobs:
                 await _execute_cron_job(job, trigger="scheduled")
 
+    def _format_recent_history(limit: int = 30) -> str:
+        if not agent.session:
+            return "No active session."
+        messages = agent.session.messages[-max(1, int(limit)) :]
+        if not messages:
+            return "Session history is empty."
+        lines: list[str] = [f"Session: {agent.session.name} ({agent.session.id})", ""]
+        for idx, msg in enumerate(messages, start=1):
+            role = str(msg.get("role", "")).strip().lower() or "unknown"
+            content = str(msg.get("content", "")).strip().replace("\n", " ")
+            if len(content) > 220:
+                content = content[:220].rstrip() + "..."
+            lines.append(f"{idx}. {role}: {content}")
+        return "\n".join(lines)
+
+    def _format_active_configuration_text() -> str:
+        cfg = get_config()
+        active_model = agent.get_runtime_model_details()
+        active_provider = str(active_model.get("provider", "")).strip() or cfg.model.provider
+        active_model_name = str(active_model.get("model", "")).strip() or cfg.model.model
+        active_model_id = str(active_model.get("id", "")).strip()
+        active_model_source = str(active_model.get("source", "")).strip() or "default"
+        model_id_part = f" [id={active_model_id}]" if active_model_id else ""
+        workspace_path = str(cfg.resolved_workspace_path(Path.cwd()))
+        return "\n".join(
+            [
+                "Configuration (active):",
+                f"- model: {active_provider}/{active_model_name}{model_id_part} (source={active_model_source})",
+                f"- workspace: {workspace_path}",
+                f"- pipeline: {agent.pipeline_mode}",
+                f"- context size: {int(cfg.context.max_tokens)} tokens",
+                (
+                    "- guards: "
+                    f"input(enabled={cfg.guards.input.enabled}, level={cfg.guards.input.level}), "
+                    f"output(enabled={cfg.guards.output.enabled}, level={cfg.guards.output.level}), "
+                    f"script/tool(enabled={cfg.guards.script_tool.enabled}, level={cfg.guards.script_tool.level})"
+                ),
+            ]
+        )
+
+    def _telegram_help_text() -> str:
+        lines = [
+            "Captain Claw Telegram commands:",
+            "",
+        ]
+        for command, description in telegram_command_specs:
+            lines.append(f"/{command} - {description}")
+        lines.extend(
+            [
+                "",
+                "Tip: send normal text (without `/`) to chat with the active session.",
+            ]
+        )
+        return "\n".join(lines)
+
+    async def _register_telegram_commands() -> None:
+        if not telegram_bridge:
+            return
+        try:
+            await telegram_bridge.set_my_commands(telegram_command_specs)
+            await telegram_bridge.set_chat_menu_button_commands()
+            ui.append_system_line(
+                f"Telegram commands registered ({len(telegram_command_specs)} entries)."
+            )
+        except Exception as e:
+            ui.append_system_line(f"Telegram command registration failed: {str(e)}")
+
+    async def _handle_telegram_command(message: TelegramMessage) -> bool:
+        """Handle Telegram slash command. Returns True when handled."""
+        raw_text = message.text.strip()
+        lowered_text = raw_text.lower()
+        chat_id = message.chat_id
+        if lowered_text == "/start" or lowered_text.startswith("/start "):
+            await _telegram_send(
+                chat_id,
+                (
+                    "Captain Claw connected.\n"
+                    "Use /help to see available commands.\n"
+                    "Send plain text to chat with the current session."
+                ),
+            )
+            return True
+        if lowered_text == "/help" or lowered_text.startswith("/help "):
+            await _telegram_send(chat_id, _telegram_help_text())
+            return True
+
+        result = ui.handle_special_command(message.text)
+        if result is None:
+            # Includes /help output and parser errors already shown in console.
+            await _telegram_send(chat_id, "Command processed.")
+            return True
+        if result == "EXIT":
+            await _telegram_send(chat_id, "`/exit` is only available in local console.")
+            return True
+        if result.startswith("APPROVE_TELEGRAM_USER:"):
+            await _telegram_send(chat_id, "This command is operator-only in local console.")
+            return True
+        if result == "PIPELINE_INFO":
+            await _telegram_send(
+                chat_id,
+                (
+                    "Pipeline mode: "
+                    f"{agent.pipeline_mode} "
+                    "(loop=fast/simple, contracts=planner+completion gate)"
+                ),
+            )
+            return True
+        if result == "PLANNING_ON":
+            await agent.set_pipeline_mode("contracts")
+            await _telegram_send(chat_id, "Pipeline mode set to contracts.")
+            return True
+        if result == "PLANNING_OFF":
+            await agent.set_pipeline_mode("loop")
+            await _telegram_send(chat_id, "Pipeline mode set to loop.")
+            return True
+        if result.startswith("PIPELINE_MODE:"):
+            mode = result.split(":", 1)[1].strip().lower()
+            try:
+                await agent.set_pipeline_mode(mode)
+            except Exception:
+                await _telegram_send(chat_id, "Invalid pipeline mode. Use /pipeline loop|contracts")
+                return True
+            await _telegram_send(chat_id, f"Pipeline mode set to {agent.pipeline_mode}.")
+            return True
+        if result == "SKILLS_LIST":
+            skills = agent.list_user_invocable_skills()
+            if not skills:
+                await _telegram_send(chat_id, "No user-invocable skills available.")
+                return True
+            lines = ["Available skills:", "Use `/skill <name> [args]` to run one:"]
+            for command in skills:
+                lines.append(f"- /skill {command.name}")
+            await _telegram_send(chat_id, "\n".join(lines))
+            return True
+        if result.startswith("SKILL_INVOKE:") or result.startswith("SKILL_ALIAS_INVOKE:"):
+            payload = json.loads(result.split(":", 1)[1].strip())
+            skill_name = str(payload.get("name", "")).strip()
+            skill_args = str(payload.get("args", "")).strip()
+            invocation = await agent.invoke_skill_command(skill_name, args=skill_args)
+            if not bool(invocation.get("ok", False)):
+                await _telegram_send(chat_id, str(invocation.get("error", "Skill invocation failed.")))
+                return True
+            mode = str(invocation.get("mode", "")).strip().lower()
+            if mode == "dispatch":
+                await _telegram_send(chat_id, str(invocation.get("text", "")).strip() or "Done.")
+                return True
+            prompt = str(invocation.get("prompt", "")).strip()
+            if not prompt:
+                await _telegram_send(chat_id, "Skill invocation returned empty prompt.")
+                return True
+            await _run_prompt_in_active_session(
+                prompt,
+                display_prompt=f"[TG skill:{skill_name}] {skill_args}".strip(),
+                on_assistant_text=lambda text: _telegram_send(chat_id, text),
+                after_turn=lambda turn_start_idx, user_prompt, assistant_text: _telegram_maybe_send_audio_for_turn(
+                    chat_id=chat_id,
+                    reply_to_message_id=message.message_id,
+                    user_prompt=user_prompt,
+                    assistant_text=assistant_text,
+                    turn_start_idx=turn_start_idx,
+                ),
+            )
+            return True
+        if result == "SESSION_INFO":
+            if not agent.session:
+                await _telegram_send(chat_id, "No active session.")
+            else:
+                details = agent.get_runtime_model_details()
+                await _telegram_send(
+                    chat_id,
+                    (
+                        f"Session: {agent.session.name}\n"
+                        f"ID: {agent.session.id}\n"
+                        f"Messages: {len(agent.session.messages)}\n"
+                        f"Model: {details.get('provider')}/{details.get('model')}"
+                    ),
+                )
+            return True
+        if result == "SESSIONS":
+            sessions = await agent.session_manager.list_sessions(limit=20)
+            if not sessions:
+                await _telegram_send(chat_id, "No sessions found.")
+                return True
+            lines = ["Sessions:"]
+            for idx, session in enumerate(sessions, start=1):
+                marker = "*" if agent.session and session.id == agent.session.id else " "
+                lines.append(
+                    f"{marker} [{idx}] {session.name} ({session.id}) messages={len(session.messages)}"
+                )
+            await _telegram_send(chat_id, "\n".join(lines))
+            return True
+        if result == "MODELS":
+            models = agent.get_allowed_models()
+            details = agent.get_runtime_model_details()
+            lines = ["Allowed models:"]
+            for idx, model in enumerate(models, start=1):
+                marker = ""
+                if (
+                    str(model.get("provider", "")).strip() == str(details.get("provider", "")).strip()
+                    and str(model.get("model", "")).strip() == str(details.get("model", "")).strip()
+                ):
+                    marker = " *"
+                lines.append(
+                    f"[{idx}] {model.get('id')} -> {model.get('provider')}/{model.get('model')}{marker}"
+                )
+            await _telegram_send(chat_id, "\n".join(lines))
+            return True
+        if result == "CLEAR":
+            if agent.session:
+                if agent.is_session_memory_protected():
+                    await _telegram_send(chat_id, "Session memory is protected. Disable with /session protect off.")
+                    return True
+                agent.session.messages = []
+                await agent.session_manager.save_session(agent.session)
+                await _telegram_send(chat_id, "Session cleared.")
+            else:
+                await _telegram_send(chat_id, "No active session.")
+            return True
+        if result == "COMPACT":
+            compacted, stats = await agent.compact_session(force=True, trigger="manual")
+            if compacted:
+                await _telegram_send(
+                    chat_id,
+                    (
+                        "Session compacted "
+                        f"({int(stats.get('before_tokens', 0))} -> {int(stats.get('after_tokens', 0))} tokens)"
+                    ),
+                )
+            else:
+                await _telegram_send(chat_id, f"Compaction skipped: {str(stats.get('reason', 'not_needed'))}")
+            return True
+        if result == "CONFIG":
+            await _telegram_send(chat_id, _format_active_configuration_text())
+            return True
+        if result == "HISTORY":
+            await _telegram_send(chat_id, _format_recent_history(limit=30))
+            return True
+        if result == "SESSION_MODEL_INFO":
+            details = agent.get_runtime_model_details()
+            await _telegram_send(
+                chat_id,
+                (
+                    "Active model: "
+                    f"{details.get('provider')}/{details.get('model')} "
+                    f"(source={details.get('source') or 'unknown'}, id={details.get('id') or '-'})"
+                ),
+            )
+            return True
+        if result.startswith("SESSION_MODEL_SET:"):
+            selector = result.split(":", 1)[1].strip()
+            ok, message = await agent.set_session_model_by_selector(selector, persist=True)
+            await _telegram_send(chat_id, message)
+            return True
+        if result == "NEW" or result.startswith("NEW:"):
+            session_name = "default"
+            if result.startswith("NEW:"):
+                session_name = result.split(":", 1)[1].strip() or "default"
+            agent.session = await agent.session_manager.create_session(name=session_name)
+            agent.refresh_session_runtime_flags()
+            if agent.session:
+                await agent.session_manager.set_last_active_session(agent.session.id)
+                await _telegram_send(chat_id, f"Started new session: {agent.session.name} ({agent.session.id})")
+            return True
+        if result.startswith("SESSION_SELECT:"):
+            selector = result.split(":", 1)[1].strip()
+            selected = await agent.session_manager.select_session(selector)
+            if not selected:
+                await _telegram_send(chat_id, f"Session not found: {selector}")
+                return True
+            agent.session = selected
+            agent.refresh_session_runtime_flags()
+            await agent.session_manager.set_last_active_session(selected.id)
+            await _telegram_send(chat_id, f"Switched session: {selected.name} ({selected.id})")
+            return True
+        if result.startswith("SESSION_RENAME:"):
+            new_name = result.split(":", 1)[1].strip()
+            if not agent.session:
+                await _telegram_send(chat_id, "No active session.")
+                return True
+            ok = await agent.session_manager.rename_session(agent.session.id, new_name)
+            if not ok:
+                await _telegram_send(chat_id, "Failed to rename session.")
+                return True
+            updated = await agent.session_manager.load_session(agent.session.id)
+            if updated:
+                agent.session = updated
+            await _telegram_send(chat_id, f"Session renamed to: {new_name}")
+            return True
+        if result.startswith("CRON_ONEOFF:"):
+            payload = json.loads(result.split(":", 1)[1].strip())
+            prompt = str(payload.get("prompt", "")).strip()
+            if not prompt:
+                await _telegram_send(chat_id, "Usage: /cron \"<task>\"")
+                return True
+            await _run_prompt_in_active_session(
+                prompt,
+                display_prompt=f"[TG cron oneoff] {prompt}",
+                on_assistant_text=lambda text: _telegram_send(chat_id, text),
+                after_turn=lambda turn_start_idx, user_prompt, assistant_text: _telegram_maybe_send_audio_for_turn(
+                    chat_id=chat_id,
+                    reply_to_message_id=message.message_id,
+                    user_prompt=user_prompt,
+                    assistant_text=assistant_text,
+                    turn_start_idx=turn_start_idx,
+                ),
+            )
+            return True
+        await _telegram_send(chat_id, "Command requires local console in this version.")
+        return True
+
+    async def _handle_telegram_message(message: TelegramMessage) -> None:
+        try:
+            await _telegram_mark_read(message)
+            await _telegram_monitor_event(
+                "incoming_message",
+                chat_id=message.chat_id,
+                user_id=message.user_id,
+                username=message.username or "",
+                message_id=message.message_id,
+                is_command=bool(message.text.strip().startswith("/")),
+                text_preview=_truncate_telegram_text(message.text),
+            )
+            user_id_key = str(message.user_id)
+            if user_id_key not in approved_telegram_users:
+                await _pair_unknown_telegram_user(message)
+                return
+            text = message.text.strip()
+            if not text:
+                return
+            if text.startswith("/"):
+                await _run_with_telegram_typing(
+                    message.chat_id,
+                    _handle_telegram_command(message),
+                )
+                return
+            user_label = message.username or message.first_name or str(message.user_id)
+            await _run_with_telegram_typing(
+                message.chat_id,
+                _run_prompt_in_active_session(
+                    text,
+                    display_prompt=f"[TG {user_label}] {text}",
+                    on_assistant_text=lambda out: _telegram_send(
+                        message.chat_id,
+                        out,
+                        reply_to_message_id=message.message_id,
+                    ),
+                    after_turn=lambda turn_start_idx, user_prompt, assistant_text: _telegram_maybe_send_audio_for_turn(
+                        chat_id=message.chat_id,
+                        reply_to_message_id=message.message_id,
+                        user_prompt=user_prompt,
+                        assistant_text=assistant_text,
+                        turn_start_idx=turn_start_idx,
+                    ),
+                ),
+            )
+        except Exception as e:
+            log.error("Telegram message handler failed", error=str(e))
+            try:
+                await _telegram_monitor_event(
+                    "handler_error",
+                    chat_id=message.chat_id,
+                    user_id=message.user_id,
+                    message_id=message.message_id,
+                    error=str(e),
+                )
+            except Exception:
+                pass
+            try:
+                await _telegram_send(
+                    message.chat_id,
+                    f"Error while processing your request: {str(e)}",
+                    reply_to_message_id=message.message_id,
+                )
+            except Exception:
+                pass
+
+    async def _telegram_poll_loop() -> None:
+        """Background Telegram polling and message dispatch."""
+        nonlocal telegram_offset
+        assert telegram_bridge is not None
+        while True:
+            try:
+                updates = await telegram_bridge.get_updates(
+                    offset=telegram_offset,
+                    timeout=max(1, int(telegram_cfg.poll_timeout_seconds)),
+                )
+                for update in updates:
+                    next_offset = int(update.update_id) + 1
+                    telegram_offset = next_offset if telegram_offset is None else max(telegram_offset, next_offset)
+                    asyncio.create_task(_handle_telegram_message(update))
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                ui.append_system_line(f"Telegram poll error: {str(e)}")
+                await asyncio.sleep(2.0)
+
+    if telegram_enabled:
+        token = telegram_cfg.bot_token.strip()
+        if token:
+            telegram_bridge = TelegramBridge(token=token, api_base_url=telegram_cfg.api_base_url)
+            approved_telegram_users = await _load_json_state(telegram_state_key_approved)
+            pending_telegram_pairings = await _load_json_state(telegram_state_key_pending)
+            _cleanup_expired_pairings()
+            await _save_telegram_state()
+            await _register_telegram_commands()
+            telegram_poll_task = asyncio.create_task(_telegram_poll_loop())
+            ui.append_system_line("Telegram UI enabled (long polling started).")
+        else:
+            ui.append_system_line("Telegram enabled but bot_token is empty; skipping Telegram startup.")
+
     cron_worker = asyncio.create_task(_cron_scheduler_loop())
     try:
         # Main loop
@@ -1245,15 +2137,26 @@ async def run_interactive() -> None:
                 ui.set_runtime_status("user input")
                 # Get user input (threaded so event loop keeps servicing Captain Claw cron).
                 user_input = await asyncio.to_thread(ui.prompt)
-            
+
                 # Handle special commands
                 result = ui.handle_special_command(user_input)
-            
+
                 if result is None:
                     continue
                 elif result == "EXIT":
                     log.info("User requested exit")
                     break
+                elif result.startswith("APPROVE_TELEGRAM_USER:"):
+                    if not telegram_enabled:
+                        ui.print_error("Telegram integration is not enabled.")
+                        continue
+                    token = result.split(":", 1)[1].strip()
+                    ok, message = await _approve_telegram_pairing_token(token)
+                    if ok:
+                        ui.print_success(message)
+                    else:
+                        ui.print_error(message)
+                    continue
                 elif result == "CLEAR":
                     if agent.session:
                         if agent.is_session_memory_protected():
@@ -1807,7 +2710,7 @@ async def run_interactive() -> None:
                     ui.print_success(f"Manual cron run finished: {job_id}")
                     continue
                 elif result == "CONFIG":
-                    ui.print_config(get_config())
+                    ui.print_message("system", _format_active_configuration_text())
                     continue
                 elif result == "HISTORY":
                     if agent.session:
@@ -1859,11 +2762,9 @@ async def run_interactive() -> None:
                     if not skills:
                         ui.print_warning("No user-invocable skills available.")
                         continue
-                    lines = ["Available skills:"]
+                    lines = ["Available skills:", "Use `/skill <name> [args]` to run one:"]
                     for command in skills:
-                        lines.append(
-                            f"- /skill {command.name} (alias: /{command.name}) - {command.description}"
-                        )
+                        lines.append(f"- /skill {command.name} - {command.description}")
                     ui.print_message("system", "\n".join(lines))
                     continue
                 elif result.startswith("SKILL_INVOKE:") or result.startswith("SKILL_ALIAS_INVOKE:"):
@@ -1960,13 +2861,13 @@ async def run_interactive() -> None:
                     else:
                         ui.print_error(message)
                     continue
-            
+
                 # Skip empty input
                 if not user_input.strip():
                     continue
 
                 await _run_prompt_in_active_session(user_input)
-            
+
             except KeyboardInterrupt:
                 log.info("Interrupted by user")
                 break
@@ -1977,6 +2878,17 @@ async def run_interactive() -> None:
                 ui.print_error(str(e))
                 log.error("Error in interactive loop", error=str(e))
     finally:
+        if telegram_poll_task is not None:
+            telegram_poll_task.cancel()
+            try:
+                await telegram_poll_task
+            except asyncio.CancelledError:
+                pass
+        if telegram_bridge is not None:
+            try:
+                await telegram_bridge.close()
+            except Exception:
+                pass
         cron_worker.cancel()
         try:
             await cron_worker
@@ -1992,9 +2904,9 @@ def version() -> None:
 
 if __name__ == "__main__":
     import typer
-    
+
     cli = typer.Typer(help="Captain Claw - A powerful console-based AI agent")
-    
+
     @cli.command()
     def run(
         config: str = typer.Option("", "-c", "--config", help="Path to config file"),
@@ -2004,9 +2916,9 @@ if __name__ == "__main__":
         verbose: bool = typer.Option(False, "-v", "--verbose", help="Debug logging"),
     ) -> None:
         main(config, model, provider, no_stream, verbose)
-    
+
     @cli.command()
     def ver() -> None:
         version()
-    
+
     cli()

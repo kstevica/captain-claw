@@ -542,53 +542,8 @@ class AgentOrchestrationMixin:
                     if finalized:
                         return finish(final_text, success=finish_success)
                     continue
-                # Try to get final response
-                messages = self._build_messages(
-                    tool_messages_from_index=turn_start_idx,
-                    query=effective_user_input,
-                    planning_pipeline=planning_pipeline,
-                    list_task_plan=list_task_plan,
-                )
-                try:
-                    response = await self._complete_with_guards(
-                        messages=messages,
-                        tools=None,
-                        interaction_label="tool_followup",
-                        turn_usage=turn_usage,
-                    )
-                except GuardBlockedError as e:
-                    final = str(e)
-                    self._update_clarification_state(
-                        user_input=user_input,
-                        effective_user_input=effective_user_input,
-                        assistant_response=final,
-                    )
-                    await self._persist_assistant_response(final)
-                    return finish(final, success=False)
-                except Exception as e:
-                    # Model doesn't support tool results - return tool output
-                    log.warning("Model doesn't support tool results", error=str(e))
-                    output = self._collect_turn_tool_output(turn_start_idx)
-                    final = await self._friendly_tool_output_response(
-                        user_input=effective_user_input,
-                        tool_output=output,
-                        turn_usage=turn_usage,
-                    )
-                    finalized, final_text, finish_success = await attempt_finalize_response(
-                        output_text=final,
-                        iteration=iteration,
-                        finish_success=False,
-                    )
-                    if finalized:
-                        return finish(final_text, success=finish_success)
-                    continue
-                finalized, final_text, finish_success = await attempt_finalize_response(
-                    output_text=response.content,
-                    iteration=iteration,
-                    finish_success=True,
-                )
-                if finalized:
-                    return finish(final_text, success=finish_success)
+                # Continue loop with normal tool-enabled call on next iteration.
+                # This avoids prematurely finalizing after a single tool (e.g. skill read).
                 continue
             
             # Check for tool calls embedded in response text (fallback)
@@ -619,53 +574,7 @@ class AgentOrchestrationMixin:
                     if finalized:
                         return finish(final_text, success=finish_success)
                     continue
-                # Try to get final response
-                messages = self._build_messages(
-                    tool_messages_from_index=turn_start_idx,
-                    query=effective_user_input,
-                    planning_pipeline=planning_pipeline,
-                    list_task_plan=list_task_plan,
-                )
-                try:
-                    response = await self._complete_with_guards(
-                        messages=messages,
-                        tools=None,
-                        interaction_label="embedded_tool_followup",
-                        turn_usage=turn_usage,
-                    )
-                except GuardBlockedError as e:
-                    final = str(e)
-                    self._update_clarification_state(
-                        user_input=user_input,
-                        effective_user_input=effective_user_input,
-                        assistant_response=final,
-                    )
-                    await self._persist_assistant_response(final)
-                    return finish(final, success=False)
-                except Exception as e:
-                    log.warning("Model doesn't support tool results", error=str(e))
-                    output = self._collect_turn_tool_output(turn_start_idx)
-                    final = await self._friendly_tool_output_response(
-                        user_input=effective_user_input,
-                        tool_output=output,
-                        turn_usage=turn_usage,
-                    )
-                    finalized, final_text, finish_success = await attempt_finalize_response(
-                        output_text=final,
-                        iteration=iteration,
-                        finish_success=False,
-                    )
-                    if finalized:
-                        return finish(final_text, success=finish_success)
-                    continue
-                # If successful, return the response normally
-                finalized, final_text, finish_success = await attempt_finalize_response(
-                    output_text=response.content,
-                    iteration=iteration,
-                    finish_success=True,
-                )
-                if finalized:
-                    return finish(final_text, success=finish_success)
+                # Continue loop with normal tool-enabled call on next iteration.
                 continue
             
             # Check for inline commands in response (fallback for models without tool calling)

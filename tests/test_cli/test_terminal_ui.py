@@ -337,6 +337,7 @@ def test_planning_command_parsing():
     assert alias.startswith("SKILL_ALIAS_INVOKE:")
     alias_payload = json.loads(alias.split(":", 1)[1])
     assert alias_payload == {"name": "example-source-brief", "args": "index.hr"}
+    assert ui.handle_special_command("/approve user telegram ABC123") == "APPROVE_TELEGRAM_USER:ABC123"
 
 
 def test_new_command_supports_optional_name():

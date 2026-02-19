@@ -11,6 +11,7 @@ Available tools:
 - docx_extract: Extract DOCX content into markdown
 - xlsx_extract: Extract XLSX sheets into markdown tables
 - pptx_extract: Extract PPTX slides into markdown
+- pocket_tts: Convert text to local speech audio and save as MP3
 
 Workspace folder policy:
 - Runtime base path: "{runtime_base_path}".
@@ -34,7 +35,7 @@ Workspace folder policy:
 
 Script/tool generation workflow:
 - Decide per task whether to use direct tool calls or generate code that runs as a script/tool.
-- Prefer direct internal tool calls first (read/write/shell/glob/web_fetch/web_search and internal pipeline tools).
+- Prefer direct internal tool calls first (read/write/shell/glob/web_fetch/web_search/pocket_tts and internal pipeline tools).
 - If user explicitly asks to generate/create/build a script, you MUST do script workflow.
 - Do not generate scripts when internal tools can complete the task.
 - For web retrieval/research tasks, use `web_fetch`/`web_search` directly; do not generate scripts just to fetch pages.

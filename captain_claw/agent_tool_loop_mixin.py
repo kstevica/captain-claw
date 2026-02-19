@@ -173,9 +173,34 @@ class AgentToolLoopMixin:
         """
         import re
         
-        tool_calls = []
+        tool_calls: list[ToolCall] = []
         if not content:
             return tool_calls
+
+        max_calls = 8
+        seen: set[str] = set()
+
+        def _append_tool_call(name: str, arguments: dict[str, Any]) -> None:
+            if len(tool_calls) >= max_calls:
+                return
+            normalized_name = str(name or "").strip().lower()
+            if not normalized_name or not isinstance(arguments, dict):
+                return
+            signature = json.dumps(
+                {"name": normalized_name, "arguments": arguments},
+                ensure_ascii=True,
+                sort_keys=True,
+            )
+            if signature in seen:
+                return
+            seen.add(signature)
+            tool_calls.append(
+                ToolCall(
+                    id=f"embedded_{len(tool_calls)}",
+                    name=normalized_name,
+                    arguments=arguments,
+                )
+            )
         
         # Pattern 1: @tool\ncommand: value
         pattern1 = r'@(\w+)\s*\n\s*command:\s*(.+?)(?:\n\n|\n\*|$)'
@@ -198,20 +223,12 @@ class AgentToolLoopMixin:
                     tool_name = match.group(1).strip().lower()
                     command = match.group(2).strip()
                     if tool_name and command:
-                        tool_calls.append(ToolCall(
-                            id=f"embedded_{len(tool_calls)}",
-                            name=tool_name,
-                            arguments={"command": command},
-                        ))
+                        _append_tool_call(tool_name, {"command": command})
                 elif pattern == pattern1:
                     tool_name = match.group(1).strip().lower()
                     command = match.group(2).strip()
                     if tool_name and command:
-                        tool_calls.append(ToolCall(
-                            id=f"embedded_{len(tool_calls)}",
-                            name=tool_name,
-                            arguments={"command": command},
-                        ))
+                        _append_tool_call(tool_name, {"command": command})
                 elif pattern == pattern2:
                     tool_name = match.group(1).strip()
                     args_str = match.group(2).strip()
@@ -222,20 +239,123 @@ class AgentToolLoopMixin:
                         value = arg_match.group(2)
                         args[key] = value
                     if tool_name and args:
-                        tool_calls.append(ToolCall(
-                            id=f"embedded_{len(tool_calls)}",
-                            name=tool_name,
-                            arguments=args,
-                        ))
+                        _append_tool_call(tool_name, args)
                 elif pattern == pattern3:
                     tool_name = match.group(1).strip().lower()
                     command = match.group(2).strip()
                     if tool_name and command:
-                        tool_calls.append(ToolCall(
-                            id=f"embedded_{len(tool_calls)}",
-                            name=tool_name,
-                            arguments={"command": command},
-                        ))
+                        _append_tool_call(tool_name, {"command": command})
+
+        # Pattern 5: JSON tool calls and pseudo-tool argument objects.
+        # Supports:
+        # - {"tool":"web_search","args":{"query":"..."}}
+        # - {"name":"web_fetch","arguments":{"url":"https://..."}}
+        # - {"tool":"web_search","input":"..."}
+        # - {"query":"..."}  -> web_search
+        # - {"url":"https://..."} -> web_fetch
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("{") or not line.endswith("}"):
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+
+            explicit_tool = str(payload.get("tool", payload.get("name", "")) or "").strip().lower()
+            explicit_args = payload.get("args", payload.get("arguments"))
+            if explicit_tool and isinstance(explicit_args, dict):
+                args_obj = dict(explicit_args)
+                if explicit_tool == "web_search" and "max_results" in args_obj and "count" not in args_obj:
+                    try:
+                        args_obj["count"] = int(args_obj.get("max_results"))
+                    except Exception:
+                        pass
+                _append_tool_call(explicit_tool, args_obj)
+                continue
+            if explicit_tool:
+                args_obj: dict[str, Any] = {}
+                input_text = str(payload.get("input", "") or "").strip()
+                if explicit_tool == "web_search":
+                    query = str(payload.get("query", "") or "").strip()
+                    if not query and input_text:
+                        query = input_text
+                    if query:
+                        args_obj["query"] = query
+                    if "count" in payload:
+                        args_obj["count"] = payload.get("count")
+                    elif "max_results" in payload:
+                        args_obj["count"] = payload.get("max_results")
+                    for key in ("offset", "country", "search_lang", "freshness", "safesearch"):
+                        if key in payload:
+                            args_obj[key] = payload.get(key)
+                elif explicit_tool == "web_fetch":
+                    url = str(payload.get("url", "") or "").strip()
+                    if not url and input_text.startswith(("http://", "https://")):
+                        url = input_text
+                    if url.startswith(("http://", "https://")):
+                        args_obj["url"] = url
+                    if "max_chars" in payload:
+                        args_obj["max_chars"] = payload.get("max_chars")
+                    if "extract_mode" in payload:
+                        args_obj["extract_mode"] = payload.get("extract_mode")
+                elif explicit_tool == "shell":
+                    command = str(payload.get("command", "") or "").strip()
+                    if not command and input_text:
+                        command = input_text
+                    if command:
+                        args_obj["command"] = command
+                elif explicit_tool == "pocket_tts":
+                    text = str(payload.get("text", "") or "").strip()
+                    if not text and input_text:
+                        text = input_text
+                    if text:
+                        args_obj["text"] = text
+                    voice = str(payload.get("voice", "") or "").strip()
+                    if voice:
+                        args_obj["voice"] = voice
+                    output_path = str(payload.get("output_path", "") or "").strip()
+                    if output_path:
+                        args_obj["output_path"] = output_path
+                    if "sample_rate" in payload:
+                        args_obj["sample_rate"] = payload.get("sample_rate")
+                else:
+                    for key, value in payload.items():
+                        if key in {"tool", "name", "id", "input"}:
+                            continue
+                        args_obj[str(key)] = value
+                    if input_text and "input" not in args_obj:
+                        args_obj["input"] = input_text
+                if args_obj:
+                    _append_tool_call(explicit_tool, args_obj)
+                    continue
+
+            # Heuristic fallback: common pseudo-tool argument blobs.
+            if "query" in payload:
+                query = str(payload.get("query", "")).strip()
+                if query:
+                    args_obj: dict[str, Any] = {"query": query}
+                    if "count" in payload:
+                        args_obj["count"] = payload.get("count")
+                    elif "max_results" in payload:
+                        args_obj["count"] = payload.get("max_results")
+                    for key in ("offset", "country", "search_lang", "freshness", "safesearch"):
+                        if key in payload:
+                            args_obj[key] = payload.get(key)
+                    _append_tool_call("web_search", args_obj)
+                    continue
+
+            if "url" in payload:
+                url = str(payload.get("url", "")).strip()
+                if url.startswith(("http://", "https://")):
+                    args_obj = {"url": url}
+                    if "max_chars" in payload:
+                        args_obj["max_chars"] = payload.get("max_chars")
+                    if "extract_mode" in payload:
+                        args_obj["extract_mode"] = payload.get("extract_mode")
+                    _append_tool_call("web_fetch", args_obj)
         
         return tool_calls
 
@@ -321,4 +441,3 @@ class AgentToolLoopMixin:
         
         self._set_runtime_status("thinking")
         return results
-

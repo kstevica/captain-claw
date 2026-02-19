@@ -90,7 +90,14 @@ class Agent(
     def _is_monitor_only_tool_name(tool_name: str) -> bool:
         """Whether tool output is monitor-only and should not feed model context."""
         normalized = str(tool_name or "").strip().lower()
-        return normalized in {"llm_trace", "planning", "task_contract", "completion_gate", "pipeline_trace"}
+        return normalized in {
+            "llm_trace",
+            "planning",
+            "task_contract",
+            "completion_gate",
+            "pipeline_trace",
+            "telegram",
+        }
 
     @staticmethod
     def _accumulate_usage(target: dict[str, int], usage: dict[str, int] | None) -> None:

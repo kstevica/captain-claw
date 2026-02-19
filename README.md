@@ -27,7 +27,7 @@ In under five minutes, you can have a multi-model terminal agentic system with p
 - Parallel work across sessions: keep separate short-term contexts per task while preserving long-term session history.
 - Live per-session model switching: use different models for different threads without restarting.
 - Built-in safety guards: input, output, and script/tool checks with configurable enforcement.
-- Real tool execution: shell, file read/write, glob, and web fetch with persistent session traces.
+- Real tool execution: shell, file ops, web fetch/search, document extraction, and local TTS with persistent session traces.
 - Practical for production-like workflows: monitor view, selectable pipeline modes, context compaction, and resumable sessions.
 
 ## Feature Snapshot
@@ -38,7 +38,7 @@ In under five minutes, you can have a multi-model terminal agentic system with p
 | Per-session model selection | Keep one session on GPT, another on Claude, another on Ollama. |
 | Persistent multi-session state | Resume work exactly where you left off. |
 | Built-in guard system | Reduce risky prompts, outputs, and command execution. |
-| Built-in tools | Move from chat to action: shell, file ops, web fetch. |
+| Built-in tools | Move from chat to action: shell, file ops, web, doc extraction, local TTS. |
 | Planning + monitor modes | Better visibility for longer, multi-step agent runs. |
 | Context compaction | Keep long threads usable without losing continuity. |
 
@@ -217,12 +217,18 @@ guards:
     level: "stop_suspicious" # or ask_for_approval
 
 tools:
-  enabled: ["shell", "read", "write", "glob", "web_fetch", "web_search"]
+  enabled: ["shell", "read", "write", "glob", "web_fetch", "web_search", "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract", "pocket_tts"]
   web_search:
     provider: "brave"
     api_key: "" # or BRAVE_API_KEY env var
     max_results: 5
     safesearch: "moderate"
+  pocket_tts:
+    max_chars: 4000
+    default_voice: "" # optional; fallback is model default voice
+    sample_rate: 24000
+    mp3_bitrate_kbps: 128
+    timeout_seconds: 180
 
 workspace:
   path: "./workspace" # local artifact root; tool outputs go under ./workspace/saved
@@ -368,6 +374,11 @@ Captain Claw can use:
 - `glob`: search files by pattern
 - `web_fetch`: fetch and parse web content
 - `web_search`: search the web (Brave API-backed) for current sources and links
+- `pdf_extract`: extract PDF files to markdown
+- `docx_extract`: extract DOCX files to markdown
+- `xlsx_extract`: extract XLSX sheets to markdown tables
+- `pptx_extract`: extract PPTX slides to markdown
+- `pocket_tts`: generate local speech MP3 files (128 kbps) with pocket-tts
 
 ### File Output Policy
 

@@ -636,6 +636,7 @@ async def test_set_session_model_uses_allowed_models_and_updates_metadata():
     cfg = old_cfg.model_copy(deep=True)
     cfg.model.provider = "ollama"
     cfg.model.model = "minimax-m2.5:cloud"
+    cfg.model.base_url = "http://localhost:11434"
     cfg.model.allowed = [
         {
             "id": "ollama-cloud",
@@ -666,6 +667,8 @@ async def test_set_session_model_uses_allowed_models_and_updates_metadata():
         details = agent.get_runtime_model_details()
         assert str(details.get("provider", "")).startswith("openai")
         assert "gpt-4o-mini" in str(details.get("model", ""))
+        assert str(details.get("base_url", "")).strip() == ""
+        assert str(selection.get("base_url", "")).strip() == ""
 
         ok_default, message_default = await agent.set_session_model("default", persist=True)
         assert ok_default is True
