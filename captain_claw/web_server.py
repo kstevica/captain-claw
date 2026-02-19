@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+import secrets
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,7 @@ from captain_claw.config import Config, get_config, set_config
 from captain_claw.instructions import InstructionLoader
 from captain_claw.logging import configure_logging, get_logger
 from captain_claw.session import get_session_manager
+from captain_claw.telegram_bridge import TelegramBridge, TelegramMessage
 
 log = get_logger(__name__)
 
@@ -53,6 +56,7 @@ COMMANDS: list[dict[str, str]] = [
     {"command": "/cron pause|resume|remove <job-id>", "description": "Manage scheduled jobs", "category": "Cron"},
     {"command": "/monitor on|off", "description": "Toggle monitor split view", "category": "Monitor"},
     {"command": "/monitor trace on|off", "description": "Toggle LLM trace logging", "category": "Monitor"},
+    {"command": "/approve user telegram <token>", "description": "Approve a Telegram user pairing", "category": "Telegram"},
 ]
 
 
@@ -64,8 +68,22 @@ class WebServer:
         self.agent: Agent | None = None
         self.clients: set[web.WebSocketResponse] = set()
         self._busy = False
+        self._busy_lock = asyncio.Lock()
+        self._telegram_queue: asyncio.Queue[TelegramMessage] = asyncio.Queue()
         self._instructions_dir = InstructionLoader().base_dir
         self._loop: asyncio.AbstractEventLoop | None = None
+
+        # Telegram bridge state
+        telegram_cfg = config.telegram
+        self._telegram_enabled = bool(
+            telegram_cfg.enabled or telegram_cfg.bot_token.strip()
+        )
+        self._telegram_bridge: TelegramBridge | None = None
+        self._telegram_offset: int | None = None
+        self._approved_telegram_users: dict[str, dict[str, object]] = {}
+        self._pending_telegram_pairings: dict[str, dict[str, object]] = {}
+        self._telegram_poll_task: asyncio.Task[None] | None = None
+        self._telegram_worker_task: asyncio.Task[None] | None = None
 
     async def _init_agent(self) -> None:
         """Initialize the agent with web callbacks."""
@@ -244,46 +262,47 @@ class WebServer:
             })
             return
 
-        self._busy = True
-        self._broadcast({"type": "status", "status": "thinking"})
+        async with self._busy_lock:
+            self._busy = True
+            self._broadcast({"type": "status", "status": "thinking"})
 
-        # Echo user message to all clients
-        self._broadcast({
-            "type": "chat_message",
-            "role": "user",
-            "content": content,
-        })
-
-        try:
-            # Use complete() which handles tool calls and guards
-            response = await self.agent.complete(content)
-
+            # Echo user message to all clients
             self._broadcast({
                 "type": "chat_message",
-                "role": "assistant",
-                "content": response,
+                "role": "user",
+                "content": content,
             })
 
-            # Send updated usage/session info
-            self._broadcast({
-                "type": "usage",
-                "last": self.agent.last_usage,
-                "total": self.agent.total_usage,
-            })
-            self._broadcast({
-                "type": "session_info",
-                **self._session_info(),
-            })
+            try:
+                # Use complete() which handles tool calls and guards
+                response = await self.agent.complete(content)
 
-        except Exception as e:
-            log.error("Chat error", error=str(e))
-            self._broadcast({
-                "type": "error",
-                "message": f"Error: {str(e)}",
-            })
-        finally:
-            self._busy = False
-            self._broadcast({"type": "status", "status": "ready"})
+                self._broadcast({
+                    "type": "chat_message",
+                    "role": "assistant",
+                    "content": response,
+                })
+
+                # Send updated usage/session info
+                self._broadcast({
+                    "type": "usage",
+                    "last": self.agent.last_usage,
+                    "total": self.agent.total_usage,
+                })
+                self._broadcast({
+                    "type": "session_info",
+                    **self._session_info(),
+                })
+
+            except Exception as e:
+                log.error("Chat error", error=str(e))
+                self._broadcast({
+                    "type": "error",
+                    "message": f"Error: {str(e)}",
+                })
+            finally:
+                self._busy = False
+                self._broadcast({"type": "status", "status": "ready"})
 
     # ── Command handler ──────────────────────────────────────────────
 
@@ -427,6 +446,9 @@ class WebServer:
             elif cmd in ("/exit", "/quit"):
                 result = "Use Ctrl+C on the server terminal or close this browser tab."
 
+            elif cmd in ("/approve",):
+                result = await self._handle_approve_command(args.strip())
+
             else:
                 # Try to process it as a chat message (the agent might understand it)
                 result = f"Unknown command: `{cmd}`. Type `/help` for available commands."
@@ -539,6 +561,366 @@ class WebServer:
             lines.append("")
         lines.append("**Tip:** Type `/` to see command suggestions. Press `Ctrl+K` for the command palette.")
         return "\n".join(lines)
+
+    async def _handle_approve_command(self, args: str) -> str:
+        """Handle /approve user telegram <token>."""
+        parts = args.split()
+        if len(parts) < 3 or parts[0].lower() != "user" or parts[1].lower() != "telegram":
+            return "Usage: `/approve user telegram <token>`"
+        token = parts[2].strip().upper()
+        if not token:
+            return "Usage: `/approve user telegram <token>`"
+        self._tg_cleanup_expired()
+        record = self._pending_telegram_pairings.get(token)
+        if not isinstance(record, dict):
+            return f"Telegram pairing token not found or expired: `{token}`"
+        user_id = str(record.get("user_id", "")).strip()
+        if not user_id:
+            self._pending_telegram_pairings.pop(token, None)
+            await self._tg_save_state()
+            return f"Telegram pairing token invalid: `{token}`"
+
+        self._approved_telegram_users[user_id] = {
+            "user_id": int(record.get("user_id", 0) or 0),
+            "chat_id": int(record.get("chat_id", 0) or 0),
+            "username": str(record.get("username", "")).strip(),
+            "first_name": str(record.get("first_name", "")).strip(),
+            "approved_at": datetime.now(UTC).isoformat(),
+            "token": token,
+        }
+        self._pending_telegram_pairings.pop(token, None)
+        await self._tg_save_state()
+
+        chat_id = int(self._approved_telegram_users[user_id].get("chat_id", 0) or 0)
+        if chat_id and self._telegram_bridge:
+            await self._tg_send(
+                chat_id,
+                "Pairing approved. You can now use Captain Claw.\nSend any text to chat.",
+            )
+
+        username = str(record.get("username", "")).strip()
+        first_name = str(record.get("first_name", "")).strip()
+        label = username or first_name or user_id
+        return f"Approved Telegram user: **{label}**"
+
+    # ── Telegram integration ────────────────────────────────────────
+
+    async def _start_telegram(self) -> None:
+        """Initialize and start Telegram polling + worker if configured."""
+        if not self._telegram_enabled:
+            return
+        token = self.config.telegram.bot_token.strip()
+        if not token:
+            log.info("Telegram enabled but bot_token is empty; skipping in web mode.")
+            return
+        self._telegram_bridge = TelegramBridge(
+            token=token, api_base_url=self.config.telegram.api_base_url,
+        )
+        # Load persisted pairing state
+        if self.agent:
+            self._approved_telegram_users = await self._tg_load_state(
+                "telegram_approved_users"
+            )
+            self._pending_telegram_pairings = await self._tg_load_state(
+                "telegram_pending_pairings"
+            )
+            self._tg_cleanup_expired()
+            await self._tg_save_state()
+        self._telegram_poll_task = asyncio.create_task(self._telegram_poll_loop())
+        self._telegram_worker_task = asyncio.create_task(self._telegram_worker())
+        log.info("Telegram bridge started in web mode (long polling).")
+        print("  Telegram integration active (long polling).")
+
+    async def _stop_telegram(self) -> None:
+        """Gracefully stop Telegram tasks."""
+        for task in (self._telegram_poll_task, self._telegram_worker_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        if self._telegram_bridge:
+            await self._telegram_bridge.close()
+
+    async def _telegram_poll_loop(self) -> None:
+        """Background Telegram long-polling loop."""
+        assert self._telegram_bridge is not None
+        poll_timeout = max(1, int(self.config.telegram.poll_timeout_seconds))
+        while True:
+            try:
+                updates = await self._telegram_bridge.get_updates(
+                    offset=self._telegram_offset, timeout=poll_timeout,
+                )
+                for update in updates:
+                    next_offset = int(update.update_id) + 1
+                    self._telegram_offset = (
+                        next_offset
+                        if self._telegram_offset is None
+                        else max(self._telegram_offset, next_offset)
+                    )
+                    await self._telegram_queue.put(update)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.error("Telegram poll error", error=str(exc))
+                await asyncio.sleep(2.0)
+
+    async def _telegram_worker(self) -> None:
+        """Process queued Telegram messages one at a time."""
+        while True:
+            try:
+                message = await self._telegram_queue.get()
+                await self._handle_telegram_message(message)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.error("Telegram worker error", error=str(exc))
+
+    async def _handle_telegram_message(self, message: TelegramMessage) -> None:
+        """Process a single Telegram message."""
+        bridge = self._telegram_bridge
+        if not bridge or not self.agent:
+            return
+        try:
+            # Mark as read (business messages)
+            if message.business_connection_id:
+                try:
+                    await bridge.read_business_message(
+                        message.business_connection_id, message.chat_id, message.message_id,
+                    )
+                except Exception:
+                    pass
+
+            # User approval check
+            user_id_key = str(message.user_id)
+            if user_id_key not in self._approved_telegram_users:
+                await self._tg_pair_unknown_user(message)
+                return
+
+            text = message.text.strip()
+            if not text:
+                return
+
+            # Handle /start and /help directly
+            lowered = text.lower()
+            if lowered == "/start" or lowered.startswith("/start "):
+                await self._tg_send(
+                    message.chat_id,
+                    "Captain Claw connected (web mode).\nSend plain text to chat.",
+                    reply_to_message_id=message.message_id,
+                )
+                return
+            if lowered == "/help" or lowered.startswith("/help "):
+                await self._tg_send(
+                    message.chat_id,
+                    "Send any text to chat with the current session.\n"
+                    "Full command support is available in the Web UI.",
+                    reply_to_message_id=message.message_id,
+                )
+                return
+
+            # Notify web UI clients about the incoming Telegram message
+            user_label = message.username or message.first_name or str(message.user_id)
+            self._broadcast({
+                "type": "chat_message",
+                "role": "user",
+                "content": f"[TG {user_label}] {text}",
+            })
+
+            # Process through agent with typing indicator
+            await self._tg_process_with_typing(message.chat_id, text, message.message_id)
+
+        except Exception as exc:
+            log.error("Telegram message handler failed", error=str(exc))
+            try:
+                await self._tg_send(
+                    message.chat_id,
+                    f"Error while processing your request: {str(exc)}",
+                    reply_to_message_id=message.message_id,
+                )
+            except Exception:
+                pass
+
+    async def _tg_process_with_typing(
+        self, chat_id: int, text: str, reply_to_message_id: int | None = None,
+    ) -> None:
+        """Run agent.complete() with Telegram typing indicator, respecting busy state."""
+        bridge = self._telegram_bridge
+        if not bridge or not self.agent:
+            return
+
+        # If agent is already busy (web UI or another message), inform the user
+        if self._busy:
+            await self._tg_send(
+                chat_id,
+                "Agent is busy processing another request. Your message is queued…",
+                reply_to_message_id=reply_to_message_id,
+            )
+
+        # Wait for exclusive agent access
+        async with self._busy_lock:
+            self._busy = True
+            self._broadcast({"type": "status", "status": "thinking"})
+
+            stop_typing = asyncio.Event()
+
+            async def _typing_heartbeat() -> None:
+                while not stop_typing.is_set():
+                    try:
+                        await bridge.send_chat_action(chat_id=chat_id, action="typing")
+                    except Exception:
+                        pass
+                    try:
+                        await asyncio.wait_for(stop_typing.wait(), timeout=4.0)
+                    except TimeoutError:
+                        continue
+
+            heartbeat = asyncio.create_task(_typing_heartbeat())
+            try:
+                response = await self.agent.complete(text)
+
+                # Send response to Telegram
+                await self._tg_send(chat_id, response, reply_to_message_id=reply_to_message_id)
+
+                # Broadcast to web UI
+                self._broadcast({
+                    "type": "chat_message",
+                    "role": "assistant",
+                    "content": response,
+                })
+                self._broadcast({
+                    "type": "usage",
+                    "last": self.agent.last_usage,
+                    "total": self.agent.total_usage,
+                })
+                self._broadcast({
+                    "type": "session_info",
+                    **self._session_info(),
+                })
+            except Exception as exc:
+                log.error("Telegram agent error", error=str(exc))
+                await self._tg_send(
+                    chat_id, f"Error: {str(exc)}", reply_to_message_id=reply_to_message_id,
+                )
+                self._broadcast({"type": "error", "message": f"Telegram error: {str(exc)}"})
+            finally:
+                stop_typing.set()
+                heartbeat.cancel()
+                try:
+                    await heartbeat
+                except asyncio.CancelledError:
+                    pass
+                self._busy = False
+                self._broadcast({"type": "status", "status": "ready"})
+
+    # ── Telegram helpers ──────────────────────────────────────────────
+
+    async def _tg_send(
+        self, chat_id: int, text: str, *, reply_to_message_id: int | None = None,
+    ) -> None:
+        if self._telegram_bridge:
+            try:
+                await self._telegram_bridge.send_message(
+                    chat_id=chat_id, text=text, reply_to_message_id=reply_to_message_id,
+                )
+            except Exception as exc:
+                log.error("Telegram send failed", error=str(exc))
+
+    async def _tg_load_state(self, key: str) -> dict[str, dict[str, object]]:
+        if not self.agent:
+            return {}
+        raw = await self.agent.session_manager.get_app_state(key)
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    async def _tg_save_state(self) -> None:
+        if not self.agent:
+            return
+        await self.agent.session_manager.set_app_state(
+            "telegram_approved_users",
+            json.dumps(self._approved_telegram_users, ensure_ascii=True, sort_keys=True),
+        )
+        await self.agent.session_manager.set_app_state(
+            "telegram_pending_pairings",
+            json.dumps(self._pending_telegram_pairings, ensure_ascii=True, sort_keys=True),
+        )
+
+    def _tg_cleanup_expired(self) -> None:
+        now_ts = datetime.now(UTC).timestamp()
+        expired = []
+        for token, payload in self._pending_telegram_pairings.items():
+            expires_at_raw = str(payload.get("expires_at", "")).strip()
+            if not expires_at_raw:
+                continue
+            try:
+                expires_at = datetime.fromisoformat(
+                    expires_at_raw.replace("Z", "+00:00")
+                )
+                if expires_at.timestamp() <= now_ts:
+                    expired.append(token)
+            except Exception:
+                expired.append(token)
+        for token in expired:
+            self._pending_telegram_pairings.pop(token, None)
+
+    def _tg_generate_pairing_token(self) -> str:
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        while True:
+            token = "".join(secrets.choice(alphabet) for _ in range(8))
+            if token not in self._pending_telegram_pairings:
+                return token
+
+    async def _tg_pair_unknown_user(self, message: TelegramMessage) -> None:
+        self._tg_cleanup_expired()
+        user_id_key = str(message.user_id)
+        if user_id_key in self._approved_telegram_users:
+            return
+        existing_token = ""
+        for token, payload in self._pending_telegram_pairings.items():
+            if str(payload.get("user_id", "")).strip() == str(message.user_id):
+                existing_token = token
+                break
+        if not existing_token:
+            existing_token = self._tg_generate_pairing_token()
+            ttl_minutes = max(1, int(self.config.telegram.pairing_ttl_minutes))
+            expires = datetime.now(UTC).timestamp() + ttl_minutes * 60
+            expires_dt = datetime.fromtimestamp(expires, tz=UTC)
+            self._pending_telegram_pairings[existing_token] = {
+                "user_id": message.user_id,
+                "chat_id": message.chat_id,
+                "username": message.username,
+                "first_name": message.first_name,
+                "created_at": datetime.now(UTC).isoformat(),
+                "expires_at": expires_dt.isoformat(),
+            }
+            await self._tg_save_state()
+
+        await self._tg_send(
+            message.chat_id,
+            (
+                "Pairing required.\n"
+                f"Your pairing token: `{existing_token}`\n\n"
+                "Ask the Captain Claw operator to approve you with:\n"
+                f"/approve user telegram {existing_token}"
+            ),
+            reply_to_message_id=message.message_id,
+        )
+        # Notify web UI about the pairing request
+        self._broadcast({
+            "type": "chat_message",
+            "role": "system",
+            "content": (
+                f"Telegram pairing request from "
+                f"{message.username or message.first_name or message.user_id}. "
+                f"Token: {existing_token}"
+            ),
+        })
 
     # ── REST handlers ────────────────────────────────────────────────
 
@@ -671,6 +1053,9 @@ async def _run_server(config: Config) -> None:
     print("Initializing Captain Claw agent...")
     await server._init_agent()
 
+    # Start Telegram bridge if configured
+    await server._start_telegram()
+
     app = server.create_app()
     runner = web.AppRunner(app)
     await runner.setup()
@@ -687,6 +1072,7 @@ async def _run_server(config: Config) -> None:
     try:
         await asyncio.Event().wait()
     finally:
+        await server._stop_telegram()
         await runner.cleanup()
 
 
