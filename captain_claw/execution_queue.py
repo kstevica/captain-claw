@@ -34,6 +34,13 @@ class CommandLaneClearedError(RuntimeError):
         self.lane = lane or ""
 
 
+class CommandLaneStaleTaskError(CommandLaneClearedError):
+    """Raised when a task finishes after lane generation changed."""
+
+    def __init__(self, lane: str | None = None):
+        super().__init__(lane=lane)
+
+
 @dataclass
 class QueueEntry:
     task: Callable[[], Awaitable[object]]
@@ -95,24 +102,47 @@ class CommandQueueManager:
         try:
             result = await entry.task()
             completed_current_generation = self._complete_task(state, task_id, task_generation)
-            if completed_current_generation:
-                elapsed = int(asyncio.get_running_loop().time() * 1000) - started_ms
+            elapsed = int(asyncio.get_running_loop().time() * 1000) - started_ms
+            if not completed_current_generation:
                 log.debug(
-                    "lane task complete",
+                    "dropping stale lane task completion",
                     lane=lane,
                     duration_ms=elapsed,
-                    active=len(state.active_task_ids),
-                    queued=len(state.queue),
+                    task_id=task_id,
+                    task_generation=task_generation,
+                    lane_generation=state.generation,
                 )
-                self._schedule_drain(lane)
+                if not entry.future.done():
+                    entry.future.set_exception(CommandLaneStaleTaskError(lane))
+                return
+            log.debug(
+                "lane task complete",
+                lane=lane,
+                duration_ms=elapsed,
+                active=len(state.active_task_ids),
+                queued=len(state.queue),
+            )
+            self._schedule_drain(lane)
             if not entry.future.done():
                 entry.future.set_result(result)
         except Exception as e:
             completed_current_generation = self._complete_task(state, task_id, task_generation)
-            if completed_current_generation:
-                elapsed = int(asyncio.get_running_loop().time() * 1000) - started_ms
-                log.error("lane task failed", lane=lane, duration_ms=elapsed, error=str(e))
-                self._schedule_drain(lane)
+            elapsed = int(asyncio.get_running_loop().time() * 1000) - started_ms
+            if not completed_current_generation:
+                log.debug(
+                    "dropping stale lane task failure",
+                    lane=lane,
+                    duration_ms=elapsed,
+                    task_id=task_id,
+                    task_generation=task_generation,
+                    lane_generation=state.generation,
+                    error=str(e),
+                )
+                if not entry.future.done():
+                    entry.future.set_exception(CommandLaneStaleTaskError(lane))
+                return
+            log.error("lane task failed", lane=lane, duration_ms=elapsed, error=str(e))
+            self._schedule_drain(lane)
             if not entry.future.done():
                 entry.future.set_exception(e)
 

@@ -147,6 +147,7 @@ class PocketTTSTool(Tool):
     """Generate local speech audio (MP3) from text via pocket-tts."""
 
     name = "pocket_tts"
+    timeout_seconds = 600.0
     description = (
         "Convert text to speech using local pocket-tts and save an MP3 (128 kbps) under saved/media."
     )
@@ -176,6 +177,8 @@ class PocketTTSTool(Tool):
     }
 
     def __init__(self):
+        cfg = get_config()
+        self.timeout_seconds = float(getattr(cfg.tools.pocket_tts, "timeout_seconds", 600) or 600)
         self._model: Any | None = None
         self._model_load_error: str | None = None
 

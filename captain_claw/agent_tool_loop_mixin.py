@@ -1,5 +1,6 @@
 """Tool-call parsing/execution helpers for Agent."""
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -363,6 +364,9 @@ class AgentToolLoopMixin:
         self,
         tool_calls: list[ToolCall],
         turn_usage: dict[str, int] | None = None,
+        session_policy: dict[str, Any] | None = None,
+        task_policy: dict[str, Any] | None = None,
+        abort_event: asyncio.Event | None = None,
     ) -> list[dict[str, Any]]:
         """Handle tool calls from LLM.
         
@@ -393,6 +397,9 @@ class AgentToolLoopMixin:
                     arguments=arguments,
                     interaction_label=f"tool_call:{tc.name}",
                     turn_usage=turn_usage,
+                    session_policy=session_policy,
+                    task_policy=task_policy,
+                    abort_event=abort_event,
                 )
                 
                 # Add result to session

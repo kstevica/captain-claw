@@ -45,6 +45,79 @@ class ContextConfig(BaseModel):
     compaction_ratio: float = 0.4
 
 
+class MemoryEmbeddingsConfig(BaseModel):
+    """Embedding provider settings for semantic memory."""
+
+    provider: str = "auto"  # auto | litellm | ollama | none
+    litellm_model: str = "text-embedding-3-small"
+    litellm_api_key: str = ""
+    litellm_base_url: str = ""
+    ollama_model: str = "nomic-embed-text"
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    request_timeout_seconds: int = 4
+    fallback_to_local_hash: bool = True
+
+
+class MemorySearchConfig(BaseModel):
+    """Hybrid retrieval scoring controls."""
+
+    max_results: int = 6
+    candidate_limit: int = 80
+    min_score: float = 0.1
+    vector_weight: float = 0.65
+    text_weight: float = 0.35
+    temporal_decay_enabled: bool = True
+    temporal_half_life_days: float = 21.0
+
+
+class MemoryConfig(BaseModel):
+    """Layered memory settings."""
+
+    enabled: bool = True
+    path: str = "~/.captain-claw/memory.db"
+    index_workspace: bool = True
+    index_sessions: bool = True
+    auto_sync_on_search: bool = True
+    max_workspace_files: int = 400
+    max_file_bytes: int = 262144
+    chunk_chars: int = 1400
+    chunk_overlap_chars: int = 200
+    cache_ttl_seconds: int = 45
+    stale_after_seconds: int = 120
+    include_extensions: list[str] = Field(
+        default_factory=lambda: [
+            ".txt",
+            ".md",
+            ".markdown",
+            ".py",
+            ".js",
+            ".ts",
+            ".tsx",
+            ".jsx",
+            ".json",
+            ".yaml",
+            ".yml",
+            ".toml",
+            ".sql",
+            ".csv",
+            ".sh",
+        ]
+    )
+    exclude_dirs: list[str] = Field(
+        default_factory=lambda: [
+            ".git",
+            ".hg",
+            ".svn",
+            "node_modules",
+            "__pycache__",
+            ".venv",
+            "venv",
+        ]
+    )
+    embeddings: MemoryEmbeddingsConfig = Field(default_factory=MemoryEmbeddingsConfig)
+    search: MemorySearchConfig = Field(default_factory=MemorySearchConfig)
+
+
 class ShellToolConfig(BaseModel):
     """Shell tool configuration."""
 
@@ -239,6 +312,7 @@ class Config(BaseSettings):
 
     model: ModelConfig = Field(default_factory=ModelConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     guards: GuardConfig = Field(default_factory=GuardConfig)

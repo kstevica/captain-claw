@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from captain_claw.execution_queue import CommandLaneClearedError, CommandQueueManager
+from captain_claw.execution_queue import CommandLaneStaleTaskError
 
 
 @pytest.mark.asyncio
@@ -85,3 +86,24 @@ async def test_clear_lane_rejects_queued_entries() -> None:
     assert await first_task == "first"
     with pytest.raises(CommandLaneClearedError):
         await second_task
+
+
+@pytest.mark.asyncio
+async def test_reset_all_lanes_rejects_stale_active_completion() -> None:
+    queue = CommandQueueManager()
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    async def stale_task() -> str:
+        started.set()
+        await release.wait()
+        return "stale"
+
+    task = asyncio.create_task(queue.enqueue_in_lane("lane-reset", stale_task))
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    queue.reset_all_lanes()
+    release.set()
+
+    with pytest.raises(CommandLaneStaleTaskError):
+        await task

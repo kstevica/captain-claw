@@ -423,6 +423,63 @@ def test_nested_pipeline_progress_tracks_leaf_order_and_parent_rollup():
     assert pipeline["tasks"][1]["status"] == "in_progress"
 
 
+def test_pipeline_dag_dependencies_block_until_parent_leaf_completes():
+    agent = Agent(provider=TokenAwareProvider())
+    pipeline = agent._build_task_pipeline(
+        "dag dependency test",
+        tasks_override=[
+            {"id": "task_a", "title": "First"},
+            {"id": "task_b", "title": "Second", "depends_on": ["task_a"]},
+            {"id": "task_c", "title": "Independent"},
+        ],
+    )
+
+    blocked = set(pipeline.get("blocked_task_ids", []))
+    assert "task_b" in blocked
+
+    # Advance once: first active task completes, dependency should unlock.
+    agent._advance_pipeline(pipeline, event="dependency_advance")
+    status_b = pipeline["task_graph"]["task_b"]["status"]
+    assert status_b in {"ready", "in_progress", "completed"}
+
+
+def test_pipeline_runtime_timeout_retries_then_fails_task():
+    agent = Agent(provider=TokenAwareProvider())
+    pipeline = agent._build_task_pipeline(
+        "timeout retry test",
+        tasks_override=[
+            {
+                "id": "task_timeout",
+                "title": "May timeout",
+                "timeout_seconds": 0.001,
+                "max_retries": 1,
+            }
+        ],
+    )
+    node = pipeline["task_graph"]["task_timeout"]
+    node["status"] = "in_progress"
+    node["started_at"] = (datetime.now(UTC) - timedelta(seconds=2)).isoformat()
+    pipeline["active_task_ids"] = ["task_timeout"]
+    pipeline["ready_task_ids"] = []
+
+    first_tick = agent._tick_pipeline_runtime(pipeline, event="timeout_tick_1")
+    assert first_tick["changed"] is True
+    assert "task_timeout" in first_tick["timed_out"]
+    assert "task_timeout" in first_tick["retried"]
+    assert int(node.get("retries", 0)) == 1
+
+    node["status"] = "in_progress"
+    node["started_at"] = (datetime.now(UTC) - timedelta(seconds=2)).isoformat()
+    pipeline["active_task_ids"] = ["task_timeout"]
+    pipeline["ready_task_ids"] = []
+
+    second_tick = agent._tick_pipeline_runtime(pipeline, event="timeout_tick_2")
+    assert second_tick["changed"] is True
+    assert "task_timeout" in second_tick["timed_out"]
+    assert "task_timeout" in second_tick["failed"]
+    assert pipeline["task_graph"]["task_timeout"]["status"] == "failed"
+
+
 def test_pipeline_progress_details_include_nested_scope_remaining_counts():
     agent = Agent(provider=TokenAwareProvider())
     pipeline = agent._build_task_pipeline(

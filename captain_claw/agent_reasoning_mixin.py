@@ -270,10 +270,10 @@ class AgentReasoningMixin:
     def _normalize_contract_tasks(
         raw_tasks: Any,
         max_tasks: int = 8,
-        max_depth: int = 4,
+        max_depth: int = 12,
         max_total_nodes: int = 36,
     ) -> list[dict[str, Any]]:
-        """Normalize planner task items into a nested task tree."""
+        """Normalize planner task items into a validated DAG-capable task tree."""
         if isinstance(raw_tasks, dict):
             source_tasks: list[Any] = [raw_tasks]
         elif isinstance(raw_tasks, list):
@@ -302,6 +302,52 @@ class AgentReasoningMixin:
                     return value
             return []
 
+        def _extract_depends_on(item: Any) -> list[str]:
+            if not isinstance(item, dict):
+                return []
+            raw_depends = item.get("depends_on")
+            if raw_depends is None:
+                raw_depends = item.get("depends")
+            if raw_depends is None:
+                raw_depends = item.get("after")
+            if not isinstance(raw_depends, list):
+                return []
+            deps: list[str] = []
+            for dep in raw_depends:
+                dep_id = re.sub(r"[^a-zA-Z0-9_]+", "_", str(dep or "").strip()).strip("_")
+                if dep_id and dep_id not in deps:
+                    deps.append(dep_id[:64])
+            return deps
+
+        def _extract_max_retries(item: Any) -> int:
+            if not isinstance(item, dict):
+                return 2
+            for key in ("max_retries", "retries", "retry_limit"):
+                value = item.get(key)
+                if value is None:
+                    continue
+                try:
+                    return max(0, min(8, int(value)))
+                except Exception:
+                    continue
+            return 2
+
+        def _extract_timeout_seconds(item: Any) -> float | None:
+            if not isinstance(item, dict):
+                return 180.0
+            for key in ("timeout_seconds", "timeout_sec", "timeout"):
+                value = item.get(key)
+                if value in {None, ""}:
+                    continue
+                try:
+                    parsed = float(value)
+                except Exception:
+                    continue
+                if parsed <= 0:
+                    return None
+                return min(parsed, 3600.0)
+            return 180.0
+
         def _visit(item: Any, depth: int) -> dict[str, Any] | None:
             nonlocal next_id
             if next_id >= max_total_nodes:
@@ -310,7 +356,17 @@ class AgentReasoningMixin:
             if not title:
                 return None
             next_id += 1
-            node: dict[str, Any] = {"id": f"task_{next_id}", "title": title[:180]}
+            raw_id = ""
+            if isinstance(item, dict):
+                raw_id = re.sub(r"[^a-zA-Z0-9_]+", "_", str(item.get("id", "")).strip()).strip("_")
+            node: dict[str, Any] = {
+                "id": raw_id or f"task_{next_id}",
+                "title": title[:220],
+                "depends_on": _extract_depends_on(item),
+                "retries": 0,
+                "max_retries": _extract_max_retries(item),
+                "timeout_seconds": _extract_timeout_seconds(item),
+            }
             if depth >= max_depth:
                 return node
             child_nodes: list[dict[str, Any]] = []

@@ -1,5 +1,6 @@
 """Guard policy and guarded LLM completion helpers for Agent."""
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -381,6 +382,9 @@ class AgentGuardMixin:
         arguments: dict[str, Any],
         interaction_label: str,
         turn_usage: dict[str, int] | None = None,
+        session_policy: dict[str, Any] | None = None,
+        task_policy: dict[str, Any] | None = None,
+        abort_event: asyncio.Event | None = None,
     ):
         """Execute a tool after script/tool guard policy check."""
         guard_payload = json.dumps(
@@ -404,4 +408,7 @@ class AgentGuardMixin:
             name=name,
             arguments=arguments,
             session_id=self._current_session_slug(),
+            session_policy=session_policy,
+            task_policy=task_policy,
+            abort_event=abort_event,
         )

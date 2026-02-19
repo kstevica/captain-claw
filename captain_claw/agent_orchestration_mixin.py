@@ -1,5 +1,6 @@
 """Main request orchestration (complete/stream) for Agent."""
 
+import asyncio
 import json
 from typing import Any, AsyncIterator
 
@@ -24,6 +25,7 @@ class AgentOrchestrationMixin:
         if not self._initialized:
             await self.initialize()
         self._last_memory_debug_signature = None
+        self._last_semantic_memory_debug_signature = None
         restore_skill_env = self._apply_skill_env_overrides_for_run()
         skill_env_restored = False
 
@@ -39,9 +41,22 @@ class AgentOrchestrationMixin:
             self.planning_enabled,
             pipeline_mode=self.pipeline_mode,
         )
+        if clarification_context_applied:
+            # Clarification follow-ups usually represent partially-specified
+            # continuations of a larger request; keep strict completion gating.
+            use_contract_pipeline = True
         explicit_script_request = self._is_explicit_script_request(effective_user_input)
         enforce_python_worker_mode = explicit_script_request
-        available_tools = {name.strip().lower() for name in self.tools.list_tools()}
+        session_id = self._current_session_slug()
+        session_tool_policy = self._session_tool_policy_payload()
+        turn_abort_event = asyncio.Event()
+        available_tools = {
+            name.strip().lower()
+            for name in self.tools.list_tools(
+                session_id=session_id,
+                session_policy=session_tool_policy,
+            )
+        }
         python_worker_tools_available = {"write", "shell"}.issubset(available_tools)
         python_worker_attempted = False
         list_task_plan: dict[str, Any] = {
@@ -332,10 +347,16 @@ class AgentOrchestrationMixin:
             else:
                 planning_pipeline["mode"] = "auto_contract"
             self._emit_pipeline_update("created", planning_pipeline)
-        
-        # Send tool definitions so the model can issue structured tool calls.
-        tool_defs = self.tools.get_definitions()
-        log.debug("Tool definitions available", count=len(self.tools.list_tools()), tools_sent=bool(tool_defs))
+            created_children = await self.ensure_pipeline_subagent_contexts(planning_pipeline)
+            if created_children:
+                self._emit_tool_output(
+                    "planning",
+                    {"event": "subagent_contexts_spawned", "count": len(created_children)},
+                    (
+                        "event=subagent_contexts_spawned\n"
+                        f"count={len(created_children)}"
+                    ),
+                )
         
         # Main agent loop
         base_turn_iterations = self.max_iterations + (2 if completion_requirements else 0)
@@ -369,6 +390,25 @@ class AgentOrchestrationMixin:
                 ),
             )
         for iteration in range(hard_turn_iterations):
+            if planning_pipeline is not None:
+                runtime_update = self._tick_pipeline_runtime(
+                    planning_pipeline,
+                    event=f"runtime_tick_{iteration + 1}",
+                )
+                if bool(runtime_update.get("changed", False)):
+                    activated = runtime_update.get("activated", [])
+                    if isinstance(activated, list) and activated:
+                        await self.ensure_pipeline_subagent_contexts(
+                            planning_pipeline,
+                            task_ids=[str(item) for item in activated],
+                        )
+                    self._emit_pipeline_update("runtime_update", planning_pipeline)
+                if str(planning_pipeline.get("state", "")).strip().lower() == "failed":
+                    self._set_runtime_status("waiting")
+                    return finish(
+                        "Task pipeline failed after timeout/retry exhaustion. Could not complete the request.",
+                        success=False,
+                    )
             if iteration >= soft_turn_iterations:
                 recent_progress = any(progress_window[-4:])
                 remaining_work = (
@@ -470,6 +510,24 @@ class AgentOrchestrationMixin:
                         content=completion_feedback,
                     )
                 )
+
+            active_task_tool_policy = self._active_task_tool_policy_payload(planning_pipeline)
+            tool_defs = self.tools.get_definitions(
+                session_id=session_id,
+                session_policy=session_tool_policy,
+                task_policy=active_task_tool_policy,
+            )
+            log.debug(
+                "Tool definitions available",
+                count=len(
+                    self.tools.list_tools(
+                        session_id=session_id,
+                        session_policy=session_tool_policy,
+                        task_policy=active_task_tool_policy,
+                    )
+                ),
+                tools_sent=bool(tool_defs),
+            )
             
             # Call LLM
             log.info("Calling LLM", iteration=iteration + 1, message_count=len(messages))
@@ -515,6 +573,10 @@ class AgentOrchestrationMixin:
                 log.error("LLM call failed", error=str(e), exc_info=True)
                 _restore_skill_env_once()
                 raise
+            self._record_pipeline_task_usage(
+                planning_pipeline,
+                response.usage if isinstance(getattr(response, "usage", None), dict) else {},
+            )
             
             # Check for explicit tool calls (for models that support it)
             if response.tool_calls:
@@ -524,9 +586,20 @@ class AgentOrchestrationMixin:
                     content=str(response.content or ""),
                     tool_calls=self._serialize_tool_calls_for_session(response.tool_calls),
                 )
-                await self._handle_tool_calls(response.tool_calls, turn_usage=turn_usage)
+                await self._handle_tool_calls(
+                    response.tool_calls,
+                    turn_usage=turn_usage,
+                    session_policy=session_tool_policy,
+                    task_policy=active_task_tool_policy,
+                    abort_event=turn_abort_event,
+                )
                 if planning_pipeline is not None:
-                    self._advance_pipeline(planning_pipeline, event="tool_calls_completed")
+                    activated = self._advance_pipeline(planning_pipeline, event="tool_calls_completed")
+                    if activated:
+                        await self.ensure_pipeline_subagent_contexts(
+                            planning_pipeline,
+                            task_ids=[str(item) for item in activated],
+                        )
                 if not self._supports_tool_result_followup():
                     output = self._collect_turn_tool_output(turn_start_idx)
                     final = await self._friendly_tool_output_response(
@@ -556,9 +629,20 @@ class AgentOrchestrationMixin:
                     content=str(response.content or ""),
                     tool_calls=self._serialize_tool_calls_for_session(embedded_calls),
                 )
-                await self._handle_tool_calls(embedded_calls, turn_usage=turn_usage)
+                await self._handle_tool_calls(
+                    embedded_calls,
+                    turn_usage=turn_usage,
+                    session_policy=session_tool_policy,
+                    task_policy=active_task_tool_policy,
+                    abort_event=turn_abort_event,
+                )
                 if planning_pipeline is not None:
-                    self._advance_pipeline(planning_pipeline, event="embedded_tool_calls_completed")
+                    activated = self._advance_pipeline(planning_pipeline, event="embedded_tool_calls_completed")
+                    if activated:
+                        await self.ensure_pipeline_subagent_contexts(
+                            planning_pipeline,
+                            task_ids=[str(item) for item in activated],
+                        )
                 if not self._supports_tool_result_followup():
                     output = self._collect_turn_tool_output(turn_start_idx)
                     final = await self._friendly_tool_output_response(
@@ -588,6 +672,9 @@ class AgentOrchestrationMixin:
                         arguments={"command": command},
                         interaction_label="inline_command",
                         turn_usage=turn_usage,
+                        session_policy=session_tool_policy,
+                        task_policy=active_task_tool_policy,
+                        abort_event=turn_abort_event,
                     )
                     tool_result = result.content if result.success else f"Error: {result.error}"
                 except Exception as e:
@@ -603,7 +690,12 @@ class AgentOrchestrationMixin:
                 )
                 self._emit_tool_output("shell", {"command": command}, tool_result)
                 if planning_pipeline is not None:
-                    self._advance_pipeline(planning_pipeline, event="inline_command_completed")
+                    activated = self._advance_pipeline(planning_pipeline, event="inline_command_completed")
+                    if activated:
+                        await self.ensure_pipeline_subagent_contexts(
+                            planning_pipeline,
+                            task_ids=[str(item) for item in activated],
+                        )
                 if not self._supports_tool_result_followup():
                     final = await self._friendly_tool_output_response(
                         user_input=effective_user_input,
@@ -683,6 +775,7 @@ class AgentOrchestrationMixin:
         if not self._initialized:
             await self.initialize()
         self._last_memory_debug_signature = None
+        self._last_semantic_memory_debug_signature = None
         self.last_usage = self._empty_usage()
 
         # Tool-calling and streaming over a single pass is currently limited.
@@ -705,6 +798,7 @@ class AgentOrchestrationMixin:
         if self.planning_enabled:
             planning_pipeline = self._build_task_pipeline(user_input)
             self._emit_pipeline_update("created", planning_pipeline)
+            await self.ensure_pipeline_subagent_contexts(planning_pipeline)
         
         # Get tool definitions
         tool_defs = self.tools.get_definitions()
@@ -727,6 +821,9 @@ class AgentOrchestrationMixin:
         if self.session:
             self._add_session_message("assistant", full_content)
             await self.session_manager.save_session(self.session)
+            memory = getattr(self, "memory", None)
+            if memory is not None:
+                memory.schedule_background_sync("assistant_stream_saved")
 
         if planning_pipeline is not None:
             self._finalize_pipeline(planning_pipeline, success=True)

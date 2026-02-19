@@ -75,6 +75,8 @@ class Agent(
         self._provider_override = provider is not None
         self._runtime_model_details: dict[str, Any] = {}
         self._skills_snapshot_cache = None
+        self.memory = None
+        self._last_semantic_memory_debug_signature: str | None = None
         self._refresh_runtime_model_details(source="startup")
 
     @staticmethod

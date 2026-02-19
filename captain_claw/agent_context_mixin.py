@@ -40,6 +40,74 @@ class AgentContextMixin:
                 merged.append(url)
         return merged
 
+    @staticmethod
+    def _normalize_tool_policy_payload(raw: Any) -> dict[str, Any] | None:
+        """Normalize policy payload shape for registry consumption."""
+        if not isinstance(raw, dict):
+            return None
+
+        allow_raw = raw.get("allow")
+        if allow_raw is None:
+            allow: list[str] | None = None
+        elif isinstance(allow_raw, list):
+            allow = [str(item).strip() for item in allow_raw if str(item).strip()]
+        else:
+            return None
+
+        deny_raw = raw.get("deny", [])
+        deny = [str(item).strip() for item in deny_raw] if isinstance(deny_raw, list) else []
+        deny = [item for item in deny if item]
+
+        also_allow_raw = raw.get("also_allow", raw.get("alsoAllow", []))
+        also_allow = (
+            [str(item).strip() for item in also_allow_raw]
+            if isinstance(also_allow_raw, list)
+            else []
+        )
+        also_allow = [item for item in also_allow if item]
+
+        if allow is None and not deny and not also_allow:
+            return None
+        return {
+            "allow": allow,
+            "deny": deny,
+            "also_allow": also_allow,
+        }
+
+    def _session_tool_policy_payload(self) -> dict[str, Any] | None:
+        """Load session-level tool policy from session metadata when present."""
+        if not self.session or not isinstance(self.session.metadata, dict):
+            return None
+        return self._normalize_tool_policy_payload(self.session.metadata.get("tool_policy"))
+
+    def _active_task_tool_policy_payload(self, planning_pipeline: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Load active task-level tool policy from pipeline task metadata."""
+        if not isinstance(planning_pipeline, dict):
+            return None
+        graph = planning_pipeline.get("task_graph")
+        if not isinstance(graph, dict):
+            return None
+
+        candidate_ids: list[str] = []
+        current_id = str(planning_pipeline.get("current_task_id", "")).strip()
+        if current_id:
+            candidate_ids.append(current_id)
+        raw_active = planning_pipeline.get("active_task_ids", [])
+        if isinstance(raw_active, list):
+            for item in raw_active:
+                task_id = str(item).strip()
+                if task_id and task_id not in candidate_ids:
+                    candidate_ids.append(task_id)
+
+        for task_id in candidate_ids:
+            node = graph.get(task_id)
+            if not isinstance(node, dict):
+                continue
+            normalized = self._normalize_tool_policy_payload(node.get("tool_policy"))
+            if normalized is not None:
+                return normalized
+        return None
+
     def _extract_source_links(self, msg: dict[str, Any], content: str) -> list[str]:
         """Extract source links from both tool content and structured tool arguments."""
         content_links = self._extract_urls(content)
@@ -78,6 +146,57 @@ class AgentContextMixin:
                 return urls[:max_urls]
         return urls[:max_urls]
 
+    def _initialize_layered_memory(self) -> None:
+        """Create layered memory manager for semantic retrieval."""
+        if getattr(self, "memory", None) is not None:
+            return
+        cfg = get_config()
+        memory_cfg = getattr(cfg, "memory", None)
+        if memory_cfg is None or not bool(getattr(memory_cfg, "enabled", True)):
+            self.memory = None
+            return
+        session_db_path = getattr(self.session_manager, "db_path", None)
+        if session_db_path is None:
+            self.memory = None
+            return
+        try:
+            from captain_claw.memory import create_layered_memory
+
+            self.memory = create_layered_memory(
+                config=cfg,
+                session_db_path=session_db_path,
+                workspace_path=self.workspace_base_path,
+            )
+            if self.session:
+                self.memory.set_active_session(self.session.id)
+                self.memory.schedule_background_sync("agent_initialize")
+        except Exception as e:
+            log.warning("Failed to initialize layered memory", error=str(e))
+            self.memory = None
+
+    def _build_semantic_memory_note(
+        self,
+        query: str | None,
+        max_items: int = 3,
+        max_snippet_chars: int = 360,
+    ) -> tuple[str, str]:
+        """Build semantic memory context note from persisted sessions + workspace files."""
+        cleaned = str(query or "").strip()
+        if not cleaned:
+            return "", ""
+        memory = getattr(self, "memory", None)
+        if memory is None:
+            return "", ""
+        try:
+            return memory.build_semantic_note(
+                cleaned,
+                max_items=max_items,
+                max_snippet_chars=max_snippet_chars,
+            )
+        except Exception as e:
+            log.debug("Semantic memory note generation failed", error=str(e))
+            return "", ""
+
     async def initialize(self) -> None:
         """Initialize the agent."""
         if self._initialized:
@@ -98,6 +217,7 @@ class AgentContextMixin:
             self.session = await self.session_manager.get_or_create_session()
         await self.session_manager.set_last_active_session(self.session.id)
         self._sync_runtime_flags_from_session()
+        self._initialize_layered_memory()
 
         # Register default tools
         self._register_default_tools()
@@ -435,6 +555,23 @@ class AgentContextMixin:
                     memory_debug,
                 )
                 self._last_memory_debug_signature = signature
+
+        semantic_note, semantic_debug = self._build_semantic_memory_note(query=query)
+        if semantic_note:
+            candidate_messages.append({
+                "role": "assistant",
+                "content": semantic_note,
+                "tool_name": "semantic_memory_context",
+                "token_count": self._count_tokens(semantic_note),
+            })
+            semantic_signature = f"{query or ''}|{semantic_debug}"
+            if semantic_signature != getattr(self, "_last_semantic_memory_debug_signature", None):
+                self._emit_tool_output(
+                    "memory_semantic_select",
+                    {"query": query or ""},
+                    semantic_debug,
+                )
+                self._last_semantic_memory_debug_signature = semantic_signature
 
         planning_note = self._build_pipeline_note(planning_pipeline or {})
         if planning_note:

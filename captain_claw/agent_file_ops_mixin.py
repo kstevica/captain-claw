@@ -691,3 +691,6 @@ class AgentFileOpsMixin:
             return
         self._add_session_message("assistant", content)
         await self.session_manager.save_session(self.session)
+        memory = getattr(self, "memory", None)
+        if memory is not None:
+            memory.schedule_background_sync("assistant_saved")

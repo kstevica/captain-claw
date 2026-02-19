@@ -2,12 +2,16 @@
 
 import asyncio
 import os
-import re
 from typing import Any
 
 from captain_claw.config import get_config
 from captain_claw.logging import get_logger
-from captain_claw.tools.registry import Tool, ToolResult
+from captain_claw.tools.registry import (
+    Tool,
+    ToolResult,
+    extract_shell_base_commands,
+    is_blocked_shell_command,
+)
 
 log = get_logger(__name__)
 
@@ -17,6 +21,7 @@ class ShellTool(Tool):
 
     name = "shell"
     description = "Execute a shell command and return its output."
+    timeout_seconds = 30.0
     parameters = {
         "type": "object",
         "properties": {
@@ -34,6 +39,7 @@ class ShellTool(Tool):
 
     def __init__(self):
         self.config = get_config()
+        self.timeout_seconds = float(getattr(self.config.tools.shell, "timeout", 30) or 30)
 
     def _is_command_safe(self, command: str) -> tuple[bool, str]:
         """Check if command is safe to execute.
@@ -45,16 +51,28 @@ class ShellTool(Tool):
             Tuple of (is_safe, reason)
         """
         # Check blocked patterns
-        for blocked in self.config.tools.shell.blocked:
-            if blocked in command:
-                return False, f"Command matches blocked pattern: {blocked}"
+        blocked, matched = is_blocked_shell_command(command, self.config.tools.shell.blocked)
+        if blocked:
+            if matched == "empty_command":
+                return False, "Command is empty"
+            if matched == "unparseable_command":
+                return False, "Command is not parseable"
+            return False, f"Command matches blocked pattern: {matched}"
         
         # Check allowed list (if non-empty)
         if self.config.tools.shell.allowed_commands:
-            # Extract base command
-            base_cmd = command.strip().split()[0] if command.strip() else ""
-            if base_cmd not in self.config.tools.shell.allowed_commands:
-                return False, f"Command not in allowed list: {base_cmd}"
+            allowed = {
+                str(item).strip()
+                for item in self.config.tools.shell.allowed_commands
+                if str(item).strip()
+            }
+            base_commands = extract_shell_base_commands(command)
+            if not base_commands:
+                return False, "Command is not parseable"
+            for base_cmd in base_commands:
+                normalized = base_cmd.split("/")[-1]
+                if base_cmd not in allowed and normalized not in allowed:
+                    return False, f"Command not in allowed list: {base_cmd}"
         
         return True, ""
 
@@ -80,6 +98,11 @@ class ShellTool(Tool):
         # Use config timeout if not provided
         if timeout is None:
             timeout = self.config.tools.shell.timeout
+        timeout = max(1, int(timeout))
+
+        abort_event = kwargs.get("_abort_event")
+        if isinstance(abort_event, asyncio.Event) and abort_event.is_set():
+            return ToolResult(success=False, error="Command aborted")
         
         # Set up environment
         env = os.environ.copy()
@@ -95,18 +118,55 @@ class ShellTool(Tool):
                 env=env,
             )
             
+            communicate_task = asyncio.create_task(process.communicate())
+            abort_wait_task: asyncio.Task[bool] | None = None
+            if isinstance(abort_event, asyncio.Event):
+                abort_wait_task = asyncio.create_task(abort_event.wait())
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
+                wait_tasks: set[asyncio.Task[Any]] = {communicate_task}
+                if abort_wait_task is not None:
+                    wait_tasks.add(abort_wait_task)
+                done, _ = await asyncio.wait(
+                    wait_tasks,
                     timeout=timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
-            except asyncio.TimeoutError:
+
+                if communicate_task in done:
+                    stdout, stderr = await communicate_task
+                elif abort_wait_task is not None and abort_wait_task in done:
+                    process.kill()
+                    await process.wait()
+                    communicate_task.cancel()
+                    try:
+                        await communicate_task
+                    except asyncio.CancelledError:
+                        pass
+                    return ToolResult(success=False, error="Command aborted")
+                else:
+                    process.kill()
+                    await process.wait()
+                    communicate_task.cancel()
+                    try:
+                        await communicate_task
+                    except asyncio.CancelledError:
+                        pass
+                    return ToolResult(
+                        success=False,
+                        error=f"Command timed out after {timeout}s",
+                    )
+            except asyncio.CancelledError:
                 process.kill()
                 await process.wait()
-                return ToolResult(
-                    success=False,
-                    error=f"Command timed out after {timeout}s",
-                )
+                communicate_task.cancel()
+                raise
+            finally:
+                if abort_wait_task is not None and not abort_wait_task.done():
+                    abort_wait_task.cancel()
+                    try:
+                        await abort_wait_task
+                    except asyncio.CancelledError:
+                        pass
             
             # Decode output
             stdout_text = stdout.decode("utf-8", errors="replace").strip()

@@ -1,6 +1,13 @@
 """Tools package for Captain Claw."""
 
-from captain_claw.tools.registry import Tool, ToolRegistry, ToolResult, get_tool_registry
+from captain_claw.tools.registry import (
+    Tool,
+    ToolPolicy,
+    ToolPolicyChain,
+    ToolRegistry,
+    ToolResult,
+    get_tool_registry,
+)
 from captain_claw.tools.shell import ShellTool
 from captain_claw.tools.read import ReadTool
 from captain_claw.tools.write import WriteTool
@@ -17,6 +24,8 @@ from captain_claw.tools.pocket_tts import PocketTTSTool
 
 __all__ = [
     "Tool",
+    "ToolPolicy",
+    "ToolPolicyChain",
     "ToolRegistry", 
     "ToolResult",
     "get_tool_registry",

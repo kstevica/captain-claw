@@ -557,6 +557,121 @@ class AgentSessionMixin:
             "merged_messages": len(merged_messages),
         }
 
+    async def ensure_pipeline_subagent_contexts(
+        self,
+        pipeline: dict[str, Any] | None,
+        *,
+        task_ids: list[str] | None = None,
+    ) -> list[str]:
+        """Ensure active/selected tasks have isolated subagent session contexts."""
+        if not isinstance(pipeline, dict):
+            return []
+        self._refresh_pipeline_task_order(pipeline)
+        graph = pipeline.get("task_graph")
+        if not isinstance(graph, dict) or not graph:
+            return []
+
+        subagent_meta = pipeline.setdefault("subagents", {})
+        if not isinstance(subagent_meta, dict):
+            pipeline["subagents"] = {}
+            subagent_meta = pipeline["subagents"]
+        enabled = bool(subagent_meta.get("enabled", True))
+        if not enabled:
+            return []
+
+        max_spawn_depth = max(0, int(subagent_meta.get("max_spawn_depth", 2)))
+        max_active_children = max(1, int(subagent_meta.get("max_active_children", 5)))
+        allow_agents = subagent_meta.get("allow_agents")
+        if not isinstance(allow_agents, list) or not allow_agents:
+            allow_agents = ["*"]
+            subagent_meta["allow_agents"] = allow_agents
+        active_child_ids = [
+            str(item).strip()
+            for item in subagent_meta.get("active_child_session_ids", [])
+            if str(item).strip()
+        ]
+        subagent_meta["active_child_session_ids"] = active_child_ids
+
+        targets: list[str] = []
+        for task_id in task_ids or list(pipeline.get("active_task_ids", [])):
+            cleaned = str(task_id).strip()
+            if cleaned and cleaned not in targets:
+                targets.append(cleaned)
+        if not targets:
+            return []
+
+        parent_session_id = str(self.session.id) if self.session else ""
+        parent_spawn_depth = 0
+        if self.session and isinstance(self.session.metadata, dict):
+            session_subagent = self.session.metadata.get("subagent")
+            if isinstance(session_subagent, dict):
+                parent_spawn_depth = max(0, int(session_subagent.get("spawn_depth", 0)))
+
+        create_session = getattr(self.session_manager, "create_session", None)
+        created_child_ids: list[str] = []
+        for task_id in targets:
+            node = graph.get(task_id)
+            if not isinstance(node, dict):
+                continue
+            execution_context = node.get("execution_context")
+            if not isinstance(execution_context, dict):
+                execution_context = {}
+                node["execution_context"] = execution_context
+            execution_context.setdefault("context_id", f"context_{task_id}")
+            execution_context.setdefault("spawned_by", parent_session_id)
+            execution_context.setdefault("parent_task_id", "")
+            execution_context.setdefault("token_usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+            execution_context.setdefault("compaction_count", 0)
+            execution_context.setdefault("history", [])
+            execution_context.setdefault("allow_agents", allow_agents)
+            execution_context.setdefault("max_children", max_active_children)
+
+            existing_session_id = str(execution_context.get("session_id", "")).strip()
+            if existing_session_id:
+                continue
+
+            spawn_depth = max(1, int(execution_context.get("spawn_depth", parent_spawn_depth + 1)))
+            execution_context["spawn_depth"] = spawn_depth
+            if spawn_depth > max_spawn_depth:
+                execution_context["spawn_state"] = "depth_limited"
+                continue
+            if len(active_child_ids) >= max_active_children:
+                execution_context["spawn_state"] = "active_children_capped"
+                continue
+            if not callable(create_session):
+                execution_context["session_id"] = f"virtual:{task_id}"
+                execution_context["spawn_state"] = "virtual"
+                continue
+
+            child_name_base = self.session.name if self.session else "session"
+            child_name = f"{child_name_base} :: task {task_id}"
+            child_metadata = {
+                "subagent": {
+                    "spawned_by": parent_session_id,
+                    "task_id": task_id,
+                    "spawn_depth": spawn_depth,
+                    "allow_agents": allow_agents,
+                    "created_at": datetime.now(UTC).isoformat(),
+                }
+            }
+            try:
+                child = await create_session(name=child_name[:120], metadata=child_metadata)
+                child_id = str(child.id).strip()
+                if not child_id:
+                    execution_context["spawn_state"] = "spawn_failed"
+                    execution_context["spawn_error"] = "missing_child_id"
+                    continue
+                execution_context["session_id"] = child_id
+                execution_context["spawn_state"] = "spawned"
+                active_child_ids.append(child_id)
+                created_child_ids.append(child_id)
+            except Exception as e:
+                execution_context["spawn_state"] = "spawn_failed"
+                execution_context["spawn_error"] = str(e)[:240]
+
+        subagent_meta["active_child_session_ids"] = active_child_ids
+        return created_child_ids
+
     async def _auto_compact_if_needed(self) -> None:
         """Compact session automatically when context usage exceeds threshold."""
         compacted, stats = await self.compact_session(force=False, trigger="auto")
@@ -673,3 +788,6 @@ class AgentSessionMixin:
             tool_arguments=tool_arguments,
             token_count=self._count_tokens(content),
         )
+        memory = getattr(self, "memory", None)
+        if memory is not None:
+            memory.record_message(role, content)
