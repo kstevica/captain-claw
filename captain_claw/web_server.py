@@ -779,6 +779,12 @@ class WebServer:
             if not text:
                 return
 
+            # Strip Telegram-style @BotName suffix from commands
+            if text.startswith("/") and "@" in text.split()[0]:
+                parts = text.split(None, 1)
+                command_word = parts[0].split("@")[0]
+                text = command_word if len(parts) == 1 else f"{command_word} {parts[1]}"
+
             # Handle /start and /help directly
             lowered = text.lower()
             if lowered == "/start" or lowered.startswith("/start "):
@@ -796,6 +802,17 @@ class WebServer:
                     reply_to_message_id=message.message_id,
                 )
                 return
+
+            # Handle all other slash commands
+            if text.startswith("/"):
+                result = await self._execute_telegram_command(text)
+                if result is not None:
+                    await self._tg_send(
+                        message.chat_id,
+                        result,
+                        reply_to_message_id=message.message_id,
+                    )
+                    return
 
             # Notify web UI clients about the incoming Telegram message
             user_label = message.username or message.first_name or str(message.user_id)
@@ -818,6 +835,152 @@ class WebServer:
                 )
             except Exception:
                 pass
+
+    async def _execute_telegram_command(self, raw: str) -> str | None:
+        """Execute a slash command from Telegram, returning the response text.
+
+        Returns ``None`` only when the command should fall through to the
+        agent (e.g. ``/orchestrate``).
+        """
+        if not self.agent:
+            return "Agent not ready."
+
+        parts = raw.strip().split(None, 1)
+        cmd = parts[0].lower()
+        args = parts[1] if len(parts) > 1 else ""
+
+        try:
+            if cmd in ("/clear",):
+                if self.agent.session:
+                    if self.agent.is_session_memory_protected():
+                        return "Session memory is protected. Disable with /session protect off."
+                    self.agent.session.messages.clear()
+                    await self.agent.session_manager.save_session(self.agent.session)
+                    return "Session messages cleared."
+                return "No active session."
+
+            if cmd in ("/config",):
+                details = self.agent.get_runtime_model_details()
+                return (
+                    f"Model: {details.get('provider', '')}:{details.get('model', '')}\n"
+                    f"Session: {self.agent.session.name if self.agent.session else 'none'}\n"
+                    f"Pipeline: {self.agent.pipeline_mode}"
+                )
+
+            if cmd in ("/history",):
+                if self.agent.session:
+                    msgs = self.agent.session.messages[-20:]
+                    if not msgs:
+                        return "Session history is empty."
+                    lines = []
+                    for i, m in enumerate(msgs, 1):
+                        role = m.get("role", "?")
+                        content = str(m.get("content", ""))[:150].replace("\n", " ")
+                        lines.append(f"{i}. {role}: {content}")
+                    return "\n".join(lines)
+                return "No active session."
+
+            if cmd in ("/compact",):
+                if self.agent.session:
+                    compacted, stats = await self.agent.compact_session(force=True, trigger="telegram")
+                    if compacted:
+                        return (
+                            f"Session compacted ({int(stats.get('before_tokens', 0))} "
+                            f"-> {int(stats.get('after_tokens', 0))} tokens)"
+                        )
+                    return f"Compaction skipped: {stats.get('reason', 'not_needed')}"
+                return "No active session."
+
+            if cmd in ("/new",):
+                name = args.strip() or "default"
+                session = await self.agent.session_manager.create_session(name=name)
+                self.agent.session = session
+                self.agent.refresh_session_runtime_flags()
+                await self.agent.session_manager.set_last_active_session(session.id)
+                self._broadcast({"type": "session_info", **self._session_info()})
+                return f"New session: {session.name} ({session.id[:12]})"
+
+            if cmd in ("/session",):
+                if not args.strip():
+                    if not self.agent.session:
+                        return "No active session."
+                    details = self.agent.get_runtime_model_details()
+                    return (
+                        f"Session: {self.agent.session.name}\n"
+                        f"ID: {self.agent.session.id}\n"
+                        f"Messages: {len(self.agent.session.messages)}\n"
+                        f"Model: {details.get('provider')}/{details.get('model')}"
+                    )
+                return await self._handle_session_subcommand(args.strip())
+
+            if cmd in ("/sessions",):
+                sessions = await self.agent.session_manager.list_sessions(limit=20)
+                if not sessions:
+                    return "No sessions found."
+                lines = ["Sessions:"]
+                for i, s in enumerate(sessions, 1):
+                    marker = "*" if (self.agent.session and s.id == self.agent.session.id) else " "
+                    lines.append(f"{marker} [{i}] {s.name} ({s.id}) messages={len(s.messages)}")
+                return "\n".join(lines)
+
+            if cmd in ("/models",):
+                models = self.agent.get_allowed_models()
+                details = self.agent.get_runtime_model_details()
+                lines = ["Allowed models:"]
+                for i, m in enumerate(models, 1):
+                    marker = ""
+                    if (
+                        str(m.get("provider", "")).strip() == str(details.get("provider", "")).strip()
+                        and str(m.get("model", "")).strip() == str(details.get("model", "")).strip()
+                    ):
+                        marker = " *"
+                    lines.append(f"[{i}] {m.get('id')} -> {m.get('provider')}/{m.get('model')}{marker}")
+                return "\n".join(lines)
+
+            if cmd in ("/pipeline",):
+                if args.strip():
+                    mode = args.strip().lower()
+                    if mode in ("loop", "contracts"):
+                        await self.agent.set_pipeline_mode(mode)
+                        return f"Pipeline mode set to {mode}."
+                    return "Invalid mode. Use /pipeline loop|contracts"
+                return f"Pipeline mode: {self.agent.pipeline_mode}"
+
+            if cmd in ("/planning",):
+                if args.strip().lower() == "on":
+                    await self.agent.set_pipeline_mode("contracts")
+                    return "Pipeline mode set to contracts."
+                if args.strip().lower() == "off":
+                    await self.agent.set_pipeline_mode("loop")
+                    return "Pipeline mode set to loop."
+                return f"Planning: {'on' if self.agent.pipeline_mode == 'contracts' else 'off'}"
+
+            if cmd in ("/skills",):
+                skills = self.agent.list_user_invocable_skills()
+                if not skills:
+                    return "No user-invocable skills available."
+                lines = ["Available skills:"]
+                for s in skills:
+                    lines.append(f"- /skill {s.name}")
+                return "\n".join(lines)
+
+            if cmd in ("/monitor",):
+                return "Monitor is available in the Web UI."
+
+            if cmd in ("/exit", "/quit"):
+                return "/exit is only available on the server terminal."
+
+            if cmd in ("/approve",):
+                return await self._handle_approve_command(args.strip())
+
+            if cmd in ("/orchestrate",):
+                # Fall through to agent processing
+                return None
+
+            return f"Unknown command: {cmd}\nUse /help for available commands."
+
+        except Exception as e:
+            return f"Command error: {e}"
 
     async def _tg_process_with_typing(
         self, chat_id: int, text: str, reply_to_message_id: int | None = None,

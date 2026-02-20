@@ -476,6 +476,12 @@ async def handle_platform_message(
         if not text:
             return
 
+        # Strip Telegram-style @BotName suffix from commands (e.g. /help@MyBot -> /help)
+        if text.startswith("/") and "@" in text.split()[0]:
+            parts = text.split(None, 1)
+            command_word = parts[0].split("@")[0]
+            text = command_word if len(parts) == 1 else f"{command_word} {parts[1]}"
+
         channel_id = adapter._message_channel_id(message)
         reply_to = adapter._message_reply_id(message)
 
