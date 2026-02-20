@@ -2499,6 +2499,34 @@ async def run_interactive() -> None:
         if result.startswith("APPROVE_CHAT_USER:") or result.startswith("APPROVE_TELEGRAM_USER:"):
             await send_text("This command is operator-only in local console.")
             return True
+        if result.startswith("ORCHESTRATE:"):
+            payload_raw = result.split(":", 1)[1].strip()
+            try:
+                payload = json.loads(payload_raw)
+            except Exception:
+                await send_text("Invalid /orchestrate payload.")
+                return True
+            request_text = str(payload.get("request", "")).strip()
+            if not request_text:
+                await send_text("Usage: /orchestrate <request>")
+                return True
+            try:
+                from captain_claw.session_orchestrator import SessionOrchestrator
+                orchestrator = SessionOrchestrator(
+                    main_agent=agent,
+                    provider=agent.provider,
+                    status_callback=agent.status_callback,
+                    tool_output_callback=agent.tool_output_callback,
+                )
+                orch_response = await _enqueue_agent_task(
+                    agent.session.id if agent.session else None,
+                    lambda: orchestrator.orchestrate(request_text),
+                )
+                await send_text(str(orch_response or "Orchestration returned no result."))
+                await orchestrator.shutdown()
+            except Exception as e:
+                await send_text(f"Orchestration failed: {e}")
+            return True
         if result == "PIPELINE_INFO":
             await send_text(
                 (
@@ -3792,6 +3820,43 @@ async def run_interactive() -> None:
                 elif result == "PLANNING_OFF":
                     await agent.set_pipeline_mode("loop")
                     ui.print_success("Pipeline mode set to loop")
+                    continue
+                elif result.startswith("ORCHESTRATE:"):
+                    payload_raw = result.split(":", 1)[1].strip()
+                    try:
+                        payload = json.loads(payload_raw)
+                    except Exception:
+                        ui.print_error("Invalid /orchestrate payload")
+                        continue
+                    request_text = str(payload.get("request", "")).strip()
+                    if not request_text:
+                        ui.print_error("Usage: /orchestrate <request>")
+                        continue
+                    ui.print_message("system", f"Orchestrating: {request_text}")
+                    try:
+                        from captain_claw.session_orchestrator import SessionOrchestrator
+                        orchestrator = SessionOrchestrator(
+                            main_agent=agent,
+                            provider=agent.provider,
+                            status_callback=agent.status_callback,
+                            tool_output_callback=agent.tool_output_callback,
+                        )
+                        orch_response, cancelled = await _run_cancellable(
+                            ui,
+                            _enqueue_agent_task(
+                                agent.session.id if agent.session else None,
+                                lambda: orchestrator.orchestrate(request_text),
+                            ),
+                        )
+                        if cancelled:
+                            ui.print_warning("Orchestration cancelled.")
+                            await orchestrator.shutdown()
+                            continue
+                        if orch_response:
+                            ui.print_message("assistant", str(orch_response))
+                        await orchestrator.shutdown()
+                    except Exception as e:
+                        ui.print_error(f"Orchestration failed: {e}")
                     continue
                 elif result == "PIPELINE_INFO":
                     ui.print_success(

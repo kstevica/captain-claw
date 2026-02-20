@@ -15,6 +15,7 @@ from captain_claw.config import Config, get_config, set_config
 from captain_claw.instructions import InstructionLoader
 from captain_claw.logging import configure_logging, get_logger
 from captain_claw.session import get_session_manager
+from captain_claw.session_orchestrator import SessionOrchestrator
 from captain_claw.telegram_bridge import TelegramBridge, TelegramMessage
 
 log = get_logger(__name__)
@@ -57,6 +58,7 @@ COMMANDS: list[dict[str, str]] = [
     {"command": "/monitor on|off", "description": "Toggle monitor split view", "category": "Monitor"},
     {"command": "/monitor trace on|off", "description": "Toggle LLM trace logging", "category": "Monitor"},
     {"command": "/approve user telegram <token>", "description": "Approve a Telegram user pairing", "category": "Telegram"},
+    {"command": "/orchestrate <request>", "description": "Run parallel multi-session orchestration", "category": "Orchestrator"},
 ]
 
 
@@ -76,7 +78,7 @@ class WebServer:
         # Telegram bridge state
         telegram_cfg = config.telegram
         self._telegram_enabled = bool(
-            telegram_cfg.enabled or telegram_cfg.bot_token.strip()
+            telegram_cfg.enabled and telegram_cfg.bot_token.strip()
         )
         self._telegram_bridge: TelegramBridge | None = None
         self._telegram_offset: int | None = None
@@ -84,6 +86,8 @@ class WebServer:
         self._pending_telegram_pairings: dict[str, dict[str, object]] = {}
         self._telegram_poll_task: asyncio.Task[None] | None = None
         self._telegram_worker_task: asyncio.Task[None] | None = None
+        # Orchestrator (lazy init in _init_agent)
+        self._orchestrator: SessionOrchestrator | None = None
 
     async def _init_agent(self) -> None:
         """Initialize the agent with web callbacks."""
@@ -93,6 +97,18 @@ class WebServer:
             approval_callback=self._approval_callback,
         )
         await self.agent.initialize()
+
+        # Initialize orchestrator (shares provider and callbacks with main agent).
+        cfg = get_config()
+        self._orchestrator = SessionOrchestrator(
+            main_agent=self.agent,
+            max_parallel=cfg.orchestrator.max_parallel,
+            max_agents=cfg.orchestrator.max_agents,
+            provider=self.agent.provider,
+            status_callback=self._status_callback,
+            tool_output_callback=self._tool_output_callback,
+            broadcast_callback=self._broadcast,
+        )
 
     def _status_callback(self, status: str) -> None:
         """Broadcast status updates to all connected clients."""
@@ -274,14 +290,31 @@ class WebServer:
             })
 
             try:
-                # Use complete() which handles tool calls and guards
-                response = await self.agent.complete(content)
+                # Route /orchestrate requests to the orchestrator.
+                stripped = content.strip()
+                if stripped.lower().startswith("/orchestrate ") and self._orchestrator:
+                    orchestrate_input = stripped[len("/orchestrate "):].strip()
+                    if not orchestrate_input:
+                        self._broadcast({
+                            "type": "error",
+                            "message": "Usage: /orchestrate <request>",
+                        })
+                    else:
+                        response = await self._orchestrator.orchestrate(orchestrate_input)
+                        self._broadcast({
+                            "type": "chat_message",
+                            "role": "assistant",
+                            "content": response,
+                        })
+                else:
+                    # Use complete() which handles tool calls and guards
+                    response = await self.agent.complete(content)
 
-                self._broadcast({
-                    "type": "chat_message",
-                    "role": "assistant",
-                    "content": response,
-                })
+                    self._broadcast({
+                        "type": "chat_message",
+                        "role": "assistant",
+                        "content": response,
+                    })
 
                 # Send updated usage/session info
                 self._broadcast({
@@ -448,6 +481,14 @@ class WebServer:
 
             elif cmd in ("/approve",):
                 result = await self._handle_approve_command(args.strip())
+
+            elif cmd in ("/orchestrate",):
+                if not args.strip():
+                    result = "Usage: `/orchestrate <request>`"
+                else:
+                    # Delegate to _handle_chat which contains the orchestration logic.
+                    await self._handle_chat(ws, raw)
+                    return
 
             else:
                 # Try to process it as a chat message (the agent might understand it)
@@ -778,17 +819,35 @@ class WebServer:
 
             heartbeat = asyncio.create_task(_typing_heartbeat())
             try:
-                response = await self.agent.complete(text)
+                # Route /orchestrate requests to the orchestrator.
+                stripped = text.strip()
+                if stripped.lower().startswith("/orchestrate ") and self._orchestrator:
+                    orchestrate_input = stripped[len("/orchestrate "):].strip()
+                    if not orchestrate_input:
+                        await self._tg_send(
+                            chat_id, "Usage: /orchestrate <request>",
+                            reply_to_message_id=reply_to_message_id,
+                        )
+                    else:
+                        response = await self._orchestrator.orchestrate(orchestrate_input)
+                        await self._tg_send(chat_id, response, reply_to_message_id=reply_to_message_id)
+                        self._broadcast({
+                            "type": "chat_message",
+                            "role": "assistant",
+                            "content": response,
+                        })
+                else:
+                    response = await self.agent.complete(text)
 
-                # Send response to Telegram
-                await self._tg_send(chat_id, response, reply_to_message_id=reply_to_message_id)
+                    # Send response to Telegram
+                    await self._tg_send(chat_id, response, reply_to_message_id=reply_to_message_id)
 
-                # Broadcast to web UI
-                self._broadcast({
-                    "type": "chat_message",
-                    "role": "assistant",
-                    "content": response,
-                })
+                    # Broadcast to web UI
+                    self._broadcast({
+                        "type": "chat_message",
+                        "role": "assistant",
+                        "content": response,
+                    })
                 self._broadcast({
                     "type": "usage",
                     "last": self.agent.last_usage,
@@ -1027,10 +1086,14 @@ class WebServer:
         app.router.add_get("/api/config", self.get_config_summary)
         app.router.add_get("/api/sessions", self.list_sessions_api)
         app.router.add_get("/api/commands", self.get_commands_api)
+        app.router.add_get("/api/orchestrator/status", self._get_orchestrator_status)
+        app.router.add_get("/api/orchestrator/skills", self._get_orchestrator_skills)
+        app.router.add_post("/api/orchestrator/rephrase", self._rephrase_orchestrator_input)
         # Static files (serve index.html at /)
         if STATIC_DIR.is_dir():
             app.router.add_static("/static/", STATIC_DIR, show_index=False)
             app.router.add_get("/", self._serve_index)
+            app.router.add_get("/orchestrator", self._serve_orchestrator)
             app.router.add_get("/favicon.ico", self._serve_favicon)
         return app
 
@@ -1043,6 +1106,82 @@ class WebServer:
         if favicon.is_file():
             return web.FileResponse(favicon)
         return web.Response(status=204)
+
+    async def _serve_orchestrator(self, request: web.Request) -> web.FileResponse:
+        return web.FileResponse(STATIC_DIR / "orchestrator.html")
+
+    async def _get_orchestrator_status(self, request: web.Request) -> web.Response:
+        """REST endpoint: current orchestrator graph state."""
+        if not self._orchestrator:
+            return web.json_response({"status": None})
+        status = self._orchestrator.get_status()
+        return web.json_response({"status": status}, dumps=lambda obj: json.dumps(obj, default=str))
+
+    async def _get_orchestrator_skills(self, request: web.Request) -> web.Response:
+        """REST endpoint: list available skills for orchestrator workers."""
+        if not self.agent:
+            return web.json_response({"skills": []})
+        try:
+            commands = self.agent.list_user_invocable_skills()
+            skills = [
+                {"name": cmd.name, "skill_name": cmd.skill_name, "description": cmd.description}
+                for cmd in commands
+            ]
+        except Exception:
+            skills = []
+
+        # Also expose available tools as a separate list.
+        try:
+            tool_names = self.agent.tools.list_tools()
+        except Exception:
+            tool_names = []
+
+        return web.json_response({"skills": skills, "tools": tool_names})
+
+    async def _rephrase_orchestrator_input(self, request: web.Request) -> web.Response:
+        """Rephrase a casual user request into a structured orchestrator prompt."""
+        from captain_claw.llm import Message
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        user_input = str(body.get("input", "")).strip()
+        if not user_input:
+            return web.json_response({"error": "Empty input"}, status=400)
+
+        # Use shared provider (same model as main agent).
+        provider = self.agent.provider if self.agent else None
+        if provider is None:
+            from captain_claw.llm import get_provider
+            provider = get_provider()
+
+        loader = InstructionLoader()
+        prompt = loader.render(
+            "orchestrator_rephrase_prompt.md",
+            user_input=user_input,
+        )
+
+        try:
+            import asyncio as _asyncio
+
+            response = await _asyncio.wait_for(
+                provider.complete(
+                    messages=[Message(role="user", content=prompt)],
+                    tools=None,
+                    max_tokens=2000,
+                ),
+                timeout=60.0,
+            )
+            rephrased = str(getattr(response, "content", "") or "").strip()
+            if not rephrased:
+                rephrased = user_input  # fallback to original
+        except Exception as e:
+            log.error("Rephrase failed", error=str(e))
+            rephrased = user_input  # fallback to original
+
+        return web.json_response({"rephrased": rephrased, "original": user_input})
 
 
 async def _run_server(config: Config) -> None:
@@ -1072,6 +1211,8 @@ async def _run_server(config: Config) -> None:
     try:
         await asyncio.Event().wait()
     finally:
+        if server._orchestrator:
+            await server._orchestrator.shutdown()
         await server._stop_telegram()
         await runner.cleanup()
 

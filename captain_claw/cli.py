@@ -1526,6 +1526,13 @@ Commands:
                 return None
             payload = json.dumps({"prompt": prompt}, ensure_ascii=True)
             return f"CRON_ONEOFF:{payload}"
+        elif command == "/orchestrate":
+            orchestrate_arg = args.strip()
+            if not orchestrate_arg:
+                self.print_error("Usage: /orchestrate <request>")
+                return None
+            payload = json.dumps({"request": orchestrate_arg}, ensure_ascii=True)
+            return f"ORCHESTRATE:{payload}"
         elif command == "/planning":
             planning_arg = args.strip().lower()
             if planning_arg == "on":

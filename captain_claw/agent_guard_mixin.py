@@ -412,4 +412,6 @@ class AgentGuardMixin:
             session_policy=session_policy,
             task_policy=task_policy,
             abort_event=abort_event,
+            runtime_base_path=getattr(self, "workspace_base_path", None),
+            approval_callback=getattr(self, "approval_callback", None),
         )

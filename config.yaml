@@ -185,7 +185,7 @@ logging:
   level: INFO
   format: console
 telegram:
-  enabled: true
+  enabled: false
   bot_token: ''
   api_base_url: https://api.telegram.org
   poll_timeout_seconds: 25
@@ -209,3 +209,9 @@ web:
   enabled: false
   host: 127.0.0.1
   port: 8340
+orchestrator:
+  max_parallel: 5
+  max_agents: 50
+  idle_evict_seconds: 300.0
+  worker_timeout_seconds: 300.0
+  worker_max_retries: 2

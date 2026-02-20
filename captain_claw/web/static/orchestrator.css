@@ -1,0 +1,728 @@
+/* Captain Claw Orchestrator Dashboard */
+
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --bg-hover: #30363d;
+    --border: #30363d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --accent: #58a6ff;
+    --accent-hover: #79c0ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --purple: #bc8cff;
+    --orange: #f78166;
+    --monitor-bg: #0a0f14;
+    --monitor-text: #7ee787;
+    --radius: 8px;
+    --radius-sm: 4px;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    --font-mono: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
+    --header-height: 48px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+/* ─── Header ──────────────────────────────────────── */
+
+.orch-header {
+    height: var(--header-height);
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    flex-shrink: 0;
+}
+
+.orch-header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.orch-header-left .logo {
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: -0.3px;
+    color: var(--text-primary);
+    white-space: nowrap;
+    text-decoration: none;
+}
+
+.orch-header-left .logo:hover { color: var(--accent); }
+
+.orch-header-left .divider {
+    width: 1px;
+    height: 20px;
+    background: var(--border);
+}
+
+.orch-title {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--accent);
+}
+
+.orch-header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.orch-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.orch-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted);
+}
+.orch-status-dot.idle { background: var(--text-muted); }
+.orch-status-dot.running { background: var(--yellow); animation: pulse 1.5s ease-in-out infinite; }
+.orch-status-dot.completed { background: var(--green); }
+.orch-status-dot.failed { background: var(--red); }
+
+.back-link {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 13px;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+}
+.back-link:hover {
+    color: var(--text-primary);
+    border-color: var(--text-muted);
+}
+
+/* ─── Layout ──────────────────────────────────────── */
+
+.orch-layout {
+    display: flex;
+    flex-direction: column;
+    height: calc(100% - var(--header-height));
+}
+
+/* ─── Input Section ───────────────────────────────── */
+
+.orch-input-section {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
+    flex-shrink: 0;
+}
+
+.orch-input-row {
+    display: flex;
+    gap: 8px;
+}
+
+.orch-input-row input {
+    flex: 1;
+    padding: 8px 12px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 14px;
+    outline: none;
+}
+.orch-input-row input:focus {
+    border-color: var(--accent);
+}
+.orch-input-row input::placeholder {
+    color: var(--text-muted);
+}
+
+.orch-prepare-btn {
+    padding: 8px 20px;
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.orch-prepare-btn:hover { background: var(--bg-hover); border-color: var(--accent); }
+.orch-prepare-btn:disabled { opacity: 0.5; cursor: default; }
+
+.orch-run-btn {
+    padding: 8px 20px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius-sm);
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.orch-run-btn:hover { background: var(--accent-hover); }
+.orch-run-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* ─── Rephrase area ──────────────────────────────── */
+
+.orch-rephrase {
+    margin-top: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-primary);
+    overflow: hidden;
+}
+.orch-rephrase.hidden { display: none; }
+
+.orch-rephrase-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border);
+}
+
+.orch-rephrase-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.orch-rephrase-hint {
+    font-weight: 400;
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.orch-rephrase-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.orch-rephrase-discard {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+}
+.orch-rephrase-discard:hover { color: var(--text-primary); border-color: var(--text-muted); }
+
+.orch-rephrase textarea {
+    width: 100%;
+    padding: 10px 12px;
+    background: var(--bg-primary);
+    border: none;
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 13px;
+    line-height: 1.5;
+    resize: vertical;
+    min-height: 60px;
+    max-height: 200px;
+    outline: none;
+}
+.orch-rephrase textarea::placeholder { color: var(--text-muted); }
+
+/* ─── Rephrase loading spinner ───────────────────── */
+
+.orch-rephrase-loading {
+    margin-top: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    padding: 6px 0;
+}
+.orch-rephrase-loading.hidden { display: none; }
+
+.spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* ─── Main content area (graph + detail + log) ──── */
+
+.orch-content {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+}
+
+/* ─── Graph + Detail column ───────────────────────── */
+
+.orch-main-col {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-right: 1px solid var(--border);
+}
+
+/* ─── Summary bar ─────────────────────────────────── */
+
+.orch-summary-bar {
+    display: flex;
+    gap: 16px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-tertiary);
+    flex-shrink: 0;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.orch-summary-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.orch-summary-item .count {
+    font-weight: 700;
+    color: var(--text-primary);
+}
+.orch-summary-item.completed .count { color: var(--green); }
+.orch-summary-item.running .count { color: var(--yellow); }
+.orch-summary-item.failed .count { color: var(--red); }
+.orch-summary-item.pending .count { color: var(--text-muted); }
+
+/* ─── Graph area ──────────────────────────────────── */
+
+.orch-graph {
+    flex: 1;
+    overflow: auto;
+    padding: 16px;
+}
+
+.orch-graph-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-muted);
+    gap: 8px;
+}
+
+.orch-graph-empty .icon { font-size: 40px; }
+.orch-graph-empty .text { font-size: 14px; }
+
+/* Graph layers (horizontal flow: left → right) */
+
+.orch-graph-flow {
+    display: flex;
+    gap: 24px;
+    align-items: flex-start;
+    min-height: 100%;
+}
+
+.orch-graph-layer {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 220px;
+}
+
+.orch-layer-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+
+/* ─── Task cards ──────────────────────────────────── */
+
+.task-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--text-muted);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    min-width: 200px;
+    max-width: 300px;
+}
+.task-card:hover {
+    background: var(--bg-hover);
+    border-color: var(--accent);
+}
+.task-card.selected {
+    border-color: var(--accent);
+    background: var(--bg-hover);
+}
+
+.task-card.pending { border-left-color: var(--text-muted); }
+.task-card.queued { border-left-color: var(--yellow); }
+.task-card.running { border-left-color: var(--yellow); animation: card-pulse 2s ease-in-out infinite; }
+.task-card.completed { border-left-color: var(--green); }
+.task-card.failed { border-left-color: var(--red); }
+
+.task-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 4px;
+}
+
+.task-card-id {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.task-card-status {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 1px 6px;
+    border-radius: 3px;
+}
+.task-card-status.pending { color: var(--text-muted); background: transparent; }
+.task-card-status.queued { color: var(--yellow); background: #d2992220; }
+.task-card-status.running { color: var(--yellow); background: #d2992220; }
+.task-card-status.completed { color: var(--green); background: #3fb95020; }
+.task-card-status.failed { color: var(--red); background: #f8514920; }
+
+.task-card-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 2px;
+}
+
+.task-card-session {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+}
+
+.task-card-deps {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+/* ─── Detail panel ────────────────────────────────── */
+
+.orch-detail {
+    border-top: 1px solid var(--border);
+    background: var(--bg-secondary);
+    flex-shrink: 0;
+    max-height: 40%;
+    overflow: auto;
+    display: none;
+}
+.orch-detail.visible { display: block; }
+
+.orch-detail-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: var(--bg-secondary);
+}
+
+.orch-detail-title {
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.orch-detail-close {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 18px;
+    cursor: pointer;
+    padding: 2px 6px;
+}
+.orch-detail-close:hover { color: var(--text-primary); }
+
+.orch-detail-body {
+    padding: 12px 16px;
+}
+
+.orch-detail-body dl {
+    display: grid;
+    grid-template-columns: 100px 1fr;
+    gap: 6px 12px;
+}
+.orch-detail-body dt {
+    color: var(--text-muted);
+    font-size: 12px;
+    text-transform: uppercase;
+}
+.orch-detail-body dd {
+    font-size: 13px;
+}
+
+.orch-detail-output {
+    margin-top: 12px;
+    padding: 10px;
+    background: var(--monitor-bg);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--monitor-text);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 200px;
+    overflow: auto;
+}
+
+.orch-detail-error {
+    color: var(--red);
+}
+
+/* ─── Event log column ────────────────────────────── */
+
+.orch-log-col {
+    width: 360px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.orch-log-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-tertiary);
+}
+
+.orch-log-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+.orch-log-clear {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+}
+.orch-log-clear:hover {
+    color: var(--text-primary);
+    border-color: var(--text-muted);
+}
+
+.orch-log-messages {
+    flex: 1;
+    overflow: auto;
+    background: var(--monitor-bg);
+    padding: 8px;
+}
+
+.orch-log-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+.log-entry {
+    padding: 4px 0;
+    border-bottom: 1px solid #1a2030;
+    font-size: 12px;
+}
+
+.log-entry-time {
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    margin-right: 6px;
+}
+
+.log-entry-event {
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 11px;
+    margin-right: 6px;
+}
+.log-entry-event.decomposed { color: var(--accent); }
+.log-entry-event.assigned { color: var(--purple); }
+.log-entry-event.task_started { color: var(--yellow); }
+.log-entry-event.task_completed { color: var(--green); }
+.log-entry-event.task_failed { color: var(--red); }
+.log-entry-event.progress { color: var(--text-muted); }
+.log-entry-event.synthesizing { color: var(--orange); }
+.log-entry-event.completed { color: var(--green); }
+
+.log-entry-text {
+    color: var(--monitor-text);
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+
+/* ─── Skills bar ─────────────────────────────────── */
+
+.orch-skills-bar {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+}
+
+.orch-skills-label {
+    color: var(--text-muted);
+    font-weight: 600;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding-top: 2px;
+    white-space: nowrap;
+}
+
+.orch-skills-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+
+.orch-skills-loading {
+    color: var(--text-muted);
+    font-style: italic;
+    font-size: 12px;
+}
+
+.orch-skill-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    user-select: none;
+}
+.orch-skill-chip:hover {
+    border-color: var(--text-muted);
+    color: var(--text-primary);
+}
+.orch-skill-chip.active {
+    background: #58a6ff20;
+    border-color: var(--accent);
+    color: var(--accent);
+}
+.orch-skill-chip input[type="checkbox"] {
+    display: none;
+}
+.orch-skill-chip .chip-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    transition: background 0.15s ease;
+}
+.orch-skill-chip.active .chip-dot {
+    background: var(--accent);
+}
+
+/* ─── Context metrics in log entries ────────────── */
+
+.log-entry-metrics {
+    display: flex;
+    gap: 10px;
+    margin-top: 2px;
+    padding-left: 64px;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+}
+
+.log-metric {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.log-metric-label {
+    color: var(--text-muted);
+    opacity: 0.7;
+}
+
+.log-metric-value {
+    color: var(--text-secondary);
+}
+
+.log-metric-value.high-util {
+    color: var(--orange);
+}
+
+/* ─── Animations ──────────────────────────────────── */
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+@keyframes card-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(210, 153, 34, 0); }
+    50% { box-shadow: 0 0 8px 2px rgba(210, 153, 34, 0.15); }
+}
+
+/* ─── Scrollbar ───────────────────────────────────── */
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }

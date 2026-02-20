@@ -497,6 +497,8 @@ class ToolRegistry:
         session_policy: ToolPolicy | dict[str, Any] | None = None,
         task_policy: ToolPolicy | dict[str, Any] | None = None,
         abort_event: asyncio.Event | None = None,
+        runtime_base_path: Path | None = None,
+        approval_callback: Callable[[str], bool] | None = None,
     ) -> ToolResult:
         """Execute a tool by name.
 
@@ -513,6 +515,10 @@ class ToolRegistry:
             ToolBlockedError if tool is blocked
             ToolExecutionError if execution fails
         """
+        # Resolve per-call overrides (fall back to instance defaults).
+        effective_base_path = runtime_base_path or self._runtime_base_path
+        effective_approval = approval_callback or self._approval_callback
+
         # Check if tool exists
         tool = self.get(name)
 
@@ -541,8 +547,8 @@ class ToolRegistry:
                     f"Command: {command}\n"
                     f"Reason: {policy_reason}"
                 )
-                if callable(self._approval_callback):
-                    approved = bool(self._approval_callback(question))
+                if callable(effective_approval):
+                    approved = bool(effective_approval(question))
                     if not approved:
                         raise ToolBlockedError(name, "Blocked by shell execution approval policy")
                 else:
@@ -592,11 +598,17 @@ class ToolRegistry:
                     self._bridge_abort_event(abort_event, tool_abort_event)
                 )
 
+            effective_saved_base = (effective_base_path / self._saved_dir_name).resolve()
+            try:
+                effective_saved_base.relative_to(effective_base_path)
+            except ValueError:
+                effective_saved_base = (effective_base_path / "saved").resolve()
+
             execute_task = asyncio.create_task(
                 tool.execute(
                     **arguments,
-                    _runtime_base_path=self.runtime_base_path,
-                    _saved_base_path=self.get_saved_base_path(create=False),
+                    _runtime_base_path=effective_base_path,
+                    _saved_base_path=effective_saved_base,
                     _session_id=(session_id or "").strip(),
                     _abort_event=tool_abort_event,
                 )

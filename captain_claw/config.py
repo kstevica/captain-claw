@@ -338,6 +338,16 @@ class DiscordConfig(BaseModel):
     require_mention_in_guild: bool = True
 
 
+class OrchestratorConfig(BaseModel):
+    """Parallel session orchestration settings."""
+
+    max_parallel: int = 5
+    max_agents: int = 50
+    idle_evict_seconds: float = 300.0
+    worker_timeout_seconds: float = 300.0
+    worker_max_retries: int = 2
+
+
 class WebConfig(BaseModel):
     """Web UI configuration."""
 
@@ -364,6 +374,7 @@ class Config(BaseSettings):
     slack: SlackConfig = Field(default_factory=SlackConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
     web: WebConfig = Field(default_factory=WebConfig)
+    orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="CLAW_",

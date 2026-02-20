@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Captain Claw — Orchestrator</title>
+    <link rel="stylesheet" href="/static/orchestrator.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+    <!-- Header -->
+    <header class="orch-header">
+        <div class="orch-header-left">
+            <a href="/" class="logo">
+                <img src="/static/logo.svg" width="20" height="20" alt="" style="vertical-align:middle;margin-right:5px;border-radius:4px;">Captain Claw
+            </a>
+            <span class="divider"></span>
+            <span class="orch-title">Orchestrator</span>
+        </div>
+        <div class="orch-header-right">
+            <span class="orch-status" id="orchStatus">
+                <span class="orch-status-dot idle" id="orchStatusDot"></span>
+                <span id="orchStatusText">idle</span>
+            </span>
+            <a href="/" class="back-link">&larr; Chat</a>
+        </div>
+    </header>
+
+    <!-- Layout -->
+    <div class="orch-layout">
+        <!-- Input section -->
+        <div class="orch-input-section">
+            <div class="orch-input-row">
+                <input type="text" id="orchInput" placeholder="Describe a complex task to decompose and run in parallel..." autocomplete="off">
+                <button class="orch-prepare-btn" id="orchPrepareBtn">Prepare</button>
+            </div>
+            <!-- Rephrased prompt area (hidden until Prepare is clicked) -->
+            <div class="orch-rephrase hidden" id="orchRephrase">
+                <div class="orch-rephrase-header">
+                    <span class="orch-rephrase-label">Rephrased prompt <span class="orch-rephrase-hint">(editable — review and adjust before running)</span></span>
+                    <div class="orch-rephrase-actions">
+                        <button class="orch-rephrase-discard" id="orchDiscardBtn" title="Discard and go back">Discard</button>
+                        <button class="orch-run-btn" id="orchRunBtn">Run &#x25B6;</button>
+                    </div>
+                </div>
+                <textarea id="orchRephrased" rows="4" spellcheck="false" placeholder="Rephrased prompt will appear here..."></textarea>
+                <!-- Skills selector -->
+                <div class="orch-skills-bar" id="orchSkillsBar">
+                    <span class="orch-skills-label">Skills:</span>
+                    <div class="orch-skills-list" id="orchSkillsList">
+                        <span class="orch-skills-loading">loading...</span>
+                    </div>
+                </div>
+            </div>
+            <!-- Spinner shown during rephrase -->
+            <div class="orch-rephrase-loading hidden" id="orchRephraseLoading">
+                <span class="spinner"></span> Rephrasing your request...
+            </div>
+        </div>
+
+        <!-- Main content -->
+        <div class="orch-content">
+            <!-- Graph + Detail column -->
+            <div class="orch-main-col">
+                <!-- Summary bar -->
+                <div class="orch-summary-bar" id="orchSummaryBar">
+                    <div class="orch-summary-item" id="summaryTotal">
+                        <span class="count">0</span> tasks
+                    </div>
+                    <div class="orch-summary-item completed" id="summaryCompleted">
+                        <span class="count">0</span> completed
+                    </div>
+                    <div class="orch-summary-item running" id="summaryRunning">
+                        <span class="count">0</span> running
+                    </div>
+                    <div class="orch-summary-item failed" id="summaryFailed">
+                        <span class="count">0</span> failed
+                    </div>
+                    <div class="orch-summary-item pending" id="summaryPending">
+                        <span class="count">0</span> pending
+                    </div>
+                </div>
+
+                <!-- Graph area -->
+                <div class="orch-graph" id="orchGraph">
+                    <div class="orch-graph-empty" id="orchGraphEmpty">
+                        <div class="icon">&#x1F3AF;</div>
+                        <div class="text">Enter a request above and click <strong>Prepare</strong> to rephrase, then <strong>Run</strong></div>
+                    </div>
+                </div>
+
+                <!-- Detail panel (hidden by default) -->
+                <div class="orch-detail" id="orchDetail">
+                    <div class="orch-detail-header">
+                        <span class="orch-detail-title" id="detailTitle">Task Detail</span>
+                        <button class="orch-detail-close" id="detailClose">&times;</button>
+                    </div>
+                    <div class="orch-detail-body" id="detailBody"></div>
+                </div>
+            </div>
+
+            <!-- Event log column -->
+            <div class="orch-log-col">
+                <div class="orch-log-header">
+                    <span class="orch-log-title">Event Log</span>
+                    <button class="orch-log-clear" id="logClearBtn">Clear</button>
+                </div>
+                <div class="orch-log-messages" id="orchLogMessages">
+                    <div class="orch-log-empty" id="orchLogEmpty">Waiting for events...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/orchestrator.js"></script>
+</body>
+</html>
