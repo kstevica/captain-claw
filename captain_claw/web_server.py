@@ -739,11 +739,16 @@ class WebServer:
                 await asyncio.sleep(2.0)
 
     async def _telegram_worker(self) -> None:
-        """Process queued Telegram messages one at a time."""
+        """Dispatch queued Telegram messages as concurrent tasks.
+
+        Each message is spawned as its own task so that the busy-lock
+        wait in ``_tg_process_with_typing`` does not block the queue
+        for subsequent messages (matching the CLI/TUI behaviour).
+        """
         while True:
             try:
                 message = await self._telegram_queue.get()
-                await self._handle_telegram_message(message)
+                asyncio.create_task(self._handle_telegram_message(message))
             except asyncio.CancelledError:
                 break
             except Exception as exc:
