@@ -97,6 +97,7 @@ tools:
   - xlsx_extract
   - pptx_extract
   - pocket_tts
+  - send_mail
   shell:
     timeout: 30
     blocked:
@@ -126,6 +127,22 @@ tools:
     sample_rate: 24000
     mp3_bitrate_kbps: 128
     timeout_seconds: 600
+  send_mail:
+    provider: mailgun
+    from_address: ''
+    from_name: ''
+    mailgun_api_key: ''
+    mailgun_domain: ''
+    mailgun_base_url: https://api.mailgun.net/v3
+    sendgrid_api_key: ''
+    sendgrid_base_url: https://api.sendgrid.com/v3/mail/send
+    smtp_host: localhost
+    smtp_port: 587
+    smtp_username: ''
+    smtp_password: ''
+    smtp_use_tls: true
+    timeout: 60
+    max_attachment_bytes: 26214400
   require_confirmation:
   - shell
   - write
@@ -208,7 +225,16 @@ discord:
 web:
   enabled: false
   host: 127.0.0.1
-  port: 8340
+  port: 23080
+  api_enabled: true
+  api_pool_max_agents: 50
+  api_pool_idle_seconds: 600.0
+google_oauth:
+  enabled: false
+  client_id: ''
+  client_secret: ''
+  project_id: ''
+  location: us-central1
 orchestrator:
   max_parallel: 5
   max_agents: 50

@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Captain Claw</title>
+    <link rel="stylesheet" href="/static/home.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+    <div class="home">
+        <div class="home-logo">
+            <img src="/static/logo.svg" alt="Captain Claw" width="160" height="160">
+        </div>
+        <h1 class="home-title">Captain Claw</h1>
+        <p class="home-subtitle">AI Agent with Claws</p>
+
+        <div class="home-cards">
+            <a href="/chat" class="home-card">
+                <div class="home-card-icon">💬</div>
+                <div class="home-card-title">Chat</div>
+                <div class="home-card-desc">Interactive conversation with the agent. Run commands, tools, and skills in a single session.</div>
+            </a>
+            <a href="/orchestrator" class="home-card">
+                <div class="home-card-icon">🎯</div>
+                <div class="home-card-title">Orchestrator</div>
+                <div class="home-card-desc">Decompose complex tasks into a parallel DAG of sessions. Monitor progress in real time.</div>
+            </a>
+        </div>
+
+        <!-- Google OAuth — hidden until JS checks status -->
+        <div class="home-auth" id="google-auth" style="display:none;">
+            <a href="/auth/google/login" class="auth-card" id="google-card">
+                <div class="auth-icon" id="google-icon">
+                    <svg viewBox="0 0 24 24" width="22" height="22"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18A10.96 10.96 0 0 0 1 12c0 1.77.42 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+                </div>
+                <div class="auth-body">
+                    <div class="auth-title" id="google-title">Connect Google</div>
+                    <div class="auth-desc" id="google-desc">Sign in with Google to use Gemini models without an API key.</div>
+                </div>
+                <div class="auth-status" id="google-status"></div>
+            </a>
+        </div>
+    </div>
+
+    <script>
+    (async function() {
+        try {
+            var resp = await fetch('/auth/google/status');
+            var data = await resp.json();
+        } catch(e) { return; }
+
+        if (!data.enabled) return;
+
+        var section = document.getElementById('google-auth');
+        var card = document.getElementById('google-card');
+        var icon = document.getElementById('google-icon');
+        var title = document.getElementById('google-title');
+        var desc = document.getElementById('google-desc');
+        var status = document.getElementById('google-status');
+        section.style.display = '';
+
+        if (data.connected && data.user) {
+            card.removeAttribute('href');
+            card.classList.add('connected');
+            title.textContent = 'Google Connected';
+            desc.textContent = 'Signed in as ' + (data.user.email || 'unknown');
+            status.innerHTML = '<button class="auth-disconnect" onclick="disconnectGoogle(event)">Disconnect</button>';
+        }
+    })();
+
+    async function disconnectGoogle(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        await fetch('/auth/google/logout', { method: 'POST' });
+        location.reload();
+    }
+    </script>
+</body>
+</html>

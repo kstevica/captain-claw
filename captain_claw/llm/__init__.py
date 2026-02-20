@@ -488,6 +488,33 @@ class LiteLLMProvider(LLMProvider):
         )
         self.max_tokens = max_tokens
 
+        # Google OAuth / Vertex AI credentials (set via set_vertex_credentials).
+        self._vertex_credentials: dict[str, Any] | None = None
+        self._vertex_project: str = ""
+        self._vertex_location: str = "us-central1"
+
+    def set_vertex_credentials(
+        self,
+        credentials: dict[str, Any],
+        project: str,
+        location: str = "us-central1",
+    ) -> None:
+        """Inject Google OAuth ``authorized_user`` credentials for Vertex AI.
+
+        When set and the provider is ``gemini``, requests are routed
+        through LiteLLM's ``vertex_ai/`` prefix instead of ``gemini/``,
+        using OAuth tokens rather than API keys.
+        """
+        self._vertex_credentials = credentials
+        self._vertex_project = project
+        self._vertex_location = location
+
+    def clear_vertex_credentials(self) -> None:
+        """Remove injected Vertex AI credentials, reverting to API key auth."""
+        self._vertex_credentials = None
+        self._vertex_project = ""
+        self._vertex_location = "us-central1"
+
     def _request_kwargs(
         self,
         messages: list[Message],
@@ -510,8 +537,18 @@ class LiteLLMProvider(LLMProvider):
         }
         if tools:
             kwargs["tools"] = _convert_tools_for_openai_style(tools)
-        if self.api_key:
+
+        # When Google OAuth credentials are available for Gemini, route
+        # through Vertex AI instead of the Google AI Studio endpoint.
+        if self._vertex_credentials and self.provider == "gemini":
+            # Swap prefix: gemini/model-name → vertex_ai/model-name
+            kwargs["model"] = self.model.replace("gemini/", "vertex_ai/", 1)
+            kwargs["vertex_credentials"] = json.dumps(self._vertex_credentials)
+            kwargs["vertex_project"] = self._vertex_project
+            kwargs["vertex_location"] = self._vertex_location
+        elif self.api_key:
             kwargs["api_key"] = self.api_key
+
         if self.base_url:
             kwargs["api_base"] = self.base_url
         return kwargs

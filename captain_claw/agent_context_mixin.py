@@ -239,6 +239,7 @@ class AgentContextMixin:
             PocketTTSTool,
             PptxExtractTool,
             ReadTool,
+            SendMailTool,
             ShellTool,
             WebFetchTool,
             WebSearchTool,
@@ -272,6 +273,8 @@ class AgentContextMixin:
                 self.tools.register(PptxExtractTool())
             elif tool_name == "pocket_tts":
                 self.tools.register(PocketTTSTool())
+            elif tool_name == "send_mail":
+                self.tools.register(SendMailTool())
         self._register_plugin_tools()
 
     def _discover_plugin_tool_files(self) -> list[Path]:

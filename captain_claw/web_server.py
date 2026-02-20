@@ -2,8 +2,12 @@
 
 import asyncio
 import json
+import os
 import secrets
+import signal
 import sys
+import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -11,7 +15,15 @@ from typing import Any
 from aiohttp import web
 
 from captain_claw.agent import Agent
+from captain_claw.agent_pool import AgentPool
 from captain_claw.config import Config, get_config, set_config
+from captain_claw.google_oauth import (
+    build_authorization_url,
+    exchange_code_for_tokens,
+    fetch_user_info,
+    generate_pkce_pair,
+)
+from captain_claw.google_oauth_manager import GoogleOAuthManager
 from captain_claw.instructions import InstructionLoader
 from captain_claw.logging import configure_logging, get_logger
 from captain_claw.session import get_session_manager
@@ -88,6 +100,11 @@ class WebServer:
         self._telegram_worker_task: asyncio.Task[None] | None = None
         # Orchestrator (lazy init in _init_agent)
         self._orchestrator: SessionOrchestrator | None = None
+        # OpenAI-compatible API agent pool (lazy init in _init_agent)
+        self._api_pool: AgentPool | None = None
+        # Google OAuth state
+        self._oauth_manager: GoogleOAuthManager | None = None
+        self._pending_oauth: dict[str, dict[str, Any]] = {}  # state → {verifier, ts}
 
     async def _init_agent(self) -> None:
         """Initialize the agent with web callbacks."""
@@ -109,6 +126,20 @@ class WebServer:
             tool_output_callback=self._tool_output_callback,
             broadcast_callback=self._broadcast,
         )
+
+        # Initialize OpenAI-compatible API agent pool if enabled.
+        if cfg.web.api_enabled:
+            self._api_pool = AgentPool(
+                max_agents=cfg.web.api_pool_max_agents,
+                idle_evict_seconds=cfg.web.api_pool_idle_seconds,
+                provider=self.agent.provider,
+                session_name_prefix="api",
+            )
+
+        # Initialize Google OAuth manager and inject stored tokens.
+        if cfg.google_oauth.enabled and cfg.google_oauth.client_id:
+            self._oauth_manager = GoogleOAuthManager(self.agent.session_manager)
+            await self._inject_oauth_into_provider()
 
     def _status_callback(self, status: str) -> None:
         """Broadcast status updates to all connected clients."""
@@ -1075,6 +1106,187 @@ class WebServer:
         """Return the available commands list."""
         return web.json_response(COMMANDS)
 
+    # ── Google OAuth ────────────────────────────────────────────────
+
+    async def _auth_google_login(self, request: web.Request) -> web.Response:
+        """Start the Google OAuth2 authorization flow."""
+        cfg = get_config()
+        oauth = cfg.google_oauth
+        if not oauth.enabled or not oauth.client_id:
+            return web.json_response(
+                {"error": "Google OAuth not configured"}, status=400
+            )
+
+        # Purge stale PKCE states (older than 10 minutes).
+        cutoff = time.time() - 600
+        self._pending_oauth = {
+            k: v for k, v in self._pending_oauth.items()
+            if v.get("ts", 0) > cutoff
+        }
+
+        state = secrets.token_urlsafe(32)
+        verifier, challenge = generate_pkce_pair()
+        self._pending_oauth[state] = {
+            "verifier": verifier,
+            "ts": time.time(),
+        }
+
+        redirect_uri = (
+            f"http://localhost:{cfg.web.port}/auth/google/callback"
+        )
+        auth_url = build_authorization_url(
+            client_id=oauth.client_id,
+            redirect_uri=redirect_uri,
+            scopes=oauth.scopes,
+            state=state,
+            code_challenge=challenge,
+        )
+        raise web.HTTPFound(auth_url)
+
+    async def _auth_google_callback(self, request: web.Request) -> web.Response:
+        """Handle the OAuth2 callback from Google."""
+        error = request.query.get("error")
+        if error:
+            desc = request.query.get("error_description", error)
+            return web.Response(
+                text=f"<html><body><h2>OAuth Error</h2><p>{desc}</p>"
+                     f"<p><a href='/'>Back to home</a></p></body></html>",
+                content_type="text/html",
+            )
+
+        code = request.query.get("code", "")
+        state = request.query.get("state", "")
+        if not code or not state:
+            return web.Response(text="Missing code or state", status=400)
+
+        # Validate state and retrieve PKCE verifier.
+        pending = self._pending_oauth.pop(state, None)
+        if not pending:
+            return web.Response(
+                text="<html><body><h2>Invalid or expired state</h2>"
+                     "<p>Please try again.</p>"
+                     "<p><a href='/'>Back to home</a></p></body></html>",
+                content_type="text/html",
+                status=400,
+            )
+
+        cfg = get_config()
+        oauth = cfg.google_oauth
+        redirect_uri = f"http://localhost:{cfg.web.port}/auth/google/callback"
+
+        try:
+            tokens = await exchange_code_for_tokens(
+                code=code,
+                client_id=oauth.client_id,
+                client_secret=oauth.client_secret,
+                redirect_uri=redirect_uri,
+                code_verifier=pending["verifier"],
+            )
+        except Exception as exc:
+            log.error("Google OAuth token exchange failed: %s", exc)
+            return web.Response(
+                text=f"<html><body><h2>Token Exchange Failed</h2>"
+                     f"<p>{exc}</p>"
+                     f"<p><a href='/'>Back to home</a></p></body></html>",
+                content_type="text/html",
+                status=500,
+            )
+
+        # Fetch user info.
+        try:
+            user = await fetch_user_info(tokens.access_token)
+        except Exception as exc:
+            log.warning("Failed to fetch Google user info: %s", exc)
+            user = {}
+
+        # Store tokens and user info.
+        if self._oauth_manager:
+            await self._oauth_manager.store_tokens(tokens)
+            if user:
+                await self._oauth_manager.store_user_info(user)
+            await self._inject_oauth_into_provider()
+
+        email = user.get("email", "your Google account")
+        return web.Response(
+            text=(
+                "<!DOCTYPE html><html><head>"
+                "<meta charset='utf-8'>"
+                "<meta http-equiv='refresh' content='2;url=/'>"
+                "<title>Connected</title>"
+                "<style>"
+                "body{background:#0d1117;color:#e6edf3;font-family:sans-serif;"
+                "display:flex;align-items:center;justify-content:center;"
+                "min-height:100vh;margin:0;}"
+                ".box{text-align:center;}"
+                ".box h2{margin-bottom:8px;}"
+                ".box p{color:#8b949e;}"
+                "</style>"
+                "</head><body>"
+                f"<div class='box'><h2>Connected as {email}</h2>"
+                "<p>Redirecting to home page...</p></div>"
+                "</body></html>"
+            ),
+            content_type="text/html",
+        )
+
+    async def _auth_google_status(self, request: web.Request) -> web.Response:
+        """Return Google OAuth connection status as JSON."""
+        cfg = get_config()
+        if not cfg.google_oauth.enabled or not cfg.google_oauth.client_id:
+            return web.json_response({"connected": False, "enabled": False})
+
+        if not self._oauth_manager:
+            return web.json_response({"connected": False, "enabled": True})
+
+        connected = await self._oauth_manager.is_connected()
+        user = None
+        if connected:
+            user = await self._oauth_manager.get_user_info()
+
+        return web.json_response({
+            "connected": connected,
+            "enabled": True,
+            "user": user,
+        })
+
+    async def _auth_google_logout(self, request: web.Request) -> web.Response:
+        """Revoke Google OAuth tokens and disconnect."""
+        if self._oauth_manager:
+            await self._oauth_manager.disconnect()
+            # Clear vertex credentials from active provider.
+            self._clear_oauth_from_provider()
+        return web.json_response({"disconnected": True})
+
+    async def _inject_oauth_into_provider(self) -> None:
+        """Inject stored Google OAuth credentials into the Gemini provider."""
+        if not self._oauth_manager:
+            return
+        creds = await self._oauth_manager.get_vertex_credentials()
+        if not creds:
+            return
+
+        cfg = get_config()
+        oauth = cfg.google_oauth
+
+        from captain_claw.llm import LiteLLMProvider
+
+        # Inject into the main agent's provider.
+        if self.agent and isinstance(self.agent.provider, LiteLLMProvider):
+            if self.agent.provider.provider == "gemini":
+                self.agent.provider.set_vertex_credentials(
+                    credentials=creds,
+                    project=oauth.project_id,
+                    location=oauth.location,
+                )
+                log.info("Google OAuth credentials injected into Gemini provider.")
+
+    def _clear_oauth_from_provider(self) -> None:
+        """Remove vertex credentials from the active provider."""
+        from captain_claw.llm import LiteLLMProvider
+
+        if self.agent and isinstance(self.agent.provider, LiteLLMProvider):
+            self.agent.provider.clear_vertex_credentials()
+
     # ── App setup ────────────────────────────────────────────────────
 
     def create_app(self) -> web.Application:
@@ -1094,15 +1306,28 @@ class WebServer:
         app.router.add_post("/api/orchestrator/task/restart", self._restart_orchestrator_task)
         app.router.add_post("/api/orchestrator/task/pause", self._pause_orchestrator_task)
         app.router.add_post("/api/orchestrator/task/resume", self._resume_orchestrator_task)
+        # OpenAI-compatible API proxy routes
+        if self.config.web.api_enabled and self._api_pool:
+            app.router.add_post("/v1/chat/completions", self._api_chat_completions)
+            app.router.add_get("/v1/models", self._api_list_models)
+        # Google OAuth routes
+        app.router.add_get("/auth/google/login", self._auth_google_login)
+        app.router.add_get("/auth/google/callback", self._auth_google_callback)
+        app.router.add_get("/auth/google/status", self._auth_google_status)
+        app.router.add_post("/auth/google/logout", self._auth_google_logout)
         # Static files (serve index.html at /)
         if STATIC_DIR.is_dir():
             app.router.add_static("/static/", STATIC_DIR, show_index=False)
-            app.router.add_get("/", self._serve_index)
+            app.router.add_get("/", self._serve_home)
+            app.router.add_get("/chat", self._serve_chat)
             app.router.add_get("/orchestrator", self._serve_orchestrator)
             app.router.add_get("/favicon.ico", self._serve_favicon)
         return app
 
-    async def _serve_index(self, request: web.Request) -> web.FileResponse:
+    async def _serve_home(self, request: web.Request) -> web.FileResponse:
+        return web.FileResponse(STATIC_DIR / "home.html")
+
+    async def _serve_chat(self, request: web.Request) -> web.FileResponse:
         return web.FileResponse(STATIC_DIR / "index.html")
 
     async def _serve_favicon(self, request: web.Request) -> web.Response:
@@ -1263,11 +1488,286 @@ class WebServer:
         result = await self._orchestrator.resume_task(task_id)
         return web.json_response(result)
 
+    # ── OpenAI-compatible API proxy ──────────────────────────────────
+
+    @staticmethod
+    def _extract_api_session_id(request: web.Request) -> str | None:
+        """Extract session ID from ``Authorization: Bearer <session_id>``."""
+        auth = request.headers.get("Authorization", "").strip()
+        if not auth.lower().startswith("bearer "):
+            return None
+        token = auth[7:].strip()
+        return token or None
+
+    @staticmethod
+    def _build_chat_completion_response(
+        content: str,
+        model: str,
+        usage: dict[str, int],
+        completion_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Build an OpenAI-compatible chat completion response."""
+        return {
+            "id": completion_id or f"chatcmpl-{uuid.uuid4().hex[:24]}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": content,
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0),
+            },
+        }
+
+    async def _write_sse_streaming_response(
+        self,
+        request: web.Request,
+        content: str,
+        model: str,
+        usage: dict[str, int],
+        completion_id: str,
+    ) -> web.StreamResponse:
+        """Stream a completed response as Server-Sent Events.
+
+        Chunks the response at word boundaries for a natural streaming feel.
+        """
+        created = int(time.time())
+        resp = web.StreamResponse(
+            status=200,
+            reason="OK",
+            headers={
+                "Content-Type": "text/event-stream; charset=utf-8",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+        await resp.prepare(request)
+
+        async def _sse(data: str) -> None:
+            await resp.write(f"data: {data}\n\n".encode("utf-8"))
+
+        # First chunk: role delta.
+        await _sse(json.dumps({
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
+        }))
+
+        # Content chunks (~5 words each).
+        words = content.split(" ")
+        chunk_size = 5
+        for i in range(0, len(words), chunk_size):
+            text_chunk = " ".join(words[i : i + chunk_size])
+            if i > 0:
+                text_chunk = " " + text_chunk
+            await _sse(json.dumps({
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{"index": 0, "delta": {"content": text_chunk}, "finish_reason": None}],
+            }))
+
+        # Final chunk: finish_reason + usage.
+        await _sse(json.dumps({
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0),
+            },
+        }))
+
+        await resp.write(b"data: [DONE]\n\n")
+        await resp.write_eof()
+        return resp
+
+    async def _api_chat_completions(self, request: web.Request) -> web.Response | web.StreamResponse:
+        """``POST /v1/chat/completions`` — OpenAI-compatible endpoint.
+
+        The Bearer token in the Authorization header is used as the
+        Captain Claw session ID.  Only the last user message is extracted
+        from the ``messages`` array — the agent manages its own history.
+        """
+        if not self._api_pool:
+            return web.json_response(
+                {"error": {"message": "API proxy is disabled", "type": "server_error", "code": "api_disabled"}},
+                status=503,
+            )
+
+        # Auth — Bearer token = session ID.
+        session_id = self._extract_api_session_id(request)
+        if not session_id:
+            return web.json_response(
+                {"error": {"message": "Missing or invalid Authorization header. Expected: Bearer <session_id>", "type": "invalid_request_error", "code": "missing_api_key"}},
+                status=401,
+            )
+
+        # Parse body.
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(
+                {"error": {"message": "Invalid JSON in request body", "type": "invalid_request_error", "code": "invalid_json"}},
+                status=400,
+            )
+
+        messages = body.get("messages", [])
+        if not isinstance(messages, list) or not messages:
+            return web.json_response(
+                {"error": {"message": "messages array is required and must not be empty", "type": "invalid_request_error", "code": "invalid_messages"}},
+                status=400,
+            )
+
+        # Extract the last user message.
+        user_message: str | None = None
+        for msg in reversed(messages):
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    user_message = content.strip()
+                elif isinstance(content, list):
+                    # Multi-part content (e.g. text + image).
+                    parts = [
+                        str(p.get("text", ""))
+                        for p in content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    ]
+                    user_message = " ".join(parts).strip()
+                break
+
+        if not user_message:
+            return web.json_response(
+                {"error": {"message": "No user message found in messages array", "type": "invalid_request_error", "code": "no_user_message"}},
+                status=400,
+            )
+
+        stream = bool(body.get("stream", False))
+
+        # Get or create agent for this session.
+        try:
+            agent = await self._api_pool.get_or_create(session_id)
+        except Exception as exc:
+            log.error("API agent creation failed", session_id=session_id, error=str(exc))
+            return web.json_response(
+                {"error": {"message": f"Failed to initialize session: {exc}", "type": "server_error", "code": "agent_init_failed"}},
+                status=500,
+            )
+
+        # Run agent.
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        try:
+            response_text = await agent.complete(user_message)
+        except Exception as exc:
+            log.error("API completion failed", session_id=session_id, error=str(exc))
+            return web.json_response(
+                {"error": {"message": f"Completion failed: {exc}", "type": "server_error", "code": "completion_failed"}},
+                status=500,
+            )
+        finally:
+            await self._api_pool.release(session_id)
+
+        # Resolve model name.
+        model_name = "captain-claw"
+        try:
+            details = agent.get_runtime_model_details()
+            model_name = details.get("model", "captain-claw")
+        except Exception:
+            pass
+
+        usage = getattr(agent, "last_usage", None) or {
+            "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+        }
+
+        if not stream:
+            return web.json_response(
+                self._build_chat_completion_response(
+                    content=response_text,
+                    model=model_name,
+                    usage=usage,
+                    completion_id=completion_id,
+                )
+            )
+
+        return await self._write_sse_streaming_response(
+            request=request,
+            content=response_text,
+            model=model_name,
+            usage=usage,
+            completion_id=completion_id,
+        )
+
+    async def _api_list_models(self, request: web.Request) -> web.Response:
+        """``GET /v1/models`` — list available models."""
+        models_data: list[dict[str, Any]] = []
+        created = int(time.time())
+
+        if self.agent:
+            for entry in self.agent.get_allowed_models():
+                model_id = entry.get("id", "unknown")
+                models_data.append({
+                    "id": model_id,
+                    "object": "model",
+                    "created": created,
+                    "owned_by": "captain-claw",
+                    "permission": [],
+                    "root": model_id,
+                    "parent": None,
+                })
+
+        # Always include a generic captain-claw entry.
+        if not any(m["id"] == "captain-claw" for m in models_data):
+            models_data.insert(0, {
+                "id": "captain-claw",
+                "object": "model",
+                "created": created,
+                "owned_by": "captain-claw",
+                "permission": [],
+                "root": "captain-claw",
+                "parent": None,
+            })
+
+        return web.json_response({"object": "list", "data": models_data})
+
 
 async def _run_server(config: Config) -> None:
     """Start the web server."""
     server = WebServer(config)
-    server._loop = asyncio.get_event_loop()
+    loop = asyncio.get_event_loop()
+    server._loop = loop
+
+    # Stop event: set by signal handler to trigger graceful shutdown.
+    stop_event = asyncio.Event()
+
+    def _signal_handler() -> None:
+        if not stop_event.is_set():
+            stop_event.set()
+
+    # Install signal handlers so the first Ctrl+C triggers graceful shutdown
+    # without raising KeyboardInterrupt inside asyncio.run().
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _signal_handler)
+        except (NotImplementedError, OSError):
+            # Windows doesn't support add_signal_handler for SIGTERM.
+            pass
 
     print("Initializing Captain Claw agent...")
     await server._init_agent()
@@ -1285,21 +1785,56 @@ async def _run_server(config: Config) -> None:
     await site.start()
 
     print(f"\n  Captain Claw Web UI running at http://{host}:{port}")
+    if config.web.api_enabled and server._api_pool:
+        print(f"  OpenAI-compatible API at http://{host}:{port}/v1")
+    if server._oauth_manager:
+        connected = await server._oauth_manager.is_connected()
+        status = "connected" if connected else "ready (not connected)"
+        print(f"  Google OAuth: {status}")
     print(f"  Press Ctrl+C to stop.\n")
 
-    # Keep running until interrupted
-    try:
-        await asyncio.Event().wait()
-    finally:
-        if server._orchestrator:
+    # Keep running until stop signal.
+    await stop_event.wait()
+
+    print("\nShutting down...")
+    # Orchestrator must shut down first — cancels workers before pool.
+    if server._orchestrator:
+        try:
             await server._orchestrator.shutdown()
+        except Exception:
+            pass
+    # Shut down API agent pool.
+    if server._api_pool:
+        try:
+            await server._api_pool.shutdown()
+        except Exception:
+            pass
+    try:
         await server._stop_telegram()
+    except Exception:
+        pass
+    # Close all active WebSocket connections so the server can shut down cleanly.
+    for ws in list(server.clients):
+        try:
+            await ws.close()
+        except Exception:
+            pass
+    server.clients.clear()
+    try:
         await runner.cleanup()
+    except Exception:
+        pass
+    # All resources cleaned up — force exit to avoid hanging on
+    # asyncio.run()'s shutdown_default_executor / thread joins.
+    os._exit(0)
 
 
 def run_web_server(config: Config) -> None:
     """Entry point for running the web server."""
-    asyncio.run(_run_server(config))
+    try:
+        asyncio.run(_run_server(config))
+    except KeyboardInterrupt:
+        pass  # Signal handler handles graceful shutdown.
 
 
 def main() -> None:

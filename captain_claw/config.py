@@ -169,6 +169,30 @@ class PocketTTSToolConfig(BaseModel):
     timeout_seconds: int = 600
 
 
+class SendMailToolConfig(BaseModel):
+    """Send mail tool configuration."""
+
+    provider: str = "smtp"  # mailgun | sendgrid | smtp
+    from_address: str = ""
+    from_name: str = ""
+    # Mailgun
+    mailgun_api_key: str = ""
+    mailgun_domain: str = ""
+    mailgun_base_url: str = "https://api.mailgun.net/v3"
+    # SendGrid
+    sendgrid_api_key: str = ""
+    sendgrid_base_url: str = "https://api.sendgrid.com/v3/mail/send"
+    # SMTP
+    smtp_host: str = "localhost"
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_use_tls: bool = True
+    # General
+    timeout: int = 60
+    max_attachment_bytes: int = 26214400  # 25 MB
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
 
@@ -184,11 +208,13 @@ class ToolsConfig(BaseModel):
         "xlsx_extract",
         "pptx_extract",
         "pocket_tts",
+        "send_mail",
     ]
     shell: ShellToolConfig = Field(default_factory=ShellToolConfig)
     web_fetch: WebFetchToolConfig = Field(default_factory=WebFetchToolConfig)
     web_search: WebSearchToolConfig = Field(default_factory=WebSearchToolConfig)
     pocket_tts: PocketTTSToolConfig = Field(default_factory=PocketTTSToolConfig)
+    send_mail: SendMailToolConfig = Field(default_factory=SendMailToolConfig)
     require_confirmation: list[str] = ["shell", "write"]
     plugin_dirs: list[str] = ["skills/tools"]
 
@@ -348,12 +374,31 @@ class OrchestratorConfig(BaseModel):
     worker_max_retries: int = 2
 
 
+class GoogleOAuthConfig(BaseModel):
+    """Google OAuth2 configuration for Gemini API access via Vertex AI."""
+
+    enabled: bool = False
+    client_id: str = ""
+    client_secret: str = ""
+    project_id: str = ""  # GCP project ID (required for Vertex AI)
+    location: str = "us-central1"  # Vertex AI region
+    scopes: list[str] = Field(default_factory=lambda: [
+        "https://www.googleapis.com/auth/cloud-platform",
+        "openid",
+        "email",
+    ])
+
+
 class WebConfig(BaseModel):
     """Web UI configuration."""
 
     enabled: bool = False
     host: str = "127.0.0.1"
-    port: int = 8340
+    port: int = 23080
+    # OpenAI-compatible API proxy settings
+    api_enabled: bool = True
+    api_pool_max_agents: int = 50
+    api_pool_idle_seconds: float = 600.0
 
 
 class Config(BaseSettings):
@@ -374,6 +419,7 @@ class Config(BaseSettings):
     slack: SlackConfig = Field(default_factory=SlackConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
     web: WebConfig = Field(default_factory=WebConfig)
+    google_oauth: GoogleOAuthConfig = Field(default_factory=GoogleOAuthConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
 
     model_config = SettingsConfigDict(
@@ -553,6 +599,48 @@ class Config(BaseSettings):
             )
         if env_brave_key:
             config.tools.web_search.api_key = env_brave_key
+
+        # Security-sensitive override: send_mail credentials from env/.env.
+        _mail_env_map = {
+            "MAILGUN_API_KEY": "mailgun_api_key",
+            "MAILGUN_DOMAIN": "mailgun_domain",
+            "SENDGRID_API_KEY": "sendgrid_api_key",
+            "MAIL_FROM_ADDRESS": "from_address",
+            "MAIL_FROM_NAME": "from_name",
+            "SMTP_HOST": "smtp_host",
+            "SMTP_PORT": "smtp_port",
+            "SMTP_USERNAME": "smtp_username",
+            "SMTP_PASSWORD": "smtp_password",
+        }
+        for env_key, cfg_attr in _mail_env_map.items():
+            if not str(getattr(config.tools.send_mail, cfg_attr, "") or "").strip():
+                val = (
+                    str(os.getenv(env_key, "")).strip()
+                    or str(dotenv_values.get(env_key, "")).strip()
+                )
+                if val:
+                    # smtp_port needs int conversion.
+                    if cfg_attr == "smtp_port":
+                        try:
+                            setattr(config.tools.send_mail, cfg_attr, int(val))
+                        except ValueError:
+                            pass
+                    else:
+                        setattr(config.tools.send_mail, cfg_attr, val)
+
+        # Google OAuth env overrides.
+        for env_key, cfg_attr in [
+            ("GOOGLE_OAUTH_CLIENT_ID", "client_id"),
+            ("GOOGLE_OAUTH_CLIENT_SECRET", "client_secret"),
+            ("GOOGLE_OAUTH_PROJECT_ID", "project_id"),
+        ]:
+            if not str(getattr(config.google_oauth, cfg_attr, "") or "").strip():
+                val = (
+                    str(os.getenv(env_key, "")).strip()
+                    or str(dotenv_values.get(env_key, "")).strip()
+                )
+                if val:
+                    setattr(config.google_oauth, cfg_attr, val)
 
         # Compatibility fallbacks for common provider env vars.
         provider = str(config.model.provider or "").strip().lower()

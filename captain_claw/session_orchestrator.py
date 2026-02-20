@@ -242,7 +242,28 @@ class SessionOrchestrator:
         }
 
     async def shutdown(self) -> None:
-        """Release all pool resources."""
+        """Cancel running tasks and release all pool resources."""
+        # Cancel all pending worker futures.
+        for tid, fut in list(self._pending_futures.items()):
+            if not fut.done():
+                fut.cancel()
+        for tid, fut in list(self._pending_futures.items()):
+            if not fut.done():
+                try:
+                    await fut
+                except (asyncio.CancelledError, Exception):
+                    pass
+        self._pending_futures.clear()
+
+        # Cancel the execution loop task.
+        if self._execution_task and not self._execution_task.done():
+            self._execution_task.cancel()
+            try:
+                await self._execution_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._execution_task = None
+
         await self._pool.shutdown()
 
     # ------------------------------------------------------------------
@@ -334,84 +355,94 @@ class SessionOrchestrator:
         self._execution_done = False
         self._resume_event.clear()
 
-        # Initial activation.
-        activated = graph.activate_next()
+        try:
+            # Initial activation.
+            activated = graph.activate_next()
 
-        for task in activated:
-            future = asyncio.create_task(self._run_worker(graph, task))
-            self._pending_futures[task.id] = future
-
-        while not graph.is_complete:
-            if not self._pending_futures:
-                # Nothing running and graph not complete.
-                timeout_result = graph.tick_timeouts()
-                if not timeout_result.get("timed_out"):
-                    graph.refresh()
-                    if graph.is_complete:
-                        break
-                    newly_active = graph.activate_next()
-                    if newly_active:
-                        for task in newly_active:
-                            future = asyncio.create_task(self._run_worker(graph, task))
-                            self._pending_futures[task.id] = future
-                        continue
-                    # No tasks activatable — could be waiting for user edits.
-                    # Wait for resume signal instead of breaking.
-                    try:
-                        await asyncio.wait_for(
-                            self._resume_event.wait(), timeout=2.0,
-                        )
-                        self._resume_event.clear()
-                    except asyncio.TimeoutError:
-                        # Check again — user might have restarted a task.
-                        graph.refresh()
-                        if graph.is_complete:
-                            break
-                continue
-
-            # Wait for at least one worker to finish.
-            done, _ = await asyncio.wait(
-                self._pending_futures.values(),
-                timeout=_POLL_INTERVAL_SECONDS,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            # Remove completed futures.
-            completed_ids = [
-                tid for tid, fut in self._pending_futures.items() if fut.done()
-            ]
-            for tid in completed_ids:
-                self._pending_futures.pop(tid, None)
-
-            # Tick timeouts.
-            graph.tick_timeouts()
-
-            # Activate newly ready tasks.
-            newly_active = graph.activate_next()
-            for task in newly_active:
-                self._set_status(f"Orchestrator: starting '{task.title}'...")
+            for task in activated:
                 future = asyncio.create_task(self._run_worker(graph, task))
                 self._pending_futures[task.id] = future
 
-            # Emit progress.
-            self._emit_output(
-                "orchestrator",
-                {"event": "progress", **graph.get_summary()},
-                f"Graph: {graph.get_summary()}",
-            )
-            self._broadcast_event("progress")
+            while not graph.is_complete:
+                if not self._pending_futures:
+                    # Nothing running and graph not complete.
+                    timeout_result = graph.tick_timeouts()
+                    if not timeout_result.get("timed_out"):
+                        graph.refresh()
+                        if graph.is_complete:
+                            break
+                        newly_active = graph.activate_next()
+                        if newly_active:
+                            for task in newly_active:
+                                future = asyncio.create_task(self._run_worker(graph, task))
+                                self._pending_futures[task.id] = future
+                            continue
+                        # No tasks activatable — could be waiting for user edits.
+                        # Wait for resume signal instead of breaking.
+                        try:
+                            await asyncio.wait_for(
+                                self._resume_event.wait(), timeout=2.0,
+                            )
+                            self._resume_event.clear()
+                        except asyncio.TimeoutError:
+                            # Check again — user might have restarted a task.
+                            graph.refresh()
+                            if graph.is_complete:
+                                break
+                    continue
 
-        # Cancel any lingering futures.
+                # Wait for at least one worker to finish.
+                done, _ = await asyncio.wait(
+                    self._pending_futures.values(),
+                    timeout=_POLL_INTERVAL_SECONDS,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                # Remove completed futures.
+                completed_ids = [
+                    tid for tid, fut in self._pending_futures.items() if fut.done()
+                ]
+                for tid in completed_ids:
+                    self._pending_futures.pop(tid, None)
+
+                # Tick timeouts.
+                graph.tick_timeouts()
+
+                # Activate newly ready tasks.
+                newly_active = graph.activate_next()
+                for task in newly_active:
+                    self._set_status(f"Orchestrator: starting '{task.title}'...")
+                    future = asyncio.create_task(self._run_worker(graph, task))
+                    self._pending_futures[task.id] = future
+
+                # Emit progress.
+                self._emit_output(
+                    "orchestrator",
+                    {"event": "progress", **graph.get_summary()},
+                    f"Graph: {graph.get_summary()}",
+                )
+                self._broadcast_event("progress")
+
+        except asyncio.CancelledError:
+            log.info("Execution graph cancelled (shutdown)")
+            await self._cancel_pending_futures()
+            raise
+        finally:
+            await self._cancel_pending_futures()
+            self._execution_done = True
+
+    async def _cancel_pending_futures(self) -> None:
+        """Cancel and await all pending worker futures."""
         for tid, fut in list(self._pending_futures.items()):
             if not fut.done():
                 fut.cancel()
+        for tid, fut in list(self._pending_futures.items()):
+            if not fut.done():
                 try:
                     await fut
                 except (asyncio.CancelledError, Exception):
                     pass
-
         self._pending_futures.clear()
-        self._execution_done = True
 
     async def _run_worker(self, graph: TaskGraph, task: OrchestratorTask) -> None:
         """Execute a single task via a worker agent."""
@@ -463,6 +494,11 @@ class SessionOrchestrator:
                     "messages": ctx.get("included_messages", 0),
                 },
             })
+        except asyncio.CancelledError:
+            log.info("Worker cancelled", task_id=task.id, title=task.title)
+            if task.status == RUNNING:
+                graph.fail_task(task.id, error="cancelled")
+            raise  # Re-raise so the caller knows it was cancelled.
         except asyncio.TimeoutError:
             log.warning("Worker timed out", task_id=task.id, title=task.title)
             graph.fail_task(task.id, error="timeout")

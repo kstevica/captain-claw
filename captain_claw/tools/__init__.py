@@ -21,12 +21,13 @@ from captain_claw.tools.document_extract import (
     XlsxExtractTool,
 )
 from captain_claw.tools.pocket_tts import PocketTTSTool
+from captain_claw.tools.send_mail import SendMailTool
 
 __all__ = [
     "Tool",
     "ToolPolicy",
     "ToolPolicyChain",
-    "ToolRegistry", 
+    "ToolRegistry",
     "ToolResult",
     "get_tool_registry",
     "ShellTool",
@@ -40,4 +41,5 @@ __all__ = [
     "XlsxExtractTool",
     "PptxExtractTool",
     "PocketTTSTool",
+    "SendMailTool",
 ]

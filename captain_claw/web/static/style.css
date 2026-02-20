@@ -69,7 +69,9 @@ html, body {
     letter-spacing: -0.3px;
     color: var(--text-primary);
     white-space: nowrap;
+    text-decoration: none;
 }
+.logo:hover { color: var(--accent); }
 
 .divider {
     width: 1px;

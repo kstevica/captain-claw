@@ -37,12 +37,14 @@ class AgentPool:
         provider: LLMProvider | None = None,
         status_callback: Callable[[str], None] | None = None,
         tool_output_callback: Callable[[str, dict[str, Any], str], None] | None = None,
+        session_name_prefix: str = "orchestrator",
     ):
         self.max_agents = max(1, int(max_agents))
         self.idle_evict_seconds = max(30.0, float(idle_evict_seconds))
         self._provider = provider
         self._status_callback = status_callback
         self._tool_output_callback = tool_output_callback
+        self._session_name_prefix = session_name_prefix
         self._agents: dict[str, Any] = {}  # session_id → Agent
         self._last_used: dict[str, float] = {}
         self._lock = asyncio.Lock()
@@ -150,7 +152,7 @@ class AgentPool:
         if session is None:
             # Session doesn't exist yet — create it.
             session = await session_manager.create_session(
-                name=f"orchestrator::{session_id}",
+                name=f"{self._session_name_prefix}::{session_id}",
             )
         agent.session = session
         agent.session_manager = session_manager
