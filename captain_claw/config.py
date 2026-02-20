@@ -209,6 +209,7 @@ class ToolsConfig(BaseModel):
         "pptx_extract",
         "pocket_tts",
         "send_mail",
+        "google_drive",
     ]
     shell: ShellToolConfig = Field(default_factory=ShellToolConfig)
     web_fetch: WebFetchToolConfig = Field(default_factory=WebFetchToolConfig)
@@ -384,6 +385,7 @@ class GoogleOAuthConfig(BaseModel):
     location: str = "us-central1"  # Vertex AI region
     scopes: list[str] = Field(default_factory=lambda: [
         "https://www.googleapis.com/auth/cloud-platform",
+        "https://www.googleapis.com/auth/drive",
         "openid",
         "email",
     ])
@@ -641,6 +643,23 @@ class Config(BaseSettings):
                 )
                 if val:
                     setattr(config.google_oauth, cfg_attr, val)
+
+        # Allow enabling via env: GOOGLE_OAUTH_ENABLED=true
+        if not config.google_oauth.enabled:
+            env_enabled = (
+                str(os.getenv("GOOGLE_OAUTH_ENABLED", "")).strip().lower()
+                or str(dotenv_values.get("GOOGLE_OAUTH_ENABLED", "")).strip().lower()
+            )
+            if env_enabled in {"true", "1", "yes"}:
+                config.google_oauth.enabled = True
+
+        # Auto-enable Google OAuth when client_id and client_secret are set.
+        if (
+            not config.google_oauth.enabled
+            and str(config.google_oauth.client_id or "").strip()
+            and str(config.google_oauth.client_secret or "").strip()
+        ):
+            config.google_oauth.enabled = True
 
         # Compatibility fallbacks for common provider env vars.
         provider = str(config.model.provider or "").strip().lower()

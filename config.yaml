@@ -98,6 +98,7 @@ tools:
   - pptx_extract
   - pocket_tts
   - send_mail
+  - google_drive
   shell:
     timeout: 30
     blocked:

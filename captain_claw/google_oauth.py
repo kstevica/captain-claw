@@ -31,6 +31,7 @@ GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 
 DEFAULT_SCOPES = [
     "https://www.googleapis.com/auth/cloud-platform",
+    "https://www.googleapis.com/auth/drive",
     "openid",
     "email",
 ]

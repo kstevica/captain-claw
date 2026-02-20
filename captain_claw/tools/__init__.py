@@ -22,6 +22,7 @@ from captain_claw.tools.document_extract import (
 )
 from captain_claw.tools.pocket_tts import PocketTTSTool
 from captain_claw.tools.send_mail import SendMailTool
+from captain_claw.tools.google_drive import GoogleDriveTool
 
 __all__ = [
     "Tool",
@@ -42,4 +43,5 @@ __all__ = [
     "PptxExtractTool",
     "PocketTTSTool",
     "SendMailTool",
+    "GoogleDriveTool",
 ]

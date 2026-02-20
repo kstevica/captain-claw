@@ -243,6 +243,7 @@ class AgentContextMixin:
         from captain_claw.tools import (
             DocxExtractTool,
             GlobTool,
+            GoogleDriveTool,
             PdfExtractTool,
             PocketTTSTool,
             PptxExtractTool,
@@ -283,6 +284,8 @@ class AgentContextMixin:
                 self.tools.register(PocketTTSTool())
             elif tool_name == "send_mail":
                 self.tools.register(SendMailTool())
+            elif tool_name == "google_drive":
+                self.tools.register(GoogleDriveTool())
         self._register_plugin_tools()
 
     def _discover_plugin_tool_files(self) -> list[Path]:

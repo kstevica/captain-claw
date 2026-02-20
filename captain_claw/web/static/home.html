@@ -28,7 +28,7 @@
             </a>
         </div>
 
-        <!-- Google OAuth — hidden until JS checks status -->
+        <!-- Google OAuth -->
         <div class="home-auth" id="google-auth" style="display:none;">
             <a href="/auth/google/login" class="auth-card" id="google-card">
                 <div class="auth-icon" id="google-icon">
@@ -36,7 +36,7 @@
                 </div>
                 <div class="auth-body">
                     <div class="auth-title" id="google-title">Connect Google</div>
-                    <div class="auth-desc" id="google-desc">Sign in with Google to use Gemini models without an API key.</div>
+                    <div class="auth-desc" id="google-desc">Sign in to access Google Drive and use Gemini models via Vertex AI.</div>
                 </div>
                 <div class="auth-status" id="google-status"></div>
             </a>
@@ -45,20 +45,27 @@
 
     <script>
     (async function() {
+        var section = document.getElementById('google-auth');
+        var card = document.getElementById('google-card');
+        var title = document.getElementById('google-title');
+        var desc = document.getElementById('google-desc');
+        var status = document.getElementById('google-status');
+
         try {
             var resp = await fetch('/auth/google/status');
             var data = await resp.json();
         } catch(e) { return; }
 
-        if (!data.enabled) return;
-
-        var section = document.getElementById('google-auth');
-        var card = document.getElementById('google-card');
-        var icon = document.getElementById('google-icon');
-        var title = document.getElementById('google-title');
-        var desc = document.getElementById('google-desc');
-        var status = document.getElementById('google-status');
         section.style.display = '';
+
+        if (!data.enabled) {
+            // OAuth not configured — show a dimmed card with setup hint.
+            card.removeAttribute('href');
+            card.classList.add('not-configured');
+            title.textContent = 'Google Account';
+            desc.textContent = 'Not configured. Set google_oauth.enabled, client_id, and client_secret in config to connect.';
+            return;
+        }
 
         if (data.connected && data.user) {
             card.removeAttribute('href');
