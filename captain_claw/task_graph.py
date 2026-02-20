@@ -22,9 +22,12 @@ QUEUED = "queued"
 RUNNING = "running"
 COMPLETED = "completed"
 FAILED = "failed"
+PAUSED = "paused"
+EDITING = "editing"
 
 _TERMINAL_STATES = {COMPLETED, FAILED}
 _ACTIVATABLE_STATES = {PENDING, QUEUED}
+_HOLD_STATES = {PAUSED, EDITING}
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +53,8 @@ class OrchestratorTask:
     started_at: float = 0.0
     completed_at: float = 0.0
     error: str = ""
+    editing: bool = False
+    original_description: str = ""
 
     def is_terminal(self) -> bool:
         return self.status in _TERMINAL_STATES
@@ -159,6 +164,7 @@ class TaskGraph:
         self._running.clear()
         self._completed.clear()
         self._failed.clear()
+        self._held: set[str] = set()
 
         for tid, task in self._tasks.items():
             if task.status == COMPLETED:
@@ -167,6 +173,8 @@ class TaskGraph:
                 self._failed.add(tid)
             elif task.status == RUNNING:
                 self._running.add(tid)
+            elif task.status in _HOLD_STATES:
+                self._held.add(tid)
             elif task.status in _ACTIVATABLE_STATES:
                 deps_met = all(
                     self._tasks.get(dep_id, OrchestratorTask(id="", title="")).status == COMPLETED
@@ -212,6 +220,8 @@ class TaskGraph:
             task = self._tasks.get(tid)
             if task is None:
                 continue
+            if task.editing:
+                continue  # Skip tasks in edit mode
             task.status = RUNNING
             task.started_at = time.monotonic()
             self._running.add(tid)
@@ -268,6 +278,67 @@ class TaskGraph:
         task.status = FAILED
         task.error = error or "max_retries_exceeded"
         task.completed_at = time.monotonic()
+
+    # ------------------------------------------------------------------
+    # Task control: pause / resume / edit / restart
+    # ------------------------------------------------------------------
+
+    def pause_task(self, task_id: str) -> bool:
+        """Pause a running task.  Returns True if status was changed."""
+        task = self._tasks.get(task_id)
+        if task is None or task.status != RUNNING:
+            return False
+        task.status = PAUSED
+        return True
+
+    def resume_task(self, task_id: str) -> bool:
+        """Resume a paused or editing task back to PENDING."""
+        task = self._tasks.get(task_id)
+        if task is None or task.status not in _HOLD_STATES:
+            return False
+        task.status = PENDING
+        task.editing = False
+        task.started_at = 0.0
+        task.error = ""
+        return True
+
+    def edit_task(self, task_id: str) -> bool:
+        """Put a task into editing mode.
+
+        Works for PENDING, PAUSED, FAILED, COMPLETED, QUEUED states.
+        """
+        task = self._tasks.get(task_id)
+        if task is None:
+            return False
+        if task.status not in {PENDING, PAUSED, FAILED, COMPLETED, QUEUED}:
+            return False
+        task.editing = True
+        task.status = EDITING
+        task.original_description = task.description
+        return True
+
+    def update_task_description(self, task_id: str, new_description: str) -> bool:
+        """Update a task's instructions (description)."""
+        task = self._tasks.get(task_id)
+        if task is None:
+            return False
+        task.description = new_description
+        return True
+
+    def restart_task(self, task_id: str) -> bool:
+        """Reset a terminal / paused / editing task to PENDING."""
+        task = self._tasks.get(task_id)
+        if task is None:
+            return False
+        if task.status not in {FAILED, COMPLETED, PAUSED, EDITING}:
+            return False
+        task.status = PENDING
+        task.result = None
+        task.error = ""
+        task.started_at = 0.0
+        task.completed_at = 0.0
+        task.editing = False
+        return True
 
     # ------------------------------------------------------------------
     # Timeout tick
@@ -338,16 +409,19 @@ class TaskGraph:
         for tid, task in self._tasks.items():
             results[tid] = {
                 "title": task.title,
+                "description": task.description,
                 "status": task.status,
                 "result": task.result,
                 "error": task.error,
                 "retries": task.retries,
+                "editing": task.editing,
             }
         return results
 
     def get_summary(self) -> dict[str, Any]:
         """Compact graph status summary."""
         self.refresh()
+        held = getattr(self, "_held", set())
         return {
             "total": len(self._tasks),
             "completed": len(self._completed),
@@ -355,6 +429,7 @@ class TaskGraph:
             "running": len(self._running),
             "ready": len(self._ready),
             "blocked": len(self._blocked),
+            "paused": len(held),
             "is_complete": self.is_complete,
             "has_failures": self.has_failures,
         }

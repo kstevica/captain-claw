@@ -24,6 +24,7 @@ from captain_claw.session import get_session_manager
 from captain_claw.task_graph import (
     COMPLETED,
     FAILED,
+    RUNNING,
     OrchestratorTask,
     TaskGraph,
 )
@@ -79,6 +80,10 @@ class SessionOrchestrator:
         self._worker_timeout = orch_cfg.worker_timeout_seconds
         self._worker_max_retries = orch_cfg.worker_max_retries
         self._graph: TaskGraph | None = None
+        self._pending_futures: dict[str, asyncio.Task[None]] = {}
+        self._execution_done: bool = False
+        self._execution_task: asyncio.Task[None] | None = None
+        self._resume_event = asyncio.Event()
 
     # ------------------------------------------------------------------
     # Status helpers
@@ -225,6 +230,7 @@ class SessionOrchestrator:
                 "status": task.status,
                 "error": task.error,
                 "retries": task.retries,
+                "editing": task.editing,
                 "result_preview": (
                     str((task.result or {}).get("output", ""))[:300]
                     if task.result else ""
@@ -325,46 +331,57 @@ class SessionOrchestrator:
 
     async def _execute_graph(self, graph: TaskGraph) -> None:
         """Drive the task graph to completion with parallel workers."""
+        self._execution_done = False
+        self._resume_event.clear()
+
         # Initial activation.
         activated = graph.activate_next()
-        pending_futures: dict[str, asyncio.Task[None]] = {}
 
         for task in activated:
             future = asyncio.create_task(self._run_worker(graph, task))
-            pending_futures[task.id] = future
+            self._pending_futures[task.id] = future
 
         while not graph.is_complete:
-            if not pending_futures:
-                # Nothing running and graph not complete — likely stuck.
+            if not self._pending_futures:
+                # Nothing running and graph not complete.
                 timeout_result = graph.tick_timeouts()
                 if not timeout_result.get("timed_out"):
-                    # No timeouts either — force complete check.
                     graph.refresh()
                     if graph.is_complete:
                         break
-                    # Attempt activation once more.
                     newly_active = graph.activate_next()
-                    if not newly_active:
-                        log.warning("Orchestrator graph stuck — no tasks runnable")
-                        break
-                    for task in newly_active:
-                        future = asyncio.create_task(self._run_worker(graph, task))
-                        pending_futures[task.id] = future
+                    if newly_active:
+                        for task in newly_active:
+                            future = asyncio.create_task(self._run_worker(graph, task))
+                            self._pending_futures[task.id] = future
+                        continue
+                    # No tasks activatable — could be waiting for user edits.
+                    # Wait for resume signal instead of breaking.
+                    try:
+                        await asyncio.wait_for(
+                            self._resume_event.wait(), timeout=2.0,
+                        )
+                        self._resume_event.clear()
+                    except asyncio.TimeoutError:
+                        # Check again — user might have restarted a task.
+                        graph.refresh()
+                        if graph.is_complete:
+                            break
                 continue
 
             # Wait for at least one worker to finish.
             done, _ = await asyncio.wait(
-                pending_futures.values(),
+                self._pending_futures.values(),
                 timeout=_POLL_INTERVAL_SECONDS,
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
             # Remove completed futures.
             completed_ids = [
-                tid for tid, fut in pending_futures.items() if fut.done()
+                tid for tid, fut in self._pending_futures.items() if fut.done()
             ]
             for tid in completed_ids:
-                pending_futures.pop(tid, None)
+                self._pending_futures.pop(tid, None)
 
             # Tick timeouts.
             graph.tick_timeouts()
@@ -374,7 +391,7 @@ class SessionOrchestrator:
             for task in newly_active:
                 self._set_status(f"Orchestrator: starting '{task.title}'...")
                 future = asyncio.create_task(self._run_worker(graph, task))
-                pending_futures[task.id] = future
+                self._pending_futures[task.id] = future
 
             # Emit progress.
             self._emit_output(
@@ -385,13 +402,16 @@ class SessionOrchestrator:
             self._broadcast_event("progress")
 
         # Cancel any lingering futures.
-        for tid, fut in pending_futures.items():
+        for tid, fut in list(self._pending_futures.items()):
             if not fut.done():
                 fut.cancel()
                 try:
                     await fut
                 except (asyncio.CancelledError, Exception):
                     pass
+
+        self._pending_futures.clear()
+        self._execution_done = True
 
     async def _run_worker(self, graph: TaskGraph, task: OrchestratorTask) -> None:
         """Execute a single task via a worker agent."""
@@ -467,6 +487,161 @@ class SessionOrchestrator:
             })
         finally:
             await self._pool.release(task.session_id)
+
+    # ------------------------------------------------------------------
+    # Task control: pause / edit / update / restart / resume
+    # ------------------------------------------------------------------
+
+    async def pause_task(self, task_id: str) -> dict[str, Any]:
+        """Pause a running task.  Cancels its worker."""
+        if not self._graph:
+            return {"ok": False, "error": "No active graph"}
+
+        task = self._graph.get_task(task_id)
+        if task is None:
+            return {"ok": False, "error": "Task not found"}
+        if task.status != RUNNING:
+            return {"ok": False, "error": f"Task is {task.status}, not running"}
+
+        # Cancel the worker future.
+        fut = self._pending_futures.get(task_id)
+        if fut and not fut.done():
+            fut.cancel()
+            try:
+                await fut
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._pending_futures.pop(task_id, None)
+
+        self._graph.pause_task(task_id)
+        await self._pool.release(task.session_id)
+
+        self._broadcast_event("task_paused", {
+            "task_id": task_id, "title": task.title,
+        })
+        return {"ok": True}
+
+    async def edit_task(self, task_id: str) -> dict[str, Any]:
+        """Put a task into edit mode."""
+        if not self._graph:
+            return {"ok": False, "error": "No active graph"}
+
+        task = self._graph.get_task(task_id)
+        if task is None:
+            return {"ok": False, "error": "Task not found"}
+
+        # If task is running, pause it first.
+        if task.status == RUNNING:
+            pause_result = await self.pause_task(task_id)
+            if not pause_result.get("ok"):
+                return pause_result
+
+        if not self._graph.edit_task(task_id):
+            return {"ok": False, "error": f"Cannot edit task in {task.status} state"}
+
+        self._broadcast_event("task_editing", {
+            "task_id": task_id, "title": task.title,
+            "description": task.description,
+        })
+        return {"ok": True, "description": task.description}
+
+    async def update_task(self, task_id: str, description: str) -> dict[str, Any]:
+        """Update a task's instructions (description)."""
+        if not self._graph:
+            return {"ok": False, "error": "No active graph"}
+
+        if not self._graph.update_task_description(task_id, description):
+            return {"ok": False, "error": "Task not found"}
+
+        task = self._graph.get_task(task_id)
+        self._broadcast_event("task_updated", {
+            "task_id": task_id,
+            "title": task.title if task else task_id,
+            "description": description,
+        })
+        return {"ok": True}
+
+    async def restart_task(self, task_id: str) -> dict[str, Any]:
+        """Restart a failed/completed/paused/editing task."""
+        if not self._graph:
+            return {"ok": False, "error": "No active graph"}
+
+        task = self._graph.get_task(task_id)
+        if task is None:
+            return {"ok": False, "error": "Task not found"}
+
+        # Evict the cached agent so the task starts fresh on next run.
+        if task.session_id:
+            await self._pool.evict(task.session_id)
+
+        if not self._graph.restart_task(task_id):
+            return {"ok": False, "error": f"Cannot restart task in {task.status} state"}
+
+        # Un-cascade dependents that failed because this task failed.
+        self._uncascade_dependents(task_id)
+
+        self._broadcast_event("task_restarted", {
+            "task_id": task_id, "title": task.title,
+        })
+
+        # Re-enter the execution loop if it has exited.
+        self._reenter_execution_if_needed()
+        return {"ok": True}
+
+    async def resume_task(self, task_id: str) -> dict[str, Any]:
+        """Resume a paused or editing task back to PENDING."""
+        if not self._graph:
+            return {"ok": False, "error": "No active graph"}
+
+        task = self._graph.get_task(task_id)
+        if task is None:
+            return {"ok": False, "error": "Task not found"}
+
+        # If resuming from edit mode and description changed, evict cached
+        # agent so the task re-runs with a fresh session (no stale context).
+        was_editing = task.editing
+        desc_changed = (
+            was_editing
+            and task.original_description
+            and task.description != task.original_description
+        )
+
+        if not self._graph.resume_task(task_id):
+            return {"ok": False, "error": "Cannot resume task"}
+
+        if desc_changed and task.session_id:
+            await self._pool.evict(task.session_id)
+
+        self._broadcast_event("task_resumed", {
+            "task_id": task_id,
+            "title": task.title if task else task_id,
+        })
+
+        # Re-enter the execution loop if it has exited.
+        self._reenter_execution_if_needed()
+        return {"ok": True}
+
+    def _uncascade_dependents(self, task_id: str) -> None:
+        """Reset cascade-failed dependents when their dependency is restarted."""
+        if not self._graph:
+            return
+        for tid, task in self._graph.tasks.items():
+            if task.status == FAILED and task.error == "dependency_failed":
+                if task_id in task.depends_on:
+                    task.status = "pending"
+                    task.error = ""
+                    task.completed_at = 0.0
+
+    def _reenter_execution_if_needed(self) -> None:
+        """Re-enter execution loop if it has exited, or signal it."""
+        if self._execution_done and self._graph:
+            self._execution_done = False
+            self._execution_task = asyncio.create_task(
+                self._execute_graph(self._graph)
+            )
+        else:
+            # Signal the running loop to check for new activatable tasks.
+            self._resume_event.set()
 
     # ------------------------------------------------------------------
     # 5. SYNTHESIZE

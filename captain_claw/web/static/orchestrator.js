@@ -14,6 +14,8 @@
     let isRephrasing = false;
     let availableSkills = [];     // [{name, skill_name, description}]
     let selectedSkills = new Set(); // skill names currently selected
+    let editingTaskId = null;     // task currently being edited
+    let aggregatedContext = { totalTokens: 0, promptTokens: 0, completionTokens: 0 };
 
     // ── DOM ──────────────────────────────────────────────────
     const $ = (sel) => document.querySelector(sel);
@@ -180,6 +182,21 @@
             case 'completed':
                 handleCompleted(msg);
                 break;
+            case 'task_paused':
+                handleTaskPaused(msg);
+                break;
+            case 'task_editing':
+                handleTaskEditingEvent(msg);
+                break;
+            case 'task_updated':
+                handleTaskUpdated(msg);
+                break;
+            case 'task_restarted':
+                handleTaskRestarted(msg);
+                break;
+            case 'task_resumed':
+                handleTaskResumed(msg);
+                break;
             case 'error':
                 addLogEntry('task_failed', msg.message || 'An error occurred');
                 setOrchestratorState('failed');
@@ -252,6 +269,14 @@
             tasks[tid].context = msg.context || null;
         }
 
+        // Aggregate token consumption across all tasks
+        if (msg.usage) {
+            aggregatedContext.totalTokens += (msg.usage.total_tokens || 0);
+            aggregatedContext.promptTokens += (msg.usage.prompt_tokens || 0);
+            aggregatedContext.completionTokens += (msg.usage.completion_tokens || 0);
+        }
+        updateContextSummary();
+
         // Build context metrics string for the log entry
         const metrics = formatContextMetrics(msg.usage, msg.context);
         addLogEntry('task_completed', `Completed: ${msg.title || tid}`, metrics);
@@ -278,6 +303,64 @@
             : 'Orchestration completed successfully');
     }
 
+    function handleTaskPaused(msg) {
+        const tid = msg.task_id;
+        if (tasks[tid]) {
+            tasks[tid].status = 'paused';
+        }
+        addLogEntry('task_paused', `Paused: ${msg.title || tid}`);
+        renderGraph();
+        updateSelectedDetail();
+    }
+
+    function handleTaskEditingEvent(msg) {
+        const tid = msg.task_id;
+        if (tasks[tid]) {
+            tasks[tid].status = 'editing';
+            tasks[tid].description = msg.description || tasks[tid].description;
+        }
+        addLogEntry('task_editing', `Editing: ${msg.title || tid}`);
+        renderGraph();
+        updateSelectedDetail();
+    }
+
+    function handleTaskUpdated(msg) {
+        const tid = msg.task_id;
+        if (tasks[tid]) {
+            tasks[tid].description = msg.description || tasks[tid].description;
+        }
+        addLogEntry('progress', `Instructions updated: ${msg.title || tid}`);
+        updateSelectedDetail();
+    }
+
+    function handleTaskRestarted(msg) {
+        const tid = msg.task_id;
+        if (tasks[tid]) {
+            tasks[tid].status = 'pending';
+            tasks[tid].result = null;
+            tasks[tid].error = null;
+            tasks[tid].startTime = null;
+            tasks[tid].endTime = null;
+            tasks[tid].usage = null;
+            tasks[tid].context = null;
+        }
+        addLogEntry('task_restarted', `Restarted: ${msg.title || tid}`);
+        setOrchestratorState('running');
+        renderGraph();
+        updateSelectedDetail();
+    }
+
+    function handleTaskResumed(msg) {
+        const tid = msg.task_id;
+        if (tasks[tid]) {
+            tasks[tid].status = 'pending';
+        }
+        editingTaskId = null;
+        addLogEntry('progress', `Resumed: ${msg.title || tid}`);
+        renderGraph();
+        updateSelectedDetail();
+    }
+
     // ── Orchestrator state ───────────────────────────────────
 
     function setOrchestratorState(state) {
@@ -297,6 +380,26 @@
         summaryRunning.textContent = s.running || 0;
         summaryFailed.textContent = s.failed || 0;
         summaryPending.textContent = (s.ready || 0) + (s.blocked || 0);
+        const pausedEl = document.querySelector('#summaryPaused .count');
+        if (pausedEl) pausedEl.textContent = s.paused || 0;
+    }
+
+    function updateContextSummary() {
+        var ctxIn = document.getElementById('summaryCtxIn');
+        var ctxOut = document.getElementById('summaryCtxOut');
+        var ctxTotal = document.getElementById('summaryCtxTotal');
+        if (!ctxTotal) return;
+
+        if (aggregatedContext.totalTokens === 0) {
+            ctxIn.textContent = '—';
+            ctxOut.textContent = '—';
+            ctxTotal.textContent = '—';
+            return;
+        }
+
+        ctxIn.textContent = formatTokenCount(aggregatedContext.promptTokens);
+        ctxOut.textContent = formatTokenCount(aggregatedContext.completionTokens);
+        ctxTotal.textContent = formatTokenCount(aggregatedContext.totalTokens);
     }
 
     // ── Graph rendering ──────────────────────────────────────
@@ -344,8 +447,21 @@
                 html += `<div class="task-card-title">${esc(t.title)}</div>`;
 
                 if (t.session_id) {
-                    const shortSession = t.session_id.length > 12 ? t.session_id.slice(0, 12) + '...' : t.session_id;
-                    html += `<div class="task-card-session">${esc(shortSession)}</div>`;
+                    html += `<div class="task-card-session">${esc(t.session_id)}</div>`;
+                }
+
+                // Show token consumption and context utilization on card
+                if (t.usage || t.context) {
+                    var u = t.usage || {};
+                    var c = t.context || {};
+                    var ctxParts = [];
+                    if (u.total_tokens) ctxParts.push(formatTokenCount(u.total_tokens) + ' tok');
+                    if (c.budget) ctxParts.push(formatTokenCount(c.prompt_tokens || c.budget) + '/' + formatTokenCount(c.budget));
+                    if (c.utilization) ctxParts.push(c.utilization + '%');
+                    if (ctxParts.length > 0) {
+                        var highCls = (c.utilization && c.utilization > 80) ? ' high-util' : '';
+                        html += '<div class="task-card-ctx' + highCls + '">' + ctxParts.join(' · ') + '</div>';
+                    }
                 }
 
                 if (t.depends_on && t.depends_on.length > 0) {
@@ -422,9 +538,25 @@
 
         detailTitle.textContent = `${t.title} (${tid})`;
 
-        let html = '<dl>';
-        html += `<dt>Status</dt><dd>${esc(t.status)}</dd>`;
-        html += `<dt>Session</dt><dd>${esc(t.session_id || '—')}</dd>`;
+        let html = '';
+
+        // ── Action bar ──
+        const actionHtml = buildActionButtons(t);
+        if (actionHtml) {
+            html += `<div class="task-actions">${actionHtml}</div>`;
+        }
+
+        // ── Session pipeline (orchestrator stages) ──
+        html += buildSessionPipeline();
+
+        // ── Task pipeline visualization ──
+        html += '<div class="task-section-label">Task Pipeline</div>';
+        html += buildPipeline(t);
+
+        // ── Metadata ──
+        html += '<dl>';
+        html += `<dt>Status</dt><dd><span class="status-badge ${t.status}">${esc(t.status)}</span></dd>`;
+        html += `<dt>Session</dt><dd><span class="detail-session-id">${esc(t.session_id || '—')}</span></dd>`;
         html += `<dt>Depends on</dt><dd>${t.depends_on && t.depends_on.length ? t.depends_on.map(esc).join(', ') : 'none'}</dd>`;
         html += `<dt>Retries</dt><dd>${t.retries || 0}</dd>`;
 
@@ -433,45 +565,82 @@
             html += `<dt>Elapsed</dt><dd>${elapsed.toFixed(1)}s</dd>`;
         }
 
-        // Usage / context metrics
-        if (t.usage || t.context) {
-            const u = t.usage || {};
-            const c = t.context || {};
+        // Token consumption for this session
+        if (t.usage) {
+            const u = t.usage;
             html += '<dt>Tokens</dt><dd>';
             if (u.total_tokens) {
-                html += `${formatTokenCount(u.total_tokens)} total (${formatTokenCount(u.prompt_tokens || 0)} in / ${formatTokenCount(u.completion_tokens || 0)} out)`;
+                html += `<strong>${formatTokenCount(u.total_tokens)}</strong> total`;
+                html += ` <span class="detail-tokens-breakdown">(${formatTokenCount(u.prompt_tokens || 0)} in / ${formatTokenCount(u.completion_tokens || 0)} out)</span>`;
             } else {
                 html += '—';
             }
             html += '</dd>';
-            html += `<dt>Context</dt><dd>`;
-            const parts = [];
-            if (c.budget) parts.push(`budget: ${formatTokenCount(c.budget)}`);
-            if (c.utilization) parts.push(`used: ${c.utilization}%`);
-            if (c.messages) parts.push(`msgs: ${c.messages}`);
-            html += parts.length > 0 ? parts.join(' · ') : '—';
+        }
+
+        // Session context status (tokens / cap / %)
+        if (t.context) {
+            const c = t.context;
+            html += '<dt>Context</dt><dd>';
+            if (c.budget) {
+                const promptTok = c.prompt_tokens || 0;
+                const pct = c.utilization || 0;
+                const pctCls = pct > 80 ? ' ctx-high' : '';
+                html += `<span class="detail-ctx-bar">`;
+                html += `${formatTokenCount(promptTok)} / ${formatTokenCount(c.budget)}`;
+                if (pct > 0) {
+                    html += ` <span class="detail-ctx-pct${pctCls}">${pct}%</span>`;
+                }
+                html += `</span>`;
+                if (c.messages) {
+                    html += ` · ${c.messages} msgs`;
+                }
+            } else {
+                html += '—';
+            }
             html += '</dd>';
         }
 
         html += '</dl>';
 
-        // Description
-        if (t.description) {
-            html += `<div style="margin-top:10px;font-size:12px;color:var(--text-secondary);">${esc(t.description)}</div>`;
+        // ── Instructions section ──
+        html += '<div class="task-instructions-section">';
+        html += '<div class="task-instructions-label">Instructions</div>';
+        if (editingTaskId === tid) {
+            html += `<textarea class="task-instructions-editor" id="taskInstructionsEditor">${esc(t.description || '')}</textarea>`;
+            html += '<div class="task-instructions-actions">';
+            html += '<button class="btn-save-instructions">Save &amp; Run</button>';
+            html += '<button class="btn-cancel-edit">Cancel</button>';
+            html += '</div>';
+        } else {
+            const desc = t.description || '';
+            html += `<div class="task-instructions-content">${desc ? esc(desc) : '<em style="color:var(--text-muted);">No instructions</em>'}</div>`;
         }
+        html += '</div>';
 
-        // Result output
+        // ── Output ──
         if (t.result) {
+            html += '<div class="task-section-label">Output</div>';
             html += `<div class="orch-detail-output">${esc(t.result)}</div>`;
         }
 
-        // Error
+        // ── Error ──
         if (t.error) {
+            html += '<div class="task-section-label">Error</div>';
             html += `<div class="orch-detail-output orch-detail-error">${esc(t.error)}</div>`;
         }
 
         detailBody.innerHTML = html;
         orchDetail.classList.add('visible');
+
+        // Wire up action buttons and editor buttons
+        wireActionButtons(tid);
+
+        // Auto-focus editor if in edit mode
+        if (editingTaskId === tid) {
+            const editor = detailBody.querySelector('#taskInstructionsEditor');
+            if (editor) editor.focus();
+        }
     }
 
     function updateSelectedDetail() {
@@ -636,9 +805,11 @@
         tasks = {};
         graphSummary = {};
         selectedTaskId = null;
+        aggregatedContext = { totalTokens: 0, promptTokens: 0, completionTokens: 0 };
         orchDetail.classList.remove('visible');
         setOrchestratorState('running');
         clearLog();
+        updateContextSummary();
         addLogEntry('progress', `Submitting: ${input}`);
         renderGraph();
         updateSummaryBar();
@@ -660,6 +831,187 @@
         const d = document.createElement('div');
         d.textContent = String(str);
         return d.innerHTML;
+    }
+
+    // ── Task API actions ────────────────────────────────
+
+    async function apiTaskAction(action, taskId, extraBody) {
+        try {
+            const body = { task_id: taskId, ...(extraBody || {}) };
+            const resp = await fetch(`/api/orchestrator/task/${action}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const data = await resp.json();
+            if (!data.ok) {
+                addLogEntry('task_failed', `Action "${action}" failed: ${data.error || 'unknown'}`);
+            }
+            return data;
+        } catch (e) {
+            addLogEntry('task_failed', `Action "${action}" error: ${e.message}`);
+            return { ok: false, error: e.message };
+        }
+    }
+
+    function buildActionButtons(t) {
+        const status = t.status;
+        let html = '';
+
+        if (status === 'pending' || status === 'queued') {
+            html += '<button class="task-btn task-btn-edit" data-action="edit">Edit Instructions</button>';
+        } else if (status === 'running') {
+            html += '<button class="task-btn task-btn-pause" data-action="pause">Pause</button>';
+        } else if (status === 'paused') {
+            html += '<button class="task-btn task-btn-edit" data-action="edit">Edit Instructions</button>';
+            html += '<button class="task-btn task-btn-resume" data-action="resume">Resume</button>';
+            html += '<button class="task-btn task-btn-restart" data-action="restart">Restart</button>';
+        } else if (status === 'editing') {
+            // Buttons are in the editor area instead
+        } else if (status === 'completed') {
+            html += '<button class="task-btn task-btn-edit" data-action="edit">Edit &amp; Re-run</button>';
+            html += '<button class="task-btn task-btn-restart" data-action="restart">Re-run</button>';
+        } else if (status === 'failed') {
+            html += '<button class="task-btn task-btn-edit" data-action="edit">Edit &amp; Retry</button>';
+            html += '<button class="task-btn task-btn-restart" data-action="restart">Restart</button>';
+        }
+
+        return html;
+    }
+
+    function buildPipeline(t) {
+        const stages = ['pending', 'running', 'completed'];
+        const statusMap = {
+            'pending': 0, 'queued': 0,
+            'running': 1, 'paused': 1, 'editing': 1,
+            'completed': 2, 'failed': 2,
+        };
+        const currentIdx = (t.status in statusMap) ? statusMap[t.status] : 0;
+
+        let html = '<div class="task-pipeline">';
+        stages.forEach((stage, i) => {
+            let cls = '';
+            if (i < currentIdx) cls = 'done';
+            else if (i === currentIdx) {
+                cls = 'current';
+                if (t.status === 'failed') cls += ' failed';
+                else if (t.status === 'paused') cls += ' paused';
+                else if (t.status === 'editing') cls += ' editing';
+            }
+            html += `<span class="pipeline-stage ${cls}">${stage}</span>`;
+            if (i < stages.length - 1) {
+                html += '<span class="pipeline-arrow">&rarr;</span>';
+            }
+        });
+        html += '</div>';
+        return html;
+    }
+
+    function buildSessionPipeline() {
+        // Shows the 5 orchestrator stages with current progress
+        const stages = [
+            { key: 'decompose', label: 'Decompose' },
+            { key: 'build',     label: 'Build Graph' },
+            { key: 'assign',    label: 'Assign Sessions' },
+            { key: 'execute',   label: 'Execute' },
+            { key: 'synthesize', label: 'Synthesize' },
+        ];
+
+        // Determine current stage index from orchestratorState and graph state
+        let currentStageIdx = -1;
+        if (orchestratorState === 'idle') {
+            currentStageIdx = -1;
+        } else if (orchestratorState === 'completed' || orchestratorState === 'failed') {
+            currentStageIdx = 5; // all done
+        } else {
+            // Check graph state to infer which stage we're in
+            const taskIds = Object.keys(tasks);
+            if (taskIds.length === 0) {
+                currentStageIdx = 0; // still decomposing
+            } else {
+                const hasSession = taskIds.some(function(tid) { return tasks[tid].session_id; });
+                const hasRunningOrDone = taskIds.some(function(tid) {
+                    var s = tasks[tid].status;
+                    return s === 'running' || s === 'completed' || s === 'failed' || s === 'paused' || s === 'editing';
+                });
+                if (hasRunningOrDone) {
+                    currentStageIdx = 3; // executing
+                } else if (hasSession) {
+                    currentStageIdx = 3; // assigned, about to execute
+                } else {
+                    currentStageIdx = 1; // building graph
+                }
+            }
+        }
+
+        let html = '<div class="session-pipeline">';
+        html += '<div class="session-pipeline-label">Orchestration Pipeline</div>';
+        html += '<div class="session-pipeline-stages">';
+        stages.forEach(function(stage, i) {
+            let cls = 'session-pipeline-stage';
+            if (i < currentStageIdx) cls += ' done';
+            else if (i === currentStageIdx) {
+                cls += ' current';
+                if (orchestratorState === 'failed') cls += ' failed';
+            }
+            html += '<span class="' + cls + '">' + stage.label + '</span>';
+            if (i < stages.length - 1) {
+                html += '<span class="pipeline-arrow">&rarr;</span>';
+            }
+        });
+        html += '</div></div>';
+        return html;
+    }
+
+    function wireActionButtons(tid) {
+        detailBody.querySelectorAll('.task-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const action = btn.dataset.action;
+                btn.disabled = true;
+                if (action === 'edit') {
+                    const result = await apiTaskAction('edit', tid);
+                    if (result.ok) {
+                        editingTaskId = tid;
+                        showTaskDetail(tid);
+                    }
+                } else if (action === 'pause') {
+                    await apiTaskAction('pause', tid);
+                } else if (action === 'resume') {
+                    editingTaskId = null;
+                    await apiTaskAction('resume', tid);
+                } else if (action === 'restart') {
+                    editingTaskId = null;
+                    await apiTaskAction('restart', tid);
+                }
+                btn.disabled = false;
+            });
+        });
+
+        // Save & Run button in editor
+        const saveBtn = detailBody.querySelector('.btn-save-instructions');
+        if (saveBtn) {
+            saveBtn.addEventListener('click', async () => {
+                const editor = detailBody.querySelector('#taskInstructionsEditor');
+                if (editor) {
+                    saveBtn.disabled = true;
+                    await apiTaskAction('update', tid, { description: editor.value });
+                    editingTaskId = null;
+                    await apiTaskAction('resume', tid);
+                    saveBtn.disabled = false;
+                }
+            });
+        }
+
+        // Cancel button in editor
+        const cancelBtn = detailBody.querySelector('.btn-cancel-edit');
+        if (cancelBtn) {
+            cancelBtn.addEventListener('click', async () => {
+                cancelBtn.disabled = true;
+                editingTaskId = null;
+                await apiTaskAction('resume', tid);
+                cancelBtn.disabled = false;
+            });
+        }
     }
 
     // ── Skills ───────────────────────────────────────────
@@ -803,14 +1155,15 @@
 
                 // Determine orchestrator state
                 const hasRunning = data.status.tasks.some(t => t.status === 'running');
+                const hasPaused = data.status.tasks.some(t => t.status === 'paused' || t.status === 'editing');
                 const hasFailed = data.status.tasks.some(t => t.status === 'failed');
-                const allDone = data.status.tasks.every(t => t.status === 'completed' || t.status === 'failed');
+                const allTerminal = data.status.tasks.every(t => t.status === 'completed' || t.status === 'failed');
 
-                if (hasRunning) {
+                if (hasRunning || hasPaused) {
                     setOrchestratorState('running');
-                } else if (allDone && hasFailed) {
+                } else if (allTerminal && hasFailed) {
                     setOrchestratorState('failed');
-                } else if (allDone) {
+                } else if (allTerminal) {
                     setOrchestratorState('completed');
                 }
 

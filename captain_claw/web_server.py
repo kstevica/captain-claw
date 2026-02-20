@@ -1089,6 +1089,11 @@ class WebServer:
         app.router.add_get("/api/orchestrator/status", self._get_orchestrator_status)
         app.router.add_get("/api/orchestrator/skills", self._get_orchestrator_skills)
         app.router.add_post("/api/orchestrator/rephrase", self._rephrase_orchestrator_input)
+        app.router.add_post("/api/orchestrator/task/edit", self._edit_orchestrator_task)
+        app.router.add_post("/api/orchestrator/task/update", self._update_orchestrator_task)
+        app.router.add_post("/api/orchestrator/task/restart", self._restart_orchestrator_task)
+        app.router.add_post("/api/orchestrator/task/pause", self._pause_orchestrator_task)
+        app.router.add_post("/api/orchestrator/task/resume", self._resume_orchestrator_task)
         # Static files (serve index.html at /)
         if STATIC_DIR.is_dir():
             app.router.add_static("/static/", STATIC_DIR, show_index=False)
@@ -1182,6 +1187,81 @@ class WebServer:
             rephrased = user_input  # fallback to original
 
         return web.json_response({"rephrased": rephrased, "original": user_input})
+
+    # ------------------------------------------------------------------
+    # Orchestrator task control endpoints
+    # ------------------------------------------------------------------
+
+    async def _edit_orchestrator_task(self, request: web.Request) -> web.Response:
+        """Put a task into edit mode."""
+        if not self._orchestrator:
+            return web.json_response({"ok": False, "error": "No orchestrator"}, status=400)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+        task_id = str(body.get("task_id", "")).strip()
+        if not task_id:
+            return web.json_response({"ok": False, "error": "Missing task_id"}, status=400)
+        result = await self._orchestrator.edit_task(task_id)
+        return web.json_response(result)
+
+    async def _update_orchestrator_task(self, request: web.Request) -> web.Response:
+        """Update task instructions (description)."""
+        if not self._orchestrator:
+            return web.json_response({"ok": False, "error": "No orchestrator"}, status=400)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+        task_id = str(body.get("task_id", "")).strip()
+        description = str(body.get("description", ""))
+        if not task_id:
+            return web.json_response({"ok": False, "error": "Missing task_id"}, status=400)
+        result = await self._orchestrator.update_task(task_id, description)
+        return web.json_response(result)
+
+    async def _restart_orchestrator_task(self, request: web.Request) -> web.Response:
+        """Restart a failed/completed/paused task."""
+        if not self._orchestrator:
+            return web.json_response({"ok": False, "error": "No orchestrator"}, status=400)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+        task_id = str(body.get("task_id", "")).strip()
+        if not task_id:
+            return web.json_response({"ok": False, "error": "Missing task_id"}, status=400)
+        result = await self._orchestrator.restart_task(task_id)
+        return web.json_response(result)
+
+    async def _pause_orchestrator_task(self, request: web.Request) -> web.Response:
+        """Pause a running task."""
+        if not self._orchestrator:
+            return web.json_response({"ok": False, "error": "No orchestrator"}, status=400)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+        task_id = str(body.get("task_id", "")).strip()
+        if not task_id:
+            return web.json_response({"ok": False, "error": "Missing task_id"}, status=400)
+        result = await self._orchestrator.pause_task(task_id)
+        return web.json_response(result)
+
+    async def _resume_orchestrator_task(self, request: web.Request) -> web.Response:
+        """Resume a paused/editing task."""
+        if not self._orchestrator:
+            return web.json_response({"ok": False, "error": "No orchestrator"}, status=400)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+        task_id = str(body.get("task_id", "")).strip()
+        if not task_id:
+            return web.json_response({"ok": False, "error": "Missing task_id"}, status=400)
+        result = await self._orchestrator.resume_task(task_id)
+        return web.json_response(result)
 
 
 async def _run_server(config: Config) -> None:

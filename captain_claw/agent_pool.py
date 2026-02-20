@@ -46,6 +46,10 @@ class AgentPool:
         self._agents: dict[str, Any] = {}  # session_id → Agent
         self._last_used: dict[str, float] = {}
         self._lock = asyncio.Lock()
+        # Per-session creation locks — prevents duplicate concurrent creation
+        # for the same session while allowing different sessions to create
+        # agents in parallel.
+        self._creating: dict[str, asyncio.Lock] = {}
         # Shared instruction loader so all workers reuse the same template cache.
         self._shared_instructions = InstructionLoader()
 
@@ -64,28 +68,55 @@ class AgentPool:
         - Share the LLM provider instance
         - Skip full initialize() (no last-active session loading)
 
+        The global lock is held only for dict lookups/inserts so that
+        multiple sessions can create their agents concurrently (the heavy
+        part — LLM provider init, session loading, tool registration).
+
         Returns:
             Agent instance bound to session_id.
         """
+        # --- Fast path: already exists. ---
         async with self._lock:
             if session_id in self._agents:
                 self._last_used[session_id] = time.monotonic()
                 return self._agents[session_id]
 
-            # Evict idle agents if at capacity.
-            if len(self._agents) >= self.max_agents:
-                evicted = self._evict_idle_locked()
-                if evicted == 0 and len(self._agents) >= self.max_agents:
-                    # Force evict the oldest.
-                    oldest_id = min(self._last_used, key=self._last_used.get)
-                    self._agents.pop(oldest_id, None)
-                    self._last_used.pop(oldest_id, None)
-                    log.info("Force-evicted oldest agent from pool", session_id=oldest_id)
+            # Get or create a per-session lock so only one coroutine
+            # creates the agent for this session; others wait on *it*
+            # (not the global lock).
+            if session_id not in self._creating:
+                self._creating[session_id] = asyncio.Lock()
+            session_lock = self._creating[session_id]
 
+        # --- Per-session lock: create agent outside global lock. ---
+        async with session_lock:
+            # Re-check: another coroutine may have finished creating it.
+            async with self._lock:
+                if session_id in self._agents:
+                    self._last_used[session_id] = time.monotonic()
+                    self._creating.pop(session_id, None)
+                    return self._agents[session_id]
+
+                # Evict idle agents if at capacity.
+                if len(self._agents) >= self.max_agents:
+                    evicted = self._evict_idle_locked()
+                    if evicted == 0 and len(self._agents) >= self.max_agents:
+                        # Force evict the oldest.
+                        oldest_id = min(self._last_used, key=self._last_used.get)
+                        self._agents.pop(oldest_id, None)
+                        self._last_used.pop(oldest_id, None)
+                        log.info("Force-evicted oldest agent from pool", session_id=oldest_id)
+
+            # Heavy work runs WITHOUT the global lock — concurrent creation
+            # of agents for *different* sessions proceeds in parallel.
             agent = await self._create_worker_agent(session_id)
-            self._agents[session_id] = agent
-            self._last_used[session_id] = time.monotonic()
-            log.info("Created worker agent", session_id=session_id, pool_size=len(self._agents))
+
+            # --- Register under global lock. ---
+            async with self._lock:
+                self._agents[session_id] = agent
+                self._last_used[session_id] = time.monotonic()
+                self._creating.pop(session_id, None)
+                log.info("Created worker agent", session_id=session_id, pool_size=len(self._agents))
             return agent
 
     async def _create_worker_agent(self, session_id: str) -> Any:
@@ -138,6 +169,20 @@ class AgentPool:
         agent._initialized = True
 
         return agent
+
+    async def evict(self, session_id: str) -> bool:
+        """Remove a specific agent from the pool (e.g. after task edit).
+
+        Returns True if an agent was evicted.
+        """
+        async with self._lock:
+            removed = self._agents.pop(session_id, None)
+            self._last_used.pop(session_id, None)
+            self._creating.pop(session_id, None)
+            if removed is not None:
+                log.info("Evicted agent for edited task", session_id=session_id)
+                return True
+            return False
 
     async def release(self, session_id: str) -> None:
         """Mark agent as idle (eligible for eviction)."""

@@ -649,7 +649,18 @@ class AgentContextMixin:
         candidate_messages: list[dict[str, Any]] = []
         skipped_historical_tools: list[dict[str, Any]] = []
         filter_historical_tools = tool_messages_from_index is not None
+        # Collect tool_call_ids that were filtered so we can strip the
+        # corresponding tool_calls from their parent assistant messages.
+        _filtered_tool_call_ids: set[str] = set()
         if self.session:
+            # First pass: identify which tool response messages will be filtered.
+            if filter_historical_tools:
+                for idx, msg in enumerate(self.session.messages):
+                    if msg.get("role") == "tool" and idx < tool_messages_from_index:
+                        tcid = str(msg.get("tool_call_id", "")).strip()
+                        if tcid:
+                            _filtered_tool_call_ids.add(tcid)
+
             for idx, msg in enumerate(self.session.messages):
                 tool_name = str(msg.get("tool_name", "")).strip().lower()
                 if (
@@ -666,6 +677,23 @@ class AgentContextMixin:
                 ):
                     skipped_historical_tools.append(msg)
                     continue
+                # Strip tool_calls from assistant messages whose tool responses
+                # were filtered out, preventing orphaned tool_calls references.
+                if (
+                    _filtered_tool_call_ids
+                    and msg.get("role") == "assistant"
+                    and msg.get("tool_calls")
+                ):
+                    remaining_calls = [
+                        tc for tc in msg["tool_calls"]
+                        if str(tc.get("id", "")).strip() not in _filtered_tool_call_ids
+                    ]
+                    if len(remaining_calls) != len(msg["tool_calls"]):
+                        msg = dict(msg)  # shallow copy to avoid mutating session
+                        if remaining_calls:
+                            msg["tool_calls"] = remaining_calls
+                        else:
+                            msg.pop("tool_calls", None)
                 candidate_messages.append(msg)
 
         memory_note, memory_debug = self._build_tool_memory_note(

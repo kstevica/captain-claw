@@ -30,10 +30,6 @@ class WebFetchTool(Tool):
                 "type": "number",
                 "description": "Maximum characters to return (default from config, typically 100000)",
             },
-            "extract_mode": {
-                "type": "string",
-                "description": "Extraction mode: 'text' (default, readable text) or 'html' (raw HTML)",
-            },
         },
         "required": ["url"],
     }
@@ -51,52 +47,38 @@ class WebFetchTool(Tool):
         self,
         url: str,
         max_chars: int | None = None,
-        extract_mode: str = "text",
         **kwargs: Any,
     ) -> ToolResult:
-        """Fetch a web page.
-        
+        """Fetch a web page and extract readable text via BeautifulSoup.
+
         Args:
             url: URL to fetch
             max_chars: Max characters to return
-            extract_mode: Extraction mode
-        
+
         Returns:
-            ToolResult with page content
+            ToolResult with extracted readable text
         """
+        # Ignore any extract_mode passed by the LLM — always use text extraction.
+        kwargs.pop("extract_mode", None)
+
         try:
             log.info("Fetching URL", url=url)
             cfg = get_config()
             configured_max = int(getattr(cfg.tools.web_fetch, "max_chars", 100000))
             effective_max_chars = configured_max if max_chars is None else int(max_chars)
             effective_max_chars = max(1, effective_max_chars)
-            
+
             response = await self.client.get(url)
             response.raise_for_status()
-            
-            mode = (extract_mode or "text").strip().lower()
-            if mode in {"markdown", "md"}:
-                mode = "text"
-            if mode in {"raw", "raw_html"}:
-                mode = "html"
 
-            if mode == "html":
-                content = response.text
-            elif mode == "text":
-                content = self._extract_readable_text(response.text, base_url=url)
-            else:
-                return ToolResult(
-                    success=False,
-                    error=f"Unsupported extract_mode '{extract_mode}'. Use 'text' or 'html'.",
-                )
+            content = self._extract_readable_text(response.text, base_url=url)
 
             if len(content) > effective_max_chars:
                 content = content[:effective_max_chars] + "\n... [truncated]"
-            
+
             # Add header with URL info
             output = f"[URL: {url}]\n"
             output += f"[Status: {response.status_code}]\n"
-            output += f"[Mode: {mode}]\n"
             output += f"[Size: {len(response.text)} chars]\n\n"
             output += content
             
