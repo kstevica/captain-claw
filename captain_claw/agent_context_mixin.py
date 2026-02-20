@@ -227,6 +227,14 @@ class AgentContextMixin:
         # Register default tools
         self._register_default_tools()
 
+        # Initialize file registry for single-agent mode.
+        # Orchestration mode creates its own shared registry per run.
+        if getattr(self, "_file_registry", None) is None:
+            from captain_claw.file_registry import FileRegistry
+            self._file_registry = FileRegistry(
+                orchestration_id=f"session-{self.session.id}" if self.session else "default",
+            )
+
         self._initialized = True
         log.info("Agent initialized", session_id=self.session.id)
 

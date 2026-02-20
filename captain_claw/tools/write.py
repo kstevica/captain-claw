@@ -7,6 +7,9 @@ from typing import Any
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 
+# Late-import guard: FileRegistry is imported inside execute() to avoid
+# circular imports when the module is loaded before the registry module.
+
 log = get_logger(__name__)
 
 
@@ -125,7 +128,20 @@ class WriteTool(Tool):
             requested = Path(path).expanduser()
             if str(requested) != str(file_path):
                 redirect_note = f" (requested: {path})"
-            
+
+            # Register the logical -> physical mapping so other tasks /
+            # later reads can find this file by its original requested path.
+            file_registry = kwargs.get("_file_registry")
+            if file_registry is not None:
+                try:
+                    file_registry.register(
+                        logical_path=path,
+                        physical_path=str(file_path),
+                        task_id=str(kwargs.get("_task_id", "")),
+                    )
+                except Exception:
+                    pass  # Best-effort; don't fail writes on registry errors
+
             return ToolResult(
                 success=True,
                 content=f"Written {len(content)} chars to {file_path}{redirect_note}",

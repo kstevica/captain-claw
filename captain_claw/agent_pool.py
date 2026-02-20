@@ -60,7 +60,7 @@ class AgentPool:
         """Current number of agents in the pool."""
         return len(self._agents)
 
-    async def get_or_create(self, session_id: str) -> Any:
+    async def get_or_create(self, session_id: str, file_registry: Any | None = None) -> Any:
         """Get a cached agent for session_id or create a fresh one.
 
         Worker agents:
@@ -74,6 +74,11 @@ class AgentPool:
         multiple sessions can create their agents concurrently (the heavy
         part — LLM provider init, session loading, tool registration).
 
+        Args:
+            session_id: Session to bind the agent to.
+            file_registry: Optional shared FileRegistry for cross-task
+                file resolution within an orchestration run.
+
         Returns:
             Agent instance bound to session_id.
         """
@@ -81,7 +86,12 @@ class AgentPool:
         async with self._lock:
             if session_id in self._agents:
                 self._last_used[session_id] = time.monotonic()
-                return self._agents[session_id]
+                agent = self._agents[session_id]
+                # Always update file_registry so the agent sees the latest
+                # mappings from other completed tasks in this run.
+                if file_registry is not None:
+                    agent._file_registry = file_registry
+                return agent
 
             # Get or create a per-session lock so only one coroutine
             # creates the agent for this session; others wait on *it*
@@ -97,7 +107,10 @@ class AgentPool:
                 if session_id in self._agents:
                     self._last_used[session_id] = time.monotonic()
                     self._creating.pop(session_id, None)
-                    return self._agents[session_id]
+                    agent = self._agents[session_id]
+                    if file_registry is not None:
+                        agent._file_registry = file_registry
+                    return agent
 
                 # Evict idle agents if at capacity.
                 if len(self._agents) >= self.max_agents:
@@ -111,7 +124,7 @@ class AgentPool:
 
             # Heavy work runs WITHOUT the global lock — concurrent creation
             # of agents for *different* sessions proceeds in parallel.
-            agent = await self._create_worker_agent(session_id)
+            agent = await self._create_worker_agent(session_id, file_registry=file_registry)
 
             # --- Register under global lock. ---
             async with self._lock:
@@ -121,7 +134,7 @@ class AgentPool:
                 log.info("Created worker agent", session_id=session_id, pool_size=len(self._agents))
             return agent
 
-    async def _create_worker_agent(self, session_id: str) -> Any:
+    async def _create_worker_agent(self, session_id: str, file_registry: Any | None = None) -> Any:
         """Create a worker agent bound to a specific session.
 
         Bypasses Agent.initialize() and manually configures the agent
@@ -166,6 +179,10 @@ class AgentPool:
 
         # Share instruction loader cache.
         agent.instructions = self._shared_instructions
+
+        # Attach shared file registry for cross-task file resolution.
+        if file_registry is not None:
+            agent._file_registry = file_registry
 
         # Mark as initialized to allow complete() calls.
         agent._initialized = True

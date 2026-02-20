@@ -499,6 +499,7 @@ class ToolRegistry:
         abort_event: asyncio.Event | None = None,
         runtime_base_path: Path | None = None,
         approval_callback: Callable[[str], bool] | None = None,
+        file_registry: Any | None = None,
     ) -> ToolResult:
         """Execute a tool by name.
 
@@ -611,6 +612,7 @@ class ToolRegistry:
                     _saved_base_path=effective_saved_base,
                     _session_id=(session_id or "").strip(),
                     _abort_event=tool_abort_event,
+                    _file_registry=file_registry,
                 )
             )
             abort_wait_task = asyncio.create_task(tool_abort_event.wait())

@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 from captain_claw.agent_pool import AgentPool
 from captain_claw.config import get_config
+from captain_claw.file_registry import FileRegistry
 from captain_claw.instructions import InstructionLoader
 from captain_claw.llm import LLMProvider, Message, get_provider
 from captain_claw.logging import get_logger
@@ -84,6 +85,8 @@ class SessionOrchestrator:
         self._execution_done: bool = False
         self._execution_task: asyncio.Task[None] | None = None
         self._resume_event = asyncio.Event()
+        # Shared file registry for cross-task file resolution within a run.
+        self._file_registry: FileRegistry | None = None
 
     # ------------------------------------------------------------------
     # Status helpers
@@ -133,6 +136,11 @@ class SessionOrchestrator:
         """
         self._set_status("Orchestrator: decomposing request...")
         self._broadcast_event("decomposing", {"input": user_input[:500]})
+
+        # Create a shared file registry for this orchestration run.
+        import uuid
+        orch_run_id = str(uuid.uuid4())
+        self._file_registry = FileRegistry(orchestration_id=orch_run_id)
 
         # 1. DECOMPOSE
         plan = await self._decompose(user_input)
@@ -367,28 +375,29 @@ class SessionOrchestrator:
                 if not self._pending_futures:
                     # Nothing running and graph not complete.
                     timeout_result = graph.tick_timeouts()
-                    if not timeout_result.get("timed_out"):
+                    await self._broadcast_timeout_events(timeout_result)
+                    graph.refresh()
+                    if graph.is_complete:
+                        break
+                    newly_active = graph.activate_next()
+                    if newly_active:
+                        for task in newly_active:
+                            future = asyncio.create_task(self._run_worker(graph, task))
+                            self._pending_futures[task.id] = future
+                        continue
+                    # No tasks activatable — could be waiting for user edits
+                    # or timeout postponements.
+                    # Wait for resume signal instead of breaking.
+                    try:
+                        await asyncio.wait_for(
+                            self._resume_event.wait(), timeout=2.0,
+                        )
+                        self._resume_event.clear()
+                    except asyncio.TimeoutError:
+                        # Check again — user might have restarted a task.
                         graph.refresh()
                         if graph.is_complete:
                             break
-                        newly_active = graph.activate_next()
-                        if newly_active:
-                            for task in newly_active:
-                                future = asyncio.create_task(self._run_worker(graph, task))
-                                self._pending_futures[task.id] = future
-                            continue
-                        # No tasks activatable — could be waiting for user edits.
-                        # Wait for resume signal instead of breaking.
-                        try:
-                            await asyncio.wait_for(
-                                self._resume_event.wait(), timeout=2.0,
-                            )
-                            self._resume_event.clear()
-                        except asyncio.TimeoutError:
-                            # Check again — user might have restarted a task.
-                            graph.refresh()
-                            if graph.is_complete:
-                                break
                     continue
 
                 # Wait for at least one worker to finish.
@@ -405,8 +414,9 @@ class SessionOrchestrator:
                 for tid in completed_ids:
                     self._pending_futures.pop(tid, None)
 
-                # Tick timeouts.
-                graph.tick_timeouts()
+                # Tick timeouts and broadcast warning/countdown events.
+                timeout_result = graph.tick_timeouts()
+                await self._broadcast_timeout_events(timeout_result)
 
                 # Activate newly ready tasks.
                 newly_active = graph.activate_next()
@@ -430,6 +440,61 @@ class SessionOrchestrator:
         finally:
             await self._cancel_pending_futures()
             self._execution_done = True
+
+    async def _broadcast_timeout_events(self, timeout_result: dict[str, Any]) -> None:
+        """Broadcast timeout warning, countdown, restart, and failure events."""
+        # Newly warned tasks.
+        for tid in timeout_result.get("warned", []):
+            task = self._graph.get_task(tid) if self._graph else None
+            title = task.title if task else tid
+            self._broadcast_event("timeout_warning", {
+                "task_id": tid,
+                "title": title,
+                "remaining_seconds": 60,
+            })
+            log.info("Task timeout warning", task_id=tid, title=title)
+
+        # Tasks whose grace period expired and were restarted — cancel their
+        # worker futures so the agent stops working on the old attempt.
+        for tid in timeout_result.get("restarted", []):
+            task = self._graph.get_task(tid) if self._graph else None
+            title = task.title if task else tid
+            await self._cancel_worker_future(tid)
+            self._broadcast_event("task_restarted", {
+                "task_id": tid,
+                "title": title,
+                "reason": "timeout",
+            })
+            log.info("Task restarted after timeout", task_id=tid, title=title)
+
+        # Tasks that exhausted retries after timeout — cancel their workers.
+        for tid in timeout_result.get("failed", []):
+            task = self._graph.get_task(tid) if self._graph else None
+            title = task.title if task else tid
+            await self._cancel_worker_future(tid)
+            self._broadcast_event("task_failed", {
+                "task_id": tid,
+                "title": title,
+                "error": "timeout_exhausted",
+            })
+            log.info("Task failed (timeout exhausted)", task_id=tid, title=title)
+
+        # Active countdown updates for tasks in warning phase.
+        countdown = timeout_result.get("countdown", [])
+        if countdown:
+            self._broadcast_event("timeout_countdown", {
+                "tasks": countdown,
+            })
+
+    async def _cancel_worker_future(self, task_id: str) -> None:
+        """Cancel and clean up a single worker future."""
+        fut = self._pending_futures.pop(task_id, None)
+        if fut and not fut.done():
+            fut.cancel()
+            try:
+                await fut
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def _cancel_pending_futures(self) -> None:
         """Cancel and await all pending worker futures."""
@@ -458,16 +523,29 @@ class SessionOrchestrator:
         })
 
         try:
-            agent = await self._pool.get_or_create(task.session_id)
+            agent = await self._pool.get_or_create(
+                task.session_id,
+                file_registry=self._file_registry,
+            )
+
+            # Build file manifest from prior completed tasks so the worker
+            # knows which files are available from upstream dependencies.
+            file_manifest = ""
+            if self._file_registry and len(self._file_registry) > 0:
+                manifest_text = self._file_registry.build_manifest()
+                if manifest_text:
+                    file_manifest = f"\n\n{manifest_text}\n"
+
             worker_prompt = self._instructions.render(
                 "orchestrator_worker_prompt.md",
                 task_title=task.title,
                 task_description=task.description,
+                file_manifest=file_manifest,
             )
-            response = await asyncio.wait_for(
-                agent.complete(worker_prompt),
-                timeout=task.timeout_seconds,
-            )
+            # No asyncio.wait_for timeout — timeout management is handled
+            # by tick_timeouts() in the execution loop, which provides
+            # a warning phase and user-postpone flow before restarting.
+            response = await agent.complete(worker_prompt)
             result = {
                 "success": True,
                 "output": str(response or "").strip(),
@@ -657,6 +735,25 @@ class SessionOrchestrator:
         self._reenter_execution_if_needed()
         return {"ok": True}
 
+    async def postpone_task(self, task_id: str) -> dict[str, Any]:
+        """Postpone a timeout warning, granting another full timeout period."""
+        if not self._graph:
+            return {"ok": False, "error": "No active graph"}
+
+        task = self._graph.get_task(task_id)
+        if task is None:
+            return {"ok": False, "error": "Task not found"}
+
+        if not self._graph.postpone_task(task_id):
+            return {"ok": False, "error": f"Cannot postpone task in {task.status} state"}
+
+        self._broadcast_event("timeout_postponed", {
+            "task_id": task_id,
+            "title": task.title,
+        })
+        log.info("Task timeout postponed", task_id=task_id, title=task.title)
+        return {"ok": True}
+
     def _uncascade_dependents(self, task_id: str) -> None:
         """Reset cascade-failed dependents when their dependency is restarted."""
         if not self._graph:
@@ -692,6 +789,12 @@ class SessionOrchestrator:
         """Feed all task results back to the LLM for a final combined answer."""
         results = graph.get_results()
         task_results_text = self._format_results_for_synthesis(results)
+
+        # Append file manifest so synthesis knows about all created files.
+        if self._file_registry and len(self._file_registry) > 0:
+            manifest = self._file_registry.build_manifest()
+            if manifest:
+                task_results_text = f"{task_results_text}\n\n{manifest}"
 
         user_prompt = self._instructions.render(
             "orchestrator_synthesize_user_prompt.md",

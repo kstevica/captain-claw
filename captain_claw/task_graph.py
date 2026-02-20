@@ -24,10 +24,14 @@ COMPLETED = "completed"
 FAILED = "failed"
 PAUSED = "paused"
 EDITING = "editing"
+TIMEOUT_WARNING = "timeout_warning"
 
 _TERMINAL_STATES = {COMPLETED, FAILED}
 _ACTIVATABLE_STATES = {PENDING, QUEUED}
 _HOLD_STATES = {PAUSED, EDITING}
+
+# Grace period (seconds) between timeout warning and automatic restart.
+TIMEOUT_GRACE_SECONDS = 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +59,8 @@ class OrchestratorTask:
     error: str = ""
     editing: bool = False
     original_description: str = ""
+    # Timeout warning grace period tracking.
+    timeout_warning_at: float = 0.0  # monotonic timestamp when warning started
 
     def is_terminal(self) -> bool:
         return self.status in _TERMINAL_STATES
@@ -171,7 +177,9 @@ class TaskGraph:
                 self._completed.add(tid)
             elif task.status == FAILED:
                 self._failed.add(tid)
-            elif task.status == RUNNING:
+            elif task.status == RUNNING or task.status == TIMEOUT_WARNING:
+                # TIMEOUT_WARNING tasks are still running; they count
+                # against the parallel slot limit.
                 self._running.add(tid)
             elif task.status in _HOLD_STATES:
                 self._held.add(tid)
@@ -344,19 +352,65 @@ class TaskGraph:
     # Timeout tick
     # ------------------------------------------------------------------
 
-    def tick_timeouts(self) -> dict[str, list[str]]:
-        """Check running tasks for timeout, apply retry/fail policy.
+    def tick_timeouts(self) -> dict[str, Any]:
+        """Check running tasks for timeout, apply warning → grace → restart flow.
 
-        Returns dict with keys: timed_out, retried, failed.
+        Instead of immediately retrying/failing on timeout, tasks enter a
+        60-second grace period (TIMEOUT_WARNING). The user can postpone the
+        restart (resetting the timer for another timeout_seconds). If the
+        grace period expires without postponement, the task is restarted.
+
+        Returns dict with keys:
+            - ``warned``: tasks that just entered the warning phase
+            - ``restarted``: tasks whose grace period expired → restarted
+            - ``failed``: tasks that exhausted retries
+            - ``countdown``: list of ``{task_id, remaining_seconds}`` for
+              tasks currently in the warning phase
         """
         now = time.monotonic()
-        timed_out: list[str] = []
-        retried: list[str] = []
+        warned: list[str] = []
+        restarted: list[str] = []
         failed: list[str] = []
+        countdown: list[dict[str, Any]] = []
 
         for tid in list(self._running):
             task = self._tasks.get(tid)
-            if task is None or task.status != RUNNING:
+            if task is None:
+                continue
+
+            # ── Phase 2: task already in warning → check grace period ──
+            if task.status == TIMEOUT_WARNING:
+                if task.timeout_warning_at <= 0:
+                    task.timeout_warning_at = now
+                grace_elapsed = now - task.timeout_warning_at
+                remaining = max(0.0, TIMEOUT_GRACE_SECONDS - grace_elapsed)
+
+                if remaining > 0:
+                    # Still within grace period; report countdown.
+                    countdown.append({
+                        "task_id": tid,
+                        "remaining_seconds": round(remaining),
+                    })
+                    continue
+
+                # Grace period expired → restart or fail.
+                if task.retries < task.max_retries:
+                    task.retries += 1
+                    task.status = PENDING
+                    task.started_at = 0.0
+                    task.timeout_warning_at = 0.0
+                    task.error = f"timeout_restart_{task.retries}"
+                    restarted.append(tid)
+                else:
+                    task.status = FAILED
+                    task.error = "timeout_exhausted"
+                    task.completed_at = now
+                    task.timeout_warning_at = 0.0
+                    failed.append(tid)
+                continue
+
+            # ── Phase 1: running task → check if timeout reached ──
+            if task.status != RUNNING:
                 continue
             if task.started_at <= 0:
                 continue
@@ -364,23 +418,43 @@ class TaskGraph:
             if elapsed < task.timeout_seconds:
                 continue
 
-            timed_out.append(tid)
-            if task.retries < task.max_retries:
-                task.retries += 1
-                task.status = PENDING
-                task.started_at = 0.0
-                task.error = f"timeout_retry_{task.retries}"
-                retried.append(tid)
-            else:
-                task.status = FAILED
-                task.error = "timeout_exhausted"
-                task.completed_at = now
-                failed.append(tid)
+            # Timeout reached → enter warning phase.
+            task.status = TIMEOUT_WARNING
+            task.timeout_warning_at = now
+            warned.append(tid)
+            countdown.append({
+                "task_id": tid,
+                "remaining_seconds": round(TIMEOUT_GRACE_SECONDS),
+            })
 
-        if timed_out:
+        if warned or restarted or failed:
             self.refresh()
 
-        return {"timed_out": timed_out, "retried": retried, "failed": failed}
+        return {
+            "warned": warned,
+            "restarted": restarted,
+            "failed": failed,
+            "countdown": countdown,
+        }
+
+    def postpone_task(self, task_id: str) -> bool:
+        """Postpone a timeout warning, granting another full timeout period.
+
+        Resets the task back to RUNNING with a fresh started_at timestamp,
+        so the next timeout check starts from zero.
+
+        Returns True if the task was successfully postponed.
+        """
+        task = self._tasks.get(task_id)
+        if task is None:
+            return False
+        if task.status != TIMEOUT_WARNING:
+            return False
+        task.status = RUNNING
+        task.started_at = time.monotonic()
+        task.timeout_warning_at = 0.0
+        task.error = ""
+        return True
 
     # ------------------------------------------------------------------
     # Graph-level queries

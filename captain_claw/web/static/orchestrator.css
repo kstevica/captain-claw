@@ -1028,3 +1028,78 @@ html, body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ─── Timeout warning styles ─────────────────────── */
+
+.task-card.timeout_warning {
+    border-left-color: var(--orange);
+    animation: card-pulse-warning 1s ease-in-out infinite;
+}
+
+@keyframes card-pulse-warning {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(247, 129, 102, 0); }
+    50% { box-shadow: 0 0 8px 2px rgba(247, 129, 102, 0.3); }
+}
+
+.task-card-status.timeout_warning {
+    color: var(--orange);
+}
+
+.status-badge.timeout_warning {
+    color: var(--orange);
+    background: #f7816630;
+}
+
+.pipeline-stage.current.timeout-warning {
+    background: #f7816630;
+    color: var(--orange);
+    animation: pulse-stage-warning 1s ease-in-out infinite;
+}
+
+@keyframes pulse-stage-warning {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+.timeout-countdown-badge {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--orange);
+    background: #f7816615;
+    border: 1px solid #f7816640;
+    border-radius: 4px;
+    padding: 2px 6px;
+    margin-top: 4px;
+    animation: pulse-stage-warning 1s ease-in-out infinite;
+}
+
+.timeout-warning-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: #f7816618;
+    border: 1px solid #f7816640;
+    border-radius: 6px;
+    padding: 8px 12px;
+    margin-bottom: 8px;
+    animation: card-pulse-warning 1.5s ease-in-out infinite;
+}
+
+.timeout-warning-icon {
+    font-size: 18px;
+}
+
+.detail-timeout-countdown {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--orange);
+}
+
+.task-btn-postpone {
+    color: var(--orange);
+    border-color: var(--orange);
+}
+
+.task-btn-postpone:hover {
+    background: #f7816615;
+}

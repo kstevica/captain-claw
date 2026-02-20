@@ -1474,6 +1474,7 @@ class WebServer:
         app.router.add_post("/api/orchestrator/task/restart", self._restart_orchestrator_task)
         app.router.add_post("/api/orchestrator/task/pause", self._pause_orchestrator_task)
         app.router.add_post("/api/orchestrator/task/resume", self._resume_orchestrator_task)
+        app.router.add_post("/api/orchestrator/task/postpone", self._postpone_orchestrator_task)
         # OpenAI-compatible API proxy routes
         if self.config.web.api_enabled and self._api_pool:
             app.router.add_post("/v1/chat/completions", self._api_chat_completions)
@@ -1654,6 +1655,20 @@ class WebServer:
         if not task_id:
             return web.json_response({"ok": False, "error": "Missing task_id"}, status=400)
         result = await self._orchestrator.resume_task(task_id)
+        return web.json_response(result)
+
+    async def _postpone_orchestrator_task(self, request: web.Request) -> web.Response:
+        """Postpone a task's timeout warning, granting another timeout period."""
+        if not self._orchestrator:
+            return web.json_response({"ok": False, "error": "No orchestrator"}, status=400)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+        task_id = str(body.get("task_id", "")).strip()
+        if not task_id:
+            return web.json_response({"ok": False, "error": "Missing task_id"}, status=400)
+        result = await self._orchestrator.postpone_task(task_id)
         return web.json_response(result)
 
     # ── OpenAI-compatible API proxy ──────────────────────────────────

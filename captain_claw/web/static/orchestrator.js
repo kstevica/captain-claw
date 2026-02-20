@@ -16,6 +16,8 @@
     let selectedSkills = new Set(); // skill names currently selected
     let editingTaskId = null;     // task currently being edited
     let aggregatedContext = { totalTokens: 0, promptTokens: 0, completionTokens: 0 };
+    let timeoutCountdowns = {};   // task_id → remaining seconds
+    let countdownInterval = null; // client-side 1s countdown ticker
 
     // ── DOM ──────────────────────────────────────────────────
     const $ = (sel) => document.querySelector(sel);
@@ -197,6 +199,15 @@
             case 'task_resumed':
                 handleTaskResumed(msg);
                 break;
+            case 'timeout_warning':
+                handleTimeoutWarning(msg);
+                break;
+            case 'timeout_countdown':
+                handleTimeoutCountdown(msg);
+                break;
+            case 'timeout_postponed':
+                handleTimeoutPostponed(msg);
+                break;
             case 'error':
                 addLogEntry('task_failed', msg.message || 'An error occurred');
                 setOrchestratorState('failed');
@@ -291,6 +302,8 @@
             tasks[tid].error = msg.error || 'Unknown error';
             tasks[tid].endTime = Date.now();
         }
+        // Clean up timeout countdown state.
+        delete timeoutCountdowns[tid];
         addLogEntry('task_failed', `Failed: ${msg.title || tid} — ${msg.error || '?'}`);
         renderGraph();
         updateSelectedDetail();
@@ -344,7 +357,10 @@
             tasks[tid].usage = null;
             tasks[tid].context = null;
         }
-        addLogEntry('task_restarted', `Restarted: ${msg.title || tid}`);
+        // Clean up timeout countdown state.
+        delete timeoutCountdowns[tid];
+        const reason = msg.reason === 'timeout' ? ' (timeout)' : '';
+        addLogEntry('task_restarted', `Restarted${reason}: ${msg.title || tid}`);
         setOrchestratorState('running');
         renderGraph();
         updateSelectedDetail();
@@ -359,6 +375,91 @@
         addLogEntry('progress', `Resumed: ${msg.title || tid}`);
         renderGraph();
         updateSelectedDetail();
+    }
+
+    function handleTimeoutWarning(msg) {
+        const tid = msg.task_id;
+        if (tasks[tid]) {
+            tasks[tid].status = 'timeout_warning';
+        }
+        timeoutCountdowns[tid] = msg.remaining_seconds || 60;
+        startCountdownTicker();
+        addLogEntry('task_failed', `⏱ Timeout warning: ${msg.title || tid} — will restart in ${timeoutCountdowns[tid]}s`);
+        renderGraph();
+        updateSelectedDetail();
+    }
+
+    function handleTimeoutCountdown(msg) {
+        const taskList = msg.tasks || [];
+        taskList.forEach(function (entry) {
+            timeoutCountdowns[entry.task_id] = entry.remaining_seconds;
+        });
+        // Remove countdown entries for tasks no longer in warning
+        Object.keys(timeoutCountdowns).forEach(function (tid) {
+            if (!taskList.find(function (e) { return e.task_id === tid; })) {
+                delete timeoutCountdowns[tid];
+            }
+        });
+        if (Object.keys(timeoutCountdowns).length > 0) {
+            startCountdownTicker();
+        }
+        updateCountdownDisplays();
+        updateSelectedDetail();
+    }
+
+    function handleTimeoutPostponed(msg) {
+        const tid = msg.task_id;
+        if (tasks[tid]) {
+            tasks[tid].status = 'running';
+        }
+        delete timeoutCountdowns[tid];
+        addLogEntry('progress', `⏱ Timeout postponed: ${msg.title || tid} — timer reset`);
+        renderGraph();
+        updateSelectedDetail();
+    }
+
+    function startCountdownTicker() {
+        if (countdownInterval) return; // already running
+        countdownInterval = setInterval(function () {
+            let anyActive = false;
+            Object.keys(timeoutCountdowns).forEach(function (tid) {
+                if (timeoutCountdowns[tid] > 0) {
+                    timeoutCountdowns[tid]--;
+                    anyActive = true;
+                }
+            });
+            if (!anyActive) {
+                clearInterval(countdownInterval);
+                countdownInterval = null;
+            }
+            updateCountdownDisplays();
+        }, 1000);
+    }
+
+    function updateCountdownDisplays() {
+        // Update countdown badges on task cards
+        Object.keys(timeoutCountdowns).forEach(function (tid) {
+            const card = orchGraph.querySelector(`.task-card[data-task-id="${tid}"]`);
+            if (!card) return;
+            let badge = card.querySelector('.timeout-countdown-badge');
+            if (timeoutCountdowns[tid] > 0) {
+                if (!badge) {
+                    badge = document.createElement('div');
+                    badge.className = 'timeout-countdown-badge';
+                    card.appendChild(badge);
+                }
+                badge.textContent = `⏱ Restarting in ${timeoutCountdowns[tid]}s`;
+            } else if (badge) {
+                badge.remove();
+            }
+        });
+        // Update detail panel countdown if visible
+        if (selectedTaskId && timeoutCountdowns[selectedTaskId] !== undefined) {
+            const countdownEl = detailBody.querySelector('.detail-timeout-countdown');
+            if (countdownEl) {
+                countdownEl.textContent = `Restarting in ${timeoutCountdowns[selectedTaskId]}s`;
+            }
+        }
     }
 
     // ── Orchestrator state ───────────────────────────────────
@@ -544,6 +645,14 @@
         const actionHtml = buildActionButtons(t);
         if (actionHtml) {
             html += `<div class="task-actions">${actionHtml}</div>`;
+        }
+
+        // ── Timeout warning banner ──
+        if (t.status === 'timeout_warning' && timeoutCountdowns[tid] !== undefined) {
+            html += '<div class="timeout-warning-banner">';
+            html += '<span class="timeout-warning-icon">⏱</span>';
+            html += '<span class="detail-timeout-countdown">Restarting in ' + timeoutCountdowns[tid] + 's</span>';
+            html += '</div>';
         }
 
         // ── Session pipeline (orchestrator stages) ──
@@ -806,6 +915,8 @@
         graphSummary = {};
         selectedTaskId = null;
         aggregatedContext = { totalTokens: 0, promptTokens: 0, completionTokens: 0 };
+        timeoutCountdowns = {};
+        if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
         orchDetail.classList.remove('visible');
         setOrchestratorState('running');
         clearLog();
@@ -862,6 +973,8 @@
             html += '<button class="task-btn task-btn-edit" data-action="edit">Edit Instructions</button>';
         } else if (status === 'running') {
             html += '<button class="task-btn task-btn-pause" data-action="pause">Pause</button>';
+        } else if (status === 'timeout_warning') {
+            html += '<button class="task-btn task-btn-postpone" data-action="postpone">Postpone (5 min)</button>';
         } else if (status === 'paused') {
             html += '<button class="task-btn task-btn-edit" data-action="edit">Edit Instructions</button>';
             html += '<button class="task-btn task-btn-resume" data-action="resume">Resume</button>';
@@ -883,7 +996,7 @@
         const stages = ['pending', 'running', 'completed'];
         const statusMap = {
             'pending': 0, 'queued': 0,
-            'running': 1, 'paused': 1, 'editing': 1,
+            'running': 1, 'paused': 1, 'editing': 1, 'timeout_warning': 1,
             'completed': 2, 'failed': 2,
         };
         const currentIdx = (t.status in statusMap) ? statusMap[t.status] : 0;
@@ -897,6 +1010,7 @@
                 if (t.status === 'failed') cls += ' failed';
                 else if (t.status === 'paused') cls += ' paused';
                 else if (t.status === 'editing') cls += ' editing';
+                else if (t.status === 'timeout_warning') cls += ' timeout-warning';
             }
             html += `<span class="pipeline-stage ${cls}">${stage}</span>`;
             if (i < stages.length - 1) {
@@ -932,7 +1046,7 @@
                 const hasSession = taskIds.some(function(tid) { return tasks[tid].session_id; });
                 const hasRunningOrDone = taskIds.some(function(tid) {
                     var s = tasks[tid].status;
-                    return s === 'running' || s === 'completed' || s === 'failed' || s === 'paused' || s === 'editing';
+                    return s === 'running' || s === 'completed' || s === 'failed' || s === 'paused' || s === 'editing' || s === 'timeout_warning';
                 });
                 if (hasRunningOrDone) {
                     currentStageIdx = 3; // executing
@@ -982,6 +1096,8 @@
                 } else if (action === 'restart') {
                     editingTaskId = null;
                     await apiTaskAction('restart', tid);
+                } else if (action === 'postpone') {
+                    await apiTaskAction('postpone', tid);
                 }
                 btn.disabled = false;
             });
@@ -1154,7 +1270,7 @@
                 renderGraph();
 
                 // Determine orchestrator state
-                const hasRunning = data.status.tasks.some(t => t.status === 'running');
+                const hasRunning = data.status.tasks.some(t => t.status === 'running' || t.status === 'timeout_warning');
                 const hasPaused = data.status.tasks.some(t => t.status === 'paused' || t.status === 'editing');
                 const hasFailed = data.status.tasks.some(t => t.status === 'failed');
                 const allTerminal = data.status.tasks.every(t => t.status === 'completed' || t.status === 'failed');

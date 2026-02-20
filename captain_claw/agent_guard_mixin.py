@@ -414,4 +414,5 @@ class AgentGuardMixin:
             abort_event=abort_event,
             runtime_base_path=getattr(self, "workspace_base_path", None),
             approval_callback=getattr(self, "approval_callback", None),
+            file_registry=getattr(self, "_file_registry", None),
         )

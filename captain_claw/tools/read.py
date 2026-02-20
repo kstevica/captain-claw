@@ -36,23 +36,48 @@ class ReadTool(Tool):
 
     async def execute(self, path: str, limit: int | None = None, offset: int | None = None, **kwargs: Any) -> ToolResult:
         """Read a file.
-        
+
         Args:
             path: Path to file
             limit: Optional line limit
             offset: Optional line offset
-        
+
         Returns:
             ToolResult with file contents
         """
         try:
             file_path = Path(path).expanduser().resolve()
-            
+
             if not file_path.exists():
-                return ToolResult(
-                    success=False,
-                    error=f"File not found: {path}",
-                )
+                # Attempt file registry resolution before giving up.
+                file_registry = kwargs.get("_file_registry")
+                resolved_path: str | None = None
+                if file_registry is not None:
+                    try:
+                        resolved_path = file_registry.resolve(path)
+                    except Exception:
+                        pass
+                if resolved_path is not None:
+                    candidate = Path(resolved_path).expanduser().resolve()
+                    if candidate.exists():
+                        file_path = candidate
+                    else:
+                        return ToolResult(
+                            success=False,
+                            error=f"File not found: {path} (registry resolved to {resolved_path}, also missing)",
+                        )
+                else:
+                    # Also try resolving under the saved root with session scoping
+                    saved_base = kwargs.get("_saved_base_path")
+                    fallback_found = False
+                    if saved_base is not None and file_registry is not None:
+                        # The registry didn't have it; report not found
+                        pass
+                    if not fallback_found:
+                        return ToolResult(
+                            success=False,
+                            error=f"File not found: {path}",
+                        )
             
             if not file_path.is_file():
                 return ToolResult(

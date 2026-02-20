@@ -16,6 +16,7 @@ from captain_claw.agent_session_mixin import AgentSessionMixin
 from captain_claw.agent_skills_mixin import AgentSkillsMixin
 from captain_claw.agent_tool_loop_mixin import AgentToolLoopMixin
 from captain_claw.config import get_config
+from captain_claw.file_registry import FileRegistry
 from captain_claw.instructions import InstructionLoader
 from captain_claw.llm import LLMProvider
 from captain_claw.session import Session, get_session_manager
@@ -78,6 +79,9 @@ class Agent(
         self._skills_snapshot_cache = None
         self.memory = None
         self._last_semantic_memory_debug_signature: str | None = None
+        # File registry for cross-task/cross-session file path resolution.
+        # Set per orchestration run or per session for single-agent mode.
+        self._file_registry: FileRegistry | None = None
         self._refresh_runtime_model_details(source="startup")
 
     @staticmethod
