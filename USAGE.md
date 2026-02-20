@@ -26,9 +26,9 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [context](#context)
   - [memory](#memory)
   - [tools](#tools)
-  - [skills](#skills-config)
-  - [guards](#guards-config)
-  - [session](#session-config)
+  - [skills](#skills)
+  - [guards](#guards)
+  - [session](#session)
   - [workspace](#workspace)
   - [ui](#ui)
   - [execution_queue](#execution_queue)
@@ -38,7 +38,7 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [discord](#discord)
   - [web](#web)
   - [google_oauth](#google_oauth)
-  - [orchestrator](#orchestrator-config)
+  - [orchestrator](#orchestrator)
 - [Guard System](#guard-system)
 - [Skills System](#skills-system)
 - [Memory and RAG](#memory-and-rag)
@@ -82,8 +82,8 @@ pip install -e ".[dev]"
 
 | Command | Description |
 |---|---|
-| `captain-claw` | Terminal UI (default) |
-| `captain-claw --web` | Start with web UI |
+| `captain-claw` | Web UI (default) |
+| `captain-claw --tui` | Start with terminal UI |
 | `captain-claw --onboarding` | Re-run first-time setup wizard |
 | `captain-claw-web` | Web UI only (standalone entry point) |
 
@@ -564,7 +564,7 @@ tools:
     max_attachment_bytes: 26214400  # 25 MB
 ```
 
-### skills (config) {#skills-config}
+### skills
 
 ```yaml
 skills:
@@ -587,7 +587,7 @@ skills:
   search_max_candidates: 5000
 ```
 
-### guards (config) {#guards-config}
+### guards
 
 ```yaml
 guards:
@@ -602,7 +602,7 @@ guards:
     level: "stop_suspicious"
 ```
 
-### session (config) {#session-config}
+### session
 
 ```yaml
 session:
@@ -685,6 +685,18 @@ discord:
   require_mention_in_guild: true  # require @mention in server channels
 ```
 
+### web
+
+```yaml
+web:
+  enabled: false
+  host: "127.0.0.1"
+  port: 23080
+  api_enabled: true               # OpenAI-compatible API proxy
+  api_pool_max_agents: 50
+  api_pool_idle_seconds: 600.0
+```
+
 ### google_oauth
 
 ```yaml
@@ -701,7 +713,7 @@ google_oauth:
     - "email"
 ```
 
-### orchestrator (config) {#orchestrator-config}
+### orchestrator
 
 ```yaml
 orchestrator:
@@ -1049,11 +1061,11 @@ Captain Claw includes a browser-based interface with the same capabilities as th
 ### Starting
 
 ```bash
-captain-claw --web              # start with web UI
+captain-claw                    # web UI is the default
 captain-claw-web                # standalone web server
 ```
 
-Or set `web.enabled: true` in config for automatic launch. Default: `http://127.0.0.1:8340`.
+The web UI launches by default at `http://127.0.0.1:23080`. To disable it, set `web.enabled: false` in config (or pass `--tui`).
 
 ### Layout
 
@@ -1106,7 +1118,7 @@ Or set `web.enabled: true` in config for automatic launch. Default: `http://127.
 web:
   enabled: false
   host: "127.0.0.1"
-  port: 8340
+  port: 23080
   api_enabled: true               # OpenAI-compatible API proxy
   api_pool_max_agents: 50
   api_pool_idle_seconds: 600.0
@@ -1161,7 +1173,7 @@ When the web server is running with `api_enabled: true`, Captain Claw exposes an
 ### Usage
 
 ```bash
-curl http://127.0.0.1:8340/v1/chat/completions \
+curl http://127.0.0.1:23080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "default",
@@ -1188,7 +1200,7 @@ Requests are proxied through the Captain Claw agent pool. Each API request gets 
 ### Setup
 
 1. Create OAuth 2.0 credentials in the [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
-2. Set the **Authorized redirect URI** to: `http://localhost:<port>/auth/google/callback` (default port: 23080 for CLI, 8340 for web)
+2. Set the **Authorized redirect URI** to: `http://localhost:23080/auth/google/callback` (default port: 23080)
 3. Add credentials to config or `.env`:
 
 ```bash

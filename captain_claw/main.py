@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -34,7 +35,7 @@ def _build_runtime_arg_parser() -> argparse.ArgumentParser:
         help="Run interactive onboarding wizard before starting",
     )
     parser.add_argument("--version", action="store_true", help="Show version information and exit")
-    parser.add_argument("--web", action="store_true", help="Start the web UI instead of the terminal UI")
+    parser.add_argument("--tui", action="store_true", help="Start the terminal UI instead of the web UI")
     parser.add_argument("-h", "--help", action="store_true", help="Show this help message and exit")
     return parser
 
@@ -46,9 +47,9 @@ def _should_parse_runtime_cli_from_argv(
     no_stream: bool,
     verbose: bool,
     onboarding: bool,
-    web: bool = False,
+    tui: bool = False,
 ) -> bool:
-    if config or model or provider or no_stream or verbose or onboarding or web:
+    if config or model or provider or no_stream or verbose or onboarding or tui:
         return False
     if len(sys.argv) <= 1:
         return False
@@ -66,7 +67,7 @@ def main(
     no_stream: bool = False,
     verbose: bool = False,
     onboarding: bool = False,
-    web: bool = False,
+    tui: bool = False,
 ) -> None:
     """Start Captain Claw interactive session."""
     if _should_parse_runtime_cli_from_argv(
@@ -76,7 +77,7 @@ def main(
         no_stream=no_stream,
         verbose=verbose,
         onboarding=onboarding,
-        web=web,
+        tui=tui,
     ):
         runtime_args = list(sys.argv[1:])
         if runtime_args and runtime_args[0].strip().lower() == "run":
@@ -98,7 +99,7 @@ def main(
         no_stream = bool(parsed.no_stream)
         verbose = bool(parsed.verbose)
         onboarding = bool(parsed.onboarding)
-        web = bool(parsed.web)
+        tui = bool(parsed.tui)
         if unknown:
             print(f"Warning: ignoring unsupported arguments: {' '.join(unknown)}")
 
@@ -156,31 +157,31 @@ def main(
     workspace_path = cfg.resolved_workspace_path(Path.cwd())
     workspace_path.mkdir(parents=True, exist_ok=True)
 
-    # Web UI mode
-    if web or cfg.web.enabled:
-        from captain_claw.web_server import run_web_server
+    # TUI mode (opt-in via --tui or web.enabled=false in config)
+    if tui or not cfg.web.enabled:
+        ui = get_ui()
+        set_system_log_sink(ui.append_system_line if ui.has_sticky_layout() else None)
 
         try:
-            run_web_server(cfg)
+            asyncio.run(run_interactive())
         except KeyboardInterrupt:
-            log.info("Web server shutting down...")
+            log.info("Shutting down...")
             sys.exit(0)
         except Exception as e:
-            log.error("Web server fatal error", error=str(e))
+            log.error("Fatal error", error=str(e))
             sys.exit(1)
         return
 
-    ui = get_ui()
-    set_system_log_sink(ui.append_system_line if ui.has_sticky_layout() else None)
+    # Web UI mode (default)
+    from captain_claw.web_server import run_web_server
 
-    # Run the interactive loop
     try:
-        asyncio.run(run_interactive())
+        run_web_server(cfg)
     except KeyboardInterrupt:
-        log.info("Shutting down...")
+        log.info("Web server shutting down...")
         sys.exit(0)
     except Exception as e:
-        log.error("Fatal error", error=str(e))
+        log.error("Web server fatal error", error=str(e))
         sys.exit(1)
 
 
@@ -191,6 +192,25 @@ async def run_interactive() -> None:
     from captain_claw.platform_lifecycle import init_platforms, teardown_platforms
     from captain_claw.prompt_execution import run_prompt_in_active_session
     from captain_claw.runtime_context import RuntimeContext
+
+    loop = asyncio.get_event_loop()
+
+    # Stop event: set by signal handler to trigger graceful shutdown,
+    # mirroring the web server pattern.  The blocking ``input()`` call
+    # lives in a thread-pool worker that cannot be interrupted by Python
+    # signals, so we need this event to break out of the main loop and
+    # then force-exit after cleanup (just like web mode does).
+    stop_event = asyncio.Event()
+
+    def _signal_handler() -> None:
+        if not stop_event.is_set():
+            stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _signal_handler)
+        except (NotImplementedError, OSError):
+            pass  # Windows doesn't support add_signal_handler for SIGTERM.
 
     ui = get_ui()
     ui.set_monitor_full_output(bool(get_config().ui.monitor_full_output))
@@ -219,7 +239,7 @@ async def run_interactive() -> None:
     cron_worker = asyncio.create_task(cron_scheduler_loop(ctx))
     try:
         # Main loop
-        while True:
+        while not stop_event.is_set():
             try:
                 ui.print_status_line(
                     last_usage=agent.last_usage,
@@ -231,8 +251,30 @@ async def run_interactive() -> None:
                     model_details=agent.get_runtime_model_details(),
                 )
                 ui.set_runtime_status("user input")
-                # Get user input (threaded so event loop keeps servicing cron).
-                user_input = await asyncio.to_thread(ui.prompt)
+
+                # Get user input (threaded so event loop keeps servicing
+                # cron / platform bridges).  We race the blocking prompt
+                # against the stop event so Ctrl+C breaks out immediately
+                # even though input() is stuck in a thread.
+                prompt_task = asyncio.ensure_future(
+                    asyncio.to_thread(ui.prompt)
+                )
+                stop_task = asyncio.ensure_future(stop_event.wait())
+
+                done, pending = await asyncio.wait(
+                    [prompt_task, stop_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                # If stop was signalled, exit the loop.
+                if stop_task in done:
+                    prompt_task.cancel()
+                    break
+
+                # Otherwise stop_task is still pending; cancel it so it
+                # doesn't linger.
+                stop_task.cancel()
+                user_input: str = prompt_task.result()
 
                 # Handle special commands
                 result = ui.handle_special_command(user_input)
@@ -263,12 +305,25 @@ async def run_interactive() -> None:
                 ui.print_error(str(e))
                 log.error("Error in interactive loop", error=str(e))
     finally:
+        log.info("Shutting down...")
         await teardown_platforms(ctx)
         cron_worker.cancel()
         try:
             await cron_worker
         except asyncio.CancelledError:
             pass
+        # Restore terminal scroll region & cursor position before
+        # force-exiting — os._exit() skips atexit handlers, so the
+        # registered _reset_scroll_region would never run.
+        ui._reset_scroll_region()
+        # Move cursor below the status/prompt area so the shell
+        # prompt appears on a clean line.
+        sys.stdout.write("\033[999;1H\n")
+        sys.stdout.flush()
+        # Force exit to avoid hanging on asyncio.run()'s
+        # shutdown_default_executor / thread-pool joins — the
+        # blocking input() thread cannot be interrupted cleanly.
+        os._exit(0)
 
 
 def version() -> None:
@@ -294,8 +349,13 @@ if __name__ == "__main__":
             "--onboarding",
             help="Run interactive onboarding wizard before starting",
         ),
+        tui: bool = typer.Option(
+            False,
+            "--tui",
+            help="Start the terminal UI instead of the web UI",
+        ),
     ) -> None:
-        main(config, model, provider, no_stream, verbose, onboarding)
+        main(config, model, provider, no_stream, verbose, onboarding, tui=tui)
 
     @cli.command()
     def ver() -> None:

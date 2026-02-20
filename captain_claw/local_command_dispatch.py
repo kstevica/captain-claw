@@ -96,13 +96,23 @@ async def dispatch_local_command(
             if agent.is_session_memory_protected():
                 ui.print_error("Session memory is protected. Disable it with '/session protect off' first.")
                 return "continue"
+            # Clear followup queue for this session before wiping messages.
+            ctx.followup_queue.clear_queue(agent.session.id)
             agent.session.messages = []
             await agent.session_manager.save_session(agent.session)
+            # Reset token counters and context window.
+            agent.last_usage = agent._empty_usage()
+            agent.last_context_window = {}
+            # Reset both monitor panes.
             ui.clear_monitor_tool_output()
+            ui.clear_monitor_chat_output()
             ui.print_success("Session cleared")
         return "continue"
 
     if result == "NEW" or result.startswith("NEW:"):
+        # Clear followup queue for the old session before switching.
+        if agent.session:
+            ctx.followup_queue.clear_queue(agent.session.id)
         session_name = "default"
         if result.startswith("NEW:"):
             session_name = result.split(":", 1)[1].strip() or "default"
@@ -110,6 +120,11 @@ async def dispatch_local_command(
         agent.refresh_session_runtime_flags()
         if agent.session:
             await agent.session_manager.set_last_active_session(agent.session.id)
+        # Reset token counters and context window.
+        agent.last_usage = agent._empty_usage()
+        agent.last_context_window = {}
+        # Reset both monitor panes for the fresh session.
+        ui.clear_monitor_chat_output()
         if agent.session:
             ui.load_monitor_tool_output_from_session(agent.session.messages)
             ui.print_session_info(agent.session)

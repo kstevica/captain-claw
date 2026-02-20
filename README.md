@@ -6,7 +6,7 @@
 [![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20Ollama-orange)](#feature-snapshot)
 [![Guardrails](https://img.shields.io/badge/guardrails-input%20%7C%20output%20%7C%20script%2Ftool-red)](#guards)
 
-A terminal-first agentic system for everyday work. Multi-model LLM support, persistent sessions, built-in safety guards, tool execution, and a web UI — all in one CLI.
+An open-source AI agent that runs locally, supports multiple LLM providers, and gets work done — coding, research, automation, document processing, orchestration — through persistent sessions with built-in safety guards.
 
 ## Feature Snapshot
 
@@ -75,15 +75,15 @@ First run starts interactive onboarding automatically. To re-run it later: `capt
 
 Each session keeps its own model, context, and history.
 
-### 5. Launch the Web UI (optional)
+### 5. Open the Web UI
+
+The web UI starts by default at **http://127.0.0.1:23080**. Use `Ctrl+K` for the command palette, `Ctrl+B` for the sidebar, and edit instruction files live in the Instructions tab.
+
+To use the terminal UI instead, pass `--tui`:
 
 ```bash
-captain-claw --web
+captain-claw --tui
 ```
-
-Open **http://127.0.0.1:8340** in your browser. Use `Ctrl+K` for the command palette, `Ctrl+B` for the sidebar, and edit instruction files live in the Instructions tab.
-
-To start the web UI automatically on every launch, set `web.enabled: true` in `config.yaml`.
 
 ## How It Works
 
@@ -159,7 +159,7 @@ tools:
 
 web:
   enabled: true
-  port: 8340
+  port: 23080
 ```
 
 **Load precedence:** `./config.yaml` > `~/.captain-claw/config.yaml` > environment variables > `.env` file > defaults.
@@ -178,7 +178,7 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 
 - **[Cron scheduling](USAGE.md#cron-commands)** — Pseudo-cron within the runtime. Schedule prompts, scripts, or tools at intervals, daily, or weekly. Guards remain active for every cron execution.
 
-- **[Execution queue](USAGE.md#execution-queue)** — Five queue modes (steer, followup, collect, interrupt, queue) control how follow-up messages are handled during agent execution.
+- **[Execution queue](USAGE.md#execution-queue-1)** — Five queue modes (steer, followup, collect, interrupt, queue) control how follow-up messages are handled during agent execution.
 
 - **[Remote integrations](USAGE.md#remote-integrations)** — Connect Telegram, Slack, or Discord bots. Unknown users get a pairing token; the operator approves locally with `/approve user`.
 
@@ -231,7 +231,7 @@ Yes. Model selection is per session. Different sessions can use different provid
 No. Guards are off by default. Enable them when you want stricter safety behavior.
 
 **Is there a web interface?**
-Yes. Run `captain-claw --web` and open `http://127.0.0.1:8340`. Same agent, sessions, tools, and guardrails as the terminal.
+Yes — it's the default. Run `captain-claw` and open `http://127.0.0.1:23080`. Same agent, sessions, tools, and guardrails as the terminal. Use `--tui` for the terminal UI.
 
 **Where is the full reference?**
 See [USAGE.md](USAGE.md) for comprehensive documentation of every command, tool, config option, and feature.

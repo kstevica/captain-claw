@@ -394,7 +394,7 @@ class GoogleOAuthConfig(BaseModel):
 class WebConfig(BaseModel):
     """Web UI configuration."""
 
-    enabled: bool = False
+    enabled: bool = True
     host: str = "127.0.0.1"
     port: int = 23080
     # OpenAI-compatible API proxy settings

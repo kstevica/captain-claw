@@ -84,7 +84,9 @@ class WebServer:
         self._busy = False
         self._busy_lock = asyncio.Lock()
         self._telegram_queue: asyncio.Queue[TelegramMessage] = asyncio.Queue()
-        self._instructions_dir = InstructionLoader().base_dir
+        self._instr_loader = InstructionLoader()
+        self._instructions_dir = self._instr_loader.base_dir
+        self._instructions_personal_dir = self._instr_loader.personal_dir
         self._loop: asyncio.AbstractEventLoop | None = None
 
         # Telegram bridge state
@@ -389,6 +391,8 @@ class WebServer:
                 if self.agent.session:
                     self.agent.session.messages.clear()
                     await self.agent.session_manager.save_session(self.agent.session)
+                    self.agent.last_usage = self.agent._empty_usage()
+                    self.agent.last_context_window = {}
                 result = "Session messages cleared."
 
             elif cmd in ("/config",):
@@ -428,7 +432,10 @@ class WebServer:
                     name=name or "web-session"
                 )
                 self.agent.session = session
+                self.agent.refresh_session_runtime_flags()
                 await self.agent.session_manager.set_last_active_session(session.id)
+                self.agent.last_usage = self.agent._empty_usage()
+                self.agent.last_context_window = {}
                 result = f"New session created: **{session.name}** (`{session.id[:8]}`)"
                 self._broadcast({"type": "session_info", **self._session_info()})
 
@@ -565,7 +572,10 @@ class WebServer:
             name = subargs or "web-session"
             session = await self.agent.session_manager.create_session(name=name)
             self.agent.session = session
+            self.agent.refresh_session_runtime_flags()
             await self.agent.session_manager.set_last_active_session(session.id)
+            self.agent.last_usage = self.agent._empty_usage()
+            self.agent.last_context_window = {}
             self._broadcast({"type": "session_info", **self._session_info()})
             self._broadcast({"type": "session_switched"})
             return f"Created and switched to session **{session.name}**."
@@ -856,6 +866,8 @@ class WebServer:
                         return "Session memory is protected. Disable with /session protect off."
                     self.agent.session.messages.clear()
                     await self.agent.session_manager.save_session(self.agent.session)
+                    self.agent.last_usage = self.agent._empty_usage()
+                    self.agent.last_context_window = {}
                     return "Session messages cleared."
                 return "No active session."
 
@@ -897,6 +909,8 @@ class WebServer:
                 self.agent.session = session
                 self.agent.refresh_session_runtime_flags()
                 await self.agent.session_manager.set_last_active_session(session.id)
+                self.agent.last_usage = self.agent._empty_usage()
+                self.agent.last_context_window = {}
                 self._broadcast({"type": "session_info", **self._session_info()})
                 return f"New session: {session.name} ({session.id[:12]})"
 
@@ -1183,51 +1197,109 @@ class WebServer:
     # ── REST handlers ────────────────────────────────────────────────
 
     async def list_instructions(self, request: web.Request) -> web.Response:
-        """List instruction .md files."""
-        files = []
+        """List instruction .md files, merging system and personal dirs."""
+        seen: dict[str, dict] = {}
+
+        # System (base) directory first
         if self._instructions_dir.is_dir():
             for f in sorted(self._instructions_dir.iterdir()):
                 if f.suffix == ".md" and f.is_file():
-                    files.append({
+                    seen[f.name] = {
                         "name": f.name,
                         "size": f.stat().st_size,
-                    })
+                        "overridden": False,
+                    }
+
+        # Personal overrides — update size and mark as overridden
+        if self._instructions_personal_dir.is_dir():
+            for f in sorted(self._instructions_personal_dir.iterdir()):
+                if f.suffix == ".md" and f.is_file():
+                    seen[f.name] = {
+                        "name": f.name,
+                        "size": f.stat().st_size,
+                        "overridden": True,
+                    }
+
+        files = sorted(seen.values(), key=lambda x: x["name"])
         return web.json_response(files)
 
     async def get_instruction(self, request: web.Request) -> web.Response:
-        """Read an instruction file."""
+        """Read an instruction file (personal override wins over system)."""
         name = request.match_info["name"]
         # Sanitize: only allow .md files, no path traversal
         if ".." in name or "/" in name or not name.endswith(".md"):
             return web.json_response({"error": "Invalid file name"}, status=400)
-        path = self._instructions_dir / name
+
+        # Personal override takes precedence
+        personal_path = self._instructions_personal_dir / name
+        system_path = self._instructions_dir / name
+        overridden = personal_path.is_file()
+        path = personal_path if overridden else system_path
+
         if not path.is_file():
             return web.json_response({"error": "File not found"}, status=404)
+
         content = path.read_text(encoding="utf-8")
-        return web.json_response({"name": name, "content": content})
+        return web.json_response({
+            "name": name,
+            "content": content,
+            "overridden": overridden,
+        })
 
     async def put_instruction(self, request: web.Request) -> web.Response:
-        """Save or create an instruction file."""
+        """Save instruction to the personal override directory."""
         name = request.match_info["name"]
         # Security: no path traversal, no subdirectories, .md only
         if ".." in name or "/" in name or "\\" in name or not name.endswith(".md"):
             return web.json_response({"error": "Invalid file name"}, status=400)
-        path = self._instructions_dir / name
-        # Ensure the resolved path stays inside the instructions directory
+        path = self._instructions_personal_dir / name
+        # Ensure the resolved path stays inside the personal directory
         try:
-            path.resolve().relative_to(self._instructions_dir.resolve())
+            path.resolve().relative_to(self._instructions_personal_dir.resolve())
         except ValueError:
             return web.json_response({"error": "Invalid path"}, status=400)
         body = await request.json()
         content = body.get("content", "")
         is_new = not path.exists()
-        self._instructions_dir.mkdir(parents=True, exist_ok=True)
+        self._instructions_personal_dir.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         # Clear instruction cache so changes take effect on next agent request
         if self.agent:
             self.agent.instructions._cache.pop(name, None)
         status = "created" if is_new else "saved"
-        return web.json_response({"status": status, "name": name, "size": path.stat().st_size})
+        return web.json_response({
+            "status": status,
+            "name": name,
+            "size": path.stat().st_size,
+            "overridden": True,
+        })
+
+    async def revert_instruction(self, request: web.Request) -> web.Response:
+        """Delete the personal override, reverting to the system default."""
+        name = request.match_info["name"]
+        if ".." in name or "/" in name or "\\" in name or not name.endswith(".md"):
+            return web.json_response({"error": "Invalid file name"}, status=400)
+        personal_path = self._instructions_personal_dir / name
+        system_path = self._instructions_dir / name
+        if not personal_path.is_file():
+            return web.json_response({"error": "No personal override to revert"}, status=404)
+        if not system_path.is_file():
+            return web.json_response(
+                {"error": "No system default exists — cannot revert"},
+                status=400,
+            )
+        personal_path.unlink()
+        # Clear instruction cache so the system default is loaded next
+        if self.agent:
+            self.agent.instructions._cache.pop(name, None)
+        content = system_path.read_text(encoding="utf-8")
+        return web.json_response({
+            "status": "reverted",
+            "name": name,
+            "content": content,
+            "size": system_path.stat().st_size,
+            "overridden": False,
+        })
 
     async def get_config_summary(self, request: web.Request) -> web.Response:
         """Return a safe config summary (no secrets)."""
@@ -1463,6 +1535,7 @@ class WebServer:
         app.router.add_get("/api/instructions", self.list_instructions)
         app.router.add_get("/api/instructions/{name}", self.get_instruction)
         app.router.add_put("/api/instructions/{name}", self.put_instruction)
+        app.router.add_delete("/api/instructions/{name}", self.revert_instruction)
         app.router.add_get("/api/config", self.get_config_summary)
         app.router.add_get("/api/sessions", self.list_sessions_api)
         app.router.add_get("/api/commands", self.get_commands_api)
@@ -1490,6 +1563,7 @@ class WebServer:
             app.router.add_get("/", self._serve_home)
             app.router.add_get("/chat", self._serve_chat)
             app.router.add_get("/orchestrator", self._serve_orchestrator)
+            app.router.add_get("/instructions", self._serve_instructions)
             app.router.add_get("/favicon.ico", self._serve_favicon)
         return app
 
@@ -1508,6 +1582,9 @@ class WebServer:
 
     async def _serve_orchestrator(self, request: web.Request) -> web.FileResponse:
         return web.FileResponse(STATIC_DIR / "orchestrator.html")
+
+    async def _serve_instructions(self, request: web.Request) -> web.FileResponse:
+        return web.FileResponse(STATIC_DIR / "instructions.html")
 
     async def _get_orchestrator_status(self, request: web.Request) -> web.Response:
         """REST endpoint: current orchestrator graph state."""

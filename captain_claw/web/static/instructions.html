@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Captain Claw — Instructions</title>
+    <link rel="stylesheet" href="/static/instructions.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+    <!-- Header -->
+    <header class="instr-header">
+        <div class="instr-header-left">
+            <a href="/" class="logo">
+                <img src="/static/logo.svg" width="20" height="20" alt=""
+                     style="vertical-align:middle;margin-right:5px;border-radius:4px;">Captain Claw
+            </a>
+            <span class="divider"></span>
+            <span class="instr-page-title">Instructions</span>
+        </div>
+        <div class="instr-header-right">
+            <a href="/chat" class="header-link">&#8592; Chat</a>
+        </div>
+    </header>
+
+    <!-- Warning Banner -->
+    <div class="instr-warning-banner">
+        <span class="instr-warning-icon">&#x26A0;</span>
+        <div class="instr-warning-text">
+            <strong>Careful editing.</strong>
+            These instruction files directly control the agent's behavior, safety guards, and output quality.
+            Back up originals before making changes — incorrect modifications may cause unexpected results.
+        </div>
+    </div>
+
+    <!-- Split Layout -->
+    <div class="instr-layout">
+        <!-- Left Panel: File Browser -->
+        <aside class="instr-sidebar" id="instrSidebar">
+            <div class="instr-sidebar-header">
+                <input type="text" class="instr-search" id="instrSearch"
+                       placeholder="Filter files..." autocomplete="off">
+            </div>
+            <div class="instr-groups" id="instrGroups">
+                <div class="instr-loading">Loading instruction files...</div>
+            </div>
+        </aside>
+
+        <!-- Right Panel: Editor -->
+        <main class="instr-editor-pane" id="instrEditorPane">
+            <!-- Empty state -->
+            <div class="instr-editor-empty" id="instrEditorEmpty">
+                <div class="instr-editor-empty-icon">&#x1F4DD;</div>
+                <div class="instr-editor-empty-title">Instruction Editor</div>
+                <div class="instr-editor-empty-text">Select a file from the left panel to view and edit it.</div>
+                <div class="instr-editor-empty-hint">
+                    <strong>System prompts</strong> define how the LLM behaves.
+                    <strong>User prompts</strong> are templates with <code>{placeholders}</code> filled at runtime.
+                    <strong>Templates</strong> are context headers and footers injected into conversations.
+                </div>
+            </div>
+            <!-- Active editor (hidden until file selected) -->
+            <div class="instr-editor-active hidden" id="instrEditorActive">
+                <div class="instr-editor-toolbar">
+                    <div class="instr-editor-file-info">
+                        <span class="instr-editor-badge" id="editorBadge">system</span>
+                        <span class="instr-editor-filename" id="editorFilename">-</span>
+                        <span class="instr-editor-dirty hidden" id="editorDirty"
+                              title="Unsaved changes">&#x25CF;</span>
+                    </div>
+                    <div class="instr-editor-desc" id="editorDesc">-</div>
+                    <div class="instr-editor-actions">
+                        <span class="instr-editor-override hidden" id="editorOverride"
+                              title="Customized — loaded from ~/.captain-claw/instructions/">customized</span>
+                        <span class="instr-editor-save-status" id="editorSaveStatus"></span>
+                        <button class="instr-btn revert hidden" id="revertBtn"
+                                title="Revert to system default">Revert</button>
+                        <button class="instr-btn primary" id="saveBtn" title="Save (Ctrl+S)">Save</button>
+                        <button class="instr-btn secondary" id="closeBtn" title="Close file">&#x2715;</button>
+                    </div>
+                </div>
+                <textarea class="instr-textarea" id="instrTextarea" spellcheck="false"></textarea>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/instructions.js"></script>
+</body>
+</html>

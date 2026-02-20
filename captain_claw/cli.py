@@ -638,6 +638,12 @@ Commands:
         self._monitor_tool_scroll_offset = 0
         self._render_monitor_view()
 
+    def clear_monitor_chat_output(self) -> None:
+        """Clear chat output pane content."""
+        self._chat_output_text = ""
+        self._monitor_chat_scroll_offset = 0
+        self._render_monitor_view()
+
     @staticmethod
     def _split_web_fetch_payload(raw_output: str) -> str:
         """Return extracted content portion from web_fetch output."""

@@ -744,6 +744,12 @@ html, body {
 .instruction-item-name { font-family: var(--font-mono); font-size: 12px; }
 .instruction-item-size { font-size: 11px; color: var(--text-muted); white-space: nowrap; margin-left: 8px; }
 
+.instruction-item.overridden { border-left: 2px solid var(--orange, #f78166); }
+.instruction-item-customized {
+    font-size: 9px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.3px; color: var(--orange, #f78166); margin-left: 3px;
+}
+
 /* ─── Instruction Editor ─────────────────────────────── */
 
 .instruction-editor {

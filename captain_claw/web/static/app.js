@@ -492,8 +492,9 @@
             }
             instructionsList.innerHTML = files.map(f => {
                 const sizeKb = (f.size / 1024).toFixed(1);
-                return `<div class="instruction-item" data-name="${escapeHtml(f.name)}" title="${escapeHtml(f.name)} — ${sizeKb} KB — click to edit">
-                    <span class="instruction-item-name">${escapeHtml(f.name)}</span>
+                const customized = f.overridden ? ' <span class="instruction-item-customized">customized</span>' : '';
+                return `<div class="instruction-item${f.overridden ? ' overridden' : ''}" data-name="${escapeHtml(f.name)}" title="${escapeHtml(f.name)} — ${sizeKb} KB${f.overridden ? ' — customized' : ''} — click to edit">
+                    <span class="instruction-item-name">${escapeHtml(f.name)}${customized}</span>
                     <span class="instruction-item-size">${sizeKb} KB</span>
                 </div>`;
             }).join('');

@@ -224,7 +224,7 @@ discord:
   pairing_ttl_minutes: 30
   require_mention_in_guild: true
 web:
-  enabled: false
+  enabled: true
   host: 127.0.0.1
   port: 23080
   api_enabled: true

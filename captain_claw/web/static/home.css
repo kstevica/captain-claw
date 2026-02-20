@@ -85,6 +85,8 @@ html, body {
 
 .home-cards {
     display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
     gap: 24px;
     animation: textFadeIn 0.8s ease-out 0.45s both;
 }
@@ -232,6 +234,38 @@ html, body {
 .auth-disconnect:hover {
     border-color: #f85149;
     color: #f85149;
+}
+
+/* ─── GitHub Footer Link ─────────────────────────────── */
+
+.home-footer {
+    margin-top: 32px;
+    animation: textFadeIn 0.8s ease-out 0.6s both;
+}
+
+.home-github-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-muted);
+    text-decoration: none;
+    font-size: 13px;
+    padding: 6px 12px;
+    border-radius: var(--radius);
+    transition: color 0.2s, background 0.2s;
+}
+
+.home-github-link:hover {
+    color: var(--text-secondary);
+    background: var(--bg-secondary);
+}
+
+.home-github-link svg {
+    opacity: 0.7;
+}
+
+.home-github-link:hover svg {
+    opacity: 1;
 }
 
 /* ─── Responsive ─────────────────────────────────────── */
