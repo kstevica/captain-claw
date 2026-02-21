@@ -1328,3 +1328,68 @@ html, body {
     margin-top: 3px;
     font-style: italic;
 }
+
+/* ─── Workflow Variables Panel ───────────────────── */
+
+.orch-variables-panel {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
+}
+
+.orch-variables-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.orch-variables-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--accent);
+}
+
+.orch-variables-count {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.orch-variables-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 8px;
+}
+
+.orch-variable-field {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.orch-variable-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.orch-variable-input {
+    padding: 5px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 13px;
+    outline: none;
+}
+
+.orch-variable-input:focus {
+    border-color: var(--accent);
+}
+
+.orch-variable-input::placeholder {
+    color: var(--text-muted);
+}

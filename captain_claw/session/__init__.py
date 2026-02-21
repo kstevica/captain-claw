@@ -639,6 +639,7 @@ class SessionManager:
         job_id: str,
         *,
         enabled: bool | None = None,
+        payload: dict[str, Any] | None = None,
         next_run_at: str | None = None,
         last_run_at: str | None = None,
         last_status: str | None = None,
@@ -652,6 +653,9 @@ class SessionManager:
         assignments: list[str] = ["updated_at = ?"]
         params: list[Any] = [_utcnow_iso()]
 
+        if payload is not None:
+            assignments.append("payload = ?")
+            params.append(json.dumps(payload))
         if enabled is not None:
             assignments.append("enabled = ?")
             params.append(1 if enabled else 0)

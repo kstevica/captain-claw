@@ -311,12 +311,18 @@ async def _run_orchestrate_cron(
     workflow_name: str,
     trigger: str,
     cron_job_id: str | None = None,
+    variable_values: dict[str, str] | None = None,
 ) -> None:
     """Run a saved orchestrator workflow as a cron job.
 
     Creates a fresh SessionOrchestrator, loads the named workflow,
     executes it, and logs the result.  Runs inline (not queued) because
     orchestration manages its own parallelism via AgentPool.
+
+    *variable_values*, if provided, are substituted into the workflow's
+    ``{{placeholder}}`` fields before execution.  When a workflow defines
+    default values for its variables, those are used as a fallback for
+    any key not present in *variable_values*.
     """
     from captain_claw.config import get_config
     from captain_claw.session_orchestrator import SessionOrchestrator
@@ -354,6 +360,18 @@ async def _run_orchestrate_cron(
         if not load_result.get("ok"):
             raise ValueError(load_result.get("error", f"Failed to load workflow: {workflow_name}"))
 
+        # Build effective variable values: workflow defaults ← cron overrides.
+        effective_vars: dict[str, str] | None = None
+        wf_variables = load_result.get("variables") or []
+        if wf_variables or variable_values:
+            effective_vars = {}
+            for v in wf_variables:
+                default_val = v.get("default", "")
+                if default_val:
+                    effective_vars[v["name"]] = default_val
+            if variable_values:
+                effective_vars.update(variable_values)
+
         task_count = len(load_result.get("tasks", []))
         await cron_monitor_event(
             ctx, "orchestrate_executing",
@@ -361,7 +379,7 @@ async def _run_orchestrate_cron(
             trigger=trigger, workflow=workflow_name, task_count=task_count,
         )
 
-        synthesis = await orchestrator.execute()
+        synthesis = await orchestrator.execute(variable_values=effective_vars)
 
         await cron_monitor_event(
             ctx, "orchestrate_done",
@@ -447,11 +465,13 @@ async def execute_cron_job(ctx: RuntimeContext, job: Any, trigger: str = "schedu
             workflow_name = str(payload.get("workflow", "")).strip() if isinstance(payload, dict) else ""
             if not workflow_name:
                 raise ValueError(f"Cron job {job_id} has empty orchestrate workflow name")
+            variable_values = payload.get("variable_values") if isinstance(payload, dict) else None
             await _run_orchestrate_cron(
                 ctx,
                 workflow_name=workflow_name,
                 trigger=trigger,
                 cron_job_id=job_id,
+                variable_values=variable_values,
             )
         else:
             raise ValueError(f"Unsupported cron job kind: {kind}")

@@ -1287,3 +1287,84 @@ html, body {
     font-family: var(--font-mono);
     font-size: 12px;
 }
+
+/* ─── Workflow Variables in Add Form ───────────────── */
+
+.cron-vars-container {
+    padding: 8px 0;
+}
+
+.cron-vars-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--accent);
+    margin-bottom: 6px;
+}
+
+.cron-vars-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 6px;
+}
+
+.cron-var-field {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.cron-var-field label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.cron-var-field input {
+    padding: 5px 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 13px;
+    outline: none;
+}
+
+.cron-var-field input:focus {
+    border-color: var(--accent);
+}
+
+/* Variable inputs in detail panel */
+.cron-detail-var-input {
+    padding: 4px 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 13px;
+    outline: none;
+    width: 100%;
+}
+
+.cron-detail-var-input:focus {
+    border-color: var(--accent);
+}
+
+.cron-save-vars-btn {
+    padding: 5px 14px;
+    background: var(--accent);
+    border: none;
+    border-radius: 4px;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s;
+}
+
+.cron-save-vars-btn:hover {
+    opacity: 0.85;
+}

@@ -93,6 +93,7 @@ class SessionOrchestrator:
         self._workflow_name: str = ""
         self._user_input: str = ""
         self._synthesis_instruction: str = ""
+        self._workflow_variables: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     # Workflow naming helpers
@@ -111,6 +112,60 @@ class SessionOrchestrator:
         words = summary.split()[:5]
         base = " ".join(words) if words else "workflow"
         return SessionOrchestrator._safe_filename(base)
+
+    # ------------------------------------------------------------------
+    # Workflow variable helpers
+    # ------------------------------------------------------------------
+
+    _VAR_RE = re.compile(r"\{\{(\w+)\}\}")
+
+    @staticmethod
+    def _extract_variables(
+        texts: list[str],
+        existing_vars: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Scan *texts* for ``{{variable_name}}`` and build a variables list.
+
+        Preserves label/default from *existing_vars* for names that still
+        appear; adds new entries for newly detected names; drops entries
+        whose name no longer appears in any text.
+        """
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for text in texts:
+            for m in SessionOrchestrator._VAR_RE.finditer(text or ""):
+                name = m.group(1)
+                if name not in seen:
+                    seen.add(name)
+                    ordered.append(name)
+
+        lookup: dict[str, dict[str, Any]] = {}
+        if existing_vars:
+            for v in existing_vars:
+                lookup[v.get("name", "")] = v
+
+        result: list[dict[str, Any]] = []
+        for name in ordered:
+            if name in lookup:
+                result.append(lookup[name])
+            else:
+                result.append({
+                    "name": name,
+                    "label": name.replace("_", " ").title(),
+                    "default": "",
+                })
+        return result
+
+    @staticmethod
+    def _substitute_variables(text: str, values: dict[str, str]) -> str:
+        """Replace ``{{name}}`` placeholders with corresponding *values*.
+
+        Unmatched placeholders (no value provided) are left as-is.
+        """
+        def _repl(m: re.Match[str]) -> str:
+            name = m.group(1)
+            return values.get(name, m.group(0))
+        return SessionOrchestrator._VAR_RE.sub(_repl, text or "")
 
     # ------------------------------------------------------------------
     # Status helpers
@@ -222,10 +277,18 @@ class SessionOrchestrator:
                 "session_id": t.session_id, "model_id": t.model_id,
             })
 
+        # Detect {{variable}} placeholders in the decomposed content.
+        all_texts = [user_input, synthesis_instruction]
+        for t in tasks_out:
+            all_texts.append(t.get("title", ""))
+            all_texts.append(t.get("description", ""))
+        self._workflow_variables = self._extract_variables(all_texts, self._workflow_variables)
+
         self._broadcast_event("decomposed", {
             "summary": summary,
             "tasks": tasks_out,
             "workflow_name": self._workflow_name,
+            "variables": self._workflow_variables,
         })
 
         return {
@@ -234,9 +297,14 @@ class SessionOrchestrator:
             "summary": summary,
             "tasks": tasks_out,
             "synthesis_instruction": synthesis_instruction,
+            "variables": self._workflow_variables,
         }
 
-    async def execute(self, task_overrides: dict[str, dict[str, Any]] | None = None) -> str:
+    async def execute(
+        self,
+        task_overrides: dict[str, dict[str, Any]] | None = None,
+        variable_values: dict[str, str] | None = None,
+    ) -> str:
         """Execute a previously prepared graph.
 
         Runs stages 3 (ASSIGN SESSIONS), 4 (EXECUTE), and 5 (SYNTHESIZE).
@@ -245,6 +313,9 @@ class SessionOrchestrator:
             task_overrides: Optional per-task overrides keyed by task ID.
                 Each value may contain ``title``, ``description``,
                 ``session_id``, ``model_id``, and/or ``skills``.
+            variable_values: Optional mapping of ``{{name}}`` →  value for
+                workflow template variables.  Applied to user_input,
+                synthesis_instruction, and all task titles/descriptions.
 
         Returns:
             Final synthesized response string.
@@ -253,6 +324,16 @@ class SessionOrchestrator:
             return "No prepared graph to execute.  Call prepare() first."
 
         graph = self._graph
+
+        # Substitute {{variable}} placeholders if values provided.
+        if variable_values:
+            self._user_input = self._substitute_variables(self._user_input, variable_values)
+            self._synthesis_instruction = self._substitute_variables(
+                self._synthesis_instruction, variable_values,
+            )
+            for _tid, task in graph.tasks.items():
+                task.title = self._substitute_variables(task.title, variable_values)
+                task.description = self._substitute_variables(task.description, variable_values)
 
         # Apply per-task overrides from the preview editor.
         if task_overrides:
@@ -374,6 +455,7 @@ class SessionOrchestrator:
         self._workflow_name = ""
         self._user_input = ""
         self._synthesis_instruction = ""
+        self._workflow_variables = []
         self._execution_done = False
         self._file_registry = None
         self._resume_event = asyncio.Event()
@@ -1044,12 +1126,21 @@ class SessionOrchestrator:
                 "skills": t.skills,
             })
 
-        payload = {
+        # Auto-detect {{variable}} placeholders and build metadata.
+        all_texts = [self._user_input, self._synthesis_instruction]
+        for t in tasks_out:
+            all_texts.append(t.get("title", ""))
+            all_texts.append(t.get("description", ""))
+        variables = self._extract_variables(all_texts, self._workflow_variables)
+
+        payload: dict[str, Any] = {
             "workflow_name": wf_name,
             "user_input": self._user_input,
             "synthesis_instruction": self._synthesis_instruction,
             "tasks": tasks_out,
         }
+        if variables:
+            payload["variables"] = variables
 
         try:
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1102,6 +1193,7 @@ class SessionOrchestrator:
         self._workflow_name = data.get("workflow_name", name)
         self._user_input = data.get("user_input", "")
         self._synthesis_instruction = data.get("synthesis_instruction", "")
+        self._workflow_variables = data.get("variables", [])
 
         import uuid
         self._file_registry = FileRegistry(orchestration_id=str(uuid.uuid4()))
@@ -1120,6 +1212,7 @@ class SessionOrchestrator:
             "tasks": tasks_out,
             "workflow_name": self._workflow_name,
             "user_input": self._user_input,
+            "variables": self._workflow_variables,
         })
 
         return {
@@ -1128,6 +1221,7 @@ class SessionOrchestrator:
             "tasks": tasks_out,
             "synthesis_instruction": self._synthesis_instruction,
             "user_input": self._user_input,
+            "variables": self._workflow_variables,
         }
 
     async def list_workflows(self) -> list[dict[str, Any]]:
@@ -1141,6 +1235,8 @@ class SessionOrchestrator:
                     "name": data.get("workflow_name", p.stem),
                     "filename": p.stem,
                     "task_count": len(data.get("tasks", [])),
+                    "has_variables": bool(data.get("variables")),
+                    "variables": data.get("variables", []),
                 })
             except Exception:
                 result.append({"name": p.stem, "filename": p.stem, "task_count": 0})

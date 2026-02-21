@@ -8,6 +8,7 @@
     var currentJobs = [];
     var selectedJobId = null;
     var activeTab = 'chat';
+    var workflowsData = [];  // [{name, filename, task_count, variables}]
 
     // ── DOM References ───────────────────────────────────────
     var cronBadge = document.getElementById('cronBadge');
@@ -25,6 +26,7 @@
     var cronPayloadPath = document.getElementById('cronPayloadPath');
     var cronPayloadWorkflow = document.getElementById('cronPayloadWorkflow');
     var cronAddBtn = document.getElementById('cronAddBtn');
+    var cronVarsContainer = document.getElementById('cronVarsContainer');
     var cronTableBody = document.getElementById('cronTableBody');
     var cronTable = document.getElementById('cronTable');
     var cronEmpty = document.getElementById('cronEmpty');
@@ -57,6 +59,9 @@
         }
         if (cronKind) {
             cronKind.addEventListener('change', updatePayloadFields);
+        }
+        if (cronPayloadWorkflow) {
+            cronPayloadWorkflow.addEventListener('change', renderCronVars);
         }
         if (cronAddBtn) {
             cronAddBtn.addEventListener('click', addJob);
@@ -146,6 +151,7 @@
         try {
             var data = await apiFetch('/api/orchestrator/workflows');
             var workflows = (data && data.workflows) ? data.workflows : [];
+            workflowsData = workflows;
             cronPayloadWorkflow.innerHTML = '';
             if (workflows.length === 0) {
                 var emptyOpt = document.createElement('option');
@@ -158,12 +164,54 @@
                 var opt = document.createElement('option');
                 var name = typeof w === 'string' ? w : (w.name || '');
                 opt.value = name;
-                opt.textContent = name;
+                opt.textContent = name + (w.has_variables ? ' (vars)' : '');
                 cronPayloadWorkflow.appendChild(opt);
             }
         } catch (e) {
             // Leave dropdown empty on error
         }
+    }
+
+    // ── Workflow Variable Fields in Add Form ──────────────
+
+    function renderCronVars() {
+        if (!cronVarsContainer) return;
+        var selectedName = cronPayloadWorkflow ? cronPayloadWorkflow.value : '';
+        var wf = null;
+        for (var i = 0; i < workflowsData.length; i++) {
+            if (workflowsData[i].name === selectedName) { wf = workflowsData[i]; break; }
+        }
+        var vars = (wf && wf.variables) ? wf.variables : [];
+        if (vars.length === 0) {
+            cronVarsContainer.style.display = 'none';
+            cronVarsContainer.innerHTML = '';
+            return;
+        }
+        cronVarsContainer.style.display = '';
+        var html = '<div class="cron-vars-title">Variables</div>';
+        html += '<div class="cron-vars-grid">';
+        for (var i = 0; i < vars.length; i++) {
+            var v = vars[i];
+            var label = v.label || v.name;
+            var def = v['default'] || '';
+            html += '<div class="cron-var-field">';
+            html += '<label for="cronVar_' + escapeHtml(v.name) + '">' + escapeHtml(label) + '</label>';
+            html += '<input type="text" id="cronVar_' + escapeHtml(v.name) + '" data-var-name="' + escapeHtml(v.name) + '" value="' + escapeHtml(def) + '" spellcheck="false">';
+            html += '</div>';
+        }
+        html += '</div>';
+        cronVarsContainer.innerHTML = html;
+    }
+
+    function collectCronVarValues() {
+        if (!cronVarsContainer) return null;
+        var inputs = cronVarsContainer.querySelectorAll('input[data-var-name]');
+        if (inputs.length === 0) return null;
+        var values = {};
+        inputs.forEach(function (inp) {
+            values[inp.dataset.varName] = inp.value;
+        });
+        return values;
     }
 
     // ── Render Table ─────────────────────────────────────────
@@ -442,6 +490,12 @@
         if (cronPayloadWorkflow) {
             cronPayloadWorkflow.style.display = (kind === 'orchestrate') ? '' : 'none';
         }
+        // Show/hide workflow variable inputs
+        if (kind === 'orchestrate') {
+            renderCronVars();
+        } else if (cronVarsContainer) {
+            cronVarsContainer.style.display = 'none';
+        }
     }
 
     // ── Add Job ──────────────────────────────────────────────
@@ -499,6 +553,10 @@
                 return;
             }
             payload.workflow = workflowName;
+            var varVals = collectCronVarValues();
+            if (varVals) {
+                payload.variable_values = varVals;
+            }
         }
 
         if (!sessionId) {
@@ -629,9 +687,26 @@
                 infoHtml += '<dt>Payload</dt><dd class="mono">' + escapeHtml(payload.path) + '</dd>';
             } else if (job.kind === 'orchestrate' && payload.workflow) {
                 infoHtml += '<dt>Workflow</dt><dd>' + escapeHtml(payload.workflow) + '</dd>';
+                if (payload.variable_values) {
+                    var varNames = Object.keys(payload.variable_values);
+                    for (var vi = 0; vi < varNames.length; vi++) {
+                        var vn = varNames[vi];
+                        infoHtml += '<dt>' + escapeHtml(vn) + '</dt>';
+                        infoHtml += '<dd><input type="text" class="cron-detail-var-input" data-var-name="' + escapeHtml(vn) + '" value="' + escapeHtml(payload.variable_values[vn]) + '" spellcheck="false"></dd>';
+                    }
+                    infoHtml += '<dt></dt><dd><button class="cron-save-vars-btn" id="cronDetailSaveVars">Save variables</button></dd>';
+                }
             }
 
             cronDetailInfo.innerHTML = infoHtml;
+
+            // Wire up save-variables button
+            var saveVarsBtn = document.getElementById('cronDetailSaveVars');
+            if (saveVarsBtn) {
+                saveVarsBtn.addEventListener('click', function () {
+                    saveCronJobVars(job);
+                });
+            }
         }
 
         // Default to chat tab
@@ -646,6 +721,31 @@
         selectedJobId = null;
         if (cronDetail) cronDetail.style.display = 'none';
         renderTable();
+    }
+
+    async function saveCronJobVars(job) {
+        // Collect current values from the detail panel inputs
+        var inputs = cronDetailInfo.querySelectorAll('.cron-detail-var-input');
+        if (inputs.length === 0) return;
+        var newVars = {};
+        inputs.forEach(function (inp) {
+            newVars[inp.dataset.varName] = inp.value;
+        });
+        // Rebuild payload with updated variable_values
+        var newPayload = Object.assign({}, job.payload || {});
+        newPayload.variable_values = newVars;
+        try {
+            await apiFetch('/api/cron/jobs/' + encodeURIComponent(job.id), {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ payload: newPayload }),
+            });
+            // Update local state
+            job.payload = newPayload;
+            await loadJobs();
+        } catch (e) {
+            alert('Failed to save variables: ' + e.message);
+        }
     }
 
     // ── History ──────────────────────────────────────────────

@@ -534,13 +534,25 @@ class WebServer:
                     result = "Orchestrator not available."
                 else:
                     task_overrides = None
+                    variable_values = None
                     if args.strip():
                         try:
-                            task_overrides = json.loads(args.strip())
+                            parsed = json.loads(args.strip())
+                            # New format: {task_overrides: ..., variable_values: ...}
+                            if isinstance(parsed, dict) and (
+                                "variable_values" in parsed or "task_overrides" in parsed
+                            ):
+                                task_overrides = parsed.get("task_overrides")
+                                variable_values = parsed.get("variable_values")
+                            else:
+                                # Backward compat: bare dict is task overrides
+                                task_overrides = parsed
                         except json.JSONDecodeError:
                             task_overrides = None
                     try:
-                        response = await self._orchestrator.execute(task_overrides)
+                        response = await self._orchestrator.execute(
+                            task_overrides, variable_values=variable_values,
+                        )
                         self._broadcast({
                             "type": "chat_message",
                             "role": "assistant",
@@ -1707,6 +1719,27 @@ class WebServer:
         )
         return web.json_response({"ok": True, "next_run_at": next_run})
 
+    async def _update_cron_job_payload(self, request: web.Request) -> web.Response:
+        """PATCH /api/cron/jobs/{id} — update job payload (e.g. variable values)."""
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+
+        job_id = request.match_info.get("id", "")
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        sm = self.agent.session_manager
+        new_payload = body.get("payload")
+        if new_payload is None:
+            return web.json_response({"error": "Missing payload"}, status=400)
+
+        ok = await sm.update_cron_job(job_id, payload=new_payload)
+        if not ok:
+            return web.json_response({"error": "Job not found"}, status=404)
+        return web.json_response({"ok": True})
+
     async def _delete_cron_job(self, request: web.Request) -> web.Response:
         """DELETE /api/cron/jobs/{id} — remove a job."""
         if not self.agent:
@@ -1892,6 +1925,7 @@ class WebServer:
         app.router.add_post("/api/cron/jobs/{id}/run", self._run_cron_job)
         app.router.add_post("/api/cron/jobs/{id}/pause", self._pause_cron_job)
         app.router.add_post("/api/cron/jobs/{id}/resume", self._resume_cron_job)
+        app.router.add_patch("/api/cron/jobs/{id}", self._update_cron_job_payload)
         app.router.add_delete("/api/cron/jobs/{id}", self._delete_cron_job)
         app.router.add_get("/api/cron/jobs/{id}/history", self._get_cron_job_history)
         # Workflow browser API routes

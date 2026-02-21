@@ -23,6 +23,8 @@
     let taskOverrides = {};       // tid → {title, description, session_id, model_id, skills}
     let availableSessions = [];   // [{id, name}]
     let availableModels = [];     // [{id, provider, model}]
+    let workflowVariables = [];   // [{name, label, default}]
+    let variableValues = {};      // name → current input value
 
     // ── DOM ──────────────────────────────────────────────────
     const $ = (sel) => document.querySelector(sel);
@@ -271,6 +273,20 @@
         if (msg.user_input && !orchRephrased.value) {
             orchRephrased.value = msg.user_input;
             syncPaneHeights();
+        }
+
+        // Apply workflow variables if present (from loaded workflow or fresh decompose).
+        if (msg.variables && msg.variables.length > 0) {
+            applyVariables(msg.variables);
+        } else {
+            // Auto-detect {{var}} from user_input and task descriptions when
+            // the backend didn't supply a variables array (e.g. older server).
+            var detected = detectVariables(msg);
+            if (detected.length > 0) {
+                applyVariables(detected);
+            } else {
+                applyVariables([]);
+            }
         }
 
         addLogEntry('decomposed', `Decomposed into ${tasksList.length} tasks: ${msg.summary || ''}`);
@@ -1119,6 +1135,8 @@
             selectedTaskId = null;
             workflowName = '';
             taskOverrides = {};
+            workflowVariables = [];
+            variableValues = {};
             aggregatedContext = { totalTokens: 0, promptTokens: 0, completionTokens: 0 };
             timeoutCountdowns = {};
             if (countdownInterval) {
@@ -1130,6 +1148,7 @@
             orchInput.value = '';
             orchRephrased.value = '';
             syncPaneHeights();
+            hideVariablesPanel();
             updateWorkflowNameDisplay();
             clearLog();
             updateSummaryBar();
@@ -1174,6 +1193,9 @@
         graphSummary = {};
         selectedTaskId = null;
         taskOverrides = {};
+        workflowVariables = [];
+        variableValues = {};
+        hideVariablesPanel();
         aggregatedContext = { totalTokens: 0, promptTokens: 0, completionTokens: 0 };
         timeoutCountdowns = {};
         if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
@@ -1217,14 +1239,21 @@
     function executeOrchestrator() {
         if (!isConnected || orchestratorState === 'running') return;
 
-        // Collect overrides
+        // Collect overrides and variable values
         const overrides = Object.keys(taskOverrides).length > 0 ? taskOverrides : null;
+        const varVals = Object.keys(variableValues).length > 0 ? variableValues : null;
 
         setOrchestratorState('running');
         addLogEntry('progress', 'Starting execution...');
 
-        // Send as WebSocket command
-        const payload = overrides ? JSON.stringify(overrides) : '';
+        // Build payload: new format includes both overrides and variable values
+        var payload = '';
+        if (overrides || varVals) {
+            payload = JSON.stringify({
+                task_overrides: overrides,
+                variable_values: varVals,
+            });
+        }
         ws.send(JSON.stringify({
             type: 'command',
             command: `/orchestrate-execute ${payload}`.trim(),
@@ -1245,6 +1274,104 @@
         const d = document.createElement('div');
         d.textContent = String(str);
         return d.innerHTML;
+    }
+
+    // ── Workflow Variables Panel ─────────────────────────
+
+    function renderVariablesPanel() {
+        var panel = document.getElementById('orchVariablesPanel');
+        if (!panel) {
+            panel = document.createElement('div');
+            panel.id = 'orchVariablesPanel';
+            panel.className = 'orch-variables-panel';
+            // Insert after orchWorkflowBar in the input section
+            var bar = document.getElementById('orchWorkflowBar');
+            if (bar && bar.parentNode) {
+                bar.parentNode.insertBefore(panel, bar.nextSibling);
+            }
+        }
+
+        if (!workflowVariables || workflowVariables.length === 0) {
+            panel.style.display = 'none';
+            return;
+        }
+
+        panel.style.display = '';
+        var html = '<div class="orch-variables-header">';
+        html += '<span class="orch-variables-label">Variables</span>';
+        html += '<span class="orch-variables-count">' + workflowVariables.length + ' var' + (workflowVariables.length !== 1 ? 's' : '') + '</span>';
+        html += '</div>';
+        html += '<div class="orch-variables-grid">';
+
+        workflowVariables.forEach(function (v) {
+            var value = variableValues[v.name] || '';
+            var label = v.label || v.name;
+            html += '<div class="orch-variable-field">';
+            html += '<label class="orch-variable-label" for="orchVar_' + esc(v.name) + '">' + esc(label) + '</label>';
+            html += '<input type="text" class="orch-variable-input" id="orchVar_' + esc(v.name) + '" data-var-name="' + esc(v.name) + '" value="' + esc(value) + '" placeholder="' + esc(v.name) + '" spellcheck="false">';
+            html += '</div>';
+        });
+
+        html += '</div>';
+        panel.innerHTML = html;
+
+        // Wire up live value capture
+        panel.querySelectorAll('.orch-variable-input').forEach(function (input) {
+            input.addEventListener('input', function () {
+                variableValues[input.dataset.varName] = input.value;
+            });
+        });
+    }
+
+    function hideVariablesPanel() {
+        var panel = document.getElementById('orchVariablesPanel');
+        if (panel) panel.style.display = 'none';
+    }
+
+    function detectVariables(msg) {
+        // Client-side fallback: scan texts for {{variable_name}} patterns.
+        var texts = [];
+        if (msg.user_input) texts.push(msg.user_input);
+        var tasksList = msg.tasks || [];
+        tasksList.forEach(function (t) {
+            if (t.title) texts.push(t.title);
+            if (t.description) texts.push(t.description);
+        });
+        // Also scan the rephrased textarea (covers fresh decompose case).
+        if (orchRephrased && orchRephrased.value) texts.push(orchRephrased.value);
+
+        var seen = {};
+        var result = [];
+        var re = /\{\{(\w+)\}\}/g;
+        texts.forEach(function (text) {
+            var m;
+            while ((m = re.exec(text)) !== null) {
+                var name = m[1];
+                if (!seen[name]) {
+                    seen[name] = true;
+                    result.push({
+                        name: name,
+                        label: name.replace(/_/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); }),
+                        'default': ''
+                    });
+                }
+            }
+            re.lastIndex = 0;  // reset for next string
+        });
+        return result;
+    }
+
+    function applyVariables(vars) {
+        workflowVariables = vars || [];
+        variableValues = {};
+        workflowVariables.forEach(function (v) {
+            variableValues[v.name] = v['default'] || '';
+        });
+        if (workflowVariables.length > 0) {
+            renderVariablesPanel();
+        } else {
+            hideVariablesPanel();
+        }
     }
 
     // ── Task API actions ────────────────────────────────
@@ -1565,6 +1692,14 @@
                 if (userInput) {
                     orchRephrased.value = userInput;
                     syncPaneHeights();
+                }
+
+                // Apply workflow variables from response (also arrives via WS but
+                // the HTTP response is more immediate).
+                if (data.variables && data.variables.length > 0) {
+                    applyVariables(data.variables);
+                } else {
+                    applyVariables([]);
                 }
             } else {
                 addLogEntry('task_failed', `Load failed: ${data.error || 'unknown'}`);
