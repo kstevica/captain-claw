@@ -99,6 +99,8 @@ tools:
   - pocket_tts
   - send_mail
   - google_drive
+  - todo
+  - contacts
   shell:
     timeout: 30
     blocked:
@@ -236,6 +238,17 @@ google_oauth:
   client_secret: ''
   project_id: ''
   location: us-central1
+todo:
+  enabled: true
+  auto_capture: true
+  inject_on_session_load: true
+  max_items_in_prompt: 10
+  archive_after_days: 30
+addressbook:
+  enabled: true
+  auto_capture: true
+  inject_on_mention: true
+  max_items_in_prompt: 5
 orchestrator:
   max_parallel: 5
   max_agents: 50

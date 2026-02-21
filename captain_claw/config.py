@@ -365,6 +365,25 @@ class DiscordConfig(BaseModel):
     require_mention_in_guild: bool = True
 
 
+class TodoConfig(BaseModel):
+    """Cross-session to-do memory settings."""
+
+    enabled: bool = True
+    auto_capture: bool = True
+    inject_on_session_load: bool = True
+    max_items_in_prompt: int = 10
+    archive_after_days: int = 30
+
+
+class AddressBookConfig(BaseModel):
+    """Cross-session address book / contact memory settings."""
+
+    enabled: bool = True
+    auto_capture: bool = True
+    inject_on_mention: bool = True
+    max_items_in_prompt: int = 5
+
+
 class OrchestratorConfig(BaseModel):
     """Parallel session orchestration settings."""
 
@@ -422,6 +441,8 @@ class Config(BaseSettings):
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     google_oauth: GoogleOAuthConfig = Field(default_factory=GoogleOAuthConfig)
+    todo: TodoConfig = Field(default_factory=TodoConfig)
+    addressbook: AddressBookConfig = Field(default_factory=AddressBookConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
 
     model_config = SettingsConfigDict(

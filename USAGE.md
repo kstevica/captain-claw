@@ -16,6 +16,8 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [Monitor Commands](#monitor-commands)
   - [Pipeline Commands](#pipeline-commands)
   - [Cron Commands](#cron-commands)
+  - [Todo Commands](#todo-commands)
+  - [Contacts Commands](#contacts-commands)
   - [Skills Commands](#skills-commands)
   - [Orchestrator Commands](#orchestrator-commands)
   - [Admin Commands](#admin-commands)
@@ -28,6 +30,7 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [tools](#tools)
   - [skills](#skills)
   - [guards](#guards)
+  - [todo](#todo)
   - [session](#session)
   - [workspace](#workspace)
   - [ui](#ui)
@@ -42,6 +45,8 @@ For a quick overview and installation guide, see [README.md](README.md).
 - [Guard System](#guard-system)
 - [Skills System](#skills-system)
 - [Memory and RAG](#memory-and-rag)
+- [Cross-Session Todo Memory](#cross-session-todo-memory)
+- [Cross-Session Address Book](#cross-session-address-book)
 - [Session Management](#session-management)
 - [Context Compaction](#context-compaction)
 - [Execution Queue](#execution-queue-1)
@@ -198,6 +203,32 @@ Model selection persists per session. Use `default` to revert to the global conf
 - Weekly: `weekly mon 09:00` (UTC, days: mon-sun)
 
 Cron is pseudo-cron managed inside the Captain Claw runtime. Guardrails remain active for every execution. Output is tagged with `[CRON ...]` in chat and monitor panes.
+
+### Todo Commands
+
+| Command | Description |
+|---|---|
+| `/todo` or `/todo list` | List all pending and in-progress to-do items |
+| `/todo add <text>` | Add a new to-do item |
+| `/todo done <id\|#index>` | Mark a to-do item as done |
+| `/todo remove <id\|#index>` | Delete a to-do item |
+| `/todo assign <id\|#index> bot\|human` | Reassign responsibility |
+
+The agent can also manage todos via the `todo` tool during conversation. Items are persistent across sessions and can be assigned to `bot` or `human`.
+
+### Contacts Commands
+
+| Command | Description |
+|---|---|
+| `/contacts` or `/contacts list` | List all contacts sorted by importance |
+| `/contacts add <name>` | Add a new contact |
+| `/contacts info <id\|#index\|name>` | Show full contact details |
+| `/contacts search <query>` | Search contacts by name, organization, or email |
+| `/contacts update <id\|#index\|name> <field=value ...>` | Update contact fields |
+| `/contacts importance <id\|#index\|name> <1-10>` | Set contact importance (pins value) |
+| `/contacts remove <id\|#index\|name>` | Remove a contact |
+
+The agent can also manage contacts via the `contacts` tool during conversation. Contacts are persistent across sessions and support auto-capture from conversation and email recipients.
 
 ### Skills Commands
 
@@ -393,6 +424,47 @@ Interact with Google Drive. Requires Google OAuth connection.
 
 **Read behavior:** Google Docs export as markdown, Sheets as CSV, Slides as plain text. Office files (DOCX, XLSX, PPTX) are downloaded and parsed by the corresponding extract tools. Plain text files are downloaded directly.
 
+### todo
+
+Persistent cross-session to-do list. The agent uses this tool to manage tasks that survive across sessions.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `add`, `list`, `update`, `remove` |
+| `content` | string | for add | Task description |
+| `todo_id` | string | for update/remove | Todo ID or `#index` |
+| `status` | string | no | `pending`, `in_progress`, `done`, `cancelled` |
+| `responsible` | string | no | `bot` or `human` (default: `bot`) |
+| `priority` | string | no | `low`, `normal`, `high`, `urgent` (default: `normal`) |
+| `tags` | string | no | Comma-separated tags |
+| `filter_status` | string | no | Filter list by status |
+| `filter_responsible` | string | no | Filter list by responsible party |
+
+Items include session affinity tracking. The agent is nudged about pending items via context injection at the start of each turn.
+
+### contacts
+
+Persistent cross-session address book. The agent uses this tool to track people across sessions.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `add`, `list`, `search`, `info`, `update`, `remove` |
+| `name` | string | for add | Contact name |
+| `contact_id` | string | for info/update/remove | Contact ID, `#index`, or name |
+| `description` | string | no | Short description of the person |
+| `position` | string | no | Job title |
+| `organization` | string | no | Company or organization |
+| `relation` | string | no | Relationship: colleague, client, manager, friend, vendor, etc. |
+| `email` | string | no | Email address(es), comma-separated |
+| `phone` | string | no | Phone number |
+| `importance` | integer | no | Importance score 1-10 (setting this pins the value) |
+| `tags` | string | no | Comma-separated tags |
+| `notes` | string | no | Context notes (appended on update, not replaced) |
+| `query` | string | for search | Search query |
+| `privacy_tier` | string | no | `normal` or `private` (private contacts are not auto-injected) |
+
+Contact context is injected on demand when a known contact name appears in the user message, unlike todo which injects every turn.
+
 ---
 
 ## Configuration Reference
@@ -514,6 +586,8 @@ tools:
     - pocket_tts
     - send_mail
     - google_drive
+    - todo
+    - contacts
   require_confirmation:           # tools that require user approval
     - shell
     - write
@@ -600,6 +674,27 @@ guards:
   script_tool:
     enabled: false
     level: "stop_suspicious"
+```
+
+### todo
+
+```yaml
+todo:
+  enabled: true                   # enable cross-session to-do memory
+  auto_capture: true              # auto-detect tasks from conversation
+  inject_on_session_load: true    # nudge agent with pending items
+  max_items_in_prompt: 10         # max items injected into context
+  archive_after_days: 30          # archive completed items after N days
+```
+
+### addressbook
+
+```yaml
+addressbook:
+  enabled: true                   # enable cross-session address book
+  auto_capture: true              # auto-detect contacts from conversation
+  inject_on_mention: true         # inject contact context when name appears in message
+  max_items_in_prompt: 5          # max contacts injected into context per turn
 ```
 
 ### session
@@ -873,6 +968,54 @@ Key settings in `config.memory`:
 - `chunk_overlap_chars: 200` — overlap between chunks
 - `search.max_results: 6` — results returned per query
 - `search.min_score: 0.1` — minimum relevance threshold
+
+---
+
+## Cross-Session Todo Memory
+
+Captain Claw includes a persistent to-do system that works across sessions. Items survive restarts and can be managed by both the user and the agent.
+
+### How It Works
+
+- **Explicit capture:** Use `/todo add <text>` or tell the agent "save this to to-do" or "remind me to..."
+- **Auto-capture:** Conservative pattern matching detects task-like phrases in conversation (e.g., "don't forget to...", "to-do: ..."). Disabled with `todo.auto_capture: false`.
+- **Context injection:** At each turn, the agent receives a compact note of pending and in-progress items, nudging it to act on outstanding tasks.
+- **Session affinity:** Each item tracks which session created it. Items with no session target are visible globally.
+
+### Responsible Parties
+
+Items can be assigned to `bot` (the agent should handle it) or `human` (the user should handle it). Default is `bot`.
+
+### Priorities
+
+Four levels: `urgent`, `high`, `normal` (default), `low`. Items are sorted by priority in listings and context injection.
+
+### Availability
+
+The `/todo` command and `todo` tool are available across all interfaces: CLI, Web UI, Telegram, Slack, and Discord. The Web UI also exposes REST endpoints (`GET/POST /api/todos`, `PATCH/DELETE /api/todos/{id}`).
+
+---
+
+## Cross-Session Address Book
+
+Captain Claw includes a persistent address book that tracks people across sessions. Contacts survive restarts and accumulate context over time.
+
+### How It Works
+
+- **Explicit capture:** Use `/contacts add <name>` or tell the agent "remember that John is the CTO" or "save contact: Jane Smith".
+- **Auto-capture:** Conservative pattern matching detects contact-like phrases in conversation. Email recipients from `send_mail` are automatically added as contacts. Disabled with `addressbook.auto_capture: false`.
+- **On-demand context injection:** When a known contact name appears in the user message (or "who is..." patterns), the agent receives relevant contact details. Unlike todo, contacts are NOT injected every turn.
+- **Privacy tiers:** Contacts marked as `private` are excluded from auto-injection but remain accessible via explicit tool/CLI queries.
+
+### Importance Tracking
+
+Contacts have an importance score (1-10). It can be:
+- **Auto-computed:** Based on mention frequency, recency (21-day half-life), and session diversity. Uses `min(10, 1 + log2(mentions) * recency * diversity)`.
+- **Manually pinned:** Set via `/contacts importance <name> <score>` or the tool. Pinned values are not overwritten by auto-computation.
+
+### Availability
+
+The `/contacts` command and `contacts` tool are available across all interfaces: CLI, Web UI, Telegram, Slack, and Discord. The Web UI also exposes REST endpoints (`GET/POST /api/contacts`, `GET /api/contacts/search?q=`, `GET/PATCH/DELETE /api/contacts/{id}`).
 
 ---
 
@@ -1153,7 +1296,7 @@ Captain Claw can run alongside Telegram, Slack, and Discord bots.
 
 ### Supported Remote Commands
 
-Remote users can use: `/help`, `/config`, `/history`, `/compact`, `/models`, `/sessions`, `/session info`, `/session select`, `/session rename`, `/skills`, `/skill`, `/skill search`, `/cron`, `/pipeline`, `/planning`, `/orchestrate`.
+Remote users can use: `/help`, `/config`, `/history`, `/compact`, `/models`, `/sessions`, `/session info`, `/session select`, `/session rename`, `/skills`, `/skill`, `/skill search`, `/cron`, `/todo`, `/contacts`, `/pipeline`, `/planning`, `/orchestrate`.
 
 Local-only commands (not available remotely): `/exit`, `/approve user`, `/session run`, `/session procreate`, `/session protect`, `/session export`, `/session queue`, `/monitor`, `/cron add/list/history/pause/resume/remove`.
 

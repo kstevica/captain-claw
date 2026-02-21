@@ -642,6 +642,226 @@ async def dispatch_local_command(
         ui.print_success(f"Manual cron run finished: {job_id}")
         return "continue"
 
+    # ------------------------------------------------------------------
+    # To-do management
+    # ------------------------------------------------------------------
+
+    if result == "TODO_LIST":
+        items = await agent.session_manager.list_todos(
+            limit=50,
+            status_filter=None,
+        )
+        if not items:
+            ui.print_message("system", "No to-do items.")
+            return "continue"
+        lines: list[str] = []
+        for idx, item in enumerate(items, 1):
+            tag_suffix = f" [{item.tags}]" if item.tags else ""
+            status_icon = {"pending": " ", "in_progress": ">", "done": "x", "cancelled": "-"}.get(item.status, " ")
+            lines.append(
+                f"  [{status_icon}] #{idx} [{item.priority}/{item.responsible}] "
+                f"{item.content} ({item.status}){tag_suffix}  id={item.id[:8]}"
+            )
+        ui.print_message("system", "To-do items:\n" + "\n".join(lines))
+        return "continue"
+
+    if result.startswith("TODO_ADD:"):
+        text = result.split(":", 1)[1].strip()
+        session_id = agent.session.id if agent.session else None
+        item = await agent.session_manager.create_todo(
+            content=text,
+            responsible="human",
+            source_session=session_id,
+        )
+        ui.print_success(f"Added todo #{item.id[:8]}: {text}")
+        return "continue"
+
+    if result.startswith("TODO_DONE:"):
+        selector = result.split(":", 1)[1].strip()
+        item = await agent.session_manager.select_todo(selector)
+        if not item:
+            ui.print_error(f"Todo not found: {selector}")
+            return "continue"
+        await agent.session_manager.update_todo(item.id, status="done")
+        ui.print_success(f"Marked done: #{item.id[:8]} — {item.content}")
+        return "continue"
+
+    if result.startswith("TODO_REMOVE:"):
+        selector = result.split(":", 1)[1].strip()
+        item = await agent.session_manager.select_todo(selector)
+        if not item:
+            ui.print_error(f"Todo not found: {selector}")
+            return "continue"
+        await agent.session_manager.delete_todo(item.id)
+        ui.print_success(f"Removed todo: #{item.id[:8]} — {item.content}")
+        return "continue"
+
+    if result.startswith("TODO_ASSIGN:"):
+        payload_raw = result.split(":", 1)[1].strip()
+        try:
+            payload = json.loads(payload_raw)
+        except Exception:
+            ui.print_error("Invalid /todo assign payload")
+            return "continue"
+        responsible = str(payload.get("responsible", "")).strip()
+        selector = str(payload.get("selector", "")).strip()
+        item = await agent.session_manager.select_todo(selector)
+        if not item:
+            ui.print_error(f"Todo not found: {selector}")
+            return "continue"
+        await agent.session_manager.update_todo(item.id, responsible=responsible)
+        ui.print_success(f"Assigned #{item.id[:8]} to {responsible}")
+        return "continue"
+
+    # ------------------------------------------------------------------
+    # Contacts / address book management
+    # ------------------------------------------------------------------
+
+    if result == "CONTACTS_LIST":
+        items = await agent.session_manager.list_contacts(limit=50)
+        if not items:
+            ui.print_message("system", "No contacts.")
+            return "continue"
+        lines: list[str] = []
+        for idx, c in enumerate(items, 1):
+            org_part = f" @ {c.organization}" if c.organization else ""
+            pos_part = f" ({c.position})" if c.position else ""
+            lines.append(
+                f"  #{idx} [{c.importance}] {c.name}{pos_part}{org_part}"
+                f" [{c.relation or '-'}]  id={c.id[:8]}"
+            )
+        ui.print_message("system", "Contacts:\n" + "\n".join(lines))
+        return "continue"
+
+    if result.startswith("CONTACTS_ADD:"):
+        name = result.split(":", 1)[1].strip()
+        session_id = agent.session.id if agent.session else None
+        item = await agent.session_manager.create_contact(
+            name=name,
+            source_session=session_id,
+        )
+        ui.print_success(f"Added contact #{item.id[:8]}: {name}")
+        return "continue"
+
+    if result.startswith("CONTACTS_INFO:"):
+        selector = result.split(":", 1)[1].strip()
+        item = await agent.session_manager.select_contact(selector)
+        if not item:
+            ui.print_error(f"Contact not found: {selector}")
+            return "continue"
+        parts = [f"Name: {item.name}", f"ID: {item.id}"]
+        if item.position:
+            parts.append(f"Position: {item.position}")
+        if item.organization:
+            parts.append(f"Organization: {item.organization}")
+        if item.relation:
+            parts.append(f"Relation: {item.relation}")
+        if item.email:
+            parts.append(f"Email: {item.email}")
+        if item.phone:
+            parts.append(f"Phone: {item.phone}")
+        parts.append(f"Importance: {item.importance} (pinned={item.importance_pinned})")
+        parts.append(f"Mentions: {item.mention_count}")
+        if item.last_seen_at:
+            parts.append(f"Last seen: {item.last_seen_at}")
+        if item.tags:
+            parts.append(f"Tags: {item.tags}")
+        if item.description:
+            parts.append(f"Description: {item.description}")
+        if item.notes:
+            parts.append(f"Notes: {item.notes}")
+        parts.append(f"Privacy: {item.privacy_tier}")
+        ui.print_message("system", "\n".join(parts))
+        return "continue"
+
+    if result.startswith("CONTACTS_SEARCH:"):
+        query = result.split(":", 1)[1].strip()
+        items = await agent.session_manager.search_contacts(query, limit=20)
+        if not items:
+            ui.print_message("system", f"No contacts matching: {query}")
+            return "continue"
+        lines = []
+        for idx, c in enumerate(items, 1):
+            org_part = f" @ {c.organization}" if c.organization else ""
+            lines.append(
+                f"  #{idx} [{c.importance}] {c.name}{org_part}  id={c.id[:8]}"
+            )
+        ui.print_message("system", "Search results:\n" + "\n".join(lines))
+        return "continue"
+
+    if result.startswith("CONTACTS_UPDATE:"):
+        raw = result.split(":", 1)[1].strip()
+        # First token is the selector, rest are field=value pairs
+        update_parts = raw.split(None, 1)
+        if len(update_parts) < 2:
+            ui.print_error("Usage: /contacts update <id|#index|name> <field=value ...>")
+            return "continue"
+        selector = update_parts[0]
+        fields_str = update_parts[1]
+        item = await agent.session_manager.select_contact(selector)
+        if not item:
+            ui.print_error(f"Contact not found: {selector}")
+            return "continue"
+        kwargs: dict[str, Any] = {}
+        valid_fields = {"name", "description", "position", "organization", "relation",
+                        "email", "phone", "tags", "notes", "privacy_tier"}
+        for token in shlex.split(fields_str):
+            if "=" not in token:
+                continue
+            key, _, value = token.partition("=")
+            key = key.strip().lower()
+            if key in valid_fields:
+                if key == "notes":
+                    existing = item.notes or ""
+                    kwargs["notes"] = (existing.rstrip() + "\n" + value) if existing else value
+                else:
+                    kwargs[key] = value
+        if not kwargs:
+            ui.print_error("No valid fields to update. Use field=value syntax.")
+            return "continue"
+        ok = await agent.session_manager.update_contact(item.id, **kwargs)
+        if ok:
+            ui.print_success(f"Updated contact #{item.id[:8]}")
+        else:
+            ui.print_error("Update failed.")
+        return "continue"
+
+    if result.startswith("CONTACTS_IMPORTANCE:"):
+        payload_raw = result.split(":", 1)[1].strip()
+        try:
+            payload = json.loads(payload_raw)
+        except Exception:
+            ui.print_error("Invalid /contacts importance payload")
+            return "continue"
+        selector = str(payload.get("selector", "")).strip()
+        importance = int(payload.get("importance", 0))
+        item = await agent.session_manager.select_contact(selector)
+        if not item:
+            ui.print_error(f"Contact not found: {selector}")
+            return "continue"
+        importance = max(1, min(10, importance))
+        ok = await agent.session_manager.update_contact(
+            item.id, importance=importance, importance_pinned=True,
+        )
+        if ok:
+            ui.print_success(f"Set importance={importance} (pinned) for #{item.id[:8]}: {item.name}")
+        else:
+            ui.print_error("Update failed.")
+        return "continue"
+
+    if result.startswith("CONTACTS_REMOVE:"):
+        selector = result.split(":", 1)[1].strip()
+        item = await agent.session_manager.select_contact(selector)
+        if not item:
+            ui.print_error(f"Contact not found: {selector}")
+            return "continue"
+        ok = await agent.session_manager.delete_contact(item.id)
+        if ok:
+            ui.print_success(f"Removed contact #{item.id[:8]}: {item.name}")
+        else:
+            ui.print_error("Delete failed.")
+        return "continue"
+
     if result == "CONFIG":
         ui.print_message("system", format_active_configuration_text(ctx))
         return "continue"

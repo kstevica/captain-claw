@@ -82,6 +82,8 @@ class RuntimeContext:
             "Run/search/install skill: /skill <name> [args] | /skill search <criteria> | /skill install <github-url> | /skill install <skill-name> [install-id]",
         ),
         ("cron", "Run one-off cron prompt"),
+        ("todo", "Manage to-do items"),
+        ("contacts", "Manage address book contacts"),
     ])
 
     def get_platform_state(self, platform: str) -> PlatformState:

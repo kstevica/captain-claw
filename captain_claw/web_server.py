@@ -67,6 +67,18 @@ COMMANDS: list[dict[str, str]] = [
     {"command": "/cron list", "description": "List scheduled jobs", "category": "Cron"},
     {"command": "/cron run <job-id>", "description": "Execute a scheduled job now", "category": "Cron"},
     {"command": "/cron pause|resume|remove <job-id>", "description": "Manage scheduled jobs", "category": "Cron"},
+    {"command": "/todo", "description": "List to-do items", "category": "Todo"},
+    {"command": "/todo add <text>", "description": "Add a to-do item", "category": "Todo"},
+    {"command": "/todo done <id|#index>", "description": "Mark item done", "category": "Todo"},
+    {"command": "/todo remove <id|#index>", "description": "Remove a to-do item", "category": "Todo"},
+    {"command": "/todo assign bot|human <id|#index>", "description": "Reassign responsible", "category": "Todo"},
+    {"command": "/contacts", "description": "List contacts", "category": "Contacts"},
+    {"command": "/contacts add <name>", "description": "Add a contact", "category": "Contacts"},
+    {"command": "/contacts info <id|#index|name>", "description": "Show contact details", "category": "Contacts"},
+    {"command": "/contacts search <query>", "description": "Search contacts", "category": "Contacts"},
+    {"command": "/contacts update <id> <field=value>", "description": "Update contact fields", "category": "Contacts"},
+    {"command": "/contacts importance <id> <1-10>", "description": "Set contact importance", "category": "Contacts"},
+    {"command": "/contacts remove <id|#index|name>", "description": "Remove a contact", "category": "Contacts"},
     {"command": "/monitor on|off", "description": "Toggle monitor split view", "category": "Monitor"},
     {"command": "/monitor trace on|off", "description": "Toggle LLM trace logging", "category": "Monitor"},
     {"command": "/approve user telegram <token>", "description": "Approve a Telegram user pairing", "category": "Telegram"},
@@ -569,6 +581,12 @@ class WebServer:
                         })
                     return
 
+            elif cmd in ("/todo",):
+                result = await self._handle_todo_command(args.strip())
+
+            elif cmd in ("/contacts",):
+                result = await self._handle_contacts_command(args.strip())
+
             else:
                 # Try to process it as a chat message (the agent might understand it)
                 result = f"Unknown command: `{cmd}`. Type `/help` for available commands."
@@ -669,6 +687,213 @@ class WebServer:
             return "No active session."
 
         return f"Unknown session subcommand: `{subcmd}`"
+
+    async def _handle_todo_command(self, args: str) -> str:
+        """Handle /todo subcommands in the web UI."""
+        sm = self.agent.session_manager
+        if not args or args.lower() in ("list", "ls"):
+            items = await sm.list_todos(limit=50)
+            if not items:
+                return "No to-do items."
+            lines: list[str] = []
+            for idx, item in enumerate(items, 1):
+                tag_suffix = f" [{item.tags}]" if item.tags else ""
+                status_icon = {"pending": " ", "in_progress": ">", "done": "x", "cancelled": "-"}.get(item.status, " ")
+                lines.append(
+                    f"[{status_icon}] #{idx} [{item.priority}/{item.responsible}] "
+                    f"{item.content} ({item.status}){tag_suffix}  `{item.id[:8]}`"
+                )
+            return "**To-do items:**\n" + "\n".join(lines)
+
+        parts = args.split(None, 1)
+        subcmd = parts[0].lower()
+        subargs = parts[1].strip() if len(parts) > 1 else ""
+
+        if subcmd == "add":
+            if not subargs:
+                return "Usage: `/todo add <text>`"
+            session_id = self.agent.session.id if self.agent.session else None
+            item = await sm.create_todo(
+                content=subargs, responsible="human", source_session=session_id,
+            )
+            return f"Added todo: **{subargs}** (`{item.id[:8]}`)"
+
+        if subcmd in ("done", "complete", "finish"):
+            if not subargs:
+                return "Usage: `/todo done <id|#index>`"
+            item = await sm.select_todo(subargs)
+            if not item:
+                return f"Todo not found: `{subargs}`"
+            await sm.update_todo(item.id, status="done")
+            return f"Marked done: **{item.content}**"
+
+        if subcmd in ("remove", "rm", "delete", "del"):
+            if not subargs:
+                return "Usage: `/todo remove <id|#index>`"
+            item = await sm.select_todo(subargs)
+            if not item:
+                return f"Todo not found: `{subargs}`"
+            await sm.delete_todo(item.id)
+            return f"Removed: **{item.content}**"
+
+        if subcmd == "assign":
+            assign_parts = subargs.split(None, 1)
+            if len(assign_parts) < 2 or assign_parts[0] not in ("bot", "human"):
+                return "Usage: `/todo assign bot|human <id|#index>`"
+            responsible, selector = assign_parts
+            item = await sm.select_todo(selector)
+            if not item:
+                return f"Todo not found: `{selector}`"
+            await sm.update_todo(item.id, responsible=responsible)
+            return f"Assigned **{item.content}** to {responsible}"
+
+        # Fallback: treat entire args as an add
+        session_id = self.agent.session.id if self.agent.session else None
+        item = await sm.create_todo(
+            content=args, responsible="human", source_session=session_id,
+        )
+        return f"Added todo: **{args}** (`{item.id[:8]}`)"
+
+    async def _handle_contacts_command(self, args: str) -> str:
+        """Handle /contacts subcommands in the web UI."""
+        sm = self.agent.session_manager
+        if not args or args.lower() in ("list", "ls"):
+            items = await sm.list_contacts(limit=50)
+            if not items:
+                return "No contacts."
+            lines: list[str] = []
+            for idx, c in enumerate(items, 1):
+                org_part = f" @ {c.organization}" if c.organization else ""
+                pos_part = f" ({c.position})" if c.position else ""
+                lines.append(
+                    f"#{idx} [{c.importance}] {c.name}{pos_part}{org_part}"
+                    f" [{c.relation or '-'}]  `{c.id[:8]}`"
+                )
+            return "**Contacts:**\n" + "\n".join(lines)
+
+        parts = args.split(None, 1)
+        subcmd = parts[0].lower()
+        subargs = parts[1].strip() if len(parts) > 1 else ""
+
+        if subcmd == "add":
+            if not subargs:
+                return "Usage: `/contacts add <name>`"
+            session_id = self.agent.session.id if self.agent.session else None
+            item = await sm.create_contact(
+                name=subargs, source_session=session_id,
+            )
+            return f"Added contact: **{subargs}** (`{item.id[:8]}`)"
+
+        if subcmd == "info":
+            if not subargs:
+                return "Usage: `/contacts info <id|#index|name>`"
+            item = await sm.select_contact(subargs)
+            if not item:
+                return f"Contact not found: `{subargs}`"
+            parts_out = [f"**{item.name}**  `{item.id}`"]
+            if item.position:
+                parts_out.append(f"Position: {item.position}")
+            if item.organization:
+                parts_out.append(f"Organization: {item.organization}")
+            if item.relation:
+                parts_out.append(f"Relation: {item.relation}")
+            if item.email:
+                parts_out.append(f"Email: {item.email}")
+            if item.phone:
+                parts_out.append(f"Phone: {item.phone}")
+            parts_out.append(f"Importance: {item.importance} (pinned={item.importance_pinned})")
+            parts_out.append(f"Mentions: {item.mention_count}")
+            if item.last_seen_at:
+                parts_out.append(f"Last seen: {item.last_seen_at}")
+            if item.tags:
+                parts_out.append(f"Tags: {item.tags}")
+            if item.description:
+                parts_out.append(f"Description: {item.description}")
+            if item.notes:
+                parts_out.append(f"Notes: {item.notes}")
+            parts_out.append(f"Privacy: {item.privacy_tier}")
+            return "\n".join(parts_out)
+
+        if subcmd == "search":
+            if not subargs:
+                return "Usage: `/contacts search <query>`"
+            items = await sm.search_contacts(subargs, limit=20)
+            if not items:
+                return f"No contacts matching: `{subargs}`"
+            lines = []
+            for idx, c in enumerate(items, 1):
+                org_part = f" @ {c.organization}" if c.organization else ""
+                lines.append(
+                    f"#{idx} [{c.importance}] {c.name}{org_part}  `{c.id[:8]}`"
+                )
+            return "**Search results:**\n" + "\n".join(lines)
+
+        if subcmd in ("remove", "rm", "delete", "del"):
+            if not subargs:
+                return "Usage: `/contacts remove <id|#index|name>`"
+            item = await sm.select_contact(subargs)
+            if not item:
+                return f"Contact not found: `{subargs}`"
+            await sm.delete_contact(item.id)
+            return f"Removed: **{item.name}**"
+
+        if subcmd == "importance":
+            imp_parts = subargs.rsplit(None, 1)
+            if len(imp_parts) < 2:
+                return "Usage: `/contacts importance <id|#index|name> <1-10>`"
+            selector, score_str = imp_parts
+            try:
+                score = max(1, min(10, int(score_str)))
+            except ValueError:
+                return "Importance must be a number 1-10."
+            item = await sm.select_contact(selector)
+            if not item:
+                return f"Contact not found: `{selector}`"
+            await sm.update_contact(item.id, importance=score, importance_pinned=True)
+            return f"Set importance={score} (pinned) for **{item.name}**"
+
+        if subcmd == "update":
+            if not subargs:
+                return "Usage: `/contacts update <id|#index|name> <field=value ...>`"
+            update_parts = subargs.split(None, 1)
+            if len(update_parts) < 2:
+                return "Usage: `/contacts update <id|#index|name> <field=value ...>`"
+            selector = update_parts[0]
+            fields_str = update_parts[1]
+            item = await sm.select_contact(selector)
+            if not item:
+                return f"Contact not found: `{selector}`"
+            import shlex as _shlex
+            kwargs: dict[str, Any] = {}
+            valid_fields = {"name", "description", "position", "organization", "relation",
+                            "email", "phone", "tags", "notes", "privacy_tier"}
+            for token in _shlex.split(fields_str):
+                if "=" not in token:
+                    continue
+                key, _, value = token.partition("=")
+                key = key.strip().lower()
+                if key in valid_fields:
+                    if key == "notes":
+                        existing = item.notes or ""
+                        kwargs["notes"] = (existing.rstrip() + "\n" + value) if existing else value
+                    else:
+                        kwargs[key] = value
+            if not kwargs:
+                return "No valid fields to update. Use `field=value` syntax."
+            ok = await sm.update_contact(item.id, **kwargs)
+            return f"Updated contact: **{item.name}**" if ok else "Update failed."
+
+        # Fallback: treat as search
+        items = await sm.search_contacts(args, limit=20)
+        if not items:
+            return f"No contacts matching: `{args}`"
+        lines = []
+        for idx, c in enumerate(items, 1):
+            org_part = f" @ {c.organization}" if c.organization else ""
+            lines.append(
+                f"#{idx} [{c.importance}] {c.name}{org_part}  `{c.id[:8]}`"
+            )
+        return "**Search results:**\n" + "\n".join(lines)
 
     def _format_help(self) -> str:
         """Format help text for the /help command."""
@@ -1774,6 +1999,190 @@ class WebServer:
     async def _serve_cron(self, request: web.Request) -> web.FileResponse:
         return web.FileResponse(STATIC_DIR / "cron.html")
 
+    # ── Todo API ─────────────────────────────────────────────────────
+
+    async def _list_todos(self, request: web.Request) -> web.Response:
+        """GET /api/todos — list todo items."""
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        sm = self.agent.session_manager
+        status_filter = request.query.get("status")
+        responsible_filter = request.query.get("responsible")
+        session_filter = request.query.get("session_id")
+        items = await sm.list_todos(
+            limit=200,
+            status_filter=status_filter or None,
+            responsible_filter=responsible_filter or None,
+            session_filter=session_filter or None,
+        )
+        return web.json_response(
+            [item.to_dict() for item in items],
+            dumps=lambda obj: json.dumps(obj, default=str),
+        )
+
+    async def _create_todo(self, request: web.Request) -> web.Response:
+        """POST /api/todos — create a todo item."""
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON body"}, status=400)
+        content = str(body.get("content", "")).strip()
+        if not content:
+            return web.json_response({"error": "content is required"}, status=400)
+        sm = self.agent.session_manager
+        item = await sm.create_todo(
+            content=content,
+            responsible=str(body.get("responsible", "human")).strip() or "human",
+            priority=str(body.get("priority", "normal")).strip() or "normal",
+            source_session=str(body.get("source_session", "")).strip() or None,
+            target_session=str(body.get("target_session", "")).strip() or None,
+            tags=str(body.get("tags", "")).strip() or None,
+        )
+        return web.json_response(item.to_dict(), status=201)
+
+    async def _update_todo(self, request: web.Request) -> web.Response:
+        """PATCH /api/todos/{id} — update a todo item."""
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        todo_id = request.match_info.get("id", "")
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON body"}, status=400)
+        sm = self.agent.session_manager
+        kwargs: dict[str, Any] = {}
+        for field in ("content", "status", "responsible", "priority", "target_session", "tags"):
+            if field in body:
+                kwargs[field] = str(body[field]).strip() if body[field] is not None else None
+        ok = await sm.update_todo(todo_id, **kwargs)
+        if not ok:
+            return web.json_response({"error": "Todo not found"}, status=404)
+        item = await sm.load_todo(todo_id)
+        return web.json_response(item.to_dict() if item else {"ok": True})
+
+    async def _delete_todo(self, request: web.Request) -> web.Response:
+        """DELETE /api/todos/{id} — delete a todo item."""
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        todo_id = request.match_info.get("id", "")
+        sm = self.agent.session_manager
+        ok = await sm.delete_todo(todo_id)
+        if not ok:
+            return web.json_response({"error": "Todo not found"}, status=404)
+        return web.json_response({"ok": True})
+
+    # ── Contacts API ──────────────────────────────────────────────────
+
+    async def _list_contacts(self, request: web.Request) -> web.Response:
+        """GET /api/contacts — list contacts."""
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        sm = self.agent.session_manager
+        items = await sm.list_contacts(limit=200)
+        return web.json_response(
+            [c.to_dict() for c in items],
+            dumps=lambda obj: json.dumps(obj, default=str),
+        )
+
+    async def _search_contacts(self, request: web.Request) -> web.Response:
+        """GET /api/contacts/search?q= — search contacts."""
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        query = request.query.get("q", "").strip()
+        if not query:
+            return web.json_response({"error": "q parameter required"}, status=400)
+        sm = self.agent.session_manager
+        items = await sm.search_contacts(query, limit=50)
+        return web.json_response(
+            [c.to_dict() for c in items],
+            dumps=lambda obj: json.dumps(obj, default=str),
+        )
+
+    async def _create_contact(self, request: web.Request) -> web.Response:
+        """POST /api/contacts — create a contact."""
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON body"}, status=400)
+        name = str(body.get("name", "")).strip()
+        if not name:
+            return web.json_response({"error": "name is required"}, status=400)
+        sm = self.agent.session_manager
+        item = await sm.create_contact(
+            name=name,
+            description=str(body.get("description", "")).strip() or None,
+            position=str(body.get("position", "")).strip() or None,
+            organization=str(body.get("organization", "")).strip() or None,
+            relation=str(body.get("relation", "")).strip() or None,
+            email=str(body.get("email", "")).strip() or None,
+            phone=str(body.get("phone", "")).strip() or None,
+            importance=int(body.get("importance", 1)),
+            tags=str(body.get("tags", "")).strip() or None,
+            notes=str(body.get("notes", "")).strip() or None,
+            privacy_tier=str(body.get("privacy_tier", "normal")).strip() or "normal",
+            source_session=str(body.get("source_session", "")).strip() or None,
+        )
+        return web.json_response(
+            item.to_dict(), status=201,
+            dumps=lambda obj: json.dumps(obj, default=str),
+        )
+
+    async def _get_contact(self, request: web.Request) -> web.Response:
+        """GET /api/contacts/{id} — get a single contact."""
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        contact_id = request.match_info.get("id", "")
+        sm = self.agent.session_manager
+        item = await sm.load_contact(contact_id)
+        if not item:
+            return web.json_response({"error": "Contact not found"}, status=404)
+        return web.json_response(
+            item.to_dict(),
+            dumps=lambda obj: json.dumps(obj, default=str),
+        )
+
+    async def _update_contact(self, request: web.Request) -> web.Response:
+        """PATCH /api/contacts/{id} — update a contact."""
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        contact_id = request.match_info.get("id", "")
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON body"}, status=400)
+        sm = self.agent.session_manager
+        kwargs: dict[str, Any] = {}
+        for field in ("name", "description", "position", "organization", "relation",
+                       "email", "phone", "tags", "notes", "privacy_tier"):
+            if field in body:
+                kwargs[field] = str(body[field]).strip() if body[field] is not None else None
+        if "importance" in body:
+            kwargs["importance"] = max(1, min(10, int(body["importance"])))
+            kwargs["importance_pinned"] = True
+        ok = await sm.update_contact(contact_id, **kwargs)
+        if not ok:
+            return web.json_response({"error": "Contact not found"}, status=404)
+        item = await sm.load_contact(contact_id)
+        return web.json_response(
+            item.to_dict() if item else {"ok": True},
+            dumps=lambda obj: json.dumps(obj, default=str),
+        )
+
+    async def _delete_contact(self, request: web.Request) -> web.Response:
+        """DELETE /api/contacts/{id} — delete a contact."""
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        contact_id = request.match_info.get("id", "")
+        sm = self.agent.session_manager
+        ok = await sm.delete_contact(contact_id)
+        if not ok:
+            return web.json_response({"error": "Contact not found"}, status=404)
+        return web.json_response({"ok": True})
+
     # ── Workflow browser API ──────────────────────────────────────────
 
     def _workflows_dir(self) -> Path:
@@ -2149,6 +2558,18 @@ class WebServer:
         app.router.add_patch("/api/cron/jobs/{id}", self._update_cron_job_payload)
         app.router.add_delete("/api/cron/jobs/{id}", self._delete_cron_job)
         app.router.add_get("/api/cron/jobs/{id}/history", self._get_cron_job_history)
+        # Todo API routes
+        app.router.add_get("/api/todos", self._list_todos)
+        app.router.add_post("/api/todos", self._create_todo)
+        app.router.add_patch("/api/todos/{id}", self._update_todo)
+        app.router.add_delete("/api/todos/{id}", self._delete_todo)
+        # Contacts API routes
+        app.router.add_get("/api/contacts", self._list_contacts)
+        app.router.add_get("/api/contacts/search", self._search_contacts)
+        app.router.add_post("/api/contacts", self._create_contact)
+        app.router.add_get("/api/contacts/{id}", self._get_contact)
+        app.router.add_patch("/api/contacts/{id}", self._update_contact)
+        app.router.add_delete("/api/contacts/{id}", self._delete_contact)
         # Workflow browser API routes
         app.router.add_get("/api/workflow-browser", self._list_workflow_outputs)
         app.router.add_get("/api/workflow-browser/output/{filename}", self._get_workflow_output)

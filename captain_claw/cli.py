@@ -42,6 +42,8 @@ class TerminalUI:
             "/history",
             "/compact",
             "/cron",
+            "/todo",
+            "/contacts",
             "/planning",
             "/pipeline",
             "/monitor",
@@ -192,6 +194,18 @@ Commands:
   /cron pause <job-id|#index> - Pause cron job
   /cron resume <job-id|#index> - Resume cron job
   /cron remove <job-id|#index> - Remove cron job
+  /todo           - List active to-do items
+  /todo add <text> - Add a to-do item (default: responsible=human)
+  /todo done <id|#index> - Mark to-do item as done
+  /todo remove <id|#index> - Remove a to-do item
+  /todo assign bot|human <id|#index> - Reassign responsible party
+  /contacts       - List contacts (address book)
+  /contacts add <name> - Add a new contact
+  /contacts info <id|#index|name> - Show contact details
+  /contacts search <query> - Search contacts by name/org/email
+  /contacts update <id|#index|name> <field=value ...> - Update contact fields
+  /contacts importance <id|#index|name> <1-10> - Set contact importance (pins value)
+  /contacts remove <id|#index|name> - Remove a contact
   /pipeline loop|contracts - Set execution pipeline mode (simple loop vs contract gate)
   /planning on|off - Legacy alias for /pipeline contracts|loop
   /skills         - List currently available user-invocable skills
@@ -1532,6 +1546,86 @@ Commands:
                 return None
             payload = json.dumps({"prompt": prompt}, ensure_ascii=True)
             return f"CRON_ONEOFF:{payload}"
+        elif command == "/todo":
+            todo_arg = args.strip()
+            if not todo_arg or todo_arg.lower() in {"list", "ls"}:
+                return "TODO_LIST"
+            todo_parts = todo_arg.split(None, 1)
+            subcommand = todo_parts[0].lower()
+            if subcommand == "add":
+                text = todo_arg[len(todo_parts[0]):].strip()
+                if not text:
+                    self.print_error("Usage: /todo add <text>")
+                    return None
+                return f"TODO_ADD:{text}"
+            if subcommand in {"done", "complete", "finish"}:
+                selector = todo_arg[len(todo_parts[0]):].strip()
+                if not selector:
+                    self.print_error("Usage: /todo done <id|#index>")
+                    return None
+                return f"TODO_DONE:{selector}"
+            if subcommand in {"remove", "rm", "delete", "del"}:
+                selector = todo_arg[len(todo_parts[0]):].strip()
+                if not selector:
+                    self.print_error("Usage: /todo remove <id|#index>")
+                    return None
+                return f"TODO_REMOVE:{selector}"
+            if subcommand == "assign":
+                rest = todo_arg[len(todo_parts[0]):].strip()
+                assign_parts = rest.split(None, 1)
+                if len(assign_parts) < 2 or assign_parts[0] not in {"bot", "human"}:
+                    self.print_error("Usage: /todo assign bot|human <id|#index>")
+                    return None
+                payload = json.dumps({"responsible": assign_parts[0], "selector": assign_parts[1]})
+                return f"TODO_ASSIGN:{payload}"
+            # Fallback: treat the whole argument as text for add
+            return f"TODO_ADD:{todo_arg}"
+        elif command == "/contacts":
+            contacts_arg = args.strip()
+            if not contacts_arg or contacts_arg.lower() in {"list", "ls"}:
+                return "CONTACTS_LIST"
+            contacts_parts = contacts_arg.split(None, 1)
+            subcommand = contacts_parts[0].lower()
+            rest = contacts_arg[len(contacts_parts[0]):].strip() if len(contacts_parts) > 1 else ""
+            if subcommand == "add":
+                if not rest:
+                    self.print_error("Usage: /contacts add <name>")
+                    return None
+                return f"CONTACTS_ADD:{rest}"
+            if subcommand == "info":
+                if not rest:
+                    self.print_error("Usage: /contacts info <id|#index|name>")
+                    return None
+                return f"CONTACTS_INFO:{rest}"
+            if subcommand == "search":
+                if not rest:
+                    self.print_error("Usage: /contacts search <query>")
+                    return None
+                return f"CONTACTS_SEARCH:{rest}"
+            if subcommand == "update":
+                if not rest:
+                    self.print_error("Usage: /contacts update <id|#index|name> <field=value ...>")
+                    return None
+                return f"CONTACTS_UPDATE:{rest}"
+            if subcommand == "importance":
+                imp_parts = rest.rsplit(None, 1)
+                if len(imp_parts) < 2:
+                    self.print_error("Usage: /contacts importance <id|#index|name> <1-10>")
+                    return None
+                try:
+                    score = int(imp_parts[1])
+                except ValueError:
+                    self.print_error("Importance must be a number 1-10.")
+                    return None
+                payload = json.dumps({"selector": imp_parts[0], "importance": score})
+                return f"CONTACTS_IMPORTANCE:{payload}"
+            if subcommand in {"remove", "rm", "delete", "del"}:
+                if not rest:
+                    self.print_error("Usage: /contacts remove <id|#index|name>")
+                    return None
+                return f"CONTACTS_REMOVE:{rest}"
+            # Fallback: treat as search query
+            return f"CONTACTS_SEARCH:{contacts_arg}"
         elif command == "/orchestrate":
             orchestrate_arg = args.strip()
             if not orchestrate_arg:

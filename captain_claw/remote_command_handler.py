@@ -415,6 +415,194 @@ async def handle_remote_command(
             return True
         await execute_prompt(prompt, f"[{sender_label} cron oneoff] {prompt}")
         return True
+    # To-do commands
+    if result == "TODO_LIST":
+        sm = agent.session_manager
+        items = await sm.list_todos(limit=50)
+        if not items:
+            await send_text("No to-do items.")
+            return True
+        lines: list[str] = []
+        for idx, item in enumerate(items, 1):
+            tag_suffix = f" [{item.tags}]" if item.tags else ""
+            status_icon = {"pending": " ", "in_progress": ">", "done": "x", "cancelled": "-"}.get(item.status, " ")
+            lines.append(
+                f"[{status_icon}] #{idx} [{item.priority}/{item.responsible}] "
+                f"{item.content} ({item.status}){tag_suffix}"
+            )
+        await send_text("To-do items:\n" + "\n".join(lines))
+        return True
+    if result.startswith("TODO_ADD:"):
+        text = result.split(":", 1)[1].strip()
+        sm = agent.session_manager
+        session_id = agent.session.id if agent.session else None
+        item = await sm.create_todo(content=text, responsible="human", source_session=session_id)
+        await send_text(f"Added todo: {text}")
+        return True
+    if result.startswith("TODO_DONE:"):
+        selector = result.split(":", 1)[1].strip()
+        sm = agent.session_manager
+        item = await sm.select_todo(selector)
+        if not item:
+            await send_text(f"Todo not found: {selector}")
+            return True
+        await sm.update_todo(item.id, status="done")
+        await send_text(f"Marked done: {item.content}")
+        return True
+    if result.startswith("TODO_REMOVE:"):
+        selector = result.split(":", 1)[1].strip()
+        sm = agent.session_manager
+        item = await sm.select_todo(selector)
+        if not item:
+            await send_text(f"Todo not found: {selector}")
+            return True
+        await sm.delete_todo(item.id)
+        await send_text(f"Removed: {item.content}")
+        return True
+    if result.startswith("TODO_ASSIGN:"):
+        payload_raw = result.split(":", 1)[1].strip()
+        try:
+            payload = json.loads(payload_raw)
+        except Exception:
+            await send_text("Invalid /todo assign payload.")
+            return True
+        responsible = str(payload.get("responsible", "")).strip()
+        selector = str(payload.get("selector", "")).strip()
+        sm = agent.session_manager
+        item = await sm.select_todo(selector)
+        if not item:
+            await send_text(f"Todo not found: {selector}")
+            return True
+        await sm.update_todo(item.id, responsible=responsible)
+        await send_text(f"Assigned to {responsible}: {item.content}")
+        return True
+    # Contacts commands
+    if result == "CONTACTS_LIST":
+        sm = agent.session_manager
+        items = await sm.list_contacts(limit=50)
+        if not items:
+            await send_text("No contacts.")
+            return True
+        lines: list[str] = []
+        for idx, c in enumerate(items, 1):
+            org_part = f" @ {c.organization}" if c.organization else ""
+            pos_part = f" ({c.position})" if c.position else ""
+            lines.append(
+                f"#{idx} [{c.importance}] {c.name}{pos_part}{org_part}"
+                f" [{c.relation or '-'}]"
+            )
+        await send_text("Contacts:\n" + "\n".join(lines))
+        return True
+    if result.startswith("CONTACTS_ADD:"):
+        name = result.split(":", 1)[1].strip()
+        sm = agent.session_manager
+        session_id = agent.session.id if agent.session else None
+        item = await sm.create_contact(name=name, source_session=session_id)
+        await send_text(f"Added contact: {name}")
+        return True
+    if result.startswith("CONTACTS_INFO:"):
+        selector = result.split(":", 1)[1].strip()
+        sm = agent.session_manager
+        item = await sm.select_contact(selector)
+        if not item:
+            await send_text(f"Contact not found: {selector}")
+            return True
+        parts = [f"Name: {item.name}"]
+        if item.position:
+            parts.append(f"Position: {item.position}")
+        if item.organization:
+            parts.append(f"Organization: {item.organization}")
+        if item.relation:
+            parts.append(f"Relation: {item.relation}")
+        if item.email:
+            parts.append(f"Email: {item.email}")
+        if item.phone:
+            parts.append(f"Phone: {item.phone}")
+        parts.append(f"Importance: {item.importance} (pinned={item.importance_pinned})")
+        parts.append(f"Mentions: {item.mention_count}")
+        if item.tags:
+            parts.append(f"Tags: {item.tags}")
+        if item.description:
+            parts.append(f"Description: {item.description}")
+        if item.notes:
+            parts.append(f"Notes: {item.notes}")
+        parts.append(f"Privacy: {item.privacy_tier}")
+        await send_text("\n".join(parts))
+        return True
+    if result.startswith("CONTACTS_SEARCH:"):
+        query = result.split(":", 1)[1].strip()
+        sm = agent.session_manager
+        items = await sm.search_contacts(query, limit=20)
+        if not items:
+            await send_text(f"No contacts matching: {query}")
+            return True
+        lines = []
+        for idx, c in enumerate(items, 1):
+            org_part = f" @ {c.organization}" if c.organization else ""
+            lines.append(f"#{idx} [{c.importance}] {c.name}{org_part}")
+        await send_text("Search results:\n" + "\n".join(lines))
+        return True
+    if result.startswith("CONTACTS_REMOVE:"):
+        selector = result.split(":", 1)[1].strip()
+        sm = agent.session_manager
+        item = await sm.select_contact(selector)
+        if not item:
+            await send_text(f"Contact not found: {selector}")
+            return True
+        await sm.delete_contact(item.id)
+        await send_text(f"Removed: {item.name}")
+        return True
+    if result.startswith("CONTACTS_IMPORTANCE:"):
+        payload_raw = result.split(":", 1)[1].strip()
+        try:
+            payload = json.loads(payload_raw)
+        except Exception:
+            await send_text("Invalid /contacts importance payload.")
+            return True
+        selector = str(payload.get("selector", "")).strip()
+        importance = max(1, min(10, int(payload.get("importance", 1))))
+        sm = agent.session_manager
+        item = await sm.select_contact(selector)
+        if not item:
+            await send_text(f"Contact not found: {selector}")
+            return True
+        await sm.update_contact(item.id, importance=importance, importance_pinned=True)
+        await send_text(f"Set importance={importance} (pinned) for {item.name}")
+        return True
+    if result.startswith("CONTACTS_UPDATE:"):
+        raw = result.split(":", 1)[1].strip()
+        update_parts = raw.split(None, 1)
+        if len(update_parts) < 2:
+            await send_text("Usage: /contacts update <id|#index|name> <field=value ...>")
+            return True
+        selector = update_parts[0]
+        fields_str = update_parts[1]
+        sm = agent.session_manager
+        item = await sm.select_contact(selector)
+        if not item:
+            await send_text(f"Contact not found: {selector}")
+            return True
+        import shlex as _shlex
+        kwargs: dict[str, Any] = {}
+        valid_fields = {"name", "description", "position", "organization", "relation",
+                        "email", "phone", "tags", "notes", "privacy_tier"}
+        for token in _shlex.split(fields_str):
+            if "=" not in token:
+                continue
+            key, _, value = token.partition("=")
+            key = key.strip().lower()
+            if key in valid_fields:
+                if key == "notes":
+                    existing = item.notes or ""
+                    kwargs["notes"] = (existing.rstrip() + "\n" + value) if existing else value
+                else:
+                    kwargs[key] = value
+        if not kwargs:
+            await send_text("No valid fields to update. Use field=value syntax.")
+            return True
+        ok = await sm.update_contact(item.id, **kwargs)
+        await send_text(f"Updated contact: {item.name}" if ok else "Update failed.")
+        return True
     # Unhandled command -> local-only message
     _ = platform
     await send_text("Command requires local console in this version.")

@@ -258,6 +258,8 @@ class AgentOrchestrationMixin:
                 assistant_response=final_response,
             )
             await self._persist_assistant_response(final_response)
+            await self._auto_capture_todos(effective_user_input, final_response)
+            await self._auto_capture_contacts(effective_user_input, final_response)
             return True, final_response, finish_success
 
         turn_start_idx = len(self.session.messages) if self.session else 0
@@ -274,6 +276,8 @@ class AgentOrchestrationMixin:
         # Add user message to session
         self._add_session_message("user", user_input)
         await self._auto_compact_if_needed()
+        await self._refresh_todo_context_cache()
+        await self._refresh_contacts_context_cache()
         if clarification_context_applied:
             self._emit_tool_output(
                 "task_contract",

@@ -138,6 +138,149 @@ class CronJob:
         )
 
 
+@dataclass
+class TodoItem:
+    """A persistent cross-session to-do item."""
+
+    id: str
+    content: str
+    status: str = "pending"  # pending | in_progress | done | cancelled
+    responsible: str = "bot"  # bot | human
+    priority: str = "normal"  # low | normal | high | urgent
+    source_session: str | None = None
+    target_session: str | None = None
+    created_at: str = field(default_factory=_utcnow_iso)
+    updated_at: str = field(default_factory=_utcnow_iso)
+    completed_at: str | None = None
+    context: str | None = None
+    tags: str | None = None
+
+    @classmethod
+    def from_row(cls, row: tuple[Any, ...]) -> "TodoItem":
+        """Create todo item from sqlite row."""
+        return cls(
+            id=str(row[0]),
+            content=str(row[1]),
+            status=str(row[2] or "pending"),
+            responsible=str(row[3] or "bot"),
+            priority=str(row[4] or "normal"),
+            source_session=str(row[5]) if row[5] else None,
+            target_session=str(row[6]) if row[6] else None,
+            created_at=str(row[7]),
+            updated_at=str(row[8]),
+            completed_at=str(row[9]) if row[9] else None,
+            context=str(row[10]) if row[10] else None,
+            tags=str(row[11]) if row[11] else None,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "id": self.id,
+            "content": self.content,
+            "status": self.status,
+            "responsible": self.responsible,
+            "priority": self.priority,
+            "source_session": self.source_session,
+            "target_session": self.target_session,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "completed_at": self.completed_at,
+            "context": self.context,
+            "tags": self.tags,
+        }
+
+
+@dataclass
+class ContactEntry:
+    """A persistent cross-session address book contact."""
+
+    id: str
+    name: str
+    description: str | None = None
+    position: str | None = None
+    organization: str | None = None
+    relation: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    importance: int = 1
+    importance_pinned: bool = False
+    mention_count: int = 0
+    last_seen_at: str | None = None
+    source_session: str | None = None
+    tags: str | None = None
+    notes: str | None = None
+    privacy_tier: str = "normal"
+    created_at: str = field(default_factory=_utcnow_iso)
+    updated_at: str = field(default_factory=_utcnow_iso)
+
+    @classmethod
+    def from_row(cls, row: tuple[Any, ...]) -> "ContactEntry":
+        """Create contact from sqlite row."""
+        return cls(
+            id=str(row[0]),
+            name=str(row[1]),
+            description=str(row[2]) if row[2] else None,
+            position=str(row[3]) if row[3] else None,
+            organization=str(row[4]) if row[4] else None,
+            relation=str(row[5]) if row[5] else None,
+            email=str(row[6]) if row[6] else None,
+            phone=str(row[7]) if row[7] else None,
+            importance=int(row[8]) if row[8] is not None else 1,
+            importance_pinned=bool(int(row[9])) if row[9] is not None else False,
+            mention_count=int(row[10]) if row[10] is not None else 0,
+            last_seen_at=str(row[11]) if row[11] else None,
+            source_session=str(row[12]) if row[12] else None,
+            tags=str(row[13]) if row[13] else None,
+            notes=str(row[14]) if row[14] else None,
+            privacy_tier=str(row[15]) if row[15] else "normal",
+            created_at=str(row[16]),
+            updated_at=str(row[17]),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "position": self.position,
+            "organization": self.organization,
+            "relation": self.relation,
+            "email": self.email,
+            "phone": self.phone,
+            "importance": self.importance,
+            "importance_pinned": self.importance_pinned,
+            "mention_count": self.mention_count,
+            "last_seen_at": self.last_seen_at,
+            "source_session": self.source_session,
+            "tags": self.tags,
+            "notes": self.notes,
+            "privacy_tier": self.privacy_tier,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass
+class ContactMention:
+    """A lightweight interaction log entry for a contact."""
+
+    id: str
+    contact_id: str
+    session_id: str
+    mentioned_at: str = field(default_factory=_utcnow_iso)
+
+    @classmethod
+    def from_row(cls, row: tuple[Any, ...]) -> "ContactMention":
+        return cls(
+            id=str(row[0]),
+            contact_id=str(row[1]),
+            session_id=str(row[2]),
+            mentioned_at=str(row[3]),
+        )
+
+
 class SessionManager:
     """Manages conversation sessions with SQLite storage."""
 
@@ -208,6 +351,68 @@ class SessionManager:
             )
             await self._db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_cron_jobs_session_id ON cron_jobs(session_id)"
+            )
+            await self._db.execute("""
+                CREATE TABLE IF NOT EXISTS todo_items (
+                    id              TEXT PRIMARY KEY,
+                    content         TEXT NOT NULL,
+                    status          TEXT NOT NULL DEFAULT 'pending',
+                    responsible     TEXT NOT NULL DEFAULT 'bot',
+                    priority        TEXT NOT NULL DEFAULT 'normal',
+                    source_session  TEXT,
+                    target_session  TEXT,
+                    created_at      TEXT NOT NULL,
+                    updated_at      TEXT NOT NULL,
+                    completed_at    TEXT,
+                    context         TEXT,
+                    tags            TEXT
+                )
+            """)
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_todo_status ON todo_items(status)"
+            )
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_todo_responsible_status ON todo_items(responsible, status)"
+            )
+            await self._db.execute("""
+                CREATE TABLE IF NOT EXISTS contacts (
+                    id              TEXT PRIMARY KEY,
+                    name            TEXT NOT NULL,
+                    description     TEXT,
+                    position        TEXT,
+                    organization    TEXT,
+                    relation        TEXT,
+                    email           TEXT,
+                    phone           TEXT,
+                    importance      INTEGER NOT NULL DEFAULT 1,
+                    importance_pinned INTEGER NOT NULL DEFAULT 0,
+                    mention_count   INTEGER NOT NULL DEFAULT 0,
+                    last_seen_at    TEXT,
+                    source_session  TEXT,
+                    tags            TEXT,
+                    notes           TEXT,
+                    privacy_tier    TEXT NOT NULL DEFAULT 'normal',
+                    created_at      TEXT NOT NULL,
+                    updated_at      TEXT NOT NULL
+                )
+            """)
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(name COLLATE NOCASE)"
+            )
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_contacts_importance ON contacts(importance DESC)"
+            )
+            await self._db.execute("""
+                CREATE TABLE IF NOT EXISTS contact_mentions (
+                    id          TEXT PRIMARY KEY,
+                    contact_id  TEXT NOT NULL,
+                    session_id  TEXT NOT NULL,
+                    mentioned_at TEXT NOT NULL,
+                    FOREIGN KEY (contact_id) REFERENCES contacts(id) ON DELETE CASCADE
+                )
+            """)
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_contact_mentions_contact_id ON contact_mentions(contact_id)"
             )
             await self._ensure_cron_jobs_migrations()
             await self._db.commit()
@@ -723,6 +928,555 @@ class SessionManager:
         cursor = await self._db.execute("DELETE FROM cron_jobs WHERE id = ?", (job_id,))
         await self._db.commit()
         return cursor.rowcount > 0
+
+    # ------------------------------------------------------------------
+    # To-do items
+    # ------------------------------------------------------------------
+
+    _TODO_COLS = (
+        "id, content, status, responsible, priority, source_session, "
+        "target_session, created_at, updated_at, completed_at, context, tags"
+    )
+
+    async def create_todo(
+        self,
+        content: str,
+        *,
+        responsible: str = "bot",
+        priority: str = "normal",
+        source_session: str | None = None,
+        target_session: str | None = None,
+        context: str | None = None,
+        tags: str | None = None,
+    ) -> TodoItem:
+        """Create and persist a to-do item."""
+        await self._ensure_db()
+        now_iso = _utcnow_iso()
+        item = TodoItem(
+            id=str(uuid.uuid4()),
+            content=content,
+            responsible=responsible,
+            priority=priority,
+            source_session=source_session,
+            target_session=target_session,
+            created_at=now_iso,
+            updated_at=now_iso,
+            context=context,
+            tags=tags,
+        )
+        await self._db.execute(
+            f"""
+            INSERT INTO todo_items ({self._TODO_COLS})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item.id, item.content, item.status, item.responsible,
+                item.priority, item.source_session, item.target_session,
+                item.created_at, item.updated_at, item.completed_at,
+                item.context, item.tags,
+            ),
+        )
+        await self._db.commit()
+        return item
+
+    async def load_todo(self, todo_id: str) -> TodoItem | None:
+        """Load a single to-do item by id."""
+        await self._ensure_db()
+        async with self._db.execute(
+            f"SELECT {self._TODO_COLS} FROM todo_items WHERE id = ?",
+            (todo_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return None
+        return TodoItem.from_row(row)
+
+    async def select_todo(self, selector: str) -> TodoItem | None:
+        """Select a to-do item by id, content search, or #index."""
+        key = selector.strip()
+        if not key:
+            return None
+
+        by_id = await self.load_todo(key)
+        if by_id:
+            return by_id
+
+        index_text = key[1:] if key.startswith("#") else key
+        if index_text.isdigit():
+            index = int(index_text)
+            if index > 0:
+                items = await self.list_todos(limit=max(200, index))
+                if index <= len(items):
+                    return items[index - 1]
+        return None
+
+    async def list_todos(
+        self,
+        *,
+        limit: int = 200,
+        status_filter: str | None = None,
+        responsible_filter: str | None = None,
+        session_filter: str | None = None,
+    ) -> list[TodoItem]:
+        """List to-do items with optional filters."""
+        await self._ensure_db()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status_filter:
+            clauses.append("status = ?")
+            params.append(status_filter)
+        if responsible_filter:
+            clauses.append("responsible = ?")
+            params.append(responsible_filter)
+        if session_filter:
+            clauses.append("(source_session = ? OR target_session = ?)")
+            params.extend([session_filter, session_filter])
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        query = f"""
+            SELECT {self._TODO_COLS}
+            FROM todo_items
+            {where}
+            ORDER BY
+                CASE priority
+                    WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
+                    WHEN 'normal' THEN 2 ELSE 3
+                END,
+                created_at ASC
+            LIMIT ?
+        """
+        async with self._db.execute(query, tuple(params)) as cursor:
+            rows = await cursor.fetchall()
+        return [TodoItem.from_row(row) for row in rows]
+
+    async def update_todo(
+        self,
+        todo_id: str,
+        *,
+        content: str | None = None,
+        status: str | None = None,
+        responsible: str | None = None,
+        priority: str | None = None,
+        target_session: str | None = None,
+        tags: str | None = None,
+    ) -> bool:
+        """Update mutable to-do fields."""
+        await self._ensure_db()
+        assignments: list[str] = ["updated_at = ?"]
+        params: list[Any] = [_utcnow_iso()]
+        if content is not None:
+            assignments.append("content = ?")
+            params.append(content)
+        if status is not None:
+            assignments.append("status = ?")
+            params.append(status)
+            if status == "done":
+                assignments.append("completed_at = ?")
+                params.append(_utcnow_iso())
+        if responsible is not None:
+            assignments.append("responsible = ?")
+            params.append(responsible)
+        if priority is not None:
+            assignments.append("priority = ?")
+            params.append(priority)
+        if target_session is not None:
+            assignments.append("target_session = ?")
+            params.append(target_session)
+        if tags is not None:
+            assignments.append("tags = ?")
+            params.append(tags)
+        params.append(todo_id)
+        cursor = await self._db.execute(
+            f"UPDATE todo_items SET {', '.join(assignments)} WHERE id = ?",
+            tuple(params),
+        )
+        await self._db.commit()
+        return cursor.rowcount > 0
+
+    async def delete_todo(self, todo_id: str) -> bool:
+        """Delete a to-do item."""
+        await self._ensure_db()
+        cursor = await self._db.execute(
+            "DELETE FROM todo_items WHERE id = ?", (todo_id,)
+        )
+        await self._db.commit()
+        return cursor.rowcount > 0
+
+    async def archive_old_todos(self, days: int = 30) -> int:
+        """Mark completed items older than *days* as cancelled (archived)."""
+        await self._ensure_db()
+        cutoff = datetime.now(UTC).isoformat()
+        # SQLite ISO comparison: items completed before cutoff - days
+        cursor = await self._db.execute(
+            """
+            UPDATE todo_items
+            SET status = 'cancelled', updated_at = ?
+            WHERE status = 'done'
+              AND completed_at IS NOT NULL
+              AND julianday(?) - julianday(completed_at) > ?
+            """,
+            (_utcnow_iso(), cutoff, days),
+        )
+        await self._db.commit()
+        return cursor.rowcount
+
+    async def get_todo_summary(
+        self,
+        session_id: str | None = None,
+        max_items: int = 10,
+    ) -> list[TodoItem]:
+        """Return items relevant to *session_id*: own items plus global pending items."""
+        await self._ensure_db()
+        if session_id:
+            query = f"""
+                SELECT {self._TODO_COLS}
+                FROM todo_items
+                WHERE status IN ('pending', 'in_progress')
+                  AND (
+                      source_session = ?
+                      OR target_session = ?
+                      OR target_session IS NULL
+                  )
+                ORDER BY
+                    CASE priority
+                        WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
+                        WHEN 'normal' THEN 2 ELSE 3
+                    END,
+                    created_at ASC
+                LIMIT ?
+            """
+            params: tuple[Any, ...] = (session_id, session_id, max_items)
+        else:
+            query = f"""
+                SELECT {self._TODO_COLS}
+                FROM todo_items
+                WHERE status IN ('pending', 'in_progress')
+                ORDER BY
+                    CASE priority
+                        WHEN 'urgent' THEN 0 WHEN 'high' THEN 1
+                        WHEN 'normal' THEN 2 ELSE 3
+                    END,
+                    created_at ASC
+                LIMIT ?
+            """
+            params = (max_items,)
+        async with self._db.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+        return [TodoItem.from_row(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Contacts (address book)
+    # ------------------------------------------------------------------
+
+    _CONTACT_COLS = (
+        "id, name, description, position, organization, relation, "
+        "email, phone, importance, importance_pinned, mention_count, "
+        "last_seen_at, source_session, tags, notes, privacy_tier, "
+        "created_at, updated_at"
+    )
+
+    async def create_contact(
+        self,
+        name: str,
+        *,
+        description: str | None = None,
+        position: str | None = None,
+        organization: str | None = None,
+        relation: str | None = None,
+        email: str | None = None,
+        phone: str | None = None,
+        importance: int = 1,
+        source_session: str | None = None,
+        tags: str | None = None,
+        notes: str | None = None,
+        privacy_tier: str = "normal",
+    ) -> ContactEntry:
+        """Create and persist a contact."""
+        await self._ensure_db()
+        now_iso = _utcnow_iso()
+        item = ContactEntry(
+            id=str(uuid.uuid4()),
+            name=name,
+            description=description,
+            position=position,
+            organization=organization,
+            relation=relation,
+            email=email,
+            phone=phone,
+            importance=max(1, min(10, importance)),
+            source_session=source_session,
+            tags=tags,
+            notes=notes,
+            privacy_tier=privacy_tier,
+            created_at=now_iso,
+            updated_at=now_iso,
+        )
+        await self._db.execute(
+            f"""
+            INSERT INTO contacts ({self._CONTACT_COLS})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item.id, item.name, item.description, item.position,
+                item.organization, item.relation, item.email, item.phone,
+                item.importance, 1 if item.importance_pinned else 0,
+                item.mention_count, item.last_seen_at, item.source_session,
+                item.tags, item.notes, item.privacy_tier,
+                item.created_at, item.updated_at,
+            ),
+        )
+        await self._db.commit()
+        return item
+
+    async def load_contact(self, contact_id: str) -> ContactEntry | None:
+        """Load a single contact by id."""
+        await self._ensure_db()
+        async with self._db.execute(
+            f"SELECT {self._CONTACT_COLS} FROM contacts WHERE id = ?",
+            (contact_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return None
+        return ContactEntry.from_row(row)
+
+    async def select_contact(self, selector: str) -> ContactEntry | None:
+        """Select a contact by id, #index, or fuzzy name match."""
+        key = selector.strip()
+        if not key:
+            return None
+
+        by_id = await self.load_contact(key)
+        if by_id:
+            return by_id
+
+        index_text = key[1:] if key.startswith("#") else key
+        if index_text.isdigit():
+            index = int(index_text)
+            if index > 0:
+                items = await self.list_contacts(limit=max(200, index))
+                if index <= len(items):
+                    return items[index - 1]
+
+        # Fuzzy name match
+        results = await self.search_contacts(key, limit=1)
+        if results:
+            return results[0]
+        return None
+
+    async def list_contacts(
+        self,
+        *,
+        limit: int = 200,
+        importance_min: int | None = None,
+        relation_filter: str | None = None,
+    ) -> list[ContactEntry]:
+        """List contacts sorted by importance DESC."""
+        await self._ensure_db()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if importance_min is not None:
+            clauses.append("importance >= ?")
+            params.append(importance_min)
+        if relation_filter:
+            clauses.append("relation = ?")
+            params.append(relation_filter)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        query = f"""
+            SELECT {self._CONTACT_COLS}
+            FROM contacts
+            {where}
+            ORDER BY importance DESC, mention_count DESC, updated_at DESC
+            LIMIT ?
+        """
+        async with self._db.execute(query, tuple(params)) as cursor:
+            rows = await cursor.fetchall()
+        return [ContactEntry.from_row(row) for row in rows]
+
+    async def search_contacts(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+    ) -> list[ContactEntry]:
+        """Search contacts by name, organization, or email (case-insensitive LIKE)."""
+        await self._ensure_db()
+        pattern = f"%{query}%"
+        sql = f"""
+            SELECT {self._CONTACT_COLS}
+            FROM contacts
+            WHERE name LIKE ? COLLATE NOCASE
+               OR organization LIKE ? COLLATE NOCASE
+               OR email LIKE ? COLLATE NOCASE
+            ORDER BY importance DESC, mention_count DESC
+            LIMIT ?
+        """
+        async with self._db.execute(sql, (pattern, pattern, pattern, limit)) as cursor:
+            rows = await cursor.fetchall()
+        return [ContactEntry.from_row(row) for row in rows]
+
+    async def update_contact(
+        self,
+        contact_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        position: str | None = None,
+        organization: str | None = None,
+        relation: str | None = None,
+        email: str | None = None,
+        phone: str | None = None,
+        importance: int | None = None,
+        importance_pinned: bool | None = None,
+        tags: str | None = None,
+        notes: str | None = None,
+        privacy_tier: str | None = None,
+    ) -> bool:
+        """Update mutable contact fields."""
+        await self._ensure_db()
+        assignments: list[str] = ["updated_at = ?"]
+        params: list[Any] = [_utcnow_iso()]
+        if name is not None:
+            assignments.append("name = ?")
+            params.append(name)
+        if description is not None:
+            assignments.append("description = ?")
+            params.append(description)
+        if position is not None:
+            assignments.append("position = ?")
+            params.append(position)
+        if organization is not None:
+            assignments.append("organization = ?")
+            params.append(organization)
+        if relation is not None:
+            assignments.append("relation = ?")
+            params.append(relation)
+        if email is not None:
+            assignments.append("email = ?")
+            params.append(email)
+        if phone is not None:
+            assignments.append("phone = ?")
+            params.append(phone)
+        if importance is not None:
+            assignments.append("importance = ?")
+            params.append(max(1, min(10, importance)))
+        if importance_pinned is not None:
+            assignments.append("importance_pinned = ?")
+            params.append(1 if importance_pinned else 0)
+        if tags is not None:
+            assignments.append("tags = ?")
+            params.append(tags)
+        if notes is not None:
+            assignments.append("notes = ?")
+            params.append(notes)
+        if privacy_tier is not None:
+            assignments.append("privacy_tier = ?")
+            params.append(privacy_tier)
+        params.append(contact_id)
+        cursor = await self._db.execute(
+            f"UPDATE contacts SET {', '.join(assignments)} WHERE id = ?",
+            tuple(params),
+        )
+        await self._db.commit()
+        return cursor.rowcount > 0
+
+    async def delete_contact(self, contact_id: str) -> bool:
+        """Delete a contact and its mentions."""
+        await self._ensure_db()
+        await self._db.execute(
+            "DELETE FROM contact_mentions WHERE contact_id = ?", (contact_id,)
+        )
+        cursor = await self._db.execute(
+            "DELETE FROM contacts WHERE id = ?", (contact_id,)
+        )
+        await self._db.commit()
+        return cursor.rowcount > 0
+
+    async def increment_contact_mention(
+        self,
+        contact_id: str,
+        session_id: str,
+    ) -> bool:
+        """Record a mention and update mention_count + last_seen_at."""
+        await self._ensure_db()
+        now_iso = _utcnow_iso()
+        await self._db.execute(
+            "INSERT INTO contact_mentions (id, contact_id, session_id, mentioned_at) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), contact_id, session_id, now_iso),
+        )
+        cursor = await self._db.execute(
+            """
+            UPDATE contacts
+            SET mention_count = mention_count + 1,
+                last_seen_at = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (now_iso, now_iso, contact_id),
+        )
+        await self._db.commit()
+        return cursor.rowcount > 0
+
+    async def get_contact_mentions(
+        self,
+        contact_id: str,
+        limit: int = 50,
+    ) -> list[ContactMention]:
+        """Return recent mentions for a contact."""
+        await self._ensure_db()
+        async with self._db.execute(
+            """
+            SELECT id, contact_id, session_id, mentioned_at
+            FROM contact_mentions
+            WHERE contact_id = ?
+            ORDER BY mentioned_at DESC
+            LIMIT ?
+            """,
+            (contact_id, limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [ContactMention.from_row(row) for row in rows]
+
+    async def compute_auto_importance(self, contact_id: str) -> int:
+        """Compute importance from mention frequency, recency, and diversity."""
+        import math
+
+        await self._ensure_db()
+        contact = await self.load_contact(contact_id)
+        if not contact or contact.importance_pinned:
+            return contact.importance if contact else 1
+
+        mc = max(contact.mention_count, 0)
+        if mc == 0:
+            return 1
+
+        # Recency factor: days since last seen
+        recency_factor = 1.0
+        if contact.last_seen_at:
+            try:
+                last_seen = datetime.fromisoformat(contact.last_seen_at)
+                days_ago = (datetime.now(UTC) - last_seen).total_seconds() / 86400
+                # Half-life of 21 days
+                recency_factor = 0.5 ** (days_ago / 21.0)
+            except Exception:
+                pass
+
+        # Diversity factor: unique sessions
+        async with self._db.execute(
+            "SELECT COUNT(DISTINCT session_id) FROM contact_mentions WHERE contact_id = ?",
+            (contact_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        unique_sessions = int(row[0]) if row else 1
+        diversity_factor = min(2.0, 1.0 + math.log2(max(unique_sessions, 1)) * 0.3)
+
+        score = 1 + math.log2(mc) * recency_factor * diversity_factor
+        importance = max(1, min(10, int(round(score))))
+
+        # Persist computed value
+        await self.update_contact(contact_id, importance=importance)
+        return importance
 
     async def close(self) -> None:
         """Close the database connection."""

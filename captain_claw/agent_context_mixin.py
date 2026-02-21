@@ -179,6 +179,244 @@ class AgentContextMixin:
             log.warning("Failed to initialize layered memory", error=str(e))
             self.memory = None
 
+    def _build_todo_context_note(self) -> str:
+        """Build compact context note from pending to-do items."""
+        cfg = get_config()
+        if not cfg.todo.enabled or not cfg.todo.inject_on_session_load:
+            return ""
+        session_id = self._current_session_slug() if self.session else None
+        sm = getattr(self, "session_manager", None)
+        if sm is None:
+            return ""
+        import asyncio
+        try:
+            items = asyncio.get_event_loop().run_until_complete(
+                sm.get_todo_summary(session_id, cfg.todo.max_items_in_prompt)
+            )
+        except RuntimeError:
+            # Already inside an event loop — use a sync-safe approach.
+            return self._build_todo_context_note_sync_cache()
+        return self._format_todo_note(items)
+
+    def _build_todo_context_note_sync_cache(self) -> str:
+        """Fallback: use cached todo items when called inside an event loop."""
+        items = getattr(self, "_todo_context_cache", None)
+        if items is None:
+            return ""
+        return self._format_todo_note(items)
+
+    @staticmethod
+    def _format_todo_note(items: list[Any]) -> str:
+        if not items:
+            return ""
+        lines = ["Active to-do items:"]
+        for idx, item in enumerate(items, 1):
+            tag_suffix = f" [{item.tags}]" if item.tags else ""
+            lines.append(
+                f"#{idx} [{item.priority}/{item.responsible}] "
+                f"{item.content} ({item.status}){tag_suffix}"
+            )
+        lines.append('You have a "todo" tool to manage these items.')
+        return "\n".join(lines)
+
+    async def _refresh_todo_context_cache(self) -> None:
+        """Pre-fetch todo items so the sync note builder can use them."""
+        cfg = get_config()
+        if not cfg.todo.enabled or not cfg.todo.inject_on_session_load:
+            return
+        sm = getattr(self, "session_manager", None)
+        if sm is None:
+            return
+        session_id = self._current_session_slug() if self.session else None
+        try:
+            self._todo_context_cache = await sm.get_todo_summary(
+                session_id, cfg.todo.max_items_in_prompt,
+            )
+        except Exception:
+            self._todo_context_cache = []
+
+    # Auto-capture patterns for to-do extraction.
+    _TODO_USER_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+        (re.compile(r"(?:^|\W)remind me to\s+(.+)", re.I), "human"),
+        (re.compile(r"(?:^|\W)don'?t forget to\s+(.+)", re.I), "human"),
+        (re.compile(r"(?:^|\W)(?:add to|save (?:this )?to) (?:my )?to-?do[:\s]+(.+)", re.I), "human"),
+        (re.compile(r"(?:^|\W)to-?do:\s*(.+)", re.I), "human"),
+    ]
+    _TODO_ASSISTANT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+        (re.compile(r"I'?ll (?:handle|do|take care of) (?:that|this|it) (?:later|next|after)", re.I), "bot"),
+        (re.compile(r"(?:after|once|when) you (?:provide|share|send|give)\s+(.+)", re.I), "human"),
+    ]
+
+    async def _auto_capture_todos(
+        self, user_message: str, assistant_response: str,
+    ) -> None:
+        """Extract to-do items from a completed turn via conservative pattern matching."""
+        cfg = get_config()
+        if not cfg.todo.enabled or not cfg.todo.auto_capture:
+            return
+        sm = getattr(self, "session_manager", None)
+        if sm is None:
+            return
+        session_id = self._current_session_slug() if self.session else None
+
+        # Scan user message for explicit triggers.
+        for pattern, responsible in self._TODO_USER_PATTERNS:
+            m = pattern.search(user_message)
+            if m:
+                task_text = m.group(1).strip().rstrip(".!,;")
+                if len(task_text) > 3:
+                    await sm.create_todo(
+                        content=task_text,
+                        responsible=responsible,
+                        source_session=session_id,
+                        context=f"auto-captured from user message",
+                    )
+                    log.debug("Auto-captured user todo", content=task_text[:60])
+
+        # Scan assistant response for deferred-work patterns.
+        for pattern, responsible in self._TODO_ASSISTANT_PATTERNS:
+            m = pattern.search(assistant_response)
+            if m:
+                task_text = (m.group(1) if m.lastindex else m.group(0)).strip().rstrip(".!,;")
+                if len(task_text) > 3:
+                    await sm.create_todo(
+                        content=task_text,
+                        responsible=responsible,
+                        source_session=session_id,
+                        context=f"auto-captured from assistant response",
+                    )
+                    log.debug("Auto-captured assistant todo", content=task_text[:60])
+
+    # ------------------------------------------------------------------
+    # Contacts (address book) context injection + auto-capture
+    # ------------------------------------------------------------------
+
+    async def _refresh_contacts_context_cache(self) -> None:
+        """Pre-fetch contacts for sync name matching."""
+        cfg = get_config()
+        if not cfg.addressbook.enabled:
+            return
+        sm = getattr(self, "session_manager", None)
+        if sm is None:
+            return
+        try:
+            self._contacts_context_cache = await sm.list_contacts(
+                limit=cfg.addressbook.max_items_in_prompt * 3,
+            )
+        except Exception:
+            self._contacts_context_cache = []
+
+    def _build_contacts_context_note(self, user_message: str) -> str:
+        """Build on-demand contact context when names match the user message."""
+        cfg = get_config()
+        if not cfg.addressbook.enabled or not cfg.addressbook.inject_on_mention:
+            return ""
+        contacts_cache = getattr(self, "_contacts_context_cache", None)
+        if not contacts_cache:
+            return ""
+        user_lower = user_message.lower()
+        matched = []
+        for contact in contacts_cache:
+            if contact.privacy_tier == "private":
+                continue
+            if contact.name.lower() in user_lower:
+                matched.append(contact)
+        if not matched:
+            return ""
+        lines = ["Relevant contacts from address book:"]
+        for c in matched[: cfg.addressbook.max_items_in_prompt]:
+            parts = [c.name]
+            if c.position:
+                parts.append(f"({c.position})")
+            if c.organization:
+                parts.append(f"at {c.organization}")
+            if c.email:
+                parts.append(f"email: {c.email}")
+            if c.relation:
+                parts.append(f"[{c.relation}]")
+            if c.notes:
+                parts.append(f"- {c.notes[:200]}")
+            lines.append("- " + " ".join(parts))
+        lines.append('You have a "contacts" tool to manage the address book.')
+        return "\n".join(lines)
+
+    _CONTACT_CAPTURE_PATTERNS: list[re.Pattern[str]] = [
+        re.compile(r"(?:^|\W)remember that\s+(\w[\w\s]*?)\s+is\s+(?:the\s+)?(.+)", re.I),
+        re.compile(r"(?:^|\W)save contact[:\s]+(.+)", re.I),
+        re.compile(r"(?:^|\W)add contact[:\s]+(.+)", re.I),
+    ]
+
+    async def _auto_capture_contacts(
+        self, user_message: str, assistant_response: str,
+    ) -> None:
+        """Extract contact info from conversation via conservative pattern matching."""
+        cfg = get_config()
+        if not cfg.addressbook.enabled or not cfg.addressbook.auto_capture:
+            return
+        sm = getattr(self, "session_manager", None)
+        if sm is None:
+            return
+        session_id = self._current_session_slug() if self.session else None
+
+        for pattern in self._CONTACT_CAPTURE_PATTERNS:
+            m = pattern.search(user_message)
+            if not m:
+                continue
+            name = m.group(1).strip()
+            rest = m.group(2).strip().rstrip(".!,;") if m.lastindex >= 2 else ""
+            if len(name) < 2:
+                continue
+            # Check for duplicate via fuzzy name match
+            existing = await sm.search_contacts(name, limit=1)
+            if existing and existing[0].name.lower() == name.lower():
+                # Update existing contact notes
+                if rest:
+                    old_notes = existing[0].notes or ""
+                    new_notes = (old_notes.rstrip() + "\n" + rest) if old_notes else rest
+                    await sm.update_contact(existing[0].id, notes=new_notes)
+            else:
+                await sm.create_contact(
+                    name=name,
+                    description=rest or None,
+                    source_session=session_id,
+                )
+            log.debug("Auto-captured contact", name=name[:40])
+
+    async def _auto_capture_contacts_from_tool_call(
+        self, tool_name: str, arguments: dict[str, Any],
+    ) -> None:
+        """Extract contacts from send_mail tool usage."""
+        cfg = get_config()
+        if not cfg.addressbook.enabled or not cfg.addressbook.auto_capture:
+            return
+        if tool_name != "send_mail":
+            return
+        sm = getattr(self, "session_manager", None)
+        if sm is None:
+            return
+        session_id = self._current_session_slug() if self.session else None
+        recipients: list[str] = []
+        for f in ("to", "cc", "bcc"):
+            vals = arguments.get(f)
+            if isinstance(vals, list):
+                recipients.extend(vals)
+            elif isinstance(vals, str):
+                recipients.extend([v.strip() for v in vals.split(",")])
+        for email_addr in recipients:
+            email_addr = email_addr.strip()
+            if not email_addr or "@" not in email_addr:
+                continue
+            existing = await sm.search_contacts(email_addr, limit=1)
+            if not existing:
+                name_part = email_addr.split("@")[0].replace(".", " ").replace("_", " ").title()
+                await sm.create_contact(
+                    name=name_part,
+                    email=email_addr,
+                    source_session=session_id,
+                    notes="Auto-captured from send_mail usage",
+                )
+                log.debug("Auto-captured contact from email", email=email_addr[:40])
+
     def _build_semantic_memory_note(
         self,
         query: str | None,
@@ -235,6 +473,9 @@ class AgentContextMixin:
                 orchestration_id=f"session-{self.session.id}" if self.session else "default",
             )
 
+        await self._refresh_todo_context_cache()
+        await self._refresh_contacts_context_cache()
+
         self._initialized = True
         log.info("Agent initialized", session_id=self.session.id)
 
@@ -250,6 +491,8 @@ class AgentContextMixin:
             ReadTool,
             SendMailTool,
             ShellTool,
+            TodoTool,
+            ContactsTool,
             WebFetchTool,
             WebSearchTool,
             WriteTool,
@@ -286,6 +529,10 @@ class AgentContextMixin:
                 self.tools.register(SendMailTool())
             elif tool_name == "google_drive":
                 self.tools.register(GoogleDriveTool())
+            elif tool_name == "todo":
+                self.tools.register(TodoTool())
+            elif tool_name == "contacts":
+                self.tools.register(ContactsTool())
         self._register_plugin_tools()
 
     def _discover_plugin_tool_files(self) -> list[Path]:
@@ -763,6 +1010,22 @@ class AgentContextMixin:
                 "tool_name": "list_task_memory",
                 "token_count": self._count_tokens(list_note),
             })
+        todo_note = self._build_todo_context_note()
+        if todo_note:
+            candidate_messages.append({
+                "role": "assistant",
+                "content": todo_note,
+                "tool_name": "todo_context",
+                "token_count": self._count_tokens(todo_note),
+            })
+        contacts_note = self._build_contacts_context_note(query or "") if query else ""
+        if contacts_note:
+            candidate_messages.append({
+                "role": "assistant",
+                "content": contacts_note,
+                "tool_name": "contacts_context",
+                "token_count": self._count_tokens(contacts_note),
+            })
 
         selected_reversed: list[dict[str, Any]] = []
         used_tokens = 0
@@ -807,6 +1070,7 @@ class AgentContextMixin:
             "historical_tool_messages_filtered": len(skipped_historical_tools),
             "memory_note_used": 1 if memory_note else 0,
             "planning_note_used": 1 if planning_note else 0,
+            "todo_note_used": 1 if todo_note else 0,
             "over_budget": 1 if prompt_tokens > context_budget else 0,
             "utilization": (prompt_tokens / context_budget) if context_budget else 0.0,
         }

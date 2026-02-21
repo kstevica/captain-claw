@@ -422,7 +422,16 @@ class AgentToolLoopMixin:
                     "success": result.success,
                     "content": result.content if result.success else result.error,
                 })
-                
+
+                # Auto-capture contacts from send_mail usage.
+                if result.success and hasattr(self, "_auto_capture_contacts_from_tool_call"):
+                    try:
+                        await self._auto_capture_contacts_from_tool_call(
+                            tc.name, arguments if isinstance(arguments, dict) else {},
+                        )
+                    except Exception:
+                        pass
+
             except Exception as e:
                 log.error("Tool execution failed", tool=tc.name, error=str(e))
                 
