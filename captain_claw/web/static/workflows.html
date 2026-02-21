@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Workflows - Captain Claw</title>
+    <link rel="stylesheet" href="/static/workflows.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<header class="wf-header">
+    <div class="wf-header-left">
+        <a href="/" class="wf-logo-link"><img src="/static/logo.svg" width="28" height="28"></a>
+        <h1>Workflows</h1>
+    </div>
+    <div class="wf-header-right">
+        <a href="/chat" class="wf-nav-link">&larr; Chat</a>
+    </div>
+</header>
+
+<div class="wf-layout">
+    <!-- Sidebar: workflow list -->
+    <aside class="wf-sidebar" id="wfSidebar">
+        <div class="wf-sidebar-header">
+            <span class="wf-sidebar-title">Workflows</span>
+            <span class="wf-sidebar-count" id="wfCount">0</span>
+        </div>
+        <div class="wf-workflow-list" id="wfList">
+            <div class="wf-loading" id="wfLoading">Loading...</div>
+        </div>
+    </aside>
+
+    <!-- Main area: output viewer -->
+    <main class="wf-main" id="wfMain">
+        <div class="wf-empty" id="wfEmpty">
+            <div class="wf-empty-icon">&#128196;</div>
+            <div class="wf-empty-text">Select a workflow to view its outputs</div>
+        </div>
+
+        <!-- Output selector (shown when a workflow is selected) -->
+        <div class="wf-output-bar" id="wfOutputBar" style="display:none;">
+            <div class="wf-output-bar-left">
+                <span class="wf-output-wf-name" id="wfSelectedName"></span>
+                <select class="wf-output-select" id="wfOutputSelect"></select>
+            </div>
+            <div class="wf-output-bar-right">
+                <span class="wf-output-meta" id="wfOutputMeta"></span>
+            </div>
+        </div>
+
+        <!-- Rendered markdown output -->
+        <div class="wf-output-content" id="wfOutputContent" style="display:none;"></div>
+
+        <!-- Loading state for output -->
+        <div class="wf-output-loading" id="wfOutputLoading" style="display:none;">
+            <div class="wf-spinner"></div>
+            <span>Loading output...</span>
+        </div>
+
+        <!-- No outputs state -->
+        <div class="wf-no-outputs" id="wfNoOutputs" style="display:none;">
+            <div class="wf-empty-icon">&#128203;</div>
+            <div class="wf-empty-text">This workflow has no outputs yet</div>
+            <div class="wf-empty-sub">Run the workflow from the Orchestrator to generate outputs.</div>
+        </div>
+    </main>
+</div>
+
+<script src="/static/workflows.js"></script>
+</body>
+</html>

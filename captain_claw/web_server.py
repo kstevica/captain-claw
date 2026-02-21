@@ -1552,6 +1552,310 @@ class WebServer:
         if self.agent and isinstance(self.agent.provider, LiteLLMProvider):
             self.agent.provider.clear_vertex_credentials()
 
+    # ── Cron management API ──────────────────────────────────────────
+
+    def _get_web_runtime_context(self) -> "RuntimeContext":
+        """Create a lightweight RuntimeContext for web-mode cron execution."""
+        from captain_claw.runtime_context import RuntimeContext
+
+        class _WebCronUI:
+            """Minimal TerminalUI stand-in for web-mode cron execution."""
+
+            def print_message(self, role: str, content: str) -> None:
+                pass
+
+            def print_error(self, error: str) -> None:
+                log.error("WebCronUI error", error=error)
+
+            def set_runtime_status(self, status: str) -> None:
+                pass
+
+            def append_tool_output(
+                self, tool_name: str, arguments: object, output: str
+            ) -> None:
+                pass
+
+            def confirm(self, message: str) -> bool:
+                return True
+
+        if not self.agent:
+            raise RuntimeError("Agent not initialized")
+        return RuntimeContext(agent=self.agent, ui=_WebCronUI())  # type: ignore[arg-type]
+
+    async def _list_cron_jobs(self, request: web.Request) -> web.Response:
+        """GET /api/cron/jobs — list all cron jobs."""
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        sm = self.agent.session_manager
+        jobs = await sm.list_cron_jobs(limit=200, active_only=False)
+        result = []
+        for j in jobs:
+            result.append({
+                "id": j.id,
+                "kind": j.kind,
+                "payload": j.payload,
+                "schedule": j.schedule,
+                "session_id": j.session_id,
+                "enabled": j.enabled,
+                "created_at": j.created_at,
+                "updated_at": j.updated_at,
+                "last_run_at": j.last_run_at,
+                "next_run_at": j.next_run_at,
+                "last_status": j.last_status,
+                "last_error": j.last_error,
+            })
+        return web.json_response(result)
+
+    async def _create_cron_job(self, request: web.Request) -> web.Response:
+        """POST /api/cron/jobs — create a new cron job."""
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+        kind = str(body.get("kind", "")).strip().lower()
+        if kind not in ("prompt", "script", "tool", "orchestrate"):
+            return web.json_response({"error": "Invalid kind"}, status=400)
+
+        schedule = body.get("schedule")
+        if not isinstance(schedule, dict) or "type" not in schedule:
+            return web.json_response({"error": "Invalid schedule"}, status=400)
+
+        payload = body.get("payload")
+        if not isinstance(payload, dict):
+            return web.json_response({"error": "Invalid payload"}, status=400)
+
+        session_id = str(body.get("session_id", "")).strip()
+        if not session_id:
+            return web.json_response({"error": "session_id is required"}, status=400)
+
+        from captain_claw.cron import compute_next_run, schedule_to_text, to_utc_iso
+
+        # Add human-readable _text field to schedule.
+        schedule["_text"] = schedule_to_text(schedule)
+
+        try:
+            next_run = to_utc_iso(compute_next_run(schedule))
+        except Exception as e:
+            return web.json_response({"error": f"Bad schedule: {e}"}, status=400)
+
+        sm = self.agent.session_manager
+        job = await sm.create_cron_job(
+            kind=kind,
+            payload=payload,
+            schedule=schedule,
+            session_id=session_id,
+            next_run_at=next_run,
+        )
+        return web.json_response({
+            "ok": True,
+            "id": job.id,
+            "next_run_at": job.next_run_at,
+        })
+
+    async def _run_cron_job(self, request: web.Request) -> web.Response:
+        """POST /api/cron/jobs/{id}/run — execute a job immediately."""
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+
+        job_id = request.match_info.get("id", "")
+        sm = self.agent.session_manager
+        job = await sm.load_cron_job(job_id)
+        if not job:
+            return web.json_response({"error": "Job not found"}, status=404)
+
+        from captain_claw.cron_dispatch import execute_cron_job
+
+        try:
+            ctx = self._get_web_runtime_context()
+            asyncio.create_task(execute_cron_job(ctx, job, trigger="manual"))
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+        return web.json_response({"ok": True, "status": "started"})
+
+    async def _pause_cron_job(self, request: web.Request) -> web.Response:
+        """POST /api/cron/jobs/{id}/pause — disable a job."""
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+
+        job_id = request.match_info.get("id", "")
+        sm = self.agent.session_manager
+        ok = await sm.update_cron_job(job_id, enabled=False, last_status="paused")
+        if not ok:
+            return web.json_response({"error": "Job not found"}, status=404)
+        return web.json_response({"ok": True})
+
+    async def _resume_cron_job(self, request: web.Request) -> web.Response:
+        """POST /api/cron/jobs/{id}/resume — re-enable a paused job."""
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+
+        job_id = request.match_info.get("id", "")
+        sm = self.agent.session_manager
+        job = await sm.load_cron_job(job_id)
+        if not job:
+            return web.json_response({"error": "Job not found"}, status=404)
+
+        from captain_claw.cron import compute_next_run, to_utc_iso
+
+        next_run = to_utc_iso(compute_next_run(job.schedule))
+        await sm.update_cron_job(
+            job_id, enabled=True, last_status="pending", next_run_at=next_run,
+        )
+        return web.json_response({"ok": True, "next_run_at": next_run})
+
+    async def _delete_cron_job(self, request: web.Request) -> web.Response:
+        """DELETE /api/cron/jobs/{id} — remove a job."""
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+
+        job_id = request.match_info.get("id", "")
+        sm = self.agent.session_manager
+        ok = await sm.delete_cron_job(job_id)
+        if not ok:
+            return web.json_response({"error": "Job not found"}, status=404)
+        return web.json_response({"ok": True})
+
+    async def _get_cron_job_history(self, request: web.Request) -> web.Response:
+        """GET /api/cron/jobs/{id}/history — get job execution history."""
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+
+        job_id = request.match_info.get("id", "")
+        sm = self.agent.session_manager
+        job = await sm.load_cron_job(job_id)
+        if not job:
+            return web.json_response({"error": "Job not found"}, status=404)
+        return web.json_response(
+            {"chat_history": job.chat_history, "monitor_history": job.monitor_history},
+            dumps=lambda obj: json.dumps(obj, default=str),
+        )
+
+    async def _serve_cron(self, request: web.Request) -> web.FileResponse:
+        return web.FileResponse(STATIC_DIR / "cron.html")
+
+    # ── Workflow browser API ──────────────────────────────────────────
+
+    def _workflows_dir(self) -> Path:
+        """Return the workflows directory (same as SessionOrchestrator)."""
+        cfg = get_config()
+        ws = cfg.resolved_workspace_path()
+        d = ws / "workflows"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    async def _list_workflow_outputs(self, request: web.Request) -> web.Response:
+        """GET /api/workflow-browser — list workflows with their outputs.
+
+        Returns a list of workflow objects, each with:
+        - name: workflow name (stem of the .json file)
+        - outputs: list of {filename, timestamp, size} for each -output-*.md
+        """
+        d = self._workflows_dir()
+        # Collect JSON workflow files.
+        workflows: dict[str, dict[str, Any]] = {}
+        for p in sorted(d.glob("*.json")):
+            name = p.stem
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                wf_name = data.get("workflow_name", name)
+                user_input = data.get("user_input", "")
+                task_count = len(data.get("tasks", []))
+            except Exception:
+                wf_name = name
+                user_input = ""
+                task_count = 0
+            workflows[name] = {
+                "name": wf_name,
+                "filename": name,
+                "user_input": user_input,
+                "task_count": task_count,
+                "outputs": [],
+            }
+
+        # Collect output .md files and match to workflows.
+        for p in sorted(d.glob("*-output-*.md")):
+            fname = p.name
+            stem = p.stem  # e.g. "fetch-news-output-20260221-083216"
+            # Find the matching workflow by checking if the stem starts
+            # with a known workflow filename.
+            matched = False
+            for wf_key in workflows:
+                if stem.startswith(wf_key + "-output-"):
+                    # Extract timestamp portion.
+                    ts_part = stem[len(wf_key) + len("-output-"):]
+                    try:
+                        stat = p.stat()
+                        size = stat.st_size
+                    except Exception:
+                        size = 0
+                    workflows[wf_key]["outputs"].append({
+                        "filename": fname,
+                        "timestamp": ts_part,
+                        "size": size,
+                    })
+                    matched = True
+                    break
+
+            if not matched:
+                # Orphan output — create a virtual entry.
+                # Try to infer the workflow name from the filename.
+                idx = stem.rfind("-output-")
+                if idx > 0:
+                    inferred_key = stem[:idx]
+                    ts_part = stem[idx + len("-output-"):]
+                else:
+                    inferred_key = stem
+                    ts_part = ""
+                if inferred_key not in workflows:
+                    workflows[inferred_key] = {
+                        "name": inferred_key,
+                        "filename": inferred_key,
+                        "user_input": "",
+                        "task_count": 0,
+                        "outputs": [],
+                    }
+                try:
+                    size = p.stat().st_size
+                except Exception:
+                    size = 0
+                workflows[inferred_key]["outputs"].append({
+                    "filename": fname,
+                    "timestamp": ts_part,
+                    "size": size,
+                })
+
+        # Sort outputs newest-first within each workflow.
+        for wf in workflows.values():
+            wf["outputs"].sort(key=lambda o: o.get("timestamp", ""), reverse=True)
+
+        result = sorted(workflows.values(), key=lambda w: w["name"])
+        return web.json_response(result)
+
+    async def _get_workflow_output(self, request: web.Request) -> web.Response:
+        """GET /api/workflow-browser/output/{filename} — read an output .md file."""
+        filename = request.match_info.get("filename", "")
+        if not filename or ".." in filename or "/" in filename:
+            return web.json_response({"error": "Invalid filename"}, status=400)
+
+        d = self._workflows_dir()
+        path = d / filename
+        if not path.is_file():
+            return web.json_response({"error": "File not found"}, status=404)
+
+        try:
+            content = path.read_text(encoding="utf-8")
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+        return web.json_response({"filename": filename, "content": content})
+
+    async def _serve_workflows(self, request: web.Request) -> web.FileResponse:
+        return web.FileResponse(STATIC_DIR / "workflows.html")
+
     # ── App setup ────────────────────────────────────────────────────
 
     def create_app(self) -> web.Application:
@@ -1565,6 +1869,7 @@ class WebServer:
         app.router.add_get("/api/sessions", self.list_sessions_api)
         app.router.add_get("/api/commands", self.get_commands_api)
         app.router.add_get("/api/orchestrator/status", self._get_orchestrator_status)
+        app.router.add_post("/api/orchestrator/reset", self._reset_orchestrator)
         app.router.add_get("/api/orchestrator/skills", self._get_orchestrator_skills)
         app.router.add_post("/api/orchestrator/rephrase", self._rephrase_orchestrator_input)
         app.router.add_post("/api/orchestrator/task/edit", self._edit_orchestrator_task)
@@ -1581,6 +1886,17 @@ class WebServer:
         app.router.add_post("/api/orchestrator/workflows/save", self._save_workflow)
         app.router.add_post("/api/orchestrator/workflows/load", self._load_workflow)
         app.router.add_delete("/api/orchestrator/workflows/{name}", self._delete_workflow)
+        # Cron management API routes
+        app.router.add_get("/api/cron/jobs", self._list_cron_jobs)
+        app.router.add_post("/api/cron/jobs", self._create_cron_job)
+        app.router.add_post("/api/cron/jobs/{id}/run", self._run_cron_job)
+        app.router.add_post("/api/cron/jobs/{id}/pause", self._pause_cron_job)
+        app.router.add_post("/api/cron/jobs/{id}/resume", self._resume_cron_job)
+        app.router.add_delete("/api/cron/jobs/{id}", self._delete_cron_job)
+        app.router.add_get("/api/cron/jobs/{id}/history", self._get_cron_job_history)
+        # Workflow browser API routes
+        app.router.add_get("/api/workflow-browser", self._list_workflow_outputs)
+        app.router.add_get("/api/workflow-browser/output/{filename}", self._get_workflow_output)
         # OpenAI-compatible API proxy routes
         if self.config.web.api_enabled and self._api_pool:
             app.router.add_post("/v1/chat/completions", self._api_chat_completions)
@@ -1597,6 +1913,8 @@ class WebServer:
             app.router.add_get("/chat", self._serve_chat)
             app.router.add_get("/orchestrator", self._serve_orchestrator)
             app.router.add_get("/instructions", self._serve_instructions)
+            app.router.add_get("/cron", self._serve_cron)
+            app.router.add_get("/workflows", self._serve_workflows)
             app.router.add_get("/favicon.ico", self._serve_favicon)
         return app
 
@@ -1625,6 +1943,17 @@ class WebServer:
             return web.json_response({"status": None})
         status = self._orchestrator.get_status()
         return web.json_response({"status": status}, dumps=lambda obj: json.dumps(obj, default=str))
+
+    async def _reset_orchestrator(self, request: web.Request) -> web.Response:
+        """POST /api/orchestrator/reset — cancel work and reset to idle."""
+        if not self._orchestrator:
+            return web.json_response({"ok": False, "error": "No orchestrator"}, status=400)
+        try:
+            await self._orchestrator.reset()
+        except Exception as e:
+            log.error("Orchestrator reset error", error=str(e))
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+        return web.json_response({"ok": True})
 
     async def _get_orchestrator_skills(self, request: web.Request) -> web.Response:
         """REST endpoint: list available skills for orchestrator workers."""
@@ -2170,10 +2499,31 @@ async def _run_server(config: Config) -> None:
         print(f"  Google OAuth: {status}")
     print(f"  Press Ctrl+C to stop.\n")
 
+    # Start background cron scheduler loop so cron jobs fire automatically.
+    cron_worker: asyncio.Task[None] | None = None
+    try:
+        from captain_claw.cron_dispatch import cron_scheduler_loop
+
+        ctx = server._get_web_runtime_context()
+        cron_worker = asyncio.create_task(cron_scheduler_loop(ctx))
+        log.info("cron_scheduler_started")
+        print("  Cron scheduler started.")
+    except Exception as exc:
+        log.warning("cron_scheduler_failed_to_start", error=str(exc))
+
     # Keep running until stop signal.
     await stop_event.wait()
 
     print("\nShutting down...")
+
+    # Cancel background cron scheduler.
+    if cron_worker and not cron_worker.done():
+        cron_worker.cancel()
+        try:
+            await cron_worker
+        except (asyncio.CancelledError, Exception):
+            pass
+
     # Orchestrator must shut down first — cancels workers before pool.
     if server._orchestrator:
         try:

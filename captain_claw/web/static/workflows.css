@@ -1,0 +1,523 @@
+/* Captain Claw Workflow Browser */
+
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --bg-hover: #30363d;
+    --border: #30363d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --accent: #58a6ff;
+    --accent-hover: #79c0ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --purple: #bc8cff;
+    --orange: #f78166;
+    --monitor-bg: #0a0f14;
+    --monitor-text: #7ee787;
+    --radius: 8px;
+    --radius-sm: 4px;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    --font-mono: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
+    --header-height: 48px;
+    --sidebar-width: 280px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+/* ─── Header ──────────────────────────────────────── */
+
+.wf-header {
+    height: var(--header-height);
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    flex-shrink: 0;
+}
+
+.wf-header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.wf-header h1 {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--accent);
+}
+
+.wf-logo-link {
+    display: inline-flex;
+    align-items: center;
+    text-decoration: none;
+}
+.wf-logo-link img {
+    border-radius: var(--radius-sm);
+}
+
+.wf-header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.wf-nav-link {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 13px;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+}
+.wf-nav-link:hover {
+    color: var(--text-primary);
+    border-color: var(--text-muted);
+}
+
+/* ─── Layout ──────────────────────────────────────── */
+
+.wf-layout {
+    display: flex;
+    height: calc(100% - var(--header-height));
+    overflow: hidden;
+}
+
+/* ─── Sidebar ─────────────────────────────────────── */
+
+.wf-sidebar {
+    width: var(--sidebar-width);
+    min-width: var(--sidebar-width);
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.wf-sidebar-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.wf-sidebar-title {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+}
+
+.wf-sidebar-count {
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+    background: var(--bg-tertiary);
+    padding: 1px 8px;
+    border-radius: 10px;
+}
+
+.wf-workflow-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0;
+}
+
+.wf-loading {
+    padding: 20px 16px;
+    color: var(--text-muted);
+    font-size: 13px;
+    text-align: center;
+}
+
+/* ─── Workflow item ───────────────────────────────── */
+
+.wf-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 10px 16px;
+    cursor: pointer;
+    transition: background 0.1s;
+    border-bottom: 1px solid transparent;
+}
+.wf-item:hover {
+    background: var(--bg-hover);
+}
+.wf-item.selected {
+    background: var(--bg-tertiary);
+    border-left: 3px solid var(--accent);
+    padding-left: 13px;
+}
+
+.wf-item-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    word-break: break-word;
+}
+
+.wf-item-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.wf-item-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 0 6px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: 600;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+}
+
+.wf-item-badge.has-outputs {
+    color: var(--green);
+    border-color: #3fb95030;
+    background: #3fb95010;
+}
+
+.wf-item-badge.no-outputs {
+    color: var(--text-muted);
+}
+
+/* ─── Main area ───────────────────────────────────── */
+
+.wf-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
+}
+
+.wf-empty {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--text-muted);
+}
+
+.wf-empty-icon {
+    font-size: 48px;
+    opacity: 0.4;
+}
+
+.wf-empty-text {
+    font-size: 14px;
+}
+
+.wf-empty-sub {
+    font-size: 12px;
+    color: var(--text-muted);
+    opacity: 0.7;
+}
+
+.wf-no-outputs {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--text-muted);
+}
+
+/* ─── Output bar ──────────────────────────────────── */
+
+.wf-output-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 16px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    gap: 12px;
+}
+
+.wf-output-bar-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+}
+
+.wf-output-wf-name {
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--accent);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 300px;
+}
+
+.wf-output-select {
+    padding: 4px 28px 4px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    outline: none;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%238b949e'%3E%3Cpath d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    cursor: pointer;
+}
+.wf-output-select:focus {
+    border-color: var(--accent);
+}
+
+.wf-output-bar-right {
+    flex-shrink: 0;
+}
+
+.wf-output-meta {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+}
+
+/* ─── Output loading ──────────────────────────────── */
+
+.wf-output-loading {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+.wf-spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: wf-spin 0.8s linear infinite;
+}
+
+@keyframes wf-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* ─── Rendered markdown content ───────────────────── */
+
+.wf-output-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px 32px;
+    line-height: 1.7;
+}
+
+/* Markdown rendering styles */
+.wf-output-content h1 {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin: 0 0 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+.wf-output-content h2 {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 24px 0 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+}
+
+.wf-output-content h3 {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 20px 0 6px;
+}
+
+.wf-output-content h4 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin: 16px 0 4px;
+}
+
+.wf-output-content p {
+    margin: 8px 0;
+    color: var(--text-primary);
+}
+
+.wf-output-content strong {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.wf-output-content em {
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+.wf-output-content a {
+    color: var(--accent);
+    text-decoration: none;
+}
+.wf-output-content a:hover {
+    text-decoration: underline;
+    color: var(--accent-hover);
+}
+
+.wf-output-content ul,
+.wf-output-content ol {
+    margin: 8px 0;
+    padding-left: 24px;
+}
+
+.wf-output-content li {
+    margin: 4px 0;
+}
+
+.wf-output-content code {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--bg-tertiary);
+    padding: 2px 6px;
+    border-radius: 3px;
+    color: var(--orange);
+}
+
+.wf-output-content pre {
+    margin: 12px 0;
+    padding: 14px 16px;
+    background: var(--monitor-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow-x: auto;
+}
+
+.wf-output-content pre code {
+    background: none;
+    padding: 0;
+    color: var(--monitor-text);
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.wf-output-content blockquote {
+    margin: 12px 0;
+    padding: 8px 16px;
+    border-left: 3px solid var(--accent);
+    background: var(--bg-tertiary);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    color: var(--text-secondary);
+}
+
+.wf-output-content hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 20px 0;
+}
+
+.wf-output-content table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0;
+}
+
+.wf-output-content th {
+    text-align: left;
+    padding: 8px 12px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.wf-output-content td {
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    font-size: 13px;
+}
+
+.wf-output-content img {
+    max-width: 100%;
+    border-radius: var(--radius);
+}
+
+/* Task status badges in markdown */
+.wf-output-content .task-status {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+/* ─── Scrollbar ───────────────────────────────────── */
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ─── Responsive ──────────────────────────────────── */
+
+@media (max-width: 768px) {
+    .wf-layout {
+        flex-direction: column;
+    }
+
+    .wf-sidebar {
+        width: 100%;
+        min-width: unset;
+        max-height: 200px;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .wf-output-content {
+        padding: 16px;
+    }
+
+    .wf-output-wf-name {
+        max-width: 150px;
+    }
+}

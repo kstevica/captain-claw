@@ -54,6 +54,7 @@ vector = [
 [project.scripts]
 captain-claw = "captain_claw.main:main"
 captain-claw-web = "captain_claw.web_server:main"
+captain-claw-orchestrate = "captain_claw.orchestrator_cli:cli_orchestrate"
 
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]

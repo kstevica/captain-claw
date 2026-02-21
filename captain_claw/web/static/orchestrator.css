@@ -134,31 +134,83 @@ html, body {
     flex-shrink: 0;
 }
 
-.orch-input-row {
+/* ─── Input toolbar (workflow select row) ────────── */
+
+.orch-input-toolbar {
     display: flex;
     gap: 8px;
+    margin-bottom: 8px;
 }
 
-.orch-input-row input {
+/* ─── Dual-pane prompt layout ────────────────────── */
+
+.orch-dual-pane {
+    display: flex;
+    gap: 12px;
+}
+
+.orch-pane {
     flex: 1;
-    padding: 8px 12px;
-    background: var(--bg-primary);
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius);
+    background: var(--bg-primary);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
+}
+
+.orch-pane-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 5px 12px;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border);
+}
+
+.orch-pane-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.orch-rephrase-hint {
+    font-weight: 400;
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.orch-pane textarea {
+    flex: 1;
+    width: 100%;
+    padding: 10px 12px;
+    background: var(--bg-primary);
+    border: none;
     color: var(--text-primary);
     font-family: var(--font);
-    font-size: 14px;
+    font-size: 13px;
+    line-height: 1.5;
+    resize: none;
+    min-height: 80px;
     outline: none;
+    box-sizing: border-box;
 }
-.orch-input-row input:focus {
-    border-color: var(--accent);
-}
-.orch-input-row input::placeholder {
-    color: var(--text-muted);
+.orch-pane textarea::placeholder { color: var(--text-muted); }
+.orch-pane textarea:focus { background: var(--bg-primary); }
+
+.orch-pane-footer {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 6px 10px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-tertiary);
 }
 
 .orch-prepare-btn {
-    padding: 8px 20px;
+    padding: 6px 20px;
     background: var(--bg-tertiary);
     color: var(--text-primary);
     border: 1px solid var(--border);
@@ -172,7 +224,7 @@ html, body {
 .orch-prepare-btn:disabled { opacity: 0.5; cursor: default; }
 
 .orch-run-btn {
-    padding: 8px 20px;
+    padding: 6px 20px;
     background: var(--accent);
     color: #fff;
     border: none;
@@ -185,70 +237,21 @@ html, body {
 .orch-run-btn:hover { background: var(--accent-hover); }
 .orch-run-btn:disabled { opacity: 0.5; cursor: default; }
 
-/* ─── Rephrase area ──────────────────────────────── */
-
-.orch-rephrase {
-    margin-top: 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    background: var(--bg-primary);
-    overflow: hidden;
-}
-.orch-rephrase.hidden { display: none; }
-
-.orch-rephrase-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 6px 12px;
-    background: var(--bg-tertiary);
-    border-bottom: 1px solid var(--border);
-}
-
-.orch-rephrase-label {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-secondary);
-}
-
-.orch-rephrase-hint {
-    font-weight: 400;
-    color: var(--text-muted);
-    font-size: 11px;
-}
-
-.orch-rephrase-actions {
-    display: flex;
-    gap: 6px;
-    align-items: center;
-}
-
 .orch-rephrase-discard {
     background: none;
     border: 1px solid var(--border);
     color: var(--text-muted);
     font-size: 12px;
-    padding: 3px 10px;
+    padding: 4px 10px;
     border-radius: var(--radius-sm);
     cursor: pointer;
 }
 .orch-rephrase-discard:hover { color: var(--text-primary); border-color: var(--text-muted); }
 
-.orch-rephrase textarea {
-    width: 100%;
-    padding: 10px 12px;
-    background: var(--bg-primary);
-    border: none;
-    color: var(--text-primary);
-    font-family: var(--font);
-    font-size: 13px;
-    line-height: 1.5;
-    resize: vertical;
-    min-height: 60px;
-    max-height: 200px;
-    outline: none;
+/* Right pane initially dimmed until rephrased content appears */
+.orch-pane-right textarea:placeholder-shown {
+    opacity: 0.5;
 }
-.orch-rephrase textarea::placeholder { color: var(--text-muted); }
 
 /* ─── Rephrase loading spinner ───────────────────── */
 
@@ -1176,6 +1179,25 @@ html, body {
     min-width: 180px;
 }
 .orch-workflow-select:focus { border-color: var(--accent); }
+
+.orch-reset-btn {
+    padding: 5px 12px;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-family: var(--font);
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+.orch-reset-btn:hover {
+    color: var(--red);
+    border-color: var(--red);
+    background: #f8514910;
+}
 
 /* ─── Execute button ─────────────────────────────── */
 

@@ -346,6 +346,41 @@ class SessionOrchestrator:
             "user_input": self._user_input,
         }
 
+    async def reset(self) -> None:
+        """Cancel any running work and reset to a clean idle state."""
+        # Cancel all pending worker futures.
+        for tid, fut in list(self._pending_futures.items()):
+            if not fut.done():
+                fut.cancel()
+        for tid, fut in list(self._pending_futures.items()):
+            if not fut.done():
+                try:
+                    await fut
+                except (asyncio.CancelledError, Exception):
+                    pass
+        self._pending_futures.clear()
+
+        # Cancel the execution loop task.
+        if self._execution_task and not self._execution_task.done():
+            self._execution_task.cancel()
+            try:
+                await self._execution_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._execution_task = None
+
+        # Clear graph and metadata.
+        self._graph = None
+        self._workflow_name = ""
+        self._user_input = ""
+        self._synthesis_instruction = ""
+        self._execution_done = False
+        self._file_registry = None
+        self._resume_event = asyncio.Event()
+
+        # Evict idle agents from the pool.
+        await self._pool.evict_idle()
+
     async def shutdown(self) -> None:
         """Cancel running tasks and release all pool resources."""
         # Cancel all pending worker futures.

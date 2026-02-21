@@ -41,29 +41,40 @@
                     <button class="orch-execute-btn" id="orchExecuteBtn">Execute &#x25B6;</button>
                 </div>
             </div>
-            <div class="orch-input-row">
+            <div class="orch-input-toolbar">
                 <select class="orch-workflow-select" id="orchLoadWorkflowSelect">
                     <option value="">Load workflow...</option>
                 </select>
-                <input type="text" id="orchInput" placeholder="Describe a complex task to decompose and run in parallel..." autocomplete="off">
-                <button class="orch-prepare-btn" id="orchPrepareBtn">Prepare</button>
+                <button class="orch-reset-btn" id="orchResetBtn" title="Reset orchestration">Reset</button>
             </div>
-            <!-- Rephrased prompt area (hidden until Prepare is clicked) -->
-            <div class="orch-rephrase hidden" id="orchRephrase">
-                <div class="orch-rephrase-header">
-                    <span class="orch-rephrase-label">Rephrased prompt <span class="orch-rephrase-hint">(editable — review and adjust before running)</span></span>
-                    <div class="orch-rephrase-actions">
+            <div class="orch-dual-pane">
+                <!-- Left: user prompt -->
+                <div class="orch-pane orch-pane-left">
+                    <div class="orch-pane-header">
+                        <span class="orch-pane-label">Your prompt</span>
+                    </div>
+                    <textarea id="orchInput" rows="4" spellcheck="false" placeholder="Describe a complex task to decompose and run in parallel..."></textarea>
+                    <div class="orch-pane-footer">
+                        <button class="orch-prepare-btn" id="orchPrepareBtn">Prepare</button>
+                    </div>
+                </div>
+                <!-- Right: rephrased prompt -->
+                <div class="orch-pane orch-pane-right" id="orchRephrase">
+                    <div class="orch-pane-header">
+                        <span class="orch-pane-label">Rephrased prompt <span class="orch-rephrase-hint">(editable)</span></span>
+                    </div>
+                    <textarea id="orchRephrased" rows="4" spellcheck="false" placeholder="Rephrased prompt will appear here after Prepare..."></textarea>
+                    <div class="orch-pane-footer">
                         <button class="orch-rephrase-discard" id="orchDiscardBtn" title="Discard and go back">Discard</button>
                         <button class="orch-run-btn" id="orchRunBtn">Decompose &#x25B6;</button>
                     </div>
                 </div>
-                <textarea id="orchRephrased" rows="4" spellcheck="false" placeholder="Rephrased prompt will appear here..."></textarea>
-                <!-- Skills selector -->
-                <div class="orch-skills-bar" id="orchSkillsBar">
-                    <span class="orch-skills-label">Skills:</span>
-                    <div class="orch-skills-list" id="orchSkillsList">
-                        <span class="orch-skills-loading">loading...</span>
-                    </div>
+            </div>
+            <!-- Skills selector (below both panes) -->
+            <div class="orch-skills-bar" id="orchSkillsBar">
+                <span class="orch-skills-label">Skills:</span>
+                <div class="orch-skills-list" id="orchSkillsList">
+                    <span class="orch-skills-loading">loading...</span>
                 </div>
             </div>
             <!-- Spinner shown during rephrase -->

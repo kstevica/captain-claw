@@ -1,0 +1,1289 @@
+/* Captain Claw Cron Management Dashboard */
+
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --bg-hover: #30363d;
+    --border: #30363d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --accent: #58a6ff;
+    --accent-hover: #79c0ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --purple: #bc8cff;
+    --orange: #f78166;
+    --monitor-bg: #0a0f14;
+    --monitor-text: #7ee787;
+    --radius: 8px;
+    --radius-sm: 4px;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    --font-mono: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
+    --header-height: 48px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+/* ─── Header ──────────────────────────────────────── */
+
+.cron-header {
+    height: var(--header-height);
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    flex-shrink: 0;
+}
+
+.cron-header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.cron-header-left .logo {
+    font-weight: 700;
+    font-size: 15px;
+    letter-spacing: -0.3px;
+    color: var(--text-primary);
+    white-space: nowrap;
+    text-decoration: none;
+}
+
+.cron-header-left .logo:hover { color: var(--accent); }
+
+.cron-header-left .divider {
+    width: 1px;
+    height: 20px;
+    background: var(--border);
+}
+
+.cron-title {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--accent);
+}
+
+.cron-header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.cron-active-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--green);
+    background: #3fb95018;
+    border: 1px solid #3fb95030;
+}
+
+.cron-active-badge .count {
+    font-family: var(--font-mono);
+    font-weight: 700;
+}
+
+.cron-back-link {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 13px;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+}
+.cron-back-link:hover {
+    color: var(--text-primary);
+    border-color: var(--text-muted);
+}
+
+/* ─── Main Content Area ───────────────────────────── */
+
+.cron-main {
+    height: calc(100% - var(--header-height));
+    overflow-y: auto;
+    padding: 16px;
+}
+
+.cron-main-inner {
+    max-width: 1100px;
+    margin: 0 auto;
+}
+
+/* ─── Add Job Section (Collapsible) ───────────────── */
+
+.cron-add-section {
+    margin-bottom: 20px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: var(--bg-secondary);
+}
+
+.cron-toggle-btn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 10px 16px;
+    background: var(--bg-secondary);
+    border: none;
+    color: var(--text-secondary);
+    font-family: var(--font);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+.cron-toggle-btn:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
+.cron-toggle-btn .chevron {
+    display: inline-block;
+    transition: transform 0.2s ease;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.cron-toggle-btn.open .chevron {
+    transform: rotate(90deg);
+}
+
+.cron-add-body {
+    display: none;
+    padding: 16px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-primary);
+}
+.cron-add-body.visible {
+    display: block;
+}
+
+/* ─── Cron Form ───────────────────────────────────── */
+
+.cron-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: flex-end;
+}
+
+.cron-form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 140px;
+}
+
+.cron-form-group label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+}
+
+.cron-form-group select,
+.cron-form-group input {
+    padding: 6px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.15s;
+}
+.cron-form-group select:focus,
+.cron-form-group input:focus {
+    border-color: var(--accent);
+}
+.cron-form-group select:hover,
+.cron-form-group input:hover {
+    border-color: var(--text-muted);
+}
+
+.cron-form-group select {
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%238b949e'%3E%3Cpath d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    padding-right: 28px;
+}
+
+.cron-form-payload {
+    flex-basis: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.cron-form-payload label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+}
+
+.cron-form-payload textarea {
+    width: 100%;
+    min-height: 80px;
+    max-height: 200px;
+    padding: 8px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 13px;
+    line-height: 1.5;
+    resize: vertical;
+    outline: none;
+    transition: border-color 0.15s;
+}
+.cron-form-payload textarea:focus {
+    border-color: var(--accent);
+}
+.cron-form-payload textarea::placeholder {
+    color: var(--text-muted);
+}
+
+.cron-form-footer {
+    flex-basis: 100%;
+    display: flex;
+    justify-content: flex-end;
+    padding-top: 4px;
+}
+
+.cron-add-btn {
+    padding: 6px 20px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius-sm);
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s;
+}
+.cron-add-btn:hover {
+    background: var(--accent-hover);
+}
+.cron-add-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+/* ─── Jobs Table Section ──────────────────────────── */
+
+.cron-jobs-section {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: var(--bg-secondary);
+}
+
+.cron-table-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
+}
+
+.cron-table-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.cron-table-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.cron-show-disabled {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+}
+
+.cron-show-disabled input[type="checkbox"] {
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.cron-table-wrapper {
+    overflow-x: auto;
+}
+
+.cron-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.cron-table th {
+    color: var(--text-secondary);
+    background: var(--bg-tertiary);
+    padding: 8px 12px;
+    text-align: left;
+    font-weight: 500;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+    border-bottom: 1px solid var(--border);
+}
+
+.cron-table td {
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+    font-size: 13px;
+    vertical-align: middle;
+}
+
+.cron-table tbody tr {
+    cursor: pointer;
+    transition: background 0.1s;
+}
+
+.cron-table tbody tr:first-child td {
+    border-top: none;
+}
+
+.cron-table tbody tr:hover {
+    background: var(--bg-hover);
+}
+
+.cron-table tbody tr.selected {
+    background: var(--bg-tertiary);
+}
+
+.cron-table tbody tr.disabled {
+    opacity: 0.5;
+}
+
+.cron-table .col-status {
+    width: 32px;
+    text-align: center;
+}
+
+.cron-table .col-actions {
+    width: 80px;
+    text-align: right;
+}
+
+.cron-table .job-name {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.cron-table .job-schedule {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.cron-table .job-next-run {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+}
+
+.cron-table .job-last-run {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+/* ─── Status Indicators ───────────────────────────── */
+
+.cron-status-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    vertical-align: middle;
+}
+
+.cron-status-dot.active {
+    background: var(--green);
+}
+
+.cron-status-dot.paused {
+    background: var(--yellow);
+}
+
+.cron-status-dot.failed {
+    background: var(--red);
+}
+
+.cron-status-dot.running {
+    background: var(--accent);
+    animation: cron-pulse 1.5s ease-in-out infinite;
+}
+
+.cron-status-dot.disabled {
+    background: var(--text-muted);
+    opacity: 0.5;
+}
+
+@keyframes cron-pulse {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(88, 166, 255, 0.4); }
+    50% { opacity: 0.6; box-shadow: 0 0 6px 2px rgba(88, 166, 255, 0.2); }
+}
+
+/* ─── Action Buttons ──────────────────────────────── */
+
+.cron-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 2px;
+}
+
+.cron-action-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 13px;
+    transition: background 0.15s, color 0.15s;
+}
+.cron-action-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.cron-action-btn.run:hover {
+    color: var(--green);
+    background: #3fb95015;
+}
+
+.cron-action-btn.pause:hover {
+    color: var(--yellow);
+    background: #d2992215;
+}
+
+.cron-action-btn.resume:hover {
+    color: var(--green);
+    background: #3fb95015;
+}
+
+.cron-action-btn.delete:hover {
+    color: var(--red);
+    background: #f8514915;
+}
+
+.cron-action-btn.edit:hover {
+    color: var(--accent);
+    background: #58a6ff15;
+}
+
+/* ─── Kind Badges ─────────────────────────────────── */
+
+.cron-kind-badge {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+}
+
+.cron-kind-badge.prompt {
+    color: var(--accent);
+    background: #58a6ff18;
+    border: 1px solid #58a6ff30;
+}
+
+.cron-kind-badge.script {
+    color: var(--green);
+    background: #3fb95018;
+    border: 1px solid #3fb95030;
+}
+
+.cron-kind-badge.tool {
+    color: var(--purple);
+    background: #bc8cff18;
+    border: 1px solid #bc8cff30;
+}
+
+.cron-kind-badge.orchestrate {
+    color: var(--orange);
+    background: #f7816618;
+    border: 1px solid #f7816630;
+}
+
+/* ─── Detail Panel ────────────────────────────────── */
+
+.cron-detail {
+    display: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-secondary);
+    margin-top: 16px;
+    overflow: hidden;
+    animation: cron-slide-in 0.2s ease-out;
+}
+.cron-detail.visible {
+    display: block;
+}
+
+@keyframes cron-slide-in {
+    from {
+        opacity: 0;
+        transform: translateY(-8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.cron-detail-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
+}
+
+.cron-detail-title {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.cron-detail-close {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 18px;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    transition: color 0.15s, background 0.15s;
+}
+.cron-detail-close:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+}
+
+.cron-detail-body {
+    padding: 16px;
+}
+
+/* ─── Detail Info Grid ────────────────────────────── */
+
+.cron-detail-info {
+    display: grid;
+    grid-template-columns: 120px 1fr;
+    gap: 8px 16px;
+    margin-bottom: 16px;
+    padding: 16px;
+}
+
+.cron-detail-info dt {
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding-top: 2px;
+}
+
+.cron-detail-info dd {
+    font-size: 13px;
+    color: var(--text-primary);
+    word-break: break-word;
+}
+
+.cron-detail-info dd.mono {
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+
+.cron-detail-info dd .timestamp {
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+
+/* ─── Detail Payload Block ────────────────────────── */
+
+.cron-detail-payload {
+    margin: 12px 0;
+    padding: 10px 12px;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+}
+
+.cron-detail-payload-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+}
+
+.cron-detail-payload-content {
+    font-size: 13px;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.6;
+}
+
+/* ─── Detail Tab Bar ──────────────────────────────── */
+
+.cron-detail-tab-bar {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--border);
+    margin: 0 16px;
+}
+
+.cron-detail-tab {
+    padding: 6px 16px;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-secondary);
+    font-family: var(--font);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+}
+.cron-detail-tab:hover {
+    color: var(--text-primary);
+}
+.cron-detail-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+}
+
+.cron-detail-tab-content {
+    display: none;
+}
+.cron-detail-tab-content.visible {
+    display: block;
+}
+
+/* ─── Detail History ──────────────────────────────── */
+
+.cron-detail-history {
+    margin: 8px 16px 16px;
+    background: var(--monitor-bg);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 8px;
+}
+
+.cron-history-entry {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 4px 0;
+    border-bottom: 1px solid #1a2030;
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+.cron-history-entry:last-child {
+    border-bottom: none;
+}
+
+.cron-history-time {
+    color: var(--text-muted);
+    font-size: 11px;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.cron-history-status {
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    flex-shrink: 0;
+}
+.cron-history-status.success { color: var(--green); }
+.cron-history-status.failed { color: var(--red); }
+.cron-history-status.running { color: var(--yellow); }
+.cron-history-status.skipped { color: var(--text-muted); }
+
+.cron-history-message {
+    color: var(--monitor-text);
+    word-break: break-word;
+}
+
+.cron-history-empty {
+    padding: 20px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-family: var(--font);
+}
+
+/* ─── Detail Monitor Output ───────────────────────── */
+
+.cron-detail-monitor {
+    margin-top: 8px;
+    padding: 10px;
+    background: var(--monitor-bg);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--monitor-text);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 320px;
+    overflow-y: auto;
+}
+
+/* ─── Detail Actions ──────────────────────────────── */
+
+.cron-detail-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+}
+
+.cron-detail-action-btn {
+    padding: 5px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    transition: all 0.15s;
+}
+.cron-detail-action-btn:hover {
+    border-color: var(--accent);
+}
+
+.cron-detail-action-btn.run-now {
+    color: var(--green);
+    border-color: var(--green);
+}
+.cron-detail-action-btn.run-now:hover {
+    background: #3fb95015;
+}
+
+.cron-detail-action-btn.pause {
+    color: var(--yellow);
+    border-color: var(--yellow);
+}
+.cron-detail-action-btn.pause:hover {
+    background: #d2992215;
+}
+
+.cron-detail-action-btn.delete {
+    color: var(--red);
+    border-color: var(--red);
+}
+.cron-detail-action-btn.delete:hover {
+    background: #f8514915;
+}
+
+/* ─── Empty State ─────────────────────────────────── */
+
+.cron-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 16px;
+    color: var(--text-muted);
+    gap: 8px;
+}
+
+.cron-empty .icon {
+    font-size: 40px;
+    opacity: 0.5;
+}
+
+.cron-empty .text {
+    font-size: 14px;
+}
+
+.cron-empty .subtext {
+    font-size: 12px;
+    color: var(--text-muted);
+    opacity: 0.7;
+}
+
+/* ─── Toast / Notification ────────────────────────── */
+
+.cron-toast {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    padding: 10px 16px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    font-weight: 500;
+    color: #fff;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    z-index: 1000;
+    animation: cron-toast-in 0.3s ease-out;
+    pointer-events: none;
+}
+
+.cron-toast.success { border-color: var(--green); }
+.cron-toast.error { border-color: var(--red); }
+
+@keyframes cron-toast-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Confirm Dialog ──────────────────────────────── */
+
+.cron-confirm-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 999;
+}
+
+.cron-confirm-dialog {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    max-width: 400px;
+    width: 90%;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.cron-confirm-title {
+    font-weight: 600;
+    font-size: 15px;
+    margin-bottom: 8px;
+    color: var(--text-primary);
+}
+
+.cron-confirm-message {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 16px;
+    line-height: 1.5;
+}
+
+.cron-confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.cron-confirm-cancel {
+    padding: 6px 16px;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 13px;
+    cursor: pointer;
+}
+.cron-confirm-cancel:hover {
+    color: var(--text-primary);
+    border-color: var(--text-muted);
+}
+
+.cron-confirm-ok {
+    padding: 6px 16px;
+    background: var(--red);
+    border: none;
+    border-radius: var(--radius-sm);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.cron-confirm-ok:hover {
+    background: #ff6e6e;
+}
+
+/* ─── Loading Spinner ─────────────────────────────── */
+
+.cron-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 40px;
+    color: var(--text-muted);
+    gap: 8px;
+    font-size: 13px;
+}
+
+.cron-spinner {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: cron-spin 0.8s linear infinite;
+}
+
+@keyframes cron-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* ─── Cron expression helper ──────────────────────── */
+
+.cron-expr-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    margin-top: 2px;
+}
+
+.cron-expr-next {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+}
+.cron-expr-next .label {
+    color: var(--text-muted);
+}
+
+/* ─── Inline status label ─────────────────────────── */
+
+.cron-status-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+.cron-status-label.active { color: var(--green); }
+.cron-status-label.paused { color: var(--yellow); }
+.cron-status-label.failed { color: var(--red); }
+.cron-status-label.running { color: var(--accent); }
+.cron-status-label.disabled { color: var(--text-muted); }
+
+/* ─── Scrollbar ───────────────────────────────────── */
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ─── Responsive ──────────────────────────────────── */
+
+@media (max-width: 768px) {
+    .cron-form {
+        flex-direction: column;
+    }
+
+    .cron-form-group {
+        min-width: 100%;
+    }
+
+    .cron-form-payload {
+        flex-basis: 100%;
+    }
+
+    .cron-detail-info {
+        grid-template-columns: 1fr;
+        gap: 4px 0;
+    }
+
+    .cron-detail-info dt {
+        margin-top: 8px;
+    }
+
+    .cron-table-header {
+        flex-direction: column;
+        gap: 8px;
+        align-items: flex-start;
+    }
+
+    .cron-header {
+        padding: 0 10px;
+    }
+
+    .cron-header-left .divider {
+        display: none;
+    }
+
+    .cron-active-badge {
+        display: none;
+    }
+}
+
+@media (max-width: 640px) {
+    .cron-main {
+        padding: 10px;
+    }
+
+    .cron-table th,
+    .cron-table td {
+        padding: 6px 8px;
+        font-size: 12px;
+    }
+
+    .cron-detail-body {
+        padding: 12px;
+    }
+
+    .cron-add-body,
+    .cron-add-panel {
+        padding: 12px;
+    }
+
+    .cron-actions {
+        gap: 0;
+    }
+}
+
+/* ─── HTML class aliases ─────────────────────────── */
+/* Map HTML class names to the styles defined above.  */
+
+.cron-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--green);
+    background: #3fb95018;
+    border: 1px solid #3fb95030;
+    font-family: var(--font-mono);
+}
+
+.cron-logo-link {
+    display: inline-flex;
+    align-items: center;
+    text-decoration: none;
+}
+.cron-logo-link img {
+    border-radius: var(--radius-sm);
+}
+
+.cron-nav-link {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 13px;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+}
+.cron-nav-link:hover {
+    color: var(--text-primary);
+    border-color: var(--text-muted);
+}
+
+.cron-header h1 {
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--accent);
+}
+
+.cron-add-panel {
+    padding: 16px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-primary);
+}
+
+.cron-add-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: flex-end;
+    margin-bottom: 12px;
+}
+
+.cron-add-row label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+}
+
+.cron-add-row select,
+.cron-add-row input[type="number"],
+.cron-add-row input[type="time"],
+.cron-add-row input[type="text"] {
+    padding: 6px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.15s;
+}
+.cron-add-row select:focus,
+.cron-add-row input:focus {
+    border-color: var(--accent);
+}
+
+.cron-sched-fields {
+    display: inline-flex;
+    gap: 6px;
+    align-items: flex-end;
+}
+
+.cron-payload-row {
+    flex-direction: column;
+}
+
+.cron-payload-row textarea {
+    width: 100%;
+    min-height: 80px;
+    max-height: 200px;
+    padding: 8px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 13px;
+    line-height: 1.5;
+    resize: vertical;
+    outline: none;
+}
+.cron-payload-row textarea:focus {
+    border-color: var(--accent);
+}
+.cron-payload-row textarea::placeholder {
+    color: var(--text-muted);
+}
+
+.cron-payload-row input[type="text"] {
+    width: 100%;
+    padding: 8px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    outline: none;
+}
+.cron-payload-row input[type="text"]:focus {
+    border-color: var(--accent);
+}
+.cron-payload-row input[type="text"]::placeholder {
+    color: var(--text-muted);
+    font-family: var(--font);
+}
+
+.cron-payload-row select {
+    width: 100%;
+    padding: 8px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 13px;
+    outline: none;
+}
+
+.cron-add-footer {
+    display: flex;
+    justify-content: flex-end;
+    padding-top: 4px;
+}
+
+.cron-jobs-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
+}
+
+.cron-jobs-header h3 {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.cron-jobs-header label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+}
+
+.cron-jobs-header label input[type="checkbox"] {
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.cron-detail-info dd.timestamp {
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+}

@@ -52,6 +52,7 @@
     const orchSaveWorkflowBtn = $('#orchSaveWorkflowBtn');
     const orchLoadWorkflowSelect = $('#orchLoadWorkflowSelect');
     const orchExecuteBtn = $('#orchExecuteBtn');
+    const orchResetBtn = $('#orchResetBtn');
 
     // Summary bar counts
     const summaryTotal = $('#summaryTotal .count');
@@ -269,8 +270,7 @@
         // Show the rephrased prompt that was used to decompose (e.g. from loaded workflow).
         if (msg.user_input && !orchRephrased.value) {
             orchRephrased.value = msg.user_input;
-            orchRephrase.classList.remove('hidden');
-            autoResizeRephrased();
+            syncPaneHeights();
         }
 
         addLogEntry('decomposed', `Decomposed into ${tasksList.length} tasks: ${msg.summary || ''}`);
@@ -1047,7 +1047,7 @@
         isRephrasing = true;
         orchPrepareBtn.disabled = true;
         orchRephraseLoading.classList.remove('hidden');
-        orchRephrase.classList.add('hidden');
+        orchRephrased.value = '';
 
         try {
             const resp = await fetch('/api/orchestrator/rephrase', {
@@ -1063,19 +1063,14 @@
             const data = await resp.json();
             const rephrased = data.rephrased || input;
 
-            // Show the rephrase area with the result
             orchRephrased.value = rephrased;
-            orchRephrase.classList.remove('hidden');
             orchRephrased.focus();
-
-            // Auto-resize textarea to fit content
-            autoResizeRephrased();
+            syncPaneHeights();
         } catch (e) {
-            // On failure, show original text for manual editing
+            // On failure, copy original text for manual editing
             orchRephrased.value = input;
-            orchRephrase.classList.remove('hidden');
             orchRephrased.focus();
-            autoResizeRephrased();
+            syncPaneHeights();
         } finally {
             isRephrasing = false;
             orchPrepareBtn.disabled = false;
@@ -1084,24 +1079,89 @@
     }
 
     function discardRephrase() {
-        orchRephrase.classList.add('hidden');
         orchRephrased.value = '';
         orchInput.focus();
+        syncPaneHeights();
     }
 
     function autoResizeRephrased() {
+        syncPaneHeights();
+    }
+
+    function syncPaneHeights() {
+        // Reset both to auto so scrollHeight is accurate
+        orchInput.style.height = 'auto';
         orchRephrased.style.height = 'auto';
-        orchRephrased.style.height = Math.min(orchRephrased.scrollHeight, 200) + 'px';
+        // Use the taller of the two, clamped to a reasonable max
+        var h = Math.max(orchInput.scrollHeight, orchRephrased.scrollHeight, 80);
+        h = Math.min(h, 300);
+        orchInput.style.height = h + 'px';
+        orchRephrased.style.height = h + 'px';
+    }
+
+    // ── Reset ────────────────────────────────────────────────
+
+    async function resetOrchestrator() {
+        if (!confirm('Reset the current orchestration? This will cancel any running tasks and clear the graph.')) {
+            return;
+        }
+
+        try {
+            orchResetBtn.disabled = true;
+            orchResetBtn.textContent = 'Resetting...';
+
+            await fetch('/api/orchestrator/reset', { method: 'POST' });
+
+            // Reset client-side state
+            tasks = {};
+            graphSummary = {};
+            eventLog = [];
+            selectedTaskId = null;
+            workflowName = '';
+            taskOverrides = {};
+            aggregatedContext = { totalTokens: 0, promptTokens: 0, completionTokens: 0 };
+            timeoutCountdowns = {};
+            if (countdownInterval) {
+                clearInterval(countdownInterval);
+                countdownInterval = null;
+            }
+
+            // Reset UI
+            orchInput.value = '';
+            orchRephrased.value = '';
+            syncPaneHeights();
+            updateWorkflowNameDisplay();
+            clearLog();
+            updateSummaryBar();
+            updateContextSummary();
+
+            // Reset graph area
+            orchGraph.innerHTML = '';
+            if (orchGraphEmpty) {
+                orchGraph.appendChild(orchGraphEmpty);
+                orchGraphEmpty.style.display = '';
+            }
+
+            // Hide detail panel
+            orchDetail.classList.remove('visible');
+
+            // Return to idle state
+            setOrchestratorState('idle');
+
+        } catch (e) {
+            alert('Reset failed: ' + e.message);
+        } finally {
+            orchResetBtn.disabled = false;
+            orchResetBtn.textContent = 'Reset';
+        }
     }
 
     // ── Decompose (was "Run") — now does prepare() only ──────
 
     async function decomposeOrchestrator() {
-        // Use rephrased text if visible, otherwise fall back to input
-        const rephraseVisible = !orchRephrase.classList.contains('hidden');
-        const input = rephraseVisible
-            ? orchRephrased.value.trim()
-            : orchInput.value.trim();
+        // Use rephrased text if available, otherwise fall back to input
+        const rephrasedText = orchRephrased.value.trim();
+        const input = rephrasedText || orchInput.value.trim();
 
         if (!input || isDecomposing) return;
 
@@ -1504,8 +1564,7 @@
                 var userInput = data.user_input || '';
                 if (userInput) {
                     orchRephrased.value = userInput;
-                    orchRephrase.classList.remove('hidden');
-                    autoResizeRephrased();
+                    syncPaneHeights();
                 }
             } else {
                 addLogEntry('task_failed', `Load failed: ${data.error || 'unknown'}`);
@@ -1545,13 +1604,16 @@
         // Prepare button → rephrase
         orchPrepareBtn.addEventListener('click', prepareOrchestrator);
 
-        // Enter key in input → prepare (rephrase)
+        // Ctrl+Enter in prompt textarea → prepare (rephrase)
         orchInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                 e.preventDefault();
                 prepareOrchestrator();
             }
         });
+
+        // Auto-sync pane heights when user types in prompt
+        orchInput.addEventListener('input', syncPaneHeights);
 
         // Run button (now "Decompose") → decompose into tasks for preview
         orchRunBtn.addEventListener('click', decomposeOrchestrator);
@@ -1572,6 +1634,9 @@
 
         // Execute button → run the prepared graph
         orchExecuteBtn.addEventListener('click', executeOrchestrator);
+
+        // Reset button → clear everything
+        if (orchResetBtn) orchResetBtn.addEventListener('click', resetOrchestrator);
 
         // Detail close
         detailClose.addEventListener('click', () => {
@@ -1644,8 +1709,7 @@
                 // Restore the rephrased prompt text if available.
                 if (data.status.user_input) {
                     orchRephrased.value = data.status.user_input;
-                    orchRephrase.classList.remove('hidden');
-                    autoResizeRephrased();
+                    syncPaneHeights();
                 }
 
                 updateSummaryBar();

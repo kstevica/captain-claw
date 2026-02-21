@@ -10,6 +10,8 @@ import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from captain_claw.logging import get_logger
+
 from captain_claw.cron import (
     compute_next_run,
     now_utc,
@@ -22,6 +24,8 @@ from captain_claw.session_export import normalize_session_id, truncate_history_t
 
 if TYPE_CHECKING:
     from captain_claw.runtime_context import RuntimeContext
+
+log = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -283,10 +287,99 @@ def parse_cron_add_args(raw_add: str) -> tuple[dict[str, object], str, dict[str,
             raise ValueError(f"Usage: /cron add ... {kind_head} <path>")
         return schedule, kind_head, {"path": path_text}
 
+    if kind_head == "orchestrate":
+        # /cron add every 1h orchestrate <workflow-name>
+        if len(remaining) < 2:
+            raise ValueError("Usage: /cron add ... orchestrate <workflow-name>")
+        wf_name = " ".join(remaining[1:]).strip()
+        if not wf_name:
+            raise ValueError("Usage: /cron add ... orchestrate <workflow-name>")
+        return schedule, "orchestrate", {"workflow": wf_name}
+
     prompt_text = " ".join(remaining).strip()
     if not prompt_text:
         raise ValueError('Usage: /cron add ... "<task>"')
     return schedule, "prompt", {"text": prompt_text}
+
+
+# ---------------------------------------------------------------------------
+# Orchestrate workflow execution (cron kind)
+# ---------------------------------------------------------------------------
+
+async def _run_orchestrate_cron(
+    ctx: RuntimeContext,
+    workflow_name: str,
+    trigger: str,
+    cron_job_id: str | None = None,
+) -> None:
+    """Run a saved orchestrator workflow as a cron job.
+
+    Creates a fresh SessionOrchestrator, loads the named workflow,
+    executes it, and logs the result.  Runs inline (not queued) because
+    orchestration manages its own parallelism via AgentPool.
+    """
+    from captain_claw.config import get_config
+    from captain_claw.session_orchestrator import SessionOrchestrator
+
+    cfg = get_config()
+
+    ctx.ui.print_message(
+        "system",
+        f"[CRON] {trigger} orchestrate workflow={workflow_name}",
+    )
+
+    await cron_monitor_event(
+        ctx, "orchestrate_start",
+        history_job_id=cron_job_id,
+        trigger=trigger, workflow=workflow_name,
+    )
+    await cron_chat_event(
+        ctx, cron_job_id, "system",
+        f"[CRON] {trigger} orchestrate start: {workflow_name}",
+        trigger=trigger, kind="orchestrate", workflow=workflow_name,
+    )
+
+    # Create a temporary orchestrator for this run.
+    orchestrator = SessionOrchestrator(
+        main_agent=ctx.agent,
+        max_parallel=cfg.orchestrator.max_parallel,
+        max_agents=cfg.orchestrator.max_agents,
+        provider=ctx.agent.provider,
+        status_callback=ctx.ui.set_runtime_status,
+        tool_output_callback=ctx.ui.append_tool_output,
+    )
+
+    try:
+        load_result = await orchestrator.load_workflow(workflow_name)
+        if not load_result.get("ok"):
+            raise ValueError(load_result.get("error", f"Failed to load workflow: {workflow_name}"))
+
+        task_count = len(load_result.get("tasks", []))
+        await cron_monitor_event(
+            ctx, "orchestrate_executing",
+            history_job_id=cron_job_id,
+            trigger=trigger, workflow=workflow_name, task_count=task_count,
+        )
+
+        synthesis = await orchestrator.execute()
+
+        await cron_monitor_event(
+            ctx, "orchestrate_done",
+            history_job_id=cron_job_id,
+            trigger=trigger, workflow=workflow_name,
+            result_preview=truncate_history_text(synthesis),
+        )
+        await cron_chat_event(
+            ctx, cron_job_id, "assistant",
+            truncate_history_text(synthesis),
+            trigger=trigger, kind="orchestrate", workflow=workflow_name,
+        )
+        ctx.ui.print_message(
+            "system",
+            f"[CRON] {trigger} orchestrate complete: {workflow_name}",
+        )
+    finally:
+        await orchestrator.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +391,9 @@ async def execute_cron_job(ctx: RuntimeContext, job: Any, trigger: str = "schedu
 
     job_id = str(getattr(job, "id", "")).strip()
     if not job_id or job_id in ctx.cron_running_job_ids:
+        log.debug("cron_job_skipped", job_id=job_id, already_running=job_id in ctx.cron_running_job_ids)
         return
+    log.info("cron_job_execute_start", job_id=job_id, trigger=trigger)
 
     ctx.cron_running_job_ids.add(job_id)
     started_at_iso = to_utc_iso(now_utc())
@@ -348,10 +443,21 @@ async def execute_cron_job(ctx: RuntimeContext, job: Any, trigger: str = "schedu
                 trigger=trigger,
                 cron_job_id=job_id,
             )
+        elif kind == "orchestrate":
+            workflow_name = str(payload.get("workflow", "")).strip() if isinstance(payload, dict) else ""
+            if not workflow_name:
+                raise ValueError(f"Cron job {job_id} has empty orchestrate workflow name")
+            await _run_orchestrate_cron(
+                ctx,
+                workflow_name=workflow_name,
+                trigger=trigger,
+                cron_job_id=job_id,
+            )
         else:
             raise ValueError(f"Unsupported cron job kind: {kind}")
 
         success = True
+        log.info("cron_job_execute_done", job_id=job_id, trigger=trigger, kind=kind)
         await cron_monitor_event(
             ctx,
             "job_queued" if queued_for_followup else "job_done",
@@ -378,6 +484,7 @@ async def execute_cron_job(ctx: RuntimeContext, job: Any, trigger: str = "schedu
         )
     except Exception as e:
         error_text = str(e)
+        log.error("cron_job_execute_failed", job_id=job_id, trigger=trigger, error=error_text)
         await cron_monitor_event(
             ctx, "job_failed", history_job_id=job_id,
             trigger=trigger, job_id=job_id, error=error_text,
@@ -408,11 +515,24 @@ async def cron_scheduler_loop(ctx: RuntimeContext) -> None:
     """Background pseudo-cron runner."""
     import asyncio
 
+    log.info("cron_scheduler_loop_started", poll_seconds=ctx.cron_poll_seconds)
     while True:
         await asyncio.sleep(ctx.cron_poll_seconds)
-        due_jobs = await ctx.agent.session_manager.get_due_cron_jobs(
-            now_iso=to_utc_iso(now_utc()),
-            limit=10,
-        )
-        for job in due_jobs:
-            await execute_cron_job(ctx, job, trigger="scheduled")
+        try:
+            now_iso = to_utc_iso(now_utc())
+            due_jobs = await ctx.agent.session_manager.get_due_cron_jobs(
+                now_iso=now_iso,
+                limit=10,
+            )
+            if due_jobs:
+                log.info("cron_due_jobs_found", count=len(due_jobs), now=now_iso)
+            for job in due_jobs:
+                job_id = getattr(job, "id", "?")
+                kind = getattr(job, "kind", "?")
+                log.info("cron_executing_job", job_id=job_id, kind=kind)
+                await execute_cron_job(ctx, job, trigger="scheduled")
+        except asyncio.CancelledError:
+            log.info("cron_scheduler_loop_cancelled")
+            raise
+        except Exception:
+            log.exception("cron_scheduler_loop_error")

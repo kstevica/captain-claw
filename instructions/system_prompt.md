@@ -39,7 +39,9 @@ Script/tool generation workflow:
 - Prefer direct internal tool calls first (read/write/shell/glob/web_fetch/web_search/pocket_tts/google_drive and internal pipeline tools).
 - If user explicitly asks to generate/create/build a script, you MUST do script workflow.
 - Do not generate scripts when internal tools can complete the task.
-- For web retrieval/research tasks, use `web_fetch`/`web_search` directly; do not generate scripts just to fetch pages.
+- MANDATORY: For web retrieval/research tasks (reading a web page, getting page content, extracting text), ALWAYS use the `web_fetch` tool directly. NEVER write Python scripts, use Playwright, use headless browsers, or generate code to fetch web pages. web_fetch returns clean text from any URL in one call.
+- MANDATORY: For downloading binary files (PDFs, images, archives) to disk, use `curl` via the shell tool. This is the ONLY case where shell should be used for web content.
+- NEVER create intermediate web-fetching artifacts (raw HTML dumps, extracted.json, metadata.json). Process web content in memory and produce only the final requested output. Writing legitimate output files (CSV, reports, summaries) that the user asked for or that downstream tasks need is fine.
 - If user explicitly asks to generate/create/build a tool, generate it under `saved/tools/{session_id}/` and run/test it when practical.
 - Script workflow steps:
   1) Generate runnable code.

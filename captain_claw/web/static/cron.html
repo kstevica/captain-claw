@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cron Jobs - Captain Claw</title>
+    <link rel="stylesheet" href="/static/cron.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<header class="cron-header">
+    <div class="cron-header-left">
+        <a href="/" class="cron-logo-link"><img src="/static/logo.svg" width="28" height="28"></a>
+        <h1>Cron Jobs</h1>
+        <span class="cron-badge" id="cronBadge">0 active</span>
+    </div>
+    <div class="cron-header-right">
+        <a href="/chat" class="cron-nav-link">&larr; Chat</a>
+    </div>
+</header>
+
+<main class="cron-main">
+
+    <!-- Add New Job Section -->
+    <section class="cron-add-section">
+        <button class="cron-toggle-btn" id="cronToggleAdd">+ Add New Cron Job</button>
+        <div class="cron-add-panel" id="cronAddPanel" style="display:none;">
+            <div class="cron-add-row">
+                <label>Schedule
+                    <select id="cronSchedType">
+                        <option value="every">every</option>
+                        <option value="daily">daily</option>
+                        <option value="weekly">weekly</option>
+                    </select>
+                </label>
+
+                <span class="cron-sched-fields" id="cronIntervalFields">
+                    <input id="cronInterval" type="number" min="1" value="15" style="width:60px">
+                    <select id="cronIntervalUnit">
+                        <option value="minutes">minutes</option>
+                        <option value="hours">hours</option>
+                    </select>
+                </span>
+
+                <span class="cron-sched-fields" id="cronDailyFields" style="display:none;">
+                    <input id="cronDailyTime" type="time" value="09:00">
+                </span>
+
+                <span class="cron-sched-fields" id="cronWeeklyFields" style="display:none;">
+                    <select id="cronWeeklyDay">
+                        <option value="mon">Mon</option>
+                        <option value="tue">Tue</option>
+                        <option value="wed">Wed</option>
+                        <option value="thu">Thu</option>
+                        <option value="fri">Fri</option>
+                        <option value="sat">Sat</option>
+                        <option value="sun">Sun</option>
+                    </select>
+                    <input id="cronWeeklyTime" type="time" value="09:00">
+                </span>
+
+                <label>Kind
+                    <select id="cronKind">
+                        <option value="prompt">prompt</option>
+                        <option value="script">script</option>
+                        <option value="tool">tool</option>
+                        <option value="orchestrate">orchestrate</option>
+                    </select>
+                </label>
+
+                <label>Session
+                    <select id="cronSession"></select>
+                </label>
+            </div>
+
+            <div class="cron-add-row cron-payload-row">
+                <textarea id="cronPayloadPrompt" placeholder="Enter the prompt text..."></textarea>
+                <input id="cronPayloadPath" type="text" placeholder="Path to script/tool file..." style="display:none;">
+                <select id="cronPayloadWorkflow" style="display:none;"></select>
+            </div>
+
+            <div class="cron-add-footer">
+                <button class="cron-add-btn" id="cronAddBtn">Add Job</button>
+            </div>
+        </div>
+    </section>
+
+    <!-- Jobs Table Section -->
+    <section class="cron-jobs-section">
+        <div class="cron-jobs-header">
+            <h3>Scheduled Jobs</h3>
+            <label><input type="checkbox" id="cronShowDisabled" checked> Show disabled</label>
+        </div>
+
+        <table class="cron-table" id="cronTable">
+            <thead>
+                <tr>
+                    <th style="width:32px"></th>
+                    <th>Kind</th>
+                    <th>Description</th>
+                    <th>Schedule</th>
+                    <th>Last Run</th>
+                    <th>Next Run</th>
+                    <th>Status</th>
+                    <th style="width:100px">Actions</th>
+                </tr>
+            </thead>
+            <tbody id="cronTableBody">
+            </tbody>
+        </table>
+
+        <div class="cron-empty" id="cronEmpty" style="display:none;">No cron jobs scheduled yet.</div>
+    </section>
+
+    <!-- Detail Panel -->
+    <div class="cron-detail" id="cronDetail" style="display:none;">
+        <div class="cron-detail-header">
+            <h3 id="cronDetailTitle"></h3>
+            <button class="cron-action-btn" id="cronDetailClose" title="Close">&#10005;</button>
+        </div>
+        <div class="cron-detail-info" id="cronDetailInfo"></div>
+        <div class="cron-detail-tab-bar">
+            <button class="cron-detail-tab active" data-tab="chat">Chat History</button>
+            <button class="cron-detail-tab" data-tab="monitor">Monitor History</button>
+        </div>
+        <div class="cron-detail-history" id="cronDetailHistory"></div>
+    </div>
+
+</main>
+
+<script src="/static/cron.js"></script>
+</body>
+</html>

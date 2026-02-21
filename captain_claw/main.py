@@ -37,6 +37,18 @@ def _build_runtime_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="store_true", help="Show version information and exit")
     parser.add_argument("--tui", action="store_true", help="Start the terminal UI instead of the web UI")
     parser.add_argument("-h", "--help", action="store_true", help="Show this help message and exit")
+
+    # Orchestrate subcommand (headless workflow execution for cron/scripts).
+    subparsers = parser.add_subparsers(dest="subcommand")
+    orch_parser = subparsers.add_parser("orchestrate", help="Run orchestrated workflows headlessly")
+    orch_group = orch_parser.add_mutually_exclusive_group()
+    orch_group.add_argument("-w", "--workflow", default="", help="Saved workflow name to execute")
+    orch_group.add_argument("prompt", nargs="?", default="", help="Ad-hoc prompt to orchestrate")
+    orch_parser.add_argument("--max-parallel", type=int, default=0, help="Max parallel workers")
+    orch_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress status output")
+    orch_parser.add_argument("--json", action="store_true", dest="json_output", help="Output as JSON")
+    orch_parser.add_argument("--list", action="store_true", dest="list_workflows", help="List saved workflows")
+
     return parser
 
 
@@ -93,6 +105,48 @@ def main(
         if parsed.version:
             version()
             return
+        # Handle orchestrate subcommand before regular startup.
+        if getattr(parsed, "subcommand", None) == "orchestrate":
+            if verbose:
+                os.environ["CLAW_LOGGING__LEVEL"] = "DEBUG"
+            from captain_claw.orchestrator_cli import run_orchestrator_headless, _list_workflows_cli
+            configure_logging()
+
+            cfg_path = str(parsed.config or "")
+            mdl = str(parsed.model or "")
+            prov = str(parsed.provider or "")
+
+            if getattr(parsed, "list_workflows", False):
+                asyncio.run(_list_workflows_cli(cfg_path))
+                return
+
+            wf = getattr(parsed, "workflow", "") or ""
+            prompt_text = getattr(parsed, "prompt", "") or ""
+            if not wf and not prompt_text:
+                print("Error: Either --workflow or a prompt is required.")
+                sys.exit(1)
+
+            result = asyncio.run(run_orchestrator_headless(
+                workflow_name=wf,
+                prompt=prompt_text,
+                config_path=cfg_path,
+                model=mdl,
+                provider=prov,
+                max_parallel=getattr(parsed, "max_parallel", 0),
+                quiet=getattr(parsed, "quiet", False),
+                json_output=getattr(parsed, "json_output", False),
+            ))
+
+            if getattr(parsed, "json_output", False):
+                import json as _json
+                print(_json.dumps(result, ensure_ascii=False, indent=2))
+            elif result["ok"]:
+                print(result["result"])
+            else:
+                sys.stderr.write(f"Error: {result['error']}\n")
+                sys.exit(1)
+            return
+
         config = str(parsed.config or "")
         model = str(parsed.model or "")
         provider = str(parsed.provider or "")

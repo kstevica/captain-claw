@@ -25,6 +25,14 @@ Rules:
 - Include any file naming conventions or output structure the user mentioned or implied.
 - Keep the rephrased prompt concise. A few clear sentences are better than a wall of micro-instructions.
 
+CRITICAL — web content retrieval rules (you MUST follow these when rephrasing):
+- When the user wants to READ, VIEW, or GET the content of a web page (to summarize, analyze, extract information, etc.), the rephrased prompt MUST say "use the web_fetch tool to read" or "fetch the page content using web_fetch". NEVER say "download", "save HTML", "use headless browser", or "retrieve raw HTML" for reading tasks.
+- When the user explicitly says DOWNLOAD a file (binary file, PDF, image, archive), the rephrased prompt MUST say "download using curl" or "use shell curl to download the file".
+- NEVER instruct workers to write scripts, use Playwright, use headless browsers, or write Python code for fetching web pages. Workers have a built-in web_fetch tool that handles this directly.
+- NEVER add intermediate web-fetching file-saving steps (save HTML, save extracted.json, save meta.json). Workers should process web content in memory and produce only the final output files the user requested.
+- DO mention output files that the user asked for or that downstream steps need (CSV, summary.md, report.json, etc.) — these are legitimate deliverables, not throwaway intermediates.
+- Keep the task pipeline simple: fetch content → process it → produce the requested output.
+
 User's original request:
 {user_input}
 
