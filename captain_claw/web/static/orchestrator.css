@@ -329,9 +329,14 @@ html, body {
 /* ─── Graph area ──────────────────────────────────── */
 
 .orch-graph {
-    flex: 0 1 35%;
+    flex: 1;
     overflow: auto;
     padding: 16px;
+}
+
+/* Shrink graph when detail panel is open so they share space */
+.orch-main-col.detail-open .orch-graph {
+    flex: 0 1 35%;
 }
 
 .orch-graph-empty {

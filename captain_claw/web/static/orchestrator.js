@@ -717,7 +717,7 @@
         if (selectedTaskId === tid) {
             // Deselect
             selectedTaskId = null;
-            orchDetail.classList.remove('visible');
+            hideDetailPanel();
             renderGraph();
             return;
         }
@@ -839,7 +839,7 @@
         }
 
         detailBody.innerHTML = html;
-        orchDetail.classList.add('visible');
+        showDetailPanel();
 
         // Wire up action buttons and editor buttons
         if (orchestratorState === 'preview') {
@@ -1162,7 +1162,7 @@
             }
 
             // Hide detail panel
-            orchDetail.classList.remove('visible');
+            hideDetailPanel();
 
             // Return to idle state
             setOrchestratorState('idle');
@@ -1199,7 +1199,7 @@
         aggregatedContext = { totalTokens: 0, promptTokens: 0, completionTokens: 0 };
         timeoutCountdowns = {};
         if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
-        orchDetail.classList.remove('visible');
+        hideDetailPanel();
         clearLog();
         updateContextSummary();
         addLogEntry('progress', `Decomposing: ${input.slice(0, 200)}`);
@@ -1265,6 +1265,18 @@
     function runOrchestrator() {
         // This is now "Decompose" — call decomposeOrchestrator
         decomposeOrchestrator();
+    }
+
+    // ── Detail panel visibility helper ──────────────────────
+
+    function showDetailPanel() {
+        orchDetail.classList.add('visible');
+        if (orchDetail.parentNode) orchDetail.parentNode.classList.add('detail-open');
+    }
+
+    function hideDetailPanel() {
+        orchDetail.classList.remove('visible');
+        if (orchDetail.parentNode) orchDetail.parentNode.classList.remove('detail-open');
     }
 
     // ── Helpers ──────────────────────────────────────────────
@@ -1776,7 +1788,7 @@
         // Detail close
         detailClose.addEventListener('click', () => {
             selectedTaskId = null;
-            orchDetail.classList.remove('visible');
+            hideDetailPanel();
             renderGraph();
         });
 
