@@ -47,6 +47,7 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     model: str = ""
     usage: dict[str, int] = field(default_factory=dict)
+    finish_reason: str = ""
 
 
 @dataclass
@@ -385,11 +386,13 @@ class OllamaProvider(LLMProvider):
                 "total_tokens": int(_obj_get(data, "prompt_eval_count", 0) or 0)
                 + int(_obj_get(data, "eval_count", 0) or 0),
             }
+            finish_reason = str(_obj_get(data, "done_reason", "") or "")
             return LLMResponse(
                 content=str(content),
                 tool_calls=tool_calls,
                 model=str(_obj_get(data, "model", self.model) or self.model),
                 usage=usage,
+                finish_reason=finish_reason,
             )
         except LLMAPIError:
             raise
@@ -575,8 +578,10 @@ class LiteLLMProvider(LLMProvider):
                     stream=False,
                 )
             )
-            choice = _obj_get(_obj_get(response, "choices", [{}])[0], "message", {})
+            first_choice = _obj_get(response, "choices", [{}])[0]
+            choice = _obj_get(first_choice, "message", {})
             content = _obj_get(choice, "content", "") or ""
+            finish_reason = str(_obj_get(first_choice, "finish_reason", "") or "")
 
             tool_calls: list[ToolCall] = []
             raw_calls = _obj_get(choice, "tool_calls", []) or []
@@ -601,6 +606,7 @@ class LiteLLMProvider(LLMProvider):
                 tool_calls=tool_calls,
                 model=str(_obj_get(response, "model", self.model) or self.model),
                 usage=_extract_usage(_obj_get(response, "usage", None)),
+                finish_reason=finish_reason,
             )
         except Exception as e:
             status_code = _obj_get(e, "status_code", None)

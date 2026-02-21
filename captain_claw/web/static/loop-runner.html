@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Loop Runner - Captain Claw</title>
+    <link rel="stylesheet" href="/static/loop-runner.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<header class="loop-header">
+    <div class="loop-header-left">
+        <a href="/" class="loop-logo-link"><img src="/static/logo.svg" width="28" height="28"></a>
+        <h1>Loop Runner</h1>
+        <span class="loop-badge" id="loopBadge"></span>
+    </div>
+    <div class="loop-header-right">
+        <span class="loop-status" id="loopStatus">
+            <span class="loop-status-dot idle" id="loopStatusDot"></span>
+            <span id="loopStatusText">idle</span>
+        </span>
+        <a href="/" class="loop-nav-link">&larr; Home</a>
+    </div>
+</header>
+
+<main class="loop-main">
+
+    <!-- Setup Section -->
+    <section class="loop-setup" id="loopSetup">
+        <div class="loop-setup-row">
+            <label class="loop-label">Workflow
+                <select id="loopWorkflowSelect" class="loop-select">
+                    <option value="">Select workflow...</option>
+                </select>
+            </label>
+            <label class="loop-label">Iterations
+                <input id="loopIterationCount" type="number" min="1" max="200" value="1" class="loop-input-number">
+            </label>
+            <button id="loopApplyCount" class="loop-btn loop-btn-secondary">Apply</button>
+        </div>
+
+        <!-- Variable grid -->
+        <div class="loop-var-grid-wrapper" id="loopVarGridWrapper" style="display:none;">
+            <div class="loop-var-toolbar">
+                <button id="loopAddRow" class="loop-btn loop-btn-small">+ Add Iteration</button>
+                <button id="loopCopyDown" class="loop-btn loop-btn-small" title="Copy first row values to all rows">Copy Row 1 &darr;</button>
+            </div>
+            <div class="loop-var-grid-scroll">
+                <table class="loop-var-table" id="loopVarTable">
+                    <thead id="loopVarThead"></thead>
+                    <tbody id="loopVarTbody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- No-variables info -->
+        <div class="loop-no-vars" id="loopNoVars" style="display:none;">
+            This workflow has no variables. Each iteration will run with identical settings.
+        </div>
+
+        <div class="loop-setup-actions">
+            <button id="loopStartBtn" class="loop-btn loop-btn-primary" disabled>Start Loop</button>
+        </div>
+    </section>
+
+    <!-- Progress Section -->
+    <section class="loop-progress" id="loopProgress" style="display:none;">
+        <div class="loop-progress-header">
+            <div class="loop-progress-bar-wrapper">
+                <div class="loop-progress-bar" id="loopProgressBar"></div>
+            </div>
+            <span class="loop-progress-text" id="loopProgressText">0 / 0</span>
+            <button id="loopStopBtn" class="loop-btn loop-btn-danger">Stop</button>
+        </div>
+        <div class="loop-progress-body">
+            <div class="loop-iterations-col">
+                <div class="loop-iterations" id="loopIterations"></div>
+                <div class="loop-done-actions" id="loopDoneActions" style="display:none;">
+                    <button id="loopNewBtn" class="loop-btn loop-btn-secondary">New Loop</button>
+                </div>
+            </div>
+            <div class="loop-log-col">
+                <div class="loop-log-header">
+                    <span class="loop-log-title">Event Log</span>
+                    <button id="loopLogClear" class="loop-btn loop-btn-small">Clear</button>
+                </div>
+                <div class="loop-log-messages" id="loopLogMessages">
+                    <div class="loop-log-empty" id="loopLogEmpty">Waiting for events...</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+</main>
+
+<script src="/static/loop-runner.js"></script>
+</body>
+</html>

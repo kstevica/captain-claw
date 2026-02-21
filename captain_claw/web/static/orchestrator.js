@@ -229,6 +229,7 @@
                 addLogEntry('completed', `Run output saved: ${msg.filename || ''}`);
                 break;
             case 'error':
+                console.error('[orch-event] error event received', msg);
                 addLogEntry('task_failed', msg.message || 'An error occurred');
                 setOrchestratorState('failed');
                 break;
@@ -242,6 +243,7 @@
     // ── Event handlers ───────────────────────────────────────
 
     function handleDecomposed(msg) {
+        console.log('[orch-decomposed] WS event received', { taskCount: (msg.tasks || []).length, summary: msg.summary, workflowName: msg.workflow_name, hasVariables: !!(msg.variables && msg.variables.length), keys: Object.keys(msg) });
         const tasksList = msg.tasks || [];
         tasks = {};
 
@@ -1182,7 +1184,11 @@
         const rephrasedText = orchRephrased.value.trim();
         const input = rephrasedText || orchInput.value.trim();
 
-        if (!input || isDecomposing) return;
+        console.log('[orch-decompose] start', { inputLen: input.length, inputPreview: input.slice(0, 200), isDecomposing: isDecomposing });
+        if (!input || isDecomposing) {
+            console.warn('[orch-decompose] aborted: empty input or already decomposing', { hasInput: !!input, isDecomposing: isDecomposing });
+            return;
+        }
 
         isDecomposing = true;
         orchRunBtn.disabled = true;
@@ -1210,14 +1216,18 @@
             const skillsParam = getSelectedSkillsParam();
             const fullInput = input + skillsParam;
 
+            console.log('[orch-decompose] calling /api/orchestrator/prepare', { fullInputLen: fullInput.length, skills: skillsParam });
             const resp = await fetch('/api/orchestrator/prepare', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ input: fullInput }),
             });
 
+            console.log('[orch-decompose] response status', resp.status, resp.statusText);
             const data = await resp.json();
+            console.log('[orch-decompose] response data', { ok: data.ok, error: data.error, taskCount: (data.tasks || []).length, keys: Object.keys(data) });
             if (!data.ok) {
+                console.error('[orch-decompose] FAILED', data.error);
                 addLogEntry('task_failed', `Decompose failed: ${data.error || 'unknown'}`);
                 setOrchestratorState('failed');
             }
@@ -1225,6 +1235,7 @@
             // which is handled by handleDecomposed() above.
             // The state transitions to 'preview' there.
         } catch (e) {
+            console.error('[orch-decompose] EXCEPTION', e);
             addLogEntry('task_failed', `Decompose error: ${e.message}`);
             setOrchestratorState('failed');
         } finally {

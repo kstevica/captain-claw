@@ -36,6 +36,9 @@ log = get_logger(__name__)
 
 # Timeout for the decomposition and synthesis LLM calls.
 _PLANNER_TIMEOUT_SECONDS = 120.0
+# Max output tokens for the decompose / synthesize LLM calls.
+_DECOMPOSE_MAX_TOKENS = 16000
+_SYNTHESIZE_MAX_TOKENS = 16000
 # How often to poll for task graph changes during execution.
 _POLL_INTERVAL_SECONDS = 1.0
 
@@ -214,6 +217,8 @@ class SessionOrchestrator:
             Dict with ``ok``, ``workflow_name``, ``summary``, ``tasks``,
             and ``synthesis_instruction``.
         """
+        log.info("prepare() called", input_len=len(user_input),
+                 input_preview=user_input[:200])
         self._set_status("Orchestrator: decomposing request...")
         self._broadcast_event("decomposing", {"input": user_input[:500]})
 
@@ -225,11 +230,13 @@ class SessionOrchestrator:
         # 1. DECOMPOSE
         plan = await self._decompose(user_input)
         if plan is None:
+            log.error("prepare() failed: _decompose returned None")
             self._broadcast_event("error", {"message": "Could not decompose the request into tasks."})
             return {"ok": False, "error": "Could not decompose the request into tasks."}
 
         tasks_data = plan.get("tasks", [])
         if not tasks_data:
+            log.error("prepare() failed: plan has no tasks", plan_keys=list(plan.keys()))
             self._broadcast_event("error", {"message": "Decomposition produced no tasks."})
             return {"ok": False, "error": "Decomposition produced no tasks."}
 
@@ -237,9 +244,12 @@ class SessionOrchestrator:
         summary = str(plan.get("summary", "")).strip()
 
         # 2. BUILD GRAPH
+        log.info("Building task graph", raw_task_count=len(tasks_data),
+                 summary=summary[:200])
         self._broadcast_event("building_graph", {"task_count": len(tasks_data)})
         graph = TaskGraph(max_parallel=self._max_parallel)
-        for task_data in tasks_data:
+        skipped_tasks = []
+        for i, task_data in enumerate(tasks_data):
             task = OrchestratorTask(
                 id=str(task_data.get("id", "")).strip(),
                 title=str(task_data.get("title", "")).strip(),
@@ -250,10 +260,22 @@ class SessionOrchestrator:
                 max_retries=self._worker_max_retries,
             )
             if not task.id:
+                log.warning("Skipping task with empty id",
+                            index=i, raw_data=str(task_data)[:300])
+                skipped_tasks.append({"index": i, "reason": "empty_id",
+                                      "data": str(task_data)[:200]})
                 continue
+            log.debug("Adding task to graph", task_id=task.id,
+                      title=task.title, depends_on=task.depends_on)
             graph.add_task(task)
 
+        if skipped_tasks:
+            log.warning("Some tasks were skipped during graph build",
+                        skipped_count=len(skipped_tasks), skipped=skipped_tasks)
+
         if graph.task_count == 0:
+            log.error("Graph has 0 valid tasks after build",
+                      raw_count=len(tasks_data), skipped=skipped_tasks)
             self._broadcast_event("error", {"message": "Decomposition produced no valid tasks."})
             return {"ok": False, "error": "Decomposition produced no valid tasks."}
 
@@ -494,7 +516,11 @@ class SessionOrchestrator:
 
     async def _decompose(self, user_input: str) -> dict[str, Any] | None:
         """Use LLM to decompose user_input into a task plan (JSON)."""
+        log.info("Decompose started", input_len=len(user_input),
+                 input_preview=user_input[:200])
+
         available_sessions = await self._list_available_sessions()
+        log.debug("Available sessions for decompose", sessions=available_sessions[:300])
 
         system_prompt = self._instructions.load("orchestrator_decompose_system_prompt.md")
         user_prompt = self._instructions.render(
@@ -502,6 +528,14 @@ class SessionOrchestrator:
             user_input=user_input,
             available_sessions=available_sessions,
         )
+        log.debug("Decompose prompts ready",
+                  system_prompt_len=len(system_prompt) if system_prompt else 0,
+                  user_prompt_len=len(user_prompt) if user_prompt else 0)
+
+        if not system_prompt:
+            log.error("Decompose system prompt is empty — instruction file missing?")
+        if not user_prompt:
+            log.error("Decompose user prompt is empty — template render failed?")
 
         messages = [
             Message(role="system", content=system_prompt),
@@ -509,19 +543,55 @@ class SessionOrchestrator:
         ]
 
         try:
+            log.info("Calling LLM for decomposition...",
+                     provider=type(self._provider).__name__,
+                     max_tokens=_DECOMPOSE_MAX_TOKENS,
+                     timeout=_PLANNER_TIMEOUT_SECONDS)
             response = await asyncio.wait_for(
-                self._provider.complete(messages=messages, tools=None, max_tokens=4000),
+                self._provider.complete(messages=messages, tools=None, max_tokens=_DECOMPOSE_MAX_TOKENS),
                 timeout=_PLANNER_TIMEOUT_SECONDS,
             )
+            log.info("LLM decompose response received",
+                     response_type=type(response).__name__,
+                     has_content=bool(getattr(response, "content", None)),
+                     content_len=len(getattr(response, "content", "") or ""),
+                     model=getattr(response, "model", "?"),
+                     usage=getattr(response, "usage", None),
+                     finish_reason=getattr(response, "finish_reason", None))
         except asyncio.TimeoutError:
-            log.error("Orchestrator decomposition timed out")
+            log.error("Orchestrator decomposition timed out",
+                      timeout=_PLANNER_TIMEOUT_SECONDS)
             return None
         except Exception as e:
-            log.error("Orchestrator decomposition failed", error=str(e))
+            log.error("Orchestrator decomposition failed",
+                      error=str(e), error_type=type(e).__name__)
             return None
 
         raw = str(getattr(response, "content", "") or "").strip()
-        return self._parse_json_response(raw)
+        finish = getattr(response, "finish_reason", "")
+        log.debug("LLM raw response", raw_len=len(raw), raw_preview=raw[:500],
+                  finish_reason=finish)
+
+        if not raw:
+            log.error("LLM returned empty content for decompose",
+                      finish_reason=finish,
+                      model=getattr(response, "model", "?"),
+                      usage=getattr(response, "usage", None),
+                      user_prompt_preview=user_prompt[:500])
+            return None
+
+        parsed = self._parse_json_response(raw)
+        if parsed is None:
+            log.error("Failed to parse decompose response as JSON",
+                      raw_len=len(raw), raw_full=raw[:2000],
+                      finish_reason=finish)
+        else:
+            task_count = len(parsed.get("tasks", []))
+            log.info("Decompose JSON parsed OK",
+                     task_count=task_count,
+                     has_summary=bool(parsed.get("summary")),
+                     has_synthesis=bool(parsed.get("synthesis_instruction")))
+        return parsed
 
     async def _list_available_sessions(self) -> str:
         """Build a compact list of existing sessions for the decompose prompt."""
@@ -1032,7 +1102,7 @@ class SessionOrchestrator:
 
         try:
             response = await asyncio.wait_for(
-                self._provider.complete(messages=messages, tools=None, max_tokens=8000),
+                self._provider.complete(messages=messages, tools=None, max_tokens=_SYNTHESIZE_MAX_TOKENS),
                 timeout=_PLANNER_TIMEOUT_SECONDS,
             )
             return str(getattr(response, "content", "") or "").strip() or "Synthesis returned no content."
@@ -1319,34 +1389,64 @@ class SessionOrchestrator:
         """Parse JSON from LLM response, handling markdown fences."""
         text = raw.strip()
         if not text:
+            log.warning("_parse_json_response: empty input")
             return None
 
         # Try direct parse.
         try:
             value = json.loads(text)
             if isinstance(value, dict):
+                log.debug("_parse_json_response: direct parse OK")
                 return value
-        except json.JSONDecodeError:
-            pass
+            log.warning("_parse_json_response: direct parse returned non-dict",
+                        value_type=type(value).__name__)
+        except json.JSONDecodeError as e:
+            log.debug("_parse_json_response: direct parse failed",
+                      error=str(e), pos=e.pos)
 
         # Strip markdown code fences.
         fence_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
         if fence_match:
+            extracted = fence_match.group(1).strip()
+            log.debug("_parse_json_response: found code fence",
+                      extracted_len=len(extracted),
+                      extracted_preview=extracted[:300])
             try:
-                value = json.loads(fence_match.group(1).strip())
+                value = json.loads(extracted)
                 if isinstance(value, dict):
+                    log.debug("_parse_json_response: fence parse OK")
                     return value
-            except json.JSONDecodeError:
-                pass
+                log.warning("_parse_json_response: fence parse returned non-dict",
+                            value_type=type(value).__name__)
+            except json.JSONDecodeError as e:
+                log.warning("_parse_json_response: fence parse failed",
+                            error=str(e), pos=e.pos,
+                            extracted_preview=extracted[:500])
+        else:
+            log.debug("_parse_json_response: no code fence found")
 
         # Last resort: find first { ... } block.
         brace_match = re.search(r"\{.*\}", text, re.DOTALL)
         if brace_match:
+            extracted = brace_match.group(0)
+            log.debug("_parse_json_response: found brace block",
+                      extracted_len=len(extracted),
+                      extracted_preview=extracted[:300])
             try:
-                value = json.loads(brace_match.group(0))
+                value = json.loads(extracted)
                 if isinstance(value, dict):
+                    log.debug("_parse_json_response: brace parse OK")
                     return value
-            except json.JSONDecodeError:
-                pass
+                log.warning("_parse_json_response: brace parse returned non-dict",
+                            value_type=type(value).__name__)
+            except json.JSONDecodeError as e:
+                log.warning("_parse_json_response: brace parse failed",
+                            error=str(e), pos=e.pos,
+                            extracted_preview=extracted[:500])
+        else:
+            log.warning("_parse_json_response: no brace block found in response",
+                        text_preview=text[:500])
 
+        log.error("_parse_json_response: all parse attempts failed",
+                  text_len=len(text), text_preview=text[:1000])
         return None

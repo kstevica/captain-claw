@@ -10,7 +10,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from aiohttp import web
 
@@ -102,6 +102,10 @@ class WebServer:
         self._telegram_worker_task: asyncio.Task[None] | None = None
         # Orchestrator (lazy init in _init_agent)
         self._orchestrator: SessionOrchestrator | None = None
+        # Loop runner state
+        self._loop_runner_task: asyncio.Task[None] | None = None
+        self._loop_runner_state: dict[str, Any] = {}
+        self._loop_runner_stop: bool = False
         # OpenAI-compatible API agent pool (lazy init in _init_agent)
         self._api_pool: AgentPool | None = None
         # Google OAuth state
@@ -1889,6 +1893,223 @@ class WebServer:
     async def _serve_workflows(self, request: web.Request) -> web.FileResponse:
         return web.FileResponse(STATIC_DIR / "workflows.html")
 
+    # ── Loop Runner API ──────────────────────────────────────────────
+
+    async def _start_loop(self, request: web.Request) -> web.Response:
+        """POST /api/loops/start — start a loop execution."""
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+
+        if self._loop_runner_task and not self._loop_runner_task.done():
+            return web.json_response(
+                {"error": "A loop is already running"}, status=409,
+            )
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        workflow_name = str(body.get("workflow", "")).strip()
+        if not workflow_name:
+            return web.json_response({"error": "Missing workflow name"}, status=400)
+
+        iterations_data = body.get("iterations", [])
+        if not iterations_data or not isinstance(iterations_data, list):
+            return web.json_response({"error": "Missing iterations"}, status=400)
+
+        import uuid as _uuid
+        loop_id = str(_uuid.uuid4())[:8]
+
+        # Build iteration state.
+        iterations: list[dict[str, Any]] = []
+        for i, it in enumerate(iterations_data):
+            iterations.append({
+                "iteration_index": i,
+                "variable_values": it.get("variable_values", {}),
+                "status": "pending",
+                "duration": None,
+                "result_preview": None,
+                "error": None,
+            })
+
+        self._loop_runner_stop = False
+        self._loop_runner_state = {
+            "loop_id": loop_id,
+            "workflow": workflow_name,
+            "state": "running",
+            "iterations": iterations,
+            "started_at": datetime.now(UTC).isoformat(),
+        }
+
+        self._loop_runner_task = asyncio.create_task(
+            self._run_loop(loop_id, workflow_name, iterations),
+        )
+
+        log.info("loop_started", loop_id=loop_id, workflow=workflow_name,
+                 iteration_count=len(iterations))
+        return web.json_response({"loop_id": loop_id})
+
+    async def _get_loop_status(self, request: web.Request) -> web.Response:
+        """GET /api/loops/status — return current loop state."""
+        if not self._loop_runner_state:
+            return web.json_response({"state": "idle"})
+        return web.json_response(
+            self._loop_runner_state,
+            dumps=lambda obj: json.dumps(obj, default=str),
+        )
+
+    async def _stop_loop(self, request: web.Request) -> web.Response:
+        """POST /api/loops/stop — signal the running loop to stop."""
+        if not self._loop_runner_task or self._loop_runner_task.done():
+            return web.json_response({"error": "No loop running"}, status=400)
+
+        self._loop_runner_stop = True
+        log.info("loop_stop_requested")
+        return web.json_response({"ok": True})
+
+    async def _run_loop(
+        self,
+        loop_id: str,
+        workflow_name: str,
+        iterations: list[dict[str, Any]],
+    ) -> None:
+        """Execute a workflow N times sequentially with different variable values.
+
+        Each iteration creates a fresh SessionOrchestrator (matching the
+        ``_run_orchestrate_cron`` pattern from cron_dispatch.py), loads the
+        named workflow, executes with the iteration's variable values, and
+        shuts down.  Orchestrators are created with **no callbacks** so their
+        internal ``orchestrator_event`` broadcasts don't leak to the
+        orchestrator page.
+        """
+        import time as _time
+
+        from captain_claw.config import get_config
+        from captain_claw.session_orchestrator import SessionOrchestrator
+
+        cfg = get_config()
+
+        for i, iteration in enumerate(iterations):
+            # ── Check stop flag ──────────────────────────────
+            if self._loop_runner_stop:
+                for j in range(i, len(iterations)):
+                    iterations[j]["status"] = "cancelled"
+                self._loop_runner_state["state"] = "stopped"
+                self._broadcast({
+                    "type": "loop_event",
+                    "event": "loop_stopped",
+                    "loop_id": loop_id,
+                    "stopped_at_index": i,
+                })
+                log.info("loop_stopped", loop_id=loop_id, stopped_at=i)
+                return
+
+            # ── Signal iteration start ───────────────────────
+            iteration["status"] = "running"
+            self._broadcast({
+                "type": "loop_event",
+                "event": "iteration_started",
+                "loop_id": loop_id,
+                "iteration_index": i,
+            })
+            log.info("loop_iteration_started", loop_id=loop_id, iteration=i)
+
+            started = _time.time()
+            orchestrator: SessionOrchestrator | None = None
+            try:
+                # Fresh orchestrator per iteration.  Uses a scoped broadcast
+                # callback that re-tags orchestrator_event → loop_orchestrator_event
+                # so the loop-runner page can show the event log without polluting
+                # the orchestrator page.
+                def _make_loop_broadcast(idx: int) -> Callable[[dict[str, Any]], None]:
+                    def _cb(payload: dict[str, Any]) -> None:
+                        if payload.get("type") == "orchestrator_event":
+                            payload = dict(payload)
+                            payload["type"] = "loop_orchestrator_event"
+                            payload["loop_id"] = loop_id
+                            payload["iteration_index"] = idx
+                        self._broadcast(payload)
+                    return _cb
+
+                orchestrator = SessionOrchestrator(
+                    main_agent=self.agent,
+                    max_parallel=cfg.orchestrator.max_parallel,
+                    max_agents=cfg.orchestrator.max_agents,
+                    provider=self.agent.provider,
+                    broadcast_callback=_make_loop_broadcast(i),
+                )
+
+                load_result = await orchestrator.load_workflow(workflow_name)
+                if not load_result.get("ok"):
+                    raise ValueError(
+                        load_result.get("error", f"Failed to load workflow: {workflow_name}"),
+                    )
+
+                # Build effective variable values: workflow defaults ← iteration overrides.
+                wf_variables = load_result.get("variables") or []
+                effective_vars: dict[str, str] = {}
+                for v in wf_variables:
+                    default_val = v.get("default", "")
+                    if default_val:
+                        effective_vars[v["name"]] = default_val
+                user_vars = iteration.get("variable_values") or {}
+                effective_vars.update(user_vars)
+
+                synthesis = await orchestrator.execute(
+                    variable_values=effective_vars if effective_vars else None,
+                )
+
+                elapsed = _time.time() - started
+                iteration["status"] = "completed"
+                iteration["duration"] = round(elapsed, 1)
+                iteration["result_preview"] = (synthesis[:500] if synthesis else "")
+
+                self._broadcast({
+                    "type": "loop_event",
+                    "event": "iteration_completed",
+                    "loop_id": loop_id,
+                    "iteration_index": i,
+                    "duration": iteration["duration"],
+                    "result_preview": iteration["result_preview"],
+                })
+                log.info("loop_iteration_completed", loop_id=loop_id,
+                         iteration=i, duration=iteration["duration"])
+
+            except Exception as e:
+                elapsed = _time.time() - started
+                iteration["status"] = "failed"
+                iteration["duration"] = round(elapsed, 1)
+                iteration["error"] = str(e)
+
+                self._broadcast({
+                    "type": "loop_event",
+                    "event": "iteration_failed",
+                    "loop_id": loop_id,
+                    "iteration_index": i,
+                    "duration": iteration["duration"],
+                    "error": str(e),
+                })
+                log.error("loop_iteration_failed", loop_id=loop_id,
+                          iteration=i, error=str(e))
+
+            finally:
+                if orchestrator:
+                    try:
+                        await orchestrator.shutdown()
+                    except Exception:
+                        pass
+
+        # All iterations done.
+        self._loop_runner_state["state"] = "completed"
+        self._broadcast({
+            "type": "loop_event",
+            "event": "loop_completed",
+            "loop_id": loop_id,
+        })
+        log.info("loop_completed", loop_id=loop_id,
+                 total=len(iterations))
+
     # ── App setup ────────────────────────────────────────────────────
 
     def create_app(self) -> web.Application:
@@ -1931,6 +2152,10 @@ class WebServer:
         # Workflow browser API routes
         app.router.add_get("/api/workflow-browser", self._list_workflow_outputs)
         app.router.add_get("/api/workflow-browser/output/{filename}", self._get_workflow_output)
+        # Loop runner API routes
+        app.router.add_post("/api/loops/start", self._start_loop)
+        app.router.add_get("/api/loops/status", self._get_loop_status)
+        app.router.add_post("/api/loops/stop", self._stop_loop)
         # OpenAI-compatible API proxy routes
         if self.config.web.api_enabled and self._api_pool:
             app.router.add_post("/v1/chat/completions", self._api_chat_completions)
@@ -1949,6 +2174,7 @@ class WebServer:
             app.router.add_get("/instructions", self._serve_instructions)
             app.router.add_get("/cron", self._serve_cron)
             app.router.add_get("/workflows", self._serve_workflows)
+            app.router.add_get("/loop-runner", self._serve_loop_runner)
             app.router.add_get("/favicon.ico", self._serve_favicon)
         return app
 
@@ -1970,6 +2196,9 @@ class WebServer:
 
     async def _serve_instructions(self, request: web.Request) -> web.FileResponse:
         return web.FileResponse(STATIC_DIR / "instructions.html")
+
+    async def _serve_loop_runner(self, request: web.Request) -> web.FileResponse:
+        return web.FileResponse(STATIC_DIR / "loop-runner.html")
 
     async def _get_orchestrator_status(self, request: web.Request) -> web.Response:
         """REST endpoint: current orchestrator graph state."""
@@ -2149,15 +2378,29 @@ class WebServer:
     async def _prepare_orchestrator(self, request: web.Request) -> web.Response:
         """Decompose a request into tasks without executing (preview)."""
         if not self._orchestrator:
+            log.warning("_prepare_orchestrator: no orchestrator available")
             return web.json_response({"ok": False, "error": "No orchestrator"}, status=400)
         try:
             body = await request.json()
-        except Exception:
+        except Exception as e:
+            log.error("_prepare_orchestrator: invalid JSON body", error=str(e))
             return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
         user_input = str(body.get("input", "")).strip()
         if not user_input:
+            log.warning("_prepare_orchestrator: empty input")
             return web.json_response({"ok": False, "error": "Missing input"}, status=400)
-        result = await self._orchestrator.prepare(user_input)
+        log.info("_prepare_orchestrator: calling prepare",
+                 input_len=len(user_input), input_preview=user_input[:150])
+        try:
+            result = await self._orchestrator.prepare(user_input)
+        except Exception as e:
+            log.error("_prepare_orchestrator: prepare() raised exception",
+                      error=str(e), error_type=type(e).__name__)
+            return web.json_response(
+                {"ok": False, "error": f"Prepare failed: {e}"}, status=500)
+        log.info("_prepare_orchestrator: result",
+                 ok=result.get("ok"), task_count=len(result.get("tasks", [])),
+                 error=result.get("error"))
         return web.json_response(result, dumps=lambda obj: json.dumps(obj, default=str))
 
     async def _get_orchestrator_sessions(self, request: web.Request) -> web.Response:
