@@ -203,7 +203,7 @@ logging:
   level: INFO
   format: console
 telegram:
-  enabled: true
+  enabled: false
   bot_token: ''
   api_base_url: https://api.telegram.org
   poll_timeout_seconds: 25

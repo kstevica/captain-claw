@@ -13,6 +13,8 @@ import asyncio
 import json
 import re
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 
 from captain_claw.agent_pool import AgentPool
@@ -87,6 +89,28 @@ class SessionOrchestrator:
         self._resume_event = asyncio.Event()
         # Shared file registry for cross-task file resolution within a run.
         self._file_registry: FileRegistry | None = None
+        # Workflow metadata persisted across prepare() → execute().
+        self._workflow_name: str = ""
+        self._user_input: str = ""
+        self._synthesis_instruction: str = ""
+
+    # ------------------------------------------------------------------
+    # Workflow naming helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _safe_filename(name: str) -> str:
+        """Convert a string to a filesystem-safe slug."""
+        slug = re.sub(r"[^\w\s-]", "", name.lower().strip())
+        slug = re.sub(r"[\s_-]+", "-", slug).strip("-")
+        return slug[:80] or "workflow"
+
+    @staticmethod
+    def _generate_workflow_name(summary: str) -> str:
+        """Generate a short workflow name from the summary text."""
+        words = summary.split()[:5]
+        base = " ".join(words) if words else "workflow"
+        return SessionOrchestrator._safe_filename(base)
 
     # ------------------------------------------------------------------
     # Status helpers
@@ -125,14 +149,15 @@ class SessionOrchestrator:
     # Public API
     # ------------------------------------------------------------------
 
-    async def orchestrate(self, user_input: str) -> str:
-        """Decompose, execute in parallel, and synthesize a response.
+    async def prepare(self, user_input: str) -> dict[str, Any]:
+        """Decompose a request and build the task graph for preview.
 
-        Args:
-            user_input: The user's complex request.
+        Runs stages 1 (DECOMPOSE) and 2 (BUILD GRAPH) only.  The graph
+        is stored internally so :meth:`execute` can run it later.
 
         Returns:
-            Final synthesized response string.
+            Dict with ``ok``, ``workflow_name``, ``summary``, ``tasks``,
+            and ``synthesis_instruction``.
         """
         self._set_status("Orchestrator: decomposing request...")
         self._broadcast_event("decomposing", {"input": user_input[:500]})
@@ -146,25 +171,15 @@ class SessionOrchestrator:
         plan = await self._decompose(user_input)
         if plan is None:
             self._broadcast_event("error", {"message": "Could not decompose the request into tasks."})
-            return "Could not decompose the request into tasks."
+            return {"ok": False, "error": "Could not decompose the request into tasks."}
 
         tasks_data = plan.get("tasks", [])
         if not tasks_data:
             self._broadcast_event("error", {"message": "Decomposition produced no tasks."})
-            return "Decomposition produced no tasks."
+            return {"ok": False, "error": "Decomposition produced no tasks."}
 
         synthesis_instruction = str(plan.get("synthesis_instruction", "")).strip()
         summary = str(plan.get("summary", "")).strip()
-
-        self._emit_output(
-            "orchestrator",
-            {"event": "decomposed", "task_count": len(tasks_data), "summary": summary},
-            json.dumps(plan, ensure_ascii=False, indent=2),
-        )
-        self._broadcast_event("decomposed", {
-            "summary": summary,
-            "tasks": tasks_data,
-        })
 
         # 2. BUILD GRAPH
         self._broadcast_event("building_graph", {"task_count": len(tasks_data)})
@@ -185,9 +200,75 @@ class SessionOrchestrator:
 
         if graph.task_count == 0:
             self._broadcast_event("error", {"message": "Decomposition produced no valid tasks."})
-            return "Decomposition produced no valid tasks."
+            return {"ok": False, "error": "Decomposition produced no valid tasks."}
 
+        # Store state for execute().
         self._graph = graph
+        self._user_input = user_input
+        self._synthesis_instruction = synthesis_instruction
+        self._workflow_name = self._generate_workflow_name(summary)
+
+        self._emit_output(
+            "orchestrator",
+            {"event": "decomposed", "task_count": len(tasks_data), "summary": summary},
+            json.dumps(plan, ensure_ascii=False, indent=2),
+        )
+
+        tasks_out = []
+        for tid, t in graph.tasks.items():
+            tasks_out.append({
+                "id": t.id, "title": t.title, "description": t.description,
+                "depends_on": t.depends_on, "session_name": t.session_name,
+            })
+
+        self._broadcast_event("decomposed", {
+            "summary": summary,
+            "tasks": tasks_out,
+            "workflow_name": self._workflow_name,
+        })
+
+        return {
+            "ok": True,
+            "workflow_name": self._workflow_name,
+            "summary": summary,
+            "tasks": tasks_out,
+            "synthesis_instruction": synthesis_instruction,
+        }
+
+    async def execute(self, task_overrides: dict[str, dict[str, Any]] | None = None) -> str:
+        """Execute a previously prepared graph.
+
+        Runs stages 3 (ASSIGN SESSIONS), 4 (EXECUTE), and 5 (SYNTHESIZE).
+
+        Args:
+            task_overrides: Optional per-task overrides keyed by task ID.
+                Each value may contain ``title``, ``description``,
+                ``session_id``, ``model_id``, and/or ``skills``.
+
+        Returns:
+            Final synthesized response string.
+        """
+        if self._graph is None:
+            return "No prepared graph to execute.  Call prepare() first."
+
+        graph = self._graph
+
+        # Apply per-task overrides from the preview editor.
+        if task_overrides:
+            for tid, overrides in task_overrides.items():
+                task = graph.get_task(tid)
+                if task is None:
+                    continue
+                if "title" in overrides:
+                    task.title = str(overrides["title"]).strip()
+                if "description" in overrides:
+                    task.description = str(overrides["description"]).strip()
+                if "session_id" in overrides and overrides["session_id"]:
+                    task.session_id = str(overrides["session_id"]).strip()
+                if "model_id" in overrides and overrides["model_id"]:
+                    task.model_id = str(overrides["model_id"]).strip()
+                if "skills" in overrides:
+                    task.skills = list(overrides["skills"])
 
         # 3. ASSIGN SESSIONS
         self._broadcast_event("assigning_sessions", {"task_count": graph.task_count})
@@ -195,7 +276,6 @@ class SessionOrchestrator:
 
         # 4. EXECUTE GRAPH
         self._set_status(f"Orchestrator: executing {graph.task_count} tasks...")
-        # Broadcast assigned task details for the dashboard.
         assigned_tasks = []
         for tid, t in graph.tasks.items():
             assigned_tasks.append({
@@ -210,10 +290,13 @@ class SessionOrchestrator:
         # 5. SYNTHESIZE
         self._set_status("Orchestrator: synthesizing results...")
         self._broadcast_event("synthesizing")
-        result = await self._synthesize(user_input, graph, synthesis_instruction)
+        result = await self._synthesize(self._user_input, graph, self._synthesis_instruction)
+
+        # Save run output to workspace/workflows/.
+        output_path = await self._save_run_output(result)
 
         self._broadcast_event("completed", {
-            "result_preview": result[:500] if result else "",
+            "result_preview": result or "",
             "has_failures": graph.has_failures,
         })
 
@@ -221,6 +304,17 @@ class SessionOrchestrator:
         await self._pool.evict_idle()
 
         return result
+
+    async def orchestrate(self, user_input: str) -> str:
+        """Convenience wrapper: prepare + execute in one call.
+
+        Used by Telegram, CLI, and other non-web paths that do not need
+        the preview phase.
+        """
+        prep = await self.prepare(user_input)
+        if not prep.get("ok"):
+            return prep.get("error", "Preparation failed.")
+        return await self.execute()
 
     def get_status(self) -> dict[str, Any] | None:
         """Return current orchestration status for the REST API."""
@@ -240,13 +334,15 @@ class SessionOrchestrator:
                 "retries": task.retries,
                 "editing": task.editing,
                 "result_preview": (
-                    str((task.result or {}).get("output", ""))[:300]
+                    str((task.result or {}).get("output", ""))
                     if task.result else ""
                 ),
             })
         return {
             "summary": graph.get_summary(),
             "tasks": tasks_list,
+            "workflow_name": self._workflow_name,
+            "user_input": self._user_input,
         }
 
     async def shutdown(self) -> None:
@@ -334,16 +430,17 @@ class SessionOrchestrator:
     async def _assign_sessions(self, graph: TaskGraph) -> None:
         """Assign a unique session_id to each task.
 
-        Every task gets its own fresh session to enable true parallel
-        execution. Session names from the decomposer are used only as
-        naming hints, never for session reuse — sharing a session between
-        two concurrent workers would serialize them.
+        If a task already has a session_id (set via preview overrides),
+        it is left as-is and ``use_existing_session`` is set.  Otherwise
+        a fresh session is created per task.
         """
         for tid, task in graph.tasks.items():
             if task.session_id:
+                # User pre-selected an existing session; mark it.
+                task.use_existing_session = True
                 continue
 
-            # Always create a fresh session per task.
+            # Create a fresh session per task.
             label = task.session_name or task.title or tid
             try:
                 session = await self._session_manager.create_session(
@@ -528,6 +625,13 @@ class SessionOrchestrator:
                 file_registry=self._file_registry,
             )
 
+            # Apply per-task model override if specified.
+            if task.model_id:
+                try:
+                    await agent.set_session_model(task.model_id, persist=False)
+                except Exception as e:
+                    log.warning("Failed to set task model", task_id=task.id, model=task.model_id, error=str(e))
+
             # Build file manifest from prior completed tasks so the worker
             # knows which files are available from upstream dependencies.
             file_manifest = ""
@@ -563,7 +667,7 @@ class SessionOrchestrator:
             )
             self._broadcast_event("task_completed", {
                 "task_id": task.id, "title": task.title,
-                "output": str(response or "").strip()[:500],
+                "output": str(response or "").strip(),
                 "usage": usage,
                 "context": {
                     "prompt_tokens": ctx.get("prompt_tokens", 0),
@@ -840,6 +944,206 @@ class SessionOrchestrator:
                 lines.append(f"Error: {error}")
             lines.append("")
         return "\n".join(lines).strip()
+
+    # ------------------------------------------------------------------
+    # Workflow save / load / export
+    # ------------------------------------------------------------------
+
+    def _workflows_dir(self) -> Path:
+        """Return (and create) the workflows directory under workspace."""
+        cfg = get_config()
+        ws = cfg.resolved_workspace_path()
+        d = ws / "workflows"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    async def save_workflow(self, name: str | None = None) -> dict[str, Any]:
+        """Serialize the current graph as a reusable workflow JSON file."""
+        if self._graph is None:
+            return {"ok": False, "error": "No prepared graph to save."}
+
+        wf_name = name or self._workflow_name or "workflow"
+        safe = self._safe_filename(wf_name)
+        path = self._workflows_dir() / f"{safe}.json"
+
+        tasks_out: list[dict[str, Any]] = []
+        for tid, t in self._graph.tasks.items():
+            tasks_out.append({
+                "id": t.id,
+                "title": t.title,
+                "description": t.description,
+                "depends_on": t.depends_on,
+                "session_name": t.session_name,
+                "model_id": t.model_id,
+                "skills": t.skills,
+            })
+
+        payload = {
+            "workflow_name": wf_name,
+            "user_input": self._user_input,
+            "synthesis_instruction": self._synthesis_instruction,
+            "tasks": tasks_out,
+        }
+
+        try:
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+        self._broadcast_event("workflow_saved", {"name": wf_name, "path": str(path)})
+        return {"ok": True, "name": wf_name, "path": str(path)}
+
+    async def load_workflow(self, name: str) -> dict[str, Any]:
+        """Load a workflow JSON file and rebuild the graph for preview."""
+        safe = self._safe_filename(name)
+        path = self._workflows_dir() / f"{safe}.json"
+
+        if not path.is_file():
+            return {"ok": False, "error": f"Workflow '{name}' not found."}
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            return {"ok": False, "error": f"Failed to read workflow: {e}"}
+
+        tasks_data = data.get("tasks", [])
+        if not tasks_data:
+            return {"ok": False, "error": "Workflow contains no tasks."}
+
+        # Build graph from saved tasks.
+        graph = TaskGraph(max_parallel=self._max_parallel)
+        for td in tasks_data:
+            task = OrchestratorTask(
+                id=str(td.get("id", "")).strip(),
+                title=str(td.get("title", "")).strip(),
+                description=str(td.get("description", "")).strip(),
+                depends_on=list(td.get("depends_on", [])),
+                session_name=str(td.get("session_name", "")).strip(),
+                model_id=str(td.get("model_id", "")).strip(),
+                skills=list(td.get("skills", [])),
+                timeout_seconds=self._worker_timeout,
+                max_retries=self._worker_max_retries,
+            )
+            if task.id:
+                graph.add_task(task)
+
+        if graph.task_count == 0:
+            return {"ok": False, "error": "No valid tasks in workflow."}
+
+        # Store state for preview/execute.
+        self._graph = graph
+        self._workflow_name = data.get("workflow_name", name)
+        self._user_input = data.get("user_input", "")
+        self._synthesis_instruction = data.get("synthesis_instruction", "")
+
+        import uuid
+        self._file_registry = FileRegistry(orchestration_id=str(uuid.uuid4()))
+
+        tasks_out: list[dict[str, Any]] = []
+        for tid, t in graph.tasks.items():
+            tasks_out.append({
+                "id": t.id, "title": t.title, "description": t.description,
+                "depends_on": t.depends_on, "session_name": t.session_name,
+                "model_id": t.model_id, "skills": t.skills,
+            })
+
+        self._broadcast_event("decomposed", {
+            "summary": f"Loaded workflow: {self._workflow_name}",
+            "tasks": tasks_out,
+            "workflow_name": self._workflow_name,
+            "user_input": self._user_input,
+        })
+
+        return {
+            "ok": True,
+            "workflow_name": self._workflow_name,
+            "tasks": tasks_out,
+            "synthesis_instruction": self._synthesis_instruction,
+        }
+
+    async def list_workflows(self) -> list[dict[str, Any]]:
+        """List saved workflow files."""
+        d = self._workflows_dir()
+        result: list[dict[str, Any]] = []
+        for p in sorted(d.glob("*.json")):
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                result.append({
+                    "name": data.get("workflow_name", p.stem),
+                    "filename": p.stem,
+                    "task_count": len(data.get("tasks", [])),
+                })
+            except Exception:
+                result.append({"name": p.stem, "filename": p.stem, "task_count": 0})
+        return result
+
+    async def delete_workflow(self, name: str) -> dict[str, Any]:
+        """Delete a saved workflow file."""
+        safe = self._safe_filename(name)
+        path = self._workflows_dir() / f"{safe}.json"
+        if not path.is_file():
+            return {"ok": False, "error": f"Workflow '{name}' not found."}
+        try:
+            path.unlink()
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True}
+
+    async def _save_run_output(self, synthesis_result: str) -> str | None:
+        """Save a Markdown report of the completed run."""
+        if not self._graph:
+            return None
+
+        wf_name = self._workflow_name or "workflow"
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        safe = self._safe_filename(wf_name)
+        filename = f"{safe}-output-{stamp}.md"
+        path = self._workflows_dir() / filename
+
+        lines: list[str] = [
+            f"# Workflow: {wf_name}",
+            f"**Run**: {datetime.now().isoformat()}",
+            f"**Tasks**: {self._graph.task_count}",
+            "",
+            "---",
+            "",
+        ]
+
+        for tid, task in self._graph.tasks.items():
+            lines.append(f"## Task: {task.title} (`{tid}`)")
+            lines.append(f"**Status**: {task.status}")
+            lines.append("")
+            lines.append("### Instructions")
+            lines.append(task.description or "_No instructions._")
+            lines.append("")
+
+            output = ""
+            if task.result and isinstance(task.result, dict):
+                output = str(task.result.get("output", "")).strip()
+            if output:
+                lines.append("### Output")
+                lines.append(output)
+                lines.append("")
+
+            if task.error:
+                lines.append("### Error")
+                lines.append(task.error)
+                lines.append("")
+
+            lines.append("---")
+            lines.append("")
+
+        lines.append("## Synthesis")
+        lines.append(synthesis_result or "_No synthesis result._")
+        lines.append("")
+
+        try:
+            path.write_text("\n".join(lines), encoding="utf-8")
+            self._broadcast_event("output_saved", {"filename": filename, "path": str(path)})
+            return str(path)
+        except Exception as e:
+            log.error("Failed to save run output", error=str(e))
+            return None
 
     # ------------------------------------------------------------------
     # JSON parsing

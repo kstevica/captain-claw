@@ -10,14 +10,19 @@
     let graphSummary = {};       // { total, completed, failed, running, ready, blocked }
     let eventLog = [];           // chronological event entries
     let selectedTaskId = null;
-    let orchestratorState = 'idle'; // idle | running | completed | failed
+    let orchestratorState = 'idle'; // idle | preview | running | completed | failed
     let isRephrasing = false;
+    let isDecomposing = false;
     let availableSkills = [];     // [{name, skill_name, description}]
     let selectedSkills = new Set(); // skill names currently selected
-    let editingTaskId = null;     // task currently being edited
+    let editingTaskId = null;     // task currently being edited (during running state)
     let aggregatedContext = { totalTokens: 0, promptTokens: 0, completionTokens: 0 };
     let timeoutCountdowns = {};   // task_id → remaining seconds
     let countdownInterval = null; // client-side 1s countdown ticker
+    let workflowName = '';        // current workflow name
+    let taskOverrides = {};       // tid → {title, description, session_id, model_id, skills}
+    let availableSessions = [];   // [{id, name}]
+    let availableModels = [];     // [{id, provider, model}]
 
     // ── DOM ──────────────────────────────────────────────────
     const $ = (sel) => document.querySelector(sel);
@@ -29,6 +34,7 @@
     const orchRephrase = $('#orchRephrase');
     const orchRephrased = $('#orchRephrased');
     const orchRephraseLoading = $('#orchRephraseLoading');
+    const orchDecomposeLoading = $('#orchDecomposeLoading');
     const orchStatusDot = $('#orchStatusDot');
     const orchStatusText = $('#orchStatusText');
     const orchGraph = $('#orchGraph');
@@ -40,6 +46,12 @@
     const orchLogMessages = $('#orchLogMessages');
     const orchLogEmpty = $('#orchLogEmpty');
     const logClearBtn = $('#logClearBtn');
+    const orchWorkflowName = $('#orchWorkflowName');
+    const orchWorkflowBar = $('#orchWorkflowBar');
+    const orchWorkflowNameInput = $('#orchWorkflowNameInput');
+    const orchSaveWorkflowBtn = $('#orchSaveWorkflowBtn');
+    const orchLoadWorkflowSelect = $('#orchLoadWorkflowSelect');
+    const orchExecuteBtn = $('#orchExecuteBtn');
 
     // Summary bar counts
     const summaryTotal = $('#summaryTotal .count');
@@ -146,11 +158,9 @@
 
         switch (event) {
             case 'decomposing':
-                setOrchestratorState('running');
                 addLogEntry('progress', 'Decomposing request into tasks...');
                 break;
             case 'decomposed':
-                setOrchestratorState('running');
                 handleDecomposed(msg);
                 break;
             case 'building_graph':
@@ -208,6 +218,13 @@
             case 'timeout_postponed':
                 handleTimeoutPostponed(msg);
                 break;
+            case 'workflow_saved':
+                addLogEntry('completed', `Workflow saved: ${msg.name || ''}`);
+                loadWorkflowList();
+                break;
+            case 'output_saved':
+                addLogEntry('completed', `Run output saved: ${msg.filename || ''}`);
+                break;
             case 'error':
                 addLogEntry('task_failed', msg.message || 'An error occurred');
                 setOrchestratorState('failed');
@@ -233,6 +250,8 @@
                 depends_on: t.depends_on || [],
                 session_id: t.session_id || null,
                 session_name: t.session_name || null,
+                model_id: t.model_id || '',
+                skills: t.skills || [],
                 status: 'pending',
                 result: null,
                 error: null,
@@ -242,7 +261,26 @@
             };
         });
 
+        if (msg.workflow_name) {
+            workflowName = msg.workflow_name;
+            updateWorkflowNameDisplay();
+        }
+
+        // Show the rephrased prompt that was used to decompose (e.g. from loaded workflow).
+        if (msg.user_input && !orchRephrased.value) {
+            orchRephrased.value = msg.user_input;
+            orchRephrase.classList.remove('hidden');
+            autoResizeRephrased();
+        }
+
         addLogEntry('decomposed', `Decomposed into ${tasksList.length} tasks: ${msg.summary || ''}`);
+
+        // If we're in decompose-only mode (preview), enter preview state.
+        // If we're in running mode (from /orchestrate wrapper), keep running.
+        if (orchestratorState !== 'running') {
+            setOrchestratorState('preview');
+        }
+
         renderGraph();
     }
 
@@ -384,7 +422,7 @@
         }
         timeoutCountdowns[tid] = msg.remaining_seconds || 60;
         startCountdownTicker();
-        addLogEntry('task_failed', `⏱ Timeout warning: ${msg.title || tid} — will restart in ${timeoutCountdowns[tid]}s`);
+        addLogEntry('task_failed', `\u23F1 Timeout warning: ${msg.title || tid} \u2014 will restart in ${timeoutCountdowns[tid]}s`);
         renderGraph();
         updateSelectedDetail();
     }
@@ -413,7 +451,7 @@
             tasks[tid].status = 'running';
         }
         delete timeoutCountdowns[tid];
-        addLogEntry('progress', `⏱ Timeout postponed: ${msg.title || tid} — timer reset`);
+        addLogEntry('progress', `\u23F1 Timeout postponed: ${msg.title || tid} \u2014 timer reset`);
         renderGraph();
         updateSelectedDetail();
     }
@@ -448,7 +486,7 @@
                     badge.className = 'timeout-countdown-badge';
                     card.appendChild(badge);
                 }
-                badge.textContent = `⏱ Restarting in ${timeoutCountdowns[tid]}s`;
+                badge.textContent = `\u23F1 Restarting in ${timeoutCountdowns[tid]}s`;
             } else if (badge) {
                 badge.remove();
             }
@@ -468,8 +506,35 @@
         orchestratorState = state;
         orchStatusDot.className = `orch-status-dot ${state}`;
         orchStatusText.textContent = state;
-        orchRunBtn.disabled = (state === 'running');
+
+        // Button states
+        orchRunBtn.disabled = (state === 'running' || state === 'preview');
         orchPrepareBtn.disabled = (state === 'running');
+
+        // Show/hide workflow bar & execute button
+        if (state === 'preview') {
+            orchWorkflowBar.classList.remove('hidden');
+            orchExecuteBtn.disabled = false;
+        } else if (state === 'running') {
+            orchWorkflowBar.classList.remove('hidden');
+            orchExecuteBtn.disabled = true;
+        } else if (state === 'completed' || state === 'failed') {
+            orchWorkflowBar.classList.remove('hidden');
+            orchExecuteBtn.disabled = false;  // allow re-execute
+        } else {
+            orchWorkflowBar.classList.add('hidden');
+        }
+    }
+
+    // ── Workflow name display ────────────────────────────────
+
+    function updateWorkflowNameDisplay() {
+        if (orchWorkflowName) {
+            orchWorkflowName.textContent = workflowName ? `\u2014 ${workflowName}` : '';
+        }
+        if (orchWorkflowNameInput) {
+            orchWorkflowNameInput.value = workflowName;
+        }
     }
 
     // ── Summary bar ──────────────────────────────────────────
@@ -492,9 +557,9 @@
         if (!ctxTotal) return;
 
         if (aggregatedContext.totalTokens === 0) {
-            ctxIn.textContent = '—';
-            ctxOut.textContent = '—';
-            ctxTotal.textContent = '—';
+            ctxIn.textContent = '\u2014';
+            ctxOut.textContent = '\u2014';
+            ctxTotal.textContent = '\u2014';
             return;
         }
 
@@ -539,13 +604,14 @@
                 const t = tasks[tid];
                 const selected = tid === selectedTaskId ? ' selected' : '';
                 const statusClass = t.status || 'pending';
+                const hasOverride = taskOverrides[tid] ? ' has-override' : '';
 
-                html += `<div class="task-card ${statusClass}${selected}" data-task-id="${tid}">`;
+                html += `<div class="task-card ${statusClass}${selected}${hasOverride}" data-task-id="${tid}">`;
                 html += `<div class="task-card-header">`;
                 html += `<span class="task-card-id">${esc(tid)}</span>`;
                 html += `<span class="task-card-status ${statusClass}">${esc(statusClass)}</span>`;
                 html += `</div>`;
-                html += `<div class="task-card-title">${esc(t.title)}</div>`;
+                html += `<div class="task-card-title">${esc((taskOverrides[tid] && taskOverrides[tid].title) || t.title)}</div>`;
 
                 if (t.session_id) {
                     html += `<div class="task-card-session">${esc(t.session_id)}</div>`;
@@ -561,7 +627,18 @@
                     if (c.utilization) ctxParts.push(c.utilization + '%');
                     if (ctxParts.length > 0) {
                         var highCls = (c.utilization && c.utilization > 80) ? ' high-util' : '';
-                        html += '<div class="task-card-ctx' + highCls + '">' + ctxParts.join(' · ') + '</div>';
+                        html += '<div class="task-card-ctx' + highCls + '">' + ctxParts.join(' \u00B7 ') + '</div>';
+                    }
+                }
+
+                // Show per-task override indicators in preview
+                if (orchestratorState === 'preview' && taskOverrides[tid]) {
+                    const ov = taskOverrides[tid];
+                    const parts = [];
+                    if (ov.model_id) parts.push(ov.model_id);
+                    if (ov.session_id) parts.push('session');
+                    if (parts.length) {
+                        html += `<div class="task-card-override">${parts.join(' \u00B7 ')}</div>`;
                     }
                 }
 
@@ -637,95 +714,101 @@
         const t = tasks[tid];
         if (!t) return;
 
-        detailTitle.textContent = `${t.title} (${tid})`;
+        const displayTitle = (taskOverrides[tid] && taskOverrides[tid].title) || t.title;
+        detailTitle.textContent = `${displayTitle} (${tid})`;
 
         let html = '';
 
-        // ── Action bar ──
-        const actionHtml = buildActionButtons(t);
-        if (actionHtml) {
-            html += `<div class="task-actions">${actionHtml}</div>`;
-        }
-
-        // ── Timeout warning banner ──
-        if (t.status === 'timeout_warning' && timeoutCountdowns[tid] !== undefined) {
-            html += '<div class="timeout-warning-banner">';
-            html += '<span class="timeout-warning-icon">⏱</span>';
-            html += '<span class="detail-timeout-countdown">Restarting in ' + timeoutCountdowns[tid] + 's</span>';
-            html += '</div>';
-        }
-
-        // ── Session pipeline (orchestrator stages) ──
-        html += buildSessionPipeline();
-
-        // ── Task pipeline visualization ──
-        html += '<div class="task-section-label">Task Pipeline</div>';
-        html += buildPipeline(t);
-
-        // ── Metadata ──
-        html += '<dl>';
-        html += `<dt>Status</dt><dd><span class="status-badge ${t.status}">${esc(t.status)}</span></dd>`;
-        html += `<dt>Session</dt><dd><span class="detail-session-id">${esc(t.session_id || '—')}</span></dd>`;
-        html += `<dt>Depends on</dt><dd>${t.depends_on && t.depends_on.length ? t.depends_on.map(esc).join(', ') : 'none'}</dd>`;
-        html += `<dt>Retries</dt><dd>${t.retries || 0}</dd>`;
-
-        if (t.startTime) {
-            const elapsed = ((t.endTime || Date.now()) - t.startTime) / 1000;
-            html += `<dt>Elapsed</dt><dd>${elapsed.toFixed(1)}s</dd>`;
-        }
-
-        // Token consumption for this session
-        if (t.usage) {
-            const u = t.usage;
-            html += '<dt>Tokens</dt><dd>';
-            if (u.total_tokens) {
-                html += `<strong>${formatTokenCount(u.total_tokens)}</strong> total`;
-                html += ` <span class="detail-tokens-breakdown">(${formatTokenCount(u.prompt_tokens || 0)} in / ${formatTokenCount(u.completion_tokens || 0)} out)</span>`;
-            } else {
-                html += '—';
-            }
-            html += '</dd>';
-        }
-
-        // Session context status (tokens / cap / %)
-        if (t.context) {
-            const c = t.context;
-            html += '<dt>Context</dt><dd>';
-            if (c.budget) {
-                const promptTok = c.prompt_tokens || 0;
-                const pct = c.utilization || 0;
-                const pctCls = pct > 80 ? ' ctx-high' : '';
-                html += `<span class="detail-ctx-bar">`;
-                html += `${formatTokenCount(promptTok)} / ${formatTokenCount(c.budget)}`;
-                if (pct > 0) {
-                    html += ` <span class="detail-ctx-pct${pctCls}">${pct}%</span>`;
-                }
-                html += `</span>`;
-                if (c.messages) {
-                    html += ` · ${c.messages} msgs`;
-                }
-            } else {
-                html += '—';
-            }
-            html += '</dd>';
-        }
-
-        html += '</dl>';
-
-        // ── Instructions section ──
-        html += '<div class="task-instructions-section">';
-        html += '<div class="task-instructions-label">Instructions</div>';
-        if (editingTaskId === tid) {
-            html += `<textarea class="task-instructions-editor" id="taskInstructionsEditor">${esc(t.description || '')}</textarea>`;
-            html += '<div class="task-instructions-actions">';
-            html += '<button class="btn-save-instructions">Save &amp; Run</button>';
-            html += '<button class="btn-cancel-edit">Cancel</button>';
-            html += '</div>';
+        // ── Preview mode: editable fields ──
+        if (orchestratorState === 'preview') {
+            html += buildPreviewEditor(tid, t);
         } else {
-            const desc = t.description || '';
-            html += `<div class="task-instructions-content">${desc ? esc(desc) : '<em style="color:var(--text-muted);">No instructions</em>'}</div>`;
+            // ── Action bar (running/completed mode) ──
+            const actionHtml = buildActionButtons(t);
+            if (actionHtml) {
+                html += `<div class="task-actions">${actionHtml}</div>`;
+            }
+
+            // ── Timeout warning banner ──
+            if (t.status === 'timeout_warning' && timeoutCountdowns[tid] !== undefined) {
+                html += '<div class="timeout-warning-banner">';
+                html += '<span class="timeout-warning-icon">\u23F1</span>';
+                html += '<span class="detail-timeout-countdown">Restarting in ' + timeoutCountdowns[tid] + 's</span>';
+                html += '</div>';
+            }
+
+            // ── Session pipeline (orchestrator stages) ──
+            html += buildSessionPipeline();
+
+            // ── Task pipeline visualization ──
+            html += '<div class="task-section-label">Task Pipeline</div>';
+            html += buildPipeline(t);
+
+            // ── Metadata ──
+            html += '<dl>';
+            html += `<dt>Status</dt><dd><span class="status-badge ${t.status}">${esc(t.status)}</span></dd>`;
+            html += `<dt>Session</dt><dd><span class="detail-session-id">${esc(t.session_id || '\u2014')}</span></dd>`;
+            html += `<dt>Depends on</dt><dd>${t.depends_on && t.depends_on.length ? t.depends_on.map(esc).join(', ') : 'none'}</dd>`;
+            html += `<dt>Retries</dt><dd>${t.retries || 0}</dd>`;
+
+            if (t.startTime) {
+                const elapsed = ((t.endTime || Date.now()) - t.startTime) / 1000;
+                html += `<dt>Elapsed</dt><dd>${elapsed.toFixed(1)}s</dd>`;
+            }
+
+            // Token consumption for this session
+            if (t.usage) {
+                const u = t.usage;
+                html += '<dt>Tokens</dt><dd>';
+                if (u.total_tokens) {
+                    html += `<strong>${formatTokenCount(u.total_tokens)}</strong> total`;
+                    html += ` <span class="detail-tokens-breakdown">(${formatTokenCount(u.prompt_tokens || 0)} in / ${formatTokenCount(u.completion_tokens || 0)} out)</span>`;
+                } else {
+                    html += '\u2014';
+                }
+                html += '</dd>';
+            }
+
+            // Session context status (tokens / cap / %)
+            if (t.context) {
+                const c = t.context;
+                html += '<dt>Context</dt><dd>';
+                if (c.budget) {
+                    const promptTok = c.prompt_tokens || 0;
+                    const pct = c.utilization || 0;
+                    const pctCls = pct > 80 ? ' ctx-high' : '';
+                    html += `<span class="detail-ctx-bar">`;
+                    html += `${formatTokenCount(promptTok)} / ${formatTokenCount(c.budget)}`;
+                    if (pct > 0) {
+                        html += ` <span class="detail-ctx-pct${pctCls}">${pct}%</span>`;
+                    }
+                    html += `</span>`;
+                    if (c.messages) {
+                        html += ` \u00B7 ${c.messages} msgs`;
+                    }
+                } else {
+                    html += '\u2014';
+                }
+                html += '</dd>';
+            }
+
+            html += '</dl>';
+
+            // ── Instructions section (running/completed mode) ──
+            html += '<div class="task-instructions-section">';
+            html += '<div class="task-instructions-label">Instructions</div>';
+            if (editingTaskId === tid) {
+                html += `<textarea class="task-instructions-editor" id="taskInstructionsEditor">${esc(t.description || '')}</textarea>`;
+                html += '<div class="task-instructions-actions">';
+                html += '<button class="btn-save-instructions">Save &amp; Run</button>';
+                html += '<button class="btn-cancel-edit">Cancel</button>';
+                html += '</div>';
+            } else {
+                const desc = t.description || '';
+                html += `<div class="task-instructions-content">${desc ? esc(desc) : '<em style="color:var(--text-muted);">No instructions</em>'}</div>`;
+            }
+            html += '</div>';
         }
-        html += '</div>';
 
         // ── Output ──
         if (t.result) {
@@ -743,7 +826,11 @@
         orchDetail.classList.add('visible');
 
         // Wire up action buttons and editor buttons
-        wireActionButtons(tid);
+        if (orchestratorState === 'preview') {
+            wirePreviewEditorButtons(tid);
+        } else {
+            wireActionButtons(tid);
+        }
 
         // Auto-focus editor if in edit mode
         if (editingTaskId === tid) {
@@ -755,6 +842,118 @@
     function updateSelectedDetail() {
         if (selectedTaskId && tasks[selectedTaskId]) {
             showTaskDetail(selectedTaskId);
+        }
+    }
+
+    // ── Preview editor (task editing before execution) ────────
+
+    function buildPreviewEditor(tid, t) {
+        const ov = taskOverrides[tid] || {};
+        const title = ov.title !== undefined ? ov.title : t.title;
+        const desc = ov.description !== undefined ? ov.description : t.description;
+        const sessionId = ov.session_id || '';
+        const modelId = ov.model_id || t.model_id || '';
+
+        let html = '<div class="preview-editor">';
+
+        // Title
+        html += '<div class="preview-field">';
+        html += '<label class="preview-field-label">Title</label>';
+        html += `<input type="text" class="preview-field-input" id="previewTitle" value="${esc(title)}">`;
+        html += '</div>';
+
+        // Description
+        html += '<div class="preview-field">';
+        html += '<label class="preview-field-label">Instructions</label>';
+        html += `<textarea class="preview-field-textarea" id="previewDescription">${esc(desc)}</textarea>`;
+        html += '</div>';
+
+        // Session selector
+        html += '<div class="preview-field">';
+        html += '<label class="preview-field-label">Session</label>';
+        html += '<select class="preview-field-select" id="previewSession">';
+        html += '<option value="">New session (auto)</option>';
+        availableSessions.forEach(s => {
+            const sel = sessionId === s.id ? ' selected' : '';
+            html += `<option value="${esc(s.id)}"${sel}>${esc(s.name)} (${esc(s.id.slice(0, 8))})</option>`;
+        });
+        html += '</select>';
+        html += '</div>';
+
+        // Model selector
+        html += '<div class="preview-field">';
+        html += '<label class="preview-field-label">Model</label>';
+        html += '<select class="preview-field-select" id="previewModel">';
+        html += '<option value="">Default</option>';
+        availableModels.forEach(m => {
+            const mId = m.id || `${m.provider}:${m.model}`;
+            const sel = modelId === mId ? ' selected' : '';
+            html += `<option value="${esc(mId)}"${sel}>${esc(mId)}</option>`;
+        });
+        html += '</select>';
+        html += '</div>';
+
+        // Dependencies (read-only)
+        html += '<div class="preview-field">';
+        html += '<label class="preview-field-label">Depends on</label>';
+        html += `<div class="preview-field-value">${t.depends_on && t.depends_on.length ? t.depends_on.map(esc).join(', ') : 'none'}</div>`;
+        html += '</div>';
+
+        // Save button
+        html += '<div class="preview-editor-actions">';
+        html += '<button class="btn-save-preview" id="btnSavePreview">Save Changes</button>';
+        if (taskOverrides[tid]) {
+            html += '<button class="btn-reset-preview" id="btnResetPreview">Reset</button>';
+        }
+        html += '</div>';
+
+        html += '</div>';
+        return html;
+    }
+
+    function wirePreviewEditorButtons(tid) {
+        const saveBtn = detailBody.querySelector('#btnSavePreview');
+        if (saveBtn) {
+            saveBtn.addEventListener('click', () => {
+                const titleEl = detailBody.querySelector('#previewTitle');
+                const descEl = detailBody.querySelector('#previewDescription');
+                const sessionEl = detailBody.querySelector('#previewSession');
+                const modelEl = detailBody.querySelector('#previewModel');
+
+                const ov = {};
+                if (titleEl && titleEl.value.trim() !== tasks[tid].title) {
+                    ov.title = titleEl.value.trim();
+                }
+                if (descEl && descEl.value !== tasks[tid].description) {
+                    ov.description = descEl.value;
+                }
+                if (sessionEl && sessionEl.value) {
+                    ov.session_id = sessionEl.value;
+                }
+                if (modelEl && modelEl.value) {
+                    ov.model_id = modelEl.value;
+                }
+
+                if (Object.keys(ov).length > 0) {
+                    taskOverrides[tid] = { ...(taskOverrides[tid] || {}), ...ov };
+                    // Also update the local tasks for display
+                    if (ov.title) tasks[tid].title = ov.title;
+                    if (ov.description !== undefined) tasks[tid].description = ov.description;
+                    addLogEntry('progress', `Task ${tid} configured`);
+                    renderGraph();
+                    showTaskDetail(tid);
+                }
+            });
+        }
+
+        const resetBtn = detailBody.querySelector('#btnResetPreview');
+        if (resetBtn) {
+            resetBtn.addEventListener('click', () => {
+                delete taskOverrides[tid];
+                addLogEntry('progress', `Task ${tid} reset to defaults`);
+                renderGraph();
+                showTaskDetail(tid);
+            });
         }
     }
 
@@ -895,44 +1094,88 @@
         orchRephrased.style.height = Math.min(orchRephrased.scrollHeight, 200) + 'px';
     }
 
-    // ── Run orchestrator ─────────────────────────────────────
+    // ── Decompose (was "Run") — now does prepare() only ──────
 
-    function runOrchestrator() {
+    async function decomposeOrchestrator() {
         // Use rephrased text if visible, otherwise fall back to input
         const rephraseVisible = !orchRephrase.classList.contains('hidden');
         const input = rephraseVisible
             ? orchRephrased.value.trim()
             : orchInput.value.trim();
 
-        if (!input || !isConnected) return;
+        if (!input || isDecomposing) return;
 
-        // Hide rephrase area
-        orchRephrase.classList.add('hidden');
-        orchRephrased.value = '';
+        isDecomposing = true;
+        orchRunBtn.disabled = true;
+        orchDecomposeLoading.classList.remove('hidden');
 
         // Reset state
         tasks = {};
         graphSummary = {};
         selectedTaskId = null;
+        taskOverrides = {};
         aggregatedContext = { totalTokens: 0, promptTokens: 0, completionTokens: 0 };
         timeoutCountdowns = {};
         if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
         orchDetail.classList.remove('visible');
-        setOrchestratorState('running');
         clearLog();
         updateContextSummary();
-        addLogEntry('progress', `Submitting: ${input}`);
+        addLogEntry('progress', `Decomposing: ${input.slice(0, 200)}`);
         renderGraph();
         updateSummaryBar();
 
-        // Send as a command message with /orchestrate prefix, appending skill filter if needed
-        const skillsParam = getSelectedSkillsParam();
+        try {
+            const skillsParam = getSelectedSkillsParam();
+            const fullInput = input + skillsParam;
+
+            const resp = await fetch('/api/orchestrator/prepare', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ input: fullInput }),
+            });
+
+            const data = await resp.json();
+            if (!data.ok) {
+                addLogEntry('task_failed', `Decompose failed: ${data.error || 'unknown'}`);
+                setOrchestratorState('failed');
+            }
+            // The prepare endpoint broadcasts 'decomposed' via WebSocket,
+            // which is handled by handleDecomposed() above.
+            // The state transitions to 'preview' there.
+        } catch (e) {
+            addLogEntry('task_failed', `Decompose error: ${e.message}`);
+            setOrchestratorState('failed');
+        } finally {
+            isDecomposing = false;
+            orchRunBtn.disabled = false;
+            orchDecomposeLoading.classList.add('hidden');
+        }
+    }
+
+    // ── Execute (after preview) ──────────────────────────────
+
+    function executeOrchestrator() {
+        if (!isConnected || orchestratorState === 'running') return;
+
+        // Collect overrides
+        const overrides = Object.keys(taskOverrides).length > 0 ? taskOverrides : null;
+
+        setOrchestratorState('running');
+        addLogEntry('progress', 'Starting execution...');
+
+        // Send as WebSocket command
+        const payload = overrides ? JSON.stringify(overrides) : '';
         ws.send(JSON.stringify({
             type: 'command',
-            command: `/orchestrate ${input}${skillsParam}`,
+            command: `/orchestrate-execute ${payload}`.trim(),
         }));
+    }
 
-        orchInput.value = '';
+    // ── Legacy run (directly via /orchestrate for backward compat) ──
+
+    function runOrchestrator() {
+        // This is now "Decompose" — call decomposeOrchestrator
+        decomposeOrchestrator();
     }
 
     // ── Helpers ──────────────────────────────────────────────
@@ -1035,6 +1278,8 @@
         let currentStageIdx = -1;
         if (orchestratorState === 'idle') {
             currentStageIdx = -1;
+        } else if (orchestratorState === 'preview') {
+            currentStageIdx = 1; // decompose done, graph built, waiting for user
         } else if (orchestratorState === 'completed' || orchestratorState === 'failed') {
             currentStageIdx = 5; // all done
         } else {
@@ -1194,6 +1439,101 @@
         return ` [skills: ${Array.from(selectedSkills).join(', ')}]`;
     }
 
+    // ── Workflow save/load ──────────────────────────────────
+
+    async function saveWorkflow() {
+        // Use the editable input value as the name
+        var saveName = (orchWorkflowNameInput && orchWorkflowNameInput.value.trim()) || workflowName;
+        if (saveName) {
+            workflowName = saveName;
+            updateWorkflowNameDisplay();
+        }
+        try {
+            const resp = await fetch('/api/orchestrator/workflows/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: saveName }),
+            });
+            const data = await resp.json();
+            if (data.ok) {
+                addLogEntry('completed', `Workflow saved: ${data.name || saveName}`);
+                loadWorkflowList();
+            } else {
+                addLogEntry('task_failed', `Save failed: ${data.error || 'unknown'}`);
+            }
+        } catch (e) {
+            addLogEntry('task_failed', `Save error: ${e.message}`);
+        }
+    }
+
+    async function loadWorkflowList() {
+        try {
+            const resp = await fetch('/api/orchestrator/workflows');
+            const data = await resp.json();
+            const workflows = data.workflows || [];
+
+            orchLoadWorkflowSelect.innerHTML = '<option value="">Load workflow...</option>';
+            workflows.forEach(wf => {
+                const opt = document.createElement('option');
+                opt.value = wf.filename || wf.name;
+                opt.textContent = `${wf.name} (${wf.task_count} tasks)`;
+                orchLoadWorkflowSelect.appendChild(opt);
+            });
+        } catch (e) {
+            // Silently fail
+        }
+    }
+
+    async function loadWorkflow(name) {
+        if (!name) return;
+        try {
+            const resp = await fetch('/api/orchestrator/workflows/load', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name }),
+            });
+            const data = await resp.json();
+            if (data.ok) {
+                addLogEntry('progress', `Loaded workflow: ${data.workflow_name || name}`);
+                // The load endpoint broadcasts 'decomposed' via WebSocket
+                // which populates tasks and enters preview state.
+
+                // Show the rephrased prompt that was used to decompose.
+                var userInput = data.user_input || '';
+                if (userInput) {
+                    orchRephrased.value = userInput;
+                    orchRephrase.classList.remove('hidden');
+                    autoResizeRephrased();
+                }
+            } else {
+                addLogEntry('task_failed', `Load failed: ${data.error || 'unknown'}`);
+            }
+        } catch (e) {
+            addLogEntry('task_failed', `Load error: ${e.message}`);
+        }
+    }
+
+    // ── Load available sessions and models for per-task config ──
+
+    async function loadSessionsAndModels() {
+        try {
+            const [sessResp, modelResp] = await Promise.all([
+                fetch('/api/orchestrator/sessions'),
+                fetch('/api/orchestrator/models'),
+            ]);
+            if (sessResp.ok) {
+                const sessData = await sessResp.json();
+                availableSessions = sessData.sessions || [];
+            }
+            if (modelResp.ok) {
+                const modelData = await modelResp.json();
+                availableModels = modelData.models || [];
+            }
+        } catch (e) {
+            // Silently fail
+        }
+    }
+
     // ── Init ─────────────────────────────────────────────────
 
     function init() {
@@ -1211,14 +1551,14 @@
             }
         });
 
-        // Run button → execute rephrased prompt
-        orchRunBtn.addEventListener('click', runOrchestrator);
+        // Run button (now "Decompose") → decompose into tasks for preview
+        orchRunBtn.addEventListener('click', decomposeOrchestrator);
 
-        // Ctrl+Enter in rephrased textarea → run
+        // Ctrl+Enter in rephrased textarea → decompose
         orchRephrased.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                 e.preventDefault();
-                runOrchestrator();
+                decomposeOrchestrator();
             }
         });
 
@@ -1227,6 +1567,9 @@
 
         // Discard button
         orchDiscardBtn.addEventListener('click', discardRephrase);
+
+        // Execute button → run the prepared graph
+        orchExecuteBtn.addEventListener('click', executeOrchestrator);
 
         // Detail close
         detailClose.addEventListener('click', () => {
@@ -1238,8 +1581,30 @@
         // Clear log
         logClearBtn.addEventListener('click', clearLog);
 
-        // Load skills and current status on page load
+        // Save workflow button
+        orchSaveWorkflowBtn.addEventListener('click', saveWorkflow);
+
+        // Sync workflow name from input to header on edit
+        orchWorkflowNameInput.addEventListener('input', function () {
+            workflowName = orchWorkflowNameInput.value.trim();
+            if (orchWorkflowName) {
+                orchWorkflowName.textContent = workflowName ? '\u2014 ' + workflowName : '';
+            }
+        });
+
+        // Load workflow select
+        orchLoadWorkflowSelect.addEventListener('change', (e) => {
+            const name = e.target.value;
+            if (name) {
+                loadWorkflow(name);
+                e.target.value = '';  // Reset select
+            }
+        });
+
+        // Load skills, sessions, models, workflows, and current status on page load
         loadSkills();
+        loadSessionsAndModels();
+        loadWorkflowList();
         loadCurrentStatus();
     }
 
@@ -1257,6 +1622,8 @@
                         depends_on: t.depends_on || [],
                         session_id: t.session_id || null,
                         session_name: null,
+                        model_id: '',
+                        skills: [],
                         status: t.status || 'pending',
                         result: t.result_preview || null,
                         error: t.error || null,
@@ -1266,6 +1633,19 @@
                     };
                 });
                 graphSummary = data.status.summary || {};
+
+                if (data.status.workflow_name) {
+                    workflowName = data.status.workflow_name;
+                    updateWorkflowNameDisplay();
+                }
+
+                // Restore the rephrased prompt text if available.
+                if (data.status.user_input) {
+                    orchRephrased.value = data.status.user_input;
+                    orchRephrase.classList.remove('hidden');
+                    autoResizeRephrased();
+                }
+
                 updateSummaryBar();
                 renderGraph();
 
@@ -1274,8 +1654,11 @@
                 const hasPaused = data.status.tasks.some(t => t.status === 'paused' || t.status === 'editing');
                 const hasFailed = data.status.tasks.some(t => t.status === 'failed');
                 const allTerminal = data.status.tasks.every(t => t.status === 'completed' || t.status === 'failed');
+                const allPending = data.status.tasks.every(t => t.status === 'pending');
 
-                if (hasRunning || hasPaused) {
+                if (allPending) {
+                    setOrchestratorState('preview');
+                } else if (hasRunning || hasPaused) {
                     setOrchestratorState('running');
                 } else if (allTerminal && hasFailed) {
                     setOrchestratorState('failed');

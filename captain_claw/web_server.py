@@ -528,6 +528,31 @@ class WebServer:
                     await self._handle_chat(ws, raw)
                     return
 
+            elif cmd in ("/orchestrate-execute",):
+                # Execute a previously prepared orchestration graph.
+                if not self._orchestrator:
+                    result = "Orchestrator not available."
+                else:
+                    task_overrides = None
+                    if args.strip():
+                        try:
+                            task_overrides = json.loads(args.strip())
+                        except json.JSONDecodeError:
+                            task_overrides = None
+                    try:
+                        response = await self._orchestrator.execute(task_overrides)
+                        self._broadcast({
+                            "type": "chat_message",
+                            "role": "assistant",
+                            "content": response,
+                        })
+                    except Exception as e:
+                        self._broadcast({
+                            "type": "error",
+                            "message": f"Orchestrator execute failed: {e}",
+                        })
+                    return
+
             else:
                 # Try to process it as a chat message (the agent might understand it)
                 result = f"Unknown command: `{cmd}`. Type `/help` for available commands."
@@ -1548,6 +1573,14 @@ class WebServer:
         app.router.add_post("/api/orchestrator/task/pause", self._pause_orchestrator_task)
         app.router.add_post("/api/orchestrator/task/resume", self._resume_orchestrator_task)
         app.router.add_post("/api/orchestrator/task/postpone", self._postpone_orchestrator_task)
+        # Orchestrator prepare/execute/workflow endpoints
+        app.router.add_post("/api/orchestrator/prepare", self._prepare_orchestrator)
+        app.router.add_get("/api/orchestrator/sessions", self._get_orchestrator_sessions)
+        app.router.add_get("/api/orchestrator/models", self._get_orchestrator_models)
+        app.router.add_get("/api/orchestrator/workflows", self._list_workflows)
+        app.router.add_post("/api/orchestrator/workflows/save", self._save_workflow)
+        app.router.add_post("/api/orchestrator/workflows/load", self._load_workflow)
+        app.router.add_delete("/api/orchestrator/workflows/{name}", self._delete_workflow)
         # OpenAI-compatible API proxy routes
         if self.config.web.api_enabled and self._api_pool:
             app.router.add_post("/v1/chat/completions", self._api_chat_completions)
@@ -1746,6 +1779,89 @@ class WebServer:
         if not task_id:
             return web.json_response({"ok": False, "error": "Missing task_id"}, status=400)
         result = await self._orchestrator.postpone_task(task_id)
+        return web.json_response(result)
+
+    # ── Orchestrator: prepare / workflows / sessions / models ───────
+
+    async def _prepare_orchestrator(self, request: web.Request) -> web.Response:
+        """Decompose a request into tasks without executing (preview)."""
+        if not self._orchestrator:
+            return web.json_response({"ok": False, "error": "No orchestrator"}, status=400)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+        user_input = str(body.get("input", "")).strip()
+        if not user_input:
+            return web.json_response({"ok": False, "error": "Missing input"}, status=400)
+        result = await self._orchestrator.prepare(user_input)
+        return web.json_response(result, dumps=lambda obj: json.dumps(obj, default=str))
+
+    async def _get_orchestrator_sessions(self, request: web.Request) -> web.Response:
+        """List sessions for per-task session selection."""
+        if not self.agent:
+            return web.json_response({"sessions": []})
+        try:
+            sessions = await self.agent.session_manager.list_sessions(limit=30)
+            result = [
+                {"id": s.id, "name": s.name}
+                for s in sessions
+            ]
+        except Exception:
+            result = []
+        return web.json_response({"sessions": result})
+
+    async def _get_orchestrator_models(self, request: web.Request) -> web.Response:
+        """List allowed models for per-task model selection."""
+        if not self.agent:
+            return web.json_response({"models": []})
+        try:
+            models = self.agent.get_allowed_models()
+        except Exception:
+            models = []
+        return web.json_response({"models": models})
+
+    async def _list_workflows(self, request: web.Request) -> web.Response:
+        """List saved workflows."""
+        if not self._orchestrator:
+            return web.json_response({"workflows": []})
+        workflows = await self._orchestrator.list_workflows()
+        return web.json_response({"workflows": workflows})
+
+    async def _save_workflow(self, request: web.Request) -> web.Response:
+        """Save the current graph as a workflow."""
+        if not self._orchestrator:
+            return web.json_response({"ok": False, "error": "No orchestrator"}, status=400)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+        name = str(body.get("name", "")).strip() or None
+        result = await self._orchestrator.save_workflow(name)
+        return web.json_response(result)
+
+    async def _load_workflow(self, request: web.Request) -> web.Response:
+        """Load a saved workflow for preview."""
+        if not self._orchestrator:
+            return web.json_response({"ok": False, "error": "No orchestrator"}, status=400)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+        name = str(body.get("name", "")).strip()
+        if not name:
+            return web.json_response({"ok": False, "error": "Missing name"}, status=400)
+        result = await self._orchestrator.load_workflow(name)
+        return web.json_response(result, dumps=lambda obj: json.dumps(obj, default=str))
+
+    async def _delete_workflow(self, request: web.Request) -> web.Response:
+        """Delete a saved workflow."""
+        if not self._orchestrator:
+            return web.json_response({"ok": False, "error": "No orchestrator"}, status=400)
+        name = request.match_info.get("name", "").strip()
+        if not name:
+            return web.json_response({"ok": False, "error": "Missing name"}, status=400)
+        result = await self._orchestrator.delete_workflow(name)
         return web.json_response(result)
 
     # ── OpenAI-compatible API proxy ──────────────────────────────────

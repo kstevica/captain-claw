@@ -16,6 +16,7 @@
             </a>
             <span class="divider"></span>
             <span class="orch-title">Orchestrator</span>
+            <span class="orch-workflow-name" id="orchWorkflowName"></span>
         </div>
         <div class="orch-header-right">
             <span class="orch-status" id="orchStatus">
@@ -30,7 +31,20 @@
     <div class="orch-layout">
         <!-- Input section -->
         <div class="orch-input-section">
+            <!-- Workflow toolbar (shown when graph exists) -->
+            <div class="orch-workflow-bar hidden" id="orchWorkflowBar">
+                <div class="orch-workflow-bar-left">
+                    <input type="text" class="orch-workflow-name-input" id="orchWorkflowNameInput" placeholder="Workflow name..." spellcheck="false">
+                    <button class="orch-workflow-btn" id="orchSaveWorkflowBtn">Save</button>
+                </div>
+                <div class="orch-workflow-bar-right">
+                    <button class="orch-execute-btn" id="orchExecuteBtn">Execute &#x25B6;</button>
+                </div>
+            </div>
             <div class="orch-input-row">
+                <select class="orch-workflow-select" id="orchLoadWorkflowSelect">
+                    <option value="">Load workflow...</option>
+                </select>
                 <input type="text" id="orchInput" placeholder="Describe a complex task to decompose and run in parallel..." autocomplete="off">
                 <button class="orch-prepare-btn" id="orchPrepareBtn">Prepare</button>
             </div>
@@ -40,7 +54,7 @@
                     <span class="orch-rephrase-label">Rephrased prompt <span class="orch-rephrase-hint">(editable — review and adjust before running)</span></span>
                     <div class="orch-rephrase-actions">
                         <button class="orch-rephrase-discard" id="orchDiscardBtn" title="Discard and go back">Discard</button>
-                        <button class="orch-run-btn" id="orchRunBtn">Run &#x25B6;</button>
+                        <button class="orch-run-btn" id="orchRunBtn">Decompose &#x25B6;</button>
                     </div>
                 </div>
                 <textarea id="orchRephrased" rows="4" spellcheck="false" placeholder="Rephrased prompt will appear here..."></textarea>
@@ -55,6 +69,10 @@
             <!-- Spinner shown during rephrase -->
             <div class="orch-rephrase-loading hidden" id="orchRephraseLoading">
                 <span class="spinner"></span> Rephrasing your request...
+            </div>
+            <!-- Decompose loading spinner -->
+            <div class="orch-rephrase-loading hidden" id="orchDecomposeLoading">
+                <span class="spinner"></span> Decomposing into tasks...
             </div>
         </div>
 
@@ -84,14 +102,14 @@
                     </div>
                     <div class="orch-summary-spacer"></div>
                     <div class="orch-summary-item context" id="summaryContext">
-                        <span class="ctx-icon">◈</span>
-                        <span class="ctx-value" id="summaryCtxIn">—</span>
+                        <span class="ctx-icon">&#x25C8;</span>
+                        <span class="ctx-value" id="summaryCtxIn">&mdash;</span>
                         <span class="ctx-label">in</span>
                         <span class="ctx-sep">/</span>
-                        <span class="ctx-value" id="summaryCtxOut">—</span>
+                        <span class="ctx-value" id="summaryCtxOut">&mdash;</span>
                         <span class="ctx-label">out</span>
                         <span class="ctx-sep">/</span>
-                        <span class="ctx-value ctx-total" id="summaryCtxTotal">—</span>
+                        <span class="ctx-value ctx-total" id="summaryCtxTotal">&mdash;</span>
                         <span class="ctx-label">total</span>
                     </div>
                 </div>
@@ -100,7 +118,7 @@
                 <div class="orch-graph" id="orchGraph">
                     <div class="orch-graph-empty" id="orchGraphEmpty">
                         <div class="icon">&#x1F3AF;</div>
-                        <div class="text">Enter a request above and click <strong>Prepare</strong> to rephrase, then <strong>Run</strong></div>
+                        <div class="text">Enter a request above and click <strong>Prepare</strong> to rephrase, then <strong>Decompose</strong></div>
                     </div>
                 </div>
 

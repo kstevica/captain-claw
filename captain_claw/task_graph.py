@@ -61,6 +61,10 @@ class OrchestratorTask:
     original_description: str = ""
     # Timeout warning grace period tracking.
     timeout_warning_at: float = 0.0  # monotonic timestamp when warning started
+    # Per-task configuration (set during preview / workflow load).
+    model_id: str = ""
+    skills: list[str] = field(default_factory=list)
+    use_existing_session: bool = False
 
     def is_terminal(self) -> bool:
         return self.status in _TERMINAL_STATES

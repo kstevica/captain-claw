@@ -326,7 +326,7 @@ html, body {
 /* ─── Graph area ──────────────────────────────────── */
 
 .orch-graph {
-    flex: 1;
+    flex: 0 1 35%;
     overflow: auto;
     padding: 16px;
 }
@@ -461,8 +461,8 @@ html, body {
 .orch-detail {
     border-top: 1px solid var(--border);
     background: var(--bg-secondary);
-    flex-shrink: 0;
-    max-height: 55%;
+    flex: 1;
+    min-height: 0;
     overflow: auto;
     display: none;
 }
@@ -522,7 +522,7 @@ html, body {
     color: var(--monitor-text);
     white-space: pre-wrap;
     word-break: break-word;
-    max-height: 200px;
+    max-height: none;
     overflow: auto;
 }
 
@@ -845,7 +845,7 @@ html, body {
     color: var(--text-primary);
     white-space: pre-wrap;
     word-break: break-word;
-    max-height: 200px;
+    max-height: 400px;
     overflow: auto;
     line-height: 1.6;
 }
@@ -1102,4 +1102,207 @@ html, body {
 
 .task-btn-postpone:hover {
     background: #f7816615;
+}
+
+/* ─── Workflow name in header ────────────────────── */
+
+.orch-workflow-name {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-weight: 400;
+    margin-left: 4px;
+}
+
+/* ─── Workflow toolbar bar ───────────────────────── */
+
+.orch-workflow-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    gap: 8px;
+}
+.orch-workflow-bar.hidden { display: none; }
+
+.orch-workflow-bar-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.orch-workflow-bar-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.orch-workflow-name-input {
+    padding: 5px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 13px;
+    font-weight: 600;
+    outline: none;
+    min-width: 200px;
+}
+.orch-workflow-name-input:focus { border-color: var(--accent); }
+.orch-workflow-name-input::placeholder { color: var(--text-muted); font-weight: 400; }
+
+.orch-workflow-btn {
+    padding: 5px 14px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.orch-workflow-btn:hover { border-color: var(--accent); color: var(--text-primary); }
+
+.orch-workflow-select {
+    padding: 5px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: 12px;
+    font-family: var(--font);
+    outline: none;
+    min-width: 180px;
+}
+.orch-workflow-select:focus { border-color: var(--accent); }
+
+/* ─── Execute button ─────────────────────────────── */
+
+.orch-execute-btn {
+    padding: 8px 24px;
+    background: var(--green);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius-sm);
+    font-weight: 700;
+    font-size: 13px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.orch-execute-btn:hover { background: #46d160; }
+.orch-execute-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* ─── Preview status dot ─────────────────────────── */
+
+.orch-status-dot.preview { background: var(--accent); }
+
+/* ─── Preview editor (task detail in preview state) ─ */
+
+.preview-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.preview-field {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.preview-field-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+}
+
+.preview-field-input {
+    padding: 6px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 13px;
+    outline: none;
+}
+.preview-field-input:focus { border-color: var(--accent); }
+
+.preview-field-textarea {
+    padding: 8px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    min-height: 80px;
+    max-height: 250px;
+    resize: vertical;
+    outline: none;
+}
+.preview-field-textarea:focus { border-color: var(--accent); }
+
+.preview-field-select {
+    padding: 6px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 12px;
+    outline: none;
+}
+.preview-field-select:focus { border-color: var(--accent); }
+
+.preview-field-value {
+    font-size: 13px;
+    color: var(--text-secondary);
+    padding: 4px 0;
+}
+
+.preview-editor-actions {
+    display: flex;
+    gap: 6px;
+    padding-top: 4px;
+}
+
+.btn-save-preview {
+    padding: 5px 16px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius-sm);
+    font-weight: 600;
+    font-size: 12px;
+    cursor: pointer;
+}
+.btn-save-preview:hover { background: var(--accent-hover); }
+
+.btn-reset-preview {
+    padding: 5px 16px;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    cursor: pointer;
+}
+.btn-reset-preview:hover { color: var(--text-primary); border-color: var(--text-muted); }
+
+/* ─── Task card: override indicator ──────────────── */
+
+.task-card.has-override {
+    border-right: 2px solid var(--accent);
+}
+
+.task-card-override {
+    font-size: 10px;
+    color: var(--accent);
+    margin-top: 3px;
+    font-style: italic;
 }
