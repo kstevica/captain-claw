@@ -219,6 +219,7 @@ class SessionOrchestrator:
             tasks_out.append({
                 "id": t.id, "title": t.title, "description": t.description,
                 "depends_on": t.depends_on, "session_name": t.session_name,
+                "session_id": t.session_id, "model_id": t.model_id,
             })
 
         self._broadcast_event("decomposed", {
@@ -957,10 +958,39 @@ class SessionOrchestrator:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    async def save_workflow(self, name: str | None = None) -> dict[str, Any]:
-        """Serialize the current graph as a reusable workflow JSON file."""
+    async def save_workflow(
+        self,
+        name: str | None = None,
+        task_overrides: dict[str, dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Serialize the current graph as a reusable workflow JSON file.
+
+        Args:
+            name: Workflow name (uses generated name if omitted).
+            task_overrides: Optional per-task overrides from the preview
+                editor (title, description, session_id, model_id, skills).
+                Applied to the graph tasks before serializing so that
+                user-configured session/model selections are persisted.
+        """
         if self._graph is None:
             return {"ok": False, "error": "No prepared graph to save."}
+
+        # Apply pending preview overrides so they are persisted.
+        if task_overrides:
+            for tid, overrides in task_overrides.items():
+                task = self._graph.get_task(tid)
+                if task is None:
+                    continue
+                if "title" in overrides:
+                    task.title = str(overrides["title"]).strip()
+                if "description" in overrides:
+                    task.description = str(overrides["description"]).strip()
+                if "session_id" in overrides and overrides["session_id"]:
+                    task.session_id = str(overrides["session_id"]).strip()
+                if "model_id" in overrides and overrides["model_id"]:
+                    task.model_id = str(overrides["model_id"]).strip()
+                if "skills" in overrides:
+                    task.skills = list(overrides["skills"])
 
         wf_name = name or self._workflow_name or "workflow"
         safe = self._safe_filename(wf_name)
@@ -974,6 +1004,7 @@ class SessionOrchestrator:
                 "description": t.description,
                 "depends_on": t.depends_on,
                 "session_name": t.session_name,
+                "session_id": t.session_id,
                 "model_id": t.model_id,
                 "skills": t.skills,
             })
@@ -1019,6 +1050,7 @@ class SessionOrchestrator:
                 description=str(td.get("description", "")).strip(),
                 depends_on=list(td.get("depends_on", [])),
                 session_name=str(td.get("session_name", "")).strip(),
+                session_id=str(td.get("session_id", "")).strip(),
                 model_id=str(td.get("model_id", "")).strip(),
                 skills=list(td.get("skills", [])),
                 timeout_seconds=self._worker_timeout,
@@ -1044,7 +1076,8 @@ class SessionOrchestrator:
             tasks_out.append({
                 "id": t.id, "title": t.title, "description": t.description,
                 "depends_on": t.depends_on, "session_name": t.session_name,
-                "model_id": t.model_id, "skills": t.skills,
+                "session_id": t.session_id, "model_id": t.model_id,
+                "skills": t.skills,
             })
 
         self._broadcast_event("decomposed", {
@@ -1059,6 +1092,7 @@ class SessionOrchestrator:
             "workflow_name": self._workflow_name,
             "tasks": tasks_out,
             "synthesis_instruction": self._synthesis_instruction,
+            "user_input": self._user_input,
         }
 
     async def list_workflows(self) -> list[dict[str, Any]]:

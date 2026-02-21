@@ -71,6 +71,7 @@ class Agent(
         self._last_memory_debug_signature: str | None = None
         self.pipeline_mode: str = "loop"  # "loop" (fast/simple) | "contracts" (planner+critic)
         self.planning_enabled: bool = False
+        self._is_worker: bool = False  # Set True for orchestrator worker agents
         self.monitor_trace_llm: bool = bool(getattr(cfg.ui, "monitor_trace_llm", False))
         self.monitor_trace_pipeline: bool = bool(getattr(cfg.ui, "monitor_trace_pipeline", True))
         self.instructions = InstructionLoader()

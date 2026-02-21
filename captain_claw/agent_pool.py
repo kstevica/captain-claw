@@ -184,6 +184,13 @@ class AgentPool:
         if file_registry is not None:
             agent._file_registry = file_registry
 
+        # Worker-specific tuning: lower iteration limits, skip heavyweight
+        # pipeline features (list-task extraction, contract validation) that
+        # are designed for interactive multi-step planning but cause workers
+        # to loop endlessly on simple fetch-and-summarize tasks.
+        agent._is_worker = True
+        agent.max_iterations = 5
+
         # Mark as initialized to allow complete() calls.
         agent._initialized = True
 

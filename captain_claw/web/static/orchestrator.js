@@ -851,7 +851,7 @@
         const ov = taskOverrides[tid] || {};
         const title = ov.title !== undefined ? ov.title : t.title;
         const desc = ov.description !== undefined ? ov.description : t.description;
-        const sessionId = ov.session_id || '';
+        const sessionId = ov.session_id || t.session_id || '';
         const modelId = ov.model_id || t.model_id || '';
 
         let html = '<div class="preview-editor">';
@@ -1449,10 +1449,12 @@
             updateWorkflowNameDisplay();
         }
         try {
+            // Send task overrides so per-task session/model config is persisted.
+            var overrides = Object.keys(taskOverrides).length > 0 ? taskOverrides : null;
             const resp = await fetch('/api/orchestrator/workflows/save', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: saveName }),
+                body: JSON.stringify({ name: saveName, task_overrides: overrides }),
             });
             const data = await resp.json();
             if (data.ok) {

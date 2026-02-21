@@ -36,6 +36,7 @@ class AgentOrchestrationMixin:
         effective_user_input = user_input
         effective_user_input, clarification_context_applied = self._resolve_effective_user_input(user_input)
         require_all_sources = self._request_references_all_sources(effective_user_input)
+        is_worker = getattr(self, "_is_worker", False)
         use_contract_pipeline = self._should_use_contract_pipeline(
             effective_user_input,
             self.planning_enabled,
@@ -45,8 +46,12 @@ class AgentOrchestrationMixin:
             # Clarification follow-ups usually represent partially-specified
             # continuations of a larger request; keep strict completion gating.
             use_contract_pipeline = True
+        # Workers should never use contract pipelines — they execute a
+        # single focused task and should return as soon as it's done.
+        if is_worker:
+            use_contract_pipeline = False
         explicit_script_request = self._is_explicit_script_request(effective_user_input)
-        enforce_python_worker_mode = explicit_script_request
+        enforce_python_worker_mode = explicit_script_request and not is_worker
         session_id = self._current_session_slug()
         session_tool_policy = self._session_tool_policy_payload()
         turn_abort_event = asyncio.Event()
@@ -276,11 +281,17 @@ class AgentOrchestrationMixin:
                 "step=clarification_context_applied\nstatus=merged_pending_anchor_into_current_turn",
             )
         list_context_excerpt = self._collect_list_extraction_context()
-        list_task_plan = await self._generate_list_task_plan(
-            user_input=effective_user_input,
-            context_excerpt=list_context_excerpt,
-            turn_usage=turn_usage,
-        )
+        # Workers execute a single focused task — skip the heavyweight list
+        # task extraction / coverage pipeline which can cause endless loops
+        # on simple fetch-and-summarize instructions.
+        if getattr(self, "_is_worker", False):
+            list_task_plan = list_task_plan  # keep default (disabled)
+        else:
+            list_task_plan = await self._generate_list_task_plan(
+                user_input=effective_user_input,
+                context_excerpt=list_context_excerpt,
+                turn_usage=turn_usage,
+            )
         extracted_strategy = str(list_task_plan.get("strategy", "none")).strip().lower()
         if extracted_strategy == "script" and not explicit_script_request:
             self._emit_tool_output(
