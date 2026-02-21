@@ -94,6 +94,8 @@ class SessionOrchestrator:
         self._file_registry: FileRegistry | None = None
         # Workflow metadata persisted across prepare() → execute().
         self._workflow_name: str = ""
+        self._workflow_model: str = ""          # workflow-level model override
+        self._workflow_saved_filename: str = "" # safe filename of last save/load
         self._user_input: str = ""
         self._synthesis_instruction: str = ""
         self._workflow_variables: list[dict[str, Any]] = []
@@ -310,12 +312,14 @@ class SessionOrchestrator:
             "summary": summary,
             "tasks": tasks_out,
             "workflow_name": self._workflow_name,
+            "model": self._workflow_model,
             "variables": self._workflow_variables,
         })
 
         return {
             "ok": True,
             "workflow_name": self._workflow_name,
+            "model": self._workflow_model,
             "summary": summary,
             "tasks": tasks_out,
             "synthesis_instruction": synthesis_instruction,
@@ -373,6 +377,12 @@ class SessionOrchestrator:
                     task.model_id = str(overrides["model_id"]).strip()
                 if "skills" in overrides:
                     task.skills = list(overrides["skills"])
+
+        # Apply workflow-level model to tasks that lack their own override.
+        if self._workflow_model:
+            for _tid, task in graph.tasks.items():
+                if not task.model_id:
+                    task.model_id = self._workflow_model
 
         # 3. ASSIGN SESSIONS
         self._broadcast_event("assigning_sessions", {"task_count": graph.task_count})
@@ -446,6 +456,7 @@ class SessionOrchestrator:
             "summary": graph.get_summary(),
             "tasks": tasks_list,
             "workflow_name": self._workflow_name,
+            "model": self._workflow_model,
             "user_input": self._user_input,
         }
 
@@ -475,6 +486,8 @@ class SessionOrchestrator:
         # Clear graph and metadata.
         self._graph = None
         self._workflow_name = ""
+        self._workflow_model = ""
+        self._workflow_saved_filename = ""
         self._user_input = ""
         self._synthesis_instruction = ""
         self._workflow_variables = []
@@ -1149,6 +1162,7 @@ class SessionOrchestrator:
         self,
         name: str | None = None,
         task_overrides: dict[str, dict[str, Any]] | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         """Serialize the current graph as a reusable workflow JSON file.
 
@@ -1158,6 +1172,8 @@ class SessionOrchestrator:
                 editor (title, description, session_id, model_id, skills).
                 Applied to the graph tasks before serializing so that
                 user-configured session/model selections are persisted.
+            model: Workflow-level model override.  When set, this model is
+                applied to every task that doesn't have its own override.
         """
         if self._graph is None:
             return {"ok": False, "error": "No prepared graph to save."}
@@ -1179,9 +1195,24 @@ class SessionOrchestrator:
                 if "skills" in overrides:
                     task.skills = list(overrides["skills"])
 
+        # Track workflow-level model.
+        if model is not None:
+            self._workflow_model = model
+
         wf_name = name or self._workflow_name or "workflow"
-        safe = self._safe_filename(wf_name)
-        path = self._workflows_dir() / f"{safe}.json"
+        new_safe = self._safe_filename(wf_name)
+        wf_dir = self._workflows_dir()
+        path = wf_dir / f"{new_safe}.json"
+
+        # If the name changed, remove the old file to avoid duplicates.
+        old_safe = self._workflow_saved_filename
+        if old_safe and old_safe != new_safe:
+            old_path = wf_dir / f"{old_safe}.json"
+            if old_path.is_file():
+                try:
+                    old_path.unlink()
+                except Exception:
+                    pass  # best-effort cleanup
 
         tasks_out: list[dict[str, Any]] = []
         for tid, t in self._graph.tasks.items():
@@ -1209,6 +1240,8 @@ class SessionOrchestrator:
             "synthesis_instruction": self._synthesis_instruction,
             "tasks": tasks_out,
         }
+        if self._workflow_model:
+            payload["model"] = self._workflow_model
         if variables:
             payload["variables"] = variables
 
@@ -1216,6 +1249,10 @@ class SessionOrchestrator:
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+        # Update internal tracking so subsequent saves detect renames.
+        self._workflow_name = wf_name
+        self._workflow_saved_filename = new_safe
 
         self._broadcast_event("workflow_saved", {"name": wf_name, "path": str(path)})
         return {"ok": True, "name": wf_name, "path": str(path)}
@@ -1261,6 +1298,8 @@ class SessionOrchestrator:
         # Store state for preview/execute.
         self._graph = graph
         self._workflow_name = data.get("workflow_name", name)
+        self._workflow_model = data.get("model", "")
+        self._workflow_saved_filename = safe
         self._user_input = data.get("user_input", "")
         self._synthesis_instruction = data.get("synthesis_instruction", "")
         self._workflow_variables = data.get("variables", [])
@@ -1281,6 +1320,7 @@ class SessionOrchestrator:
             "summary": f"Loaded workflow: {self._workflow_name}",
             "tasks": tasks_out,
             "workflow_name": self._workflow_name,
+            "model": self._workflow_model,
             "user_input": self._user_input,
             "variables": self._workflow_variables,
         })
@@ -1288,6 +1328,7 @@ class SessionOrchestrator:
         return {
             "ok": True,
             "workflow_name": self._workflow_name,
+            "model": self._workflow_model,
             "tasks": tasks_out,
             "synthesis_instruction": self._synthesis_instruction,
             "user_input": self._user_input,
@@ -1305,6 +1346,7 @@ class SessionOrchestrator:
                     "name": data.get("workflow_name", p.stem),
                     "filename": p.stem,
                     "task_count": len(data.get("tasks", [])),
+                    "model": data.get("model", ""),
                     "has_variables": bool(data.get("variables")),
                     "variables": data.get("variables", []),
                 })

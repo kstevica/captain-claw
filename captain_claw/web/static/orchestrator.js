@@ -20,6 +20,7 @@
     let timeoutCountdowns = {};   // task_id → remaining seconds
     let countdownInterval = null; // client-side 1s countdown ticker
     let workflowName = '';        // current workflow name
+    let workflowModel = '';       // workflow-level model override
     let taskOverrides = {};       // tid → {title, description, session_id, model_id, skills}
     let availableSessions = [];   // [{id, name}]
     let availableModels = [];     // [{id, provider, model}]
@@ -52,6 +53,7 @@
     const orchWorkflowBar = $('#orchWorkflowBar');
     const orchWorkflowNameInput = $('#orchWorkflowNameInput');
     const orchSaveWorkflowBtn = $('#orchSaveWorkflowBtn');
+    const orchWorkflowModelSelect = $('#orchWorkflowModelSelect');
     const orchLoadWorkflowSelect = $('#orchLoadWorkflowSelect');
     const orchExecuteBtn = $('#orchExecuteBtn');
     const orchResetBtn = $('#orchResetBtn');
@@ -269,6 +271,12 @@
         if (msg.workflow_name) {
             workflowName = msg.workflow_name;
             updateWorkflowNameDisplay();
+        }
+
+        // Apply workflow-level model if present.
+        if (msg.model !== undefined) {
+            workflowModel = msg.model || '';
+            if (orchWorkflowModelSelect) orchWorkflowModelSelect.value = workflowModel;
         }
 
         // Show the rephrased prompt that was used to decompose (e.g. from loaded workflow).
@@ -1136,9 +1144,11 @@
             eventLog = [];
             selectedTaskId = null;
             workflowName = '';
+            workflowModel = '';
             taskOverrides = {};
             workflowVariables = [];
             variableValues = {};
+            if (orchWorkflowModelSelect) orchWorkflowModelSelect.value = '';
             aggregatedContext = { totalTokens: 0, promptTokens: 0, completionTokens: 0 };
             timeoutCountdowns = {};
             if (countdownInterval) {
@@ -1658,13 +1668,16 @@
             workflowName = saveName;
             updateWorkflowNameDisplay();
         }
+        // Capture workflow model from selector.
+        var modelVal = orchWorkflowModelSelect ? orchWorkflowModelSelect.value : '';
+        workflowModel = modelVal;
         try {
             // Send task overrides so per-task session/model config is persisted.
             var overrides = Object.keys(taskOverrides).length > 0 ? taskOverrides : null;
             const resp = await fetch('/api/orchestrator/workflows/save', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: saveName, task_overrides: overrides }),
+                body: JSON.stringify({ name: saveName, task_overrides: overrides, model: modelVal }),
             });
             const data = await resp.json();
             if (data.ok) {
@@ -1717,6 +1730,10 @@
                     syncPaneHeights();
                 }
 
+                // Apply workflow model from response.
+                workflowModel = data.model || '';
+                if (orchWorkflowModelSelect) orchWorkflowModelSelect.value = workflowModel;
+
                 // Apply workflow variables from response (also arrives via WS but
                 // the HTTP response is more immediate).
                 if (data.variables && data.variables.length > 0) {
@@ -1747,10 +1764,24 @@
             if (modelResp.ok) {
                 const modelData = await modelResp.json();
                 availableModels = modelData.models || [];
+                populateWorkflowModelSelect();
             }
         } catch (e) {
             // Silently fail
         }
+    }
+
+    function populateWorkflowModelSelect() {
+        if (!orchWorkflowModelSelect) return;
+        orchWorkflowModelSelect.innerHTML = '<option value="">Default model</option>';
+        availableModels.forEach(m => {
+            const mId = m.id || `${m.provider}:${m.model}`;
+            const opt = document.createElement('option');
+            opt.value = mId;
+            opt.textContent = mId;
+            if (workflowModel && workflowModel === mId) opt.selected = true;
+            orchWorkflowModelSelect.appendChild(opt);
+        });
     }
 
     // ── Init ─────────────────────────────────────────────────
@@ -1809,6 +1840,13 @@
         // Save workflow button
         orchSaveWorkflowBtn.addEventListener('click', saveWorkflow);
 
+        // Sync workflow model from selector
+        if (orchWorkflowModelSelect) {
+            orchWorkflowModelSelect.addEventListener('change', function () {
+                workflowModel = orchWorkflowModelSelect.value;
+            });
+        }
+
         // Sync workflow name from input to header on edit
         orchWorkflowNameInput.addEventListener('input', function () {
             workflowName = orchWorkflowNameInput.value.trim();
@@ -1862,6 +1900,12 @@
                 if (data.status.workflow_name) {
                     workflowName = data.status.workflow_name;
                     updateWorkflowNameDisplay();
+                }
+
+                // Restore workflow model if available.
+                if (data.status.model) {
+                    workflowModel = data.status.model;
+                    if (orchWorkflowModelSelect) orchWorkflowModelSelect.value = workflowModel;
                 }
 
                 // Restore the rephrased prompt text if available.

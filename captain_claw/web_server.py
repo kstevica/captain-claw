@@ -2444,7 +2444,10 @@ class WebServer:
             return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
         name = str(body.get("name", "")).strip() or None
         task_overrides = body.get("task_overrides") or None
-        result = await self._orchestrator.save_workflow(name, task_overrides=task_overrides)
+        model = body.get("model")
+        if model is not None:
+            model = str(model).strip()
+        result = await self._orchestrator.save_workflow(name, task_overrides=task_overrides, model=model)
         return web.json_response(result)
 
     async def _load_workflow(self, request: web.Request) -> web.Response:

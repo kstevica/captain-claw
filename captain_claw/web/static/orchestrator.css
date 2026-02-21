@@ -1172,6 +1172,20 @@ html, body {
 }
 .orch-workflow-btn:hover { border-color: var(--accent); color: var(--text-primary); }
 
+.orch-workflow-model-select {
+    padding: 5px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-family: var(--font);
+    font-size: 12px;
+    cursor: pointer;
+    min-width: 160px;
+}
+.orch-workflow-model-select:focus { outline: none; border-color: var(--accent); }
+.orch-workflow-model-select:hover { border-color: var(--text-muted); }
+
 .orch-workflow-select {
     padding: 5px 10px;
     background: var(--bg-primary);
