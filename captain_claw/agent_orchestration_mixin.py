@@ -18,7 +18,7 @@ log = get_logger(__name__)
 # incremental append-to-file strategy instead of trying to hold everything in
 # context.
 # ---------------------------------------------------------------------------
-_SCALE_ADVISORY_TEMPLATE = (
+_SCALE_ADVISORY_SINGLE_FILE = (
     "\n\n--- SCALE ADVISORY (auto-detected) ---\n"
     "This task involves approximately {item_count} items. "
     "That is TOO MANY to hold in the context window at once.\n"
@@ -42,6 +42,78 @@ _SCALE_ADVISORY_TEMPLATE = (
     "confirmation before starting.\n"
     "--- END SCALE ADVISORY ---\n"
 )
+
+_SCALE_ADVISORY_FILE_PER_ITEM = (
+    "\n\n--- SCALE ADVISORY (auto-detected) ---\n"
+    "This task involves approximately {item_count} items. "
+    "That is TOO MANY to hold in the context window at once.\n"
+    "OUTPUT: Each item produces its OWN SEPARATE file "
+    "(filename template: {filename_template}).\n"
+    "MANDATORY strategy — you MUST follow this exactly:\n"
+    "1. Glob/list all items first to get the full item list.\n"
+    "2. Process items ONE AT A TIME in strict read-then-write pairs:\n"
+    "   - Read/extract one item.\n"
+    "   - Immediately write its processed result to a NEW file named using "
+    "the template (write tool, append=false). Each item gets its own file.\n"
+    "   - Only then move to the next item.\n"
+    "3. NEVER read more than one item before writing. Pattern: "
+    "read → write → read → write → ... until done.\n"
+    "4. After all items: all files are complete. Give the user a short summary.\n"
+    "CRITICAL: Do NOT append everything to one file. "
+    "Each item MUST be written to a SEPARATE file.\n"
+    "PROHIBITED actions during the loop:\n"
+    "- Do NOT re-read any output file. You wrote it — trust the write.\n"
+    "- Do NOT re-run glob. You have the list.\n"
+    "- Do NOT re-extract the same item with different parameters.\n"
+    "- Extract once, process, write to per-item file, move on.\n"
+    "If the item count exceeds 100, FIRST tell the user the count and ask for "
+    "confirmation before starting.\n"
+    "--- END SCALE ADVISORY ---\n"
+)
+
+_SCALE_ADVISORY_NO_FILE = (
+    "\n\n--- SCALE ADVISORY (auto-detected) ---\n"
+    "This task involves approximately {item_count} items. "
+    "That is TOO MANY to hold in the context window at once.\n"
+    "OUTPUT: Results should NOT be written to files. "
+    "The final action is: {final_action}.\n"
+    "MANDATORY strategy — you MUST follow this exactly:\n"
+    "1. Glob/list all items first to get the full item list.\n"
+    "2. Process items ONE AT A TIME:\n"
+    "   - Read/extract one item.\n"
+    "   - Immediately process/deliver its result ({final_action}).\n"
+    "   - Only then move to the next item.\n"
+    "3. NEVER read more than one item before processing.\n"
+    "4. After all items: give the user a short summary.\n"
+    "PROHIBITED actions during the loop:\n"
+    "- Do NOT re-run glob. You have the list.\n"
+    "- Do NOT re-extract the same item with different parameters.\n"
+    "- Extract once, process, deliver, move on.\n"
+    "If the item count exceeds 100, FIRST tell the user the count and ask for "
+    "confirmation before starting.\n"
+    "--- END SCALE ADVISORY ---\n"
+)
+
+
+def _build_scale_advisory(
+    item_count: int | str,
+    output_strategy: str = "single_file",
+    filename_template: str = "",
+    final_action: str = "write_file",
+) -> str:
+    """Build the appropriate scale advisory based on output strategy."""
+    if output_strategy == "file_per_item":
+        return _SCALE_ADVISORY_FILE_PER_ITEM.format(
+            item_count=item_count,
+            filename_template=filename_template or "(per-item filename)",
+        )
+    elif output_strategy == "no_file":
+        return _SCALE_ADVISORY_NO_FILE.format(
+            item_count=item_count,
+            final_action=final_action,
+        )
+    else:
+        return _SCALE_ADVISORY_SINGLE_FILE.format(item_count=item_count)
 
 # Patterns that suggest a task touching many files/items in a folder tree.
 _LARGE_SCALE_INPUT_PATTERNS = [
@@ -104,7 +176,16 @@ class AgentOrchestrationMixin:
             # We don't know the exact count yet — signal "many".
             estimated_count = "many (exact count unknown — discover via glob first)"
 
-        advisory = _SCALE_ADVISORY_TEMPLATE.format(item_count=estimated_count)
+        output_strategy = str(list_task_plan.get("output_strategy", "single_file")).strip().lower()
+        filename_template = str(list_task_plan.get("output_filename_template", "")).strip()
+        final_action = str(list_task_plan.get("final_action", "write_file")).strip()
+
+        advisory = _build_scale_advisory(
+            item_count=estimated_count,
+            output_strategy=output_strategy,
+            filename_template=filename_template,
+            final_action=final_action,
+        )
 
         self._emit_tool_output(
             "task_contract",
@@ -564,6 +645,16 @@ class AgentOrchestrationMixin:
             # count glob results and write(append) calls and emit "3 of 27"
             # progress indicators to the thinking line.
             self._scale_progress = {"total": 0, "completed": 0}
+            # Store output strategy so the micro-loop knows whether to
+            # write per-item files, a single file, or skip file output.
+            _out_strategy = str(list_task_plan.get("output_strategy", "single_file")).strip().lower()
+            self._scale_progress["_output_strategy"] = _out_strategy
+            self._scale_progress["_output_filename_template"] = str(
+                list_task_plan.get("output_filename_template", "")
+            ).strip()
+            self._scale_progress["_final_action"] = str(
+                list_task_plan.get("final_action", "write_file")
+            ).strip()
             # Pre-populate items from list_task_plan members when available.
             # This gives the scale progress note an initial worklist so the
             # LLM sees "REMAINING items to process" even before glob runs.
@@ -648,6 +739,9 @@ class AgentOrchestrationMixin:
                 "completed": 0,
                 "items": list(members),
                 "done_items": set(),
+                "_output_strategy": str(list_task_plan.get("output_strategy", "single_file")).strip().lower(),
+                "_output_filename_template": str(list_task_plan.get("output_filename_template", "")).strip(),
+                "_final_action": str(list_task_plan.get("final_action", "write_file")).strip(),
             }
             self._emit_tool_output(
                 "task_contract",
@@ -1005,10 +1099,18 @@ class AgentOrchestrationMixin:
 
                     # Record a synthetic session message so the completion
                     # gate can see that the work was done.
+                    _out_strategy = str(sp.get("_output_strategy", "single_file")).strip().lower()
                     summary_lines = [
                         f"Scale processing complete: {_sp_completed} of {_sp_total} items processed.",
-                        f"Output file: {output_file}",
                     ]
+                    if _out_strategy == "file_per_item":
+                        _fn_template = str(sp.get("_output_filename_template", "")).strip()
+                        summary_lines.append(
+                            f"Output: {_sp_completed} separate files "
+                            f"(template: {_fn_template or 'per-item'})"
+                        )
+                    else:
+                        summary_lines.append(f"Output file: {output_file}")
                     if _sp_failed > 0:
                         summary_lines.append(f"Failed: {_sp_failed} items")
                         for err in _micro_errors[:5]:
@@ -1106,10 +1208,19 @@ class AgentOrchestrationMixin:
                     _sp_total = micro_result.get("total", 0)
                     _sp_completed = micro_result.get("completed_total", 0)
                     _sp_failed = micro_result.get("failed", 0)
-                    micro_summary = (
-                        f"Scale processing complete: {_sp_completed} of {_sp_total} items.\n"
-                        f"Output file: {output_file}"
-                    )
+                    _out_strategy = str(sp.get("_output_strategy", "single_file")).strip().lower() if sp else "single_file"
+                    if _out_strategy == "file_per_item":
+                        _fn_template = str(sp.get("_output_filename_template", "")).strip() if sp else ""
+                        micro_summary = (
+                            f"Scale processing complete: {_sp_completed} of {_sp_total} items.\n"
+                            f"Output: {_sp_completed} separate files "
+                            f"(template: {_fn_template or 'per-item'})"
+                        )
+                    else:
+                        micro_summary = (
+                            f"Scale processing complete: {_sp_completed} of {_sp_total} items.\n"
+                            f"Output file: {output_file}"
+                        )
                     if _sp_failed:
                         micro_summary += f"\nFailed: {_sp_failed} items"
                     self._add_session_message(role="assistant", content=micro_summary)

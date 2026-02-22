@@ -1269,10 +1269,25 @@ class AgentPipelineMixin:
             return ""
         strategy = str(list_task_plan.get("strategy", "direct")).strip().lower() or "direct"
         action = str(list_task_plan.get("per_member_action", "")).strip()
+        output_strategy = str(list_task_plan.get("output_strategy", "single_file")).strip().lower()
+        filename_template = str(list_task_plan.get("output_filename_template", "")).strip()
+        final_action = str(list_task_plan.get("final_action", "write_file")).strip()
+
         lines = [
             "List task memory is active. You must process every extracted member before final response.",
             f"Strategy: {strategy}",
         ]
+        if output_strategy == "file_per_item":
+            lines.append(
+                f"Output: SEPARATE file per item (template: {filename_template or 'per-item filename'}). "
+                "Use write(append=false) for each item — do NOT combine into one file."
+            )
+        elif output_strategy == "no_file":
+            lines.append(
+                f"Output: No file output — final action is: {final_action}."
+            )
+        else:
+            lines.append("Output: Single file with append=true.")
         if action:
             lines.append(f"Per-member action: {action}")
         lines.append("Members:")

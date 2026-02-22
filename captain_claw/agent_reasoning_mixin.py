@@ -1067,6 +1067,9 @@ class AgentReasoningMixin:
             "strategy": "none",
             "per_member_action": "",
             "confidence": "low",
+            "output_strategy": "single_file",
+            "output_filename_template": "",
+            "final_action": "write_file",
         }
         if not self._is_list_processing_request(user_input):
             return fallback
@@ -1108,12 +1111,22 @@ class AgentReasoningMixin:
         per_member_action = ""
         recommended_strategy = ""
         confidence = "low"
+        output_strategy = "single_file"
+        output_filename_template = ""
+        final_action = "write_file"
         if isinstance(payload, dict):
             has_list_work = bool(payload.get("has_list_work", False))
             members = self._normalize_list_members(payload.get("members"))
             per_member_action = str(payload.get("per_member_action", "")).strip()[:220]
             recommended_strategy = str(payload.get("recommended_strategy", "")).strip().lower()
             confidence = str(payload.get("confidence", "low")).strip().lower()[:16] or "low"
+            output_strategy = str(payload.get("output_strategy", "single_file")).strip().lower()
+            if output_strategy not in ("file_per_item", "single_file", "no_file"):
+                output_strategy = "single_file"
+            output_filename_template = str(payload.get("output_filename_template", "")).strip()[:200]
+            final_action = str(payload.get("final_action", "write_file")).strip().lower()
+            if final_action not in ("write_file", "reply", "email", "api_call"):
+                final_action = "write_file"
 
         if not has_list_work and not members:
             return fallback
@@ -1128,6 +1141,9 @@ class AgentReasoningMixin:
             "strategy": strategy,
             "per_member_action": per_member_action,
             "confidence": confidence,
+            "output_strategy": output_strategy,
+            "output_filename_template": output_filename_template,
+            "final_action": final_action,
         }
         preview = ", ".join(members[:8]) if members else "(none)"
         if len(members) > 8:
@@ -1140,6 +1156,9 @@ class AgentReasoningMixin:
                 "members": len(members),
                 "strategy": strategy,
                 "confidence": confidence,
+                "output_strategy": output_strategy,
+                "output_filename_template": output_filename_template,
+                "final_action": final_action,
             },
             (
                 "step=list_extract_done\n"
@@ -1147,6 +1166,9 @@ class AgentReasoningMixin:
                 f"members={len(members)}\n"
                 f"strategy={strategy}\n"
                 f"confidence={confidence}\n"
+                f"output_strategy={output_strategy}\n"
+                f"output_filename_template={output_filename_template}\n"
+                f"final_action={final_action}\n"
                 f"members_preview={preview}"
             ),
         )

@@ -224,7 +224,7 @@ class AgentToolLoopMixin:
         # first successful glob (indicated by _glob_completed flag) or
         # when items are URLs (no glob discovery needed).
         has_urls = any(
-            item.startswith(("http://", "https://")) for item in items[:5]
+            "http://" in item or "https://" in item for item in items[:5]
         )
         glob_completed = sp.get("_glob_completed", False)
         if tool_lower == "glob" and (glob_completed or has_urls):
@@ -236,18 +236,32 @@ class AgentToolLoopMixin:
                 f"SCALE GUARD: Item list is already known ({len(items)} items, "
                 f"{len(remaining)} remaining). Do NOT re-glob.\n"
                 f"Your NEXT item to process is:\n  {short}\n"
-                "Extract/read it now, then write(append=true) its summary."
+                "Process it now (fetch/read, then write its result)."
             )
 
-        # ── Guard 2: Block read on the output file ──
+        # ── Guard 2: Block read on output file(s) ──
         # Track the output file from the first write call.
+        # For file_per_item mode, also block reads on any previously
+        # written per-item files.
         output_file = sp.get("_output_file", "")
-        if tool_lower == "read" and output_file and isinstance(arguments, dict):
+        output_files_set: set[str] = sp.get("_output_files", set())
+        if tool_lower == "read" and isinstance(arguments, dict):
             read_path = str(arguments.get("path", arguments.get("file_path", ""))).strip()
             if read_path:
                 read_abs = os.path.abspath(read_path)
-                output_abs = os.path.abspath(output_file)
-                if read_abs == output_abs:
+                # Check against single output file
+                is_output = False
+                if output_file:
+                    output_abs = os.path.abspath(output_file)
+                    if read_abs == output_abs:
+                        is_output = True
+                # Check against all per-item output files
+                if not is_output and output_files_set:
+                    for of in output_files_set:
+                        if read_abs == os.path.abspath(of):
+                            is_output = True
+                            break
+                if is_output:
                     next_item = remaining[0]
                     short = next_item
                     if "/workspace/" in next_item:
@@ -256,10 +270,10 @@ class AgentToolLoopMixin:
                     total = len(items)
                     return (
                         f"SCALE GUARD: Do NOT re-read the output file. "
-                        f"You have written {done} of {total} items to it — "
-                        f"trust the append. {len(remaining)} items remain.\n"
+                        f"You have written {done} of {total} items — "
+                        f"trust the write. {len(remaining)} items remain.\n"
                         f"Your NEXT item to process is:\n  {short}\n"
-                        "Extract/read it now, then write(append=true) its summary."
+                        "Extract/read it now, then write its result."
                     )
 
         # ── Guard 3: Block re-extraction of already-done items ──
@@ -322,10 +336,26 @@ class AgentToolLoopMixin:
         has_paths = any("/" in item and not item.startswith("http") for item in items[:5])
         has_urls = any(item.startswith(("http://", "https://")) for item in items[:5])
 
+        # Detect output strategy
+        output_strategy = str(sp.get("_output_strategy", "single_file")).strip().lower()
+        filename_template = str(sp.get("_output_filename_template", "")).strip()
+
         lines = [
             "--- SCALE PROGRESS (auto-tracked) ---",
             f"Total items: {total}  |  Completed: {done}  |  Remaining: {len(remaining)}",
         ]
+        if output_strategy == "file_per_item":
+            lines.append(
+                f"OUTPUT: SEPARATE file per item (template: {filename_template or 'per-item filename'}). "
+                "Use write(append=false) for each item."
+            )
+        elif output_strategy == "no_file":
+            final_action = str(sp.get("_final_action", "reply")).strip()
+            lines.append(
+                f"OUTPUT: No file output — final action is: {final_action}."
+            )
+        else:
+            lines.append("OUTPUT: Single file with append=true.")
         if has_urls:
             lines.append(
                 "The item list is already known (URLs). "
@@ -351,23 +381,35 @@ class AgentToolLoopMixin:
             lines.append(f"  ... and {overflow} more items after these.")
         lines.append("")
         lines.append(
-            "⚡ GUARD ACTIVE: glob, output-file reads, and re-extraction of "
+            "\u26a1 GUARD ACTIVE: glob, output-file reads, and re-extraction of "
             "completed items will be BLOCKED automatically."
         )
+
+        # Write instruction varies by output strategy
+        if output_strategy == "file_per_item":
+            write_instr = (
+                "write its result to a NEW per-item file "
+                f"(template: {filename_template or 'per-item filename'}, append=false)."
+            )
+        elif output_strategy == "no_file":
+            write_instr = "deliver its result (no file output needed)."
+        else:
+            write_instr = "write(append=true) its summary."
+
         if has_paths:
             lines.append(
-                "Process the NEXT item in this list. Extract/read it, "
-                "then immediately write(append=true) its summary."
+                f"Process the NEXT item in this list. Extract/read it, "
+                f"then immediately {write_instr}"
             )
         elif has_urls:
             lines.append(
-                "Process the NEXT URL in this list. Fetch it, "
-                "then immediately write(append=true) its summary."
+                f"Process the NEXT URL in this list. Fetch it, "
+                f"then immediately {write_instr}"
             )
         else:
             lines.append(
-                "Process the NEXT item in this list. Process it, "
-                "then immediately write(append=true) its result."
+                f"Process the NEXT item in this list. Process it, "
+                f"then immediately {write_instr}"
             )
         lines.append("--- END SCALE PROGRESS ---")
         return "\n".join(lines)
@@ -399,14 +441,66 @@ class AgentToolLoopMixin:
         ".pptx": ("pptx_extract", "path"),
     }
 
+    # Regex to find the first URL embedded anywhere in a string.
+    _URL_RE = re.compile(r"https?://[^\s)\]}>\"']+")
+
+    @staticmethod
+    def _derive_member_label(item: str) -> str:
+        """Derive a short label from an item string for use in per-item filenames.
+
+        For items like ``"18.07.2025. https://example.com/page"`` → ``"18.07.2025"``
+        For items like ``"https://example.com/page"`` → ``"page"`` (last URL path segment)
+        For file paths → the filename without extension.
+        """
+        item = item.strip()
+        # Try extracting a date-like prefix (e.g. "18.07.2025. https://...")
+        date_match = re.match(r"^(\d{1,2}\.\d{1,2}\.\d{4})", item)
+        if date_match:
+            return date_match.group(1)
+        # Try extracting a date prefix with dashes (e.g. "2025-07-18 https://...")
+        date_match2 = re.match(r"^(\d{4}-\d{2}-\d{2})", item)
+        if date_match2:
+            return date_match2.group(1)
+        # For plain URLs, use the last meaningful path segment
+        if item.startswith(("http://", "https://")):
+            try:
+                from urllib.parse import urlparse
+                path = urlparse(item).path.strip("/")
+                if path:
+                    return path.rsplit("/", 1)[-1].split(".")[0] or path
+            except Exception:
+                pass
+            return item.rsplit("/", 1)[-1][:40]
+        # For "prefix - url" or "prefix url" items with embedded URLs
+        url_match = re.search(r"https?://", item)
+        if url_match:
+            prefix = item[:url_match.start()].strip().rstrip(".-:").strip()
+            if prefix:
+                return prefix
+        # For file paths, use filename without extension
+        if "/" in item or "\\" in item:
+            basename = os.path.basename(item)
+            name, _ = os.path.splitext(basename)
+            return name or basename
+        # Fallback: the item itself, cleaned up
+        return re.sub(r"[^\w.\-]", "_", item)[:60]
+
     def _detect_item_extractor(self, item: str) -> tuple[str, dict[str, Any]]:
         """Determine which tool and arguments to use for extracting an item.
 
         Returns ``(tool_name, arguments_dict)``.
+
+        Handles plain URLs, URLs with prefixes (``"18.07.2025 - https://…"``),
+        file paths, and document extensions.
         """
         # URL items → web_fetch
+        # Check both "starts with URL" and "contains a URL somewhere"
+        # (e.g. "18.07.2025 - https://example.com/page")
         if item.startswith(("http://", "https://")):
-            return "web_fetch", {"url": item}
+            return "web_fetch", {"url": item.strip()}
+        url_match = self._URL_RE.search(item)
+        if url_match:
+            return "web_fetch", {"url": url_match.group(0)}
         # File path items → check extension
         ext = os.path.splitext(item)[-1].lower()
         if ext in self._SCALE_ITEM_EXTRACTOR:
@@ -422,6 +516,7 @@ class AgentToolLoopMixin:
         extracted_content: str,
         is_first_item: bool = False,
         previous_summary_sample: str = "",
+        output_strategy: str = "single_file",
     ) -> list[Message]:
         """Build a minimal message list for processing a single scale item.
 
@@ -432,7 +527,22 @@ class AgentToolLoopMixin:
 
         ``previous_summary_sample`` optionally provides the last written
         summary so the LLM can match the formatting pattern.
+
+        ``output_strategy`` controls the write instructions:
+        - ``single_file``: output is appended to a shared file
+        - ``file_per_item``: output is the complete content for a standalone file
         """
+        if output_strategy == "file_per_item":
+            output_instruction = (
+                "- Just output the COMPLETE file content for this single item.\n"
+                "- The output will be written as a standalone file (not appended).\n"
+                "- Include any necessary headers (e.g. CSV headers) in the output."
+            )
+        else:
+            output_instruction = (
+                "- Just output the processed content that should be appended to the output file."
+            )
+
         system_text = (
             "You are a document processing assistant. Your job is to process "
             "ONE item and produce a focused summary or processed result.\n\n"
@@ -443,7 +553,7 @@ class AgentToolLoopMixin:
             "- Do NOT mention other items, the total count, or the overall task.\n"
             "- Do NOT echo or reproduce the extracted content — summarize it.\n"
             "- NEVER include 'EXTRACTED CONTENT' sections in your output.\n"
-            "- Just output the processed content that should be appended to the output file."
+            f"{output_instruction}"
         )
 
         user_parts = [f"TASK: {task_description}\n"]
@@ -485,6 +595,23 @@ class AgentToolLoopMixin:
             Message(role="user", content="\n".join(user_parts)),
         ]
 
+    def _resolve_per_item_filename(
+        self,
+        item: str,
+        template: str,
+        output_dir: str,
+    ) -> str:
+        """Resolve the per-item output filename from a template.
+
+        ``template`` uses ``{member_label}`` as the placeholder.
+        ``output_dir`` is the directory where files should be written.
+        """
+        label = self._derive_member_label(item)
+        filename = template.replace("{member_label}", label)
+        if output_dir:
+            return os.path.join(output_dir, filename)
+        return filename
+
     async def _run_scale_micro_loop(
         self,
         task_description: str,
@@ -498,12 +625,17 @@ class AgentToolLoopMixin:
         This method takes over from the main iteration loop when the
         scale-progress system has all the information it needs:
         - ``_scale_progress["items"]`` — the full item list
-        - ``_scale_progress["_output_file"]`` — where to write
+        - ``_scale_progress["_output_file"]`` — where to write (single_file)
+        - ``_scale_progress["_output_strategy"]`` — output strategy
+        - ``_scale_progress["_output_filename_template"]`` — template for
+          per-item filenames (file_per_item strategy)
 
         For each unprocessed item:
         1. Execute the extractor tool directly (no LLM needed)
         2. Make a single LLM call with minimal context to process it
-        3. Execute write(append=true) directly (no LLM needed)
+        3. Write the result:
+           - single_file: execute write(append=true) to the shared output file
+           - file_per_item: execute write(append=false) to a per-item file
         4. Update scale progress tracking
 
         Returns a summary dict with ``success``, ``processed``, ``failed``,
@@ -530,11 +662,33 @@ class AgentToolLoopMixin:
         import time as _time
 
         _loop_start = _time.monotonic()
+
+        # Determine output strategy
+        _output_strategy = str(sp.get("_output_strategy", "single_file")).strip().lower()
+        _filename_template = str(sp.get("_output_filename_template", "")).strip()
+        _is_file_per_item = _output_strategy == "file_per_item" and bool(_filename_template)
+        # For file_per_item, resolve the output directory from the first
+        # written file or from the output_file path.
+        _output_dir = ""
+        if _is_file_per_item:
+            # Use the directory of the first output file if available
+            _first_output = ""
+            output_files_set: set[str] = sp.get("_output_files", set())
+            if output_files_set:
+                _first_output = next(iter(output_files_set))
+            if _first_output:
+                _output_dir = os.path.dirname(_first_output)
+            elif output_file:
+                _output_dir = os.path.dirname(output_file)
+
         log.info(
             "Starting micro-turn scale loop",
             total=total,
             remaining=len(remaining),
             output_file=output_file,
+            output_strategy=_output_strategy,
+            is_file_per_item=_is_file_per_item,
+            filename_template=_filename_template,
         )
 
         processed = 0
@@ -557,7 +711,9 @@ class AgentToolLoopMixin:
                 if tool_name != "write":
                     continue
                 args = msg.get("tool_arguments")
-                if isinstance(args, dict) and args.get("append") is True:
+                if isinstance(args, dict):
+                    # Accept both append=True (single_file) and append=False
+                    # (file_per_item) as valid format references.
                     last_summary = str(args.get("content", "")).strip()
                     break
 
@@ -684,6 +840,7 @@ class AgentToolLoopMixin:
                 extracted_content=extracted_content,
                 is_first_item=(item_num == 1),
                 previous_summary_sample=last_summary,
+                output_strategy=_output_strategy,
             )
 
             # Log context size for this micro-call
@@ -771,13 +928,23 @@ class AgentToolLoopMixin:
                 _clean = _clean[:-3].rstrip("\n")
             _clean = _clean.strip()
 
-            # Add a single clean separator between items
-            write_content = f"\n\n---\n\n{_clean}"
+            # Determine write path and mode based on output strategy
+            if _is_file_per_item:
+                # Per-item file: write to a unique file per item
+                write_path_arg = self._resolve_per_item_filename(
+                    item, _filename_template, _output_dir,
+                )
+                write_content = _clean
+                write_append = False
+            else:
+                # Single file: append with separator
+                write_content = f"\n\n---\n\n{_clean}"
+                # Use the original write argument (before the write tool
+                # resolves it under the saved root) so the tool doesn't
+                # double-resolve an already-absolute path.
+                write_path_arg = sp.get("_output_file_arg", output_file)
+                write_append = True
 
-            # Use the original write argument (before the write tool
-            # resolves it under the saved root) so the tool doesn't
-            # double-resolve an already-absolute path.
-            write_path_arg = sp.get("_output_file_arg", output_file)
             _t_write_start = _time.monotonic()
             try:
                 write_result = await self._execute_tool_with_guard(
@@ -785,7 +952,7 @@ class AgentToolLoopMixin:
                     arguments={
                         "path": write_path_arg,
                         "content": write_content,
-                        "append": True,
+                        "append": write_append,
                     },
                     interaction_label=f"scale_write_{item_num}",
                     turn_usage=turn_usage,
@@ -949,6 +1116,10 @@ class AgentToolLoopMixin:
         3. At least the first item has been processed by the LLM
            (so we know the format/structure)
         4. There are remaining items to process
+        5. Output strategy is compatible:
+           - single_file: must be writing to a SINGLE file (original behavior)
+           - file_per_item: always compatible (micro-loop creates per-item files)
+           - no_file: not compatible (micro-loop needs file output)
         """
         sp = getattr(self, "_scale_progress", None)
         if sp is None:
@@ -956,9 +1127,35 @@ class AgentToolLoopMixin:
         items = sp.get("items", [])
         if not items:
             return False
-        output_file = sp.get("_output_file", "") or sp.get("_output_file_arg", "")
-        if not output_file:
+
+        output_strategy = str(sp.get("_output_strategy", "single_file")).strip().lower()
+
+        # no_file output strategy — micro-loop cannot take over because
+        # the final action is not file-based (email, API, reply, etc.).
+        if output_strategy == "no_file":
             return False
+
+        if output_strategy == "file_per_item":
+            # For file-per-item: we need the filename template and at least
+            # one item done so we know the format.
+            filename_template = str(sp.get("_output_filename_template", "")).strip()
+            if not filename_template:
+                # No template — need at least one write to infer the pattern.
+                # Check if the LLM has written at least one per-item file.
+                output_files: set[str] = sp.get("_output_files", set())
+                if not output_files:
+                    return False
+        else:
+            # single_file mode (original behavior)
+            output_file = sp.get("_output_file", "") or sp.get("_output_file_arg", "")
+            if not output_file:
+                return False
+            # If the LLM is creating separate files per item but we expected
+            # single_file, the micro-loop cannot take over.
+            output_files = sp.get("_output_files", set())
+            if len(output_files) > 1:
+                return False
+
         # At least 1 item done — the LLM has established the format.
         # Use both done_items (path-matched) and completed (counter)
         # as indicators since done_items matching can be fuzzy.
@@ -1710,113 +1907,141 @@ class AgentToolLoopMixin:
                         #   _output_file_arg: the original arg passed to
                         #     the write tool (for the micro-loop to reuse,
                         #     since the write tool re-resolves its input)
+                        # Extract the real resolved path from the tool result.
+                        real_path = ""
+                        if result.content and " to " in result.content:
+                            after_to = result.content.split(" to ", 1)[-1]
+                            real_path = after_to.split(" (requested:")[0].strip()
+                        if not real_path:
+                            write_path = str(arguments.get("path", "")).strip()
+                            if write_path:
+                                real_path = os.path.abspath(write_path)
                         if not sp.get("_output_file"):
-                            # Extract the real resolved path from the tool
-                            # result ("Written N chars to /actual/path")
-                            real_path = ""
-                            if result.content and " to " in result.content:
-                                after_to = result.content.split(" to ", 1)[-1]
-                                real_path = after_to.split(" (requested:")[0].strip()
-                            if not real_path:
-                                write_path = str(arguments.get("path", "")).strip()
-                                if write_path:
-                                    real_path = os.path.abspath(write_path)
                             if real_path:
                                 sp["_output_file"] = real_path
                             # Also keep the original argument for micro-loop
                             original_arg = str(arguments.get("path", "")).strip()
                             if original_arg:
                                 sp["_output_file_arg"] = original_arg
-                        if arguments.get("append") is True:
+                        # Track distinct output files.  When the LLM writes
+                        # to MULTIPLE different files (one per item), the
+                        # micro-loop cannot take over because it assumes a
+                        # single output file with appends.
+                        if real_path:
+                            output_files: set[str] = sp.setdefault("_output_files", set())
+                            output_files.add(real_path)
+                        # Track item completion.
+                        # For append=True: match written content against items.
+                        # For append=False: also try matching — the LLM may
+                        # write separate files per item (e.g. "FinSMEs-18.07.2025.csv"
+                        # for item "18.07.2025. https://…").
+                        is_append = arguments.get("append") is True
+                        if is_append:
                             sp["completed"] = sp.get("completed", 0) + 1
-                            # Mark item as done by matching the written
-                            # content against the items list.  The LLM
-                            # typically includes the item identifier
-                            # (filename, URL, name) in the first few lines
-                            # of each appended summary section.
-                            written_content = str(arguments.get("content", ""))
-                            # Check a broader portion of written content —
-                            # not just the first line — to catch items
-                            # mentioned in markdown headers, sub-headings, etc.
-                            content_head = written_content[:500].lower()
-                            done_items: set[str] = sp.get("done_items", set())
-                            items: list[str] = sp.get("items", [])
-                            for item in items:
-                                if item in done_items:
-                                    continue
-                                # Build match candidates for this item:
-                                # - filename (last path component)
-                                # - URL domain+path for web URLs
-                                # - the item itself (lowered)
-                                candidates: list[str] = []
-                                if "/" in item:
-                                    # Could be a file path or URL
-                                    candidates.append(item.rsplit("/", 1)[-1].lower())
-                                # The item itself (e.g. "index.hr/...", "Company Name")
-                                candidates.append(item.lower())
-                                # For URLs, also match just the path portion
-                                if item.startswith(("http://", "https://")):
-                                    try:
-                                        from urllib.parse import urlparse
-                                        parsed = urlparse(item)
-                                        path_part = parsed.path.strip("/")
-                                        if path_part:
-                                            candidates.append(path_part.lower())
-                                        # hostname + path for partial matching
-                                        if parsed.hostname:
-                                            candidates.append(
-                                                f"{parsed.hostname}{parsed.path}".lower()
-                                            )
-                                    except Exception:
-                                        pass
-                                # For non-path items (e.g. "Company Name"),
-                                # also try normalized form
-                                if " " in item:
-                                    candidates.append(
-                                        re.sub(r"[^a-z0-9]+", " ", item.lower()).strip()
-                                    )
-                                matched = any(
-                                    c and c in content_head
-                                    for c in candidates
-                                    if len(c) >= 3
-                                )
-                                if matched:
-                                    done_items.add(item)
-                                    break
-                            sp["done_items"] = done_items
-                            total = sp.get("total", 0)
-                            done = sp["completed"]
-                            path = str(arguments.get("path", "")).strip()
-                            filename = path.rsplit("/", 1)[-1] if path else ""
-                            if total > 0:
-                                pct = int(done / total * 100)
-                                progress_text = f"{done} of {total} ({pct}%)"
+                        # Build a search text from both file content and path.
+                        written_content = str(arguments.get("content", ""))
+                        write_path = str(arguments.get("path", "")).strip().lower()
+                        # Check a broader portion of written content —
+                        # not just the first line — to catch items
+                        # mentioned in markdown headers, sub-headings, etc.
+                        content_head = written_content[:500].lower()
+                        # For non-append writes, also search in the file path
+                        # (the LLM may embed the item identifier in the filename).
+                        search_text = content_head + " " + write_path
+                        done_items: set[str] = sp.get("done_items", set())
+                        items: list[str] = sp.get("items", [])
+                        for item in items:
+                            if item in done_items:
+                                continue
+                            # Build match candidates for this item:
+                            # - filename (last path component)
+                            # - URL domain+path for web URLs
+                            # - the item itself (lowered)
+                            candidates: list[str] = []
+                            if "/" in item:
+                                # Could be a file path or URL
+                                candidates.append(item.rsplit("/", 1)[-1].lower())
+                            # The item itself (e.g. "index.hr/...", "Company Name")
+                            candidates.append(item.lower())
+                            # For URLs, also match just the path portion.
+                            # Handle both plain URLs and items with
+                            # embedded URLs (e.g. "18.07.2025 - https://…")
+                            _url_in_item = None
+                            if item.startswith(("http://", "https://")):
+                                _url_in_item = item
                             else:
-                                progress_text = f"{done} items written"
-                            # Show last-written filename in the indicator.
-                            # Look at the content to extract a section title
-                            # if it starts with "## " or "# ".
-                            content_str = str(arguments.get("content", ""))
-                            label = ""
-                            for cline in content_str.splitlines():
-                                cline = cline.strip()
-                                if cline.startswith("#"):
-                                    label = cline.lstrip("#").strip()[:60]
-                                    break
-                            if not label and filename:
-                                label = filename[:60]
-                            display = f"📄 {progress_text}"
-                            if label:
-                                display += f" — {label}"
-                            self._emit_thinking(display, tool="progress", phase="tool")
-                            # ── Context trimming ─────────────────────
-                            # After successfully writing a summary, the
-                            # full extracted content of previous items is
-                            # no longer needed.  Trim large tool results
-                            # from earlier in the turn to keep the context
-                            # lean and prevent the LLM from "forgetting"
-                            # where it is in the list.
-                            self._trim_processed_extracts_in_session()
+                                _um = re.search(r"https?://[^\s)\]}>\"']+", item)
+                                if _um:
+                                    _url_in_item = _um.group(0)
+                            if _url_in_item:
+                                try:
+                                    from urllib.parse import urlparse
+                                    parsed = urlparse(_url_in_item)
+                                    path_part = parsed.path.strip("/")
+                                    if path_part:
+                                        candidates.append(path_part.lower())
+                                    # hostname + path for partial matching
+                                    if parsed.hostname:
+                                        candidates.append(
+                                            f"{parsed.hostname}{parsed.path}".lower()
+                                        )
+                                except Exception:
+                                    pass
+                            # Extract date-like tokens from items
+                            # (e.g. "18.07.2025" from "18.07.2025. https://…")
+                            _date_m = re.search(r"\d{2}\.\d{2}\.\d{4}", item)
+                            if _date_m:
+                                candidates.append(_date_m.group(0))
+                            # For non-path items (e.g. "Company Name"),
+                            # also try normalized form
+                            if " " in item:
+                                candidates.append(
+                                    re.sub(r"[^a-z0-9]+", " ", item.lower()).strip()
+                                )
+                            matched = any(
+                                c and c in search_text
+                                for c in candidates
+                                if len(c) >= 3
+                            )
+                            if matched:
+                                done_items.add(item)
+                                if not is_append:
+                                    sp["completed"] = sp.get("completed", 0) + 1
+                                break
+                        sp["done_items"] = done_items
+                        total = sp.get("total", 0)
+                        done = sp["completed"]
+                        path = str(arguments.get("path", "")).strip()
+                        filename = path.rsplit("/", 1)[-1] if path else ""
+                        if total > 0:
+                            pct = int(done / total * 100)
+                            progress_text = f"{done} of {total} ({pct}%)"
+                        else:
+                            progress_text = f"{done} items written"
+                        # Show last-written filename in the indicator.
+                        # Look at the content to extract a section title
+                        # if it starts with "## " or "# ".
+                        content_str = str(arguments.get("content", ""))
+                        label = ""
+                        for cline in content_str.splitlines():
+                            cline = cline.strip()
+                            if cline.startswith("#"):
+                                label = cline.lstrip("#").strip()[:60]
+                                break
+                        if not label and filename:
+                            label = filename[:60]
+                        display = f"📄 {progress_text}"
+                        if label:
+                            display += f" — {label}"
+                        self._emit_thinking(display, tool="progress", phase="tool")
+                        # ── Context trimming ─────────────────────
+                        # After successfully writing a summary, the
+                        # full extracted content of previous items is
+                        # no longer needed.  Trim large tool results
+                        # from earlier in the turn to keep the context
+                        # lean and prevent the LLM from "forgetting"
+                        # where it is in the list.
+                        self._trim_processed_extracts_in_session()
 
                 # Auto-capture contacts from send_mail usage.
                 if result.success and hasattr(self, "_auto_capture_contacts_from_tool_call"):
