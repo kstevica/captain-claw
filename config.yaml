@@ -101,6 +101,8 @@ tools:
   - google_drive
   - todo
   - contacts
+  - scripts
+  - apis
   shell:
     timeout: 30
     blocked:
@@ -245,6 +247,16 @@ todo:
   max_items_in_prompt: 10
   archive_after_days: 30
 addressbook:
+  enabled: true
+  auto_capture: true
+  inject_on_mention: true
+  max_items_in_prompt: 5
+scripts_memory:
+  enabled: true
+  auto_capture: true
+  inject_on_mention: true
+  max_items_in_prompt: 5
+apis_memory:
   enabled: true
   auto_capture: true
   inject_on_mention: true

@@ -14,6 +14,76 @@ log = get_logger(__name__)
 
 class AgentToolLoopMixin:
     """Extract commands, parse embedded tool calls, and execute tool loops."""
+
+    @staticmethod
+    def _tool_thinking_summary(tool_name: str, arguments: dict[str, Any]) -> str:
+        """Derive a short human-readable summary of a tool call for the thinking indicator."""
+        name = str(tool_name or "").strip().lower()
+        # ── Core tools ──────────────────────────────────────
+        if name == "read":
+            path = str(arguments.get("path", arguments.get("file_path", ""))).strip()
+            return f"Reading: {path.rsplit('/', 1)[-1]}" if path else "Reading file"
+        if name == "write":
+            path = str(arguments.get("path", arguments.get("file_path", ""))).strip()
+            return f"Writing: {path.rsplit('/', 1)[-1]}" if path else "Writing file"
+        if name == "shell":
+            cmd = str(arguments.get("command", "")).strip()
+            return f"Running: {cmd[:60]}" if cmd else "Running shell command"
+        if name == "web_fetch":
+            url = str(arguments.get("url", "")).strip()
+            return f"Fetching: {url[:60]}" if url else "Fetching URL"
+        if name == "web_search":
+            query = str(arguments.get("query", "")).strip()
+            return f"Searching: {query[:60]}" if query else "Searching the web"
+        if name == "send_mail":
+            to = str(arguments.get("to", "")).strip()
+            return f"Sending email to {to}" if to else "Sending email"
+        if name in {"todos", "contacts", "scripts", "apis"}:
+            action = str(arguments.get("action", "list")).strip()
+            return f"{action.capitalize()}: {name} memory"
+        # ── Memory & context ────────────────────────────────
+        if name == "memory_select":
+            query = str(arguments.get("query", "")).strip()
+            return f"Selecting memory context: {query[:50]}" if query else "Selecting memory context"
+        if name == "memory_semantic_select":
+            query = str(arguments.get("query", "")).strip()
+            return f"Semantic memory search: {query[:50]}" if query else "Semantic memory search"
+        # ── Pipeline & planning ─────────────────────────────
+        if name == "task_contract":
+            step = str(arguments.get("step", "")).strip()
+            return f"Task planner: {step}" if step else "Generating task contract"
+        if name == "completion_gate":
+            step = str(arguments.get("step", "")).strip()
+            return f"Completion check: {step}" if step else "Evaluating completion"
+        if name == "planning":
+            event = str(arguments.get("event", "")).strip()
+            return f"Planning: {event}" if event else "Updating plan"
+        if name == "pipeline_trace":
+            return "Pipeline trace"
+        # ── Guards ──────────────────────────────────────────
+        if name.startswith("guard_"):
+            guard_type = name[6:]
+            decision = str(arguments.get("decision", "")).strip()
+            return f"Guard ({guard_type}): {decision}" if decision else f"Checking guard: {guard_type}"
+        # ── Session management ──────────────────────────────
+        if name == "compaction":
+            trigger = str(arguments.get("trigger", "")).strip()
+            return f"Compacting messages: {trigger}" if trigger else "Compacting session messages"
+        if name == "session_procreate":
+            step = str(arguments.get("step", "")).strip()
+            return f"Session procreation: {step}" if step else "Procreating session"
+        # ── LLM tracing ────────────────────────────────────
+        if name == "llm_trace":
+            return "LLM trace"
+        # ── Media ──────────────────────────────────────────
+        if name == "pocket_tts":
+            return "Text-to-speech"
+        # ── Approval ───────────────────────────────────────
+        if name == "approval":
+            return "Auto-approved action"
+        # ── Fallback ───────────────────────────────────────
+        return f"Running: {tool_name}"
+
     def _extract_command_from_response(self, content: str) -> str | None:
         """Extract shell command from model response.
         
@@ -381,7 +451,7 @@ class AgentToolLoopMixin:
         for tc in tool_calls:
             self._set_runtime_status("running script")
             log.info("Executing tool", tool=tc.name, call_id=tc.id)
-            
+
             # Parse arguments (could be string or dict)
             arguments = tc.arguments
             if isinstance(arguments, str):
@@ -389,7 +459,12 @@ class AgentToolLoopMixin:
                     arguments = json.loads(arguments)
                 except json.JSONDecodeError:
                     arguments = {"raw": arguments}
-            
+
+            # Emit inline thinking indicator for the tool being executed.
+            args_dict = arguments if isinstance(arguments, dict) else {}
+            summary = self._tool_thinking_summary(tc.name, args_dict)
+            self._emit_thinking(summary, tool=tc.name, phase="tool")
+
             try:
                 # Execute tool
                 result = await self._execute_tool_with_guard(
@@ -429,8 +504,26 @@ class AgentToolLoopMixin:
                         await self._auto_capture_contacts_from_tool_call(
                             tc.name, arguments if isinstance(arguments, dict) else {},
                         )
-                    except Exception:
-                        pass
+                    except Exception as _ac_err:
+                        log.warning("Auto-capture contacts failed", tool=tc.name, error=str(_ac_err))
+
+                # Auto-capture scripts from write tool usage.
+                if result.success and hasattr(self, "_auto_capture_scripts_from_tool_call"):
+                    try:
+                        await self._auto_capture_scripts_from_tool_call(
+                            tc.name, arguments if isinstance(arguments, dict) else {},
+                        )
+                    except Exception as _ac_err:
+                        log.warning("Auto-capture scripts failed", tool=tc.name, error=str(_ac_err))
+
+                # Auto-capture APIs from web_fetch tool usage.
+                if result.success and hasattr(self, "_auto_capture_apis_from_tool_call"):
+                    try:
+                        await self._auto_capture_apis_from_tool_call(
+                            tc.name, arguments if isinstance(arguments, dict) else {},
+                        )
+                    except Exception as _ac_err:
+                        log.warning("Auto-capture APIs failed", tool=tc.name, error=str(_ac_err))
 
             except Exception as e:
                 log.error("Tool execution failed", tool=tc.name, error=str(e))

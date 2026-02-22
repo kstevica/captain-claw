@@ -18,6 +18,8 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [Cron Commands](#cron-commands)
   - [Todo Commands](#todo-commands)
   - [Contacts Commands](#contacts-commands)
+  - [Scripts Commands](#scripts-commands)
+  - [APIs Commands](#apis-commands)
   - [Skills Commands](#skills-commands)
   - [Orchestrator Commands](#orchestrator-commands)
   - [Admin Commands](#admin-commands)
@@ -31,6 +33,9 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [skills](#skills)
   - [guards](#guards)
   - [todo](#todo)
+  - [addressbook](#addressbook)
+  - [scripts_memory](#scripts_memory)
+  - [apis_memory](#apis_memory)
   - [session](#session)
   - [workspace](#workspace)
   - [ui](#ui)
@@ -47,6 +52,8 @@ For a quick overview and installation guide, see [README.md](README.md).
 - [Memory and RAG](#memory-and-rag)
 - [Cross-Session Todo Memory](#cross-session-todo-memory)
 - [Cross-Session Address Book](#cross-session-address-book)
+- [Cross-Session Script Memory](#cross-session-script-memory)
+- [Cross-Session API Memory](#cross-session-api-memory)
 - [Session Management](#session-management)
 - [Context Compaction](#context-compaction)
 - [Execution Queue](#execution-queue-1)
@@ -229,6 +236,32 @@ The agent can also manage todos via the `todo` tool during conversation. Items a
 | `/contacts remove <id\|#index\|name>` | Remove a contact |
 
 The agent can also manage contacts via the `contacts` tool during conversation. Contacts are persistent across sessions and support auto-capture from conversation and email recipients.
+
+### Scripts Commands
+
+| Command | Description |
+|---|---|
+| `/scripts` or `/scripts list` | List all scripts sorted by usage |
+| `/scripts add <name> <file_path>` | Register a new script |
+| `/scripts info <id\|#index\|name>` | Show full script details |
+| `/scripts search <query>` | Search scripts by name, path, or language |
+| `/scripts update <id\|#index\|name> <field=value ...>` | Update script fields |
+| `/scripts remove <id\|#index\|name>` | Remove a script |
+
+The agent can also manage scripts via the `scripts` tool during conversation. Scripts are persistent across sessions and support auto-capture from the `write` tool when executable file extensions are detected.
+
+### APIs Commands
+
+| Command | Description |
+|---|---|
+| `/apis` or `/apis list` | List all APIs sorted by usage |
+| `/apis add <name> <base_url>` | Register a new API |
+| `/apis info <id\|#index\|name>` | Show full API details |
+| `/apis search <query>` | Search APIs by name, URL, or description |
+| `/apis update <id\|#index\|name> <field=value ...>` | Update API fields |
+| `/apis remove <id\|#index\|name>` | Remove an API |
+
+The agent can also manage APIs via the `apis` tool during conversation. APIs are persistent across sessions and support auto-capture from `web_fetch` when API-like URLs are detected.
 
 ### Skills Commands
 
@@ -465,6 +498,45 @@ Persistent cross-session address book. The agent uses this tool to track people 
 
 Contact context is injected on demand when a known contact name appears in the user message, unlike todo which injects every turn.
 
+### scripts
+
+Persistent cross-session script/file memory. The agent uses this tool to track scripts and files it creates across sessions.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `add`, `list`, `search`, `info`, `update`, `remove` |
+| `name` | string | for add | Script name |
+| `script_id` | string | for info/update/remove | Script ID, `#index`, or name |
+| `file_path` | string | for add | Relative file path to the script |
+| `description` | string | no | Short description of the script |
+| `purpose` | string | no | What the script does |
+| `language` | string | no | Programming language (python, bash, javascript, etc.) |
+| `created_reason` | string | no | Why the script was created |
+| `tags` | string | no | Comma-separated tags |
+| `query` | string | for search | Search query |
+
+Scripts are auto-captured from `write` tool calls when executable file extensions are detected (.py, .sh, .js, .ts, .rb, .pl, .php, .go, .rs, .java, etc.). Script context is injected on demand when a known script name appears in the user message.
+
+### apis
+
+Persistent cross-session API memory. The agent uses this tool to track external APIs it interacts with across sessions.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `add`, `list`, `search`, `info`, `update`, `remove` |
+| `name` | string | for add | API name |
+| `api_id` | string | for info/update/remove | API ID, `#index`, or name |
+| `base_url` | string | for add | Base URL of the API |
+| `endpoints` | string | no | JSON list of endpoint definitions [{method, path, description}] |
+| `auth_type` | string | no | Authentication type: `bearer`, `api_key`, `basic`, `none` |
+| `credentials` | string | no | Authentication credentials (plaintext) |
+| `description` | string | no | Short description of the API |
+| `purpose` | string | no | What this API is used for |
+| `tags` | string | no | Comma-separated tags |
+| `query` | string | for search | Search query |
+
+APIs are auto-captured from `web_fetch` tool calls when API-like URL patterns are detected (URLs containing `/api/` or `/v[0-9]+/`). API context is injected on demand when a known API name or base URL appears in the user message. Credentials are stored as plaintext for easy injection into generated scripts.
+
 ---
 
 ## Configuration Reference
@@ -588,6 +660,8 @@ tools:
     - google_drive
     - todo
     - contacts
+    - scripts
+    - apis
   require_confirmation:           # tools that require user approval
     - shell
     - write
@@ -695,6 +769,26 @@ addressbook:
   auto_capture: true              # auto-detect contacts from conversation
   inject_on_mention: true         # inject contact context when name appears in message
   max_items_in_prompt: 5          # max contacts injected into context per turn
+```
+
+### scripts_memory
+
+```yaml
+scripts_memory:
+  enabled: true                   # enable cross-session script memory
+  auto_capture: true              # auto-detect scripts from write tool calls
+  inject_on_mention: true         # inject script context when name appears in message
+  max_items_in_prompt: 5          # max scripts injected into context per turn
+```
+
+### apis_memory
+
+```yaml
+apis_memory:
+  enabled: true                   # enable cross-session API memory
+  auto_capture: true              # auto-detect APIs from web_fetch tool calls
+  inject_on_mention: true         # inject API context when name/URL appears in message
+  max_items_in_prompt: 5          # max APIs injected into context per turn
 ```
 
 ### session
@@ -1019,6 +1113,71 @@ The `/contacts` command and `contacts` tool are available across all interfaces:
 
 ---
 
+## Cross-Session Script Memory
+
+Captain Claw includes a persistent script/file memory that tracks scripts and files the agent creates across sessions. Script metadata survives restarts and accumulates context over time.
+
+### How It Works
+
+- **Explicit capture:** Use `/scripts add <name> <path>` or tell the agent "remember script..." or "save script: ...".
+- **Auto-capture from write tool:** When the `write` tool creates a file with an executable extension (.py, .sh, .js, .ts, .rb, .pl, .php, .go, .rs, .java, etc.), it is automatically registered. Disabled with `scripts_memory.auto_capture: false`.
+- **Auto-capture from conversation:** Conservative pattern matching detects script-related phrases (e.g., "remember script...", "save script:...").
+- **On-demand context injection:** When a known script name appears in the user message, the agent receives relevant script metadata. Like contacts, scripts are NOT injected every turn.
+- **No file content in DB:** Only path and metadata are stored. File content can be regenerated if needed.
+- **Deduplication:** Scripts are deduplicated by file path — a new write to the same path updates the existing entry.
+
+### Tracked Fields
+
+| Field | Description |
+|---|---|
+| `name` | Script display name |
+| `file_path` | Relative path from workspace |
+| `language` | Programming language (auto-detected from extension) |
+| `description` | Short description |
+| `purpose` | What the script does |
+| `created_reason` | Why it was created |
+| `tags` | Comma-separated tags |
+| `use_count` | How many times the script has been referenced |
+
+### Availability
+
+The `/scripts` command and `scripts` tool are available across all interfaces: CLI, Web UI, Telegram, Slack, and Discord. The Web UI also exposes REST endpoints (`GET/POST /api/scripts`, `GET /api/scripts/search?q=`, `GET/PATCH/DELETE /api/scripts/{id}`).
+
+---
+
+## Cross-Session API Memory
+
+Captain Claw includes a persistent API memory that tracks external APIs the agent interacts with across sessions. API metadata and credentials survive restarts and accumulate context over time.
+
+### How It Works
+
+- **Explicit capture:** Use `/apis add <name> <base_url>` or tell the agent "remember api..." or "save api: ...".
+- **Auto-capture from web_fetch:** When `web_fetch` accesses a URL containing `/api/` or `/v[0-9]+/` patterns, the API is automatically registered. Disabled with `apis_memory.auto_capture: false`.
+- **Auto-capture from conversation:** Conservative pattern matching detects API-related phrases.
+- **On-demand context injection:** When a known API name or base URL appears in the user message, the agent receives relevant API details including credentials and endpoints. Like contacts, APIs are NOT injected every turn.
+- **Plaintext credentials:** API credentials are stored as plaintext for easy injection into generated scripts. This is a deliberate design choice for usability.
+- **Deduplication:** APIs are deduplicated by base URL — a new registration with the same base URL updates the existing entry.
+
+### Tracked Fields
+
+| Field | Description |
+|---|---|
+| `name` | API display name |
+| `base_url` | Base URL of the API |
+| `endpoints` | JSON list of endpoint definitions [{method, path, description}] |
+| `auth_type` | Authentication type: bearer, api_key, basic, none |
+| `credentials` | Authentication credentials (plaintext) |
+| `description` | Short description |
+| `purpose` | What this API is used for |
+| `tags` | Comma-separated tags |
+| `use_count` | How many times the API has been referenced |
+
+### Availability
+
+The `/apis` command and `apis` tool are available across all interfaces: CLI, Web UI, Telegram, Slack, and Discord. The Web UI also exposes REST endpoints (`GET/POST /api/apis`, `GET /api/apis/search?q=`, `GET/PATCH/DELETE /api/apis/{id}`).
+
+---
+
 ## Session Management
 
 ### Lifecycle
@@ -1296,7 +1455,7 @@ Captain Claw can run alongside Telegram, Slack, and Discord bots.
 
 ### Supported Remote Commands
 
-Remote users can use: `/help`, `/config`, `/history`, `/compact`, `/models`, `/sessions`, `/session info`, `/session select`, `/session rename`, `/skills`, `/skill`, `/skill search`, `/cron`, `/todo`, `/contacts`, `/pipeline`, `/planning`, `/orchestrate`.
+Remote users can use: `/help`, `/config`, `/history`, `/compact`, `/models`, `/sessions`, `/session info`, `/session select`, `/session rename`, `/skills`, `/skill`, `/skill search`, `/cron`, `/todo`, `/contacts`, `/scripts`, `/apis`, `/pipeline`, `/planning`, `/orchestrate`.
 
 Local-only commands (not available remotely): `/exit`, `/approve user`, `/session run`, `/session procreate`, `/session protect`, `/session export`, `/session queue`, `/monitor`, `/cron add/list/history/pause/resume/remove`.
 

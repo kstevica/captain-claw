@@ -417,6 +417,256 @@ class AgentContextMixin:
                 )
                 log.debug("Auto-captured contact from email", email=email_addr[:40])
 
+    # ------------------------------------------------------------------
+    # Scripts memory — context injection + auto-capture
+    # ------------------------------------------------------------------
+
+    async def _refresh_scripts_context_cache(self) -> None:
+        """Pre-fetch scripts for sync name matching."""
+        cfg = get_config()
+        if not cfg.scripts_memory.enabled:
+            return
+        sm = getattr(self, "session_manager", None)
+        if sm is None:
+            return
+        try:
+            self._scripts_context_cache = await sm.list_scripts(
+                limit=cfg.scripts_memory.max_items_in_prompt * 3,
+            )
+        except Exception:
+            self._scripts_context_cache = []
+
+    def _build_scripts_context_note(self, user_message: str) -> str:
+        """Build on-demand script context when names match user message."""
+        cfg = get_config()
+        if not cfg.scripts_memory.enabled or not cfg.scripts_memory.inject_on_mention:
+            return ""
+        scripts_cache = getattr(self, "_scripts_context_cache", None)
+        if not scripts_cache:
+            return ""
+        user_lower = user_message.lower()
+        matched = [s for s in scripts_cache if s.name.lower() in user_lower]
+        if not matched:
+            return ""
+        lines = ["Relevant scripts from memory:"]
+        for s in matched[: cfg.scripts_memory.max_items_in_prompt]:
+            parts = [s.name]
+            if s.language:
+                parts.append(f"({s.language})")
+            parts.append(f"at {s.file_path}")
+            if s.purpose:
+                parts.append(f"- {s.purpose[:200]}")
+            lines.append("- " + " ".join(parts))
+        lines.append('You have a "scripts" tool to manage script memory.')
+        return "\n".join(lines)
+
+    _SCRIPT_CAPTURE_PATTERNS: list[re.Pattern[str]] = [
+        re.compile(r"(?:^|\W)remember (?:the )?script\s+(\S+)", re.I),
+        re.compile(r"(?:^|\W)save script[:\s]+(.+)", re.I),
+    ]
+
+    async def _auto_capture_scripts(
+        self, user_message: str, assistant_response: str,
+    ) -> None:
+        """Extract script info from conversation via conservative pattern matching."""
+        cfg = get_config()
+        if not cfg.scripts_memory.enabled or not cfg.scripts_memory.auto_capture:
+            return
+        sm = getattr(self, "session_manager", None)
+        if sm is None:
+            return
+        session_id = self._current_session_slug() if self.session else None
+
+        for pattern in self._SCRIPT_CAPTURE_PATTERNS:
+            m = pattern.search(user_message)
+            if not m:
+                continue
+            name = m.group(1).strip().rstrip(".!,;")
+            if len(name) < 2:
+                continue
+            existing = await sm.search_scripts(name, limit=1)
+            if existing and existing[0].name.lower() == name.lower():
+                continue  # already tracked
+            await sm.create_script(
+                name=name,
+                file_path=name,  # best guess; user can update later
+                source_session=session_id,
+                created_reason="Auto-captured from conversation",
+            )
+            log.debug("Auto-captured script", name=name[:40])
+
+    _SCRIPT_EXTENSIONS = {
+        ".py", ".sh", ".bash", ".zsh", ".js", ".ts", ".rb", ".pl",
+        ".php", ".go", ".rs", ".java", ".c", ".cpp", ".swift",
+        ".kt", ".r", ".jl", ".lua", ".ps1", ".bat", ".cmd",
+    }
+
+    _LANG_MAP = {
+        ".py": "python", ".sh": "bash", ".bash": "bash", ".zsh": "zsh",
+        ".js": "javascript", ".ts": "typescript", ".rb": "ruby",
+        ".pl": "perl", ".php": "php", ".go": "go", ".rs": "rust",
+        ".java": "java", ".c": "c", ".cpp": "c++", ".swift": "swift",
+        ".kt": "kotlin", ".r": "r", ".jl": "julia", ".lua": "lua",
+        ".ps1": "powershell", ".bat": "batch", ".cmd": "batch",
+    }
+
+    async def _auto_capture_scripts_from_tool_call(
+        self, tool_name: str, arguments: dict[str, Any],
+    ) -> None:
+        """Extract script entries from write tool usage."""
+        cfg = get_config()
+        if not cfg.scripts_memory.enabled or not cfg.scripts_memory.auto_capture:
+            return
+        if tool_name != "write":
+            return
+        path_str = str(arguments.get("path", "")).strip()
+        if not path_str:
+            return
+        from pathlib import Path as _Path
+        ext = _Path(path_str).suffix.lower()
+        if ext not in self._SCRIPT_EXTENSIONS:
+            return
+        sm = getattr(self, "session_manager", None)
+        if sm is None:
+            return
+        session_id = self._current_session_slug() if self.session else None
+        name = _Path(path_str).stem
+        # Check for duplicate by path
+        existing = await sm.search_scripts(path_str, limit=1)
+        if existing and existing[0].file_path == path_str:
+            await sm.increment_script_usage(existing[0].id)
+            return
+        language = self._LANG_MAP.get(ext, ext.lstrip("."))
+        await sm.create_script(
+            name=name,
+            file_path=path_str,
+            language=language,
+            source_session=session_id,
+            created_reason="Auto-captured from write tool usage",
+        )
+        log.debug("Auto-captured script from write", path=path_str[:60])
+
+    # ------------------------------------------------------------------
+    # APIs memory — context injection + auto-capture
+    # ------------------------------------------------------------------
+
+    async def _refresh_apis_context_cache(self) -> None:
+        """Pre-fetch APIs for sync name/URL matching."""
+        cfg = get_config()
+        if not cfg.apis_memory.enabled:
+            return
+        sm = getattr(self, "session_manager", None)
+        if sm is None:
+            return
+        try:
+            self._apis_context_cache = await sm.list_apis(
+                limit=cfg.apis_memory.max_items_in_prompt * 3,
+            )
+        except Exception:
+            self._apis_context_cache = []
+
+    def _build_apis_context_note(self, user_message: str) -> str:
+        """Build on-demand API context when names/URLs match user message."""
+        cfg = get_config()
+        if not cfg.apis_memory.enabled or not cfg.apis_memory.inject_on_mention:
+            return ""
+        apis_cache = getattr(self, "_apis_context_cache", None)
+        if not apis_cache:
+            return ""
+        user_lower = user_message.lower()
+        matched = []
+        for a in apis_cache:
+            if a.name.lower() in user_lower:
+                matched.append(a)
+            elif a.base_url and a.base_url.lower() in user_lower:
+                matched.append(a)
+        if not matched:
+            return ""
+        lines = ["Relevant APIs from memory:"]
+        for a in matched[: cfg.apis_memory.max_items_in_prompt]:
+            parts = [a.name, f"({a.base_url})"]
+            if a.auth_type:
+                parts.append(f"[{a.auth_type}]")
+            if a.credentials:
+                parts.append(f"creds: {a.credentials[:80]}")
+            if a.purpose:
+                parts.append(f"- {a.purpose[:200]}")
+            lines.append("- " + " ".join(parts))
+        lines.append('You have an "apis" tool to manage API memory.')
+        return "\n".join(lines)
+
+    _API_CAPTURE_PATTERNS: list[re.Pattern[str]] = [
+        re.compile(r"(?:^|\W)remember (?:the )?api\s+(\S+)", re.I),
+        re.compile(r"(?:^|\W)save api[:\s]+(.+)", re.I),
+    ]
+
+    async def _auto_capture_apis(
+        self, user_message: str, assistant_response: str,
+    ) -> None:
+        """Extract API info from conversation via conservative pattern matching."""
+        cfg = get_config()
+        if not cfg.apis_memory.enabled or not cfg.apis_memory.auto_capture:
+            return
+        sm = getattr(self, "session_manager", None)
+        if sm is None:
+            return
+        session_id = self._current_session_slug() if self.session else None
+
+        for pattern in self._API_CAPTURE_PATTERNS:
+            m = pattern.search(user_message)
+            if not m:
+                continue
+            token = m.group(1).strip().rstrip(".!,;")
+            if len(token) < 2:
+                continue
+            existing = await sm.search_apis(token, limit=1)
+            if existing and existing[0].name.lower() == token.lower():
+                continue
+            await sm.create_api(
+                name=token,
+                base_url=token if token.startswith("http") else f"https://{token}",
+                source_session=session_id,
+                purpose="Auto-captured from conversation",
+            )
+            log.debug("Auto-captured API", name=token[:40])
+
+    async def _auto_capture_apis_from_tool_call(
+        self, tool_name: str, arguments: dict[str, Any],
+    ) -> None:
+        """Extract API entries from web_fetch tool usage."""
+        cfg = get_config()
+        if not cfg.apis_memory.enabled or not cfg.apis_memory.auto_capture:
+            return
+        if tool_name != "web_fetch":
+            return
+        url_str = str(arguments.get("url", "")).strip()
+        if not url_str:
+            return
+        import re as _re
+        if not _re.search(r"/(?:api|v[0-9]+)/", url_str, _re.I):
+            return
+        sm = getattr(self, "session_manager", None)
+        if sm is None:
+            return
+        session_id = self._current_session_slug() if self.session else None
+        from urllib.parse import urlparse
+        parsed = urlparse(url_str)
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        # Check for duplicate by base_url
+        existing = await sm.search_apis(base_url, limit=1)
+        if existing and existing[0].base_url == base_url:
+            await sm.increment_api_usage(existing[0].id)
+            return
+        name = parsed.netloc.replace("www.", "").split(".")[0].title()
+        await sm.create_api(
+            name=name,
+            base_url=base_url,
+            description=f"Endpoint: {parsed.path}",
+            source_session=session_id,
+            purpose="Auto-captured from web_fetch tool usage",
+        )
+        log.debug("Auto-captured API from web_fetch", url=base_url[:60])
+
     def _build_semantic_memory_note(
         self,
         query: str | None,
@@ -475,6 +725,8 @@ class AgentContextMixin:
 
         await self._refresh_todo_context_cache()
         await self._refresh_contacts_context_cache()
+        await self._refresh_scripts_context_cache()
+        await self._refresh_apis_context_cache()
 
         self._initialized = True
         log.info("Agent initialized", session_id=self.session.id)
@@ -493,6 +745,8 @@ class AgentContextMixin:
             ShellTool,
             TodoTool,
             ContactsTool,
+            ScriptsTool,
+            ApisTool,
             WebFetchTool,
             WebSearchTool,
             WriteTool,
@@ -533,6 +787,10 @@ class AgentContextMixin:
                 self.tools.register(TodoTool())
             elif tool_name == "contacts":
                 self.tools.register(ContactsTool())
+            elif tool_name == "scripts":
+                self.tools.register(ScriptsTool())
+            elif tool_name == "apis":
+                self.tools.register(ApisTool())
         self._register_plugin_tools()
 
     def _discover_plugin_tool_files(self) -> list[Path]:
@@ -1025,6 +1283,22 @@ class AgentContextMixin:
                 "content": contacts_note,
                 "tool_name": "contacts_context",
                 "token_count": self._count_tokens(contacts_note),
+            })
+        scripts_note = self._build_scripts_context_note(query or "") if query else ""
+        if scripts_note:
+            candidate_messages.append({
+                "role": "assistant",
+                "content": scripts_note,
+                "tool_name": "scripts_context",
+                "token_count": self._count_tokens(scripts_note),
+            })
+        apis_note = self._build_apis_context_note(query or "") if query else ""
+        if apis_note:
+            candidate_messages.append({
+                "role": "assistant",
+                "content": apis_note,
+                "tool_name": "apis_context",
+                "token_count": self._count_tokens(apis_note),
             })
 
         selected_reversed: list[dict[str, Any]] = []

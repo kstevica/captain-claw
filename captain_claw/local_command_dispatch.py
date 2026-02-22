@@ -862,6 +862,252 @@ async def dispatch_local_command(
             ui.print_error("Delete failed.")
         return "continue"
 
+    # ------------------------------------------------------------------
+    # Scripts memory management
+    # ------------------------------------------------------------------
+
+    if result == "SCRIPTS_LIST":
+        items = await agent.session_manager.list_scripts(limit=50)
+        if not items:
+            ui.print_message("system", "No scripts.")
+            return "continue"
+        lines: list[str] = []
+        for idx, s in enumerate(items, 1):
+            lang_part = f" ({s.language})" if s.language else ""
+            lines.append(
+                f"  #{idx} {s.name}{lang_part} [{s.file_path}]"
+                f"  uses={s.use_count}  id={s.id[:8]}"
+            )
+        ui.print_message("system", "Scripts:\n" + "\n".join(lines))
+        return "continue"
+
+    if result.startswith("SCRIPTS_ADD:"):
+        payload_raw = result.split(":", 1)[1].strip()
+        try:
+            payload = json.loads(payload_raw)
+        except Exception:
+            ui.print_error("Invalid /scripts add payload")
+            return "continue"
+        name = str(payload.get("name", "")).strip()
+        file_path = str(payload.get("file_path", "")).strip()
+        if not name or not file_path:
+            ui.print_error("Usage: /scripts add <name> <path>")
+            return "continue"
+        session_id = agent.session.id if agent.session else None
+        item = await agent.session_manager.create_script(
+            name=name, file_path=file_path, source_session=session_id,
+        )
+        ui.print_success(f"Added script #{item.id[:8]}: {name} at {file_path}")
+        return "continue"
+
+    if result.startswith("SCRIPTS_INFO:"):
+        selector = result.split(":", 1)[1].strip()
+        item = await agent.session_manager.select_script(selector)
+        if not item:
+            ui.print_error(f"Script not found: {selector}")
+            return "continue"
+        parts = [f"Name: {item.name}", f"ID: {item.id}", f"Path: {item.file_path}"]
+        if item.language:
+            parts.append(f"Language: {item.language}")
+        if item.description:
+            parts.append(f"Description: {item.description}")
+        if item.purpose:
+            parts.append(f"Purpose: {item.purpose}")
+        if item.created_reason:
+            parts.append(f"Created reason: {item.created_reason}")
+        if item.tags:
+            parts.append(f"Tags: {item.tags}")
+        parts.append(f"Uses: {item.use_count}")
+        if item.last_used_at:
+            parts.append(f"Last used: {item.last_used_at}")
+        parts.append(f"Created: {item.created_at}")
+        ui.print_message("system", "\n".join(parts))
+        return "continue"
+
+    if result.startswith("SCRIPTS_SEARCH:"):
+        query = result.split(":", 1)[1].strip()
+        items = await agent.session_manager.search_scripts(query, limit=20)
+        if not items:
+            ui.print_message("system", f"No scripts matching: {query}")
+            return "continue"
+        lines = []
+        for idx, s in enumerate(items, 1):
+            lang_part = f" ({s.language})" if s.language else ""
+            lines.append(
+                f"  #{idx} {s.name}{lang_part} [{s.file_path}]  id={s.id[:8]}"
+            )
+        ui.print_message("system", "Search results:\n" + "\n".join(lines))
+        return "continue"
+
+    if result.startswith("SCRIPTS_UPDATE:"):
+        raw = result.split(":", 1)[1].strip()
+        update_parts = raw.split(None, 1)
+        if len(update_parts) < 2:
+            ui.print_error("Usage: /scripts update <id|#index|name> <field=value ...>")
+            return "continue"
+        selector = update_parts[0]
+        fields_str = update_parts[1]
+        item = await agent.session_manager.select_script(selector)
+        if not item:
+            ui.print_error(f"Script not found: {selector}")
+            return "continue"
+        kwargs: dict[str, Any] = {}
+        valid_fields = {"name", "file_path", "description", "purpose", "language",
+                        "created_reason", "tags"}
+        for token in shlex.split(fields_str):
+            if "=" not in token:
+                continue
+            key, _, value = token.partition("=")
+            key = key.strip().lower()
+            if key in valid_fields:
+                kwargs[key] = value
+        if not kwargs:
+            ui.print_error("No valid fields to update. Use field=value syntax.")
+            return "continue"
+        ok = await agent.session_manager.update_script(item.id, **kwargs)
+        if ok:
+            ui.print_success(f"Updated script #{item.id[:8]}")
+        else:
+            ui.print_error("Update failed.")
+        return "continue"
+
+    if result.startswith("SCRIPTS_REMOVE:"):
+        selector = result.split(":", 1)[1].strip()
+        item = await agent.session_manager.select_script(selector)
+        if not item:
+            ui.print_error(f"Script not found: {selector}")
+            return "continue"
+        ok = await agent.session_manager.delete_script(item.id)
+        if ok:
+            ui.print_success(f"Removed script #{item.id[:8]}: {item.name}")
+        else:
+            ui.print_error("Delete failed.")
+        return "continue"
+
+    # ------------------------------------------------------------------
+    # APIs memory management
+    # ------------------------------------------------------------------
+
+    if result == "APIS_LIST":
+        items = await agent.session_manager.list_apis(limit=50)
+        if not items:
+            ui.print_message("system", "No APIs.")
+            return "continue"
+        lines: list[str] = []
+        for idx, a in enumerate(items, 1):
+            auth_part = f" [{a.auth_type}]" if a.auth_type else ""
+            lines.append(
+                f"  #{idx} {a.name}{auth_part} ({a.base_url})"
+                f"  uses={a.use_count}  id={a.id[:8]}"
+            )
+        ui.print_message("system", "APIs:\n" + "\n".join(lines))
+        return "continue"
+
+    if result.startswith("APIS_ADD:"):
+        payload_raw = result.split(":", 1)[1].strip()
+        try:
+            payload = json.loads(payload_raw)
+        except Exception:
+            ui.print_error("Invalid /apis add payload")
+            return "continue"
+        name = str(payload.get("name", "")).strip()
+        base_url = str(payload.get("base_url", "")).strip()
+        if not name or not base_url:
+            ui.print_error("Usage: /apis add <name> <base_url>")
+            return "continue"
+        session_id = agent.session.id if agent.session else None
+        item = await agent.session_manager.create_api(
+            name=name, base_url=base_url, source_session=session_id,
+        )
+        ui.print_success(f"Added API #{item.id[:8]}: {name} ({base_url})")
+        return "continue"
+
+    if result.startswith("APIS_INFO:"):
+        selector = result.split(":", 1)[1].strip()
+        item = await agent.session_manager.select_api(selector)
+        if not item:
+            ui.print_error(f"API not found: {selector}")
+            return "continue"
+        parts = [f"Name: {item.name}", f"ID: {item.id}", f"Base URL: {item.base_url}"]
+        if item.auth_type:
+            parts.append(f"Auth type: {item.auth_type}")
+        if item.credentials:
+            parts.append(f"Credentials: {item.credentials}")
+        if item.endpoints:
+            parts.append(f"Endpoints: {item.endpoints}")
+        if item.description:
+            parts.append(f"Description: {item.description}")
+        if item.purpose:
+            parts.append(f"Purpose: {item.purpose}")
+        if item.tags:
+            parts.append(f"Tags: {item.tags}")
+        parts.append(f"Uses: {item.use_count}")
+        if item.last_used_at:
+            parts.append(f"Last used: {item.last_used_at}")
+        parts.append(f"Created: {item.created_at}")
+        ui.print_message("system", "\n".join(parts))
+        return "continue"
+
+    if result.startswith("APIS_SEARCH:"):
+        query = result.split(":", 1)[1].strip()
+        items = await agent.session_manager.search_apis(query, limit=20)
+        if not items:
+            ui.print_message("system", f"No APIs matching: {query}")
+            return "continue"
+        lines = []
+        for idx, a in enumerate(items, 1):
+            auth_part = f" [{a.auth_type}]" if a.auth_type else ""
+            lines.append(
+                f"  #{idx} {a.name}{auth_part} ({a.base_url})  id={a.id[:8]}"
+            )
+        ui.print_message("system", "Search results:\n" + "\n".join(lines))
+        return "continue"
+
+    if result.startswith("APIS_UPDATE:"):
+        raw = result.split(":", 1)[1].strip()
+        update_parts = raw.split(None, 1)
+        if len(update_parts) < 2:
+            ui.print_error("Usage: /apis update <id|#index|name> <field=value ...>")
+            return "continue"
+        selector = update_parts[0]
+        fields_str = update_parts[1]
+        item = await agent.session_manager.select_api(selector)
+        if not item:
+            ui.print_error(f"API not found: {selector}")
+            return "continue"
+        kwargs: dict[str, Any] = {}
+        valid_fields = {"name", "base_url", "endpoints", "auth_type", "credentials",
+                        "description", "purpose", "tags"}
+        for token in shlex.split(fields_str):
+            if "=" not in token:
+                continue
+            key, _, value = token.partition("=")
+            key = key.strip().lower()
+            if key in valid_fields:
+                kwargs[key] = value
+        if not kwargs:
+            ui.print_error("No valid fields to update. Use field=value syntax.")
+            return "continue"
+        ok = await agent.session_manager.update_api(item.id, **kwargs)
+        if ok:
+            ui.print_success(f"Updated API #{item.id[:8]}")
+        else:
+            ui.print_error("Update failed.")
+        return "continue"
+
+    if result.startswith("APIS_REMOVE:"):
+        selector = result.split(":", 1)[1].strip()
+        item = await agent.session_manager.select_api(selector)
+        if not item:
+            ui.print_error(f"API not found: {selector}")
+            return "continue"
+        ok = await agent.session_manager.delete_api(item.id)
+        if ok:
+            ui.print_success(f"Removed API #{item.id[:8]}: {item.name}")
+        else:
+            ui.print_error("Delete failed.")
+        return "continue"
+
     if result == "CONFIG":
         ui.print_message("system", format_active_configuration_text(ctx))
         return "continue"

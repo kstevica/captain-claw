@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Memory - Captain Claw</title>
+    <link rel="stylesheet" href="/static/memory.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<header class="mem-header">
+    <div class="mem-header-left">
+        <a href="/" class="mem-logo-link"><img src="/static/logo.svg" width="28" height="28"></a>
+        <h1>Memory</h1>
+    </div>
+    <div class="mem-header-right">
+        <a href="/chat" class="mem-nav-link">&larr; Chat</a>
+    </div>
+</header>
+
+<div class="mem-layout">
+    <!-- Panel 1: Memory type selector -->
+    <aside class="mem-categories" id="memCategories">
+        <div class="mem-cat-item selected" data-type="todos">
+            <span class="mem-cat-icon">&#x2705;</span>
+            <span class="mem-cat-label">To-dos</span>
+            <span class="mem-cat-count" id="countTodos">-</span>
+        </div>
+        <div class="mem-cat-item" data-type="contacts">
+            <span class="mem-cat-icon">&#x1F464;</span>
+            <span class="mem-cat-label">Contacts</span>
+            <span class="mem-cat-count" id="countContacts">-</span>
+        </div>
+        <div class="mem-cat-item" data-type="scripts">
+            <span class="mem-cat-icon">&#x1F4DC;</span>
+            <span class="mem-cat-label">Scripts</span>
+            <span class="mem-cat-count" id="countScripts">-</span>
+        </div>
+        <div class="mem-cat-item" data-type="apis">
+            <span class="mem-cat-icon">&#x1F310;</span>
+            <span class="mem-cat-label">APIs</span>
+            <span class="mem-cat-count" id="countApis">-</span>
+        </div>
+    </aside>
+
+    <!-- Panel 2: Item list -->
+    <aside class="mem-list-panel" id="memListPanel">
+        <div class="mem-list-header">
+            <input type="text" class="mem-search" id="memSearch"
+                   placeholder="Search..." autocomplete="off">
+            <button class="mem-add-btn" id="memAddBtn" title="Add new">+</button>
+        </div>
+        <div class="mem-item-list" id="memItemList">
+            <div class="mem-loading" id="memLoading">Loading...</div>
+        </div>
+    </aside>
+
+    <!-- Panel 3: Detail / Edit area -->
+    <main class="mem-detail" id="memDetail">
+        <!-- Empty state -->
+        <div class="mem-empty" id="memEmpty">
+            <div class="mem-empty-icon">&#x1F9E0;</div>
+            <div class="mem-empty-text">Select a memory type and item to view details</div>
+        </div>
+
+        <!-- Detail view -->
+        <div class="mem-detail-view" id="memDetailView" style="display:none;">
+            <div class="mem-detail-toolbar">
+                <h2 class="mem-detail-title" id="memDetailTitle"></h2>
+                <div class="mem-detail-actions">
+                    <button class="mem-btn primary" id="memEditBtn">Edit</button>
+                    <button class="mem-btn danger" id="memDeleteBtn">Delete</button>
+                </div>
+            </div>
+            <div class="mem-detail-fields" id="memDetailFields"></div>
+        </div>
+
+        <!-- Edit / Create form -->
+        <div class="mem-form" id="memForm" style="display:none;">
+            <div class="mem-form-toolbar">
+                <h2 class="mem-form-title" id="memFormTitle">New Item</h2>
+                <div class="mem-form-actions">
+                    <button class="mem-btn secondary" id="memCancelBtn">Cancel</button>
+                    <button class="mem-btn primary" id="memSaveBtn">Save</button>
+                </div>
+            </div>
+            <div class="mem-form-fields" id="memFormFields"></div>
+        </div>
+    </main>
+</div>
+
+<!-- Delete confirmation modal -->
+<div class="mem-modal-overlay" id="memModalOverlay" style="display:none;">
+    <div class="mem-modal">
+        <div class="mem-modal-title">Confirm Delete</div>
+        <div class="mem-modal-body" id="memModalBody">
+            Are you sure you want to delete this item?
+        </div>
+        <div class="mem-modal-actions">
+            <button class="mem-btn secondary" id="memModalCancel">Cancel</button>
+            <button class="mem-btn danger" id="memModalConfirm">Delete</button>
+        </div>
+    </div>
+</div>
+
+<!-- Toast notification -->
+<div class="mem-toast" id="memToast"></div>
+
+<script src="/static/memory.js"></script>
+</body>
+</html>

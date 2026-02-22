@@ -84,6 +84,8 @@ class RuntimeContext:
         ("cron", "Run one-off cron prompt"),
         ("todo", "Manage to-do items"),
         ("contacts", "Manage address book contacts"),
+        ("scripts", "Manage script memory"),
+        ("apis", "Manage API memory"),
     ])
 
     def get_platform_state(self, platform: str) -> PlatformState:

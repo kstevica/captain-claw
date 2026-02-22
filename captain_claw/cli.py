@@ -44,6 +44,8 @@ class TerminalUI:
             "/cron",
             "/todo",
             "/contacts",
+            "/scripts",
+            "/apis",
             "/planning",
             "/pipeline",
             "/monitor",
@@ -206,6 +208,18 @@ Commands:
   /contacts update <id|#index|name> <field=value ...> - Update contact fields
   /contacts importance <id|#index|name> <1-10> - Set contact importance (pins value)
   /contacts remove <id|#index|name> - Remove a contact
+  /scripts        - List remembered scripts
+  /scripts add <name> <path> - Register a script
+  /scripts info <id|#index|name> - Show script details
+  /scripts search <query> - Search scripts
+  /scripts update <id|#index|name> <field=value ...> - Update script fields
+  /scripts remove <id|#index|name> - Remove a script entry
+  /apis           - List remembered APIs
+  /apis add <name> <base_url> - Register an API
+  /apis info <id|#index|name> - Show API details
+  /apis search <query> - Search APIs
+  /apis update <id|#index|name> <field=value ...> - Update API fields
+  /apis remove <id|#index|name> - Remove an API entry
   /pipeline loop|contracts - Set execution pipeline mode (simple loop vs contract gate)
   /planning on|off - Legacy alias for /pipeline contracts|loop
   /skills         - List currently available user-invocable skills
@@ -1626,6 +1640,78 @@ Commands:
                 return f"CONTACTS_REMOVE:{rest}"
             # Fallback: treat as search query
             return f"CONTACTS_SEARCH:{contacts_arg}"
+        elif command == "/scripts":
+            scripts_arg = args.strip()
+            if not scripts_arg or scripts_arg.lower() in {"list", "ls"}:
+                return "SCRIPTS_LIST"
+            scripts_parts = scripts_arg.split(None, 1)
+            subcommand = scripts_parts[0].lower()
+            rest = scripts_arg[len(scripts_parts[0]):].strip() if len(scripts_parts) > 1 else ""
+            if subcommand == "add":
+                add_parts = rest.split(None, 1)
+                if len(add_parts) < 2:
+                    self.print_error("Usage: /scripts add <name> <path>")
+                    return None
+                payload = json.dumps({"name": add_parts[0], "file_path": add_parts[1]})
+                return f"SCRIPTS_ADD:{payload}"
+            if subcommand == "info":
+                if not rest:
+                    self.print_error("Usage: /scripts info <id|#index|name>")
+                    return None
+                return f"SCRIPTS_INFO:{rest}"
+            if subcommand == "search":
+                if not rest:
+                    self.print_error("Usage: /scripts search <query>")
+                    return None
+                return f"SCRIPTS_SEARCH:{rest}"
+            if subcommand == "update":
+                if not rest:
+                    self.print_error("Usage: /scripts update <id|#index|name> <field=value ...>")
+                    return None
+                return f"SCRIPTS_UPDATE:{rest}"
+            if subcommand in {"remove", "rm", "delete", "del"}:
+                if not rest:
+                    self.print_error("Usage: /scripts remove <id|#index|name>")
+                    return None
+                return f"SCRIPTS_REMOVE:{rest}"
+            # Fallback: treat as search
+            return f"SCRIPTS_SEARCH:{scripts_arg}"
+        elif command == "/apis":
+            apis_arg = args.strip()
+            if not apis_arg or apis_arg.lower() in {"list", "ls"}:
+                return "APIS_LIST"
+            apis_parts = apis_arg.split(None, 1)
+            subcommand = apis_parts[0].lower()
+            rest = apis_arg[len(apis_parts[0]):].strip() if len(apis_parts) > 1 else ""
+            if subcommand == "add":
+                add_parts = rest.split(None, 1)
+                if len(add_parts) < 2:
+                    self.print_error("Usage: /apis add <name> <base_url>")
+                    return None
+                payload = json.dumps({"name": add_parts[0], "base_url": add_parts[1]})
+                return f"APIS_ADD:{payload}"
+            if subcommand == "info":
+                if not rest:
+                    self.print_error("Usage: /apis info <id|#index|name>")
+                    return None
+                return f"APIS_INFO:{rest}"
+            if subcommand == "search":
+                if not rest:
+                    self.print_error("Usage: /apis search <query>")
+                    return None
+                return f"APIS_SEARCH:{rest}"
+            if subcommand == "update":
+                if not rest:
+                    self.print_error("Usage: /apis update <id|#index|name> <field=value ...>")
+                    return None
+                return f"APIS_UPDATE:{rest}"
+            if subcommand in {"remove", "rm", "delete", "del"}:
+                if not rest:
+                    self.print_error("Usage: /apis remove <id|#index|name>")
+                    return None
+                return f"APIS_REMOVE:{rest}"
+            # Fallback: treat as search
+            return f"APIS_SEARCH:{apis_arg}"
         elif command == "/orchestrate":
             orchestrate_arg = args.strip()
             if not orchestrate_arg:

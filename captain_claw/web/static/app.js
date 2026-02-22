@@ -118,6 +118,9 @@
             case 'approval_notice':
                 addMonitorEntry('approval', {action: 'auto-approved'}, data.message);
                 break;
+            case 'thinking':
+                updateThinkingIndicator(data.text, data.tool, data.phase);
+                break;
             case 'error':
                 addChatMessage('error', data.message);
                 break;
@@ -141,6 +144,10 @@
     let msgCount = 0;
 
     function addChatMessage(role, content, isReplay) {
+        // Remove thinking indicator when assistant or error message arrives.
+        if (role === 'assistant' || role === 'error') {
+            removeThinkingIndicator();
+        }
         chatEmpty.style.display = 'none';
         const div = document.createElement('div');
         div.className = `msg ${role}`;
@@ -187,6 +194,63 @@
         chatEmpty.style.display = '';
         msgCount = 0;
         chatCount.textContent = '0 messages';
+    }
+
+    // ── Thinking Indicator ─────────────────────────────────
+
+    function removeThinkingIndicator() {
+        const el = document.getElementById('thinkingIndicator');
+        if (el) el.remove();
+    }
+
+    function updateThinkingIndicator(text, tool, phase) {
+        // Clear on "done" phase or empty text.
+        if (phase === 'done' || !text) {
+            removeThinkingIndicator();
+            return;
+        }
+
+        // Hide empty state so indicator is visible.
+        chatEmpty.style.display = 'none';
+
+        let el = document.getElementById('thinkingIndicator');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'thinkingIndicator';
+            el.className = 'thinking-indicator';
+            const inner = document.createElement('div');
+            inner.className = 'thinking-inner';
+            const icon = document.createElement('span');
+            icon.className = 'thinking-icon';
+            icon.textContent = '\u2728';  // sparkles emoji
+            const textSpan = document.createElement('span');
+            textSpan.className = 'thinking-text';
+            inner.appendChild(icon);
+            inner.appendChild(textSpan);
+            el.appendChild(inner);
+            chatMessages.appendChild(el);
+        }
+
+        // Update the text content.
+        const textSpan = el.querySelector('.thinking-text');
+        if (phase === 'reasoning') {
+            textSpan.innerHTML = text;
+        } else if (tool) {
+            // Show tool name highlighted, then the rest of the text.
+            const toolUpper = tool.toUpperCase();
+            const rest = text.startsWith(toolUpper + ':')
+                ? text.slice(toolUpper.length + 1).trim()
+                : text.replace(/^[^:]+:\s*/, '');
+            const prefix = text.split(':')[0] || text;
+            textSpan.innerHTML = '<span class="thinking-tool">' + escapeHtml(prefix) + '</span>'
+                + (rest ? ' ' + escapeHtml(rest) : '');
+        } else {
+            textSpan.textContent = text;
+        }
+
+        // Keep it at the bottom and scroll.
+        chatMessages.appendChild(el);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
     }
 
     // ── Monitor ─────────────────────────────────────────────

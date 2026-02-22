@@ -43,18 +43,21 @@ class Agent(
         status_callback: Callable[[str], None] | None = None,
         tool_output_callback: Callable[[str, dict[str, Any], str], None] | None = None,
         approval_callback: Callable[[str], bool] | None = None,
+        thinking_callback: Callable[[str, str, str], None] | None = None,
     ):
         """Initialize the agent.
-        
+
         Args:
             provider: Optional LLM provider override
             status_callback: Optional runtime status callback
             approval_callback: Optional callback for guard approval prompts
+            thinking_callback: Optional callback for inline thinking/reasoning updates
         """
         self.provider = provider
         self.status_callback = status_callback
         self.tool_output_callback = tool_output_callback
         self.approval_callback = approval_callback
+        self.thinking_callback = thinking_callback
         self.tools = get_tool_registry()
         self.tools.set_approval_callback(self.approval_callback)
         self.runtime_base_path = Path.cwd().resolve()
@@ -129,6 +132,14 @@ class Agent(
         if self.status_callback:
             try:
                 self.status_callback(status)
+            except Exception:
+                pass
+
+    def _emit_thinking(self, text: str, tool: str = "", phase: str = "tool") -> None:
+        """Forward inline thinking/reasoning updates to the UI."""
+        if self.thinking_callback:
+            try:
+                self.thinking_callback(text, tool, phase)
             except Exception:
                 pass
 

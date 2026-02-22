@@ -16,13 +16,15 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Per-session model selection | Keep one session on Claude, another on GPT, another on Ollama |
 | Persistent multi-session workflows | Resume any session exactly where you left off |
 | Built-in safety guards | Input, output, and script/tool checks before anything runs |
-| 15 built-in tools | Shell, files, web fetch/search, docs, email, TTS, Google Drive, todo, contacts |
+| 17 built-in tools | Shell, files, web fetch/search, docs, email, TTS, Google Drive, todo, contacts, scripts, APIs |
 | Skills system | OpenClaw-compatible skills with auto-discovery and GitHub install |
 | Orchestrator / DAG mode | Decompose complex tasks into parallel multi-session execution |
 | Memory / RAG | Hybrid vector + text retrieval across workspace and sessions |
 | Web UI | Chat, monitor pane, instruction editor, command palette |
 | Remote integrations | Telegram, Slack, Discord with secure pairing |
 | Cross-session to-do memory | Persistent task list shared across sessions with auto-capture |
+| Cross-session script memory | Persistent script/file tracking with auto-capture from write tool |
+| Cross-session API memory | Persistent API endpoint tracking with auto-capture from web_fetch |
 | Cron scheduling | Interval, daily, and weekly tasks inside the runtime |
 | OpenAI-compatible API | `POST /v1/chat/completions` proxy with agent pool |
 
@@ -103,7 +105,7 @@ Sessions are first-class. Create named sessions for separate projects, switch in
 
 ### Tools
 
-Captain Claw ships with 15 built-in tools. The agent picks the right tool for each task automatically.
+Captain Claw ships with 17 built-in tools. The agent picks the right tool for each task automatically.
 
 | Tool | What it does |
 |---|---|
@@ -120,6 +122,8 @@ Captain Claw ships with 15 built-in tools. The agent picks the right tool for ea
 | `google_drive` | List, search, read, upload, and manage Google Drive files |
 | `todo` | Persistent cross-session to-do list with auto-capture |
 | `contacts` | Persistent cross-session address book with auto-capture |
+| `scripts` | Persistent cross-session script/file memory with auto-capture |
+| `apis` | Persistent cross-session API memory with auto-capture |
 
 See [USAGE.md](USAGE.md#tools-reference) for full parameters and configuration.
 
@@ -158,7 +162,8 @@ model:
 tools:
   enabled: ["shell", "read", "write", "glob", "web_fetch", "web_search",
             "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract",
-            "pocket_tts", "send_mail", "google_drive", "todo", "contacts"]
+            "pocket_tts", "send_mail", "google_drive", "todo", "contacts",
+            "scripts", "apis"]
 
 web:
   enabled: true
@@ -182,6 +187,10 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 - **[Cross-session to-do memory](USAGE.md#todo-commands)** — Persistent task list shared across sessions. Auto-capture from natural language, context injection to nudge the agent, and full `/todo` command support across CLI, Web UI, Telegram, Slack, and Discord.
 
 - **[Cross-session address book](USAGE.md#contacts-commands)** — Persistent contact memory that tracks people across sessions. Auto-captures from conversation and email, auto-computes importance from mention frequency, and injects relevant contact context on demand.
+
+- **[Cross-session script memory](USAGE.md#scripts-commands)** — Persistent tracking of scripts and files the agent creates. Auto-captures from the `write` tool when executable extensions are detected. Stores path + metadata (no file content in DB). On-demand context injection when script names appear in conversation.
+
+- **[Cross-session API memory](USAGE.md#apis-commands)** — Persistent tracking of external APIs the agent interacts with. Auto-captures from `web_fetch` when API-like URLs are detected. Stores credentials, endpoints, and accumulated context. On-demand context injection when API names or URLs appear in conversation.
 
 - **[Cron scheduling](USAGE.md#cron-commands)** — Pseudo-cron within the runtime. Schedule prompts, scripts, or tools at intervals, daily, or weekly. Guards remain active for every cron execution.
 
@@ -215,7 +224,7 @@ ruff check captain_claw/
 |---|---|
 | `captain_claw/agent.py` | Main orchestration logic |
 | `captain_claw/llm/` | Provider abstraction (OpenAI, Anthropic, Gemini, Ollama) |
-| `captain_claw/tools/` | Tool registry and 15 tool implementations |
+| `captain_claw/tools/` | Tool registry and 17 tool implementations |
 | `captain_claw/session/` | SQLite-backed session persistence |
 | `captain_claw/skills.py` | Skill discovery, loading, and invocation |
 | `captain_claw/cli.py` | Terminal UI |

@@ -323,6 +323,51 @@ html, body {
     50% { opacity: 0; }
 }
 
+/* ─── Thinking Indicator ─────────────────────────────── */
+
+.thinking-indicator {
+    max-width: 85%;
+    margin-right: auto;
+    margin-bottom: 16px;
+    animation: thinkFadeIn 0.25s ease;
+}
+.thinking-indicator .thinking-inner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px;
+    border-radius: 8px;
+    border-left: 3px solid var(--purple);
+    background: linear-gradient(135deg, rgba(188, 140, 255, 0.06) 0%, rgba(88, 166, 255, 0.04) 100%);
+}
+.thinking-indicator .thinking-icon {
+    font-size: 15px;
+    flex-shrink: 0;
+    animation: thinkPulse 1.8s ease-in-out infinite;
+}
+.thinking-indicator .thinking-text {
+    font-size: 13px;
+    font-style: italic;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.thinking-indicator .thinking-text .thinking-tool {
+    font-family: var(--font-mono);
+    font-style: normal;
+    font-size: 12px;
+    color: var(--purple);
+}
+@keyframes thinkPulse {
+    0%, 100% { opacity: 0.5; transform: scale(1); }
+    50% { opacity: 1; transform: scale(1.12); }
+}
+@keyframes thinkFadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
 /* ─── Empty State ────────────────────────────────────── */
 
 .empty-state {

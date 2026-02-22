@@ -79,6 +79,18 @@ COMMANDS: list[dict[str, str]] = [
     {"command": "/contacts update <id> <field=value>", "description": "Update contact fields", "category": "Contacts"},
     {"command": "/contacts importance <id> <1-10>", "description": "Set contact importance", "category": "Contacts"},
     {"command": "/contacts remove <id|#index|name>", "description": "Remove a contact", "category": "Contacts"},
+    {"command": "/scripts", "description": "List scripts", "category": "Scripts"},
+    {"command": "/scripts add <name> <path>", "description": "Register a script", "category": "Scripts"},
+    {"command": "/scripts info <id|#index|name>", "description": "Show script details", "category": "Scripts"},
+    {"command": "/scripts search <query>", "description": "Search scripts", "category": "Scripts"},
+    {"command": "/scripts update <id> <field=value>", "description": "Update script fields", "category": "Scripts"},
+    {"command": "/scripts remove <id|#index|name>", "description": "Remove a script", "category": "Scripts"},
+    {"command": "/apis", "description": "List APIs", "category": "APIs"},
+    {"command": "/apis add <name> <base_url>", "description": "Register an API", "category": "APIs"},
+    {"command": "/apis info <id|#index|name>", "description": "Show API details", "category": "APIs"},
+    {"command": "/apis search <query>", "description": "Search APIs", "category": "APIs"},
+    {"command": "/apis update <id> <field=value>", "description": "Update API fields", "category": "APIs"},
+    {"command": "/apis remove <id|#index|name>", "description": "Remove an API", "category": "APIs"},
     {"command": "/monitor on|off", "description": "Toggle monitor split view", "category": "Monitor"},
     {"command": "/monitor trace on|off", "description": "Toggle LLM trace logging", "category": "Monitor"},
     {"command": "/approve user telegram <token>", "description": "Approve a Telegram user pairing", "category": "Telegram"},
@@ -130,6 +142,7 @@ class WebServer:
             status_callback=self._status_callback,
             tool_output_callback=self._tool_output_callback,
             approval_callback=self._approval_callback,
+            thinking_callback=self._thinking_callback,
         )
         await self.agent.initialize()
 
@@ -163,16 +176,35 @@ class WebServer:
         """Broadcast status updates to all connected clients."""
         self._broadcast({"type": "status", "status": status})
 
+    def _thinking_callback(self, text: str, tool: str = "", phase: str = "tool") -> None:
+        """Broadcast inline thinking/reasoning updates to all connected clients."""
+        self._broadcast({"type": "thinking", "text": text, "tool": tool, "phase": phase})
+
+    # Internal actions that appear in the monitor but should NOT clutter the
+    # chat thinking indicator (plumbing, tracing, internal pipeline steps).
+    _THINKING_SILENT_TOOLS: set[str] = {
+        "llm_trace", "pipeline_trace", "memory_select", "memory_semantic_select",
+        "compaction", "guard_input", "guard_output", "guard_web", "guard_exec",
+        "guard_file", "approval",
+    }
+
     def _tool_output_callback(
         self, tool_name: str, arguments: dict[str, Any], output: str
     ) -> None:
-        """Broadcast tool output to monitor pane."""
+        """Broadcast tool output to monitor pane and update thinking indicator."""
         self._broadcast({
             "type": "monitor",
             "tool_name": tool_name,
             "arguments": arguments,
             "output": output,
         })
+        # Also emit a thinking event so the chat pane shows what's happening,
+        # but skip internal plumbing actions that would just be noise.
+        normalized = str(tool_name or "").strip().lower()
+        if normalized not in self._THINKING_SILENT_TOOLS:
+            from captain_claw.agent_tool_loop_mixin import AgentToolLoopMixin
+            summary = AgentToolLoopMixin._tool_thinking_summary(tool_name, arguments or {})
+            self._thinking_callback(summary, tool=tool_name, phase="tool")
 
     def _approval_callback(self, message: str) -> bool:
         """Handle tool approval requests from the agent.
@@ -330,6 +362,7 @@ class WebServer:
         async with self._busy_lock:
             self._busy = True
             self._broadcast({"type": "status", "status": "thinking"})
+            self._thinking_callback("Thinking\u2026", phase="reasoning")
 
             # Echo user message to all clients
             self._broadcast({
@@ -586,6 +619,12 @@ class WebServer:
 
             elif cmd in ("/contacts",):
                 result = await self._handle_contacts_command(args.strip())
+
+            elif cmd in ("/scripts",):
+                result = await self._handle_scripts_command(args.strip())
+
+            elif cmd in ("/apis",):
+                result = await self._handle_apis_command(args.strip())
 
             else:
                 # Try to process it as a chat message (the agent might understand it)
@@ -893,6 +932,228 @@ class WebServer:
             lines.append(
                 f"#{idx} [{c.importance}] {c.name}{org_part}  `{c.id[:8]}`"
             )
+        return "**Search results:**\n" + "\n".join(lines)
+
+    async def _handle_scripts_command(self, args: str) -> str:
+        """Handle /scripts subcommands in the web UI."""
+        sm = self.agent.session_manager
+        if not args or args.lower() in ("list", "ls"):
+            items = await sm.list_scripts(limit=50)
+            if not items:
+                return "No scripts."
+            lines: list[str] = []
+            for idx, s in enumerate(items, 1):
+                lang_part = f" ({s.language})" if s.language else ""
+                lines.append(
+                    f"#{idx} {s.name}{lang_part} [{s.file_path}]"
+                    f"  uses={s.use_count}  `{s.id[:8]}`"
+                )
+            return "**Scripts:**\n" + "\n".join(lines)
+
+        parts = args.split(None, 1)
+        subcmd = parts[0].lower()
+        subargs = parts[1].strip() if len(parts) > 1 else ""
+
+        if subcmd == "add":
+            add_parts = subargs.split(None, 1)
+            if len(add_parts) < 2:
+                return "Usage: `/scripts add <name> <path>`"
+            session_id = self.agent.session.id if self.agent.session else None
+            item = await sm.create_script(
+                name=add_parts[0], file_path=add_parts[1], source_session=session_id,
+            )
+            return f"Added script: **{add_parts[0]}** at {add_parts[1]} (`{item.id[:8]}`)"
+
+        if subcmd == "info":
+            if not subargs:
+                return "Usage: `/scripts info <id|#index|name>`"
+            item = await sm.select_script(subargs)
+            if not item:
+                return f"Script not found: `{subargs}`"
+            parts_out = [f"**{item.name}**  `{item.id}`", f"Path: {item.file_path}"]
+            if item.language:
+                parts_out.append(f"Language: {item.language}")
+            if item.description:
+                parts_out.append(f"Description: {item.description}")
+            if item.purpose:
+                parts_out.append(f"Purpose: {item.purpose}")
+            if item.created_reason:
+                parts_out.append(f"Created reason: {item.created_reason}")
+            if item.tags:
+                parts_out.append(f"Tags: {item.tags}")
+            parts_out.append(f"Uses: {item.use_count}")
+            if item.last_used_at:
+                parts_out.append(f"Last used: {item.last_used_at}")
+            return "\n".join(parts_out)
+
+        if subcmd == "search":
+            if not subargs:
+                return "Usage: `/scripts search <query>`"
+            items = await sm.search_scripts(subargs, limit=20)
+            if not items:
+                return f"No scripts matching: `{subargs}`"
+            lines = []
+            for idx, s in enumerate(items, 1):
+                lang_part = f" ({s.language})" if s.language else ""
+                lines.append(f"#{idx} {s.name}{lang_part} [{s.file_path}]  `{s.id[:8]}`")
+            return "**Search results:**\n" + "\n".join(lines)
+
+        if subcmd in ("remove", "rm", "delete", "del"):
+            if not subargs:
+                return "Usage: `/scripts remove <id|#index|name>`"
+            item = await sm.select_script(subargs)
+            if not item:
+                return f"Script not found: `{subargs}`"
+            await sm.delete_script(item.id)
+            return f"Removed: **{item.name}**"
+
+        if subcmd == "update":
+            if not subargs:
+                return "Usage: `/scripts update <id|#index|name> <field=value ...>`"
+            update_parts = subargs.split(None, 1)
+            if len(update_parts) < 2:
+                return "Usage: `/scripts update <id|#index|name> <field=value ...>`"
+            selector = update_parts[0]
+            fields_str = update_parts[1]
+            item = await sm.select_script(selector)
+            if not item:
+                return f"Script not found: `{selector}`"
+            import shlex as _shlex
+            kwargs: dict[str, Any] = {}
+            valid_fields = {"name", "file_path", "description", "purpose", "language",
+                            "created_reason", "tags"}
+            for token in _shlex.split(fields_str):
+                if "=" not in token:
+                    continue
+                key, _, value = token.partition("=")
+                key = key.strip().lower()
+                if key in valid_fields:
+                    kwargs[key] = value
+            if not kwargs:
+                return "No valid fields to update. Use `field=value` syntax."
+            ok = await sm.update_script(item.id, **kwargs)
+            return f"Updated script: **{item.name}**" if ok else "Update failed."
+
+        # Fallback: search
+        items = await sm.search_scripts(args, limit=20)
+        if not items:
+            return f"No scripts matching: `{args}`"
+        lines = []
+        for idx, s in enumerate(items, 1):
+            lang_part = f" ({s.language})" if s.language else ""
+            lines.append(f"#{idx} {s.name}{lang_part} [{s.file_path}]  `{s.id[:8]}`")
+        return "**Search results:**\n" + "\n".join(lines)
+
+    async def _handle_apis_command(self, args: str) -> str:
+        """Handle /apis subcommands in the web UI."""
+        sm = self.agent.session_manager
+        if not args or args.lower() in ("list", "ls"):
+            items = await sm.list_apis(limit=50)
+            if not items:
+                return "No APIs."
+            lines: list[str] = []
+            for idx, a in enumerate(items, 1):
+                auth_part = f" [{a.auth_type}]" if a.auth_type else ""
+                lines.append(
+                    f"#{idx} {a.name}{auth_part} ({a.base_url})"
+                    f"  uses={a.use_count}  `{a.id[:8]}`"
+                )
+            return "**APIs:**\n" + "\n".join(lines)
+
+        parts = args.split(None, 1)
+        subcmd = parts[0].lower()
+        subargs = parts[1].strip() if len(parts) > 1 else ""
+
+        if subcmd == "add":
+            add_parts = subargs.split(None, 1)
+            if len(add_parts) < 2:
+                return "Usage: `/apis add <name> <base_url>`"
+            session_id = self.agent.session.id if self.agent.session else None
+            item = await sm.create_api(
+                name=add_parts[0], base_url=add_parts[1], source_session=session_id,
+            )
+            return f"Added API: **{add_parts[0]}** ({add_parts[1]}) (`{item.id[:8]}`)"
+
+        if subcmd == "info":
+            if not subargs:
+                return "Usage: `/apis info <id|#index|name>`"
+            item = await sm.select_api(subargs)
+            if not item:
+                return f"API not found: `{subargs}`"
+            parts_out = [f"**{item.name}**  `{item.id}`", f"Base URL: {item.base_url}"]
+            if item.auth_type:
+                parts_out.append(f"Auth type: {item.auth_type}")
+            if item.credentials:
+                parts_out.append(f"Credentials: {item.credentials}")
+            if item.endpoints:
+                parts_out.append(f"Endpoints: {item.endpoints}")
+            if item.description:
+                parts_out.append(f"Description: {item.description}")
+            if item.purpose:
+                parts_out.append(f"Purpose: {item.purpose}")
+            if item.tags:
+                parts_out.append(f"Tags: {item.tags}")
+            parts_out.append(f"Uses: {item.use_count}")
+            if item.last_used_at:
+                parts_out.append(f"Last used: {item.last_used_at}")
+            return "\n".join(parts_out)
+
+        if subcmd == "search":
+            if not subargs:
+                return "Usage: `/apis search <query>`"
+            items = await sm.search_apis(subargs, limit=20)
+            if not items:
+                return f"No APIs matching: `{subargs}`"
+            lines = []
+            for idx, a in enumerate(items, 1):
+                auth_part = f" [{a.auth_type}]" if a.auth_type else ""
+                lines.append(f"#{idx} {a.name}{auth_part} ({a.base_url})  `{a.id[:8]}`")
+            return "**Search results:**\n" + "\n".join(lines)
+
+        if subcmd in ("remove", "rm", "delete", "del"):
+            if not subargs:
+                return "Usage: `/apis remove <id|#index|name>`"
+            item = await sm.select_api(subargs)
+            if not item:
+                return f"API not found: `{subargs}`"
+            await sm.delete_api(item.id)
+            return f"Removed: **{item.name}**"
+
+        if subcmd == "update":
+            if not subargs:
+                return "Usage: `/apis update <id|#index|name> <field=value ...>`"
+            update_parts = subargs.split(None, 1)
+            if len(update_parts) < 2:
+                return "Usage: `/apis update <id|#index|name> <field=value ...>`"
+            selector = update_parts[0]
+            fields_str = update_parts[1]
+            item = await sm.select_api(selector)
+            if not item:
+                return f"API not found: `{selector}`"
+            import shlex as _shlex
+            kwargs: dict[str, Any] = {}
+            valid_fields = {"name", "base_url", "endpoints", "auth_type", "credentials",
+                            "description", "purpose", "tags"}
+            for token in _shlex.split(fields_str):
+                if "=" not in token:
+                    continue
+                key, _, value = token.partition("=")
+                key = key.strip().lower()
+                if key in valid_fields:
+                    kwargs[key] = value
+            if not kwargs:
+                return "No valid fields to update. Use `field=value` syntax."
+            ok = await sm.update_api(item.id, **kwargs)
+            return f"Updated API: **{item.name}**" if ok else "Update failed."
+
+        # Fallback: search
+        items = await sm.search_apis(args, limit=20)
+        if not items:
+            return f"No APIs matching: `{args}`"
+        lines = []
+        for idx, a in enumerate(items, 1):
+            auth_part = f" [{a.auth_type}]" if a.auth_type else ""
+            lines.append(f"#{idx} {a.name}{auth_part} ({a.base_url})  `{a.id[:8]}`")
         return "**Search results:**\n" + "\n".join(lines)
 
     def _format_help(self) -> str:
@@ -2183,6 +2444,187 @@ class WebServer:
             return web.json_response({"error": "Contact not found"}, status=404)
         return web.json_response({"ok": True})
 
+    # ── Scripts API ────────────────────────────────────────────────────
+
+    async def _list_scripts(self, request: web.Request) -> web.Response:
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        items = await self.agent.session_manager.list_scripts(limit=200)
+        return web.json_response(
+            [s.to_dict() for s in items],
+            dumps=lambda obj: json.dumps(obj, default=str),
+        )
+
+    async def _search_scripts(self, request: web.Request) -> web.Response:
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        query = request.query.get("q", "").strip()
+        if not query:
+            return web.json_response({"error": "q parameter required"}, status=400)
+        items = await self.agent.session_manager.search_scripts(query, limit=50)
+        return web.json_response(
+            [s.to_dict() for s in items],
+            dumps=lambda obj: json.dumps(obj, default=str),
+        )
+
+    async def _create_script(self, request: web.Request) -> web.Response:
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON body"}, status=400)
+        name = str(body.get("name", "")).strip()
+        file_path = str(body.get("file_path", "")).strip()
+        if not name or not file_path:
+            return web.json_response({"error": "name and file_path are required"}, status=400)
+        item = await self.agent.session_manager.create_script(
+            name=name, file_path=file_path,
+            description=str(body.get("description", "")).strip() or None,
+            purpose=str(body.get("purpose", "")).strip() or None,
+            language=str(body.get("language", "")).strip() or None,
+            created_reason=str(body.get("created_reason", "")).strip() or None,
+            tags=str(body.get("tags", "")).strip() or None,
+            source_session=str(body.get("source_session", "")).strip() or None,
+        )
+        return web.json_response(
+            item.to_dict(), status=201,
+            dumps=lambda obj: json.dumps(obj, default=str),
+        )
+
+    async def _get_script(self, request: web.Request) -> web.Response:
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        script_id = request.match_info.get("id", "")
+        item = await self.agent.session_manager.load_script(script_id)
+        if not item:
+            return web.json_response({"error": "Script not found"}, status=404)
+        return web.json_response(
+            item.to_dict(), dumps=lambda obj: json.dumps(obj, default=str),
+        )
+
+    async def _update_script_api(self, request: web.Request) -> web.Response:
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        script_id = request.match_info.get("id", "")
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON body"}, status=400)
+        kwargs: dict[str, Any] = {}
+        for fld in ("name", "file_path", "description", "purpose", "language",
+                     "created_reason", "tags"):
+            if fld in body:
+                kwargs[fld] = str(body[fld]).strip() if body[fld] is not None else None
+        ok = await self.agent.session_manager.update_script(script_id, **kwargs)
+        if not ok:
+            return web.json_response({"error": "Script not found"}, status=404)
+        item = await self.agent.session_manager.load_script(script_id)
+        return web.json_response(
+            item.to_dict() if item else {"ok": True},
+            dumps=lambda obj: json.dumps(obj, default=str),
+        )
+
+    async def _delete_script_api(self, request: web.Request) -> web.Response:
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        script_id = request.match_info.get("id", "")
+        ok = await self.agent.session_manager.delete_script(script_id)
+        if not ok:
+            return web.json_response({"error": "Script not found"}, status=404)
+        return web.json_response({"ok": True})
+
+    # ── APIs API ──────────────────────────────────────────────────────
+
+    async def _list_apis_api(self, request: web.Request) -> web.Response:
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        items = await self.agent.session_manager.list_apis(limit=200)
+        return web.json_response(
+            [a.to_dict() for a in items],
+            dumps=lambda obj: json.dumps(obj, default=str),
+        )
+
+    async def _search_apis_api(self, request: web.Request) -> web.Response:
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        query = request.query.get("q", "").strip()
+        if not query:
+            return web.json_response({"error": "q parameter required"}, status=400)
+        items = await self.agent.session_manager.search_apis(query, limit=50)
+        return web.json_response(
+            [a.to_dict() for a in items],
+            dumps=lambda obj: json.dumps(obj, default=str),
+        )
+
+    async def _create_api_api(self, request: web.Request) -> web.Response:
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON body"}, status=400)
+        name = str(body.get("name", "")).strip()
+        base_url = str(body.get("base_url", "")).strip()
+        if not name or not base_url:
+            return web.json_response({"error": "name and base_url are required"}, status=400)
+        item = await self.agent.session_manager.create_api(
+            name=name, base_url=base_url,
+            endpoints=str(body.get("endpoints", "")).strip() or None,
+            auth_type=str(body.get("auth_type", "")).strip() or None,
+            credentials=str(body.get("credentials", "")).strip() or None,
+            description=str(body.get("description", "")).strip() or None,
+            purpose=str(body.get("purpose", "")).strip() or None,
+            tags=str(body.get("tags", "")).strip() or None,
+            source_session=str(body.get("source_session", "")).strip() or None,
+        )
+        return web.json_response(
+            item.to_dict(), status=201,
+            dumps=lambda obj: json.dumps(obj, default=str),
+        )
+
+    async def _get_api_api(self, request: web.Request) -> web.Response:
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        api_id = request.match_info.get("id", "")
+        item = await self.agent.session_manager.load_api(api_id)
+        if not item:
+            return web.json_response({"error": "API not found"}, status=404)
+        return web.json_response(
+            item.to_dict(), dumps=lambda obj: json.dumps(obj, default=str),
+        )
+
+    async def _update_api_api(self, request: web.Request) -> web.Response:
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        api_id = request.match_info.get("id", "")
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON body"}, status=400)
+        kwargs: dict[str, Any] = {}
+        for fld in ("name", "base_url", "endpoints", "auth_type", "credentials",
+                     "description", "purpose", "tags"):
+            if fld in body:
+                kwargs[fld] = str(body[fld]).strip() if body[fld] is not None else None
+        ok = await self.agent.session_manager.update_api(api_id, **kwargs)
+        if not ok:
+            return web.json_response({"error": "API not found"}, status=404)
+        item = await self.agent.session_manager.load_api(api_id)
+        return web.json_response(
+            item.to_dict() if item else {"ok": True},
+            dumps=lambda obj: json.dumps(obj, default=str),
+        )
+
+    async def _delete_api_api(self, request: web.Request) -> web.Response:
+        if not self.agent:
+            return web.json_response({"error": "Agent not initialized"}, status=503)
+        api_id = request.match_info.get("id", "")
+        ok = await self.agent.session_manager.delete_api(api_id)
+        if not ok:
+            return web.json_response({"error": "API not found"}, status=404)
+        return web.json_response({"ok": True})
+
     # ── Workflow browser API ──────────────────────────────────────────
 
     def _workflows_dir(self) -> Path:
@@ -2570,6 +3012,20 @@ class WebServer:
         app.router.add_get("/api/contacts/{id}", self._get_contact)
         app.router.add_patch("/api/contacts/{id}", self._update_contact)
         app.router.add_delete("/api/contacts/{id}", self._delete_contact)
+        # Scripts API routes
+        app.router.add_get("/api/scripts", self._list_scripts)
+        app.router.add_get("/api/scripts/search", self._search_scripts)
+        app.router.add_post("/api/scripts", self._create_script)
+        app.router.add_get("/api/scripts/{id}", self._get_script)
+        app.router.add_patch("/api/scripts/{id}", self._update_script_api)
+        app.router.add_delete("/api/scripts/{id}", self._delete_script_api)
+        # APIs API routes
+        app.router.add_get("/api/apis", self._list_apis_api)
+        app.router.add_get("/api/apis/search", self._search_apis_api)
+        app.router.add_post("/api/apis", self._create_api_api)
+        app.router.add_get("/api/apis/{id}", self._get_api_api)
+        app.router.add_patch("/api/apis/{id}", self._update_api_api)
+        app.router.add_delete("/api/apis/{id}", self._delete_api_api)
         # Workflow browser API routes
         app.router.add_get("/api/workflow-browser", self._list_workflow_outputs)
         app.router.add_get("/api/workflow-browser/output/{filename}", self._get_workflow_output)
@@ -2596,6 +3052,7 @@ class WebServer:
             app.router.add_get("/cron", self._serve_cron)
             app.router.add_get("/workflows", self._serve_workflows)
             app.router.add_get("/loop-runner", self._serve_loop_runner)
+            app.router.add_get("/memory", self._serve_memory)
             app.router.add_get("/favicon.ico", self._serve_favicon)
         return app
 
@@ -2620,6 +3077,9 @@ class WebServer:
 
     async def _serve_loop_runner(self, request: web.Request) -> web.FileResponse:
         return web.FileResponse(STATIC_DIR / "loop-runner.html")
+
+    async def _serve_memory(self, request: web.Request) -> web.FileResponse:
+        return web.FileResponse(STATIC_DIR / "memory.html")
 
     async def _get_orchestrator_status(self, request: web.Request) -> web.Response:
         """REST endpoint: current orchestrator graph state."""

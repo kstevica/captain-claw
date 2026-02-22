@@ -86,6 +86,7 @@ class AgentOrchestrationMixin:
                 pass
 
         def finish(text: str, success: bool = True) -> str:
+            self._emit_thinking("", phase="done")
             if planning_pipeline is not None:
                 self._finalize_pipeline(planning_pipeline, success=success)
             self._finalize_turn_usage(turn_usage)
@@ -260,6 +261,8 @@ class AgentOrchestrationMixin:
             await self._persist_assistant_response(final_response)
             await self._auto_capture_todos(effective_user_input, final_response)
             await self._auto_capture_contacts(effective_user_input, final_response)
+            await self._auto_capture_scripts(effective_user_input, final_response)
+            await self._auto_capture_apis(effective_user_input, final_response)
             return True, final_response, finish_success
 
         turn_start_idx = len(self.session.messages) if self.session else 0
@@ -278,6 +281,8 @@ class AgentOrchestrationMixin:
         await self._auto_compact_if_needed()
         await self._refresh_todo_context_cache()
         await self._refresh_contacts_context_cache()
+        await self._refresh_scripts_context_cache()
+        await self._refresh_apis_context_cache()
         if clarification_context_applied:
             self._emit_tool_output(
                 "task_contract",
@@ -686,6 +691,7 @@ class AgentOrchestrationMixin:
             command = self._extract_command_from_response(response.content)
             if command:
                 log.info("Executing inline command", command=command)
+                self._emit_thinking(f"Running: {command[:60]}", tool="shell", phase="tool")
                 try:
                     result = await self._execute_tool_with_guard(
                         name="shell",

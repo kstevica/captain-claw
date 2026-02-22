@@ -281,6 +281,103 @@ class ContactMention:
         )
 
 
+@dataclass
+class ScriptEntry:
+    """A persistent cross-session script/file memory entry."""
+
+    id: str
+    name: str
+    file_path: str
+    description: str | None = None
+    purpose: str | None = None
+    language: str | None = None
+    created_reason: str | None = None
+    tags: str | None = None
+    use_count: int = 0
+    last_used_at: str | None = None
+    source_session: str | None = None
+    created_at: str = field(default_factory=_utcnow_iso)
+    updated_at: str = field(default_factory=_utcnow_iso)
+
+    @classmethod
+    def from_row(cls, row: tuple[Any, ...]) -> "ScriptEntry":
+        return cls(
+            id=str(row[0]),
+            name=str(row[1]),
+            file_path=str(row[2]),
+            description=str(row[3]) if row[3] else None,
+            purpose=str(row[4]) if row[4] else None,
+            language=str(row[5]) if row[5] else None,
+            created_reason=str(row[6]) if row[6] else None,
+            tags=str(row[7]) if row[7] else None,
+            use_count=int(row[8]) if row[8] is not None else 0,
+            last_used_at=str(row[9]) if row[9] else None,
+            source_session=str(row[10]) if row[10] else None,
+            created_at=str(row[11]),
+            updated_at=str(row[12]),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id, "name": self.name, "file_path": self.file_path,
+            "description": self.description, "purpose": self.purpose,
+            "language": self.language, "created_reason": self.created_reason,
+            "tags": self.tags, "use_count": self.use_count,
+            "last_used_at": self.last_used_at, "source_session": self.source_session,
+            "created_at": self.created_at, "updated_at": self.updated_at,
+        }
+
+
+@dataclass
+class ApiEntry:
+    """A persistent cross-session API memory entry."""
+
+    id: str
+    name: str
+    base_url: str
+    endpoints: str | None = None
+    auth_type: str | None = None
+    credentials: str | None = None
+    description: str | None = None
+    purpose: str | None = None
+    tags: str | None = None
+    use_count: int = 0
+    last_used_at: str | None = None
+    source_session: str | None = None
+    created_at: str = field(default_factory=_utcnow_iso)
+    updated_at: str = field(default_factory=_utcnow_iso)
+
+    @classmethod
+    def from_row(cls, row: tuple[Any, ...]) -> "ApiEntry":
+        return cls(
+            id=str(row[0]),
+            name=str(row[1]),
+            base_url=str(row[2]),
+            endpoints=str(row[3]) if row[3] else None,
+            auth_type=str(row[4]) if row[4] else None,
+            credentials=str(row[5]) if row[5] else None,
+            description=str(row[6]) if row[6] else None,
+            purpose=str(row[7]) if row[7] else None,
+            tags=str(row[8]) if row[8] else None,
+            use_count=int(row[9]) if row[9] is not None else 0,
+            last_used_at=str(row[10]) if row[10] else None,
+            source_session=str(row[11]) if row[11] else None,
+            created_at=str(row[12]),
+            updated_at=str(row[13]),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id, "name": self.name, "base_url": self.base_url,
+            "endpoints": self.endpoints, "auth_type": self.auth_type,
+            "credentials": self.credentials, "description": self.description,
+            "purpose": self.purpose, "tags": self.tags,
+            "use_count": self.use_count, "last_used_at": self.last_used_at,
+            "source_session": self.source_session,
+            "created_at": self.created_at, "updated_at": self.updated_at,
+        }
+
+
 class SessionManager:
     """Manages conversation sessions with SQLite storage."""
 
@@ -413,6 +510,55 @@ class SessionManager:
             """)
             await self._db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_contact_mentions_contact_id ON contact_mentions(contact_id)"
+            )
+            # -- Scripts memory --
+            await self._db.execute("""
+                CREATE TABLE IF NOT EXISTS scripts (
+                    id              TEXT PRIMARY KEY,
+                    name            TEXT NOT NULL,
+                    file_path       TEXT NOT NULL,
+                    description     TEXT,
+                    purpose         TEXT,
+                    language        TEXT,
+                    created_reason  TEXT,
+                    tags            TEXT,
+                    use_count       INTEGER NOT NULL DEFAULT 0,
+                    last_used_at    TEXT,
+                    source_session  TEXT,
+                    created_at      TEXT NOT NULL,
+                    updated_at      TEXT NOT NULL
+                )
+            """)
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_scripts_name ON scripts(name COLLATE NOCASE)"
+            )
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_scripts_use_count ON scripts(use_count DESC)"
+            )
+            # -- APIs memory --
+            await self._db.execute("""
+                CREATE TABLE IF NOT EXISTS apis (
+                    id              TEXT PRIMARY KEY,
+                    name            TEXT NOT NULL,
+                    base_url        TEXT NOT NULL,
+                    endpoints       TEXT,
+                    auth_type       TEXT,
+                    credentials     TEXT,
+                    description     TEXT,
+                    purpose         TEXT,
+                    tags            TEXT,
+                    use_count       INTEGER NOT NULL DEFAULT 0,
+                    last_used_at    TEXT,
+                    source_session  TEXT,
+                    created_at      TEXT NOT NULL,
+                    updated_at      TEXT NOT NULL
+                )
+            """)
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_apis_name ON apis(name COLLATE NOCASE)"
+            )
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_apis_use_count ON apis(use_count DESC)"
             )
             await self._ensure_cron_jobs_migrations()
             await self._db.commit()
@@ -1477,6 +1623,308 @@ class SessionManager:
         # Persist computed value
         await self.update_contact(contact_id, importance=importance)
         return importance
+
+    # ------------------------------------------------------------------
+    # Scripts memory CRUD
+    # ------------------------------------------------------------------
+
+    _SCRIPT_COLS = (
+        "id, name, file_path, description, purpose, language, "
+        "created_reason, tags, use_count, last_used_at, source_session, "
+        "created_at, updated_at"
+    )
+
+    async def create_script(
+        self,
+        name: str,
+        file_path: str,
+        *,
+        description: str | None = None,
+        purpose: str | None = None,
+        language: str | None = None,
+        created_reason: str | None = None,
+        tags: str | None = None,
+        source_session: str | None = None,
+    ) -> ScriptEntry:
+        await self._ensure_db()
+        now = _utcnow_iso()
+        entry = ScriptEntry(
+            id=str(uuid.uuid4()), name=name, file_path=file_path,
+            description=description, purpose=purpose, language=language,
+            created_reason=created_reason, tags=tags,
+            source_session=source_session, created_at=now, updated_at=now,
+        )
+        await self._db.execute(
+            f"""
+            INSERT INTO scripts ({self._SCRIPT_COLS})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (entry.id, entry.name, entry.file_path, entry.description,
+             entry.purpose, entry.language, entry.created_reason,
+             entry.tags, entry.use_count, entry.last_used_at,
+             entry.source_session, entry.created_at, entry.updated_at),
+        )
+        await self._db.commit()
+        return entry
+
+    async def load_script(self, script_id: str) -> ScriptEntry | None:
+        await self._ensure_db()
+        async with self._db.execute(
+            f"SELECT {self._SCRIPT_COLS} FROM scripts WHERE id = ?",
+            (script_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return ScriptEntry.from_row(row) if row else None
+
+    async def select_script(self, selector: str) -> ScriptEntry | None:
+        direct = await self.load_script(selector)
+        if direct:
+            return direct
+        if selector.startswith("#"):
+            try:
+                idx = int(selector[1:]) - 1
+            except ValueError:
+                return None
+            items = await self.list_scripts(limit=200)
+            return items[idx] if 0 <= idx < len(items) else None
+        results = await self.search_scripts(selector, limit=1)
+        return results[0] if results else None
+
+    async def list_scripts(
+        self, *, limit: int = 200,
+    ) -> list[ScriptEntry]:
+        await self._ensure_db()
+        async with self._db.execute(
+            f"""
+            SELECT {self._SCRIPT_COLS}
+            FROM scripts
+            ORDER BY use_count DESC, updated_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [ScriptEntry.from_row(r) for r in rows]
+
+    async def search_scripts(
+        self, query: str, *, limit: int = 20,
+    ) -> list[ScriptEntry]:
+        await self._ensure_db()
+        pattern = f"%{query}%"
+        async with self._db.execute(
+            f"""
+            SELECT {self._SCRIPT_COLS}
+            FROM scripts
+            WHERE name LIKE ? COLLATE NOCASE
+               OR file_path LIKE ? COLLATE NOCASE
+               OR language LIKE ? COLLATE NOCASE
+               OR tags LIKE ? COLLATE NOCASE
+            ORDER BY use_count DESC, updated_at DESC
+            LIMIT ?
+            """,
+            (pattern, pattern, pattern, pattern, limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [ScriptEntry.from_row(r) for r in rows]
+
+    async def update_script(
+        self, script_id: str, **kwargs: Any,
+    ) -> bool:
+        await self._ensure_db()
+        allowed = {
+            "name", "file_path", "description", "purpose", "language",
+            "created_reason", "tags",
+        }
+        sets = []
+        vals: list[Any] = []
+        for key, val in kwargs.items():
+            if key in allowed:
+                sets.append(f"{key} = ?")
+                vals.append(val)
+        if not sets:
+            return False
+        sets.append("updated_at = ?")
+        vals.append(_utcnow_iso())
+        vals.append(script_id)
+        async with self._db.execute(
+            f"UPDATE scripts SET {', '.join(sets)} WHERE id = ?",
+            vals,
+        ) as cursor:
+            affected = cursor.rowcount
+        await self._db.commit()
+        return affected > 0
+
+    async def delete_script(self, script_id: str) -> bool:
+        await self._ensure_db()
+        async with self._db.execute(
+            "DELETE FROM scripts WHERE id = ?", (script_id,),
+        ) as cursor:
+            affected = cursor.rowcount
+        await self._db.commit()
+        return affected > 0
+
+    async def increment_script_usage(self, script_id: str) -> bool:
+        await self._ensure_db()
+        now = _utcnow_iso()
+        async with self._db.execute(
+            "UPDATE scripts SET use_count = use_count + 1, last_used_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, script_id),
+        ) as cursor:
+            affected = cursor.rowcount
+        await self._db.commit()
+        return affected > 0
+
+    # ------------------------------------------------------------------
+    # APIs memory CRUD
+    # ------------------------------------------------------------------
+
+    _API_COLS = (
+        "id, name, base_url, endpoints, auth_type, credentials, "
+        "description, purpose, tags, use_count, last_used_at, source_session, "
+        "created_at, updated_at"
+    )
+
+    async def create_api(
+        self,
+        name: str,
+        base_url: str,
+        *,
+        endpoints: str | None = None,
+        auth_type: str | None = None,
+        credentials: str | None = None,
+        description: str | None = None,
+        purpose: str | None = None,
+        tags: str | None = None,
+        source_session: str | None = None,
+    ) -> ApiEntry:
+        await self._ensure_db()
+        now = _utcnow_iso()
+        entry = ApiEntry(
+            id=str(uuid.uuid4()), name=name, base_url=base_url,
+            endpoints=endpoints, auth_type=auth_type, credentials=credentials,
+            description=description, purpose=purpose, tags=tags,
+            source_session=source_session, created_at=now, updated_at=now,
+        )
+        await self._db.execute(
+            f"""
+            INSERT INTO apis ({self._API_COLS})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (entry.id, entry.name, entry.base_url, entry.endpoints,
+             entry.auth_type, entry.credentials, entry.description,
+             entry.purpose, entry.tags, entry.use_count,
+             entry.last_used_at, entry.source_session,
+             entry.created_at, entry.updated_at),
+        )
+        await self._db.commit()
+        return entry
+
+    async def load_api(self, api_id: str) -> ApiEntry | None:
+        await self._ensure_db()
+        async with self._db.execute(
+            f"SELECT {self._API_COLS} FROM apis WHERE id = ?",
+            (api_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return ApiEntry.from_row(row) if row else None
+
+    async def select_api(self, selector: str) -> ApiEntry | None:
+        direct = await self.load_api(selector)
+        if direct:
+            return direct
+        if selector.startswith("#"):
+            try:
+                idx = int(selector[1:]) - 1
+            except ValueError:
+                return None
+            items = await self.list_apis(limit=200)
+            return items[idx] if 0 <= idx < len(items) else None
+        results = await self.search_apis(selector, limit=1)
+        return results[0] if results else None
+
+    async def list_apis(
+        self, *, limit: int = 200,
+    ) -> list[ApiEntry]:
+        await self._ensure_db()
+        async with self._db.execute(
+            f"""
+            SELECT {self._API_COLS}
+            FROM apis
+            ORDER BY use_count DESC, updated_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [ApiEntry.from_row(r) for r in rows]
+
+    async def search_apis(
+        self, query: str, *, limit: int = 20,
+    ) -> list[ApiEntry]:
+        await self._ensure_db()
+        pattern = f"%{query}%"
+        async with self._db.execute(
+            f"""
+            SELECT {self._API_COLS}
+            FROM apis
+            WHERE name LIKE ? COLLATE NOCASE
+               OR base_url LIKE ? COLLATE NOCASE
+               OR description LIKE ? COLLATE NOCASE
+               OR tags LIKE ? COLLATE NOCASE
+            ORDER BY use_count DESC, updated_at DESC
+            LIMIT ?
+            """,
+            (pattern, pattern, pattern, pattern, limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [ApiEntry.from_row(r) for r in rows]
+
+    async def update_api(
+        self, api_id: str, **kwargs: Any,
+    ) -> bool:
+        await self._ensure_db()
+        allowed = {
+            "name", "base_url", "endpoints", "auth_type", "credentials",
+            "description", "purpose", "tags",
+        }
+        sets = []
+        vals: list[Any] = []
+        for key, val in kwargs.items():
+            if key in allowed:
+                sets.append(f"{key} = ?")
+                vals.append(val)
+        if not sets:
+            return False
+        sets.append("updated_at = ?")
+        vals.append(_utcnow_iso())
+        vals.append(api_id)
+        async with self._db.execute(
+            f"UPDATE apis SET {', '.join(sets)} WHERE id = ?",
+            vals,
+        ) as cursor:
+            affected = cursor.rowcount
+        await self._db.commit()
+        return affected > 0
+
+    async def delete_api(self, api_id: str) -> bool:
+        await self._ensure_db()
+        async with self._db.execute(
+            "DELETE FROM apis WHERE id = ?", (api_id,),
+        ) as cursor:
+            affected = cursor.rowcount
+        await self._db.commit()
+        return affected > 0
+
+    async def increment_api_usage(self, api_id: str) -> bool:
+        await self._ensure_db()
+        now = _utcnow_iso()
+        async with self._db.execute(
+            "UPDATE apis SET use_count = use_count + 1, last_used_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, api_id),
+        ) as cursor:
+            affected = cursor.rowcount
+        await self._db.commit()
+        return affected > 0
 
     async def close(self) -> None:
         """Close the database connection."""

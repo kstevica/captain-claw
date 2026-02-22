@@ -603,6 +603,221 @@ async def handle_remote_command(
         ok = await sm.update_contact(item.id, **kwargs)
         await send_text(f"Updated contact: {item.name}" if ok else "Update failed.")
         return True
+    # Scripts commands
+    if result == "SCRIPTS_LIST":
+        sm = agent.session_manager
+        items = await sm.list_scripts(limit=50)
+        if not items:
+            await send_text("No scripts.")
+            return True
+        lines: list[str] = []
+        for idx, s in enumerate(items, 1):
+            lang_part = f" ({s.language})" if s.language else ""
+            lines.append(
+                f"#{idx} {s.name}{lang_part} [{s.file_path}]"
+                f"  uses={s.use_count}"
+            )
+        await send_text("Scripts:\n" + "\n".join(lines))
+        return True
+    if result.startswith("SCRIPTS_ADD:"):
+        payload_raw = result.split(":", 1)[1].strip()
+        try:
+            payload = json.loads(payload_raw)
+        except Exception:
+            await send_text("Invalid /scripts add payload.")
+            return True
+        name = str(payload.get("name", "")).strip()
+        file_path = str(payload.get("file_path", "")).strip()
+        if not name or not file_path:
+            await send_text("Usage: /scripts add <name> <file_path>")
+            return True
+        sm = agent.session_manager
+        session_id = agent.session.id if agent.session else None
+        item = await sm.create_script(name=name, file_path=file_path, source_session=session_id)
+        await send_text(f"Added script: {name} at {file_path}")
+        return True
+    if result.startswith("SCRIPTS_INFO:"):
+        selector = result.split(":", 1)[1].strip()
+        sm = agent.session_manager
+        item = await sm.select_script(selector)
+        if not item:
+            await send_text(f"Script not found: {selector}")
+            return True
+        parts = [f"Name: {item.name}", f"Path: {item.file_path}"]
+        if item.language:
+            parts.append(f"Language: {item.language}")
+        if item.description:
+            parts.append(f"Description: {item.description}")
+        if item.purpose:
+            parts.append(f"Purpose: {item.purpose}")
+        if item.created_reason:
+            parts.append(f"Created reason: {item.created_reason}")
+        if item.tags:
+            parts.append(f"Tags: {item.tags}")
+        parts.append(f"Uses: {item.use_count}")
+        await send_text("\n".join(parts))
+        return True
+    if result.startswith("SCRIPTS_SEARCH:"):
+        query = result.split(":", 1)[1].strip()
+        sm = agent.session_manager
+        items = await sm.search_scripts(query, limit=20)
+        if not items:
+            await send_text(f"No scripts matching: {query}")
+            return True
+        lines = []
+        for idx, s in enumerate(items, 1):
+            lang_part = f" ({s.language})" if s.language else ""
+            lines.append(f"#{idx} {s.name}{lang_part} [{s.file_path}]")
+        await send_text("Search results:\n" + "\n".join(lines))
+        return True
+    if result.startswith("SCRIPTS_REMOVE:"):
+        selector = result.split(":", 1)[1].strip()
+        sm = agent.session_manager
+        item = await sm.select_script(selector)
+        if not item:
+            await send_text(f"Script not found: {selector}")
+            return True
+        await sm.delete_script(item.id)
+        await send_text(f"Removed: {item.name}")
+        return True
+    if result.startswith("SCRIPTS_UPDATE:"):
+        raw = result.split(":", 1)[1].strip()
+        update_parts = raw.split(None, 1)
+        if len(update_parts) < 2:
+            await send_text("Usage: /scripts update <id|#index|name> <field=value ...>")
+            return True
+        selector = update_parts[0]
+        fields_str = update_parts[1]
+        sm = agent.session_manager
+        item = await sm.select_script(selector)
+        if not item:
+            await send_text(f"Script not found: {selector}")
+            return True
+        import shlex as _shlex
+        kwargs: dict[str, Any] = {}
+        valid_fields = {"name", "file_path", "description", "purpose", "language", "created_reason", "tags"}
+        for token in _shlex.split(fields_str):
+            if "=" not in token:
+                continue
+            key, _, value = token.partition("=")
+            key = key.strip().lower()
+            if key in valid_fields:
+                kwargs[key] = value
+        if not kwargs:
+            await send_text("No valid fields to update. Use field=value syntax.")
+            return True
+        ok = await sm.update_script(item.id, **kwargs)
+        await send_text(f"Updated script: {item.name}" if ok else "Update failed.")
+        return True
+    # APIs commands
+    if result == "APIS_LIST":
+        sm = agent.session_manager
+        items = await sm.list_apis(limit=50)
+        if not items:
+            await send_text("No APIs.")
+            return True
+        lines: list[str] = []
+        for idx, a in enumerate(items, 1):
+            auth_part = f" [{a.auth_type}]" if a.auth_type else ""
+            lines.append(
+                f"#{idx} {a.name}{auth_part} ({a.base_url})"
+                f"  uses={a.use_count}"
+            )
+        await send_text("APIs:\n" + "\n".join(lines))
+        return True
+    if result.startswith("APIS_ADD:"):
+        payload_raw = result.split(":", 1)[1].strip()
+        try:
+            payload = json.loads(payload_raw)
+        except Exception:
+            await send_text("Invalid /apis add payload.")
+            return True
+        name = str(payload.get("name", "")).strip()
+        base_url = str(payload.get("base_url", "")).strip()
+        if not name or not base_url:
+            await send_text("Usage: /apis add <name> <base_url>")
+            return True
+        sm = agent.session_manager
+        session_id = agent.session.id if agent.session else None
+        item = await sm.create_api(name=name, base_url=base_url, source_session=session_id)
+        await send_text(f"Added API: {name} ({base_url})")
+        return True
+    if result.startswith("APIS_INFO:"):
+        selector = result.split(":", 1)[1].strip()
+        sm = agent.session_manager
+        item = await sm.select_api(selector)
+        if not item:
+            await send_text(f"API not found: {selector}")
+            return True
+        parts = [f"Name: {item.name}", f"Base URL: {item.base_url}"]
+        if item.auth_type:
+            parts.append(f"Auth type: {item.auth_type}")
+        if item.credentials:
+            parts.append(f"Credentials: {item.credentials}")
+        if item.endpoints:
+            parts.append(f"Endpoints: {item.endpoints}")
+        if item.description:
+            parts.append(f"Description: {item.description}")
+        if item.purpose:
+            parts.append(f"Purpose: {item.purpose}")
+        if item.tags:
+            parts.append(f"Tags: {item.tags}")
+        parts.append(f"Uses: {item.use_count}")
+        await send_text("\n".join(parts))
+        return True
+    if result.startswith("APIS_SEARCH:"):
+        query = result.split(":", 1)[1].strip()
+        sm = agent.session_manager
+        items = await sm.search_apis(query, limit=20)
+        if not items:
+            await send_text(f"No APIs matching: {query}")
+            return True
+        lines = []
+        for idx, a in enumerate(items, 1):
+            auth_part = f" [{a.auth_type}]" if a.auth_type else ""
+            lines.append(f"#{idx} {a.name}{auth_part} ({a.base_url})")
+        await send_text("Search results:\n" + "\n".join(lines))
+        return True
+    if result.startswith("APIS_REMOVE:"):
+        selector = result.split(":", 1)[1].strip()
+        sm = agent.session_manager
+        item = await sm.select_api(selector)
+        if not item:
+            await send_text(f"API not found: {selector}")
+            return True
+        await sm.delete_api(item.id)
+        await send_text(f"Removed: {item.name}")
+        return True
+    if result.startswith("APIS_UPDATE:"):
+        raw = result.split(":", 1)[1].strip()
+        update_parts = raw.split(None, 1)
+        if len(update_parts) < 2:
+            await send_text("Usage: /apis update <id|#index|name> <field=value ...>")
+            return True
+        selector = update_parts[0]
+        fields_str = update_parts[1]
+        sm = agent.session_manager
+        item = await sm.select_api(selector)
+        if not item:
+            await send_text(f"API not found: {selector}")
+            return True
+        import shlex as _shlex
+        kwargs: dict[str, Any] = {}
+        valid_fields = {"name", "base_url", "endpoints", "auth_type", "credentials",
+                        "description", "purpose", "tags"}
+        for token in _shlex.split(fields_str):
+            if "=" not in token:
+                continue
+            key, _, value = token.partition("=")
+            key = key.strip().lower()
+            if key in valid_fields:
+                kwargs[key] = value
+        if not kwargs:
+            await send_text("No valid fields to update. Use field=value syntax.")
+            return True
+        ok = await sm.update_api(item.id, **kwargs)
+        await send_text(f"Updated API: {item.name}" if ok else "Update failed.")
+        return True
     # Unhandled command -> local-only message
     _ = platform
     await send_text("Command requires local console in this version.")

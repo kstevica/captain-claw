@@ -384,6 +384,24 @@ class AddressBookConfig(BaseModel):
     max_items_in_prompt: int = 5
 
 
+class ScriptsMemoryConfig(BaseModel):
+    """Cross-session script/file memory settings."""
+
+    enabled: bool = True
+    auto_capture: bool = True
+    inject_on_mention: bool = True
+    max_items_in_prompt: int = 5
+
+
+class ApisMemoryConfig(BaseModel):
+    """Cross-session API memory settings."""
+
+    enabled: bool = True
+    auto_capture: bool = True
+    inject_on_mention: bool = True
+    max_items_in_prompt: int = 5
+
+
 class OrchestratorConfig(BaseModel):
     """Parallel session orchestration settings."""
 
@@ -443,6 +461,8 @@ class Config(BaseSettings):
     google_oauth: GoogleOAuthConfig = Field(default_factory=GoogleOAuthConfig)
     todo: TodoConfig = Field(default_factory=TodoConfig)
     addressbook: AddressBookConfig = Field(default_factory=AddressBookConfig)
+    scripts_memory: ScriptsMemoryConfig = Field(default_factory=ScriptsMemoryConfig)
+    apis_memory: ApisMemoryConfig = Field(default_factory=ApisMemoryConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
 
     model_config = SettingsConfigDict(

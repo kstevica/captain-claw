@@ -25,6 +25,8 @@ from captain_claw.tools.send_mail import SendMailTool
 from captain_claw.tools.google_drive import GoogleDriveTool
 from captain_claw.tools.todo import TodoTool
 from captain_claw.tools.contacts import ContactsTool
+from captain_claw.tools.scripts import ScriptsTool
+from captain_claw.tools.apis import ApisTool
 
 __all__ = [
     "Tool",
@@ -48,4 +50,6 @@ __all__ = [
     "GoogleDriveTool",
     "TodoTool",
     "ContactsTool",
+    "ScriptsTool",
+    "ApisTool",
 ]
