@@ -82,7 +82,8 @@ class TerminalUI:
         self._monitor_full_output = bool(getattr(self.config.ui, "monitor_full_output", False))
         self._monitor_chat_scroll_offset = 0
         self._monitor_tool_scroll_offset = 0
-        
+        self._thinking_text = ""
+
         # For now, just disable colors to avoid terminal capability issues
         # Can enable later with proper terminal detection
         self._colors_enabled = False
@@ -705,13 +706,20 @@ Commands:
         text = raw_output if raw_output else "[no output]"
         if self._monitor_full_output:
             return text
-        if tool_name != "web_fetch":
+        if tool_name not in {"web_fetch", "web_get"}:
             return text
 
         used_text = self._split_web_fetch_payload(text)
         summary = self._summarize_text(used_text)
         used_kb = len(used_text.encode("utf-8")) / 1024.0
         return f"Summary: {summary}\nUsed text: {used_kb:.1f} kB"
+
+    # Internal actions that should NOT update the thinking indicator.
+    _THINKING_SILENT_TOOLS: set[str] = {
+        "llm_trace", "pipeline_trace", "memory_select", "memory_semantic_select",
+        "compaction", "guard_input", "guard_output", "guard_web", "guard_exec",
+        "guard_file", "approval",
+    }
 
     def append_tool_output(
         self,
@@ -735,11 +743,19 @@ Commands:
         self._append_tool_text(f"{header}\n{body}\n\n")
         if render:
             self._render_monitor_view()
+        # Update thinking indicator for non-silent tools (skip during history replay).
+        if not getattr(self, "_replaying_history", False):
+            normalized = str(tool_name or "").strip().lower()
+            if normalized not in self._THINKING_SILENT_TOOLS:
+                from captain_claw.agent_tool_loop_mixin import AgentToolLoopMixin
+                summary = AgentToolLoopMixin._tool_thinking_summary(tool_name, args)
+                self.set_thinking(summary, tool=tool_name, phase="tool")
 
     def load_monitor_tool_output_from_session(self, messages: list[dict[str, Any]]) -> None:
         """Rebuild monitor tool pane from session history."""
         self._tool_output_text = ""
         self._monitor_tool_scroll_offset = 0
+        self._replaying_history = True
         for msg in messages:
             if msg.get("role") != "tool":
                 continue
@@ -749,6 +765,8 @@ Commands:
                 raw_output=str(msg.get("content", "")),
                 render=False,
             )
+        self._replaying_history = False
+        self._thinking_text = ""
         self._render_monitor_view()
 
     def append_system_line(self, text: str) -> None:
@@ -774,6 +792,18 @@ Commands:
             self._footer_dirty = True
             return
         self._render_footer(force=True)
+
+    def set_thinking(self, text: str, tool: str = "", phase: str = "tool") -> None:
+        """Update the inline thinking/reasoning text shown on the status line."""
+        if phase == "done" or not text:
+            self._thinking_text = ""
+        else:
+            self._thinking_text = text
+        # Always render immediately — the thinking indicator must be visible
+        # during tool execution even when streaming is active (i.e.
+        # _assistant_output_active is True).  The whole point of this indicator
+        # is real-time feedback while the agent works.
+        self._render_system_panel()
 
     def can_capture_escape(self) -> bool:
         """Whether ESC key capture is available on this terminal."""
@@ -825,6 +855,24 @@ Commands:
         padded_logs = lines + [""] * (self._system_log_rows - len(lines))
 
         status_row = m["system_start"]
+        # Build thinking suffix (shown after status badge).
+        thinking_suffix = ""
+        if self._thinking_text:
+            if self._ansi_enabled:
+                # dim italic purple text
+                thinking_suffix = f"  \033[3;35m\u2728 {self._thinking_text}\033[0m"
+            else:
+                thinking_suffix = f"  * {self._thinking_text}"
+            # Truncate to fit remaining width (status badge ~28 visible chars).
+            max_think = max(0, width - 30)
+            # Strip ANSI for length check.
+            visible = self._thinking_text
+            if len(visible) > max_think:
+                if self._ansi_enabled:
+                    thinking_suffix = f"  \033[3;35m\u2728 {self._thinking_text[:max_think]}\u2026\033[0m"
+                else:
+                    thinking_suffix = f"  * {self._thinking_text[:max_think]}..."
+
         if self._ansi_enabled:
             label = "\033[97;44m STATUS \033[0m"
             state_styles = {
@@ -837,10 +885,12 @@ Commands:
             state_style = state_styles.get(self._runtime_status, "\033[30;107m")
             state = self._runtime_status.upper()
             sys.stdout.write(
-                f"\033[{status_row};1H\033[2K{label} {state_style} {state:<14} \033[0m"
+                f"\033[{status_row};1H\033[2K{label} {state_style} {state:<14} \033[0m{thinking_suffix}"
             )
         else:
             status_line = f"STATUS  {self._runtime_status}"
+            if self._thinking_text:
+                status_line += f"  * {self._thinking_text}"
             sys.stdout.write(
                 f"\033[{status_row};1H\033[2K{self._fit_line(status_line, width)}"
             )

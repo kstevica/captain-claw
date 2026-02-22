@@ -218,6 +218,14 @@ class ToolsConfig(BaseModel):
     send_mail: SendMailToolConfig = Field(default_factory=SendMailToolConfig)
     require_confirmation: list[str] = ["shell", "write"]
     plugin_dirs: list[str] = ["skills/tools"]
+    duplicate_call_max: int = Field(
+        default=1,
+        description=(
+            "Maximum times a tool may be called on the same target "
+            "(path/URL/pattern) per turn before the call is blocked. "
+            "Set to 1 to block on the first repeat; 2 to allow one retry."
+        ),
+    )
 
 
 class SkillEntryConfig(BaseModel):

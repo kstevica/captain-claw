@@ -12,7 +12,7 @@ from captain_claw.tools.shell import ShellTool
 from captain_claw.tools.read import ReadTool
 from captain_claw.tools.write import WriteTool
 from captain_claw.tools.glob import GlobTool
-from captain_claw.tools.web_fetch import WebFetchTool
+from captain_claw.tools.web_fetch import WebFetchTool, WebGetTool
 from captain_claw.tools.web_search import WebSearchTool
 from captain_claw.tools.document_extract import (
     DocxExtractTool,
@@ -40,6 +40,7 @@ __all__ = [
     "WriteTool",
     "GlobTool",
     "WebFetchTool",
+    "WebGetTool",
     "WebSearchTool",
     "PdfExtractTool",
     "DocxExtractTool",

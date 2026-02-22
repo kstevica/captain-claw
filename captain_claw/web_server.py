@@ -185,7 +185,7 @@ class WebServer:
     _THINKING_SILENT_TOOLS: set[str] = {
         "llm_trace", "pipeline_trace", "memory_select", "memory_semantic_select",
         "compaction", "guard_input", "guard_output", "guard_web", "guard_exec",
-        "guard_file", "approval",
+        "guard_file", "approval", "scale_micro_loop",
     }
 
     def _tool_output_callback(
@@ -337,8 +337,8 @@ class WebServer:
                 await self._handle_command(ws, command)
 
         elif msg_type == "cancel":
-            # Future: implement cancellation
-            pass
+            if self.agent and hasattr(self.agent, "cancel_event"):
+                self.agent.cancel_event.set()
 
         elif msg_type == "approval_response":
             # Reserved for future interactive approval support

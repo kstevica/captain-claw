@@ -333,7 +333,7 @@ html, body {
 }
 .thinking-indicator .thinking-inner {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 10px;
     padding: 8px 14px;
     border-radius: 8px;
@@ -343,15 +343,15 @@ html, body {
 .thinking-indicator .thinking-icon {
     font-size: 15px;
     flex-shrink: 0;
+    margin-top: 1px;
     animation: thinkPulse 1.8s ease-in-out infinite;
 }
 .thinking-indicator .thinking-text {
     font-size: 13px;
     font-style: italic;
     color: var(--text-secondary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    white-space: normal;
+    word-break: break-word;
 }
 .thinking-indicator .thinking-text .thinking-tool {
     font-family: var(--font-mono);
@@ -359,6 +359,31 @@ html, body {
     font-size: 12px;
     color: var(--purple);
 }
+.thinking-indicator .thinking-text .thinking-detail {
+    display: block;
+    font-family: var(--font-mono);
+    font-style: normal;
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 3px;
+    line-height: 1.5;
+    opacity: 0.85;
+}
+/* Frozen (completed) micro-loop steps – dimmed, no animation */
+.thinking-frozen .thinking-inner {
+    opacity: 0.55;
+    border-left-color: var(--border);
+    background: transparent;
+}
+.thinking-frozen .thinking-icon {
+    animation: none !important;
+    opacity: 0.4;
+}
+.thinking-frozen {
+    animation: none;
+    margin-bottom: 4px;
+}
+
 @keyframes thinkPulse {
     0%, 100% { opacity: 0.5; transform: scale(1); }
     50% { opacity: 1; transform: scale(1.12); }

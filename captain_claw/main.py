@@ -255,10 +255,17 @@ async def run_interactive() -> None:
     # signals, so we need this event to break out of the main loop and
     # then force-exit after cleanup (just like web mode does).
     stop_event = asyncio.Event()
+    # Will be bound to agent.cancel_event after agent is created.
+    _agent_cancel_event: asyncio.Event | None = None
 
     def _signal_handler() -> None:
+        # First signal: request graceful cancellation of the running turn.
+        # Second signal: hard stop (break out of the outer loop).
+        if _agent_cancel_event is not None and not _agent_cancel_event.is_set():
+            _agent_cancel_event.set()
+            return  # first Ctrl+C → just cancel the current turn
         if not stop_event.is_set():
-            stop_event.set()
+            stop_event.set()  # second Ctrl+C → full exit
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -272,7 +279,9 @@ async def run_interactive() -> None:
         status_callback=ui.set_runtime_status,
         tool_output_callback=ui.append_tool_output,
         approval_callback=ui.confirm,
+        thinking_callback=ui.set_thinking,
     )
+    _agent_cancel_event = agent.cancel_event
 
     # Show welcome
     ui.print_welcome()

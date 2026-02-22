@@ -1,5 +1,6 @@
 """Agent orchestration for Captain Claw."""
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -86,6 +87,11 @@ class Agent(
         # File registry for cross-task/cross-session file path resolution.
         # Set per orchestration run or per session for single-agent mode.
         self._file_registry: FileRegistry | None = None
+        # External cancellation event — set by the UI layer (TUI/web) when
+        # the user presses Ctrl+C / ESC or sends a cancel WS message.
+        # The main iteration loop checks this at the top of every iteration
+        # and breaks cleanly rather than running to completion.
+        self.cancel_event: asyncio.Event = asyncio.Event()
         self._refresh_runtime_model_details(source="startup")
 
     @staticmethod

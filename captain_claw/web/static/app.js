@@ -144,9 +144,12 @@
     let msgCount = 0;
 
     function addChatMessage(role, content, isReplay) {
-        // Remove thinking indicator when assistant or error message arrives.
+        // Remove thinking indicator(s) when assistant or error message arrives.
         if (role === 'assistant' || role === 'error') {
             removeThinkingIndicator();
+            // Also remove all frozen micro-loop steps.
+            chatMessages.querySelectorAll('.thinking-frozen').forEach(el => el.remove());
+            _thinkingTool = '';
         }
         chatEmpty.style.display = 'none';
         const div = document.createElement('div');
@@ -203,15 +206,67 @@
         if (el) el.remove();
     }
 
+    // Track whether the current live indicator belongs to a scale_micro_loop
+    // so we can freeze (persist) it when the next step arrives.
+    let _thinkingTool = '';
+
+    function _freezeThinkingIndicator() {
+        // Convert the live indicator into a static (frozen) element so it
+        // stays visible while the next step takes over.
+        const el = document.getElementById('thinkingIndicator');
+        if (!el) return;
+        el.removeAttribute('id');
+        el.classList.add('thinking-frozen');
+        // Stop the pulsing animation on the icon.
+        const icon = el.querySelector('.thinking-icon');
+        if (icon) icon.style.animation = 'none';
+    }
+
+    function _buildThinkingHtml(text, tool) {
+        // Multi-line support: first line = tool/action (purple),
+        // subsequent lines = detail (normal text, no truncation).
+        const lines = text.split('\n');
+        const firstLine = lines[0] || text;
+        const detailLines = lines.slice(1).filter(l => l.length > 0);
+
+        // Parse the first line: prefix before ':' is the tool label.
+        const prefix = firstLine.split(':')[0] || firstLine;
+        const rest = firstLine.includes(':')
+            ? firstLine.slice(firstLine.indexOf(':') + 1).trim()
+            : '';
+
+        let html = '<span class="thinking-tool">' + escapeHtml(prefix) + '</span>';
+        if (rest) html += ' ' + escapeHtml(rest);
+        if (detailLines.length > 0) {
+            html += '<span class="thinking-detail">'
+                + detailLines.map(l => escapeHtml(l)).join('<br>')
+                + '</span>';
+        }
+        return html;
+    }
+
     function updateThinkingIndicator(text, tool, phase) {
         // Clear on "done" phase or empty text.
         if (phase === 'done' || !text) {
             removeThinkingIndicator();
+            _thinkingTool = '';
             return;
         }
 
         // Hide empty state so indicator is visible.
         chatEmpty.style.display = 'none';
+
+        // For scale_micro_loop: freeze the previous step so it stays
+        // visible, then create a fresh indicator for the new step.
+        if (tool === 'scale_micro_loop' && _thinkingTool === 'scale_micro_loop') {
+            _freezeThinkingIndicator();
+        }
+        // If switching away from scale_micro_loop to another tool,
+        // just remove the live indicator (frozen ones stay).
+        if (tool !== 'scale_micro_loop' && _thinkingTool === 'scale_micro_loop') {
+            _freezeThinkingIndicator();
+        }
+        _thinkingTool = tool || '';
 
         let el = document.getElementById('thinkingIndicator');
         if (!el) {
@@ -236,14 +291,7 @@
         if (phase === 'reasoning') {
             textSpan.innerHTML = text;
         } else if (tool) {
-            // Show tool name highlighted, then the rest of the text.
-            const toolUpper = tool.toUpperCase();
-            const rest = text.startsWith(toolUpper + ':')
-                ? text.slice(toolUpper.length + 1).trim()
-                : text.replace(/^[^:]+:\s*/, '');
-            const prefix = text.split(':')[0] || text;
-            textSpan.innerHTML = '<span class="thinking-tool">' + escapeHtml(prefix) + '</span>'
-                + (rest ? ' ' + escapeHtml(rest) : '');
+            textSpan.innerHTML = _buildThinkingHtml(text, tool);
         } else {
             textSpan.textContent = text;
         }

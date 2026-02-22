@@ -7,6 +7,7 @@ import hashlib
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from captain_claw.config import get_config
 from captain_claw.llm import Message, ToolCall, get_provider, set_provider
@@ -131,20 +132,77 @@ class AgentContextMixin:
                             args_links.append(value)
         return self._merge_unique_urls(args_links, content_links)
 
+    @staticmethod
+    def _extract_mentioned_domains(text: str) -> set[str]:
+        """Extract domain names from URLs and domain-like tokens in *text*.
+
+        Returns a set of lowercased hostnames (e.g. ``{"index.hr", "www.index.hr"}``).
+        Used to scope ``_collect_recent_source_urls`` so that only URLs
+        relevant to the current request are included.
+        """
+        domains: set[str] = set()
+        # 1. Domains from full URLs
+        for url in re.findall(r"https?://[^\s)\]}>\"']+", text or ""):
+            try:
+                host = urlparse(url).hostname
+                if host:
+                    domains.add(host.lower())
+            except Exception:
+                pass
+        # 2. Bare domain-like tokens  (e.g. "index.hr", "netokracija.com")
+        for token in re.findall(r"\b([a-zA-Z0-9-]+\.[a-zA-Z]{2,})\b", text or ""):
+            candidate = token.lower()
+            # Simple validation — must have at least one dot and a known-ish TLD length
+            if "." in candidate and len(candidate.split(".")[-1]) >= 2:
+                domains.add(candidate)
+        return domains
+
+    @staticmethod
+    def _url_matches_domains(url: str, domains: set[str]) -> bool:
+        """Check whether *url*'s hostname matches any entry in *domains*."""
+        try:
+            host = urlparse(url).hostname
+        except Exception:
+            return False
+        if not host:
+            return False
+        host = host.lower()
+        for domain in domains:
+            # Match exact host or host ends with ".domain"
+            if host == domain or host.endswith(f".{domain}"):
+                return True
+        return False
+
     def _collect_recent_source_urls(
         self,
         turn_start_idx: int,
         max_messages: int = 20,
         max_urls: int = 20,
+        domain_filter: set[str] | None = None,
     ) -> list[str]:
-        """Collect recent source URLs from messages before current turn."""
+        """Collect recent source URLs from messages before current turn.
+
+        When *domain_filter* is provided and non-empty, only URLs whose
+        hostname matches one of the filter domains are included.  This
+        prevents unrelated URLs from earlier tasks (e.g. netokracija URLs
+        when the current request is about index.hr) from polluting the
+        planner context and causing wasteful prefetches.
+
+        When *domain_filter* is ``None`` or empty (no domain could be
+        extracted from the current request), the scan window is reduced
+        from *max_messages* to 5 to limit noise from older unrelated tasks.
+        """
         if not self.session:
             return []
-        start = max(0, turn_start_idx - max_messages)
+        # Narrow scan window when we have no domain signal.
+        effective_max = max_messages if domain_filter else min(max_messages, 5)
+        start = max(0, turn_start_idx - effective_max)
         urls: list[str] = []
         for msg in self.session.messages[start:turn_start_idx]:
             content = str(msg.get("content", ""))
             links = self._extract_source_links(msg, content)
+            if domain_filter:
+                links = [u for u in links if self._url_matches_domains(u, domain_filter)]
             if links:
                 urls = self._merge_unique_urls(urls, links)
             if len(urls) >= max_urls:
@@ -637,7 +695,7 @@ class AgentContextMixin:
         cfg = get_config()
         if not cfg.apis_memory.enabled or not cfg.apis_memory.auto_capture:
             return
-        if tool_name != "web_fetch":
+        if tool_name not in {"web_fetch", "web_get"}:
             return
         url_str = str(arguments.get("url", "")).strip()
         if not url_str:
@@ -748,6 +806,7 @@ class AgentContextMixin:
             ScriptsTool,
             ApisTool,
             WebFetchTool,
+            WebGetTool,
             WebSearchTool,
             WriteTool,
             XlsxExtractTool,
@@ -767,6 +826,7 @@ class AgentContextMixin:
                 self.tools.register(GlobTool())
             elif tool_name == "web_fetch":
                 self.tools.register(WebFetchTool())
+                self.tools.register(WebGetTool())
             elif tool_name == "web_search":
                 self.tools.register(WebSearchTool())
             elif tool_name == "pdf_extract":
@@ -1268,6 +1328,14 @@ class AgentContextMixin:
                 "tool_name": "list_task_memory",
                 "token_count": self._count_tokens(list_note),
             })
+        scale_note = self._build_scale_progress_note()
+        if scale_note:
+            candidate_messages.append({
+                "role": "assistant",
+                "content": scale_note,
+                "tool_name": "scale_progress",
+                "token_count": self._count_tokens(scale_note),
+            })
         todo_note = self._build_todo_context_note()
         if todo_note:
             candidate_messages.append({
@@ -1310,7 +1378,12 @@ class AgentContextMixin:
             must_include_latest_user = (
                 (not included_latest_user) and str(msg.get("role", "")) == "user"
             )
-            if used_tokens + msg_tokens <= history_budget or must_include_latest_user:
+            # The scale progress note is critical during incremental
+            # processing — it prevents the LLM from re-globbing or
+            # losing track of the worklist.  Always include it.
+            is_scale_note = str(msg.get("tool_name", "")) == "scale_progress"
+            must_include = must_include_latest_user or is_scale_note
+            if used_tokens + msg_tokens <= history_budget or must_include:
                 selected_reversed.append(msg)
                 used_tokens += msg_tokens
                 if must_include_latest_user:
@@ -1344,6 +1417,7 @@ class AgentContextMixin:
             "historical_tool_messages_filtered": len(skipped_historical_tools),
             "memory_note_used": 1 if memory_note else 0,
             "planning_note_used": 1 if planning_note else 0,
+            "scale_progress_note_used": 1 if scale_note else 0,
             "todo_note_used": 1 if todo_note else 0,
             "over_budget": 1 if prompt_tokens > context_budget else 0,
             "utilization": (prompt_tokens / context_budget) if context_budget else 0.0,

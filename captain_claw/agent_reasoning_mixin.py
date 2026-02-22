@@ -68,7 +68,16 @@ class AgentReasoningMixin:
         return True
 
     def _resolve_effective_user_input(self, user_input: str) -> tuple[str, bool]:
-        """Merge pending clarification anchor with current message when appropriate."""
+        """Merge pending clarification anchor with current message when appropriate.
+
+        When the assistant previously asked a clarification question and the user
+        now replies with a short follow-up, we merge the context so the planner
+        understands what the user wants.  Instead of re-posing the *original*
+        question (which can trigger a full re-research pipeline), we attach the
+        last assistant response as context — that response already contains the
+        specific items (URLs, article titles, numbered options) the user is
+        referring to.
+        """
         if not self.session or not isinstance(self.session.metadata, dict):
             return user_input, False
         state = self.session.metadata.get("clarification_state")
@@ -79,12 +88,37 @@ class AgentReasoningMixin:
             return user_input, False
         if not self._should_apply_pending_clarification(user_input):
             return user_input, False
-        merged = (
-            f"{anchor}\n\n"
-            "Clarifications/preferences from user:\n"
-            f"{user_input.strip()}\n\n"
-            "Execute the full original request using these clarification details."
-        )
+
+        # Try to find the last assistant response — it contains the specific
+        # items the user is referring to (URLs, articles, options offered).
+        last_assistant_text = ""
+        if self.session.messages:
+            for msg in reversed(self.session.messages):
+                if msg.get("role") == "assistant":
+                    last_assistant_text = str(msg.get("content", "")).strip()
+                    break
+
+        if last_assistant_text and len(last_assistant_text) > 50:
+            # Use the assistant's previous response as context instead of the
+            # broad original question.  This keeps the planner focused on the
+            # specific items already surfaced rather than re-researching.
+            context_excerpt = last_assistant_text[-2000:]
+            merged = (
+                f"{user_input.strip()}\n\n"
+                "Context from the previous assistant response:\n"
+                f"{context_excerpt}\n\n"
+                "Execute the user's follow-up request using the context above. "
+                "Do NOT re-research the original question — the context already "
+                "contains the needed information."
+            )
+        else:
+            # Fallback: no usable assistant response, use the original anchor.
+            merged = (
+                f"{anchor}\n\n"
+                "Clarifications/preferences from user:\n"
+                f"{user_input.strip()}\n\n"
+                "Execute the full original request using these clarification details."
+            )
         return merged, True
 
     def _update_clarification_state(
@@ -459,8 +493,8 @@ class AgentReasoningMixin:
             ),
         ]
         cfg_max_tokens = max(1, int(get_config().model.max_tokens))
-        first_max_tokens = min(1200, cfg_max_tokens)
-        retry_max_tokens = min(max(first_max_tokens * 2, 1800), cfg_max_tokens)
+        first_max_tokens = min(1800, cfg_max_tokens)
+        retry_max_tokens = min(max(first_max_tokens * 2, 3600), cfg_max_tokens)
         attempts: list[tuple[str, int]] = [("task_contract_planner", first_max_tokens)]
         if retry_max_tokens > first_max_tokens:
             attempts.append(("task_contract_planner_retry", retry_max_tokens))
@@ -782,7 +816,7 @@ class AgentReasoningMixin:
         return AgentReasoningMixin._is_explicit_script_request(user_input)
 
     @staticmethod
-    def _normalize_list_members(raw_members: Any, max_members: int = 40) -> list[str]:
+    def _normalize_list_members(raw_members: Any, max_members: int = 150) -> list[str]:
         """Normalize extracted list members into a stable ordered unique list."""
         members: list[str] = []
         seen: set[str] = set()
@@ -975,9 +1009,17 @@ class AgentReasoningMixin:
     def _apply_list_requirements(
         base_requirements: list[dict[str, Any]],
         list_task_plan: dict[str, Any],
-        max_members: int = 30,
+        max_individual_members: int = 20,
     ) -> list[dict[str, Any]]:
-        """Augment completion requirements with extracted list-member coverage checks."""
+        """Augment completion requirements with extracted list-member coverage checks.
+
+        For small/moderate lists (≤ *max_individual_members*), one requirement
+        per member is added so the critic can verify each.  For large lists,
+        a single aggregate requirement is added instead — the per-member
+        coverage is still tracked by ``_evaluate_list_member_coverage`` at
+        the completion gate, which is more reliable than the critic for
+        100-item lists.
+        """
         requirements = [dict(item) for item in base_requirements if isinstance(item, dict)]
         if not isinstance(list_task_plan, dict) or not bool(list_task_plan.get("enabled", False)):
             return requirements
@@ -986,18 +1028,30 @@ class AgentReasoningMixin:
             return requirements
         action = str(list_task_plan.get("per_member_action", "")).strip()
         existing_ids = {str(req.get("id", "")).strip() for req in requirements}
-        for idx, member in enumerate(members[:max_members], start=1):
-            base_id = re.sub(r"[^a-zA-Z0-9_]+", "_", str(member).strip().lower()).strip("_")[:28]
-            if not base_id:
-                base_id = f"member_{idx}"
-            req_id = f"req_member_{base_id}"
-            if req_id in existing_ids:
-                continue
-            existing_ids.add(req_id)
-            title = f"Cover list member: {member}"
-            if action:
-                title = f"{title} ({action})"
-            requirements.append({"id": req_id, "title": title[:220]})
+
+        if len(members) > max_individual_members:
+            # Large list: single aggregate requirement to keep the critic
+            # prompt manageable.  The scale-progress system and list-member
+            # coverage gate handle individual tracking.
+            agg_id = "req_all_list_members"
+            if agg_id not in existing_ids:
+                title = f"All {len(members)} list members must be processed"
+                if action:
+                    title += f" ({action})"
+                requirements.append({"id": agg_id, "title": title[:220]})
+        else:
+            for idx, member in enumerate(members[:max_individual_members], start=1):
+                base_id = re.sub(r"[^a-zA-Z0-9_]+", "_", str(member).strip().lower()).strip("_")[:28]
+                if not base_id:
+                    base_id = f"member_{idx}"
+                req_id = f"req_member_{base_id}"
+                if req_id in existing_ids:
+                    continue
+                existing_ids.add(req_id)
+                title = f"Cover list member: {member}"
+                if action:
+                    title = f"{title} ({action})"
+                requirements.append({"id": req_id, "title": title[:220]})
         return requirements
 
     async def _generate_list_task_plan(
@@ -1038,7 +1092,7 @@ class AgentReasoningMixin:
                 tools=None,
                 interaction_label="list_task_extractor",
                 turn_usage=turn_usage,
-                max_tokens=min(1000, int(get_config().model.max_tokens)),
+                max_tokens=min(3000, int(get_config().model.max_tokens)),
             )
             payload = self._extract_json_object(response.content or "")
         except Exception as e:

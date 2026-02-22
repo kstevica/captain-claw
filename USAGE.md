@@ -338,12 +338,20 @@ Find files by pattern.
 
 ### web_fetch
 
-Fetch and extract readable content from a URL.
+Fetch a URL and return clean readable text. Always operates in text mode — raw HTML is never returned. For raw HTML, use `web_get` instead.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `url` | string | yes | URL to fetch |
-| `extract_mode` | string | no | `text` (default, parsed readable content) or `html` (raw HTML) |
+| `max_chars` | number | no | Max output chars (default: 100000) |
+
+### web_get
+
+Fetch a URL and return raw HTML source. Use only when you need the actual HTML markup for scraping, DOM analysis, or CSS selector inspection. For normal page reading, use `web_fetch` instead.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `url` | string | yes | URL to fetch |
 | `max_chars` | number | no | Max output chars (default: 100000) |
 
 ### web_search
@@ -535,7 +543,7 @@ Persistent cross-session API memory. The agent uses this tool to track external 
 | `tags` | string | no | Comma-separated tags |
 | `query` | string | for search | Search query |
 
-APIs are auto-captured from `web_fetch` tool calls when API-like URL patterns are detected (URLs containing `/api/` or `/v[0-9]+/`). API context is injected on demand when a known API name or base URL appears in the user message. Credentials are stored as plaintext for easy injection into generated scripts.
+APIs are auto-captured from `web_fetch` and `web_get` tool calls when API-like URL patterns are detected (URLs containing `/api/` or `/v[0-9]+/`). API context is injected on demand when a known API name or base URL appears in the user message. Credentials are stored as plaintext for easy injection into generated scripts.
 
 ---
 
@@ -1152,7 +1160,7 @@ Captain Claw includes a persistent API memory that tracks external APIs the agen
 ### How It Works
 
 - **Explicit capture:** Use `/apis add <name> <base_url>` or tell the agent "remember api..." or "save api: ...".
-- **Auto-capture from web_fetch:** When `web_fetch` accesses a URL containing `/api/` or `/v[0-9]+/` patterns, the API is automatically registered. Disabled with `apis_memory.auto_capture: false`.
+- **Auto-capture from web_fetch/web_get:** When `web_fetch` or `web_get` accesses a URL containing `/api/` or `/v[0-9]+/` patterns, the API is automatically registered. Disabled with `apis_memory.auto_capture: false`.
 - **Auto-capture from conversation:** Conservative pattern matching detects API-related phrases.
 - **On-demand context injection:** When a known API name or base URL appears in the user message, the agent receives relevant API details including credentials and endpoints. Like contacts, APIs are NOT injected every turn.
 - **Plaintext credentials:** API credentials are stored as plaintext for easy injection into generated scripts. This is a deliberate design choice for usability.

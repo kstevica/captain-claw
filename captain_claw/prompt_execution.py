@@ -233,6 +233,9 @@ async def run_prompt_in_active_session(
         started = time.perf_counter()
         assistant_text = ""
         try:
+            # Clear stale thinking text from previous prompt before starting.
+            if hasattr(ui, "set_thinking"):
+                ui.set_thinking("Thinking\u2026", phase="reasoning")
             ui.set_runtime_status("thinking")
             if get_config().ui.streaming:
                 ui.begin_assistant_stream()

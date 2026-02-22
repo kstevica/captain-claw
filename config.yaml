@@ -153,6 +153,7 @@ tools:
   - write
   plugin_dirs:
   - skills/tools
+  duplicate_call_max: 1
 skills:
   managed_dir: ~/.captain-claw/skills
   allow_bundled: []
