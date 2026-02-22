@@ -27,6 +27,7 @@ from captain_claw.tools.todo import TodoTool
 from captain_claw.tools.contacts import ContactsTool
 from captain_claw.tools.scripts import ScriptsTool
 from captain_claw.tools.apis import ApisTool
+from captain_claw.tools.typesense import TypesenseTool
 
 __all__ = [
     "Tool",
@@ -53,4 +54,5 @@ __all__ = [
     "ContactsTool",
     "ScriptsTool",
     "ApisTool",
+    "TypesenseTool",
 ]

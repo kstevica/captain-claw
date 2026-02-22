@@ -193,6 +193,18 @@ class SendMailToolConfig(BaseModel):
     max_attachment_bytes: int = 26214400  # 25 MB
 
 
+class TypesenseToolConfig(BaseModel):
+    """Typesense tool configuration."""
+
+    host: str = "localhost"
+    port: int = 8108
+    protocol: str = "http"
+    api_key: str = ""
+    default_collection: str = ""
+    timeout: int = 30
+    connection_timeout: int = 5
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
 
@@ -216,6 +228,7 @@ class ToolsConfig(BaseModel):
     web_search: WebSearchToolConfig = Field(default_factory=WebSearchToolConfig)
     pocket_tts: PocketTTSToolConfig = Field(default_factory=PocketTTSToolConfig)
     send_mail: SendMailToolConfig = Field(default_factory=SendMailToolConfig)
+    typesense: TypesenseToolConfig = Field(default_factory=TypesenseToolConfig)
     require_confirmation: list[str] = ["shell", "write"]
     plugin_dirs: list[str] = ["skills/tools"]
     duplicate_call_max: int = Field(
@@ -410,6 +423,31 @@ class ApisMemoryConfig(BaseModel):
     max_items_in_prompt: int = 5
 
 
+class ScaleConfig(BaseModel):
+    """Scale loop thresholds for list processing tasks."""
+
+    # Minimum member count to activate the full scale advisory
+    # (scale progress tracking, guards, micro-loop eligibility).
+    scale_advisory_min_members: int = 7
+
+    # Minimum member count to activate lightweight scale progress
+    # (progress indicators only, no micro-loop).
+    lightweight_progress_min_members: int = 3
+
+
+class DeepMemoryConfig(BaseModel):
+    """Typesense-backed deep memory for long-term searchable content."""
+
+    enabled: bool = False
+    host: str = "localhost"
+    port: int = 8108
+    protocol: str = "http"
+    api_key: str = ""
+    collection_name: str = "captain_claw_deep_memory"
+    embedding_dims: int = 1536
+    auto_embed: bool = True
+
+
 class OrchestratorConfig(BaseModel):
     """Parallel session orchestration settings."""
 
@@ -472,6 +510,8 @@ class Config(BaseSettings):
     scripts_memory: ScriptsMemoryConfig = Field(default_factory=ScriptsMemoryConfig)
     apis_memory: ApisMemoryConfig = Field(default_factory=ApisMemoryConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
+    scale: ScaleConfig = Field(default_factory=ScaleConfig)
+    deep_memory: DeepMemoryConfig = Field(default_factory=DeepMemoryConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="CLAW_",
@@ -709,6 +749,19 @@ class Config(BaseSettings):
             and str(config.google_oauth.client_secret or "").strip()
         ):
             config.google_oauth.enabled = True
+
+        # Security-sensitive override: Typesense API key from env/.env.
+        env_typesense_key = str(getattr(env_overlay.tools.typesense, "api_key", "")).strip()
+        if not env_typesense_key:
+            env_typesense_key = (
+                str(os.getenv("TYPESENSE_API_KEY", "")).strip()
+                or str(dotenv_values.get("TYPESENSE_API_KEY", "")).strip()
+            )
+        if env_typesense_key:
+            config.tools.typesense.api_key = env_typesense_key
+            # Also set on deep_memory if it doesn't have its own key.
+            if not str(config.deep_memory.api_key or "").strip():
+                config.deep_memory.api_key = env_typesense_key
 
         # Compatibility fallbacks for common provider env vars.
         provider = str(config.model.provider or "").strip().lower()

@@ -103,6 +103,7 @@ tools:
   - contacts
   - scripts
   - apis
+  - typesense
   shell:
     timeout: 30
     blocked:
@@ -148,6 +149,14 @@ tools:
     smtp_use_tls: true
     timeout: 60
     max_attachment_bytes: 26214400
+  typesense:
+    host: localhost
+    port: 8108
+    protocol: http
+    api_key: ''
+    default_collection: captain_claw_deep_memory
+    timeout: 30
+    connection_timeout: 5
   require_confirmation:
   - shell
   - write
@@ -268,3 +277,15 @@ orchestrator:
   idle_evict_seconds: 300.0
   worker_timeout_seconds: 300.0
   worker_max_retries: 2
+scale:
+  scale_advisory_min_members: 3
+  lightweight_progress_min_members: 2
+deep_memory:
+  enabled: false
+  host: localhost
+  port: 8108
+  protocol: http
+  api_key: ''
+  collection_name: captain_claw_deep_memory
+  embedding_dims: 1536
+  auto_embed: true

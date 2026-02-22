@@ -47,8 +47,11 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [web](#web)
   - [google_oauth](#google_oauth)
   - [orchestrator](#orchestrator)
+  - [scale](#scale)
+  - [deep_memory](#deep_memory)
 - [Guard System](#guard-system)
 - [Skills System](#skills-system)
+- [Deep Memory (Typesense)](#deep-memory-typesense)
 - [Memory and RAG](#memory-and-rag)
 - [Cross-Session Todo Memory](#cross-session-todo-memory)
 - [Cross-Session Address Book](#cross-session-address-book)
@@ -545,6 +548,24 @@ Persistent cross-session API memory. The agent uses this tool to track external 
 
 APIs are auto-captured from `web_fetch` and `web_get` tool calls when API-like URL patterns are detected (URLs containing `/api/` or `/v[0-9]+/`). API context is injected on demand when a known API name or base URL appears in the user message. Credentials are stored as plaintext for easy injection into generated scripts.
 
+### typesense
+
+Index, search, and delete documents in deep memory (Typesense). All operations use the configured deep memory collection — the LLM cannot create or choose collections. The collection is auto-created at startup with a controlled schema.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `index`, `search`, `delete` |
+| `text` | string | for index | Text content to index (auto-chunked and embedded) |
+| `source` | string | no | Source label for indexed content (default: `manual`) |
+| `reference` | string | no | Reference identifier (URL, file path, label) |
+| `tags` | string | no | Comma-separated tags |
+| `query` | string | for search | Search query text |
+| `filter_by` | string | no | Typesense filter expression (for search or delete) |
+| `max_results` | number | no | Max search results (default: 10, max: 250) |
+| `document_id` | string | for delete | Document ID (deletes doc and all its chunks) |
+
+Requires a running Typesense instance. Set the API key in `config.yaml` or via `TYPESENSE_API_KEY` env var. The tool is also used as the sink for the scale loop `no_file` output strategy when `final_action: api_call`. Indexing is routed through `DeepMemoryIndex` for proper chunking, timestamping, and embedding.
+
 ---
 
 ## Configuration Reference
@@ -921,6 +942,70 @@ orchestrator:
   worker_max_retries: 2           # retries before failure
 ```
 
+### scale
+
+Controls when the **scale loop** activates for list-processing tasks. The scale loop is an optimization system that takes over repetitive per-item processing (fetch → process → write) to prevent the LLM context from growing linearly with item count.
+
+There are two activation tiers:
+
+| Tier | Default threshold | What it enables |
+|---|---|---|
+| **Full scale advisory** | `>= 7` members | Scale progress tracking, scale guards (block re-glob, re-read of output), context trimming, micro-loop takeover. The micro-loop processes remaining items with isolated per-item LLM calls at constant context size. |
+| **Lightweight progress** | `>= 3` members | Progress indicators only (e.g. "3 of 10 (30%)"). No guards, no micro-loop, no context trimming. |
+
+The full scale advisory also activates when input patterns suggest large-scale work (e.g. "process all files in folder") regardless of the member count threshold.
+
+**Output strategy:** The scale system automatically detects whether results should go to a single combined file (`append=true`), separate per-item files, or no file at all (e.g. email, API). This is extracted from the user's prompt by the list-task planner. Examples:
+
+- `"Name the output file FinSMEs-[date].csv"` → **file_per_item** — each item gets its own file
+- `"Write all results to summary.md"` → **single_file** — everything appends to one file
+- `"Send the results to email"` → **no_file** — no file output, results delivered via email/API
+
+**When to tune:** Lower `scale_advisory_min_members` if you frequently process small lists (3–6 items) and want the micro-loop optimization. Raise it if the overhead of scale tracking is unnecessary for your typical workloads. The lightweight threshold should generally stay low since it only adds progress indicators with negligible overhead.
+
+```yaml
+scale:
+  scale_advisory_min_members: 7   # activate full scale loop (guards + micro-loop)
+  lightweight_progress_min_members: 3  # activate progress indicators only
+```
+
+### deep_memory
+
+Typesense-backed long-term archive for persistent searchable content. Deep memory is an **additional layer** on top of the SQLite-backed semantic memory — it is NOT a replacement. Content is indexed via the Typesense tool or the scale loop `no_file` sink, and searched only when the user explicitly requests it.
+
+**Trigger phrases** that activate deep memory search:
+- "search deep memory", "find in archive", "search indexed"
+- "long-term memory", "search typesense", "search deep"
+
+```yaml
+deep_memory:
+  enabled: false                          # enable the deep memory layer
+  host: localhost                         # Typesense host
+  port: 8108                              # Typesense port
+  protocol: http                          # http or https
+  api_key: ""                             # Typesense API key (or set TYPESENSE_API_KEY)
+  collection_name: captain_claw_deep_memory  # collection for deep memory docs
+  embedding_dims: 1536                    # embedding dimensions (match your model)
+  auto_embed: true                        # compute embeddings on index
+```
+
+**How content flows in:**
+- Scale loop `no_file` + `api_call` sink — processed items are indexed automatically
+- Typesense tool — the LLM can index documents directly via the `index` action
+- Programmatic API — `DeepMemoryIndex.index_document()` / `index_batch()`
+
+**How content flows out:**
+- Context injection — when triggered, deep memory results appear in the LLM prompt alongside semantic memory
+- Direct search — the LLM can use the Typesense tool `search` action
+
+**Collection schema** (auto-created on first use):
+- `doc_id`, `source`, `reference`, `path` — metadata fields (faceted)
+- `text` — chunk text (searchable)
+- `chunk_index`, `start_line`, `end_line` — position within source
+- `tags` — optional string array (faceted)
+- `updated_at` — unix timestamp (default sort)
+- `embedding` — optional float array for vector search
+
 ---
 
 ## Guard System
@@ -1035,6 +1120,64 @@ Skill instructions and documentation go here...
 ```
 
 Skills are installed to `~/.captain-claw/skills/` by default.
+
+---
+
+## Deep Memory (Typesense)
+
+Captain Claw has two memory layers:
+
+1. **Semantic memory** (SQLite) — workspace files + session history, always active, searched automatically
+2. **Deep memory** (Typesense) — long-term archive, opt-in, searched only on demand
+
+Deep memory is designed for content that should persist beyond workspace files and session history — processed research, indexed articles, accumulated knowledge bases. It uses Typesense's built-in hybrid search (BM25 + vector) for retrieval.
+
+### Setup
+
+1. Run Typesense locally:
+   ```bash
+   docker run -d -p 8108:8108 \
+     -v /tmp/typesense-data:/data \
+     typesense/typesense:27.1 \
+     --data-dir /data --api-key=your-api-key
+   ```
+
+2. Configure in `config.yaml`:
+   ```yaml
+   deep_memory:
+     enabled: true
+     api_key: "your-api-key"
+     collection_name: captain_claw_deep_memory
+
+   tools:
+     typesense:
+       api_key: "your-api-key"
+   ```
+
+   Or via environment variable: `TYPESENSE_API_KEY=your-api-key`
+
+3. The collection is auto-created on first use.
+
+### Usage
+
+**Indexing content:**
+- Ask the agent: "index this article on Typesense" or "save this to deep memory"
+- Use the scale loop with `no_file` output strategy: "fetch these 10 URLs and index the results on Typesense"
+
+**Searching:**
+- Ask the agent: "search deep memory for Series A rounds in July"
+- Or: "find in archive anything about quarterly revenue"
+- Deep memory results appear in the LLM's context when triggered
+
+### Integration with Scale Loop
+
+When the list-task planner detects `output_strategy: no_file` and `final_action: api_call`, the micro-loop routes processed items directly to Typesense instead of writing files:
+
+```
+User prompt → list-task planner → scale loop → micro-loop → Typesense sink
+```
+
+Each processed item is indexed as a document with `source: "scale_loop"`, `reference: <item_label>`, and the processed text as `text`.
 
 ---
 
@@ -1647,6 +1790,7 @@ workspace/saved/
 | `MAILGUN_API_KEY` | Mailgun API key |
 | `MAILGUN_DOMAIN` | Mailgun domain |
 | `SENDGRID_API_KEY` | SendGrid API key |
+| `TYPESENSE_API_KEY` | Typesense API key (used by both tool and deep memory) |
 | `MAIL_FROM_ADDRESS` | Email sender address |
 | `MAIL_FROM_NAME` | Email sender name |
 | `SMTP_HOST` | SMTP server host |

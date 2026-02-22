@@ -237,6 +237,36 @@ class AgentContextMixin:
             log.warning("Failed to initialize layered memory", error=str(e))
             self.memory = None
 
+        # Deep memory (Typesense-backed archive) — additional layer, not a
+        # replacement for the SQLite semantic memory.
+        self._deep_memory = None
+        dm_cfg = getattr(cfg, "deep_memory", None)
+        if dm_cfg is not None and bool(getattr(dm_cfg, "enabled", False)):
+            try:
+                from captain_claw.deep_memory import DeepMemoryIndex
+
+                # Reuse the same embedding chain from semantic memory.
+                embedding_chain = None
+                if self.memory and getattr(self.memory, "semantic", None):
+                    embedding_chain = getattr(self.memory.semantic, "embedding_chain", None)
+
+                self._deep_memory = DeepMemoryIndex(
+                    host=str(getattr(dm_cfg, "host", "localhost")),
+                    port=int(getattr(dm_cfg, "port", 8108)),
+                    protocol=str(getattr(dm_cfg, "protocol", "http")),
+                    api_key=str(getattr(dm_cfg, "api_key", "")),
+                    collection_name=str(getattr(dm_cfg, "collection_name", "captain_claw_deep_memory")),
+                    embedding_dims=int(getattr(dm_cfg, "embedding_dims", 1536)),
+                    auto_embed=bool(getattr(dm_cfg, "auto_embed", True)),
+                    chunk_chars=int(getattr(getattr(cfg, "memory", None), "chunk_chars", 1400)) if getattr(cfg, "memory", None) else 1400,
+                    chunk_overlap_chars=int(getattr(getattr(cfg, "memory", None), "chunk_overlap_chars", 200)) if getattr(cfg, "memory", None) else 200,
+                    embedding_chain=embedding_chain,
+                )
+                log.info("Deep memory initialized", collection=str(getattr(dm_cfg, "collection_name", "")))
+            except Exception as e:
+                log.warning("Failed to initialize deep memory", error=str(e))
+                self._deep_memory = None
+
     def _build_todo_context_note(self) -> str:
         """Build compact context note from pending to-do items."""
         cfg = get_config()
@@ -748,6 +778,51 @@ class AgentContextMixin:
             log.debug("Semantic memory note generation failed", error=str(e))
             return "", ""
 
+    # Trigger phrases that activate deep memory search.
+    _DEEP_MEMORY_TRIGGERS = (
+        "deep memory",
+        "deep-memory",
+        "search archive",
+        "search indexed",
+        "find in archive",
+        "long-term memory",
+        "long term memory",
+        "search typesense",
+        "typesense search",
+        "search deep",
+    )
+
+    def _should_search_deep_memory(self, query: str) -> bool:
+        """Return True if the user's query explicitly requests deep memory."""
+        q = (query or "").lower()
+        return any(trigger in q for trigger in self._DEEP_MEMORY_TRIGGERS)
+
+    def _build_deep_memory_note(
+        self,
+        query: str | None,
+        max_items: int = 5,
+        max_snippet_chars: int = 400,
+    ) -> tuple[str, str]:
+        """Build deep memory context note from the Typesense archive.
+
+        Only produces a note when the user explicitly requests deep memory.
+        """
+        cleaned = str(query or "").strip()
+        if not cleaned or not self._should_search_deep_memory(cleaned):
+            return "", ""
+        deep_memory = getattr(self, "_deep_memory", None)
+        if deep_memory is None:
+            return "", ""
+        try:
+            return deep_memory.build_context_note(
+                cleaned,
+                max_items=max_items,
+                max_snippet_chars=max_snippet_chars,
+            )
+        except Exception as e:
+            log.debug("Deep memory note generation failed", error=str(e))
+            return "", ""
+
     async def initialize(self) -> None:
         """Initialize the agent."""
         if self._initialized:
@@ -851,6 +926,15 @@ class AgentContextMixin:
                 self.tools.register(ScriptsTool())
             elif tool_name == "apis":
                 self.tools.register(ApisTool())
+            elif tool_name == "typesense":
+                from captain_claw.tools.typesense import TypesenseTool
+                dm = getattr(self, "_deep_memory", None)
+                if dm is not None:
+                    try:
+                        dm.ensure_collection()
+                    except Exception as _e:
+                        log.warning("Failed to ensure deep memory collection at startup", error=str(_e))
+                self.tools.register(TypesenseTool(deep_memory=dm))
         self._register_plugin_tools()
 
     def _discover_plugin_tool_files(self) -> list[Path]:
@@ -1311,6 +1395,23 @@ class AgentContextMixin:
                     semantic_debug,
                 )
                 self._last_semantic_memory_debug_signature = semantic_signature
+
+        deep_note, deep_debug = self._build_deep_memory_note(query=query)
+        if deep_note:
+            candidate_messages.append({
+                "role": "assistant",
+                "content": deep_note,
+                "tool_name": "deep_memory_context",
+                "token_count": self._count_tokens(deep_note),
+            })
+            deep_signature = f"{query or ''}|{deep_debug}"
+            if deep_signature != getattr(self, "_last_deep_memory_debug_signature", None):
+                self._emit_tool_output(
+                    "memory_deep_select",
+                    {"query": query or ""},
+                    deep_debug,
+                )
+                self._last_deep_memory_debug_signature = deep_signature
 
         planning_note = self._build_pipeline_note(planning_pipeline or {})
         if planning_note:

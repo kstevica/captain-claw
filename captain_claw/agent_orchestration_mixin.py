@@ -5,6 +5,7 @@ import json
 import re
 from typing import Any, AsyncIterator
 
+from captain_claw.config import get_config
 from captain_claw.exceptions import GuardBlockedError
 from captain_claw.llm import Message
 from captain_claw.logging import get_logger
@@ -161,7 +162,8 @@ class AgentOrchestrationMixin:
         Returns an empty string when no advisory is needed.
         """
         member_count = len(list_task_plan.get("members", []))
-        large_from_members = member_count > 15
+        _scale_cfg = get_config().scale
+        large_from_members = member_count >= _scale_cfg.scale_advisory_min_members
         large_from_input = self._input_suggests_large_scale(effective_user_input)
 
         if not large_from_members and not large_from_input:
@@ -655,6 +657,10 @@ class AgentOrchestrationMixin:
             self._scale_progress["_final_action"] = str(
                 list_task_plan.get("final_action", "write_file")
             ).strip()
+            # Sink metadata for no_file output strategy.
+            if _out_strategy == "no_file":
+                self._scale_progress["_sink_collection"] = ""  # resolved at runtime
+                self._scale_progress["_sink_email_to"] = ""     # resolved at runtime
             # Pre-populate items from list_task_plan members when available.
             # This gives the scale progress note an initial worklist so the
             # LLM sees "REMAINING items to process" even before glob runs.
@@ -728,21 +734,26 @@ class AgentOrchestrationMixin:
         # remaining items at every iteration — preventing re-glob and
         # context-loss issues.  This generalizes the scale progress system
         # beyond large-item-count tasks and glob-based lists.
+        _lw_min = get_config().scale.lightweight_progress_min_members
         if (
             self._scale_progress is None
             and bool(list_task_plan.get("enabled", False))
-            and len(list_task_plan.get("members", [])) >= 5
+            and len(list_task_plan.get("members", [])) >= _lw_min
         ):
             members = list_task_plan.get("members", [])
+            _lw_out_strategy = str(list_task_plan.get("output_strategy", "single_file")).strip().lower()
             self._scale_progress = {
                 "total": len(members),
                 "completed": 0,
                 "items": list(members),
                 "done_items": set(),
-                "_output_strategy": str(list_task_plan.get("output_strategy", "single_file")).strip().lower(),
+                "_output_strategy": _lw_out_strategy,
                 "_output_filename_template": str(list_task_plan.get("output_filename_template", "")).strip(),
                 "_final_action": str(list_task_plan.get("final_action", "write_file")).strip(),
             }
+            if _lw_out_strategy == "no_file":
+                self._scale_progress["_sink_collection"] = ""
+                self._scale_progress["_sink_email_to"] = ""
             self._emit_tool_output(
                 "task_contract",
                 {
@@ -1109,6 +1120,14 @@ class AgentOrchestrationMixin:
                             f"Output: {_sp_completed} separate files "
                             f"(template: {_fn_template or 'per-item'})"
                         )
+                    elif _out_strategy == "no_file":
+                        _final_act = str(sp.get("_final_action", "reply")).strip()
+                        if _final_act == "api_call":
+                            summary_lines.append(f"Output: indexed {_sp_completed} items to Typesense")
+                        elif _final_act == "email":
+                            summary_lines.append(f"Output: emailed {_sp_completed} items")
+                        else:
+                            summary_lines.append(f"Output: {_sp_completed} items (no file)")
                     else:
                         summary_lines.append(f"Output file: {output_file}")
                     if _sp_failed > 0:
@@ -1216,6 +1235,23 @@ class AgentOrchestrationMixin:
                             f"Output: {_sp_completed} separate files "
                             f"(template: {_fn_template or 'per-item'})"
                         )
+                    elif _out_strategy == "no_file":
+                        _final_act = str(sp.get("_final_action", "reply")).strip() if sp else "reply"
+                        if _final_act == "api_call":
+                            micro_summary = (
+                                f"Scale processing complete: {_sp_completed} of {_sp_total} items.\n"
+                                f"Output: indexed {_sp_completed} items to Typesense"
+                            )
+                        elif _final_act == "email":
+                            micro_summary = (
+                                f"Scale processing complete: {_sp_completed} of {_sp_total} items.\n"
+                                f"Output: emailed {_sp_completed} items"
+                            )
+                        else:
+                            micro_summary = (
+                                f"Scale processing complete: {_sp_completed} of {_sp_total} items.\n"
+                                f"Output: {_sp_completed} items processed (no file)"
+                            )
                     else:
                         micro_summary = (
                             f"Scale processing complete: {_sp_completed} of {_sp_total} items.\n"

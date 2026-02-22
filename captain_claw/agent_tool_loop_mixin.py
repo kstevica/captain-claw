@@ -538,6 +538,12 @@ class AgentToolLoopMixin:
                 "- The output will be written as a standalone file (not appended).\n"
                 "- Include any necessary headers (e.g. CSV headers) in the output."
             )
+        elif output_strategy == "no_file":
+            output_instruction = (
+                "- Just output the processed result for this single item.\n"
+                "- The output will be indexed to a search engine (not written to a file).\n"
+                "- Keep the output structured and self-contained."
+            )
         else:
             output_instruction = (
                 "- Just output the processed content that should be appended to the output file."
@@ -633,9 +639,10 @@ class AgentToolLoopMixin:
         For each unprocessed item:
         1. Execute the extractor tool directly (no LLM needed)
         2. Make a single LLM call with minimal context to process it
-        3. Write the result:
+        3. Write/sink the result:
            - single_file: execute write(append=true) to the shared output file
            - file_per_item: execute write(append=false) to a per-item file
+           - no_file: route to sink (typesense, email, or accumulate for reply)
         4. Update scale progress tracking
 
         Returns a summary dict with ``success``, ``processed``, ``failed``,
@@ -667,6 +674,9 @@ class AgentToolLoopMixin:
         _output_strategy = str(sp.get("_output_strategy", "single_file")).strip().lower()
         _filename_template = str(sp.get("_output_filename_template", "")).strip()
         _is_file_per_item = _output_strategy == "file_per_item" and bool(_filename_template)
+        _is_no_file = _output_strategy == "no_file"
+        _final_action = str(sp.get("_final_action", "reply")).strip()
+        _sink_collection = str(sp.get("_sink_collection", "")).strip()
         # For file_per_item, resolve the output directory from the first
         # written file or from the output_file path.
         _output_dir = ""
@@ -929,76 +939,157 @@ class AgentToolLoopMixin:
             _clean = _clean.strip()
 
             # Determine write path and mode based on output strategy
-            if _is_file_per_item:
-                # Per-item file: write to a unique file per item
-                write_path_arg = self._resolve_per_item_filename(
-                    item, _filename_template, _output_dir,
-                )
-                write_content = _clean
-                write_append = False
-            else:
-                # Single file: append with separator
-                write_content = f"\n\n---\n\n{_clean}"
-                # Use the original write argument (before the write tool
-                # resolves it under the saved root) so the tool doesn't
-                # double-resolve an already-absolute path.
-                write_path_arg = sp.get("_output_file_arg", output_file)
-                write_append = True
-
             _t_write_start = _time.monotonic()
-            try:
-                write_result = await self._execute_tool_with_guard(
-                    name="write",
-                    arguments={
-                        "path": write_path_arg,
-                        "content": write_content,
-                        "append": write_append,
-                    },
-                    interaction_label=f"scale_write_{item_num}",
-                    turn_usage=turn_usage,
-                    session_policy=session_policy,
-                    task_policy=task_policy,
-                )
-            except Exception as e:
+
+            if _is_no_file:
+                # ── no_file: route to sink (typesense, email, reply) ──
+                _sink_label = "sink"
+                _sink_ok = False
+                try:
+                    if _final_action == "api_call":
+                        _sink_label = "typesense"
+                        sink_result = await self._execute_tool_with_guard(
+                            name="typesense",
+                            arguments={
+                                "action": "index",
+                                "text": _clean,
+                                "source": "scale_loop",
+                                "reference": item_label,
+                            },
+                            interaction_label=f"scale_sink_{item_num}",
+                            turn_usage=turn_usage,
+                            session_policy=session_policy,
+                            task_policy=task_policy,
+                        )
+                        _sink_ok = sink_result.success
+                        if not _sink_ok:
+                            raise RuntimeError(sink_result.error or "Typesense index failed")
+
+                    elif _final_action == "email":
+                        _sink_label = "email"
+                        _sink_email_to = str(sp.get("_sink_email_to", "")).strip()
+                        if _sink_email_to:
+                            sink_result = await self._execute_tool_with_guard(
+                                name="send_mail",
+                                arguments={
+                                    "to": _sink_email_to,
+                                    "subject": f"Processed: {item_label}",
+                                    "body": _clean,
+                                },
+                                interaction_label=f"scale_sink_{item_num}",
+                                turn_usage=turn_usage,
+                                session_policy=session_policy,
+                                task_policy=task_policy,
+                            )
+                            _sink_ok = sink_result.success
+                            if not _sink_ok:
+                                raise RuntimeError(sink_result.error or "Send mail failed")
+                        else:
+                            # No email target — fall through to reply accumulation.
+                            _sink_label = "reply"
+                            _sink_ok = True
+
+                    else:
+                        # "reply" — just accumulate; no external write needed.
+                        _sink_label = "reply"
+                        _sink_ok = True
+
+                except Exception as e:
+                    _t_write_end = _time.monotonic()
+                    _write_fail_sec = round(_t_write_end - _t_write_start, 2)
+                    log.warning(
+                        "Scale micro-loop sink failed",
+                        item=item_label,
+                        sink=_sink_label,
+                        error=str(e),
+                        write_sec=_write_fail_sec,
+                    )
+                    self._emit_tool_output(
+                        "scale_micro_loop",
+                        {"item": item_label, "step": "sink", "sink": _sink_label},
+                        f"[{item_num}/{total}] SINK FAILED in {_write_fail_sec}s: {item_label}\nError: {e}",
+                    )
+                    errors.append({"item": item_label, "phase": "sink", "error": str(e)})
+                    failed += 1
+                    done_items.add(item)
+                    sp["done_items"] = done_items
+                    continue
+
                 _t_write_end = _time.monotonic()
-                _write_fail_sec = round(_t_write_end - _t_write_start, 2)
-                log.warning(
-                    "Scale micro-loop write failed",
-                    item=item_label,
-                    error=str(e),
-                    write_sec=_write_fail_sec,
-                )
-                self._emit_tool_output(
-                    "scale_micro_loop",
-                    {"item": item_label, "step": "write", "path": write_path_arg},
-                    f"[{item_num}/{total}] WRITE FAILED in {_write_fail_sec}s: {item_label}\nError: {e}",
-                )
-                errors.append({"item": item_label, "phase": "write", "error": str(e)})
-                failed += 1
-                done_items.add(item)
-                sp["done_items"] = done_items
-                continue
+                _write_sec = round(_t_write_end - _t_write_start, 2)
+                write_path_arg = f"[{_sink_label}]"
 
-            _t_write_end = _time.monotonic()
-            _write_sec = round(_t_write_end - _t_write_start, 2)
+            else:
+                # ── file-based output strategies ──
+                if _is_file_per_item:
+                    # Per-item file: write to a unique file per item
+                    write_path_arg = self._resolve_per_item_filename(
+                        item, _filename_template, _output_dir,
+                    )
+                    write_content = _clean
+                    write_append = False
+                else:
+                    # Single file: append with separator
+                    write_content = f"\n\n---\n\n{_clean}"
+                    # Use the original write argument (before the write tool
+                    # resolves it under the saved root) so the tool doesn't
+                    # double-resolve an already-absolute path.
+                    write_path_arg = sp.get("_output_file_arg", output_file)
+                    write_append = True
 
-            if not write_result.success:
-                log.warning(
-                    "Scale micro-loop write error",
-                    item=item_label,
-                    error=write_result.error,
-                    write_sec=_write_sec,
-                )
-                self._emit_tool_output(
-                    "scale_micro_loop",
-                    {"item": item_label, "step": "write", "path": write_path_arg},
-                    f"[{item_num}/{total}] WRITE ERROR in {_write_sec}s: {item_label}\nError: {write_result.error}",
-                )
-                errors.append({"item": item_label, "phase": "write", "error": write_result.error})
-                failed += 1
-                done_items.add(item)
-                sp["done_items"] = done_items
-                continue
+                try:
+                    write_result = await self._execute_tool_with_guard(
+                        name="write",
+                        arguments={
+                            "path": write_path_arg,
+                            "content": write_content,
+                            "append": write_append,
+                        },
+                        interaction_label=f"scale_write_{item_num}",
+                        turn_usage=turn_usage,
+                        session_policy=session_policy,
+                        task_policy=task_policy,
+                    )
+                except Exception as e:
+                    _t_write_end = _time.monotonic()
+                    _write_fail_sec = round(_t_write_end - _t_write_start, 2)
+                    log.warning(
+                        "Scale micro-loop write failed",
+                        item=item_label,
+                        error=str(e),
+                        write_sec=_write_fail_sec,
+                    )
+                    self._emit_tool_output(
+                        "scale_micro_loop",
+                        {"item": item_label, "step": "write", "path": write_path_arg},
+                        f"[{item_num}/{total}] WRITE FAILED in {_write_fail_sec}s: {item_label}\nError: {e}",
+                    )
+                    errors.append({"item": item_label, "phase": "write", "error": str(e)})
+                    failed += 1
+                    done_items.add(item)
+                    sp["done_items"] = done_items
+                    continue
+
+                _t_write_end = _time.monotonic()
+                _write_sec = round(_t_write_end - _t_write_start, 2)
+
+                if not write_result.success:
+                    log.warning(
+                        "Scale micro-loop write error",
+                        item=item_label,
+                        error=write_result.error,
+                        write_sec=_write_sec,
+                    )
+                    self._emit_tool_output(
+                        "scale_micro_loop",
+                        {"item": item_label, "step": "write", "path": write_path_arg},
+                        f"[{item_num}/{total}] WRITE ERROR in {_write_sec}s: {item_label}\nError: {write_result.error}",
+                    )
+                    errors.append({"item": item_label, "phase": "write", "error": write_result.error})
+                    failed += 1
+                    done_items.add(item)
+                    sp["done_items"] = done_items
+                    continue
 
             # ── Step 4: Update tracking & timing ─────────────────
             done_items.add(item)
@@ -1119,7 +1210,7 @@ class AgentToolLoopMixin:
         5. Output strategy is compatible:
            - single_file: must be writing to a SINGLE file (original behavior)
            - file_per_item: always compatible (micro-loop creates per-item files)
-           - no_file: not compatible (micro-loop needs file output)
+           - no_file: compatible when sink is available (typesense, email, reply)
         """
         sp = getattr(self, "_scale_progress", None)
         if sp is None:
@@ -1130,10 +1221,16 @@ class AgentToolLoopMixin:
 
         output_strategy = str(sp.get("_output_strategy", "single_file")).strip().lower()
 
-        # no_file output strategy — micro-loop cannot take over because
-        # the final action is not file-based (email, API, reply, etc.).
+        # no_file output strategy — the micro-loop can take over when the
+        # final action has a compatible sink (typesense, email, or reply).
         if output_strategy == "no_file":
-            return False
+            final_action = str(sp.get("_final_action", "reply")).strip()
+            if final_action == "api_call":
+                # Allow if typesense tool is registered.
+                if not self.tools.has_tool("typesense"):
+                    return False
+            elif final_action not in ("reply", "email"):
+                return False
 
         if output_strategy == "file_per_item":
             # For file-per-item: we need the filename template and at least
@@ -1145,6 +1242,9 @@ class AgentToolLoopMixin:
                 output_files: set[str] = sp.get("_output_files", set())
                 if not output_files:
                     return False
+        elif output_strategy == "no_file":
+            # no_file mode — no output file needed, sink was validated above.
+            pass
         else:
             # single_file mode (original behavior)
             output_file = sp.get("_output_file", "") or sp.get("_output_file_arg", "")
@@ -1717,6 +1817,9 @@ class AgentToolLoopMixin:
             _tool_lower = str(tc.name or "").strip().lower()
             _PATH_TOOLS = {"read", "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract"}
             _URL_TOOLS = {"web_fetch", "web_get"}
+            # Stateful tools that modify data between calls — exempt from
+            # duplicate detection because index→search sequences are normal.
+            _STATEFUL_TOOLS = {"typesense", "todo", "contacts", "scripts", "apis", "send_mail"}
             # During scale-progress tasks, give extra headroom so the LLM
             # can recover from a failed first attempt or a write-before-read
             # situation without being permanently locked out of a file.
@@ -1744,6 +1847,10 @@ class AgentToolLoopMixin:
                 _dup_sig = f"{tc.name}|{_sig_args}"
             _dup_counts: dict[str, int] = getattr(self, "_turn_tool_call_counts", {})
             _dup_count = _dup_counts.get(_dup_sig, 0)
+            # Stateful tools (index→search, CRUD operations) skip duplicate
+            # detection — repeated calls are expected and legitimate.
+            if _tool_lower in _STATEFUL_TOOLS:
+                _dup_count = 0
             if _dup_count >= _dup_max:
                 # During scale tasks, give a more actionable message that
                 # tells the LLM to write what it has or skip the item.
