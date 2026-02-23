@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 from typing import Any
 
 from captain_claw.config import get_config
@@ -15,13 +16,27 @@ from captain_claw.tools.registry import (
 
 log = get_logger(__name__)
 
+# Commands that complete nearly instantly and should never hang for the
+# full config timeout.  We use a short timeout (15 s) for these.
+_QUICK_COMMANDS: frozenset[str] = frozenset({
+    "cd", "ls", "pwd", "echo", "printf", "cat", "head", "tail",
+    "mkdir", "rmdir", "touch", "cp", "mv", "rm", "ln",
+    "chmod", "chown", "chgrp",
+    "date", "cal", "whoami", "hostname", "uname", "env", "printenv",
+    "which", "type", "file", "stat", "wc", "sort", "uniq",
+    "basename", "dirname", "realpath", "readlink",
+    "true", "false", "test", "[",
+    "export", "unset", "set", "alias",
+})
+_QUICK_TIMEOUT = 15
+
 
 class ShellTool(Tool):
     """Execute shell commands."""
 
     name = "shell"
     description = "Execute a shell command and return its output."
-    timeout_seconds = 30.0
+    timeout_seconds = 120.0
     parameters = {
         "type": "object",
         "properties": {
@@ -39,7 +54,29 @@ class ShellTool(Tool):
 
     def __init__(self):
         self.config = get_config()
-        self.timeout_seconds = float(getattr(self.config.tools.shell, "timeout", 30) or 30)
+        self.timeout_seconds = float(getattr(self.config.tools.shell, "timeout", 120) or 120)
+
+    @staticmethod
+    def _is_quick_command(command: str) -> bool:
+        """Return True if *command* consists only of fast, non-blocking builtins.
+
+        Handles pipelines (``ls | head``) and chains (``mkdir a && cd a``).
+        If *any* part of the command is not in the quick-list, return False
+        so the full timeout is used.
+        """
+        # Strip leading env vars (VAR=val cmd …)
+        stripped = re.sub(r"^\s*(\w+=\S+\s+)*", "", command)
+        # Split on shell operators to get individual commands
+        parts = re.split(r"\s*(?:&&|\|\|?|;)\s*", stripped)
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            # Get the base command name (handle paths like /usr/bin/ls)
+            base = part.split()[0].split("/")[-1] if part.split() else ""
+            if base not in _QUICK_COMMANDS:
+                return False
+        return True
 
     def _is_command_safe(self, command: str) -> tuple[bool, str]:
         """Check if command is safe to execute.
@@ -95,9 +132,13 @@ class ShellTool(Tool):
                 error=f"Command blocked: {reason}",
             )
         
-        # Use config timeout if not provided
+        # Use config timeout if not provided; auto-shorten for trivial
+        # commands so a stalled ``ls`` or ``mkdir`` won't block for 120 s.
         if timeout is None:
-            timeout = self.config.tools.shell.timeout
+            if self._is_quick_command(command):
+                timeout = _QUICK_TIMEOUT
+            else:
+                timeout = self.config.tools.shell.timeout
         timeout = max(1, int(timeout))
 
         abort_event = kwargs.get("_abort_event")

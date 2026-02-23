@@ -113,7 +113,7 @@ tools:
   read:
     max_file_bytes: 200000
   shell:
-    timeout: 30
+    timeout: 120
     blocked:
     - rm -rf /
     - mkfs

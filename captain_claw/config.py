@@ -130,7 +130,7 @@ class ShellToolConfig(BaseModel):
         ALLOW = "allow"
         DENY = "deny"
 
-    timeout: int = 30
+    timeout: int = 120
     blocked: list[str] = [
         "rm -rf /",
         "mkfs",

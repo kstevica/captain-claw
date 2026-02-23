@@ -174,7 +174,7 @@ class GoogleCalendarTool(Tool):
 
     def __init__(self) -> None:
         self._client = httpx.AsyncClient(
-            timeout=60.0,
+            timeout=120.0,
             follow_redirects=True,
             headers={"User-Agent": "Captain Claw/0.1.0 (Google Calendar Tool)"},
         )
