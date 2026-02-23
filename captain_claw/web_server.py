@@ -312,8 +312,8 @@ class WebServer:
         return await get_config_summary(self, request)
 
     async def list_sessions_api(self, request: web.Request) -> web.Response:
-        from captain_claw.web.rest_config import list_sessions_api
-        return await list_sessions_api(self, request)
+        from captain_claw.web.rest_sessions import list_sessions
+        return await list_sessions(self, request)
 
     async def get_commands_api(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_config import get_commands_api
@@ -602,6 +602,35 @@ class WebServer:
         from captain_claw.web.static_pages import serve_settings
         return await serve_settings(self, request)
 
+    async def _serve_sessions(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_sessions
+        return await serve_sessions(self, request)
+
+    # Sessions REST
+    async def _get_session_detail(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_sessions import get_session_detail
+        return await get_session_detail(self, request)
+
+    async def _update_session(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_sessions import update_session
+        return await update_session(self, request)
+
+    async def _delete_session_api(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_sessions import delete_session
+        return await delete_session(self, request)
+
+    async def _auto_describe_session(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_sessions import auto_describe_session
+        return await auto_describe_session(self, request)
+
+    async def _export_session(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_sessions import export_session
+        return await export_session(self, request)
+
+    async def _bulk_delete_sessions(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_sessions import bulk_delete_sessions
+        return await bulk_delete_sessions(self, request)
+
     async def _get_settings_schema(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_settings import get_settings_schema
         return await get_settings_schema(self, request)
@@ -628,6 +657,12 @@ class WebServer:
         app.router.add_get("/api/settings", self._get_settings_values)
         app.router.add_put("/api/settings", self._put_settings)
         app.router.add_get("/api/sessions", self.list_sessions_api)
+        app.router.add_post("/api/sessions/bulk-delete", self._bulk_delete_sessions)
+        app.router.add_get("/api/sessions/{id}", self._get_session_detail)
+        app.router.add_patch("/api/sessions/{id}", self._update_session)
+        app.router.add_delete("/api/sessions/{id}", self._delete_session_api)
+        app.router.add_post("/api/sessions/{id}/auto-describe", self._auto_describe_session)
+        app.router.add_get("/api/sessions/{id}/export", self._export_session)
         app.router.add_get("/api/commands", self.get_commands_api)
         app.router.add_get("/api/orchestrator/status", self._get_orchestrator_status)
         app.router.add_post("/api/orchestrator/reset", self._reset_orchestrator)
@@ -699,6 +734,7 @@ class WebServer:
             app.router.add_get("/loop-runner", self._serve_loop_runner)
             app.router.add_get("/memory", self._serve_memory)
             app.router.add_get("/settings", self._serve_settings)
+            app.router.add_get("/sessions", self._serve_sessions)
             app.router.add_get("/favicon.ico", self._serve_favicon)
         return app
 

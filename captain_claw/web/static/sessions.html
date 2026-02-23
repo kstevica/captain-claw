@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sessions - Captain Claw</title>
+    <link rel="stylesheet" href="/static/sessions.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<header class="sess-header">
+    <div class="sess-header-left">
+        <a href="/" class="sess-logo-link"><img src="/static/logo.svg" width="28" height="28"></a>
+        <h1>Sessions</h1>
+    </div>
+    <div class="sess-header-center">
+        <input type="text" id="searchInput" class="sess-search" placeholder="Search sessions..." autocomplete="off">
+    </div>
+    <div class="sess-header-right">
+        <a href="/chat" class="sess-nav-link">&larr; Chat</a>
+    </div>
+</header>
+
+<div class="sess-layout">
+    <!-- Left panel: session list -->
+    <aside class="sess-list-panel" id="sessListPanel">
+        <div class="sess-list-header">
+            <label class="sess-select-all-label">
+                <input type="checkbox" id="selectAllCb" title="Select all sessions">
+            </label>
+            <span class="sess-list-count" id="sessCount">0 sessions</span>
+            <button class="sess-bulk-delete-btn hidden" id="bulkDeleteBtn" title="Delete selected sessions">&#x1F5D1;&#xFE0F; Delete Selected</button>
+        </div>
+        <div class="sess-list" id="sessList">
+            <div class="sess-loading">Loading sessions...</div>
+        </div>
+    </aside>
+
+    <!-- Right area: detail -->
+    <div class="sess-detail" id="sessDetail">
+        <div class="sess-detail-empty" id="sessDetailEmpty">
+            <div class="sess-detail-empty-icon">&#x1F4CB;</div>
+            <div class="sess-detail-empty-text">Select a session to view its history</div>
+        </div>
+
+        <!-- Actions bar (visible when a session is selected) -->
+        <div class="sess-actions hidden" id="sessActions">
+            <div class="sess-actions-left">
+                <span class="sess-active-name" id="sessActiveName">-</span>
+                <span class="sess-active-meta" id="sessActiveMeta"></span>
+            </div>
+            <div class="sess-actions-right">
+                <button class="sess-action-btn" id="renameBtn" title="Rename session">&#x270F;&#xFE0F; Rename</button>
+                <button class="sess-action-btn" id="descBtn" title="Edit description">&#x1F4DD; Description</button>
+                <button class="sess-action-btn" id="autoDescBtn" title="Auto-generate description">&#x1F916; Auto Describe</button>
+                <button class="sess-action-btn" id="exportChatBtn" title="Download chat history as markdown">&#x1F4E5; Chat</button>
+                <button class="sess-action-btn" id="exportMonitorBtn" title="Download monitor history as markdown">&#x1F4E5; Monitor</button>
+                <button class="sess-action-btn" id="exportAllBtn" title="Download full export (chat + monitor)">&#x1F4E5; All</button>
+                <button class="sess-action-btn danger" id="deleteBtn" title="Delete session">&#x1F5D1;&#xFE0F; Delete</button>
+            </div>
+        </div>
+
+        <!-- Chat + Monitor split -->
+        <div class="sess-panels hidden" id="sessPanels">
+            <div class="sess-chat-panel" id="sessChatPanel">
+                <div class="sess-panel-header">
+                    <span class="sess-panel-title">Chat History</span>
+                    <span class="sess-panel-count" id="chatMsgCount">0</span>
+                </div>
+                <div class="sess-chat-messages" id="sessChatMessages"></div>
+            </div>
+
+            <div class="sess-resize-handle" id="sessResizeHandle"></div>
+
+            <div class="sess-monitor-panel" id="sessMonitorPanel">
+                <div class="sess-panel-header">
+                    <span class="sess-panel-title">Monitor History</span>
+                    <span class="sess-panel-count" id="monitorMsgCount">0</span>
+                </div>
+                <div class="sess-monitor-messages" id="sessMonitorMessages"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Rename modal -->
+<div class="sess-modal-overlay hidden" id="renameModal">
+    <div class="sess-modal">
+        <h3>Rename Session</h3>
+        <input type="text" id="renameInput" class="sess-modal-input" placeholder="New name..." autocomplete="off">
+        <div class="sess-modal-buttons">
+            <button class="sess-action-btn" id="renameSaveBtn">Save</button>
+            <button class="sess-action-btn secondary" id="renameCancelBtn">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<!-- Description modal -->
+<div class="sess-modal-overlay hidden" id="descModal">
+    <div class="sess-modal">
+        <h3>Session Description</h3>
+        <textarea id="descInput" class="sess-modal-textarea" placeholder="Description..." rows="4"></textarea>
+        <div class="sess-modal-buttons">
+            <button class="sess-action-btn" id="descSaveBtn">Save</button>
+            <button class="sess-action-btn secondary" id="descCancelBtn">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<script src="/static/sessions.js"></script>
+</body>
+</html>
