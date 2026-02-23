@@ -323,6 +323,29 @@ async def handle_session_subcommand(server: WebServer, args: str) -> str:
             return "Usage: `/session protect on|off`"
         return "No active session."
 
+    elif subcmd in ("export",):
+        if not server.agent.session:
+            return "No active session."
+        mode = subargs.strip().lower() or "all"
+        from captain_claw.session_export import export_session_history
+
+        try:
+            written = export_session_history(
+                mode=mode,
+                session_id=server.agent.session.id,
+                session_name=server.agent.session.name,
+                messages=server.agent.session.messages,
+                saved_base_path=server.agent.tools.get_saved_base_path(create=True),
+            )
+        except Exception as e:
+            return f"Export failed: {e}"
+        if not written:
+            return "No files exported."
+        lines = [f"Exported **{len(written)}** file(s):"]
+        for p in written:
+            lines.append(f"- `{p}`")
+        return "\n".join(lines)
+
     return f"Unknown session subcommand: `{subcmd}`"
 
 

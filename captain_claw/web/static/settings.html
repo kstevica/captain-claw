@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Captain Claw &mdash; Settings</title>
+    <link rel="stylesheet" href="/static/settings.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+    <!-- Header -->
+    <header class="st-header">
+        <div class="st-header-left">
+            <a href="/" class="logo">
+                <img src="/static/logo.svg" width="20" height="20" alt=""
+                     style="vertical-align:middle;margin-right:5px;border-radius:4px;">Captain Claw
+            </a>
+            <span class="divider"></span>
+            <span class="st-page-title">Settings</span>
+        </div>
+        <div class="st-header-right">
+            <span class="st-save-status" id="saveStatus"></span>
+            <button class="st-btn primary" id="saveBtn" title="Save changes (Ctrl+S)">Save</button>
+            <span class="st-dirty hidden" id="dirtyDot" title="Unsaved changes">&#x25CF;</span>
+            <a href="/chat" class="header-link">&#8592; Chat</a>
+        </div>
+    </header>
+
+    <!-- Layout -->
+    <div class="st-layout">
+        <!-- Sidebar -->
+        <aside class="st-sidebar" id="sidebar">
+            <nav class="st-nav" id="nav">
+                <div class="st-loading">Loading settings...</div>
+            </nav>
+        </aside>
+
+        <!-- Main content -->
+        <main class="st-main" id="main">
+            <div class="st-loading" id="mainLoading">Loading settings...</div>
+        </main>
+    </div>
+
+    <!-- Toast container -->
+    <div class="st-toast-container" id="toastContainer"></div>
+
+    <!-- Wizard modal -->
+    <div class="st-modal-overlay hidden" id="wizardOverlay">
+        <div class="st-modal" id="wizardModal">
+            <div class="st-modal-header">
+                <span class="st-modal-title" id="wizardTitle">Setup Wizard</span>
+                <button class="st-modal-close" id="wizardClose">&times;</button>
+            </div>
+            <div class="st-modal-body" id="wizardBody"></div>
+            <div class="st-modal-footer">
+                <button class="st-btn secondary" id="wizardPrev">Back</button>
+                <button class="st-btn primary" id="wizardNext">Next</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/settings.js"></script>
+</body>
+</html>

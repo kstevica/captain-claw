@@ -723,6 +723,7 @@ class AgentOrchestrationMixin:
                 self._scale_progress["items"] = list(list_members)
                 self._scale_progress["done_items"] = set()
                 self._scale_progress["total"] = len(list_members)
+                self._scale_progress["_extraction_mode"] = self._classify_item_extraction_mode(list_members)
         if use_contract_pipeline:
             # When a clarification context was merged, the relevant URLs are
             # already embedded in effective_user_input.  Passing the full
@@ -783,6 +784,7 @@ class AgentOrchestrationMixin:
                 sp["items"] = list(prefetch_urls)
                 sp["done_items"] = set()
                 sp["total"] = len(prefetch_urls)
+                sp["_extraction_mode"] = self._classify_item_extraction_mode(prefetch_urls)
         if self.planning_enabled or task_contract is not None:
             planning_pipeline = self._build_task_pipeline(
                 effective_user_input,
@@ -829,6 +831,7 @@ class AgentOrchestrationMixin:
                 "_output_strategy": _lw_out_strategy,
                 "_output_filename_template": str(list_task_plan.get("output_filename_template", "")).strip(),
                 "_final_action": str(list_task_plan.get("final_action", "write_file")).strip(),
+                "_extraction_mode": self._classify_item_extraction_mode(members),
             }
             if _lw_out_strategy == "no_file":
                 self._scale_progress["_sink_collection"] = ""

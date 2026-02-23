@@ -37,7 +37,7 @@ Output strategy detection — carefully analyze the user's request to determine 
 
 Key signals for detecting output_strategy:
 - File-per-item: filename includes a variable part that changes per member (date, name, ID), explicit "for each" file naming
-- Single-file: "write to [filename]", "append to", "create a CSV with all", one output filename with no variable parts
+- Single-file: "write to [filename]", "append to", "create a report with all", one output filename with no variable parts
 - No-file: "send email", "reply with", "index on", "post to", "return the results"
 
 - IMPORTANT: A single follow-up message referencing one item (article, link, topic) from a previous response is NOT list work. Only flag has_list_work=true when the user explicitly asks for per-member processing of multiple items.

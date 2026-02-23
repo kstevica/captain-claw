@@ -4,7 +4,8 @@ import captain_claw.config as config_module
 from captain_claw.config import Config
 
 
-def test_load_prefers_local_config_yaml(monkeypatch, tmp_path: Path):
+def test_load_merges_home_overlay_over_local_base(monkeypatch, tmp_path: Path):
+    """Home (~/.captain-claw/config.yaml) overrides local (./config.yaml)."""
     monkeypatch.chdir(tmp_path)
 
     home_cfg = tmp_path / "home_config.yaml"
@@ -17,6 +18,7 @@ def test_load_prefers_local_config_yaml(monkeypatch, tmp_path: Path):
             "model:\n"
             "  provider: openai\n"
             "  model: gpt-4o-mini\n"
+            "  temperature: 0.5\n"
             "  allowed:\n"
             "    - id: chatgpt-fast\n"
             "      provider: openai\n"
@@ -27,14 +29,17 @@ def test_load_prefers_local_config_yaml(monkeypatch, tmp_path: Path):
 
     cfg = Config.load()
 
-    assert cfg.model.provider == "openai"
-    assert cfg.model.model == "gpt-4o-mini"
-    assert len(cfg.model.allowed) == 1
-    assert cfg.model.allowed[0].id == "chatgpt-fast"
+    # Home overlay wins for fields it sets.
+    assert cfg.model.provider == "ollama"
+    assert cfg.model.model == "llama3.2"
+    # Local base provides values not overridden by home.
+    assert cfg.model.temperature == 0.5
 
 
 def test_load_reads_skill_search_source_url_from_yaml(monkeypatch, tmp_path: Path):
     monkeypatch.chdir(tmp_path)
+    # Point home config to a non-existent file so it doesn't interfere.
+    monkeypatch.setattr(config_module, "DEFAULT_CONFIG_PATH", tmp_path / "no_home.yaml")
     local_cfg = tmp_path / "config.yaml"
     local_cfg.write_text(
         (

@@ -228,6 +228,7 @@ class ToolsConfig(BaseModel):
         "pocket_tts",
         "send_mail",
         "google_drive",
+        "google_calendar",
     ]
     shell: ShellToolConfig = Field(default_factory=ShellToolConfig)
     read: ReadToolConfig = Field(default_factory=ReadToolConfig)
@@ -450,6 +451,13 @@ class ScaleConfig(BaseModel):
     # Very short prompts (e.g. "summarize this") don't benefit.
     task_rephrase_min_chars: int = 120
 
+    # Research extraction settings — used when list items are plain-text
+    # entities (company names, product names, etc.) that require web search
+    # + web_fetch to gather information.
+    research_search_results: int = 3       # Brave search results per item
+    research_max_chars_per_fetch: int = 15000  # Max chars per fetched page
+    research_query_keywords: int = 10     # Max keywords in search query (proper nouns + content words)
+
 
 class DeepMemoryConfig(BaseModel):
     """Typesense-backed deep memory for long-term searchable content."""
@@ -485,6 +493,7 @@ class GoogleOAuthConfig(BaseModel):
     scopes: list[str] = Field(default_factory=lambda: [
         "https://www.googleapis.com/auth/cloud-platform",
         "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/calendar",
         "openid",
         "email",
     ])
@@ -600,14 +609,27 @@ class Config(BaseSettings):
             return local_path
         return DEFAULT_CONFIG_PATH
 
+    @staticmethod
+    def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+        """Recursively merge *overlay* into *base* (overlay wins on conflict).
+
+        - Dicts are merged recursively.
+        - Lists and scalars in *overlay* replace *base* entirely.
+        """
+        merged = dict(base)
+        for key, overlay_val in overlay.items():
+            base_val = merged.get(key)
+            if isinstance(base_val, dict) and isinstance(overlay_val, dict):
+                merged[key] = Config._deep_merge(base_val, overlay_val)
+            else:
+                merged[key] = overlay_val
+        return merged
+
     @classmethod
-    def from_yaml(cls, path: Path | str | None = None) -> "Config":
-        """Load configuration from YAML file."""
-        config_path = Path(path).expanduser() if path else cls.resolve_default_config_path()
-
+    def _read_yaml_data(cls, config_path: Path) -> dict[str, Any]:
+        """Read and parse a single YAML config file into a dict."""
         if not config_path.exists():
-            return cls()
-
+            return {}
         raw_text = config_path.read_text(encoding="utf-8")
         try:
             data = yaml.safe_load(raw_text) or {}
@@ -616,7 +638,6 @@ class Config(BaseSettings):
             if "python/object/apply:captain_claw.config." not in message:
                 raise
             # Legacy configs could serialize enums as python/object/apply tags.
-            # Convert these to plain scalar values so safe_load can parse the file.
             sanitized = re.sub(
                 r"(?m)^(\s*[\w_]+:\s*)!!python/object/apply:captain_claw\.config\.[^\n]+\n\s*-\s*([^\n]+)\s*$",
                 r"\1\2",
@@ -628,8 +649,43 @@ class Config(BaseSettings):
                     config_path.write_text(sanitized, encoding="utf-8")
                 except Exception:
                     pass
-        data = cls._apply_legacy_top_level_config(data)
+        return data
 
+    @classmethod
+    def from_yaml(cls, path: Path | str | None = None) -> "Config":
+        """Load configuration from YAML file(s).
+
+        When *path* is ``None`` (normal startup), both config sources are
+        merged with the home-directory file (``~/.captain-claw/config.yaml``)
+        taking precedence over the local project file (``./config.yaml``).
+        This allows the settings page to write user overrides to the home
+        file while the project ships its own defaults in the local file.
+
+        When an explicit *path* is given, only that file is loaded.
+        """
+        if path is not None:
+            data = cls._read_yaml_data(Path(path).expanduser())
+            data = cls._apply_legacy_top_level_config(data)
+            return cls(**data)
+
+        # ── Merge: local (base) + home (overlay) ──────────
+        local_path = Path.cwd() / LOCAL_CONFIG_FILENAME
+        home_path = DEFAULT_CONFIG_PATH
+
+        base_data = cls._read_yaml_data(local_path)
+        home_data = cls._read_yaml_data(home_path)
+
+        if base_data and home_data:
+            data = cls._deep_merge(base_data, home_data)
+        elif home_data:
+            data = home_data
+        else:
+            data = base_data
+
+        if not data:
+            return cls()
+
+        data = cls._apply_legacy_top_level_config(data)
         return cls(**data)
 
     @classmethod

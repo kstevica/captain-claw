@@ -17,7 +17,7 @@ Rules for rephrasing:
    - `## Items to process` — if there is a list of URLs/files/items, present them in a clean numbered list or markdown table
    - `## Output` — where and how to write results (file format, naming, single vs per-item files)
    - `## Constraints` — any rules the user stated or implied (e.g. "leave blank if not found", error handling, dedup)
-3. When the user specifies a data format (CSV columns, fields, etc.), list each field explicitly with a short description of what goes there and how to handle missing values.
+3. When the user specifies data fields (columns, attributes, etc.), list each field explicitly with a short description of what goes there and how to handle missing values. ALWAYS rewrite table/CSV output requests into human-readable Markdown with headings and **bold labels** (e.g. `## Company Name` + `**Field**: value`). NEVER preserve table or CSV format in the output section — tables are hard to read when fields contain long text.
 4. When the user provides URLs or items inline, extract them into a clean list or table.
 5. When the user mentions file naming patterns, make them explicit with placeholders.
 6. Keep the language imperative and unambiguous: "Fetch...", "Extract...", "Write...", "If not found, leave blank."

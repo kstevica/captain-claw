@@ -598,6 +598,22 @@ class WebServer:
         from captain_claw.web.static_pages import serve_memory
         return await serve_memory(self, request)
 
+    async def _serve_settings(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_settings
+        return await serve_settings(self, request)
+
+    async def _get_settings_schema(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_settings import get_settings_schema
+        return await get_settings_schema(self, request)
+
+    async def _get_settings_values(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_settings import get_settings_values
+        return await get_settings_values(self, request)
+
+    async def _put_settings(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_settings import put_settings
+        return await put_settings(self, request)
+
     # ── App setup ────────────────────────────────────────────────────
 
     def create_app(self) -> web.Application:
@@ -608,6 +624,9 @@ class WebServer:
         app.router.add_put("/api/instructions/{name}", self.put_instruction)
         app.router.add_delete("/api/instructions/{name}", self.revert_instruction)
         app.router.add_get("/api/config", self.get_config_summary)
+        app.router.add_get("/api/settings/schema", self._get_settings_schema)
+        app.router.add_get("/api/settings", self._get_settings_values)
+        app.router.add_put("/api/settings", self._put_settings)
         app.router.add_get("/api/sessions", self.list_sessions_api)
         app.router.add_get("/api/commands", self.get_commands_api)
         app.router.add_get("/api/orchestrator/status", self._get_orchestrator_status)
@@ -679,6 +698,7 @@ class WebServer:
             app.router.add_get("/workflows", self._serve_workflows)
             app.router.add_get("/loop-runner", self._serve_loop_runner)
             app.router.add_get("/memory", self._serve_memory)
+            app.router.add_get("/settings", self._serve_settings)
             app.router.add_get("/favicon.ico", self._serve_favicon)
         return app
 

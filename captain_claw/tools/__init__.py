@@ -23,6 +23,7 @@ from captain_claw.tools.document_extract import (
 from captain_claw.tools.pocket_tts import PocketTTSTool
 from captain_claw.tools.send_mail import SendMailTool
 from captain_claw.tools.google_drive import GoogleDriveTool
+from captain_claw.tools.google_calendar import GoogleCalendarTool
 from captain_claw.tools.todo import TodoTool
 from captain_claw.tools.contacts import ContactsTool
 from captain_claw.tools.scripts import ScriptsTool
@@ -50,6 +51,7 @@ __all__ = [
     "PocketTTSTool",
     "SendMailTool",
     "GoogleDriveTool",
+    "GoogleCalendarTool",
     "TodoTool",
     "ContactsTool",
     "ScriptsTool",

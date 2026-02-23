@@ -888,6 +888,7 @@ class AgentContextMixin:
         from captain_claw.tools import (
             DocxExtractTool,
             GlobTool,
+            GoogleCalendarTool,
             GoogleDriveTool,
             PdfExtractTool,
             PocketTTSTool,
@@ -937,6 +938,8 @@ class AgentContextMixin:
                 self.tools.register(SendMailTool())
             elif tool_name == "google_drive":
                 self.tools.register(GoogleDriveTool())
+            elif tool_name == "google_calendar":
+                self.tools.register(GoogleCalendarTool())
             elif tool_name == "todo":
                 self.tools.register(TodoTool())
             elif tool_name == "contacts":

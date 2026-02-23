@@ -374,6 +374,7 @@ class AgentToolLoopMixin:
         # Detect item type to tailor the instructions.
         has_paths = any("/" in item and not item.startswith("http") for item in items[:5])
         has_urls = any(item.startswith(("http://", "https://")) for item in items[:5])
+        extraction_mode = str(sp.get("_extraction_mode", "file")).strip()
 
         # Detect output strategy
         output_strategy = str(sp.get("_output_strategy", "single_file")).strip().lower()
@@ -435,7 +436,12 @@ class AgentToolLoopMixin:
         else:
             write_instr = "write(append=true) its summary."
 
-        if has_paths:
+        if extraction_mode == "research":
+            lines.append(
+                f"Process the NEXT entity in this list. Search the web for it, "
+                f"synthesize the findings, then immediately {write_instr}"
+            )
+        elif has_paths:
             lines.append(
                 f"Process the NEXT item in this list. Extract/read it, "
                 f"then immediately {write_instr}"
@@ -482,6 +488,60 @@ class AgentToolLoopMixin:
 
     # Regex to find the first URL embedded anywhere in a string.
     _URL_RE = re.compile(r"https?://[^\s)\]}>\"']+")
+
+    # File extensions recognised as "file" items during classification.
+    _KNOWN_FILE_EXTS = frozenset({
+        ".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".md", ".csv",
+        ".json", ".xml", ".html", ".htm", ".yaml", ".yml", ".toml",
+        ".py", ".js", ".ts", ".go", ".rs", ".java", ".c", ".cpp",
+    })
+
+    @staticmethod
+    def _classify_item_extraction_mode(items: list[str]) -> str:
+        """Classify list items into an extraction mode.
+
+        Samples up to 10 items and votes:
+        - ``"url"``      — majority are HTTP(S) URLs
+        - ``"file"``     — majority contain path separators or known extensions
+        - ``"research"`` — majority are plain-text entities (names, titles)
+
+        The result is stored once in ``_scale_progress["_extraction_mode"]``
+        so the micro-loop knows which extraction strategy to use.
+        """
+        if not items:
+            return "file"
+
+        sample = items[:10]
+        url_count = 0
+        file_count = 0
+        entity_count = 0
+
+        for raw in sample:
+            item = raw.strip()
+            if not item:
+                continue
+            # URL check
+            if item.startswith(("http://", "https://")) or re.search(r"https?://", item):
+                url_count += 1
+                continue
+            # Path separator check
+            if "/" in item or "\\" in item:
+                file_count += 1
+                continue
+            # Known file extension check
+            ext = os.path.splitext(item)[-1].lower()
+            if ext and ext in AgentToolLoopMixin._KNOWN_FILE_EXTS:
+                file_count += 1
+                continue
+            # Everything else is a plain-text entity
+            entity_count += 1
+
+        n = len(sample)
+        if url_count >= n * 0.5:
+            return "url"
+        if entity_count >= n * 0.5:
+            return "research"
+        return "file"
 
     @staticmethod
     def _derive_member_label(item: str) -> str:
@@ -545,8 +605,263 @@ class AgentToolLoopMixin:
         if ext in self._SCALE_ITEM_EXTRACTOR:
             tool_name, arg_name = self._SCALE_ITEM_EXTRACTOR[ext]
             return tool_name, {arg_name: item}
+        # If the item has no path separators and no file extension it is
+        # likely a plain-text entity (company name, product, etc.).  Return
+        # web_search as a safety-net fallback for cases where this method is
+        # called outside the research-mode micro-loop path.
+        if "/" not in item and "\\" not in item:
+            ext = os.path.splitext(item)[-1].lower()
+            if not ext:
+                return "web_search", {"query": item}
         # Default: plain file read
         return "read", {"path": item}
+
+    # ------------------------------------------------------------------
+    # Research extraction — web_search → web_fetch → combine
+    # ------------------------------------------------------------------
+
+    # Regex to extract URLs from Brave search output.
+    _SEARCH_RESULT_URL_RE = re.compile(r"^\s*URL:\s*(https?://\S+)", re.MULTILINE)
+
+    async def _extract_research_keywords(
+        self,
+        task_description: str,
+        all_items: list[str],
+        turn_usage: dict[str, int],
+    ) -> list[str]:
+        """Ask the LLM to extract search keywords from the task description.
+
+        Called **once** before the micro-loop starts (not per item).
+        The result is cached in ``_scale_progress["_research_keywords"]``
+        so every item reuses the same keyword set.
+
+        Returns a list of keyword strings (may include quoted phrases).
+        """
+        from captain_claw.llm import Message
+
+        cfg = get_config()
+        max_kw = cfg.scale.research_query_keywords
+
+        # Build a compact sample of item names so the LLM knows what
+        # the list members look like (and can exclude them).
+        sample = all_items[:15]
+        items_str = ", ".join(sample)
+        if len(all_items) > 15:
+            items_str += f" … ({len(all_items)} total)"
+
+        messages = [
+            Message(
+                role="system",
+                content=(
+                    "You are a search-query keyword extractor. "
+                    "Given a task description and a list of entities that will be "
+                    "searched individually, extract the most useful web-search "
+                    "keywords that should accompany EVERY entity search.\n\n"
+                    "Rules:\n"
+                    "- Return ONLY the keywords, one per line, nothing else.\n"
+                    "- Multi-word proper nouns should be wrapped in double quotes "
+                    '(e.g. "Silicon Gardens").\n'
+                    "- Include contextual identifiers (parent company, fund name, "
+                    "industry, geography) that help narrow results.\n"
+                    "- Include useful data-source names mentioned in the task "
+                    "(e.g. Crunchbase, PitchBook, LinkedIn).\n"
+                    "- EXCLUDE the entity names themselves — they will be added "
+                    "separately.\n"
+                    "- EXCLUDE generic instruction words (search, extract, find, "
+                    "compile, report, format, write, etc.).\n"
+                    "- EXCLUDE output field labels (company, founders, country, "
+                    "date, amount, etc.) — these describe output columns, not "
+                    "search terms.\n"
+                    f"- Return at most {max_kw} keywords, ordered by importance.\n"
+                ),
+            ),
+            Message(
+                role="user",
+                content=(
+                    f"Task description:\n{task_description}\n\n"
+                    f"Entity list (will be searched one by one): {items_str}\n\n"
+                    f"Extract up to {max_kw} search keywords:"
+                ),
+            ),
+        ]
+
+        try:
+            response = await self._complete_with_guards(
+                messages=messages,
+                tools=None,
+                interaction_label="research_keyword_extraction",
+                turn_usage=turn_usage,
+                max_tokens=min(200, int(cfg.model.max_tokens)),
+            )
+            raw = (response.content or "").strip()
+        except Exception as e:
+            log.warning("Research keyword extraction failed", error=str(e))
+            return []
+
+        # Parse: one keyword per line, strip whitespace and bullets.
+        keywords: list[str] = []
+        for line in raw.splitlines():
+            line = line.strip().lstrip("-•*123456789. )")
+            if not line:
+                continue
+            keywords.append(line)
+            if len(keywords) >= max_kw:
+                break
+
+        log.info(
+            "Research keywords extracted",
+            keywords=keywords,
+            count=len(keywords),
+        )
+        return keywords
+
+    @staticmethod
+    def _build_research_search_query(
+        item: str,
+        keywords: list[str],
+    ) -> str:
+        """Build a web-search query for a plain-text entity.
+
+        Combines the quoted item name with pre-extracted keywords
+        (produced once by ``_extract_research_keywords``).
+        """
+        quoted = f'"{item.strip()}"'
+        parts: list[str] = [quoted] + keywords
+
+        query = " ".join(parts)
+        # Cap at ~150 chars to stay within search engine limits.
+        if len(query) > 150:
+            query = query[:150].rsplit(" ", 1)[0]
+        return query.strip()
+
+    @staticmethod
+    def _parse_search_result_urls(search_content: str) -> list[str]:
+        """Extract URLs from Brave web-search tool output.
+
+        The output format is::
+
+            1. Title
+               URL: https://example.com/...
+               Snippet: ...
+        """
+        urls: list[str] = []
+        for match in AgentToolLoopMixin._SEARCH_RESULT_URL_RE.finditer(search_content):
+            url = match.group(1).strip().rstrip(".")
+            if url and url not in urls:
+                urls.append(url)
+        return urls
+
+    async def _extract_research_item(
+        self,
+        item: str,
+        task_description: str,
+        item_num: int,
+        total: int,
+        turn_usage: dict[str, int],
+        session_policy: dict[str, Any] | None = None,
+        task_policy: dict[str, Any] | None = None,
+    ) -> str:
+        """Search the web for a plain-text entity and fetch top results.
+
+        Returns concatenated content from the search results ready for
+        the LLM processing step.  On total failure returns a short error
+        string (the caller should treat empty-ish content as a failure).
+        """
+        cfg = get_config()
+        max_results = cfg.scale.research_search_results
+        max_chars = cfg.scale.research_max_chars_per_fetch
+
+        # ── 1. Build query ──────────────────────────────────────
+        keywords = (
+            self._scale_progress.get("_research_keywords", [])
+            if self._scale_progress
+            else []
+        )
+        query = self._build_research_search_query(item, keywords)
+
+        self._emit_thinking(
+            f"scale_micro_loop: Searching ({item_num}/{total})\n"
+            f"{item}\n"
+            f"query: {query}",
+            tool="scale_micro_loop",
+            phase="tool",
+        )
+
+        # ── 2. Web search ───────────────────────────────────────
+        search_result = await self._execute_tool_with_guard(
+            name="web_search",
+            arguments={"query": query, "count": max_results},
+            interaction_label=f"scale_research_search_{item_num}",
+            turn_usage=turn_usage,
+            session_policy=session_policy,
+            task_policy=task_policy,
+        )
+
+        if not search_result.success or not search_result.content:
+            return f"Web search failed for '{item}': {search_result.error or 'no results'}"
+
+        self._emit_tool_output(
+            "scale_micro_loop",
+            {"item": item, "step": "research_search", "query": query},
+            f"[{item_num}/{total}] Search: {query}",
+        )
+
+        # ── 3. Parse URLs from results ──────────────────────────
+        urls = self._parse_search_result_urls(search_result.content)
+        if not urls:
+            # Fall back to search snippets as extracted content.
+            return f"# Research: {item}\nSearch query: {query}\n\n{search_result.content}"
+
+        # ── 4. Fetch top N URLs ─────────────────────────────────
+        parts: list[str] = [f"# Research: {item}\nSearch query: {query}\n"]
+        fetched_ok = 0
+
+        for fetch_idx, url in enumerate(urls[:max_results], start=1):
+            self._emit_thinking(
+                f"scale_micro_loop: Fetching source ({fetch_idx}/{min(len(urls), max_results)}) "
+                f"for item {item_num}/{total}\n"
+                f"{item}\n"
+                f"{url}",
+                tool="scale_micro_loop",
+                phase="tool",
+            )
+            try:
+                fetch_result = await self._execute_tool_with_guard(
+                    name="web_fetch",
+                    arguments={"url": url, "max_chars": max_chars},
+                    interaction_label=f"scale_research_fetch_{item_num}_{fetch_idx}",
+                    turn_usage=turn_usage,
+                    session_policy=session_policy,
+                    task_policy=task_policy,
+                )
+                if fetch_result.success and fetch_result.content:
+                    parts.append(
+                        f"\n--- Source {fetch_idx}: {url} ---\n"
+                        f"{fetch_result.content[:max_chars]}\n"
+                    )
+                    fetched_ok += 1
+                else:
+                    parts.append(
+                        f"\n--- Source {fetch_idx}: {url} ---\n"
+                        f"Fetch failed: {fetch_result.error or 'empty content'}\n"
+                    )
+            except Exception as exc:
+                parts.append(
+                    f"\n--- Source {fetch_idx}: {url} ---\n"
+                    f"Fetch error: {exc}\n"
+                )
+
+        self._emit_tool_output(
+            "scale_micro_loop",
+            {"item": item, "step": "research_fetch", "fetched": fetched_ok, "total_urls": len(urls[:max_results])},
+            f"[{item_num}/{total}] Fetched {fetched_ok}/{min(len(urls), max_results)} sources for: {item}",
+        )
+
+        # If all fetches failed, fall back to search snippets.
+        if fetched_ok == 0:
+            return f"# Research: {item}\nSearch query: {query}\n\n{search_result.content}"
+
+        return "\n".join(parts)
 
     def _build_scale_item_prompt(
         self,
@@ -556,6 +871,7 @@ class AgentToolLoopMixin:
         is_first_item: bool = False,
         previous_summary_sample: str = "",
         output_strategy: str = "single_file",
+        extraction_mode: str = "file",
     ) -> list[Message]:
         """Build a minimal message list for processing a single scale item.
 
@@ -570,6 +886,10 @@ class AgentToolLoopMixin:
         ``output_strategy`` controls the write instructions:
         - ``single_file``: output is appended to a shared file
         - ``file_per_item``: output is the complete content for a standalone file
+
+        ``extraction_mode`` adjusts the system prompt:
+        - ``research``: web-search-based extraction (synthesize multiple sources)
+        - ``file`` / ``url``: standard document extraction
         """
         if output_strategy == "file_per_item":
             output_instruction = (
@@ -588,18 +908,48 @@ class AgentToolLoopMixin:
                 "- Just output the processed content that should be appended to the output file."
             )
 
-        system_text = (
-            "You are a document processing assistant. Your job is to process "
-            "ONE item and produce a focused summary or processed result.\n\n"
-            "Rules:\n"
-            "- Produce ONLY the processed result/summary for this single item.\n"
-            "- Do NOT include any preamble, commentary, or meta-discussion.\n"
-            "- Do NOT ask the user any questions.\n"
-            "- Do NOT mention other items, the total count, or the overall task.\n"
-            "- Do NOT echo or reproduce the extracted content — summarize it.\n"
-            "- NEVER include 'EXTRACTED CONTENT' sections in your output.\n"
-            f"{output_instruction}"
-        )
+        if extraction_mode == "research":
+            system_text = (
+                "You are a research assistant. Your job is to synthesize web "
+                "search results about ONE entity and produce a factual summary.\n\n"
+                "Rules:\n"
+                "- The EXTRACTED CONTENT below contains web search results from "
+                "multiple sources about this entity.\n"
+                "- Synthesize the information into the format requested by the TASK.\n"
+                "- Focus ONLY on facts mentioned in the sources — do NOT fabricate.\n"
+                "- If sources conflict, prefer more authoritative/recent sources.\n"
+                "- If no relevant information was found, leave the field blank as "
+                "instructed by the task.\n"
+                "- Produce ONLY the processed result for this single entity.\n"
+                "- Do NOT include any preamble, commentary, or meta-discussion.\n"
+                "- Do NOT ask the user any questions.\n"
+                "- Do NOT mention other items, the total count, or the overall task.\n"
+                "\n"
+                "OUTPUT FORMAT — strict rules:\n"
+                "- Use a Markdown heading (## Entity Name) followed by labeled fields, "
+                "one per line: **Field**: value\n"
+                "- NEVER output Markdown tables (no | pipes). Tables are hard to read "
+                "and break when values are long.\n"
+                "- NEVER output CSV or TSV rows.\n"
+                "- Keep it human-readable: headings, bold labels, short paragraphs.\n"
+                f"{output_instruction}"
+            )
+        else:
+            system_text = (
+                "You are a document processing assistant. Your job is to process "
+                "ONE item and produce a focused summary or processed result.\n\n"
+                "Rules:\n"
+                "- Produce ONLY the processed result/summary for this single item.\n"
+                "- Do NOT include any preamble, commentary, or meta-discussion.\n"
+                "- Do NOT ask the user any questions.\n"
+                "- Do NOT mention other items, the total count, or the overall task.\n"
+                "- Do NOT echo or reproduce the extracted content — summarize it.\n"
+                "- NEVER include 'EXTRACTED CONTENT' sections in your output.\n"
+                "- Use Markdown with headings and **bold labels** for structure. "
+                "NEVER output Markdown tables (no | pipes) or CSV/TSV rows — "
+                "use labeled fields instead (e.g. **Field**: value).\n"
+                f"{output_instruction}"
+            )
 
         user_parts = [f"TASK: {task_description}\n"]
         user_parts.append(f"ITEM: {item_label}\n")
@@ -709,12 +1059,13 @@ class AgentToolLoopMixin:
 
         _loop_start = _time.monotonic()
 
-        # Determine output strategy
+        # Determine output strategy and extraction mode
         _output_strategy = str(sp.get("_output_strategy", "single_file")).strip().lower()
         _filename_template = str(sp.get("_output_filename_template", "")).strip()
         _is_file_per_item = _output_strategy == "file_per_item" and bool(_filename_template)
         _is_no_file = _output_strategy == "no_file"
         _final_action = str(sp.get("_final_action", "reply")).strip()
+        _extraction_mode = str(sp.get("_extraction_mode", "file")).strip()
         _sink_collection = str(sp.get("_sink_collection", "")).strip()
         # For file_per_item, resolve the output directory from the first
         # written file or from the output_file path.
@@ -736,9 +1087,24 @@ class AgentToolLoopMixin:
             remaining=len(remaining),
             output_file=output_file,
             output_strategy=_output_strategy,
+            extraction_mode=_extraction_mode,
             is_file_per_item=_is_file_per_item,
             filename_template=_filename_template,
         )
+
+        # ── Research mode: extract search keywords once via LLM ──
+        if _extraction_mode == "research" and not sp.get("_research_keywords"):
+            self._emit_thinking(
+                "scale_micro_loop: Extracting search keywords from task…",
+                tool="scale_micro_loop",
+                phase="tool",
+            )
+            _research_kw = await self._extract_research_keywords(
+                task_description=task_description,
+                all_items=items,
+                turn_usage=turn_usage,
+            )
+            sp["_research_keywords"] = _research_kw
 
         processed = 0
         failed = 0
@@ -816,60 +1182,93 @@ class AgentToolLoopMixin:
                 phase="tool",
             )
 
-            # ── Step 1: Extract content directly ────────────────
+            # ── Step 1: Extract content ─────────────────────────
             _t_extract_start = _time.monotonic()
-            tool_name, tool_args = self._detect_item_extractor(item)
-            try:
-                extract_result = await self._execute_tool_with_guard(
-                    name=tool_name,
-                    arguments=tool_args,
-                    interaction_label=f"scale_extract_{item_num}",
-                    turn_usage=turn_usage,
-                    session_policy=session_policy,
-                    task_policy=task_policy,
-                )
-            except Exception as e:
-                log.warning(
-                    "Scale micro-loop extract failed",
-                    item=item_label,
-                    error=str(e),
-                )
-                self._emit_tool_output(
-                    "scale_micro_loop",
-                    {"item": item_label, "step": "extract", "tool": tool_name},
-                    f"[{item_num}/{total}] EXTRACT FAILED: {item_label}\nError: {e}",
-                )
-                errors.append({"item": item_label, "phase": "extract", "error": str(e)})
-                failed += 1
-                done_items.add(item)
-                sp["done_items"] = done_items
-                continue
 
-            if not extract_result.success:
-                log.warning(
-                    "Scale micro-loop extract error",
-                    item=item_label,
-                    error=extract_result.error,
-                )
-                self._emit_tool_output(
-                    "scale_micro_loop",
-                    {"item": item_label, "step": "extract", "tool": tool_name},
-                    f"[{item_num}/{total}] EXTRACT ERROR: {item_label}\nError: {extract_result.error}",
-                )
-                errors.append({"item": item_label, "phase": "extract", "error": extract_result.error})
-                failed += 1
-                done_items.add(item)
-                sp["done_items"] = done_items
-                continue
+            if _extraction_mode == "research":
+                # Research mode: web_search → web_fetch → combine
+                try:
+                    extracted_content = await self._extract_research_item(
+                        item=item,
+                        task_description=task_description,
+                        item_num=item_num,
+                        total=total,
+                        turn_usage=turn_usage,
+                        session_policy=session_policy,
+                        task_policy=task_policy,
+                    )
+                except Exception as e:
+                    log.warning(
+                        "Scale micro-loop research extract failed",
+                        item=item_label,
+                        error=str(e),
+                    )
+                    self._emit_tool_output(
+                        "scale_micro_loop",
+                        {"item": item_label, "step": "extract", "mode": "research"},
+                        f"[{item_num}/{total}] RESEARCH FAILED: {item_label}\nError: {e}",
+                    )
+                    errors.append({"item": item_label, "phase": "extract", "error": str(e)})
+                    failed += 1
+                    done_items.add(item)
+                    sp["done_items"] = done_items
+                    continue
 
-            extracted_content = extract_result.content or ""
+            else:
+                # Standard mode: single-tool extraction (read, web_fetch, pdf_extract, etc.)
+                tool_name, tool_args = self._detect_item_extractor(item)
+                try:
+                    extract_result = await self._execute_tool_with_guard(
+                        name=tool_name,
+                        arguments=tool_args,
+                        interaction_label=f"scale_extract_{item_num}",
+                        turn_usage=turn_usage,
+                        session_policy=session_policy,
+                        task_policy=task_policy,
+                    )
+                except Exception as e:
+                    log.warning(
+                        "Scale micro-loop extract failed",
+                        item=item_label,
+                        error=str(e),
+                    )
+                    self._emit_tool_output(
+                        "scale_micro_loop",
+                        {"item": item_label, "step": "extract", "tool": tool_name},
+                        f"[{item_num}/{total}] EXTRACT FAILED: {item_label}\nError: {e}",
+                    )
+                    errors.append({"item": item_label, "phase": "extract", "error": str(e)})
+                    failed += 1
+                    done_items.add(item)
+                    sp["done_items"] = done_items
+                    continue
+
+                if not extract_result.success:
+                    log.warning(
+                        "Scale micro-loop extract error",
+                        item=item_label,
+                        error=extract_result.error,
+                    )
+                    self._emit_tool_output(
+                        "scale_micro_loop",
+                        {"item": item_label, "step": "extract", "tool": tool_name},
+                        f"[{item_num}/{total}] EXTRACT ERROR: {item_label}\nError: {extract_result.error}",
+                    )
+                    errors.append({"item": item_label, "phase": "extract", "error": extract_result.error})
+                    failed += 1
+                    done_items.add(item)
+                    sp["done_items"] = done_items
+                    continue
+
+                extracted_content = extract_result.content or ""
+
             _t_extract_end = _time.monotonic()
             _extract_sec = round(_t_extract_end - _t_extract_start, 2)
             _extract_chars = len(extracted_content)
 
             self._emit_tool_output(
                 "scale_micro_loop",
-                {"item": item_label, "step": "extract", "tool": tool_name},
+                {"item": item_label, "step": "extract", "mode": _extraction_mode},
                 f"[{item_num}/{total}] Extracted {_extract_chars:,} chars in {_extract_sec}s — {item_label}",
             )
 
@@ -877,7 +1276,7 @@ class AgentToolLoopMixin:
                 log.warning("Scale micro-loop: empty extract", item=item_label)
                 self._emit_tool_output(
                     "scale_micro_loop",
-                    {"item": item_label, "step": "extract", "tool": tool_name},
+                    {"item": item_label, "step": "extract", "mode": _extraction_mode},
                     f"[{item_num}/{total}] EMPTY CONTENT: {item_label}",
                 )
                 errors.append({"item": item_label, "phase": "extract", "error": "empty content"})
@@ -910,6 +1309,7 @@ class AgentToolLoopMixin:
                 is_first_item=(item_num == 1),
                 previous_summary_sample=last_summary,
                 output_strategy=_output_strategy,
+                extraction_mode=_extraction_mode,
             )
 
             # Log context size for this micro-call
@@ -1111,7 +1511,7 @@ class AgentToolLoopMixin:
                     if not write_path_arg:
                         write_path_arg = (
                             str(sp.get("_output_filename_template", "")).strip()
-                            or "scale_output.csv"
+                            or "scale_output.md"
                         )
                     write_append = True
 
@@ -2095,6 +2495,7 @@ class AgentToolLoopMixin:
                             sp["completed"] = 0
                             sp["items"] = list(lines)
                             sp["done_items"] = set()
+                            sp["_extraction_mode"] = self._classify_item_extraction_mode(lines)
                             # Mark glob as completed so the scale guard
                             # blocks any subsequent re-glob attempts.
                             sp["_glob_completed"] = True

@@ -103,6 +103,7 @@ tools:
   - pocket_tts
   - send_mail
   - google_drive
+  - google_calendar
   - todo
   - contacts
   - scripts
@@ -286,6 +287,9 @@ orchestrator:
 scale:
   scale_advisory_min_members: 3
   lightweight_progress_min_members: 2
+  research_search_results: 10
+  research_max_chars_per_fetch: 25000
+  research_query_keywords: 5
 deep_memory:
   enabled: false
   host: localhost
