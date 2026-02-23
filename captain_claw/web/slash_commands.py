@@ -32,10 +32,15 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
         elif cmd in ("/clear",):
             if server.agent.session:
                 server.agent.session.messages.clear()
+                # Reset session metadata so planning/pipeline state doesn't leak
+                server.agent.session.metadata = {}
                 await server.agent.session_manager.save_session(server.agent.session)
+                # Reset agent runtime state to defaults (pipeline=loop, planning=off)
+                server.agent.refresh_session_runtime_flags()
                 server.agent.last_usage = server.agent._empty_usage()
                 server.agent.last_context_window = {}
-            result = "Session messages cleared."
+                server._broadcast({"type": "session_info", **server._session_info()})
+            result = "Session cleared (messages, planning state, and metadata reset)."
 
         elif cmd in ("/config",):
             cfg = get_config()

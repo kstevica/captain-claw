@@ -99,7 +99,11 @@ async def dispatch_local_command(
             # Clear followup queue for this session before wiping messages.
             ctx.followup_queue.clear_queue(agent.session.id)
             agent.session.messages = []
+            # Reset session metadata so planning/pipeline state doesn't leak
+            agent.session.metadata = {}
             await agent.session_manager.save_session(agent.session)
+            # Reset agent runtime state to defaults (pipeline=loop, planning=off)
+            agent.refresh_session_runtime_flags()
             # Reset token counters and context window.
             agent.last_usage = agent._empty_usage()
             agent.last_context_window = {}
