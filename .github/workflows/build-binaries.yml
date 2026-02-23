@@ -86,9 +86,13 @@ jobs:
             test -f dist/captain-claw/captain-claw-orchestrate
           fi
           echo ""
-          echo "=== Checking bundled data ==="
-          test -d dist/captain-claw/captain_claw/web/static
-          test -d dist/captain-claw/instructions
+          echo "=== Checking bundled data (PyInstaller 6+ uses _internal/) ==="
+          INTERNAL="dist/captain-claw/_internal"
+          if [[ ! -d "$INTERNAL" ]]; then
+            INTERNAL="dist/captain-claw"
+          fi
+          test -d "$INTERNAL/captain_claw/web/static"
+          test -d "$INTERNAL/instructions"
           echo "All checks passed."
 
       - name: Smoke test — version

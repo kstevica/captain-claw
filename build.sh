@@ -85,9 +85,16 @@ for name in captain-claw captain-claw-web captain-claw-orchestrate; do
     fi
 done
 
-# Check data files
+# Check data files — PyInstaller 6+ puts them under _internal/
+INTERNAL="$DIST_DIR/_internal"
+if [[ ! -d "$INTERNAL" ]]; then
+    INTERNAL="$DIST_DIR"   # fallback for older PyInstaller
+fi
+
 for dir in "captain_claw/web/static" "instructions"; do
-    if [[ -d "$DIST_DIR/$dir" ]]; then
+    if [[ -d "$INTERNAL/$dir" ]]; then
+        echo "  ✓ $dir/"
+    elif [[ -d "$DIST_DIR/$dir" ]]; then
         echo "  ✓ $dir/"
     else
         echo "  ✗ $dir/ MISSING"
