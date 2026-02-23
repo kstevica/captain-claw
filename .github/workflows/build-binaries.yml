@@ -1,0 +1,152 @@
+name: Build Binaries
+
+on:
+  push:
+    tags:
+      - "v*"          # Trigger on version tags like v0.1.0
+  workflow_dispatch:   # Allow manual trigger from Actions tab
+    inputs:
+      version:
+        description: "Version label for the release (e.g. 0.1.0)"
+        required: false
+        default: "dev"
+
+permissions:
+  contents: write      # Needed to create GitHub Releases
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+            artifact: captain-claw-linux-x64
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+            artifact: captain-claw-linux-arm64
+          - os: windows-latest
+            platform: windows-x64
+            artifact: captain-claw-windows-x64
+          - os: macos-latest
+            platform: macos-universal
+            artifact: captain-claw-macos
+
+    runs-on: ${{ matrix.os }}
+    name: Build (${{ matrix.platform }})
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install .
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          elif [[ -n "${{ github.event.inputs.version }}" ]]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build with PyInstaller
+        run: pyinstaller captain_claw.spec
+
+      - name: Verify build artifacts
+        shell: bash
+        run: |
+          echo "=== dist/captain-claw contents ==="
+          ls -la dist/captain-claw/
+          echo ""
+          echo "=== Checking executables exist ==="
+          if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
+            test -f dist/captain-claw/captain-claw.exe
+            test -f dist/captain-claw/captain-claw-web.exe
+            test -f dist/captain-claw/captain-claw-orchestrate.exe
+          else
+            test -f dist/captain-claw/captain-claw
+            test -f dist/captain-claw/captain-claw-web
+            test -f dist/captain-claw/captain-claw-orchestrate
+          fi
+          echo ""
+          echo "=== Checking bundled data ==="
+          test -d dist/captain-claw/captain_claw/web/static
+          test -d dist/captain-claw/instructions
+          echo "All checks passed."
+
+      - name: Smoke test — version
+        shell: bash
+        run: |
+          if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
+            dist/captain-claw/captain-claw.exe --version
+          else
+            dist/captain-claw/captain-claw --version
+          fi
+
+      # ── Package artifacts ──────────────────────────────────────
+
+      - name: Create archive (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cd dist
+          tar czf ${{ matrix.artifact }}-${{ steps.version.outputs.version }}.tar.gz captain-claw/
+          echo "ARCHIVE=${{ matrix.artifact }}-${{ steps.version.outputs.version }}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Create archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cd dist
+          Compress-Archive -Path captain-claw -DestinationPath "${{ matrix.artifact }}-${{ steps.version.outputs.version }}.zip"
+          echo "ARCHIVE=${{ matrix.artifact }}-${{ steps.version.outputs.version }}.zip" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ env.ARCHIVE }}
+          retention-days: 30
+
+  # ── GitHub Release (only on version tags) ──────────────────────
+  release:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    name: Create Release
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: List downloaded files
+        run: find artifacts/ -type f
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Captain Claw ${{ github.ref_name }}
+          draft: true
+          generate_release_notes: true
+          files: artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
