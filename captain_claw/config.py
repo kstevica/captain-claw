@@ -142,6 +142,12 @@ class ShellToolConfig(BaseModel):
     deny_patterns: list[str] = ["rm -rf *", "sudo *"]
 
 
+class ReadToolConfig(BaseModel):
+    """Read tool configuration."""
+
+    max_file_bytes: int = 200_000  # 200 KB
+
+
 class WebFetchToolConfig(BaseModel):
     """Web fetch tool configuration."""
 
@@ -224,6 +230,7 @@ class ToolsConfig(BaseModel):
         "google_drive",
     ]
     shell: ShellToolConfig = Field(default_factory=ShellToolConfig)
+    read: ReadToolConfig = Field(default_factory=ReadToolConfig)
     web_fetch: WebFetchToolConfig = Field(default_factory=WebFetchToolConfig)
     web_search: WebSearchToolConfig = Field(default_factory=WebSearchToolConfig)
     pocket_tts: PocketTTSToolConfig = Field(default_factory=PocketTTSToolConfig)

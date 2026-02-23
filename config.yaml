@@ -108,6 +108,8 @@ tools:
   - scripts
   - apis
   - typesense
+  read:
+    max_file_bytes: 200000
   shell:
     timeout: 30
     blocked:
@@ -123,7 +125,7 @@ tools:
     - rm -rf *
     - sudo *
   web_fetch:
-    max_chars: 100000
+    max_chars: 200000
   web_search:
     provider: brave
     api_key: ''

@@ -87,7 +87,8 @@ class ReadTool(Tool):
             
             # Check if file is too large
             file_size = file_path.stat().st_size
-            max_size = 100_000  # 100KB
+            from captain_claw.config import get_config
+            max_size = get_config().tools.read.max_file_bytes
             if file_size > max_size:
                 return ToolResult(
                     success=False,
