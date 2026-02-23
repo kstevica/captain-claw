@@ -14,6 +14,10 @@ model:
     provider: openai
     model: gpt-5-mini
     base_url: ''
+  - id: gpt-5-nano
+    provider: openai
+    model: gpt-5-nano
+    base_url: ''
   - id: gpt-5.1-codex
     provider: openai
     model: gpt-5.1-codex

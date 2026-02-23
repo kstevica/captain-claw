@@ -573,7 +573,12 @@ class AgentOrchestrationMixin:
         # in their message, the LLM list extractor (1000 max_tokens) may
         # not be able to return all of them as JSON members.  Detect this
         # and augment the list_task_plan with directly-extracted URLs.
-        input_urls = self._extract_urls(effective_user_input)
+        # IMPORTANT: use the *original* user input when a clarification
+        # context was merged, otherwise the assistant's previous response
+        # (which may list many URLs) leaks into the member list and causes
+        # unwanted scale-loop processing of all items.
+        url_extraction_source = user_input if clarification_context_applied else effective_user_input
+        input_urls = self._extract_urls(url_extraction_source)
         if len(input_urls) > len(list_task_plan.get("members", [])):
             existing_members = set(
                 str(m).strip() for m in list_task_plan.get("members", [])
@@ -672,9 +677,15 @@ class AgentOrchestrationMixin:
                 self._scale_progress["done_items"] = set()
                 self._scale_progress["total"] = len(list_members)
         if use_contract_pipeline:
+            # When a clarification context was merged, the relevant URLs are
+            # already embedded in effective_user_input.  Passing the full
+            # recent_source_urls (which may contain dozens of navigation/
+            # category links from previous web_fetch content) pollutes the
+            # planner and causes wasteful prefetching of unrelated URLs.
+            planner_source_urls = [] if clarification_context_applied else recent_source_urls
             task_contract = await self._generate_task_contract(
                 user_input=effective_user_input,
-                recent_source_urls=recent_source_urls,
+                recent_source_urls=planner_source_urls,
                 require_all_sources=require_all_sources,
                 turn_usage=turn_usage,
                 list_task_plan=list_task_plan,

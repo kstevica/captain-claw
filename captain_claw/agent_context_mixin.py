@@ -115,8 +115,16 @@ class AgentContextMixin:
         return None
 
     def _extract_source_links(self, msg: dict[str, Any], content: str) -> list[str]:
-        """Extract source links from both tool content and structured tool arguments."""
-        content_links = self._extract_urls(content)
+        """Extract source links from both tool content and structured tool arguments.
+
+        For tool result messages (role="tool") whose tool produced a large
+        fetched page (web_fetch, web_get), we only extract the URLs from
+        the tool's *arguments* (the URL that was fetched), NOT from the
+        returned content.  The fetched content contains every link on the
+        target page (navigation, categories, ads, etc.) which would pollute
+        the recent_source_urls list fed to the task contract planner and
+        cause wasteful prefetching.
+        """
         args_links: list[str] = []
         args = msg.get("tool_arguments")
         if isinstance(args, dict):
@@ -130,6 +138,17 @@ class AgentContextMixin:
                     for value in values:
                         if isinstance(value, str) and value.startswith(("http://", "https://")):
                             args_links.append(value)
+        # For tool results from web_fetch/web_get, the content body is the
+        # fetched page itself — every link on it is noise for the planner.
+        # Only use the argument URL in that case.
+        tool_name = str(msg.get("tool_name", "")).strip().lower()
+        skip_content_extraction = (
+            msg.get("role") == "tool"
+            and tool_name in ("web_fetch", "web_get")
+        )
+        if skip_content_extraction:
+            return args_links
+        content_links = self._extract_urls(content)
         return self._merge_unique_urls(args_links, content_links)
 
     @staticmethod

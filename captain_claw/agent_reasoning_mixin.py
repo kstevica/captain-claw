@@ -67,6 +67,24 @@ class AgentReasoningMixin:
             return False
         return True
 
+    @staticmethod
+    def _user_requests_refetch(user_input: str) -> bool:
+        """Detect whether the user's reply explicitly asks for fresh fetching."""
+        text = (user_input or "").strip().lower()
+        if not text:
+            return False
+        patterns = (
+            r"\bfetch\s+(?:new|again|fresh|live|now)\b",
+            r"\bre-?fetch\b",
+            r"\brefresh\b",
+            r"\bfetch\s+(?:it|the|that)\s+(?:again|now)\b",
+            r"\bgo\s+(?:fetch|get)\b",
+            r"\bget\s+(?:new|fresh|latest|live)\b",
+            r"\bre-?(?:search|research|check|load|read)\b",
+            r"\bdo\s+(?:a\s+)?(?:new|fresh|live)\s+(?:fetch|search|check)\b",
+        )
+        return any(re.search(pattern, text) for pattern in patterns)
+
     def _resolve_effective_user_input(self, user_input: str) -> tuple[str, bool]:
         """Merge pending clarification anchor with current message when appropriate.
 
@@ -77,6 +95,10 @@ class AgentReasoningMixin:
         last assistant response as context — that response already contains the
         specific items (URLs, article titles, numbered options) the user is
         referring to.
+
+        If the user explicitly requests a fresh fetch/research (e.g. "fetch new",
+        "refresh", "re-search"), the merge still provides the context but does NOT
+        forbid re-fetching so the user's intent is honoured.
         """
         if not self.session or not isinstance(self.session.metadata, dict):
             return user_input, False
@@ -88,6 +110,8 @@ class AgentReasoningMixin:
             return user_input, False
         if not self._should_apply_pending_clarification(user_input):
             return user_input, False
+
+        wants_refetch = self._user_requests_refetch(user_input)
 
         # Try to find the last assistant response — it contains the specific
         # items the user is referring to (URLs, articles, options offered).
@@ -103,14 +127,26 @@ class AgentReasoningMixin:
             # broad original question.  This keeps the planner focused on the
             # specific items already surfaced rather than re-researching.
             context_excerpt = last_assistant_text[-2000:]
-            merged = (
-                f"{user_input.strip()}\n\n"
-                "Context from the previous assistant response:\n"
-                f"{context_excerpt}\n\n"
-                "Execute the user's follow-up request using the context above. "
-                "Do NOT re-research the original question — the context already "
-                "contains the needed information."
-            )
+            if wants_refetch:
+                # User explicitly asked for a fresh fetch — provide the context
+                # for reference but do NOT forbid re-fetching.
+                merged = (
+                    f"{user_input.strip()}\n\n"
+                    "Context from the previous assistant response:\n"
+                    f"{context_excerpt}\n\n"
+                    "The user explicitly requested a fresh fetch/research. "
+                    "Perform a live fetch or search as they asked — do NOT "
+                    "reuse cached or previously saved content."
+                )
+            else:
+                merged = (
+                    f"{user_input.strip()}\n\n"
+                    "Context from the previous assistant response:\n"
+                    f"{context_excerpt}\n\n"
+                    "Execute the user's follow-up request using the context above. "
+                    "Do NOT re-research the original question — the context already "
+                    "contains the needed information."
+                )
         else:
             # Fallback: no usable assistant response, use the original anchor.
             merged = (
@@ -493,8 +529,8 @@ class AgentReasoningMixin:
             ),
         ]
         cfg_max_tokens = max(1, int(get_config().model.max_tokens))
-        first_max_tokens = min(1800, cfg_max_tokens)
-        retry_max_tokens = min(max(first_max_tokens * 2, 3600), cfg_max_tokens)
+        first_max_tokens = min(3200, cfg_max_tokens)
+        retry_max_tokens = min(max(first_max_tokens * 2, 6400), cfg_max_tokens)
         attempts: list[tuple[str, int]] = [("task_contract_planner", first_max_tokens)]
         if retry_max_tokens > first_max_tokens:
             attempts.append(("task_contract_planner_retry", retry_max_tokens))

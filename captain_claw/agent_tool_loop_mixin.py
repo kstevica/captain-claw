@@ -1338,11 +1338,18 @@ class AgentToolLoopMixin:
             return f"Completion check: {step}" if step else "Evaluating completion"
         if name == "planning":
             event = str(arguments.get("event", "")).strip()
-            # Show the current task path (human-readable) instead of the
-            # raw pipeline event name like "tool_calls_completed".
+            # Prefer the deepest scope title from scope_progress (human-
+            # readable step name) over the raw numeric path like "5".
+            scope_progress = arguments.get("scope_progress")
+            title = ""
+            if isinstance(scope_progress, list) and scope_progress:
+                deepest = scope_progress[-1]
+                if isinstance(deepest, dict):
+                    title = str(deepest.get("title", "")).strip()
             current_path = str(arguments.get("current_path", "")).strip()
-            if current_path:
-                label = current_path.split(" > ")[-1][:60]
+            label = title or current_path
+            if label:
+                label = label[:80]
                 if event and "completed" in event:
                     return f"✓ {label}"
                 return f"▸ {label}"
