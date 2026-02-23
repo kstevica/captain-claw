@@ -883,6 +883,31 @@ class AgentContextMixin:
         self._initialized = True
         log.info("Agent initialized", session_id=self.session.id)
 
+    # Built-in config key → actual tool name(s) registered.
+    # Most are 1:1, but ``web_fetch`` also registers the ``web_get`` companion.
+    _BUILTIN_TOOL_MAP: dict[str, list[str]] = {
+        "shell": ["shell"],
+        "read": ["read"],
+        "write": ["write"],
+        "glob": ["glob"],
+        "web_fetch": ["web_fetch", "web_get"],
+        "web_search": ["web_search"],
+        "pdf_extract": ["pdf_extract"],
+        "docx_extract": ["docx_extract"],
+        "xlsx_extract": ["xlsx_extract"],
+        "pptx_extract": ["pptx_extract"],
+        "pocket_tts": ["pocket_tts"],
+        "send_mail": ["send_mail"],
+        "google_drive": ["google_drive"],
+        "google_calendar": ["google_calendar"],
+        "google_mail": ["google_mail"],
+        "todo": ["todo"],
+        "contacts": ["contacts"],
+        "scripts": ["scripts"],
+        "apis": ["apis"],
+        "typesense": ["typesense"],
+    }
+
     def _register_default_tools(self) -> None:
         """Register the default tool set."""
         from captain_claw.tools import (
@@ -961,6 +986,36 @@ class AgentContextMixin:
                         log.warning("Failed to ensure deep memory collection at startup", error=str(_e))
                 self.tools.register(TypesenseTool(deep_memory=dm))
         self._register_plugin_tools()
+
+    def reload_tools(self) -> None:
+        """Re-sync the tool registry with the current ``tools.enabled`` config.
+
+        Unregisters built-in tools that were removed from the enabled list
+        and registers any newly-added ones.  Plugin tools are left untouched.
+        """
+        config = get_config()
+        enabled_set = set(config.tools.enabled)
+
+        # Collect all built-in tool names that should now be registered.
+        desired_tool_names: set[str] = set()
+        for cfg_key in enabled_set:
+            for tname in self._BUILTIN_TOOL_MAP.get(cfg_key, []):
+                desired_tool_names.add(tname)
+
+        # Unregister built-in tools no longer in the enabled list.
+        all_builtin_names: set[str] = set()
+        for names in self._BUILTIN_TOOL_MAP.values():
+            all_builtin_names.update(names)
+
+        for tname in all_builtin_names:
+            if tname not in desired_tool_names and self.tools.has_tool(tname):
+                self.tools.unregister(tname)
+                log.info("Unregistered tool (removed from enabled list)", tool=tname)
+
+        # Re-register — _register_default_tools overwrites existing entries
+        # so newly-added tools get registered and existing ones get refreshed.
+        self._register_default_tools()
+        log.info("Tools reloaded", enabled=list(enabled_set))
 
     def _discover_plugin_tool_files(self) -> list[Path]:
         """Discover plugin Python files from configured tool plugin directories."""

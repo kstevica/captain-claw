@@ -16,6 +16,9 @@ import yaml
 from aiohttp import web
 
 from captain_claw.config import DEFAULT_CONFIG_PATH, LOCAL_CONFIG_FILENAME, Config, get_config, set_config
+from captain_claw.logging import get_logger
+
+log = get_logger(__name__)
 
 if TYPE_CHECKING:
     from captain_claw.web_server import WebServer
@@ -408,6 +411,9 @@ def _build_schema() -> list[dict[str, Any]]:
                         _field("google_oauth.client_secret", "Client Secret"),
                         _field("google_oauth.project_id", "GCP Project ID", type="text"),
                         _field("google_oauth.location", "Vertex AI region", type="text"),
+                        _field("google_oauth.scopes", "OAuth Scopes", type="tags",
+                               hint="Google API scopes requested during login. "
+                                    "Required scopes are always included automatically."),
                     ],
                 },
             ],
@@ -752,5 +758,12 @@ async def put_settings(server: WebServer, request: web.Request) -> web.Response:
 
     # ── Reload in-memory config (merges local + home) ─────
     set_config(Config.load())
+
+    # ── Hot-reload tools if the enabled list changed ──────
+    if "tools.enabled" in changes and server.agent is not None:
+        try:
+            server.agent.reload_tools()
+        except Exception as exc:
+            log.warning("Tool hot-reload failed: %s", exc)
 
     return web.json_response({"ok": True})

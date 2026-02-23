@@ -10,6 +10,7 @@ from aiohttp import web
 
 from captain_claw.config import get_config
 from captain_claw.google_oauth import (
+    DEFAULT_SCOPES,
     build_authorization_url,
     exchange_code_for_tokens,
     fetch_user_info,
@@ -49,10 +50,15 @@ async def auth_google_login(server: WebServer, request: web.Request) -> web.Resp
     redirect_uri = (
         f"http://localhost:{cfg.web.port}/auth/google/callback"
     )
+    # Merge required defaults with user-configured scopes so stale home
+    # configs that lack newer scopes (calendar, gmail, etc.) never shrink
+    # the scope set.  Order doesn't matter to Google; dedup via set.
+    merged_scopes = list(set(DEFAULT_SCOPES) | set(oauth.scopes or []))
+
     auth_url = build_authorization_url(
         client_id=oauth.client_id,
         redirect_uri=redirect_uri,
-        scopes=oauth.scopes,
+        scopes=merged_scopes,
         state=state,
         code_challenge=challenge,
     )
