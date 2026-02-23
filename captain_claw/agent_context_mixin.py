@@ -890,6 +890,7 @@ class AgentContextMixin:
             GlobTool,
             GoogleCalendarTool,
             GoogleDriveTool,
+            GoogleMailTool,
             PdfExtractTool,
             PocketTTSTool,
             PptxExtractTool,
@@ -940,6 +941,8 @@ class AgentContextMixin:
                 self.tools.register(GoogleDriveTool())
             elif tool_name == "google_calendar":
                 self.tools.register(GoogleCalendarTool())
+            elif tool_name == "google_mail":
+                self.tools.register(GoogleMailTool())
             elif tool_name == "todo":
                 self.tools.register(TodoTool())
             elif tool_name == "contacts":

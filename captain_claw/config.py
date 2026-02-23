@@ -229,6 +229,7 @@ class ToolsConfig(BaseModel):
         "send_mail",
         "google_drive",
         "google_calendar",
+        "google_mail",
     ]
     shell: ShellToolConfig = Field(default_factory=ShellToolConfig)
     read: ReadToolConfig = Field(default_factory=ReadToolConfig)
@@ -494,6 +495,7 @@ class GoogleOAuthConfig(BaseModel):
         "https://www.googleapis.com/auth/cloud-platform",
         "https://www.googleapis.com/auth/drive",
         "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/gmail.readonly",
         "openid",
         "email",
     ])

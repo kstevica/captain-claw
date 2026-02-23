@@ -104,6 +104,7 @@ tools:
   - send_mail
   - google_drive
   - google_calendar
+  - google_mail
   - todo
   - contacts
   - scripts
