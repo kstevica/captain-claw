@@ -158,6 +158,17 @@
             badge: 'user',
         },
 
+        'task_rephrase_system_prompt.md': {
+            group: 'Task Planning & Verification',
+            desc: 'Restructures complex user prompts into clear, agent-friendly format before execution',
+            badge: 'system',
+        },
+        'task_rephrase_user_prompt.md': {
+            group: 'Task Planning & Verification',
+            desc: 'User payload template for task rephrasing — receives original user input',
+            badge: 'user',
+        },
+
         'README.md': {
             group: 'Documentation',
             desc: 'Documents all instruction files and their purposes',

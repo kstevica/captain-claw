@@ -305,6 +305,45 @@ class AgentToolLoopMixin:
                             "Extract/read it now, then write(append=true) its summary."
                         )
 
+        # ── Guard 4: Block batch-fetching of multiple remaining items ──
+        # When the LLM tries to fetch/extract multiple list items in a
+        # single batch (instead of processing one-at-a-time), allow only
+        # the first extraction and block subsequent ones.  This forces
+        # the incremental fetch→process→write pattern.
+        _EXTRACTION_TOOLS = _PATH_TOOLS | _URL_TOOLS
+        if tool_lower in _EXTRACTION_TOOLS and isinstance(arguments, dict):
+            target = ""
+            if tool_lower in _URL_TOOLS:
+                target = str(arguments.get("url", "")).strip()
+            else:
+                target = str(arguments.get("path", arguments.get("file_path", ""))).strip()
+            # Check if this target is one of the remaining list items
+            is_list_item = False
+            if target:
+                for item in remaining:
+                    if target == item or (
+                        not item.startswith(("http://", "https://"))
+                        and os.path.abspath(target) == os.path.abspath(item)
+                    ):
+                        is_list_item = True
+                        break
+            if is_list_item:
+                batch_extractions = sp.get("_batch_extractions", 0)
+                if batch_extractions >= 1:
+                    next_item = remaining[0]
+                    short = next_item
+                    if "/workspace/" in next_item:
+                        short = next_item.split("/workspace/", 1)[-1]
+                    return (
+                        f"SCALE GUARD: Process ONE item at a time. You are trying "
+                        f"to batch-fetch multiple list items at once — this will "
+                        f"overflow the context window.\n"
+                        f"Finish processing the current item first (extract → write "
+                        f"its result), then move to the next.\n"
+                        f"Your current/next item is:\n  {short}"
+                    )
+                sp["_batch_extractions"] = batch_extractions + 1
+
         return None
 
     def _build_scale_progress_note(self) -> str:
@@ -727,11 +766,24 @@ class AgentToolLoopMixin:
                     last_summary = str(args.get("content", "")).strip()
                     break
 
+        def _check_cancel() -> bool:
+            """Return True if the user has requested cancellation."""
+            ev: asyncio.Event | None = getattr(self, "cancel_event", None)
+            return ev is not None and ev.is_set()
+
+        def _consume_cancel() -> None:
+            """Clear the cancel event after acknowledging it."""
+            ev: asyncio.Event | None = getattr(self, "cancel_event", None)
+            if ev is not None:
+                ev.clear()
+
+        _cancelled = False
         for idx, item in enumerate(remaining):
-            # ── Cancellation check ──────────────────────────────
-            cancel_ev: asyncio.Event | None = getattr(self, "cancel_event", None)
-            if cancel_ev is not None and cancel_ev.is_set():
+            # ── Cancellation check (between items) ────────────
+            if _check_cancel():
                 log.info("Scale micro-loop cancelled by user", processed=processed)
+                _cancelled = True
+                _consume_cancel()
                 break
 
             _item_start = _time.monotonic()
@@ -834,6 +886,13 @@ class AgentToolLoopMixin:
                 sp["done_items"] = done_items
                 continue
 
+            # ── Cancellation check (after extract) ────────────
+            if _check_cancel():
+                log.info("Scale micro-loop cancelled after extract", item=item_label, processed=processed)
+                _cancelled = True
+                _consume_cancel()
+                break
+
             # ── Step 2: Isolated LLM call to process ────────────
             _t_llm_start = _time.monotonic()
             self._emit_thinking(
@@ -919,6 +978,13 @@ class AgentToolLoopMixin:
                 done_items.add(item)
                 sp["done_items"] = done_items
                 continue
+
+            # ── Cancellation check (after LLM) ───────────────
+            if _check_cancel():
+                log.info("Scale micro-loop cancelled after LLM", item=item_label, processed=processed)
+                _cancelled = True
+                _consume_cancel()
+                break
 
             # ── Step 3: Write summary directly ──────────────────
             self._emit_thinking(
@@ -1029,12 +1095,24 @@ class AgentToolLoopMixin:
                     write_content = _clean
                     write_append = False
                 else:
-                    # Single file: append with separator
-                    write_content = f"\n\n---\n\n{_clean}"
+                    # Single file: append with separator.
+                    # Skip the separator for the first item.
+                    if processed == 0 and not last_summary:
+                        write_content = _clean
+                    else:
+                        write_content = f"\n\n---\n\n{_clean}"
                     # Use the original write argument (before the write tool
                     # resolves it under the saved root) so the tool doesn't
                     # double-resolve an already-absolute path.
                     write_path_arg = sp.get("_output_file_arg", output_file)
+                    # Fallback: if we still have no output file (early takeover
+                    # before the LLM wrote anything), use the filename template
+                    # or generate a default name.
+                    if not write_path_arg:
+                        write_path_arg = (
+                            str(sp.get("_output_filename_template", "")).strip()
+                            or "scale_output.csv"
+                        )
                     write_append = True
 
                 try:
@@ -1165,16 +1243,18 @@ class AgentToolLoopMixin:
         )
 
         result = {
-            "success": failed == 0,
+            "success": failed == 0 and not _cancelled,
             "processed": processed,
             "failed": failed,
             "total": total,
             "completed_total": len(done_items),
+            "cancelled": _cancelled,
             "errors": errors,
         }
         log.info(
             "Scale micro-loop finished",
-            **result,
+            **{k: v for k, v in result.items() if k != "errors"},
+            error_count=len(errors),
             loop_total_sec=_loop_total_sec,
             avg_per_item_sec=_loop_avg_sec,
             items_per_min=_items_per_min,
@@ -1185,11 +1265,12 @@ class AgentToolLoopMixin:
 
         _loop_min = int(_loop_total_sec // 60)
         _loop_s = int(_loop_total_sec % 60)
+        _status_label = "stopped by user" if _cancelled else "finished"
         self._emit_tool_output(
             "scale_micro_loop",
-            {"step": "finished", "processed": processed, "failed": failed, "total": total},
+            {"step": _status_label, "processed": processed, "failed": failed, "total": total, "cancelled": _cancelled},
             (
-                f"Scale micro-loop finished: {processed}/{total} processed, {failed} failed\n"
+                f"Scale micro-loop {_status_label}: {processed}/{total} processed, {failed} failed\n"
                 f"  total={_loop_min}m{_loop_s:02d}s | avg={_loop_avg_sec}s/item | {_items_per_min} items/min\n"
                 f"  tokens: {_total_prompt_tokens:,} prompt + {_total_response_tokens:,} response\n"
                 f"  extracted: {_total_extract_chars:,} chars total"
@@ -1743,7 +1824,12 @@ class AgentToolLoopMixin:
             List of tool results
         """
         results = []
-        
+
+        # Reset per-batch extraction counter for scale guard.
+        sp = getattr(self, "_scale_progress", None)
+        if sp is not None:
+            sp["_batch_extractions"] = 0
+
         for tc in tool_calls:
             self._set_runtime_status("running script")
             log.info("Executing tool", tool=tc.name, call_id=tc.id)

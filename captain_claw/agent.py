@@ -111,6 +111,7 @@ class Agent(
             "llm_trace",
             "planning",
             "task_contract",
+            "task_rephrase",
             "completion_gate",
             "pipeline_trace",
             "telegram",
@@ -151,7 +152,7 @@ class Agent(
 
     def _emit_tool_output(self, tool_name: str, arguments: dict[str, Any], output: str) -> None:
         """Forward raw tool output to UI callback when configured."""
-        if self.session and tool_name in {"planning", "task_contract", "completion_gate"}:
+        if self.session and tool_name in {"planning", "task_contract", "task_rephrase", "completion_gate"}:
             self._add_session_message(
                 role="tool",
                 content=str(output or ""),

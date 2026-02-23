@@ -49,6 +49,13 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
                 f"**Planning:** {'on' if server.agent.planning_enabled else 'off'}\n"
             )
 
+        elif cmd in ("/stop", "/cancel"):
+            if hasattr(server.agent, "cancel_event"):
+                server.agent.cancel_event.set()
+                result = "Stop signal sent. The agent will stop after the current step completes."
+            else:
+                result = "No active processing to stop."
+
         elif cmd in ("/history",):
             if server.agent.session:
                 msgs = server.agent.session.messages[-20:]
@@ -296,7 +303,7 @@ async def handle_session_subcommand(server: WebServer, args: str) -> str:
         if not subargs:
             details = server.agent.get_runtime_model_details()
             return f"Active model: **{details.get('provider', '')}:{details.get('model', '')}**"
-        await server.agent.set_session_model_by_selector(subargs, persist=True)
+        await server.agent.set_session_model(subargs, persist=True)
         details = server.agent.get_runtime_model_details()
         server._broadcast({"type": "session_info", **server._session_info()})
         return f"Model set to **{details.get('provider', '')}:{details.get('model', '')}**"

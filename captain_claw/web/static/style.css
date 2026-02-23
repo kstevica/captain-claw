@@ -393,6 +393,97 @@ html, body {
     to { opacity: 1; transform: translateY(0); }
 }
 
+/* ─── Rephrase Panel ─────────────────────────────────── */
+
+.rephrase-panel {
+    max-width: 90%;
+    margin-right: auto;
+    margin-bottom: 16px;
+    border-radius: 8px;
+    border: 1px solid rgba(88, 166, 255, 0.18);
+    border-left: 3px solid var(--accent);
+    background: linear-gradient(135deg, rgba(88, 166, 255, 0.05) 0%, rgba(188, 140, 255, 0.03) 100%);
+    animation: thinkFadeIn 0.25s ease;
+    overflow: hidden;
+}
+.rephrase-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s;
+}
+.rephrase-header:hover {
+    background: rgba(88, 166, 255, 0.08);
+}
+.rephrase-icon {
+    font-size: 14px;
+    flex-shrink: 0;
+}
+.rephrase-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 0.02em;
+}
+.rephrase-toggle {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--text-secondary);
+    opacity: 0.6;
+    transition: opacity 0.15s;
+}
+.rephrase-header:hover .rephrase-toggle {
+    opacity: 1;
+}
+.rephrase-body {
+    padding: 0 14px 12px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text-secondary);
+    border-top: 1px solid rgba(88, 166, 255, 0.1);
+}
+.rephrase-body h1,
+.rephrase-body h2,
+.rephrase-body h3 {
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 600;
+    margin: 10px 0 4px;
+}
+.rephrase-body h1 { font-size: 14px; }
+.rephrase-body p { margin: 4px 0; }
+.rephrase-body ul, .rephrase-body ol {
+    margin: 4px 0;
+    padding-left: 20px;
+}
+.rephrase-body li { margin: 2px 0; }
+.rephrase-body code {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    background: var(--bg-tertiary);
+    padding: 1px 5px;
+    border-radius: 3px;
+}
+.rephrase-body table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 6px 0;
+    font-size: 12px;
+}
+.rephrase-body th,
+.rephrase-body td {
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    text-align: left;
+}
+.rephrase-body th {
+    background: var(--bg-tertiary);
+    font-weight: 600;
+}
+
 /* ─── Empty State ────────────────────────────────────── */
 
 .empty-state {
@@ -562,6 +653,27 @@ html, body {
     background: var(--accent-hover);
     border-color: var(--accent-hover);
     color: var(--bg-primary);
+}
+.stop-btn {
+    background: var(--red);
+    border-color: var(--red);
+    color: #fff;
+    font-size: 14px;
+    padding: 6px 12px;
+    animation: stopPulse 1.5s ease-in-out infinite;
+}
+.stop-btn:hover {
+    background: #e04040;
+    border-color: #e04040;
+    color: #fff;
+}
+.stop-btn-active {
+    animation: none !important;
+    opacity: 0.5;
+}
+@keyframes stopPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
 }
 
 .input-hints {

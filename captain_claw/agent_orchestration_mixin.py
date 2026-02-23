@@ -128,7 +128,18 @@ _LARGE_SCALE_INPUT_PATTERNS = [
     re.compile(r"\bsummar(?:y|ize|ise)\b.*\b(?:all|every|each)\b.*\bfiles?\b", re.I),
     re.compile(r"\bfolder\b.*\band\b.*\bsubfolders?\b", re.I),
     re.compile(r"\brecursive(?:ly)?\b.*\bfiles?\b", re.I),
+    # Explicit list-providing language
+    re.compile(r"\bhere (?:is|are) the\s+(?:list|urls?|links?|files?|pages?|items?)\b", re.I),
+    re.compile(r"\bfrom (?:these|the following)\s+(?:urls?|links?|files?|pages?)\b", re.I),
+    re.compile(r"\bthe following\s+(?:urls?|links?|files?|pages?|items?)\b", re.I),
+    re.compile(r"\bthese\s+(?:urls?|links?|files?|pages?)\b", re.I),
+    # List-producing language
+    re.compile(r"\b(?:create|compile|build|make|generate|produce|prepare)\s+(?:a\s+)?(?:list|csv|spreadsheet|table)\b", re.I),
+    re.compile(r"\bpopulate\s+(?:a\s+)?(?:csv|spreadsheet|table)\b", re.I),
 ]
+
+# Count inline URLs to detect user-provided lists even without keywords.
+_INLINE_URL_RE = re.compile(r"https?://[^\s)\]}>\"']+")
 
 
 class AgentOrchestrationMixin:
@@ -140,13 +151,29 @@ class AgentOrchestrationMixin:
     @staticmethod
     def _input_suggests_large_scale(user_input: str) -> bool:
         """Return True if the user input matches patterns that typically
-        produce a very large number of items (e.g. "all files in folder
-        and subfolders").  This is intentionally conservative — it only
-        fires on obviously large-scope phrasing."""
+        produce a very large number of items, or the user has explicitly
+        provided a list of items (URLs, file paths, numbered entries).
+
+        Fires on:
+        1. Large-scope phrasing ("all files in folder and subfolders")
+        2. Explicit list-providing language ("here are the urls", "these files")
+        3. List-producing language ("create a csv", "compile a list")
+        4. Inline item count: 3+ URLs or 5+ numbered/bulleted lines
+        """
         text = (user_input or "").strip()
         if not text:
             return False
-        return any(p.search(text) for p in _LARGE_SCALE_INPUT_PATTERNS)
+        # Keyword patterns
+        if any(p.search(text) for p in _LARGE_SCALE_INPUT_PATTERNS):
+            return True
+        # Inline URL count — if the user pasted 3+ URLs, it's a list task
+        if len(_INLINE_URL_RE.findall(text)) >= 3:
+            return True
+        # Numbered / bulleted list lines (e.g. "1. ...", "- ...", "* ...")
+        list_lines = re.findall(r"^\s*(?:\d+[\.\)]\s+|[-*•]\s+)", text, re.MULTILINE)
+        if len(list_lines) >= 5:
+            return True
+        return False
 
     def _preflight_scale_check(
         self,
@@ -158,6 +185,11 @@ class AgentOrchestrationMixin:
         The advisory is appended to the effective user input that gets
         passed to the LLM so it adopts the incremental append-to-file
         strategy instead of trying to hold all results in context.
+
+        Fires when:
+        - Member count meets the configured threshold (scale_advisory_min_members), OR
+        - The input explicitly provides or requests a list (detected by
+          ``_input_suggests_large_scale``), even with fewer members.
 
         Returns an empty string when no advisory is needed.
         """
@@ -172,7 +204,7 @@ class AgentOrchestrationMixin:
         # Use the known member count if available; otherwise use a
         # placeholder hint that prompts the LLM to discover the count
         # itself via glob before processing.
-        if large_from_members:
+        if member_count > 0:
             estimated_count = member_count
         else:
             # We don't know the exact count yet — signal "many".
@@ -557,6 +589,21 @@ class AgentOrchestrationMixin:
                 {"step": "clarification_context_applied"},
                 "step=clarification_context_applied\nstatus=merged_pending_anchor_into_current_turn",
             )
+        # ── Automatic task rephrasing ──────────────────────────────
+        # For complex user prompts (list processing with formatting
+        # details, multiple URLs, output specifications), rephrase into
+        # a structured format that downstream components can parse more
+        # reliably.  Skip for workers and clarification follow-ups.
+        task_was_rephrased = False
+        if not is_worker and not clarification_context_applied:
+            effective_user_input, task_was_rephrased = await self._rephrase_task(
+                user_input=effective_user_input,
+                turn_usage=turn_usage,
+            )
+            if task_was_rephrased:
+                # Re-check require_all_sources with the rephrased input
+                # (unlikely to change, but keeps things consistent).
+                require_all_sources = self._request_references_all_sources(effective_user_input)
         list_context_excerpt = self._collect_list_extraction_context()
         # Workers execute a single focused task — skip the heavyweight list
         # task extraction / coverage pipeline which can cause endless loops
@@ -700,17 +747,38 @@ class AgentOrchestrationMixin:
                 for url in list(task_contract.get("prefetch_urls", []))
                 if isinstance(url, str) and url.startswith(("http://", "https://"))
             ]
-            if prefetch_urls:
+            # Skip prefetch when scale progress already has items — the
+            # micro loop will fetch each item one at a time, so batch-
+            # prefetching would be redundant and waste context/tokens.
+            sp = getattr(self, "_scale_progress", None)
+            _skip_prefetch = sp is not None and bool(sp.get("items"))
+            if prefetch_urls and not _skip_prefetch:
                 await self._run_source_report_prefetch(
                     source_urls=prefetch_urls,
                     turn_usage=turn_usage,
                     pipeline_label="task_contract",
                 )
+            elif prefetch_urls and _skip_prefetch:
+                self._emit_tool_output(
+                    "task_contract",
+                    {
+                        "step": "prefetch_skipped",
+                        "reason": "scale_progress_has_items",
+                        "prefetch_urls": len(prefetch_urls),
+                        "scale_items": len(sp.get("items", [])),
+                    },
+                    (
+                        "step=prefetch_skipped\n"
+                        f"reason=scale_progress_has_items\n"
+                        f"prefetch_urls={len(prefetch_urls)}\n"
+                        f"scale_items={len(sp.get('items', []))}\n"
+                        "note=micro loop will fetch each item individually"
+                    ),
+                )
             # If scale progress is active but has no items yet (e.g. list
             # members were empty, waiting for glob), and the contract
             # produced prefetch_urls, seed items from those URLs.  This
             # covers URL-based list tasks where the "items" are web pages.
-            sp = getattr(self, "_scale_progress", None)
             if sp is not None and not sp.get("items") and prefetch_urls:
                 sp["items"] = list(prefetch_urls)
                 sp["done_items"] = set()
@@ -777,6 +845,134 @@ class AgentOrchestrationMixin:
                     "note=activated lightweight progress tracking for moderate list"
                 ),
             )
+
+        # ── Early micro-loop takeover ────────────────────────────
+        # When scale progress is active with pre-populated items and a
+        # clear per-member action, skip the main LLM loop entirely and
+        # go straight into the micro loop.  This avoids wasting context
+        # on a full LLM pass that would only process 1 item before the
+        # completion gate retries.
+        #
+        # Requirements:
+        # - scale_progress active with items
+        # - per_member_action known (from list_task_plan)
+        # - output strategy is file_per_item with a template, OR
+        #   any strategy where the micro loop can handle the first item
+        #   without prior LLM output (is_first_item=True path)
+        _sp_early = getattr(self, "_scale_progress", None)
+        _early_items = _sp_early.get("items", []) if _sp_early else []
+        # Use the full user input as the task description so the micro-
+        # loop LLM receives complete formatting instructions (CSV headers,
+        # column mappings, etc.).  The short per_member_action is kept as
+        # a prefix hint but the full prompt ensures fidelity.
+        _per_action = str(list_task_plan.get("per_member_action", "")).strip()
+        # Strip the scale advisory from effective_user_input (it's between
+        # "--- SCALE ADVISORY" and "--- END SCALE ADVISORY ---") since
+        # it contains instructions for the outer loop, not the micro loop.
+        _task_input = effective_user_input
+        _adv_start = _task_input.find("\n\n--- SCALE ADVISORY")
+        if _adv_start > 0:
+            _adv_end = _task_input.find("--- END SCALE ADVISORY ---")
+            if _adv_end > _adv_start:
+                _task_input = _task_input[:_adv_start].rstrip()
+        _early_action = _task_input[:2000]
+        if not _early_action:
+            _early_action = _per_action or "Process each item"
+        _early_output_strategy = str(
+            _sp_early.get("_output_strategy", "single_file")
+        ).strip().lower() if _sp_early else "single_file"
+        _early_fn_template = str(
+            _sp_early.get("_output_filename_template", "")
+        ).strip() if _sp_early else ""
+
+        _can_early_takeover = (
+            _sp_early is not None
+            and len(_early_items) >= 3
+            and bool(_early_action)
+            # file_per_item with template is fully self-sufficient
+            # single_file and no_file are also OK — the micro loop's
+            # is_first_item=True path handles the first item without
+            # needing a prior LLM write.
+        )
+        if _can_early_takeover:
+            # Store the per_member_action so the micro loop can use it.
+            _sp_early["_per_member_action"] = _early_action
+
+            self._emit_tool_output(
+                "task_contract",
+                {
+                    "step": "early_scale_micro_loop_takeover",
+                    "items": len(_early_items),
+                    "output_strategy": _early_output_strategy,
+                    "filename_template": _early_fn_template,
+                },
+                (
+                    "step=early_scale_micro_loop_takeover\n"
+                    f"items={len(_early_items)}\n"
+                    f"output_strategy={_early_output_strategy}\n"
+                    f"filename_template={_early_fn_template}\n"
+                    "note=skipping main LLM loop, entering micro loop directly"
+                ),
+            )
+
+            active_task_tool_policy = self._active_task_tool_policy_payload(planning_pipeline)
+            micro_result = await self._run_scale_micro_loop(
+                task_description=_early_action,
+                output_file="",  # micro loop handles file creation
+                turn_usage=turn_usage,
+                session_policy=session_tool_policy,
+                task_policy=active_task_tool_policy,
+            )
+
+            _sp_total = micro_result.get("total", 0)
+            _sp_processed = micro_result.get("processed", 0)
+            _sp_failed = micro_result.get("failed", 0)
+            _sp_completed = micro_result.get("completed_total", _sp_processed)
+            _sp_cancelled = micro_result.get("cancelled", False)
+            _micro_errors = micro_result.get("errors", [])
+
+            _status_word = "stopped by user" if _sp_cancelled else "complete"
+            summary_lines = [
+                f"Scale processing {_status_word}: {_sp_completed} of {_sp_total} items processed.",
+            ]
+            if _early_output_strategy == "file_per_item":
+                summary_lines.append(
+                    f"Output: {_sp_completed} separate files "
+                    f"(template: {_early_fn_template or 'per-item'})"
+                )
+            elif _early_output_strategy == "no_file":
+                _final_act = str(_sp_early.get("_final_action", "reply")).strip()
+                summary_lines.append(f"Output: {_sp_completed} items ({_final_act})")
+            else:
+                _output_file = _sp_early.get("_output_file", "") or _sp_early.get("_output_file_arg", "")
+                summary_lines.append(f"Output file: {_output_file}")
+            if _sp_failed > 0:
+                summary_lines.append(f"Failed: {_sp_failed} items")
+                for err in _micro_errors[:5]:
+                    summary_lines.append(f"  - {err.get('item', '?')}: {err.get('error', '?')}")
+            micro_summary = "\n".join(summary_lines)
+
+            self._add_session_message(role="assistant", content=micro_summary)
+
+            self._emit_tool_output(
+                "task_contract",
+                {
+                    "step": "early_scale_micro_loop_done",
+                    "processed": _sp_processed,
+                    "failed": _sp_failed,
+                    "total": _sp_total,
+                    "cancelled": _sp_cancelled,
+                },
+                micro_summary,
+            )
+
+            self._update_clarification_state(
+                user_input=user_input,
+                effective_user_input=effective_user_input,
+                assistant_response=micro_summary,
+            )
+            await self._persist_assistant_response(micro_summary)
+            return finish(micro_summary, success=micro_result.get("success", False))
 
         # Main agent loop
         base_turn_iterations = self.max_iterations + (2 if completion_requirements else 0)
@@ -1072,13 +1268,20 @@ class AgentOrchestrationMixin:
                 if self._scale_loop_ready():
                     sp = getattr(self, "_scale_progress", None)
                     output_file = sp.get("_output_file", "") if sp else ""
-                    # Derive the per-item task from the list_task_plan or
-                    # the user's original request.
-                    per_member_action = str(
-                        list_task_plan.get("per_member_action", "")
-                    ).strip()
+                    # Use the full user input as the task description so
+                    # the micro-loop LLM gets complete formatting instructions.
+                    # Strip the scale advisory portion if present.
+                    _task_src = effective_user_input
+                    _sa_start = _task_src.find("\n\n--- SCALE ADVISORY")
+                    if _sa_start > 0:
+                        _sa_end = _task_src.find("--- END SCALE ADVISORY ---")
+                        if _sa_end > _sa_start:
+                            _task_src = _task_src[:_sa_start].rstrip()
+                    per_member_action = _task_src[:2000]
                     if not per_member_action:
-                        per_member_action = effective_user_input[:500]
+                        per_member_action = str(
+                            list_task_plan.get("per_member_action", "")
+                        ).strip() or effective_user_input[:500]
                     # Store on scale_progress so the micro-loop can access it.
                     if sp is not None:
                         sp["_per_member_action"] = per_member_action
@@ -1117,13 +1320,15 @@ class AgentOrchestrationMixin:
                     _sp_processed = micro_result.get("processed", 0)
                     _sp_failed = micro_result.get("failed", 0)
                     _sp_completed = micro_result.get("completed_total", _sp_processed)
+                    _sp_cancelled = micro_result.get("cancelled", False)
                     _micro_errors = micro_result.get("errors", [])
 
                     # Record a synthetic session message so the completion
                     # gate can see that the work was done.
                     _out_strategy = str(sp.get("_output_strategy", "single_file")).strip().lower()
+                    _status_word = "stopped by user" if _sp_cancelled else "complete"
                     summary_lines = [
-                        f"Scale processing complete: {_sp_completed} of {_sp_total} items processed.",
+                        f"Scale processing {_status_word}: {_sp_completed} of {_sp_total} items processed.",
                     ]
                     if _out_strategy == "file_per_item":
                         _fn_template = str(sp.get("_output_filename_template", "")).strip()
@@ -1222,9 +1427,17 @@ class AgentOrchestrationMixin:
                 if self._scale_loop_ready():
                     sp = getattr(self, "_scale_progress", None)
                     output_file = sp.get("_output_file", "") if sp else ""
-                    per_member_action = str(
-                        list_task_plan.get("per_member_action", "")
-                    ).strip() or effective_user_input[:500]
+                    _task_src2 = effective_user_input
+                    _sa2_start = _task_src2.find("\n\n--- SCALE ADVISORY")
+                    if _sa2_start > 0:
+                        _sa2_end = _task_src2.find("--- END SCALE ADVISORY ---")
+                        if _sa2_end > _sa2_start:
+                            _task_src2 = _task_src2[:_sa2_start].rstrip()
+                    per_member_action = _task_src2[:2000]
+                    if not per_member_action:
+                        per_member_action = str(
+                            list_task_plan.get("per_member_action", "")
+                        ).strip() or effective_user_input[:500]
                     if sp is not None:
                         sp["_per_member_action"] = per_member_action
                     log.info("Scale micro-loop takeover (embedded path)")
@@ -1238,11 +1451,13 @@ class AgentOrchestrationMixin:
                     _sp_total = micro_result.get("total", 0)
                     _sp_completed = micro_result.get("completed_total", 0)
                     _sp_failed = micro_result.get("failed", 0)
+                    _sp_cancelled = micro_result.get("cancelled", False)
+                    _status_word = "stopped by user" if _sp_cancelled else "complete"
                     _out_strategy = str(sp.get("_output_strategy", "single_file")).strip().lower() if sp else "single_file"
                     if _out_strategy == "file_per_item":
                         _fn_template = str(sp.get("_output_filename_template", "")).strip() if sp else ""
                         micro_summary = (
-                            f"Scale processing complete: {_sp_completed} of {_sp_total} items.\n"
+                            f"Scale processing {_status_word}: {_sp_completed} of {_sp_total} items.\n"
                             f"Output: {_sp_completed} separate files "
                             f"(template: {_fn_template or 'per-item'})"
                         )
@@ -1250,22 +1465,22 @@ class AgentOrchestrationMixin:
                         _final_act = str(sp.get("_final_action", "reply")).strip() if sp else "reply"
                         if _final_act == "api_call":
                             micro_summary = (
-                                f"Scale processing complete: {_sp_completed} of {_sp_total} items.\n"
+                                f"Scale processing {_status_word}: {_sp_completed} of {_sp_total} items.\n"
                                 f"Output: indexed {_sp_completed} items to Typesense"
                             )
                         elif _final_act == "email":
                             micro_summary = (
-                                f"Scale processing complete: {_sp_completed} of {_sp_total} items.\n"
+                                f"Scale processing {_status_word}: {_sp_completed} of {_sp_total} items.\n"
                                 f"Output: emailed {_sp_completed} items"
                             )
                         else:
                             micro_summary = (
-                                f"Scale processing complete: {_sp_completed} of {_sp_total} items.\n"
+                                f"Scale processing {_status_word}: {_sp_completed} of {_sp_total} items.\n"
                                 f"Output: {_sp_completed} items processed (no file)"
                             )
                     else:
                         micro_summary = (
-                            f"Scale processing complete: {_sp_completed} of {_sp_total} items.\n"
+                            f"Scale processing {_status_word}: {_sp_completed} of {_sp_total} items.\n"
                             f"Output file: {output_file}"
                         )
                     if _sp_failed:

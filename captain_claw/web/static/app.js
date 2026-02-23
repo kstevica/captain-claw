@@ -23,6 +23,7 @@
     const monitorEmpty = $('#monitorEmpty');
     const messageInput = $('#messageInput');
     const sendBtn = $('#sendBtn');
+    const stopBtn = $('#stopBtn');
     const sessionName = $('#sessionName');
     const modelName = $('#modelName');
     const statusDot = $('#statusDot');
@@ -152,6 +153,13 @@
             _thinkingTool = '';
         }
         chatEmpty.style.display = 'none';
+
+        // Rephrase messages render as a persistent collapsible panel.
+        if (role === 'rephrase') {
+            addRephrasePanel(content, isReplay);
+            return;
+        }
+
         const div = document.createElement('div');
         div.className = `msg ${role}`;
         if (isReplay) div.style.animation = 'none';
@@ -170,6 +178,42 @@
         chatMessages.scrollTop = chatMessages.scrollHeight;
         msgCount++;
         chatCount.textContent = `${msgCount} messages`;
+    }
+
+    function addRephrasePanel(content, isReplay) {
+        const panel = document.createElement('div');
+        panel.className = 'rephrase-panel';
+        if (isReplay) panel.style.animation = 'none';
+
+        const header = document.createElement('div');
+        header.className = 'rephrase-header';
+        header.innerHTML = '<span class="rephrase-icon">\u2728</span>'
+            + '<span class="rephrase-title">Task Rephrased</span>'
+            + '<span class="rephrase-toggle">\u25BC</span>';
+
+        const body = document.createElement('div');
+        body.className = 'rephrase-body';
+        body.innerHTML = renderMarkdown(content);
+
+        // Start collapsed — user can click to expand.
+        body.style.display = 'none';
+        header.querySelector('.rephrase-toggle').textContent = '\u25B6';
+
+        header.addEventListener('click', function() {
+            const toggle = header.querySelector('.rephrase-toggle');
+            if (body.style.display === 'none') {
+                body.style.display = '';
+                toggle.textContent = '\u25BC';
+            } else {
+                body.style.display = 'none';
+                toggle.textContent = '\u25B6';
+            }
+        });
+
+        panel.appendChild(header);
+        panel.appendChild(body);
+        chatMessages.appendChild(panel);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
     }
 
     function addCommandResult(command, content) {
@@ -329,9 +373,19 @@
 
     // ── Status ──────────────────────────────────────────────
 
+    let _agentBusy = false;
+
     function setStatus(dotClass, text) {
         statusDot.className = `status-dot ${dotClass}`;
         statusText.textContent = text;
+
+        // Toggle send/stop button visibility based on agent state.
+        const busy = (text === 'thinking' || text === 'streaming');
+        if (busy !== _agentBusy) {
+            _agentBusy = busy;
+            sendBtn.style.display = busy ? 'none' : '';
+            stopBtn.style.display = busy ? '' : 'none';
+        }
     }
 
     function updateSessionInfo(info) {
@@ -808,9 +862,19 @@
 
     // ── Event Listeners ─────────────────────────────────────
 
+    function handleStop() {
+        if (!isConnected) return;
+        send({ type: 'cancel' });
+        // Provide immediate visual feedback.
+        stopBtn.classList.add('stop-btn-active');
+        setTimeout(() => stopBtn.classList.remove('stop-btn-active'), 600);
+    }
+
     function initEvents() {
         // Send button
         sendBtn.addEventListener('click', handleSend);
+        // Stop button — cancels current processing
+        stopBtn.addEventListener('click', handleStop);
 
         // Input events
         messageInput.addEventListener('keydown', (e) => {
@@ -832,10 +896,14 @@
                 if (e.key === 'Tab') { e.preventDefault(); selectSuggestion(); return; }
             }
 
-            // Escape to hide suggestions/palette
+            // Escape to hide suggestions/palette, or stop processing
             if (e.key === 'Escape') {
                 if (!commandSuggestions.classList.contains('hidden')) {
                     hideSuggestions();
+                    return;
+                }
+                if (_agentBusy) {
+                    handleStop();
                     return;
                 }
             }

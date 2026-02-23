@@ -826,13 +826,20 @@ class AgentReasoningMixin:
 
     @staticmethod
     def _is_list_processing_request(user_input: str) -> bool:
-        """Detect requests that imply processing multiple items/entities."""
+        """Detect requests that imply processing multiple items/entities.
+
+        Covers three categories:
+        1. Per-item processing language (for each, every, per, ...)
+        2. User explicitly providing a list (here are the urls, these files, ...)
+        3. Task that will produce a list (create a list, compile a list, ...)
+        """
         text = (user_input or "").strip().lower()
         if not text:
             return False
         if re.search(r"\btop\s+\d+\b", text):
             return True
         list_markers = (
+            # Per-item processing
             r"\bfor each\b",
             r"\beach\b",
             r"\bevery\b",
@@ -843,8 +850,192 @@ class AgentReasoningMixin:
             r"\bcompanies?\b",
             r"\bcities?\b",
             r"\bsources?\b",
+            # User explicitly providing items
+            r"\bhere (?:is|are) the\b",
+            r"\bthese (?:urls?|links?|files?|pages?|items?|articles?)\b",
+            r"\bthe following\b",
+            r"\bfrom (?:these|the following)\b",
+            r"\bbelow (?:is|are)\b",
+            # Task producing a list
+            r"\b(?:create|compile|build|make|generate|produce|prepare)\s+(?:a\s+)?(?:list|csv|spreadsheet|table|report)\b",
+            r"\b(?:list|csv|spreadsheet|table)\s+(?:of|with|containing)\b",
+            r"\bpopulate\s+(?:a\s+)?(?:csv|spreadsheet|table)\b",
         )
         return any(re.search(pattern, text) for pattern in list_markers)
+
+    @staticmethod
+    def _should_rephrase_task(user_input: str) -> bool:
+        """Decide whether a user prompt would benefit from automatic rephrasing.
+
+        Rephrasing helps when the user provides complex, free-form instructions
+        that mix list items, formatting details, and output specifications in an
+        unstructured way.  The rephraser converts these into a clean, structured
+        prompt that downstream components (list extractor, planner, micro-loop)
+        can parse more reliably.
+
+        Returns True when the prompt has enough complexity to justify a
+        rephrasing LLM call.  Short or already-structured prompts are skipped.
+        """
+        text = (user_input or "").strip()
+        if not text:
+            return False
+
+        cfg = get_config().scale
+        if not cfg.task_rephrase_enabled:
+            return False
+
+        # Too short — rephrasing adds latency for no benefit.
+        if len(text) < cfg.task_rephrase_min_chars:
+            return False
+
+        # Skip slash commands and very short follow-ups.
+        if text.startswith("/"):
+            return False
+
+        lowered = text.lower()
+
+        # Complexity signals — count how many apply.
+        signals = 0
+
+        # 1. Contains inline URLs (data sources to process)
+        url_count = len(re.findall(r"https?://[^\s)\]}>\"']+", text))
+        if url_count >= 2:
+            signals += 2  # strong signal
+        elif url_count >= 1:
+            signals += 1
+
+        # 2. List-processing language
+        if AgentReasoningMixin._is_list_processing_request(text):
+            signals += 1
+
+        # 3. Output format specifications (CSV, columns, fields, format)
+        format_patterns = (
+            r"\bcsv\b",
+            r"\bcolumns?\b",
+            r"\bfields?\b",
+            r"\bformat\b",
+            r"\bheader\b",
+            r"\bspreadsheet\b",
+            r"\btable\b",
+            r"\btemplate\b",
+        )
+        format_hits = sum(1 for p in format_patterns if re.search(p, lowered))
+        if format_hits >= 2:
+            signals += 2
+        elif format_hits >= 1:
+            signals += 1
+
+        # 4. Multiple lines / paragraphs (complex multi-part instruction)
+        line_count = text.count("\n")
+        if line_count >= 8:
+            signals += 2
+        elif line_count >= 4:
+            signals += 1
+
+        # 5. Numbered / bulleted list of items
+        list_lines = re.findall(r"^\s*(?:\d+[\.\)]\s+|[-*•]\s+)", text, re.MULTILINE)
+        if len(list_lines) >= 3:
+            signals += 1
+
+        # 6. File naming instructions
+        if re.search(r"\bname\s+(?:the\s+)?(?:output|file|result)", lowered):
+            signals += 1
+        if re.search(r"\.\w{2,4}\b", text) and re.search(r"\bfile\b|\boutput\b|\bsave\b|\bwrite\b", lowered):
+            signals += 1
+
+        # Threshold: need at least 3 complexity signals to justify rephrasing.
+        return signals >= 3
+
+    async def _rephrase_task(
+        self,
+        user_input: str,
+        turn_usage: dict[str, int],
+    ) -> tuple[str, bool]:
+        """Rephrase a complex user prompt into a structured, agent-friendly format.
+
+        Returns (rephrased_text, was_rephrased).
+        If rephrasing fails or is not needed, returns (user_input, False).
+        """
+        if not self._should_rephrase_task(user_input):
+            return user_input, False
+
+        self._emit_tool_output(
+            "task_contract",
+            {"step": "task_rephrase_start"},
+            "step=task_rephrase_start\nnote=rephrasing user prompt for better agent execution",
+        )
+
+        messages = [
+            Message(
+                role="system",
+                content=self.instructions.load("task_rephrase_system_prompt.md"),
+            ),
+            Message(
+                role="user",
+                content=self.instructions.render(
+                    "task_rephrase_user_prompt.md",
+                    user_input=user_input,
+                ),
+            ),
+        ]
+        try:
+            response = await self._complete_with_guards(
+                messages=messages,
+                tools=None,
+                interaction_label="task_rephrase",
+                turn_usage=turn_usage,
+                max_tokens=min(4000, int(get_config().model.max_tokens)),
+            )
+            rephrased = (response.content or "").strip()
+        except Exception as e:
+            self._emit_tool_output(
+                "task_contract",
+                {"step": "task_rephrase_error"},
+                f"step=task_rephrase_error\nerror={str(e)}",
+            )
+            return user_input, False
+
+        # Sanity checks: rephrased must be non-empty and not drastically
+        # shorter than the original (which would indicate a bad rephrase).
+        if not rephrased or len(rephrased) < len(user_input) * 0.3:
+            self._emit_tool_output(
+                "task_contract",
+                {"step": "task_rephrase_rejected", "reason": "too_short"},
+                (
+                    "step=task_rephrase_rejected\n"
+                    f"reason=too_short\n"
+                    f"original_len={len(user_input)}\n"
+                    f"rephrased_len={len(rephrased)}"
+                ),
+            )
+            return user_input, False
+
+        # Strip any accidental code fences wrapping the rephrased output.
+        if rephrased.startswith("```") and rephrased.endswith("```"):
+            rephrased = re.sub(r"^```\w*\n?", "", rephrased)
+            rephrased = re.sub(r"\n?```$", "", rephrased).strip()
+
+        self._emit_tool_output(
+            "task_contract",
+            {
+                "step": "task_rephrase_done",
+                "original_len": len(user_input),
+                "rephrased_len": len(rephrased),
+            },
+            (
+                "step=task_rephrase_done\n"
+                f"original_len={len(user_input)}\n"
+                f"rephrased_len={len(rephrased)}"
+            ),
+        )
+        # Emit the full rephrased content as a dedicated tool output so the
+        # web UI can display it in a visible panel for the user.
+        self._emit_tool_output(
+            "task_rephrase",
+            {"original_len": len(user_input), "rephrased_len": len(rephrased)},
+            rephrased,
+        )
+        return rephrased, True
 
     @staticmethod
     def _should_enforce_python_worker_mode(user_input: str) -> bool:
@@ -1171,8 +1362,14 @@ class AgentReasoningMixin:
             members_count=len(members),
             recommended=recommended_strategy,
         )
+        # Enable the plan when the extractor found list work OR concrete
+        # members.  Output-list tasks ("create a list of files") have
+        # has_list_work=True but members=[] because the items must be
+        # discovered at runtime (e.g. via glob).  We still need
+        # enabled=True so the scale advisory and progress systems know
+        # this is a list task.
         plan = {
-            "enabled": bool(members),
+            "enabled": bool(has_list_work or members),
             "members": members,
             "strategy": strategy,
             "per_member_action": per_member_action,

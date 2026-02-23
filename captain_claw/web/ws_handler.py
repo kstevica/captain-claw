@@ -46,6 +46,14 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
                     "content": content,
                     "replay": True,
                 })
+            elif role == "tool" and tool_name == "task_rephrase":
+                # Replay task rephrase as a visible chat panel.
+                await server._send(ws, {
+                    "type": "chat_message",
+                    "role": "rephrase",
+                    "content": content,
+                    "replay": True,
+                })
             elif role == "tool" and tool_name and not Agent._is_monitor_only_tool_name(tool_name):
                 await server._send(ws, {
                     "type": "monitor",
@@ -101,6 +109,7 @@ async def handle_ws_message(
     elif msg_type == "cancel":
         if server.agent and hasattr(server.agent, "cancel_event"):
             server.agent.cancel_event.set()
+            log.info("Cancel signal received via WebSocket")
 
     elif msg_type == "approval_response":
         pass

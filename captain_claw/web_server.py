@@ -26,6 +26,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
 # Available commands for the help/suggestion system
 COMMANDS: list[dict[str, str]] = [
     {"command": "/help", "description": "Show command reference", "category": "General"},
+    {"command": "/stop", "description": "Stop current processing (Esc)", "category": "General"},
     {"command": "/clear", "description": "Clear active session messages", "category": "General"},
     {"command": "/config", "description": "Show active configuration", "category": "General"},
     {"command": "/history", "description": "Show recent conversation history", "category": "General"},
@@ -96,6 +97,7 @@ class WebServer:
         self.clients: set[web.WebSocketResponse] = set()
         self._busy = False
         self._busy_lock = asyncio.Lock()
+        self._active_task: asyncio.Task | None = None
         self._telegram_queue: asyncio.Queue[TelegramMessage] = asyncio.Queue()
         self._instr_loader = InstructionLoader()
         self._instructions_dir = self._instr_loader.base_dir
@@ -175,7 +177,7 @@ class WebServer:
     _THINKING_SILENT_TOOLS: set[str] = {
         "llm_trace", "pipeline_trace", "memory_select", "memory_semantic_select",
         "compaction", "guard_input", "guard_output", "guard_web", "guard_exec",
-        "guard_file", "approval", "scale_micro_loop",
+        "guard_file", "approval", "scale_micro_loop", "task_rephrase",
     }
 
     def _tool_output_callback(
@@ -189,6 +191,14 @@ class WebServer:
             "output": output,
         })
         normalized = str(tool_name or "").strip().lower()
+        # When a task rephrase completes, broadcast the rephrased content
+        # as a chat message so the UI can display it in a visible panel.
+        if normalized == "task_rephrase":
+            self._broadcast({
+                "type": "chat_message",
+                "role": "rephrase",
+                "content": str(output or ""),
+            })
         if normalized not in self._THINKING_SILENT_TOOLS:
             from captain_claw.agent_tool_loop_mixin import AgentToolLoopMixin
             summary = AgentToolLoopMixin._tool_thinking_summary(tool_name, arguments or {})

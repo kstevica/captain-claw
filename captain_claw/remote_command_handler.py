@@ -364,7 +364,7 @@ async def handle_remote_command(
         return True
     if result.startswith("SESSION_MODEL_SET:"):
         selector = result.split(":", 1)[1].strip()
-        ok, message = await agent.set_session_model_by_selector(selector, persist=True)
+        ok, message = await agent.set_session_model(selector, persist=True)
         await send_text(message)
         return True
     if result == "NEW" or result.startswith("NEW:"):

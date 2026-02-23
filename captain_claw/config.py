@@ -434,6 +434,15 @@ class ScaleConfig(BaseModel):
     # (progress indicators only, no micro-loop).
     lightweight_progress_min_members: int = 3
 
+    # Automatic task rephrasing — rewrites complex user prompts into
+    # structured, agent-friendly format before execution.  Especially
+    # beneficial for list-processing tasks with detailed formatting.
+    task_rephrase_enabled: bool = True
+
+    # Minimum user input length (chars) to consider rephrasing.
+    # Very short prompts (e.g. "summarize this") don't benefit.
+    task_rephrase_min_chars: int = 120
+
 
 class DeepMemoryConfig(BaseModel):
     """Typesense-backed deep memory for long-term searchable content."""
