@@ -180,6 +180,38 @@ class AgentOrchestrationMixin:
             return True
         return False
 
+    @staticmethod
+    def _items_are_source_urls_only(items: list[str]) -> bool:
+        """Return True if all items appear to be the same source URL (or trivial variants).
+
+        When the initial list extraction runs BEFORE the article is fetched,
+        it may produce items that are just the source article URL repeated
+        (possibly with trailing punctuation).  These are NOT real list members
+        and should not block deferred re-extraction.
+
+        Heuristics:
+        - All items start with http:// or https://
+        - After normalizing (strip trailing punctuation, lowercase), there
+          are 2 or fewer unique URLs (duplicates of the source URL)
+        """
+        if not items:
+            return True
+        all_urls = all(
+            item.strip().startswith(("http://", "https://"))
+            for item in items
+            if item.strip()
+        )
+        if not all_urls:
+            return False
+        # Normalize: lowercase, strip trailing comma/period/space
+        normalized = set()
+        for item in items:
+            clean = item.strip().lower().rstrip(".,;:!?/ ")
+            if clean:
+                normalized.add(clean)
+        # If all items resolve to ≤2 unique URLs, they're source URLs
+        return len(normalized) <= 2
+
     def _preflight_scale_check(
         self,
         effective_user_input: str,
@@ -262,8 +294,12 @@ class AgentOrchestrationMixin:
             return list_task_plan
         sp = getattr(self, "_scale_progress", None)
         _existing_items = sp.get("items", []) if sp else []
-        if sp is not None and len(_existing_items) >= 3:
-            # Scale already initialized with enough items — nothing to do.
+        if (
+            sp is not None
+            and len(_existing_items) >= 3
+            and not self._items_are_source_urls_only(_existing_items)
+        ):
+            # Scale already initialized with enough diverse items — nothing to do.
             return list_task_plan
         # Only attempt re-detection if the input suggested list processing.
         if not (
@@ -309,6 +345,7 @@ class AgentOrchestrationMixin:
             "_output_filename_template": str(new_plan.get("output_filename_template", "")).strip(),
             "_final_action": str(new_plan.get("final_action", "write_file")).strip(),
             "_extraction_mode": self._classify_item_extraction_mode(new_members),
+            "_member_context": new_plan.get("member_context") or {},
         }
         if _out_strategy == "no_file":
             self._scale_progress["_sink_collection"] = ""
@@ -831,6 +868,7 @@ class AgentOrchestrationMixin:
                 self._scale_progress["done_items"] = set()
                 self._scale_progress["total"] = len(list_members)
                 self._scale_progress["_extraction_mode"] = self._classify_item_extraction_mode(list_members)
+                self._scale_progress["_member_context"] = list_task_plan.get("member_context") or {}
         if use_contract_pipeline:
             # When a clarification context was merged, the relevant URLs are
             # already embedded in effective_user_input.  Passing the full
@@ -939,6 +977,7 @@ class AgentOrchestrationMixin:
                 "_output_filename_template": str(list_task_plan.get("output_filename_template", "")).strip(),
                 "_final_action": str(list_task_plan.get("final_action", "write_file")).strip(),
                 "_extraction_mode": self._classify_item_extraction_mode(members),
+                "_member_context": list_task_plan.get("member_context") or {},
             }
             if _lw_out_strategy == "no_file":
                 self._scale_progress["_sink_collection"] = ""
@@ -1003,6 +1042,11 @@ class AgentOrchestrationMixin:
             # single_file and no_file are also OK — the micro loop's
             # is_first_item=True path handles the first item without
             # needing a prior LLM write.
+            #
+            # IMPORTANT: Do NOT take over when items are just source URLs
+            # (the article URL repeated).  The real list members haven't
+            # been extracted yet — the article needs to be fetched first.
+            and not self._items_are_source_urls_only(_early_items)
         )
         if _can_early_takeover:
             # Store the per_member_action so the micro loop can use it.
@@ -1378,10 +1422,14 @@ class AgentOrchestrationMixin:
                 # few items (< 3) which likely means the initial
                 # extractor only saw the source URL, not the real list.
                 _sp_pre = getattr(self, "_scale_progress", None)
+                _pre_items = _sp_pre.get("items", []) if _sp_pre else []
                 _needs_deferred = (
                     _sp_pre is None
-                    or not _sp_pre.get("items")
-                    or len(_sp_pre.get("items", [])) < 3
+                    or not _pre_items
+                    or len(_pre_items) < 3
+                    # Also re-extract when existing items are just the source
+                    # URL repeated — they're not real list members.
+                    or self._items_are_source_urls_only(_pre_items)
                 )
                 if _needs_deferred:
                     list_task_plan = await self._deferred_scale_init(
@@ -1621,10 +1669,12 @@ class AgentOrchestrationMixin:
                         )
                 # ── Deferred scale init after fetch (embedded path) ──
                 _sp_pre2 = getattr(self, "_scale_progress", None)
+                _pre_items2 = _sp_pre2.get("items", []) if _sp_pre2 else []
                 _needs_deferred2 = (
                     _sp_pre2 is None
-                    or not _sp_pre2.get("items")
-                    or len(_sp_pre2.get("items", [])) < 3
+                    or not _pre_items2
+                    or len(_pre_items2) < 3
+                    or self._items_are_source_urls_only(_pre_items2)
                 )
                 if _needs_deferred2:
                     list_task_plan = await self._deferred_scale_init(

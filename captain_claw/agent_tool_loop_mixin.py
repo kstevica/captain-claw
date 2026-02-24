@@ -796,6 +796,7 @@ class AgentToolLoopMixin:
         turn_usage: dict[str, int],
         session_policy: dict[str, Any] | None = None,
         task_policy: dict[str, Any] | None = None,
+        source_context: str = "",
     ) -> str:
         """Research a single entity using provided URLs and/or web search.
 
@@ -803,6 +804,10 @@ class AgentToolLoopMixin:
         that URL is fetched FIRST as the primary source.  Web search is then
         used to find supplementary sources.  When no embedded URL is present,
         falls back to pure web-search-based research.
+
+        ``source_context`` optionally provides metadata from the original
+        article (e.g. country, brief description) which is used to refine
+        the search query and help disambiguate common entity names.
 
         Returns concatenated content from all sources ready for the LLM
         processing step.  On total failure returns a short error string.
@@ -814,6 +819,13 @@ class AgentToolLoopMixin:
         entity_name, embedded_url = self._extract_embedded_url(item)
         # Use entity name for search queries; fall back to full item text
         search_entity = entity_name or item.strip()
+        # If source context is available, append it to help disambiguate
+        # common names in web search (e.g. "Apeyron Italy fintech" instead
+        # of just "Apeyron" which might find a Russian LED company).
+        # Keep it short — truncate to avoid bloating the search query.
+        if source_context:
+            _ctx_hint = source_context.strip()[:80]
+            search_entity = f"{search_entity} {_ctx_hint}"
 
         parts: list[str] = [f"# Research: {item}\n"]
         fetched_ok = 0
@@ -966,6 +978,7 @@ class AgentToolLoopMixin:
         previous_summary_sample: str = "",
         output_strategy: str = "single_file",
         extraction_mode: str = "file",
+        source_context: str = "",
     ) -> list[Message]:
         """Build a minimal message list for processing a single scale item.
 
@@ -984,6 +997,12 @@ class AgentToolLoopMixin:
         ``extraction_mode`` adjusts the system prompt:
         - ``research``: web-search-based extraction (synthesize multiple sources)
         - ``file`` / ``url``: standard document extraction
+
+        ``source_context`` optionally provides context about this item from the
+        original source article (e.g. country, brief description).  This is the
+        AUTHORITATIVE source for the entity's identity and should take precedence
+        over web-search results when there are conflicts (e.g. multiple companies
+        sharing the same name or domain).
         """
         if output_strategy == "file_per_item":
             output_instruction = (
@@ -1003,6 +1022,20 @@ class AgentToolLoopMixin:
             )
 
         if extraction_mode == "research":
+            _source_ctx_rule = ""
+            if source_context:
+                _source_ctx_rule = (
+                    "- IMPORTANT — SOURCE CONTEXT: The item comes from a specific "
+                    "article/source that provides authoritative context about this "
+                    "entity (see SOURCE CONTEXT below). This context is the ground "
+                    "truth for the entity's IDENTITY: its name, country/location, "
+                    "and what it is. When web search results describe a DIFFERENT "
+                    "entity that happens to share the same name or domain, you MUST "
+                    "use the source context to identify the correct entity and "
+                    "DISCARD information about the wrong one. For example, if the "
+                    "source says 'Apeyron, Italy' but web results describe a Russian "
+                    "LED company, the Italian entity is the correct one.\n"
+                )
             system_text = (
                 "You are a research assistant. Your job is to synthesize web "
                 "search results about ONE entity and produce a factual summary.\n\n"
@@ -1011,6 +1044,7 @@ class AgentToolLoopMixin:
                 "multiple sources about this entity.\n"
                 "- Synthesize the information into the format requested by the TASK.\n"
                 "- Focus ONLY on facts mentioned in the sources — do NOT fabricate.\n"
+                f"{_source_ctx_rule}"
                 "- If sources conflict, prefer more authoritative/recent sources.\n"
                 "- If no relevant information was found, leave the field blank as "
                 "instructed by the task.\n"
@@ -1047,6 +1081,12 @@ class AgentToolLoopMixin:
 
         user_parts = [f"TASK: {task_description}\n"]
         user_parts.append(f"ITEM: {item_label}\n")
+
+        if source_context:
+            user_parts.append(
+                f"SOURCE CONTEXT (authoritative — from the original article/source):\n"
+                f"{source_context}\n"
+            )
 
         if previous_summary_sample and not is_first_item:
             # Strip any leaked extracted-content echoes from the reference.
@@ -1281,6 +1321,11 @@ class AgentToolLoopMixin:
 
             if _extraction_mode == "research":
                 # Research mode: web_search → web_fetch → combine
+                # Look up per-item source context early for search query hints.
+                _member_ctx_map_r: dict[str, str] = sp.get("_member_context", {}) if sp else {}
+                _item_src_ctx = _member_ctx_map_r.get(item, "")
+                if not _item_src_ctx and item_label != item:
+                    _item_src_ctx = _member_ctx_map_r.get(item_label, "")
                 try:
                     extracted_content = await self._extract_research_item(
                         item=item,
@@ -1290,6 +1335,7 @@ class AgentToolLoopMixin:
                         turn_usage=turn_usage,
                         session_policy=session_policy,
                         task_policy=task_policy,
+                        source_context=_item_src_ctx,
                     )
                 except Exception as e:
                     log.warning(
@@ -1396,6 +1442,13 @@ class AgentToolLoopMixin:
                 phase="tool",
             )
 
+            # Look up per-item context from the source article (if available).
+            _member_ctx_map: dict[str, str] = sp.get("_member_context", {}) if sp else {}
+            _item_source_context = _member_ctx_map.get(item, "")
+            # Also try matching by item_label (which may differ from item)
+            if not _item_source_context and item_label != item:
+                _item_source_context = _member_ctx_map.get(item_label, "")
+
             item_messages = self._build_scale_item_prompt(
                 task_description=task_description,
                 item_label=item_label,
@@ -1404,6 +1457,7 @@ class AgentToolLoopMixin:
                 previous_summary_sample=last_summary,
                 output_strategy=_output_strategy,
                 extraction_mode=_extraction_mode,
+                source_context=_item_source_context,
             )
 
             # Log context size for this micro-call

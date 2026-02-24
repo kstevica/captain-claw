@@ -1335,6 +1335,7 @@ class AgentReasoningMixin:
 
         has_list_work = False
         members: list[str] = []
+        member_context: dict[str, str] = {}
         per_member_action = ""
         recommended_strategy = ""
         confidence = "low"
@@ -1354,6 +1355,13 @@ class AgentReasoningMixin:
             final_action = str(payload.get("final_action", "write_file")).strip().lower()
             if final_action not in ("write_file", "reply", "email", "api_call"):
                 final_action = "write_file"
+            # member_context: optional dict mapping member → brief context from
+            # the source article (country, description, etc.)
+            _raw_ctx = payload.get("member_context")
+            if isinstance(_raw_ctx, dict):
+                member_context = {
+                    str(k): str(v)[:200] for k, v in _raw_ctx.items() if v
+                }
 
         if not has_list_work and not members:
             return fallback
@@ -1371,6 +1379,7 @@ class AgentReasoningMixin:
         plan = {
             "enabled": bool(has_list_work or members),
             "members": members,
+            "member_context": member_context,
             "strategy": strategy,
             "per_member_action": per_member_action,
             "confidence": confidence,

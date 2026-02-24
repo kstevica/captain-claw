@@ -4,6 +4,7 @@ Return ONLY a JSON object (no markdown, no code fences):
 {
   "has_list_work": true,
   "members": ["member 1", "member 2"],
+  "member_context": {"member 1": "brief context from source", "member 2": "brief context from source"},
   "per_member_action": "short description of what to do for each member",
   "recommended_strategy": "direct",
   "confidence": "high",
@@ -17,6 +18,7 @@ Rules:
 - Extract only members relevant to the user request.
 - Deduplicate members and keep original readable names.
 - IMPORTANT: When member items have associated URLs or website links in the source content, ALWAYS include the URL with the member name using the format `"Member Name — https://example.com"`. This is critical for research tasks — the URL is the primary source for gathering information about the member. Never discard URLs that appear alongside member names in the source material.
+- `member_context` — a JSON object mapping each member string (exactly as it appears in the `members` array) to a short context string extracted from the source material. Include any metadata the source provides: country/location, brief description, category, or other identifying details. This context is the AUTHORITATIVE source for member identity during research. If the source says "Startup X (Italy)" then the context should include "Italy". If the source provides a one-line description, include it. Keep each context string under 200 characters. If no extra context is available for a member, omit that member from the object (or use an empty string).
 - Prefer `"recommended_strategy": "direct"` by default.
 - Use `"recommended_strategy": "script"` only when the user explicitly asks to generate/build/create a script.
 - If there is no list-style per-member work, return:
