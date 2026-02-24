@@ -85,6 +85,7 @@ class SessionOrchestrator:
         )
         self._max_parallel = max_parallel or orch_cfg.max_parallel
         self._worker_timeout = orch_cfg.worker_timeout_seconds
+        self._timeout_grace_seconds = orch_cfg.timeout_grace_seconds
         self._worker_max_retries = orch_cfg.worker_max_retries
         self._graph: TaskGraph | None = None
         self._pending_futures: dict[str, asyncio.Task[None]] = {}
@@ -250,7 +251,8 @@ class SessionOrchestrator:
         log.info("Building task graph", raw_task_count=len(tasks_data),
                  summary=summary[:200])
         self._broadcast_event("building_graph", {"task_count": len(tasks_data)})
-        graph = TaskGraph(max_parallel=self._max_parallel)
+        graph = TaskGraph(max_parallel=self._max_parallel,
+                          timeout_grace_seconds=self._timeout_grace_seconds)
         skipped_tasks = []
         for i, task_data in enumerate(tasks_data):
             task = OrchestratorTask(
@@ -1306,7 +1308,8 @@ class SessionOrchestrator:
             return {"ok": False, "error": "Workflow contains no tasks."}
 
         # Build graph from saved tasks.
-        graph = TaskGraph(max_parallel=self._max_parallel)
+        graph = TaskGraph(max_parallel=self._max_parallel,
+                          timeout_grace_seconds=self._timeout_grace_seconds)
         for td in tasks_data:
             task = OrchestratorTask(
                 id=str(td.get("id", "")).strip(),

@@ -557,6 +557,7 @@ def _build_schema() -> list[dict[str, Any]]:
                         _field("orchestrator.max_agents", "Max agents", type="number"),
                         _field("orchestrator.idle_evict_seconds", "Idle eviction (s)", type="number"),
                         _field("orchestrator.worker_timeout_seconds", "Worker timeout (s)", type="number"),
+                        _field("orchestrator.timeout_grace_seconds", "Timeout grace period (s)", type="number"),
                         _field("orchestrator.worker_max_retries", "Worker max retries", type="number"),
                     ],
                 },

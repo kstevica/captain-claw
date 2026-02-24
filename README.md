@@ -6,6 +6,8 @@
 [![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20Ollama-orange)](#feature-snapshot)
 [![Guardrails](https://img.shields.io/badge/guardrails-input%20%7C%20output%20%7C%20script%2Ftool-red)](#guards)
 
+![Captain Claw](docs/screenshot.png)
+
 An open-source AI agent that runs locally, supports multiple LLM providers, and gets work done — coding, research, automation, document processing, orchestration — through persistent sessions with built-in safety guards.
 
 ## Feature Snapshot

@@ -30,8 +30,8 @@ _TERMINAL_STATES = {COMPLETED, FAILED}
 _ACTIVATABLE_STATES = {PENDING, QUEUED}
 _HOLD_STATES = {PAUSED, EDITING}
 
-# Grace period (seconds) between timeout warning and automatic restart.
-TIMEOUT_GRACE_SECONDS = 60.0
+# Default grace period (seconds) between timeout warning and automatic restart.
+DEFAULT_TIMEOUT_GRACE_SECONDS = 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -82,8 +82,10 @@ class TaskGraph:
     timeout monitoring, and retry logic.
     """
 
-    def __init__(self, max_parallel: int = 5):
+    def __init__(self, max_parallel: int = 5,
+                 timeout_grace_seconds: float = DEFAULT_TIMEOUT_GRACE_SECONDS):
         self.max_parallel = max(1, int(max_parallel))
+        self.timeout_grace_seconds = max(5.0, float(timeout_grace_seconds))
         self._tasks: dict[str, OrchestratorTask] = {}
         self._order: list[str] = []
         # Pre-computed sets refreshed after mutations.
@@ -360,7 +362,7 @@ class TaskGraph:
         """Check running tasks for timeout, apply warning → grace → restart flow.
 
         Instead of immediately retrying/failing on timeout, tasks enter a
-        60-second grace period (TIMEOUT_WARNING). The user can postpone the
+        grace period (TIMEOUT_WARNING). The user can postpone the
         restart (resetting the timer for another timeout_seconds). If the
         grace period expires without postponement, the task is restarted.
 
@@ -387,7 +389,7 @@ class TaskGraph:
                 if task.timeout_warning_at <= 0:
                     task.timeout_warning_at = now
                 grace_elapsed = now - task.timeout_warning_at
-                remaining = max(0.0, TIMEOUT_GRACE_SECONDS - grace_elapsed)
+                remaining = max(0.0, self.timeout_grace_seconds - grace_elapsed)
 
                 if remaining > 0:
                     # Still within grace period; report countdown.
@@ -428,7 +430,7 @@ class TaskGraph:
             warned.append(tid)
             countdown.append({
                 "task_id": tid,
-                "remaining_seconds": round(TIMEOUT_GRACE_SECONDS),
+                "remaining_seconds": round(self.timeout_grace_seconds),
             })
 
         if warned or restarted or failed:
