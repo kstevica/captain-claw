@@ -1551,6 +1551,21 @@ class AgentToolLoopMixin:
                 _t_write_end = _time.monotonic()
                 _write_sec = round(_t_write_end - _t_write_start, 2)
 
+                # Capture the resolved output path for the summary.
+                if write_result.success and not sp.get("_output_file"):
+                    # Parse the resolved path from the write result content,
+                    # e.g. "Wrote 123 bytes to /abs/path (requested: rel)"
+                    _wr_content = str(write_result.content or "")
+                    _to_idx = _wr_content.find(" to ")
+                    if _to_idx > 0:
+                        _after_to = _wr_content[_to_idx + 4:].strip()
+                        _resolved = _after_to.split(" (requested:")[0].strip()
+                        if _resolved:
+                            sp["_output_file"] = _resolved
+                    if not sp.get("_output_file"):
+                        sp["_output_file"] = os.path.abspath(write_path_arg)
+                    sp["_output_file_arg"] = write_path_arg
+
                 if not write_result.success:
                     log.warning(
                         "Scale micro-loop write error",
