@@ -6,18 +6,28 @@ paths (where the file actually lives on disk, scoped under a session folder).
 Used during orchestration so that downstream tasks can access files created
 by upstream tasks without knowing session IDs or internal folder structures.
 Also useful in single-agent mode for consistent file resolution.
+
+Mappings are also persisted to SQLite via an optional async callback so the
+file browser survives server restarts.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Coroutine
 
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
+
+# Type for the optional persistence callback.
+PersistCallback = Callable[
+    [str, str, str, str],  # logical_path, physical_path, orchestration_id, task_id
+    Coroutine[Any, Any, None],
+]
 
 
 class FileRegistry:
@@ -34,8 +44,13 @@ class FileRegistry:
     (e.g. ``/output/results.json`` in one task, ``results.json`` in another).
     """
 
-    def __init__(self, orchestration_id: str = "") -> None:
+    def __init__(
+        self,
+        orchestration_id: str = "",
+        persist_callback: PersistCallback | None = None,
+    ) -> None:
         self._orchestration_id = orchestration_id or ""
+        self._persist_callback = persist_callback
         self._lock = threading.Lock()
         # logical_path (normalized) -> physical_path (str)
         self._mappings: dict[str, str] = {}
@@ -80,6 +95,16 @@ class FileRegistry:
             physical=physical,
             task_id=task_id,
         )
+
+        # Fire-and-forget persistence to SQLite.
+        if self._persist_callback is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._persist_callback(
+                    normalized, physical, self._orchestration_id, task_id,
+                ))
+            except RuntimeError:
+                pass  # No running event loop; skip persistence.
 
     def resolve(self, logical_path: str) -> str | None:
         """Resolve a logical path to its physical location.

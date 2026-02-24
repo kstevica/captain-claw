@@ -38,6 +38,7 @@ class AgentPool:
         status_callback: Callable[[str], None] | None = None,
         tool_output_callback: Callable[[str, dict[str, Any], str], None] | None = None,
         session_name_prefix: str = "orchestrator",
+        deep_memory: Any | None = None,
     ):
         self.max_agents = max(1, int(max_agents))
         self.idle_evict_seconds = max(30.0, float(idle_evict_seconds))
@@ -45,6 +46,7 @@ class AgentPool:
         self._status_callback = status_callback
         self._tool_output_callback = tool_output_callback
         self._session_name_prefix = session_name_prefix
+        self._deep_memory = deep_memory
         self._agents: dict[str, Any] = {}  # session_id → Agent
         self._last_used: dict[str, float] = {}
         self._lock = asyncio.Lock()
@@ -172,6 +174,13 @@ class AgentPool:
 
         # Sync runtime flags from session metadata.
         agent._sync_runtime_flags_from_session()
+
+        # Share deep memory (Typesense) from the main agent so workers can
+        # use the typesense tool without re-initializing the index.
+        # Must be set BEFORE _register_default_tools() so the TypesenseTool
+        # receives the deep_memory reference at registration time.
+        if self._deep_memory is not None:
+            agent._deep_memory = self._deep_memory
 
         # Register default tools (shared registry, per-call overrides
         # handle multi-agent safety via Phase 1 changes).

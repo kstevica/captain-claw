@@ -522,6 +522,19 @@ class WebServer:
         from captain_claw.web.rest_workflows import get_workflow_output
         return await get_workflow_output(self, request)
 
+    # File browser
+    async def _list_files(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_files import list_files
+        return await list_files(self, request)
+
+    async def _get_file_content(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_files import get_file_content
+        return await get_file_content(self, request)
+
+    async def _download_file(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_files import download_file
+        return await download_file(self, request)
+
     # Loop runner
     async def _start_loop(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_loops import start_loop
@@ -605,6 +618,10 @@ class WebServer:
     async def _serve_sessions(self, request: web.Request) -> web.FileResponse:
         from captain_claw.web.static_pages import serve_sessions
         return await serve_sessions(self, request)
+
+    async def _serve_files(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_files
+        return await serve_files(self, request)
 
     # Sessions REST
     async def _get_session_detail(self, request: web.Request) -> web.Response:
@@ -713,6 +730,9 @@ class WebServer:
         app.router.add_delete("/api/apis/{id}", self._delete_api_api)
         app.router.add_get("/api/workflow-browser", self._list_workflow_outputs)
         app.router.add_get("/api/workflow-browser/output/{filename}", self._get_workflow_output)
+        app.router.add_get("/api/files", self._list_files)
+        app.router.add_get("/api/files/content", self._get_file_content)
+        app.router.add_get("/api/files/download", self._download_file)
         app.router.add_post("/api/loops/start", self._start_loop)
         app.router.add_get("/api/loops/status", self._get_loop_status)
         app.router.add_post("/api/loops/stop", self._stop_loop)
@@ -735,6 +755,7 @@ class WebServer:
             app.router.add_get("/memory", self._serve_memory)
             app.router.add_get("/settings", self._serve_settings)
             app.router.add_get("/sessions", self._serve_sessions)
+            app.router.add_get("/files", self._serve_files)
             app.router.add_get("/favicon.ico", self._serve_favicon)
         return app
 

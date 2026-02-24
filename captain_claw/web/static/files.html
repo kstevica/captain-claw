@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Files - Captain Claw</title>
+    <link rel="stylesheet" href="/static/files.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<header class="fb-header">
+    <div class="fb-header-left">
+        <a href="/" class="fb-logo-link"><img src="/static/logo.svg" width="28" height="28"></a>
+        <h1>Files</h1>
+    </div>
+    <div class="fb-header-right">
+        <a href="/chat" class="fb-nav-link">&larr; Chat</a>
+    </div>
+</header>
+
+<div class="fb-layout">
+    <!-- Sidebar: file list -->
+    <aside class="fb-sidebar" id="fbSidebar">
+        <div class="fb-sidebar-header">
+            <input type="text" class="fb-search" id="fbSearch"
+                   placeholder="Filter files..." autocomplete="off">
+            <span class="fb-file-count" id="fbCount">0</span>
+        </div>
+        <div class="fb-file-list" id="fbFileList">
+            <div class="fb-loading" id="fbLoading">Loading...</div>
+        </div>
+    </aside>
+
+    <!-- Main area: file preview / detail -->
+    <main class="fb-main" id="fbMain">
+        <!-- Empty state -->
+        <div class="fb-empty" id="fbEmpty">
+            <div class="fb-empty-icon">&#128193;</div>
+            <div class="fb-empty-text">Select a file to view its contents</div>
+        </div>
+
+        <!-- File info bar -->
+        <div class="fb-info-bar" id="fbInfoBar" style="display:none;">
+            <div class="fb-info-left">
+                <span class="fb-info-name" id="fbInfoName"></span>
+                <span class="fb-info-path" id="fbInfoPath"></span>
+            </div>
+            <div class="fb-info-right">
+                <span class="fb-info-meta" id="fbInfoMeta"></span>
+                <a class="fb-download-btn" id="fbDownloadBtn"
+                   title="Download file" style="display:none;">&#x2B07; Download</a>
+            </div>
+        </div>
+
+        <!-- Text content preview -->
+        <div class="fb-content" id="fbContent" style="display:none;">
+            <pre class="fb-code"><code id="fbCode"></code></pre>
+        </div>
+
+        <!-- Binary file placeholder -->
+        <div class="fb-binary" id="fbBinary" style="display:none;">
+            <div class="fb-empty-icon">&#128230;</div>
+            <div class="fb-empty-text" id="fbBinaryText">Binary file</div>
+            <a class="fb-download-link" id="fbBinaryDownload">&#x2B07; Download File</a>
+        </div>
+
+        <!-- File not found on disk -->
+        <div class="fb-missing" id="fbMissing" style="display:none;">
+            <div class="fb-empty-icon">&#x26A0;</div>
+            <div class="fb-empty-text">File registered but not found on disk</div>
+            <div class="fb-empty-sub" id="fbMissingPath"></div>
+        </div>
+
+        <!-- Loading state for content -->
+        <div class="fb-content-loading" id="fbContentLoading" style="display:none;">
+            <div class="fb-spinner"></div>
+            <span>Loading file...</span>
+        </div>
+    </main>
+</div>
+
+<!-- Toast -->
+<div class="fb-toast" id="fbToast"></div>
+
+<script src="/static/files.js"></script>
+</body>
+</html>

@@ -871,8 +871,26 @@ class AgentContextMixin:
         # Orchestration mode creates its own shared registry per run.
         if getattr(self, "_file_registry", None) is None:
             from captain_claw.file_registry import FileRegistry
+            sm = self.session_manager
+            session_id = self.session.id if self.session else ""
+
+            async def _persist_file(
+                logical: str, physical: str, orch_id: str, task_id: str,
+            ) -> None:
+                try:
+                    await sm.register_file(
+                        logical, physical,
+                        orchestration_id=orch_id,
+                        session_id=session_id,
+                        task_id=task_id,
+                        source="agent",
+                    )
+                except Exception:
+                    pass
+
             self._file_registry = FileRegistry(
-                orchestration_id=f"session-{self.session.id}" if self.session else "default",
+                orchestration_id=f"session-{session_id}" if session_id else "default",
+                persist_callback=_persist_file,
             )
 
         await self._refresh_todo_context_cache()

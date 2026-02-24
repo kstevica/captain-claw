@@ -560,6 +560,30 @@ class SessionManager:
             await self._db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_apis_use_count ON apis(use_count DESC)"
             )
+            # -- File registry (persistent file mapping) --
+            await self._db.execute("""
+                CREATE TABLE IF NOT EXISTS file_registry (
+                    id              TEXT PRIMARY KEY,
+                    orchestration_id TEXT NOT NULL,
+                    session_id      TEXT,
+                    logical_path    TEXT NOT NULL,
+                    physical_path   TEXT NOT NULL,
+                    task_id         TEXT,
+                    source          TEXT NOT NULL DEFAULT 'agent',
+                    registered_at   TEXT NOT NULL,
+                    created_at      TEXT NOT NULL,
+                    updated_at      TEXT NOT NULL
+                )
+            """)
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_filereg_orch_id ON file_registry(orchestration_id)"
+            )
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_filereg_session_id ON file_registry(session_id)"
+            )
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_filereg_logical ON file_registry(logical_path)"
+            )
             await self._ensure_cron_jobs_migrations()
             await self._db.commit()
 
@@ -1921,6 +1945,71 @@ class SessionManager:
         async with self._db.execute(
             "UPDATE apis SET use_count = use_count + 1, last_used_at = ?, updated_at = ? WHERE id = ?",
             (now, now, api_id),
+        ) as cursor:
+            affected = cursor.rowcount
+        await self._db.commit()
+        return affected > 0
+
+    # ------------------------------------------------------------------
+    # File registry persistence
+    # ------------------------------------------------------------------
+
+    _FILE_REG_COLS = (
+        "id, orchestration_id, session_id, logical_path, physical_path, "
+        "task_id, source, registered_at, created_at, updated_at"
+    )
+
+    async def register_file(
+        self,
+        logical_path: str,
+        physical_path: str,
+        *,
+        orchestration_id: str = "",
+        session_id: str = "",
+        task_id: str = "",
+        source: str = "agent",
+    ) -> None:
+        """Persist a file mapping to the database (upsert by physical_path)."""
+        await self._ensure_db()
+        now = _utcnow_iso()
+        row_id = str(uuid.uuid4())
+        await self._db.execute(
+            f"""
+            INSERT INTO file_registry ({self._FILE_REG_COLS})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                logical_path = excluded.logical_path,
+                updated_at = excluded.updated_at
+            """,
+            (row_id, orchestration_id, session_id, logical_path,
+             physical_path, task_id, source, now, now, now),
+        )
+        await self._db.commit()
+
+    async def list_registered_files(
+        self, *, limit: int = 500,
+    ) -> list[dict[str, str]]:
+        """Return all persisted file mappings as dicts."""
+        await self._ensure_db()
+        async with self._db.execute(
+            f"""
+            SELECT {self._FILE_REG_COLS}
+            FROM file_registry
+            ORDER BY registered_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        cols = [c.strip() for c in self._FILE_REG_COLS.split(",")]
+        return [dict(zip(cols, row)) for row in rows]
+
+    async def delete_registered_file(self, physical_path: str) -> bool:
+        """Remove a file mapping by its physical path."""
+        await self._ensure_db()
+        async with self._db.execute(
+            "DELETE FROM file_registry WHERE physical_path = ?",
+            (physical_path,),
         ) as cursor:
             affected = cursor.rowcount
         await self._db.commit()

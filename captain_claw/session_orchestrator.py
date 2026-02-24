@@ -76,12 +76,17 @@ class SessionOrchestrator:
         self._instructions = InstructionLoader()
         self._session_manager = get_session_manager()
 
+        # Share deep memory from the main agent so worker agents can use
+        # the typesense tool without re-initializing the Typesense index.
+        _deep_memory = getattr(main_agent, "_deep_memory", None) if main_agent else None
+
         self._pool = AgentPool(
             max_agents=max_agents or orch_cfg.max_agents,
             idle_evict_seconds=orch_cfg.idle_evict_seconds,
             provider=self._provider,
             status_callback=status_callback,
             tool_output_callback=tool_output_callback,
+            deep_memory=_deep_memory,
         )
         self._max_parallel = max_parallel or orch_cfg.max_parallel
         self._worker_timeout = orch_cfg.worker_timeout_seconds
@@ -101,6 +106,29 @@ class SessionOrchestrator:
         self._user_input: str = ""
         self._synthesis_instruction: str = ""
         self._workflow_variables: list[dict[str, Any]] = []
+
+    # ------------------------------------------------------------------
+    # File registry persistence
+    # ------------------------------------------------------------------
+
+    def _make_persist_callback(self):
+        """Create a persistence callback for the file registry."""
+        sm = self._session_manager
+
+        async def _persist_file(
+            logical: str, physical: str, orch_id: str, task_id: str,
+        ) -> None:
+            try:
+                await sm.register_file(
+                    logical, physical,
+                    orchestration_id=orch_id,
+                    task_id=task_id,
+                    source="orchestrator",
+                )
+            except Exception:
+                pass
+
+        return _persist_file
 
     # ------------------------------------------------------------------
     # Workflow naming helpers
@@ -229,7 +257,10 @@ class SessionOrchestrator:
         # Create a shared file registry for this orchestration run.
         import uuid
         orch_run_id = str(uuid.uuid4())
-        self._file_registry = FileRegistry(orchestration_id=orch_run_id)
+        self._file_registry = FileRegistry(
+            orchestration_id=orch_run_id,
+            persist_callback=self._make_persist_callback(),
+        )
 
         # 1. DECOMPOSE
         plan = await self._decompose(user_input)
@@ -1339,7 +1370,10 @@ class SessionOrchestrator:
         self._workflow_variables = data.get("variables", [])
 
         import uuid
-        self._file_registry = FileRegistry(orchestration_id=str(uuid.uuid4()))
+        self._file_registry = FileRegistry(
+            orchestration_id=str(uuid.uuid4()),
+            persist_callback=self._make_persist_callback(),
+        )
 
         tasks_out: list[dict[str, Any]] = []
         for tid, t in graph.tasks.items():
