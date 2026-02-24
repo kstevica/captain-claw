@@ -445,6 +445,7 @@ def _build_schema() -> list[dict[str, Any]]:
                                options=["DEBUG", "INFO", "WARNING", "ERROR"]),
                         _field("logging.format", "Log format", type="select",
                                options=["console", "json"]),
+                        _field("logging.llm_session_logging", "LLM session logging", type="toggle"),
                     ],
                 },
                 {

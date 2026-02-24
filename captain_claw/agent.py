@@ -19,7 +19,8 @@ from captain_claw.agent_tool_loop_mixin import AgentToolLoopMixin
 from captain_claw.config import get_config
 from captain_claw.file_registry import FileRegistry
 from captain_claw.instructions import InstructionLoader
-from captain_claw.llm import LLMProvider
+from captain_claw.llm import LLMProvider, Message
+from captain_claw.llm_session_logger import get_llm_session_logger
 from captain_claw.session import Session, get_session_manager
 from captain_claw.tools import get_tool_registry
 
@@ -92,6 +93,9 @@ class Agent(
         # The main iteration loop checks this at the top of every iteration
         # and breaks cleanly rather than running to completion.
         self.cancel_event: asyncio.Event = asyncio.Event()
+        # LLM session logger — writes every LLM call to logs/<session>/session_log.md
+        self.llm_session_logging: bool = bool(getattr(cfg.logging, "llm_session_logging", False))
+        self._llm_logger = get_llm_session_logger(self.workspace_base_path / "logs")
         self._refresh_runtime_model_details(source="startup")
 
     @staticmethod
@@ -175,5 +179,39 @@ class Agent(
             return
         try:
             self.tool_output_callback(tool_name, arguments, output)
+        except Exception:
+            pass
+
+    def _log_llm_call(
+        self,
+        interaction_label: str,
+        messages: list[Message],
+        response: Any,
+        tools_enabled: bool = False,
+        max_tokens: int | None = None,
+        instruction_files: list[str] | None = None,
+    ) -> None:
+        """Write an LLM call entry to the file-based session log."""
+        if not self.llm_session_logging:
+            return
+        try:
+            # Ensure logger is pointed at the current session
+            slug = self._current_session_slug()
+            self._llm_logger.set_session(slug)
+
+            # Drain recently-loaded instruction files if not explicitly provided.
+            if not instruction_files:
+                instruction_files = self.instructions.drain_recent_files()
+
+            model = str(getattr(self.provider, "model", "") or "")
+            self._llm_logger.log_call(
+                interaction_label=interaction_label,
+                model=model,
+                messages=messages,
+                response=response,
+                instruction_files=instruction_files,
+                tools_enabled=tools_enabled,
+                max_tokens=max_tokens,
+            )
         except Exception:
             pass

@@ -224,6 +224,7 @@ execution_queue:
 logging:
   level: INFO
   format: console
+  llm_session_logging: false
 telegram:
   enabled: false
   bot_token: ''

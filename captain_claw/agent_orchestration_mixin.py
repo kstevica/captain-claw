@@ -133,6 +133,11 @@ _LARGE_SCALE_INPUT_PATTERNS = [
     re.compile(r"\bfrom (?:these|the following)\s+(?:urls?|links?|files?|pages?)\b", re.I),
     re.compile(r"\bthe following\s+(?:urls?|links?|files?|pages?|items?)\b", re.I),
     re.compile(r"\bthese\s+(?:urls?|links?|files?|pages?)\b", re.I),
+    # Deferred list language — article/page contains a list to be processed
+    re.compile(r"\bthere\s+(?:is|are)\s+(?:a\s+)?(?:list|set|collection)\b", re.I),
+    re.compile(r"\b(?:contains?|includes?|has)\s+(?:a\s+)?(?:list|set|collection)\s+of\b", re.I),
+    re.compile(r"\bresearch\b.*\b(?:all|every|each)\b", re.I),
+    re.compile(r"\b(?:about|report\s+(?:on|about))\s+(?:all|every|each)\b", re.I),
     # List-producing language
     re.compile(r"\b(?:create|compile|build|make|generate|produce|prepare)\s+(?:a\s+)?(?:list|csv|spreadsheet|table)\b", re.I),
     re.compile(r"\bpopulate\s+(?:a\s+)?(?:csv|spreadsheet|table)\b", re.I),
@@ -237,6 +242,107 @@ class AgentOrchestrationMixin:
         )
         return advisory
 
+    async def _deferred_scale_init(
+        self,
+        effective_user_input: str,
+        list_task_plan: dict[str, Any],
+        turn_usage: dict[str, int],
+    ) -> dict[str, Any]:
+        """Re-run list extraction after a web_fetch brings in new content.
+
+        When the user says "fetch article X, there is a list of Y, research all",
+        the initial list extraction can't find members because the article isn't
+        fetched yet.  This method re-runs extraction with the now-available
+        fetched content in session messages.
+
+        Returns the updated ``list_task_plan`` (unchanged if no new members).
+        """
+        # Only attempt once per turn to avoid wasting tokens.
+        if getattr(self, "_deferred_scale_attempted", False):
+            return list_task_plan
+        sp = getattr(self, "_scale_progress", None)
+        _existing_items = sp.get("items", []) if sp else []
+        if sp is not None and len(_existing_items) >= 3:
+            # Scale already initialized with enough items — nothing to do.
+            return list_task_plan
+        # Only attempt re-detection if the input suggested list processing.
+        if not (
+            self._input_suggests_large_scale(effective_user_input)
+            or self._is_list_processing_request(effective_user_input)
+        ):
+            return list_task_plan
+
+        # Re-collect context with generous limits.  The default
+        # per_message_chars (1400) truncates fetched articles before the
+        # list of items appears, so we use a much larger budget here.
+        new_context = self._collect_list_extraction_context(
+            max_messages=10,
+            max_chars=40000,
+            per_message_chars=20000,
+        )
+        if not new_context or len(new_context) < 200:
+            return list_task_plan
+
+        # Mark as attempted so we don't re-run on every iteration.
+        self._deferred_scale_attempted = True
+
+        new_plan = await self._generate_list_task_plan(
+            user_input=effective_user_input,
+            context_excerpt=new_context,
+            turn_usage=turn_usage,
+        )
+        new_members = new_plan.get("members", [])
+        if len(new_members) < 3:
+            return list_task_plan
+
+        # Initialize scale progress with the newly discovered members.
+        _scale_cfg = get_config().scale
+        _out_strategy = str(new_plan.get("output_strategy", "single_file")).strip().lower()
+        if _out_strategy not in ("file_per_item", "single_file", "no_file"):
+            _out_strategy = "single_file"
+        self._scale_progress = {
+            "total": len(new_members),
+            "completed": 0,
+            "items": list(new_members),
+            "done_items": set(),
+            "_output_strategy": _out_strategy,
+            "_output_filename_template": str(new_plan.get("output_filename_template", "")).strip(),
+            "_final_action": str(new_plan.get("final_action", "write_file")).strip(),
+            "_extraction_mode": self._classify_item_extraction_mode(new_members),
+        }
+        if _out_strategy == "no_file":
+            self._scale_progress["_sink_collection"] = ""
+            self._scale_progress["_sink_email_to"] = ""
+
+        # Inject scale advisory into effective user input.
+        advisory = _build_scale_advisory(
+            item_count=len(new_members),
+            output_strategy=_out_strategy,
+            filename_template=str(new_plan.get("output_filename_template", "")).strip(),
+            final_action=str(new_plan.get("final_action", "write_file")).strip(),
+        )
+
+        self._emit_tool_output(
+            "task_contract",
+            {
+                "step": "deferred_scale_init",
+                "members": len(new_members),
+                "output_strategy": _out_strategy,
+            },
+            (
+                "step=deferred_scale_init\n"
+                f"members={len(new_members)}\n"
+                f"output_strategy={_out_strategy}\n"
+                "note=scale loop initialized after web_fetch provided article content"
+            ),
+        )
+        log.info(
+            "Deferred scale init: members discovered after fetch",
+            members=len(new_members),
+            output_strategy=_out_strategy,
+        )
+        return new_plan
+
     async def complete(self, user_input: str) -> str:
         """Process user input and return response.
         
@@ -268,6 +374,7 @@ class AgentOrchestrationMixin:
         # Scale-progress tracker: populated when the scale advisory fires.
         # The tool loop uses this to emit "3 of 27 (11%)" progress.
         self._scale_progress: dict[str, Any] | None = None
+        self._deferred_scale_attempted: bool = False
         planning_pipeline: dict[str, Any] | None = None
         recent_source_urls: list[str] = []
         effective_user_input = user_input
@@ -1263,6 +1370,92 @@ class AgentOrchestrationMixin:
                             planning_pipeline,
                             task_ids=[str(item) for item in activated],
                         )
+                # ── Deferred scale init after fetch ──────────────────
+                # When the user says "fetch article, there is a list",
+                # the article content is now in session messages.  Re-run
+                # list extraction if scale wasn't initialized yet, has
+                # no items (preflight set total=0 shell), or has very
+                # few items (< 3) which likely means the initial
+                # extractor only saw the source URL, not the real list.
+                _sp_pre = getattr(self, "_scale_progress", None)
+                _needs_deferred = (
+                    _sp_pre is None
+                    or not _sp_pre.get("items")
+                    or len(_sp_pre.get("items", [])) < 3
+                )
+                if _needs_deferred:
+                    list_task_plan = await self._deferred_scale_init(
+                        effective_user_input=effective_user_input,
+                        list_task_plan=list_task_plan,
+                        turn_usage=turn_usage,
+                    )
+                # If deferred init just populated scale_progress with items,
+                # jump straight into the micro loop (like early takeover).
+                _sp_deferred = getattr(self, "_scale_progress", None)
+                if (
+                    _needs_deferred
+                    and _sp_deferred is not None
+                    and len(_sp_deferred.get("items", [])) >= 3
+                ):
+                    _def_task = effective_user_input
+                    _def_sa = _def_task.find("\n\n--- SCALE ADVISORY")
+                    if _def_sa > 0:
+                        _def_end = _def_task.find("--- END SCALE ADVISORY ---")
+                        if _def_end > _def_sa:
+                            _def_task = _def_task[:_def_sa].rstrip()
+                    _def_action = _def_task[:2000] or str(list_task_plan.get("per_member_action", "")).strip() or "Process each item"
+                    _sp_deferred["_per_member_action"] = _def_action
+                    self._emit_tool_output(
+                        "task_contract",
+                        {
+                            "step": "deferred_scale_micro_loop_takeover",
+                            "items": len(_sp_deferred.get("items", [])),
+                            "output_strategy": _sp_deferred.get("_output_strategy", "single_file"),
+                        },
+                        (
+                            "step=deferred_scale_micro_loop_takeover\n"
+                            f"items={len(_sp_deferred.get('items', []))}\n"
+                            "note=entering micro loop after deferred scale init"
+                        ),
+                    )
+                    active_task_tool_policy = self._active_task_tool_policy_payload(planning_pipeline)
+                    micro_result = await self._run_scale_micro_loop(
+                        task_description=_def_action,
+                        output_file="",
+                        turn_usage=turn_usage,
+                        session_policy=session_tool_policy,
+                        task_policy=active_task_tool_policy,
+                    )
+                    _sp_total = micro_result.get("total", 0)
+                    _sp_completed = micro_result.get("completed_total", 0)
+                    _sp_cancelled = micro_result.get("cancelled", False)
+                    _sp_failed = micro_result.get("failed", 0)
+                    _status_word = "stopped by user" if _sp_cancelled else "complete"
+                    _out_strategy = str(_sp_deferred.get("_output_strategy", "single_file")).strip().lower()
+                    summary_lines = [
+                        f"Scale processing {_status_word}: {_sp_completed} of {_sp_total} items processed.",
+                    ]
+                    if _out_strategy == "file_per_item":
+                        _fn_template = str(_sp_deferred.get("_output_filename_template", "")).strip()
+                        summary_lines.append(f"Output: {_sp_completed} separate files (template: {_fn_template or 'per-item'})")
+                    elif _out_strategy == "no_file":
+                        _final_act = str(_sp_deferred.get("_final_action", "reply")).strip()
+                        summary_lines.append(f"Output: {_sp_completed} items ({_final_act})")
+                    else:
+                        _def_outfile = _sp_deferred.get("_output_file", "")
+                        summary_lines.append(f"Output file: {_def_outfile}" if _def_outfile else "Output: single file")
+                    if _sp_failed > 0:
+                        summary_lines.append(f"Failed: {_sp_failed} items")
+                    micro_summary = "\n".join(summary_lines)
+                    self._add_session_message(role="assistant", content=micro_summary)
+                    finalized, final_text, finish_success = await attempt_finalize_response(
+                        output_text=micro_summary,
+                        iteration=iteration,
+                        finish_success=micro_result.get("success", False),
+                    )
+                    if finalized:
+                        return finish(final_text, success=finish_success)
+                    continue
                 # ── Micro-turn scale loop takeover ──────────────────
                 # After the LLM has established the format (1+ items done,
                 # output file known), switch to direct-execution mode for
@@ -1426,6 +1619,84 @@ class AgentOrchestrationMixin:
                             planning_pipeline,
                             task_ids=[str(item) for item in activated],
                         )
+                # ── Deferred scale init after fetch (embedded path) ──
+                _sp_pre2 = getattr(self, "_scale_progress", None)
+                _needs_deferred2 = (
+                    _sp_pre2 is None
+                    or not _sp_pre2.get("items")
+                    or len(_sp_pre2.get("items", [])) < 3
+                )
+                if _needs_deferred2:
+                    list_task_plan = await self._deferred_scale_init(
+                        effective_user_input=effective_user_input,
+                        list_task_plan=list_task_plan,
+                        turn_usage=turn_usage,
+                    )
+                _sp_deferred2 = getattr(self, "_scale_progress", None)
+                if (
+                    _needs_deferred2
+                    and _sp_deferred2 is not None
+                    and len(_sp_deferred2.get("items", [])) >= 3
+                ):
+                    _def_task2 = effective_user_input
+                    _def_sa2 = _def_task2.find("\n\n--- SCALE ADVISORY")
+                    if _def_sa2 > 0:
+                        _def_end2 = _def_task2.find("--- END SCALE ADVISORY ---")
+                        if _def_end2 > _def_sa2:
+                            _def_task2 = _def_task2[:_def_sa2].rstrip()
+                    _def_action2 = _def_task2[:2000] or str(list_task_plan.get("per_member_action", "")).strip() or "Process each item"
+                    _sp_deferred2["_per_member_action"] = _def_action2
+                    self._emit_tool_output(
+                        "task_contract",
+                        {
+                            "step": "deferred_scale_micro_loop_takeover",
+                            "items": len(_sp_deferred2.get("items", [])),
+                            "output_strategy": _sp_deferred2.get("_output_strategy", "single_file"),
+                        },
+                        (
+                            "step=deferred_scale_micro_loop_takeover\n"
+                            f"items={len(_sp_deferred2.get('items', []))}\n"
+                            "note=entering micro loop after deferred scale init (embedded)"
+                        ),
+                    )
+                    active_task_tool_policy = self._active_task_tool_policy_payload(planning_pipeline)
+                    micro_result = await self._run_scale_micro_loop(
+                        task_description=_def_action2,
+                        output_file="",
+                        turn_usage=turn_usage,
+                        session_policy=session_tool_policy,
+                        task_policy=active_task_tool_policy,
+                    )
+                    _sp_total = micro_result.get("total", 0)
+                    _sp_completed = micro_result.get("completed_total", 0)
+                    _sp_cancelled = micro_result.get("cancelled", False)
+                    _sp_failed = micro_result.get("failed", 0)
+                    _status_word = "stopped by user" if _sp_cancelled else "complete"
+                    _out_strategy = str(_sp_deferred2.get("_output_strategy", "single_file")).strip().lower()
+                    summary_lines = [
+                        f"Scale processing {_status_word}: {_sp_completed} of {_sp_total} items processed.",
+                    ]
+                    if _out_strategy == "file_per_item":
+                        _fn_template = str(_sp_deferred2.get("_output_filename_template", "")).strip()
+                        summary_lines.append(f"Output: {_sp_completed} separate files (template: {_fn_template or 'per-item'})")
+                    elif _out_strategy == "no_file":
+                        _final_act = str(_sp_deferred2.get("_final_action", "reply")).strip()
+                        summary_lines.append(f"Output: {_sp_completed} items ({_final_act})")
+                    else:
+                        _def_outfile2 = _sp_deferred2.get("_output_file", "")
+                        summary_lines.append(f"Output file: {_def_outfile2}" if _def_outfile2 else "Output: single file")
+                    if _sp_failed > 0:
+                        summary_lines.append(f"Failed: {_sp_failed} items")
+                    micro_summary = "\n".join(summary_lines)
+                    self._add_session_message(role="assistant", content=micro_summary)
+                    finalized, final_text, finish_success = await attempt_finalize_response(
+                        output_text=micro_summary,
+                        iteration=iteration,
+                        finish_success=micro_result.get("success", False),
+                    )
+                    if finalized:
+                        return finish(final_text, success=finish_success)
+                    continue
                 # ── Micro-turn scale loop takeover (embedded path) ──
                 if self._scale_loop_ready():
                     sp = getattr(self, "_scale_progress", None)

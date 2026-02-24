@@ -46,6 +46,9 @@ class InstructionLoader:
             else _PERSONAL_DIR.resolve()
         )
         self._cache: dict[str, str] = {}
+        # Track recently loaded files for LLM session logging.
+        # Cleared on each drain via ``drain_recent_files()``.
+        self._recent_files: list[str] = []
 
     @staticmethod
     def _resolve_base_dir(base_dir: Path | str | None) -> Path:
@@ -69,6 +72,7 @@ class InstructionLoader:
 
     def load(self, name: str) -> str:
         """Load instruction template content by filename."""
+        self._recent_files.append(name)
         cached = self._cache.get(name)
         if cached is not None:
             return cached
@@ -82,6 +86,12 @@ class InstructionLoader:
         content = path.read_text(encoding="utf-8").strip()
         self._cache[name] = content
         return content
+
+    def drain_recent_files(self) -> list[str]:
+        """Return and clear the list of recently loaded instruction files."""
+        files = list(dict.fromkeys(self._recent_files))  # dedupe, preserve order
+        self._recent_files.clear()
+        return files
 
     def render(self, name: str, **variables: object) -> str:
         """Render template with simple ``str.format`` placeholder substitution."""

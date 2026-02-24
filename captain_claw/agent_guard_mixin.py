@@ -374,6 +374,15 @@ class AgentGuardMixin:
             max_tokens=max_tokens,
         )
 
+        # ── File-based session logging ──
+        self._log_llm_call(
+            interaction_label=interaction_label,
+            messages=messages,
+            response=response,
+            tools_enabled=bool(tools),
+            max_tokens=max_tokens,
+        )
+
         return response
 
     async def _execute_tool_with_guard(

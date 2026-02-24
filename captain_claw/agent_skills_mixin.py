@@ -113,12 +113,13 @@ class AgentSkillsMixin:
             "Candidates:\n"
             f"{json.dumps(candidate_payload, ensure_ascii=True)}"
         )
+        skill_messages = [
+            Message(role="system", content=system_prompt),
+            Message(role="user", content=user_prompt),
+        ]
         try:
             response = await provider.complete(
-                messages=[
-                    Message(role="system", content=system_prompt),
-                    Message(role="user", content=user_prompt),
-                ],
+                messages=skill_messages,
                 tools=None,
                 temperature=0.1,
                 max_tokens=900,
@@ -126,6 +127,13 @@ class AgentSkillsMixin:
         except Exception as exc:
             log.warning("Skill search LLM ranking failed", error=str(exc))
             return []
+
+        self._log_llm_call(
+            interaction_label="skill_search",
+            messages=skill_messages,
+            response=response,
+            max_tokens=900,
+        )
 
         payload = None
         try:

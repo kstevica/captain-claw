@@ -501,9 +501,16 @@ class AgentToolLoopMixin:
         """Classify list items into an extraction mode.
 
         Samples up to 10 items and votes:
-        - ``"url"``      — majority are HTTP(S) URLs
+        - ``"url"``      — majority are pure HTTP(S) URLs (no name prefix)
         - ``"file"``     — majority contain path separators or known extensions
-        - ``"research"`` — majority are plain-text entities (names, titles)
+        - ``"research"`` — majority are plain-text entities (names, titles),
+          OR entities with accompanying URLs (``"Name — https://…"``)
+
+        Items that have BOTH a text prefix and an embedded URL are classified
+        as ``"research"`` (not ``"url"``) because they represent named entities
+        that need research — the URL is a starting point, not the sole source.
+        Pure URLs (starting with ``http://`` or ``https://`` with no name
+        prefix) remain ``"url"`` mode.
 
         The result is stored once in ``_scale_progress["_extraction_mode"]``
         so the micro-loop knows which extraction strategy to use.
@@ -512,7 +519,8 @@ class AgentToolLoopMixin:
             return "file"
 
         sample = items[:10]
-        url_count = 0
+        pure_url_count = 0
+        named_url_count = 0  # "Name — https://…" format
         file_count = 0
         entity_count = 0
 
@@ -520,9 +528,13 @@ class AgentToolLoopMixin:
             item = raw.strip()
             if not item:
                 continue
-            # URL check
-            if item.startswith(("http://", "https://")) or re.search(r"https?://", item):
-                url_count += 1
+            # Pure URL check — item IS a URL (no name prefix)
+            if item.startswith(("http://", "https://")):
+                pure_url_count += 1
+                continue
+            # Named entity with embedded URL — e.g. "Company — https://…"
+            if re.search(r"https?://", item):
+                named_url_count += 1
                 continue
             # Path separator check
             if "/" in item or "\\" in item:
@@ -537,9 +549,12 @@ class AgentToolLoopMixin:
             entity_count += 1
 
         n = len(sample)
-        if url_count >= n * 0.5:
+        # Named URLs count as research entities — the URL is a source hint,
+        # not the item itself.  Only pure URLs trigger "url" mode.
+        research_count = entity_count + named_url_count
+        if pure_url_count >= n * 0.5:
             return "url"
-        if entity_count >= n * 0.5:
+        if research_count >= n * 0.5:
             return "research"
         return "file"
 
@@ -722,11 +737,12 @@ class AgentToolLoopMixin:
     ) -> str:
         """Build a web-search query for a plain-text entity.
 
-        Combines the quoted item name with pre-extracted keywords
+        Combines the item name with pre-extracted keywords
         (produced once by ``_extract_research_keywords``).
+        The item is NOT quoted to allow fuzzy/keyword matching —
+        exact-match quotes cause zero results for obscure entities.
         """
-        quoted = f'"{item.strip()}"'
-        parts: list[str] = [quoted] + keywords
+        parts: list[str] = [item.strip()] + keywords
 
         query = " ".join(parts)
         # Cap at ~150 chars to stay within search engine limits.
@@ -751,6 +767,26 @@ class AgentToolLoopMixin:
                 urls.append(url)
         return urls
 
+    @staticmethod
+    def _extract_embedded_url(item: str) -> tuple[str, str]:
+        """Split an item into (entity_name, embedded_url).
+
+        For items like ``"Company Name — https://example.com"`` returns
+        ``("Company Name", "https://example.com")``.
+        For plain URLs or plain text returns ``("", url)`` or ``(item, "")``.
+        """
+        # Pure URL — no entity name
+        stripped = item.strip()
+        if stripped.startswith(("http://", "https://")):
+            return "", stripped
+        # Entity with embedded URL
+        url_match = re.search(r"https?://[^\s)\]}>\"']+", stripped)
+        if url_match:
+            entity = stripped[:url_match.start()].strip().rstrip("—–-:.|,").strip()
+            return entity, url_match.group(0)
+        # Plain text entity — no URL
+        return stripped, ""
+
     async def _extract_research_item(
         self,
         item: str,
@@ -761,23 +797,75 @@ class AgentToolLoopMixin:
         session_policy: dict[str, Any] | None = None,
         task_policy: dict[str, Any] | None = None,
     ) -> str:
-        """Search the web for a plain-text entity and fetch top results.
+        """Research a single entity using provided URLs and/or web search.
 
-        Returns concatenated content from the search results ready for
-        the LLM processing step.  On total failure returns a short error
-        string (the caller should treat empty-ish content as a failure).
+        When the item contains an embedded URL (e.g. ``"Company — https://…"``),
+        that URL is fetched FIRST as the primary source.  Web search is then
+        used to find supplementary sources.  When no embedded URL is present,
+        falls back to pure web-search-based research.
+
+        Returns concatenated content from all sources ready for the LLM
+        processing step.  On total failure returns a short error string.
         """
         cfg = get_config()
         max_results = cfg.scale.research_search_results
         max_chars = cfg.scale.research_max_chars_per_fetch
 
-        # ── 1. Build query ──────────────────────────────────────
+        entity_name, embedded_url = self._extract_embedded_url(item)
+        # Use entity name for search queries; fall back to full item text
+        search_entity = entity_name or item.strip()
+
+        parts: list[str] = [f"# Research: {item}\n"]
+        fetched_ok = 0
+
+        # ── 1. Fetch embedded URL first (primary source) ─────────
+        if embedded_url:
+            self._emit_thinking(
+                f"scale_micro_loop: Fetching provided URL ({item_num}/{total})\n"
+                f"{item}\n"
+                f"{embedded_url}",
+                tool="scale_micro_loop",
+                phase="tool",
+            )
+            try:
+                primary_result = await self._execute_tool_with_guard(
+                    name="web_fetch",
+                    arguments={"url": embedded_url, "max_chars": max_chars},
+                    interaction_label=f"scale_research_primary_{item_num}",
+                    turn_usage=turn_usage,
+                    session_policy=session_policy,
+                    task_policy=task_policy,
+                )
+                if primary_result.success and primary_result.content:
+                    parts.append(
+                        f"\n--- Primary source: {embedded_url} ---\n"
+                        f"{primary_result.content[:max_chars]}\n"
+                    )
+                    fetched_ok += 1
+                else:
+                    parts.append(
+                        f"\n--- Primary source: {embedded_url} ---\n"
+                        f"Fetch failed: {primary_result.error or 'empty content'}\n"
+                    )
+            except Exception as exc:
+                parts.append(
+                    f"\n--- Primary source: {embedded_url} ---\n"
+                    f"Fetch error: {exc}\n"
+                )
+
+            self._emit_tool_output(
+                "scale_micro_loop",
+                {"item": item, "step": "research_primary", "url": embedded_url},
+                f"[{item_num}/{total}] Primary fetch: {embedded_url}",
+            )
+
+        # ── 2. Web search for supplementary sources ──────────────
         keywords = (
             self._scale_progress.get("_research_keywords", [])
             if self._scale_progress
             else []
         )
-        query = self._build_research_search_query(item, keywords)
+        query = self._build_research_search_query(search_entity, keywords)
 
         self._emit_thinking(
             f"scale_micro_loop: Searching ({item_num}/{total})\n"
@@ -787,7 +875,6 @@ class AgentToolLoopMixin:
             phase="tool",
         )
 
-        # ── 2. Web search ───────────────────────────────────────
         search_result = await self._execute_tool_with_guard(
             name="web_search",
             arguments={"query": query, "count": max_results},
@@ -798,6 +885,10 @@ class AgentToolLoopMixin:
         )
 
         if not search_result.success or not search_result.content:
+            if fetched_ok > 0:
+                # Primary URL was fetched — search failure is not fatal
+                parts.append(f"\nSupplementary search failed: {search_result.error or 'no results'}\n")
+                return "\n".join(parts)
             return f"Web search failed for '{item}': {search_result.error or 'no results'}"
 
         self._emit_tool_output(
@@ -806,19 +897,22 @@ class AgentToolLoopMixin:
             f"[{item_num}/{total}] Search: {query}",
         )
 
-        # ── 3. Parse URLs from results ──────────────────────────
+        # ── 3. Parse URLs from search results ────────────────────
         urls = self._parse_search_result_urls(search_result.content)
-        if not urls:
-            # Fall back to search snippets as extracted content.
+        # Exclude the embedded URL to avoid fetching it twice
+        if embedded_url:
+            urls = [u for u in urls if u != embedded_url]
+        if not urls and fetched_ok == 0:
+            # No URLs at all — fall back to search snippets
             return f"# Research: {item}\nSearch query: {query}\n\n{search_result.content}"
 
-        # ── 4. Fetch top N URLs ─────────────────────────────────
-        parts: list[str] = [f"# Research: {item}\nSearch query: {query}\n"]
-        fetched_ok = 0
+        # ── 4. Fetch supplementary URLs ──────────────────────────
+        # Reduce supplementary fetches when we already have a primary source
+        _supp_limit = max(1, max_results - 1) if embedded_url else max_results
 
-        for fetch_idx, url in enumerate(urls[:max_results], start=1):
+        for fetch_idx, url in enumerate(urls[:_supp_limit], start=1):
             self._emit_thinking(
-                f"scale_micro_loop: Fetching source ({fetch_idx}/{min(len(urls), max_results)}) "
+                f"scale_micro_loop: Fetching source ({fetch_idx}/{min(len(urls), _supp_limit)}) "
                 f"for item {item_num}/{total}\n"
                 f"{item}\n"
                 f"{url}",
@@ -853,8 +947,8 @@ class AgentToolLoopMixin:
 
         self._emit_tool_output(
             "scale_micro_loop",
-            {"item": item, "step": "research_fetch", "fetched": fetched_ok, "total_urls": len(urls[:max_results])},
-            f"[{item_num}/{total}] Fetched {fetched_ok}/{min(len(urls), max_results)} sources for: {item}",
+            {"item": item, "step": "research_fetch", "fetched": fetched_ok, "total_urls": len(urls[:_supp_limit]), "had_primary": bool(embedded_url)},
+            f"[{item_num}/{total}] Fetched {fetched_ok} sources{' (incl. primary URL)' if embedded_url else ''} for: {item}",
         )
 
         # If all fetches failed, fall back to search snippets.
@@ -1712,7 +1806,10 @@ class AgentToolLoopMixin:
         if sp is None:
             return False
         items = sp.get("items", [])
-        if not items:
+        if len(items) < 3:
+            # Need at least 3 items for a meaningful scale loop.
+            # Fewer items likely means the extractor only found the
+            # source URL, not the actual list members.
             return False
 
         output_strategy = str(sp.get("_output_strategy", "single_file")).strip().lower()
@@ -2301,7 +2398,7 @@ class AgentToolLoopMixin:
             # When scale-progress is active, prefix extract/read calls
             # with progress info like "📄 3 of 27 — ".
             sp = getattr(self, "_scale_progress", None)
-            if sp is not None and sp.get("total", 0) > 0:
+            if sp is not None and sp.get("total", 0) >= 3:
                 tool_lower = str(tc.name or "").strip().lower()
                 _extractors = {"pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract", "read"}
                 if tool_lower in _extractors:
@@ -2629,9 +2726,12 @@ class AgentToolLoopMixin:
                         done = sp["completed"]
                         path = str(arguments.get("path", "")).strip()
                         filename = path.rsplit("/", 1)[-1] if path else ""
-                        if total > 0:
+                        if total >= 3 and done <= total:
                             pct = int(done / total * 100)
                             progress_text = f"{done} of {total} ({pct}%)"
+                        elif total >= 3:
+                            # done > total: items discovered at runtime
+                            progress_text = f"{done} items written"
                         else:
                             progress_text = f"{done} items written"
                         # Show last-written filename in the indicator.

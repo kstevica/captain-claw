@@ -22,6 +22,7 @@ from captain_claw.config import get_config
 from captain_claw.file_registry import FileRegistry
 from captain_claw.instructions import InstructionLoader
 from captain_claw.llm import LLMProvider, Message, get_provider
+from captain_claw.llm_session_logger import get_llm_session_logger
 from captain_claw.logging import get_logger
 from captain_claw.session import get_session_manager
 from captain_claw.task_graph import (
@@ -571,6 +572,21 @@ class SessionOrchestrator:
                      model=getattr(response, "model", "?"),
                      usage=getattr(response, "usage", None),
                      finish_reason=getattr(response, "finish_reason", None))
+            # File-based session logging
+            if get_config().logging.llm_session_logging:
+                try:
+                    llm_log = get_llm_session_logger()
+                    llm_log.set_session("orchestrator")
+                    llm_log.log_call(
+                        interaction_label="orchestrator_decompose",
+                        model=str(getattr(self._provider, "model", "") or ""),
+                        messages=messages,
+                        response=response,
+                        instruction_files=["orchestrator_decompose_system_prompt.md", "orchestrator_decompose_user_prompt.md"],
+                        max_tokens=_DECOMPOSE_MAX_TOKENS,
+                    )
+                except Exception:
+                    pass
         except asyncio.TimeoutError:
             log.error("Orchestrator decomposition timed out",
                       timeout=_PLANNER_TIMEOUT_SECONDS)
@@ -1118,6 +1134,21 @@ class SessionOrchestrator:
                 self._provider.complete(messages=messages, tools=None, max_tokens=_SYNTHESIZE_MAX_TOKENS),
                 timeout=_PLANNER_TIMEOUT_SECONDS,
             )
+            # File-based session logging
+            if get_config().logging.llm_session_logging:
+                try:
+                    llm_log = get_llm_session_logger()
+                    llm_log.set_session("orchestrator")
+                    llm_log.log_call(
+                        interaction_label="orchestrator_synthesize",
+                        model=str(getattr(self._provider, "model", "") or ""),
+                        messages=messages,
+                        response=response,
+                        instruction_files=["orchestrator_synthesize_user_prompt.md"],
+                        max_tokens=_SYNTHESIZE_MAX_TOKENS,
+                    )
+                except Exception:
+                    pass
             return str(getattr(response, "content", "") or "").strip() or "Synthesis returned no content."
         except asyncio.TimeoutError:
             return f"Synthesis timed out. Raw results:\n{task_results_text}"

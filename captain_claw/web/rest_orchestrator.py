@@ -81,12 +81,13 @@ async def rephrase_orchestrator_input(server: WebServer, request: web.Request) -
         user_input=user_input,
     )
 
+    rephrase_messages = [Message(role="user", content=prompt)]
     try:
         import asyncio as _asyncio
 
         response = await _asyncio.wait_for(
             provider.complete(
-                messages=[Message(role="user", content=prompt)],
+                messages=rephrase_messages,
                 tools=None,
                 max_tokens=2000,
             ),
@@ -95,6 +96,23 @@ async def rephrase_orchestrator_input(server: WebServer, request: web.Request) -
         rephrased = str(getattr(response, "content", "") or "").strip()
         if not rephrased:
             rephrased = user_input
+        # File-based session logging
+        from captain_claw.config import get_config as _get_config
+        if _get_config().logging.llm_session_logging:
+            try:
+                from captain_claw.llm_session_logger import get_llm_session_logger
+                llm_log = get_llm_session_logger()
+                llm_log.set_session("orchestrator")
+                llm_log.log_call(
+                    interaction_label="orchestrator_rephrase",
+                    model=str(getattr(provider, "model", "") or ""),
+                    messages=rephrase_messages,
+                    response=response,
+                    instruction_files=["orchestrator_rephrase_prompt.md"],
+                    max_tokens=2000,
+                )
+            except Exception:
+                pass
     except Exception as e:
         log.error("Rephrase failed", error=str(e))
         rephrased = user_input

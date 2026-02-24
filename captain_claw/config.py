@@ -360,6 +360,7 @@ class LoggingConfig(BaseModel):
 
     level: str = "INFO"
     format: str = "console"
+    llm_session_logging: bool = False
 
 
 class TelegramConfig(BaseModel):
@@ -455,7 +456,7 @@ class ScaleConfig(BaseModel):
     # Research extraction settings — used when list items are plain-text
     # entities (company names, product names, etc.) that require web search
     # + web_fetch to gather information.
-    research_search_results: int = 3       # Brave search results per item
+    research_search_results: int = 5       # Brave search results per item
     research_max_chars_per_fetch: int = 15000  # Max chars per fetched page
     research_query_keywords: int = 10     # Max keywords in search query (proper nouns + content words)
 

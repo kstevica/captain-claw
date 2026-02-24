@@ -16,6 +16,7 @@ Rules:
 - Use only the user request + provided context.
 - Extract only members relevant to the user request.
 - Deduplicate members and keep original readable names.
+- IMPORTANT: When member items have associated URLs or website links in the source content, ALWAYS include the URL with the member name using the format `"Member Name — https://example.com"`. This is critical for research tasks — the URL is the primary source for gathering information about the member. Never discard URLs that appear alongside member names in the source material.
 - Prefer `"recommended_strategy": "direct"` by default.
 - Use `"recommended_strategy": "script"` only when the user explicitly asks to generate/build/create a script.
 - If there is no list-style per-member work, return:

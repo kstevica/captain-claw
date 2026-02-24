@@ -692,6 +692,7 @@ class AgentSessionMixin:
         pipeline_mode = "loop"
         monitor_trace_llm = bool(getattr(cfg.ui, "monitor_trace_llm", False))
         monitor_trace_pipeline = bool(getattr(cfg.ui, "monitor_trace_pipeline", True))
+        llm_session_logging = bool(getattr(cfg.logging, "llm_session_logging", False))
         if self.session and isinstance(self.session.metadata, dict):
             planning_meta = self.session.metadata.get("planning")
             if isinstance(planning_meta, dict):
@@ -706,10 +707,13 @@ class AgentSessionMixin:
                 monitor_trace_llm = bool(monitor_meta.get("trace_llm", False))
             if isinstance(monitor_meta, dict) and "trace_pipeline" in monitor_meta:
                 monitor_trace_pipeline = bool(monitor_meta.get("trace_pipeline", True))
+            if isinstance(monitor_meta, dict) and "llm_session_logging" in monitor_meta:
+                llm_session_logging = bool(monitor_meta.get("llm_session_logging", False))
         self.pipeline_mode = pipeline_mode
         self.planning_enabled = self.pipeline_mode == "contracts"
         self.monitor_trace_llm = monitor_trace_llm
         self.monitor_trace_pipeline = monitor_trace_pipeline
+        self.llm_session_logging = llm_session_logging
         memory = getattr(self, "memory", None)
         if memory is not None:
             memory.set_active_session(self.session.id if self.session else None)
@@ -769,6 +773,17 @@ class AgentSessionMixin:
             return
         monitor_meta = self.session.metadata.setdefault("monitor", {})
         monitor_meta["trace_pipeline"] = self.monitor_trace_pipeline
+        monitor_meta["updated_at"] = datetime.now(UTC).isoformat()
+        if persist:
+            await self.session_manager.save_session(self.session)
+
+    async def set_llm_session_logging(self, enabled: bool, persist: bool = True) -> None:
+        """Enable or disable file-based LLM session logging."""
+        self.llm_session_logging = bool(enabled)
+        if not self.session:
+            return
+        monitor_meta = self.session.metadata.setdefault("monitor", {})
+        monitor_meta["llm_session_logging"] = self.llm_session_logging
         monitor_meta["updated_at"] = datetime.now(UTC).isoformat()
         if persist:
             await self.session_manager.save_session(self.session)
