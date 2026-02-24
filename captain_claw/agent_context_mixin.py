@@ -155,7 +155,7 @@ class AgentContextMixin:
     def _extract_mentioned_domains(text: str) -> set[str]:
         """Extract domain names from URLs and domain-like tokens in *text*.
 
-        Returns a set of lowercased hostnames (e.g. ``{"index.hr", "www.index.hr"}``).
+        Returns a set of lowercased hostnames (e.g. ``{"example.com", "www.example.com"}``).
         Used to scope ``_collect_recent_source_urls`` so that only URLs
         relevant to the current request are included.
         """
@@ -168,7 +168,7 @@ class AgentContextMixin:
                     domains.add(host.lower())
             except Exception:
                 pass
-        # 2. Bare domain-like tokens  (e.g. "index.hr", "netokracija.com")
+        # 2. Bare domain-like tokens  (e.g. "example.com", "news.io")
         for token in re.findall(r"\b([a-zA-Z0-9-]+\.[a-zA-Z]{2,})\b", text or ""):
             candidate = token.lower()
             # Simple validation — must have at least one dot and a known-ish TLD length
@@ -203,8 +203,8 @@ class AgentContextMixin:
 
         When *domain_filter* is provided and non-empty, only URLs whose
         hostname matches one of the filter domains are included.  This
-        prevents unrelated URLs from earlier tasks (e.g. netokracija URLs
-        when the current request is about index.hr) from polluting the
+        prevents unrelated URLs from earlier tasks (e.g. news-site URLs
+        when the current request is about a different domain) from polluting the
         planner context and causing wasteful prefetches.
 
         When *domain_filter* is ``None`` or empty (no domain could be

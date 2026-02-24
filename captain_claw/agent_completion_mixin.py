@@ -1,0 +1,259 @@
+"""Completion gate, finalization, and response validation for Agent.
+
+This mixin handles the logic that decides whether a turn's output is
+"done" or needs more iterations:
+
+- Auto-write of requested output files
+- Python worker mode enforcement
+- List member coverage evaluation
+- Task contract completion validation
+- Clarification state updates and session persistence
+- Auto-capture of todos, contacts, scripts, APIs
+
+Extracted from the ``attempt_finalize_response`` nested function inside
+``AgentOrchestrationMixin.complete()`` to reduce the size of the main
+orchestration loop and make the completion logic testable in isolation.
+"""
+
+import json
+from typing import Any
+
+from captain_claw.logging import get_logger
+
+
+log = get_logger(__name__)
+
+
+class AgentCompletionMixin:
+    """Completion gate and response finalization."""
+
+    async def _attempt_finalize_response(
+        self,
+        *,
+        output_text: str,
+        iteration: int,
+        hard_turn_iterations: int,
+        finish_success: bool,
+        effective_user_input: str,
+        user_input: str,
+        turn_start_idx: int,
+        turn_usage: dict[str, int],
+        session_tool_policy: dict[str, Any] | None,
+        planning_pipeline: dict[str, Any] | None,
+        list_task_plan: dict[str, Any],
+        task_contract: dict[str, Any] | None,
+        completion_requirements: list[dict[str, Any]],
+        completion_feedback: str,
+        enforce_python_worker_mode: bool,
+        python_worker_attempted: bool,
+    ) -> tuple[bool, str, bool, str, bool]:
+        """Apply auto-write + completion gate before returning final output.
+
+        Returns:
+            Tuple of (finalized, final_text, finish_success,
+                       updated_completion_feedback, updated_python_worker_attempted).
+
+        When ``finalized`` is True the orchestration loop should return
+        ``final_text`` to the caller.  When False the loop should continue
+        with ``updated_completion_feedback`` injected as a user message.
+        """
+        final_response = await self._maybe_auto_write_requested_output(
+            user_input=effective_user_input,
+            output_text=output_text,
+            turn_start_idx=turn_start_idx,
+            turn_usage=turn_usage,
+            session_policy=session_tool_policy,
+            task_policy=self._active_task_tool_policy_payload(planning_pipeline),
+        )
+        if not str(final_response or "").strip():
+            tool_output_fallback = self._collect_turn_tool_output(turn_start_idx)
+            if str(tool_output_fallback or "").strip():
+                final_response = await self._friendly_tool_output_response(
+                    user_input=effective_user_input,
+                    tool_output=tool_output_fallback,
+                    turn_usage=turn_usage,
+                )
+
+        # ── Python worker enforcement ────────────────────────────────
+        if enforce_python_worker_mode:
+            worker_ran_this_iteration = False
+            has_write = self._turn_has_successful_tool(turn_start_idx, "write")
+            has_shell = self._turn_has_successful_tool(turn_start_idx, "shell")
+            if not (has_write and has_shell) and not python_worker_attempted:
+                python_worker_attempted = True
+                worker_result = await self._run_python_worker_for_list_task(
+                    user_input=effective_user_input,
+                    turn_usage=turn_usage,
+                    list_task_plan=list_task_plan,
+                    planning_pipeline=planning_pipeline,
+                    session_policy=session_tool_policy,
+                    task_policy=self._active_task_tool_policy_payload(planning_pipeline),
+                )
+                self._emit_tool_output(
+                    "task_contract",
+                    {
+                        "step": "python_worker_autorun",
+                        "success": bool(worker_result.get("success", False)),
+                        "attempted": True,
+                    },
+                    json.dumps(worker_result, ensure_ascii=True),
+                )
+                worker_ran_this_iteration = bool(worker_result.get("success", False))
+                has_write = self._turn_has_successful_tool(turn_start_idx, "write")
+                has_shell = self._turn_has_successful_tool(turn_start_idx, "shell")
+            if worker_ran_this_iteration and iteration < (hard_turn_iterations - 1):
+                completion_feedback = (
+                    "Python worker executed successfully.\n"
+                    "Now provide the final answer covering the complete processed list and saved outputs."
+                )
+                return False, "", finish_success, completion_feedback, python_worker_attempted
+            if not (has_write and has_shell):
+                completion_feedback = (
+                    "Completion gate: execute Python worker workflow via tools before finalizing.\n"
+                    "- Generate or refine a Python script/tool that handles the full item list.\n"
+                    "- Run it through shell.\n"
+                    "- Then provide final concise summary."
+                )
+                if iteration < (hard_turn_iterations - 1):
+                    return False, "", finish_success, completion_feedback, python_worker_attempted
+
+        # ── List member coverage ─────────────────────────────────────
+        if bool(list_task_plan.get("enabled", False)):
+            members = list_task_plan.get("members")
+            if isinstance(members, list) and members:
+                _sp = getattr(self, "_scale_progress", None)
+                _sp_items = _sp.get("items", []) if _sp else []
+                _sp_done = _sp.get("done_items", set()) if _sp else set()
+                _sp_total = len(_sp_items)
+                _sp_completed = len(_sp_done)
+                _sp_all_done = _sp_total > 0 and _sp_completed >= _sp_total
+
+                if _sp_all_done:
+                    covered_members = [str(m) for m in members]
+                    missing_members: list[str] = []
+                else:
+                    eval_members = (
+                        [str(m) for m in _sp_items]
+                        if _sp_items and len(_sp_items) > len(members)
+                        else [str(m) for m in members]
+                    )
+                    covered_members, missing_members = self._evaluate_list_member_coverage(
+                        members=eval_members,
+                        candidate_response=final_response,
+                        turn_start_idx=turn_start_idx,
+                    )
+                    if _sp_done and missing_members:
+                        still_missing: list[str] = []
+                        for m in missing_members:
+                            if m in _sp_done:
+                                covered_members.append(m)
+                            else:
+                                still_missing.append(m)
+                        missing_members = still_missing
+
+                self._emit_tool_output(
+                    "completion_gate",
+                    {
+                        "step": "list_member_coverage",
+                        "covered": len(covered_members),
+                        "missing": len(missing_members),
+                        "members": len(members),
+                        "scale_progress_total": _sp_total,
+                        "scale_progress_done": _sp_completed,
+                    },
+                    (
+                        "step=list_member_coverage\n"
+                        f"covered={len(covered_members)}\n"
+                        f"missing={len(missing_members)}\n"
+                        f"members={len(members)}\n"
+                        f"scale_progress_total={_sp_total}\n"
+                        f"scale_progress_done={_sp_completed}"
+                    ),
+                )
+                if missing_members:
+                    completion_feedback = self._build_list_coverage_feedback(
+                        missing_members=missing_members,
+                        strategy=str(list_task_plan.get("strategy", "direct")).strip().lower(),
+                        per_member_action=str(list_task_plan.get("per_member_action", "")).strip(),
+                    )
+                    self._emit_tool_output(
+                        "task_contract",
+                        {
+                            "step": "list_member_retry",
+                            "missing": len(missing_members),
+                        },
+                        completion_feedback,
+                    )
+                    if iteration < (hard_turn_iterations - 1):
+                        return False, "", finish_success, completion_feedback, python_worker_attempted
+
+        # ── Contract completion validation ───────────────────────────
+        if completion_requirements and task_contract is not None:
+            critique = await self._evaluate_contract_completion(
+                user_input=effective_user_input,
+                candidate_response=final_response,
+                contract=task_contract,
+                turn_usage=turn_usage,
+            )
+            checks_ok = bool(critique.get("complete", False))
+            raw_check_results = critique.get("checks", [])
+            check_results = raw_check_results if isinstance(raw_check_results, list) else []
+            failed_items = [item for item in check_results if not bool(item.get("ok", False))]
+            failure_reasons = ", ".join(
+                f"{item.get('id', '')}: {item.get('reason', '')}" for item in failed_items
+            ) or "none"
+            self._emit_tool_output(
+                "completion_gate",
+                {
+                    "step": "validation",
+                    "passed": checks_ok,
+                    "failed_count": len(failed_items),
+                },
+                (
+                    f"step=validation\n"
+                    f"passed={checks_ok}\n"
+                    f"failed_count={len(failed_items)}\n"
+                    f"reasons={failure_reasons}"
+                ),
+            )
+            if planning_pipeline is not None:
+                task_order = self._refresh_pipeline_task_order(planning_pipeline)
+                if task_order:
+                    self._set_pipeline_progress(
+                        planning_pipeline,
+                        current_index=len(task_order) - 1,
+                        current_status="completed" if checks_ok else "in_progress",
+                    )
+                self._update_pipeline_checks(planning_pipeline, check_results)
+                self._emit_pipeline_update(
+                    "validation_passed" if checks_ok else "validation_retry",
+                    planning_pipeline,
+                )
+            if not checks_ok:
+                completion_feedback = self._build_completion_feedback(
+                    contract=task_contract,
+                    critique=critique,
+                )
+                self._emit_tool_output(
+                    "task_contract",
+                    {
+                        "step": "validation_retry",
+                        "missing": len(failed_items),
+                    },
+                    completion_feedback,
+                )
+                if iteration < (hard_turn_iterations - 1):
+                    return False, "", finish_success, completion_feedback, python_worker_attempted
+
+        # ── Finalize: persist and return ─────────────────────────────
+        self._update_clarification_state(
+            user_input=user_input,
+            effective_user_input=effective_user_input,
+            assistant_response=final_response,
+        )
+        await self._persist_assistant_response(final_response)
+        await self._auto_capture_todos(effective_user_input, final_response)
+        await self._auto_capture_contacts(effective_user_input, final_response)
+        await self._auto_capture_scripts(effective_user_input, final_response)
+        await self._auto_capture_apis(effective_user_input, final_response)
+        return True, final_response, finish_success, completion_feedback, python_worker_attempted

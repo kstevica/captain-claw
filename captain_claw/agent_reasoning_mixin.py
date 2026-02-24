@@ -1286,8 +1286,15 @@ class AgentReasoningMixin:
         user_input: str,
         context_excerpt: str,
         turn_usage: dict[str, int],
+        max_tokens_override: int | None = None,
     ) -> dict[str, Any]:
-        """Extract list members from context and select direct vs script strategy."""
+        """Extract list members from context and select direct vs script strategy.
+
+        Args:
+            max_tokens_override: Optional override for the LLM max_tokens.
+                Useful for deferred re-extraction where the context is larger
+                and more members may need to be returned.
+        """
         fallback = {
             "enabled": False,
             "members": [],
@@ -1300,6 +1307,9 @@ class AgentReasoningMixin:
         }
         if not self._is_list_processing_request(user_input):
             return fallback
+
+        _default_max_tokens = min(3000, int(get_config().model.max_tokens))
+        _effective_max_tokens = max_tokens_override if max_tokens_override else _default_max_tokens
 
         messages = [
             Message(
@@ -1322,7 +1332,7 @@ class AgentReasoningMixin:
                 tools=None,
                 interaction_label="list_task_extractor",
                 turn_usage=turn_usage,
-                max_tokens=min(3000, int(get_config().model.max_tokens)),
+                max_tokens=_effective_max_tokens,
             )
             payload = self._extract_json_object(response.content or "")
         except Exception as e:

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from typing import Callable
 
+from captain_claw.agent_completion_mixin import AgentCompletionMixin
 from captain_claw.agent_context_mixin import AgentContextMixin
 from captain_claw.agent_file_ops_mixin import AgentFileOpsMixin
 from captain_claw.agent_guard_mixin import AgentGuardMixin
@@ -13,6 +14,9 @@ from captain_claw.agent_model_mixin import AgentModelMixin
 from captain_claw.agent_orchestration_mixin import AgentOrchestrationMixin
 from captain_claw.agent_pipeline_mixin import AgentPipelineMixin
 from captain_claw.agent_reasoning_mixin import AgentReasoningMixin
+from captain_claw.agent_research_mixin import AgentResearchMixin
+from captain_claw.agent_scale_detection_mixin import AgentScaleDetectionMixin
+from captain_claw.agent_scale_loop_mixin import AgentScaleLoopMixin
 from captain_claw.agent_session_mixin import AgentSessionMixin
 from captain_claw.agent_skills_mixin import AgentSkillsMixin
 from captain_claw.agent_tool_loop_mixin import AgentToolLoopMixin
@@ -27,12 +31,16 @@ from captain_claw.tools import get_tool_registry
 
 class Agent(
     AgentOrchestrationMixin,
+    AgentCompletionMixin,
     AgentFileOpsMixin,
     AgentContextMixin,
     AgentGuardMixin,
     AgentModelMixin,
     AgentPipelineMixin,
     AgentReasoningMixin,
+    AgentResearchMixin,
+    AgentScaleDetectionMixin,
+    AgentScaleLoopMixin,
     AgentSessionMixin,
     AgentSkillsMixin,
     AgentToolLoopMixin,
