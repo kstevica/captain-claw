@@ -56,6 +56,10 @@ class FileRegistry:
         self._mappings: dict[str, str] = {}
         # filename -> list of logical_path keys (for fuzzy lookup)
         self._filename_index: dict[str, list[str]] = {}
+        # Epoch timestamp when the workflow started.  Set by the
+        # orchestrator so that tools like glob can filter out files
+        # created before this run (avoids stale results from prior runs).
+        self.workflow_started_at: float | None = None
 
     # ------------------------------------------------------------------
     # Public API

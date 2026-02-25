@@ -605,6 +605,12 @@ class ToolRegistry:
             except ValueError:
                 effective_saved_base = (effective_base_path / "saved").resolve()
 
+            # Extract workflow_started_at from the shared file registry
+            # so tools like glob can filter to files created during this run.
+            _workflow_started_at = None
+            if file_registry is not None:
+                _workflow_started_at = getattr(file_registry, "workflow_started_at", None)
+
             execute_task = asyncio.create_task(
                 tool.execute(
                     **arguments,
@@ -613,6 +619,7 @@ class ToolRegistry:
                     _session_id=(session_id or "").strip(),
                     _abort_event=tool_abort_event,
                     _file_registry=file_registry,
+                    _workflow_started_at=_workflow_started_at,
                 )
             )
             abort_wait_task = asyncio.create_task(tool_abort_event.wait())

@@ -717,13 +717,26 @@ class AgentOrchestrationMixin:
                     content=str(response.content or ""),
                     tool_calls=self._serialize_tool_calls_for_session(response.tool_calls),
                 )
-                await self._handle_tool_calls(
+                _tool_results = await self._handle_tool_calls(
                     response.tool_calls,
                     turn_usage=turn_usage,
                     session_policy=session_tool_policy,
                     task_policy=active_task_tool_policy,
                     abort_event=turn_abort_event,
                 )
+
+                # ── Free iteration for successful glob ────────────
+                # When glob finds files, the iteration was purely
+                # informational — give the budget back so the agent
+                # can spend it on real work.
+                if _tool_results and any(
+                    str(r.get("tool_name", "")).lower() == "glob"
+                    and r.get("success")
+                    and "No files found" not in str(r.get("content", ""))
+                    for r in _tool_results
+                ):
+                    soft_turn_iterations += 1
+                    hard_turn_iterations += 1
                 if planning_pipeline is not None:
                     activated = self._advance_pipeline(planning_pipeline, event="tool_calls_completed")
                     if activated:
@@ -823,13 +836,24 @@ class AgentOrchestrationMixin:
                     content=str(response.content or ""),
                     tool_calls=self._serialize_tool_calls_for_session(embedded_calls),
                 )
-                await self._handle_tool_calls(
+                _emb_tool_results = await self._handle_tool_calls(
                     embedded_calls,
                     turn_usage=turn_usage,
                     session_policy=session_tool_policy,
                     task_policy=active_task_tool_policy,
                     abort_event=turn_abort_event,
                 )
+
+                # Free iteration for successful glob (embedded path).
+                if _emb_tool_results and any(
+                    str(r.get("tool_name", "")).lower() == "glob"
+                    and r.get("success")
+                    and "No files found" not in str(r.get("content", ""))
+                    for r in _emb_tool_results
+                ):
+                    soft_turn_iterations += 1
+                    hard_turn_iterations += 1
+
                 if planning_pipeline is not None:
                     activated = self._advance_pipeline(planning_pipeline, event="embedded_tool_calls_completed")
                     if activated:

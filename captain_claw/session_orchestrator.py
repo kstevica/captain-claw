@@ -43,6 +43,41 @@ _SYNTHESIZE_MAX_TOKENS = 16000
 # How often to poll for task graph changes during execution.
 _POLL_INTERVAL_SECONDS = 1.0
 
+# Default and ceiling for the worker iteration budget estimator.
+_WORKER_DEFAULT_ITERATIONS = 5
+_WORKER_MAX_ITERATIONS = 20
+
+# Keywords / phrases that each imply at least one extra tool call.
+_COMPLEXITY_SIGNALS: list[tuple[re.Pattern[str], int]] = [
+    # Multi-file operations
+    (re.compile(r"\bread\b.*\bread\b", re.I), 2),      # read multiple files
+    (re.compile(r"\bcombine\b|\bmerge\b|\bassemble\b", re.I), 1),
+    (re.compile(r"\bsummary\.md\b", re.I), 1),
+    # Sending / API calls
+    (re.compile(r"\bsend\b.*\bemail\b|\bemail\b.*\bsend\b", re.I), 2),
+    (re.compile(r"\bmailgun\b|\bsendgrid\b|\bsmtp\b", re.I), 1),
+    (re.compile(r"\bcurl\b|\bshell\b", re.I), 1),
+    (re.compile(r"\battach\b", re.I), 1),
+    # File discovery
+    (re.compile(r"\bfind\b.*\bfiles?\b|\bglob\b|\bsearch\b.*\bfiles?\b", re.I), 1),
+    # General multi-step markers
+    (re.compile(r"\bthen\b", re.I), 1),
+]
+
+
+def _estimate_task_iterations(description: str) -> int:
+    """Estimate how many iterations a worker task will need.
+
+    Scans the task description for complexity signals and returns an
+    iteration budget that is at least ``_WORKER_DEFAULT_ITERATIONS``
+    and at most ``_WORKER_MAX_ITERATIONS``.
+    """
+    budget = _WORKER_DEFAULT_ITERATIONS
+    for pattern, weight in _COMPLEXITY_SIGNALS:
+        if pattern.search(description):
+            budget += weight
+    return min(budget, _WORKER_MAX_ITERATIONS)
+
 
 class SessionOrchestrator:
     """Orchestrates parallel session execution.
@@ -424,6 +459,11 @@ class SessionOrchestrator:
         # 3. ASSIGN SESSIONS
         self._broadcast_event("assigning_sessions", {"task_count": graph.task_count})
         await self._assign_sessions(graph)
+
+        # Record workflow start time so that tools (glob, etc.) can
+        # limit results to files created during this run.
+        if self._file_registry is not None:
+            self._file_registry.workflow_started_at = time.time()
 
         # 4. EXECUTE GRAPH
         self._set_status(f"Orchestrator: executing {graph.task_count} tasks...")
@@ -1047,6 +1087,20 @@ class SessionOrchestrator:
                 task_description=task.description,
                 file_manifest=file_manifest + dep_outputs_section,
             )
+
+            # Bump iteration budget for complex tasks that require
+            # many tool calls (find files + read + write + shell …).
+            estimated = _estimate_task_iterations(task.description)
+            if estimated > agent.max_iterations:
+                log.info(
+                    "Bumping worker max_iterations for complex task",
+                    task_id=task.id,
+                    title=task.title,
+                    default=agent.max_iterations,
+                    estimated=estimated,
+                )
+                agent.max_iterations = estimated
+
             # No asyncio.wait_for timeout — timeout management is handled
             # by tick_timeouts() in the execution loop, which provides
             # a warning phase and user-postpone flow before restarting.
