@@ -57,14 +57,31 @@ class AgentCompletionMixin:
         ``final_text`` to the caller.  When False the loop should continue
         with ``updated_completion_feedback`` injected as a user message.
         """
-        final_response = await self._maybe_auto_write_requested_output(
-            user_input=effective_user_input,
-            output_text=output_text,
-            turn_start_idx=turn_start_idx,
-            turn_usage=turn_usage,
-            session_policy=session_tool_policy,
-            task_policy=self._active_task_tool_policy_payload(planning_pipeline),
+        # Skip auto-write when the scale micro-loop just completed.
+        # The micro-loop already wrote the real content to output files
+        # via _execute_tool_with_guard (which does NOT add tool messages
+        # to the session).  Without this guard,
+        # _maybe_auto_write_requested_output would detect a filename in
+        # the user input, fail to find a write-tool session message, and
+        # auto-write the scale *summary* text as a marker file that
+        # shadows the real output for downstream tasks.
+        _sp = getattr(self, "_scale_progress", None)
+        _scale_completed = (
+            _sp is not None
+            and _sp.get("items")
+            and len(_sp.get("done_items", set())) >= len(_sp["items"])
         )
+        if _scale_completed:
+            final_response = output_text
+        else:
+            final_response = await self._maybe_auto_write_requested_output(
+                user_input=effective_user_input,
+                output_text=output_text,
+                turn_start_idx=turn_start_idx,
+                turn_usage=turn_usage,
+                session_policy=session_tool_policy,
+                task_policy=self._active_task_tool_policy_payload(planning_pipeline),
+            )
         if not str(final_response or "").strip():
             tool_output_fallback = self._collect_turn_tool_output(turn_start_idx)
             if str(tool_output_fallback or "").strip():

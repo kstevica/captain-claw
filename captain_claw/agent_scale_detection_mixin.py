@@ -158,6 +158,24 @@ _LARGE_SCALE_INPUT_PATTERNS = [
 # Count inline URLs to detect user-provided lists even without keywords.
 _INLINE_URL_RE = re.compile(r"https?://[^\s)\]}>\"']+")
 
+# Tasks whose primary purpose is NOT list-processing.  When the task
+# description matches one of these patterns the deferred scale init
+# should NOT fire — otherwise it hijacks the worker and prevents it
+# from completing its actual job (e.g. sending an email, combining
+# files into a single summary, etc.).
+_SKIP_SCALE_DETECTION_RE = re.compile(
+    r"(?:"
+    r"send\s+(?:an?\s+)?(?:email|e-mail|message|notification)"
+    r"|send\s+(?:via|using|through)\s+(?:mailgun|smtp|sendgrid|ses|postmark)"
+    r"|(?:email|e-mail)\s+(?:via|using|through)\b"
+    r"|mailgun|sendgrid|smtp"
+    r"|combine\s+(?:per-day|all|the)\s+(?:the\s+)?(?:markdowns?|files|results)"
+    r"|merge\s+(?:all\s+)?(?:the\s+)?(?:files|results|outputs)"
+    r"|produce\s+\d+-paragraph\s+summary"
+    r")",
+    re.IGNORECASE,
+)
+
 
 class AgentScaleDetectionMixin:
     """Scale detection, advisory injection, and deferred scale init."""
@@ -302,8 +320,21 @@ class AgentScaleDetectionMixin:
 
         Returns the updated ``list_task_plan`` (unchanged if no new members).
         """
-        # Only attempt once per turn to avoid wasting tokens.
-        if getattr(self, "_deferred_scale_attempted", False):
+        # ── Skip scale detection for non-scalable tasks ──
+        # Tasks like "send email via Mailgun" or "combine per-day markdowns"
+        # should NEVER be hijacked by the scale micro-loop.  Without this
+        # guard, the deferred init detects file paths/names in the session
+        # as "members" and starts a useless micro-loop that prevents the
+        # worker from completing its real job.
+        if _SKIP_SCALE_DETECTION_RE.search(effective_user_input):
+            return list_task_plan
+
+        # Limit attempts to avoid wasting tokens.  Allow up to 3 tries
+        # because the LLM list extraction can randomly fail on the first
+        # attempt (especially when two workers run in parallel and the
+        # source content is large or complex).
+        _attempts = getattr(self, "_deferred_scale_attempts", 0)
+        if _attempts >= 3:
             return list_task_plan
         sp = getattr(self, "_scale_progress", None)
         _existing_items = sp.get("items", []) if sp else []
@@ -339,8 +370,8 @@ class AgentScaleDetectionMixin:
             )
             return list_task_plan
 
-        # Mark as attempted so we don't re-run on every iteration.
-        self._deferred_scale_attempted = True
+        # Increment attempt counter to limit retries.
+        self._deferred_scale_attempts = _attempts + 1
 
         log.info(
             "Deferred scale init: re-running list extraction",
@@ -375,7 +406,15 @@ class AgentScaleDetectionMixin:
             return list_task_plan
 
         # Initialize scale progress with the newly discovered members.
-        self._scale_progress = self._init_scale_progress_from_plan(new_plan)
+        self._scale_progress = self._init_scale_progress_from_plan(
+            new_plan, user_input=effective_user_input,
+        )
+
+        # For inline extraction mode, store the full source page content
+        # so the micro-loop can feed it (rather than tiny _member_context
+        # snippets) to the per-item LLM calls.
+        if self._scale_progress.get("_extraction_mode") == "inline" and new_context:
+            self._scale_progress["_source_page_content"] = new_context
 
         # Inject scale advisory into effective user input.
         _out_strategy = str(new_plan.get("output_strategy", "single_file")).strip().lower()
@@ -414,16 +453,26 @@ class AgentScaleDetectionMixin:
     def _init_scale_progress_from_plan(
         self,
         plan: dict[str, Any],
+        user_input: str = "",
     ) -> dict[str, Any]:
         """Build the ``_scale_progress`` dict from a list_task_plan.
 
         Centralizes the duplicated scale-progress initialization that
         previously appeared in multiple places in ``complete()``.
+
+        Args:
+            plan: The list_task_plan dict with members, per_member_action, etc.
+            user_input: Raw user input / task description — used to detect
+                explicit no-external-fetch signals (e.g. "do not follow links").
         """
         members = plan.get("members", [])
         _out_strategy = str(plan.get("output_strategy", "single_file")).strip().lower()
         if _out_strategy not in ("file_per_item", "single_file", "no_file"):
             _out_strategy = "single_file"
+
+        # For single_file strategy, the plan may include an output_file field
+        # that the LLM derived from the task description.
+        _plan_output_file = str(plan.get("output_file", "")).strip()
 
         progress: dict[str, Any] = {
             "total": len(members),
@@ -432,10 +481,12 @@ class AgentScaleDetectionMixin:
             "done_items": set(),
             "_output_strategy": _out_strategy,
             "_output_filename_template": str(plan.get("output_filename_template", "")).strip(),
+            "_output_file_from_plan": _plan_output_file,
             "_final_action": str(plan.get("final_action", "write_file")).strip(),
             "_extraction_mode": self._classify_item_extraction_mode(
                 members,
                 per_member_action=str(plan.get("per_member_action", "")),
+                user_input=user_input,
             ),
             "_member_context": plan.get("member_context") or {},
         }

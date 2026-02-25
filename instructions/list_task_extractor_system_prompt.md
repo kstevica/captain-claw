@@ -10,6 +10,7 @@ Return ONLY a JSON object (no markdown, no code fences):
   "confidence": "high",
   "output_strategy": "file_per_item",
   "output_filename_template": "FinSMEs-{member_label}.csv",
+  "output_file": "",
   "final_action": "write_file"
 }
 
@@ -32,6 +33,7 @@ Output strategy detection — carefully analyze the user's request to determine 
   - `"single_file"` — the user wants ALL results combined into ONE output file (e.g. "write everything to results.csv", "append all to output.md")
   - `"no_file"` — the result should NOT be written to a file (e.g. "send the result to email", "index this on typesense", "post to API", "reply with the results")
 - `output_filename_template` — when `output_strategy` is `"file_per_item"`, provide the filename pattern with `{member_label}` as placeholder for the per-item identifier. Extract the pattern from the user's naming instruction (e.g. "FinSMEs-[provided_date].csv" → `"FinSMEs-{member_label}.csv"`). Leave empty for `"single_file"` or `"no_file"`.
+- `output_file` — when `output_strategy` is `"single_file"`, provide the output filename that the user wants (e.g. "results.md", "FinSMEs-31.07.2025.md"). Extract this from the user's request or task description. If the user doesn't specify a filename, derive one from the task context (e.g. task about "FinSMEs 31.07.2025" → "FinSMEs-31.07.2025.md"). Leave empty for `"file_per_item"` or `"no_file"`.
 - `final_action` — what should happen with each processed result:
   - `"write_file"` — write to file(s) (default for file_per_item and single_file)
   - `"reply"` — return the result in the chat response

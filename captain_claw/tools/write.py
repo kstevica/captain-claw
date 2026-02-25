@@ -63,8 +63,31 @@ class WriteTool(Tool):
 
     @staticmethod
     def _normalize_under_saved(path: str, saved_root: Path, session_id: str) -> Path:
-        """Map any requested path into the saved root and enforce session scoping."""
+        """Map any requested path into the saved root and enforce session scoping.
+
+        Paths under ``<workspace>/output/`` (the workspace root's ``output/``
+        directory, parallel to ``saved/``) are passed through directly so that
+        the scale micro-loop and other internal framework code can write to a
+        well-known output directory outside the ``saved/`` hierarchy.
+        """
         requested = Path(path).expanduser()
+
+        # ── Passthrough for <workspace>/output/ paths ──
+        # saved_root is typically <workspace>/saved.  The workspace root is
+        # its parent.  If the requested absolute path falls under
+        # <workspace>/output/ we allow it directly (still within the
+        # workspace sandbox).
+        if requested.is_absolute():
+            absolute = requested.resolve()
+            workspace_root = saved_root.parent
+            output_root = (workspace_root / "output").resolve()
+            try:
+                absolute.relative_to(output_root)
+                # Path is under <workspace>/output/ — allow it directly.
+                return absolute
+            except ValueError:
+                pass
+
         if requested.is_absolute():
             absolute = requested.resolve()
             try:
@@ -82,7 +105,7 @@ class WriteTool(Tool):
         if safe_parts and safe_parts[0].lower() == "saved":
             safe_parts = safe_parts[1:] or ["output.txt"]
 
-        categories = {"downloads", "media", "scripts", "showcase", "skills", "tmp", "tools"}
+        categories = {"downloads", "media", "output", "scripts", "showcase", "skills", "tmp", "tools"}
         scoped_parts: list[str]
         if safe_parts[0] in categories:
             if len(safe_parts) >= 2 and safe_parts[1] == session_id:

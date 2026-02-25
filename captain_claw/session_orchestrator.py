@@ -763,6 +763,9 @@ class SessionOrchestrator:
 
                 # Tick timeouts and broadcast warning/countdown events.
                 timeout_result = graph.tick_timeouts()
+                # Auto-postpone tasks whose workers are actively making
+                # scale micro-loop progress — prevents premature restart.
+                self._auto_postpone_scale_workers(graph, timeout_result)
                 await self._broadcast_timeout_events(timeout_result)
 
                 # Activate newly ready tasks.
@@ -787,6 +790,113 @@ class SessionOrchestrator:
         finally:
             await self._cancel_pending_futures()
             self._execution_done = True
+
+    def _auto_postpone_scale_workers(
+        self,
+        graph: TaskGraph,
+        timeout_result: dict[str, Any],
+    ) -> None:
+        """Auto-postpone timeout warnings for workers with active scale loops.
+
+        When a worker agent is running a scale micro-loop (processing many
+        items), the default 300s timeout is often too short.  Instead of
+        restarting the worker (which loses all micro-loop progress), we
+        check whether the worker has made recent scale progress and
+        auto-postpone the timeout if so.
+
+        Checks three categories:
+        1. ``warned`` — tasks that just entered the warning phase
+        2. ``countdown`` — tasks already in warning (from a prior tick)
+        3. ``restarted`` — tasks whose grace expired (rescue before restart)
+
+        Mutates ``timeout_result`` in place — removes auto-postponed tasks
+        from the affected lists so they aren't broadcast / restarted.
+        """
+        # Maximum age (seconds) of last scale progress to consider "active".
+        # If the worker hasn't processed any item for 3 minutes, it's likely
+        # genuinely stuck and should receive the timeout warning.
+        _MAX_PROGRESS_AGE = 180.0
+
+        warned = timeout_result.get("warned", [])
+        countdown = timeout_result.get("countdown", [])
+        restarted = timeout_result.get("restarted", [])
+
+        if not warned and not countdown and not restarted:
+            return
+
+        auto_postponed: set[str] = set()
+
+        # 1. Newly warned tasks — postpone if worker has recent progress.
+        for tid in list(warned):
+            task = graph.get_task(tid)
+            if task is None:
+                continue
+            age = self._pool.get_scale_progress_age(task.session_id)
+            if age is not None and age < _MAX_PROGRESS_AGE:
+                if graph.postpone_task(tid):
+                    auto_postponed.add(tid)
+                    log.info(
+                        "Auto-postponed scale worker timeout (warned)",
+                        task_id=tid,
+                        title=task.title,
+                        last_progress_age_sec=round(age, 1),
+                    )
+
+        # 2. Countdown tasks (already in warning from a prior tick) —
+        #    postpone before the grace period expires.
+        for entry in list(countdown):
+            tid = entry.get("task_id", "")
+            if tid in auto_postponed:
+                continue
+            task = graph.get_task(tid)
+            if task is None:
+                continue
+            age = self._pool.get_scale_progress_age(task.session_id)
+            if age is not None and age < _MAX_PROGRESS_AGE:
+                if graph.postpone_task(tid):
+                    auto_postponed.add(tid)
+                    log.info(
+                        "Auto-postponed scale worker timeout (countdown)",
+                        task_id=tid,
+                        title=task.title,
+                        last_progress_age_sec=round(age, 1),
+                    )
+
+        # 3. Restarted tasks — rescue before the restart takes effect.
+        #    tick_timeouts() already set these to PENDING, but the worker
+        #    future hasn't been cancelled yet.  Reset to RUNNING so the
+        #    existing worker can continue.
+        for tid in list(restarted):
+            task = graph.get_task(tid)
+            if task is None:
+                continue
+            age = self._pool.get_scale_progress_age(task.session_id)
+            if age is not None and age < _MAX_PROGRESS_AGE:
+                # Undo the restart: set back to RUNNING with a fresh timer.
+                task.status = RUNNING
+                task.started_at = time.monotonic()
+                task.timeout_warning_at = 0.0
+                task.error = ""
+                task.retries = max(0, task.retries - 1)  # undo the retry bump
+                auto_postponed.add(tid)
+                log.info(
+                    "Rescued scale worker from restart",
+                    task_id=tid,
+                    title=task.title,
+                    last_progress_age_sec=round(age, 1),
+                )
+
+        if auto_postponed:
+            timeout_result["warned"] = [
+                tid for tid in warned if tid not in auto_postponed
+            ]
+            timeout_result["countdown"] = [
+                c for c in countdown
+                if c.get("task_id") not in auto_postponed
+            ]
+            timeout_result["restarted"] = [
+                tid for tid in restarted if tid not in auto_postponed
+            ]
 
     async def _broadcast_timeout_events(self, timeout_result: dict[str, Any]) -> None:
         """Broadcast timeout warning, countdown, restart, and failure events."""

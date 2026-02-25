@@ -782,6 +782,7 @@ class AgentToolLoopMixin:
                             sp["_extraction_mode"] = self._classify_item_extraction_mode(
                                 lines,
                                 per_member_action=str(sp.get("_per_member_action", "")),
+                                user_input=str(sp.get("_per_member_action", "")),
                             )
                             # Mark glob as completed so the scale guard
                             # blocks any subsequent re-glob attempts.

@@ -480,7 +480,7 @@ class OrchestratorConfig(BaseModel):
     max_parallel: int = 5
     max_agents: int = 50
     idle_evict_seconds: float = 300.0
-    worker_timeout_seconds: float = 300.0
+    worker_timeout_seconds: float = 600.0
     timeout_grace_seconds: float = 60.0
     worker_max_retries: int = 2
 

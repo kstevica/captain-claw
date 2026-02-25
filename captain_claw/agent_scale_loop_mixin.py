@@ -60,6 +60,23 @@ class AgentScaleLoopMixin:
     # Regex to find the first URL embedded anywhere in a string.
     _URL_RE = re.compile(r"https?://[^\s)\]}>\"']+")
 
+    # Regex to extract an output filename from a task description.
+    # Matches patterns like:
+    #   "write results to FinSMEs-30.07.2025.md"
+    #   "output to report.csv"
+    #   "save to summary.json"
+    #   "name the output file report.md"
+    _OUTPUT_FILE_RE = re.compile(
+        r"(?:"
+        r"write\s+(?:(?:the\s+)?results?\s+)?(?:in)?to"
+        r"|output\s+(?:in)?to"
+        r"|save\s+(?:(?:the\s+)?results?\s+)?(?:in)?to"
+        r"|(?:name|call)\s+(?:the\s+)?(?:output\s+)?file"
+        r"|(?:in)?to\s+(?:a\s+)?(?:file\s+)?(?:named|called)"
+        r")\s+['\"]?([^\s'\",:;]+\.(?:md|csv|json|txt|html|xml|yaml|yml|tsv))['\"]?",
+        re.IGNORECASE,
+    )
+
     # File extensions recognised as "file" items during classification.
     _KNOWN_FILE_EXTS = frozenset({
         ".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".md", ".csv",
@@ -477,6 +494,12 @@ class AgentScaleLoopMixin:
                 f"Process the NEXT entity in this list. Search the web for it, "
                 f"synthesize the findings, then immediately {write_instr}"
             )
+        elif extraction_mode == "inline":
+            lines.append(
+                f"Process the NEXT item in this list using ONLY the information "
+                f"already available from the source page — do NOT fetch any URLs "
+                f"or search the web. Then immediately {write_instr}"
+            )
         elif has_paths:
             lines.append(
                 f"Process the NEXT item in this list. Extract/read it, "
@@ -545,17 +568,37 @@ class AgentScaleLoopMixin:
         r"explore|deep dive)\b",
         re.IGNORECASE,
     )
+    # User-level signals that forbid external fetching / link following.
+    # Checked against the raw user input / task description so that explicit
+    # instructions like "do not follow any links" suppress research mode even
+    # when items look like named entities with URLs.
+    _NO_EXTERNAL_FETCH_RE = re.compile(
+        r"(?:"
+        r"do\s+not\s+(?:follow|visit|fetch|open|click|search|browse)(?:\s+or\s+(?:follow|visit|fetch|open|click|search|browse))?\s+(?:any\s+)?(?:other\s+)?(?:links?|urls?|pages?|external)"
+        r"|(?:don'?t|never)\s+(?:follow|visit|fetch|open|click|search|browse)(?:\s+or\s+(?:follow|visit|fetch|open|click|search|browse))?\s+(?:any\s+)?(?:other\s+)?(?:links?|urls?|pages?|external)"
+        r"|read\s+only\s+(?:that|the|this)\s+(?:single\s+)?page"
+        r"|only\s+(?:read|use|extract\s+from)\s+(?:that|the|this)\s+(?:single\s+)?page"
+        r"|(?:no|without)\s+(?:external|additional|extra)\s+(?:fetching|searching|browsing|requests)"
+        r"|single[- ]page\s+(?:only|extraction)"
+        r"|do\s+not\s+(?:fetch|visit|open)\s+(?:or\s+(?:fetch|visit|open)\s+)?any\s+other"
+        r")",
+        re.IGNORECASE,
+    )
 
     @staticmethod
     def _classify_item_extraction_mode(
         items: list[str],
         per_member_action: str = "",
+        user_input: str = "",
     ) -> str:
         """Classify list items into an extraction mode.
 
         Samples up to 10 items and votes:
         - ``"url"``      — majority are pure HTTP(S) URLs (no name prefix),
           OR labelled URLs where the prefix is a date/metadata label
+        - ``"inline"``   — same as ``"url"`` but the user explicitly forbade
+          external fetching; each item is processed using only the
+          ``_member_context`` snippet from the already-fetched page
         - ``"file"``     — majority contain path separators or known extensions
         - ``"research"`` — majority are plain-text entities (names, titles),
           OR entities with accompanying URLs (``"Name — https://…"``)
@@ -572,6 +615,11 @@ class AgentScaleLoopMixin:
         "extract from page" without mentioning "research"/"search", labelled
         URLs are classified as ``"url"`` mode.
 
+        When ``user_input`` is provided, it is checked for explicit
+        no-external-fetch signals (e.g. "do not follow any links",
+        "read only that page").  These override entity-name heuristics
+        so that named URLs are treated as plain URLs (no research).
+
         The result is stored once in ``_scale_progress["_extraction_mode"]``
         so the micro-loop knows which extraction strategy to use.
         """
@@ -586,6 +634,16 @@ class AgentScaleLoopMixin:
         _action_says_research = bool(
             AgentScaleLoopMixin._RESEARCH_SIGNAL_RE.search(_action)
         ) if _action else False
+
+        # ── Check user_input for no-external-fetch signals ──
+        # The user's raw instructions override automatic heuristics: if they
+        # say "do not follow any links" or "read only that page", we suppress
+        # research mode even when items look like named entities with URLs.
+        _user_forbids_external = bool(
+            AgentScaleLoopMixin._NO_EXTERNAL_FETCH_RE.search(user_input)
+        ) if user_input else False
+        if _user_forbids_external:
+            _action_says_fetch_only = True
 
         sample = items[:10]
         pure_url_count = 0
@@ -638,6 +696,11 @@ class AgentScaleLoopMixin:
         # Only entity names (+ named URLs) count toward research.
         research_count = entity_count + named_url_count
         if url_count >= n * 0.5:
+            # User explicitly said "do not fetch/follow links" — use inline
+            # extraction from already-fetched page content (_member_context)
+            # instead of fetching each URL individually.
+            if _user_forbids_external:
+                return "inline"
             return "url"
         if research_count >= n * 0.5:
             return "research"
@@ -813,6 +876,30 @@ class AgentScaleLoopMixin:
                 "- Keep it human-readable: headings, bold labels, short paragraphs.\n"
                 f"{output_instruction}"
             )
+        elif extraction_mode == "inline":
+            system_text = (
+                "You are a document processing assistant. Your job is to process "
+                "ONE item and produce a focused summary or processed result.\n\n"
+                "Rules:\n"
+                "- The EXTRACTED CONTENT below is the FULL source page that contains "
+                "information about MANY items. Focus ONLY on the specific ITEM "
+                "identified above — find the section about that item and extract "
+                "every detail available for it.\n"
+                "- This page content is ALL the information available — do NOT "
+                "indicate that you need to fetch more information.\n"
+                "- If a field is not mentioned on the page for this item, write "
+                "'N/A' — do not guess or fabricate.\n"
+                "- Produce ONLY the processed result/summary for this single item.\n"
+                "- Do NOT include any preamble, commentary, or meta-discussion.\n"
+                "- Do NOT ask the user any questions.\n"
+                "- Do NOT mention other items, the total count, or the overall task.\n"
+                "- Do NOT echo or reproduce the extracted content — summarize it.\n"
+                "- NEVER include 'EXTRACTED CONTENT' sections in your output.\n"
+                "- Use Markdown with headings and **bold labels** for structure. "
+                "NEVER output Markdown tables (no | pipes) or CSV/TSV rows — "
+                "use labeled fields instead (e.g. **Field**: value).\n"
+                f"{output_instruction}"
+            )
         else:
             system_text = (
                 "You are a document processing assistant. Your job is to process "
@@ -891,6 +978,129 @@ class AgentScaleLoopMixin:
         if output_dir:
             return os.path.join(output_dir, filename)
         return filename
+
+    @staticmethod
+    def _extract_output_filename(text: str) -> str:
+        """Try to extract an output filename from a task description.
+
+        Looks for patterns like "write results to FILENAME.md" in the text.
+        Returns the extracted filename or empty string if not found.
+        """
+        m = AgentScaleLoopMixin._OUTPUT_FILE_RE.search(text)
+        return m.group(1).strip() if m else ""
+
+    @staticmethod
+    def _derive_output_filename_from_context(text: str) -> str:
+        """Derive an output filename from the task context text.
+
+        Extracts the task title from a worker prompt (format:
+        ``Task: {title}\\n``) and sanitizes it into a valid filename.
+        Common action prefixes (e.g. "Fetch and extract", "Process")
+        and filler words (e.g. "page", "data for") are stripped to
+        produce cleaner filenames like ``FinSMEs-31.07.2025.md``
+        instead of ``Fetch_and_extract_FinSMEs_page_31.07.2025.md``.
+
+        Returns a sanitized filename or empty string if no title can
+        be extracted.
+        """
+        # Try to extract task title from worker prompt format.
+        title_match = re.match(r"Task:\s*(.+)", text.strip())
+        if not title_match:
+            return ""
+        title = title_match.group(1).strip()
+        if not title:
+            return ""
+
+        # ---- Strip common action-verb prefixes ----
+        # These are typical task-title prefixes generated by the LLM
+        # decomposer that add no value to the filename.
+        _PREFIX_RE = re.compile(
+            r"^(?:"
+            r"fetch\s+and\s+extract"
+            r"|fetch\s+and\s+process"
+            r"|fetch\s+and\s+analyze"
+            r"|fetch\s+and\s+summarize"
+            r"|extract\s+and\s+process"
+            r"|extract\s+and\s+analyze"
+            r"|extract\s+and\s+summarize"
+            r"|collect\s+and\s+process"
+            r"|collect\s+and\s+extract"
+            r"|scrape\s+and\s+extract"
+            r"|download\s+and\s+extract"
+            r"|download\s+and\s+process"
+            r"|fetch|extract|process|analyze|summarize"
+            r"|collect|scrape|download|parse|retrieve"
+            r"|gather|compile|generate|create|produce"
+            r"|build|prepare|get|read|pull"
+            r")\s+",
+            re.IGNORECASE,
+        )
+        title = _PREFIX_RE.sub("", title)
+
+        # ---- Strip filler words that commonly wrap the core topic ----
+        # e.g. "FinSMEs page 31.07.2025" → "FinSMEs 31.07.2025"
+        #       "data for FinSMEs 31.07.2025" → "FinSMEs 31.07.2025"
+        _FILLER_RE = re.compile(
+            r"\b(?:page|pages|data\s+for|data\s+from|details?\s+from"
+            r"|details?\s+for|info\s+from|info\s+for"
+            r"|information\s+from|information\s+for"
+            r"|content\s+from|content\s+for|results?\s+from"
+            r"|results?\s+for|entries?\s+from|entries?\s+for)\b",
+            re.IGNORECASE,
+        )
+        title = _FILLER_RE.sub("", title)
+
+        # Collapse whitespace left after stripping.
+        title = re.sub(r"\s+", " ", title).strip()
+        if not title:
+            return ""
+
+        # Truncate to a reasonable length for a filename.
+        title = title[:80]
+        # Sanitize: keep alphanumeric, dots, hyphens; replace spaces
+        # with hyphens for readability, everything else with underscores.
+        safe = re.sub(r"\s+", "-", title)
+        safe = re.sub(r"[^\w.\-]", "_", safe)
+        # Collapse multiple underscores/hyphens and strip edges.
+        safe = re.sub(r"[-_]{2,}", "-", safe).strip("-_")
+        if not safe:
+            return ""
+        return f"{safe}.md"
+
+    def _resolve_scale_output_path(self, filename_or_path: str) -> str:
+        """Resolve a scale output filename to ``<workspace>/output/<session>/``.
+
+        If the agent has a known workspace base path and the filename is not
+        already absolute, this constructs the full absolute path under the
+        workspace ``output/<session>/`` directory.  The write tool recognises
+        absolute paths under ``<workspace>/output/`` and passes them through
+        without remapping into the ``saved/`` hierarchy.
+
+        If ``workspace_base_path`` is unavailable (unlikely for worker agents)
+        the filename is returned unchanged and the write tool will apply its
+        default scoping rules.
+        """
+        from pathlib import Path as _Path
+
+        if not filename_or_path:
+            return filename_or_path
+
+        # Already absolute — respect it as-is.
+        if _Path(filename_or_path).is_absolute():
+            return filename_or_path
+
+        workspace = getattr(self, "workspace_base_path", None)
+        if workspace is None:
+            return filename_or_path
+
+        session_slug = (
+            self._current_session_slug()
+            if hasattr(self, "_current_session_slug")
+            else "default"
+        )
+        output_dir = _Path(workspace) / "output" / session_slug
+        resolved = str(output_dir / filename_or_path)
+        return resolved
 
     # ------------------------------------------------------------------
     # Micro-turn scale loop — isolated per-item processing
@@ -1138,6 +1348,21 @@ class AgentScaleLoopMixin:
                     done_items.add(item)
                     sp["done_items"] = done_items
                     continue
+
+            elif _extraction_mode == "inline":
+                # Inline mode: user explicitly forbade external fetching.
+                # Use the full source page content (stored during deferred
+                # scale init) so the LLM has maximum context for extraction.
+                # Fall back to the _member_context snippet if no full page
+                # content is available.
+                _full_source = str(sp.get("_source_page_content", "")).strip() if sp else ""
+                if _full_source:
+                    extracted_content = _full_source
+                else:
+                    _member_ctx_map_i: dict[str, str] = sp.get("_member_context", {}) if sp else {}
+                    extracted_content = _member_ctx_map_i.get(item, "")
+                    if not extracted_content and item_label != item:
+                        extracted_content = _member_ctx_map_i.get(item_label, "")
 
             else:
                 # Standard mode: single-tool extraction (read, web_fetch, pdf_extract, etc.)
@@ -1438,15 +1663,28 @@ class AgentScaleLoopMixin:
                     # resolves it under the saved root) so the tool doesn't
                     # double-resolve an already-absolute path.
                     write_path_arg = sp.get("_output_file_arg", output_file)
-                    # Fallback: if we still have no output file (early takeover
-                    # before the LLM wrote anything), use the filename template
-                    # or generate a default name.
+                    # Fallback chain when no output file is known yet
+                    # (early takeover before the LLM wrote anything):
+                    # 1. Filename template from scale progress (file_per_item)
+                    # 2. output_file from plan (LLM-derived for single_file)
+                    # 3. Extract filename from task description regex
+                    # 4. Derive from worker task title (unique per worker)
+                    # 5. Last resort: "scale_output.md"
                     if not write_path_arg:
                         write_path_arg = (
                             str(sp.get("_output_filename_template", "")).strip()
+                            or str(sp.get("_output_file_from_plan", "")).strip()
+                            or self._extract_output_filename(task_description)
+                            or self._derive_output_filename_from_context(task_description)
                             or "scale_output.md"
                         )
                     write_append = True
+
+                # ── Resolve to absolute path under <workspace>/output/<session>/ ──
+                # Force all scale micro-loop output into the workspace output
+                # directory so files are easy to find regardless of whether the
+                # micro-loop or the LLM picks the filename.
+                write_path_arg = self._resolve_scale_output_path(write_path_arg)
 
                 try:
                     write_result = await self._execute_tool_with_guard(
@@ -1522,6 +1760,10 @@ class AgentScaleLoopMixin:
             sp["done_items"] = done_items
             sp["completed"] = len(done_items)
             processed += 1
+
+            # Signal progress to the orchestrator so it can auto-postpone
+            # timeout warnings for workers with active scale loops.
+            self._scale_last_progress_at = _time.monotonic()
             # Store a clean version for FORMAT REFERENCE — strip any
             # leaked extracted content echoes.
             _last = _clean

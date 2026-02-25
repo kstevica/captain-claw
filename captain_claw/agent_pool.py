@@ -246,6 +246,20 @@ class AgentPool:
             log.info("Evicted idle agents", count=len(to_evict), remaining=len(self._agents))
         return len(to_evict)
 
+    def get_scale_progress_age(self, session_id: str) -> float | None:
+        """Return seconds since the agent's last scale micro-loop progress.
+
+        Returns None if no agent exists for session_id or if the agent
+        has no recorded scale progress (not running a micro-loop).
+        """
+        agent = self._agents.get(session_id)
+        if agent is None:
+            return None
+        last_at = getattr(agent, "_scale_last_progress_at", 0.0)
+        if last_at <= 0:
+            return None
+        return time.monotonic() - last_at
+
     async def shutdown(self) -> None:
         """Release all agents from the pool."""
         async with self._lock:

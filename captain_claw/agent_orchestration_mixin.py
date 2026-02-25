@@ -58,7 +58,7 @@ class AgentOrchestrationMixin:
         # Scale-progress tracker: populated when the scale advisory fires.
         # The tool loop uses this to emit "3 of 27 (11%)" progress.
         self._scale_progress: dict[str, Any] | None = None
-        self._deferred_scale_attempted: bool = False
+        self._deferred_scale_attempts: int = 0
         planning_pipeline: dict[str, Any] | None = None
         recent_source_urls: list[str] = []
         effective_user_input = user_input
@@ -310,8 +310,12 @@ class AgentOrchestrationMixin:
                 self._scale_progress["_extraction_mode"] = self._classify_item_extraction_mode(
                     list_members,
                     per_member_action=str(list_task_plan.get("per_member_action", "")),
+                    user_input=effective_user_input,
                 )
                 self._scale_progress["_member_context"] = list_task_plan.get("member_context") or {}
+                # For inline mode, store source page content for per-item LLM calls
+                if self._scale_progress.get("_extraction_mode") == "inline" and list_context_excerpt:
+                    self._scale_progress["_source_page_content"] = list_context_excerpt
 
         # ── Contract pipeline ─────────────────────────────────────
         if use_contract_pipeline:
@@ -365,6 +369,7 @@ class AgentOrchestrationMixin:
                 sp["_extraction_mode"] = self._classify_item_extraction_mode(
                     prefetch_urls,
                     per_member_action=str(list_task_plan.get("per_member_action", "")),
+                    user_input=effective_user_input,
                 )
 
         # ── Planning pipeline setup ───────────────────────────────
@@ -399,7 +404,14 @@ class AgentOrchestrationMixin:
             and bool(list_task_plan.get("enabled", False))
             and len(list_task_plan.get("members", [])) >= _lw_min
         ):
-            self._scale_progress = self._init_scale_progress_from_plan(list_task_plan)
+            self._scale_progress = self._init_scale_progress_from_plan(
+                list_task_plan, user_input=effective_user_input,
+            )
+            # For inline mode, store the full source page content so the
+            # micro-loop can feed the entire page (not just tiny snippets)
+            # to per-item LLM calls.
+            if self._scale_progress.get("_extraction_mode") == "inline" and list_context_excerpt:
+                self._scale_progress["_source_page_content"] = list_context_excerpt
             self._emit_tool_output(
                 "task_contract",
                 {
