@@ -17,6 +17,7 @@ class GlobTool(Tool):
 
     name = "glob"
     description = "Find files matching a glob pattern."
+    timeout_seconds = 10.0  # glob is a local FS scan — 10 s is ample
     parameters = {
         "type": "object",
         "properties": {
@@ -54,7 +55,13 @@ class GlobTool(Tool):
             ToolResult with matching files
         """
         try:
-            # Set root
+            # Set root — fall back to workspace base path when no explicit
+            # root is given so that relative patterns like "pdf-test/**/*.pdf"
+            # resolve against the workspace directory, not the process cwd.
+            if not root:
+                runtime_base = kwargs.get("_runtime_base_path")
+                if runtime_base is not None:
+                    root = str(runtime_base)
             if root:
                 pattern = str(Path(root) / pattern)
             
@@ -67,13 +74,25 @@ class GlobTool(Tool):
             
             # Apply limit
             matches = matches[:limit]
-            
+
             if not matches:
                 return ToolResult(
                     success=True,
                     content=f"No files found matching: {pattern}",
                 )
-            
+
+            # Return workspace-relative paths when the root was auto-resolved
+            # to the workspace base.  This ensures paths like
+            # "pdf-test/subfolder/file.pdf" are returned instead of long
+            # absolute paths, keeping output concise and consistent with how
+            # other tools accept relative paths.
+            if root:
+                root_prefix = str(Path(root).resolve()) + "/"
+                matches = [
+                    m[len(root_prefix):] if m.startswith(root_prefix) else m
+                    for m in matches
+                ]
+
             # Format output
             output = f"Found {len(matches)} file(s):\n"
             output += "\n".join(f"  {m}" for m in matches)

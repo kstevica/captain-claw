@@ -957,7 +957,7 @@ The full scale advisory also activates when input patterns suggest large-scale w
 
 **Output strategy:** The scale system automatically detects whether results should go to a single combined file (`append=true`), separate per-item files, or no file at all (e.g. email, API). This is extracted from the user's prompt by the list-task planner. Examples:
 
-- `"Name the output file FinSMEs-[date].csv"` → **file_per_item** — each item gets its own file
+- `"Name the output file report-[date].csv"` → **file_per_item** — each item gets its own file
 - `"Write all results to summary.md"` → **single_file** — everything appends to one file
 - `"Send the results to email"` → **no_file** — no file output, results delivered via email/API
 

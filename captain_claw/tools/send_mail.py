@@ -120,9 +120,16 @@ class SendMailTool(Tool):
         # -- read attachment files ------------------------------------------
         attachment_data: list[dict[str, Any]] = []
         max_bytes = int(mail_cfg.max_attachment_bytes or 26214400)
+        runtime_base = kwargs.get("_runtime_base_path")
 
         for raw_path in attachments or []:
-            file_path = Path(raw_path).expanduser().resolve()
+            raw = Path(raw_path).expanduser()
+            if raw.is_absolute():
+                file_path = raw.resolve()
+            elif runtime_base is not None:
+                file_path = (Path(runtime_base) / raw).resolve()
+            else:
+                file_path = raw.resolve()
             if not file_path.exists():
                 return ToolResult(success=False, error=f"Attachment not found: {file_path}")
             if not file_path.is_file():

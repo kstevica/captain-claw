@@ -822,8 +822,8 @@ class AgentToolLoopMixin:
                         # Track item completion.
                         # For append=True: match written content against items.
                         # For append=False: also try matching — the LLM may
-                        # write separate files per item (e.g. "FinSMEs-18.07.2025.csv"
-                        # for item "18.07.2025. https://…").
+                        # write separate files per item (e.g. "report-2025-07-18.csv"
+                        # for item "2025-07-18 https://…").
                         is_append = arguments.get("append") is True
                         if is_append:
                             sp["completed"] = sp.get("completed", 0) + 1

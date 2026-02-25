@@ -287,6 +287,11 @@ class AgentOrchestrationMixin:
             )
 
         # ── Pre-flight scale check ────────────────────────────────
+        # The scale micro-loop accelerates large list-processing tasks by
+        # taking over the extract→write loop.  The preflight check uses
+        # _SKIP_SCALE_DETECTION_RE to avoid firing for discovery-only tasks
+        # (e.g. "find all files and return the list") so the scale loop
+        # only activates for genuine per-item processing tasks.
         scale_advisory = self._preflight_scale_check(effective_user_input, list_task_plan)
         if scale_advisory:
             effective_user_input = effective_user_input + scale_advisory

@@ -56,7 +56,13 @@
     const orchWorkflowModelSelect = $('#orchWorkflowModelSelect');
     const orchLoadWorkflowSelect = $('#orchLoadWorkflowSelect');
     const orchExecuteBtn = $('#orchExecuteBtn');
+    const orchStopBtn = $('#orchStopBtn');
     const orchResetBtn = $('#orchResetBtn');
+    const orchPromptSection = $('#orchPromptSection');
+    const orchPromptToggle = $('#orchPromptToggle');
+    const orchPromptToggleIcon = $('#orchPromptToggleIcon');
+    const orchPromptPreview = $('#orchPromptPreview');
+    const orchDualPane = $('#orchDualPane');
 
     // Summary bar counts
     const summaryTotal = $('#summaryTotal .count');
@@ -223,6 +229,9 @@
             case 'timeout_postponed':
                 handleTimeoutPostponed(msg);
                 break;
+            case 'task_step':
+                handleTaskStep(msg);
+                break;
             case 'workflow_saved':
                 addLogEntry('completed', `Workflow saved: ${msg.name || ''}`);
                 loadWorkflowList();
@@ -265,6 +274,8 @@
                 retries: 0,
                 startTime: null,
                 endTime: null,
+                step: '',
+                stepFull: '',
             };
         });
 
@@ -342,6 +353,8 @@
             tasks[tid].endTime = Date.now();
             tasks[tid].usage = msg.usage || null;
             tasks[tid].context = msg.context || null;
+            tasks[tid].step = '';
+            tasks[tid].stepFull = '';
         }
 
         // Aggregate token consumption across all tasks
@@ -365,6 +378,8 @@
             tasks[tid].status = 'failed';
             tasks[tid].error = msg.error || 'Unknown error';
             tasks[tid].endTime = Date.now();
+            tasks[tid].step = '';
+            tasks[tid].stepFull = '';
         }
         // Clean up timeout countdown state.
         delete timeoutCountdowns[tid];
@@ -482,6 +497,77 @@
         updateSelectedDetail();
     }
 
+    function handleTaskStep(msg) {
+        const tid = msg.task_id;
+        if (!tasks[tid]) return;
+        const text = msg.text || '';
+        // Strip "scale_micro_loop: " prefix for cleaner display
+        const clean = text.replace(/^scale_micro_loop:\s*/i, '');
+        // First line for card display, full text for detail panel.
+        const firstLine = clean.split('\n')[0] || '';
+        tasks[tid].step = firstLine;
+        tasks[tid].stepFull = clean;
+        // Patch the card's step element in-place (avoid expensive full
+        // re-render on every step event during rapid micro-loop progress).
+        updateTaskStep(tid);
+        // If this task is selected in the detail panel, update it.
+        if (selectedTaskId === tid) {
+            updateDetailStep(tid);
+        }
+    }
+
+    /**
+     * Patch or insert the .task-card-step element on a single task card
+     * without rebuilding the entire graph DOM.
+     */
+    function updateTaskStep(tid) {
+        const card = orchGraph.querySelector('.task-card[data-task-id="' + tid + '"]');
+        if (!card) return;
+        const t = tasks[tid];
+        let stepEl = card.querySelector('.task-card-step');
+        if (t.step && t.status === 'running') {
+            if (!stepEl) {
+                stepEl = document.createElement('div');
+                stepEl.className = 'task-card-step';
+                // Insert after .task-card-title
+                const titleEl = card.querySelector('.task-card-title');
+                if (titleEl && titleEl.nextSibling) {
+                    card.insertBefore(stepEl, titleEl.nextSibling);
+                } else {
+                    card.appendChild(stepEl);
+                }
+            }
+            stepEl.textContent = t.step;
+        } else if (stepEl) {
+            stepEl.remove();
+        }
+    }
+
+    /**
+     * Update the step section in the detail panel without full re-render.
+     */
+    function updateDetailStep(tid) {
+        const t = tasks[tid];
+        if (!t) return;
+        let section = detailBody.querySelector('.detail-step-section');
+        if (t.stepFull && t.status === 'running') {
+            if (!section) {
+                section = document.createElement('div');
+                section.className = 'detail-step-section';
+                // Insert at the top of the detail body
+                if (detailBody.firstChild) {
+                    detailBody.insertBefore(section, detailBody.firstChild);
+                } else {
+                    detailBody.appendChild(section);
+                }
+            }
+            section.innerHTML = '<div class="task-section-label">Current Step</div>'
+                + '<div class="detail-step-text">' + esc(t.stepFull) + '</div>';
+        } else if (section) {
+            section.remove();
+        }
+    }
+
     function startCountdownTicker() {
         if (countdownInterval) return; // already running
         countdownInterval = setInterval(function () {
@@ -536,6 +622,9 @@
         // Button states
         orchRunBtn.disabled = (state === 'running' || state === 'preview');
         orchPrepareBtn.disabled = (state === 'running');
+
+        // Stop button: visible only while running
+        orchStopBtn.style.display = (state === 'running') ? '' : 'none';
 
         // Show/hide workflow bar & execute button
         if (state === 'preview') {
@@ -638,6 +727,10 @@
                 html += `<span class="task-card-status ${statusClass}">${esc(statusClass)}</span>`;
                 html += `</div>`;
                 html += `<div class="task-card-title">${esc((taskOverrides[tid] && taskOverrides[tid].title) || t.title)}</div>`;
+
+                if (t.step && t.status === 'running') {
+                    html += `<div class="task-card-step">${esc(t.step)}</div>`;
+                }
 
                 if (t.session_id) {
                     html += `<div class="task-card-session">${esc(t.session_id)}</div>`;
@@ -749,6 +842,14 @@
         if (orchestratorState === 'preview') {
             html += buildPreviewEditor(tid, t);
         } else {
+            // ── Current step (live worker progress) ──
+            if (t.stepFull && t.status === 'running') {
+                html += '<div class="detail-step-section">';
+                html += '<div class="task-section-label">Current Step</div>';
+                html += `<div class="detail-step-text">${esc(t.stepFull)}</div>`;
+                html += '</div>';
+            }
+
             // ── Action bar (running/completed mode) ──
             const actionHtml = buildActionButtons(t);
             if (actionHtml) {
@@ -1119,13 +1220,52 @@
         orchInput.style.height = 'auto';
         orchRephrased.style.height = 'auto';
         // Use the taller of the two, clamped to a reasonable max
-        var h = Math.max(orchInput.scrollHeight, orchRephrased.scrollHeight, 80);
-        h = Math.min(h, 300);
+        var h = Math.max(orchInput.scrollHeight, orchRephrased.scrollHeight, 120);
+        h = Math.min(h, 400);
         orchInput.style.height = h + 'px';
         orchRephrased.style.height = h + 'px';
     }
 
+    // ── Prompt collapse toggle ─────────────────────────────
+
+    function togglePromptCollapse() {
+        var isCollapsed = orchPromptSection.classList.toggle('collapsed');
+        // Show a truncated preview of the prompt text when collapsed
+        if (isCollapsed) {
+            var text = orchInput.value.trim() || orchRephrased.value.trim() || '';
+            orchPromptPreview.textContent = text ? '— ' + text : '';
+        }
+    }
+
     // ── Reset ────────────────────────────────────────────────
+
+    async function stopOrchestrator() {
+        try {
+            orchStopBtn.disabled = true;
+            orchStopBtn.textContent = 'Stopping...';
+            await fetch('/api/orchestrator/reset', { method: 'POST' });
+            // Mark all running tasks as failed/stopped in the client
+            Object.keys(tasks).forEach(function (tid) {
+                if (tasks[tid].status === 'running') {
+                    tasks[tid].status = 'failed';
+                    tasks[tid].error = 'Stopped by user';
+                    tasks[tid].endTime = Date.now();
+                    tasks[tid].step = '';
+                    tasks[tid].stepFull = '';
+                }
+            });
+            addLogEntry('task_failed', 'Orchestration stopped by user');
+            setOrchestratorState('failed');
+            renderGraph();
+            updateSummaryBar();
+            updateSelectedDetail();
+        } catch (e) {
+            addLogEntry('task_failed', 'Stop failed: ' + e.message);
+        } finally {
+            orchStopBtn.disabled = false;
+            orchStopBtn.innerHTML = '&#x25A0; Stop';
+        }
+    }
 
     async function resetOrchestrator() {
         if (!confirm('Reset the current orchestration? This will cancel any running tasks and clear the graph.')) {
@@ -1804,6 +1944,9 @@
         // Auto-sync pane heights when user types in prompt
         orchInput.addEventListener('input', syncPaneHeights);
 
+        // Prompt section collapse toggle
+        orchPromptToggle.addEventListener('click', togglePromptCollapse);
+
         // Run button (now "Decompose") → decompose into tasks for preview
         orchRunBtn.addEventListener('click', decomposeOrchestrator);
 
@@ -1823,6 +1966,9 @@
 
         // Execute button → run the prepared graph
         orchExecuteBtn.addEventListener('click', executeOrchestrator);
+
+        // Stop button → cancel running tasks immediately
+        if (orchStopBtn) orchStopBtn.addEventListener('click', stopOrchestrator);
 
         // Reset button → clear everything
         if (orchResetBtn) orchResetBtn.addEventListener('click', resetOrchestrator);

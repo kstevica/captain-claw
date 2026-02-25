@@ -15,6 +15,7 @@ class ReadTool(Tool):
 
     name = "read"
     description = "Read the contents of a file."
+    timeout_seconds = 10.0  # local file read — 10 s is ample
     parameters = {
         "type": "object",
         "properties": {
@@ -46,7 +47,19 @@ class ReadTool(Tool):
             ToolResult with file contents
         """
         try:
-            file_path = Path(path).expanduser().resolve()
+            raw_path = Path(path).expanduser()
+
+            # Resolve relative paths against the workspace root (not the
+            # process CWD) so that paths like "pdf-test/foo.pdf" resolve
+            # consistently across all tools.
+            if raw_path.is_absolute():
+                file_path = raw_path.resolve()
+            else:
+                runtime_base = kwargs.get("_runtime_base_path")
+                if runtime_base is not None:
+                    file_path = (Path(runtime_base) / raw_path).resolve()
+                else:
+                    file_path = raw_path.resolve()
 
             if not file_path.exists():
                 # Attempt file registry resolution before giving up.
@@ -67,17 +80,10 @@ class ReadTool(Tool):
                             error=f"File not found: {path} (registry resolved to {resolved_path}, also missing)",
                         )
                 else:
-                    # Also try resolving under the saved root with session scoping
-                    saved_base = kwargs.get("_saved_base_path")
-                    fallback_found = False
-                    if saved_base is not None and file_registry is not None:
-                        # The registry didn't have it; report not found
-                        pass
-                    if not fallback_found:
-                        return ToolResult(
-                            success=False,
-                            error=f"File not found: {path}",
-                        )
+                    return ToolResult(
+                        success=False,
+                        error=f"File not found: {path}",
+                    )
             
             if not file_path.is_file():
                 return ToolResult(

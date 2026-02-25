@@ -768,6 +768,16 @@ class Config(BaseSettings):
             config.tools.web_search.api_key = env_brave_key
 
         # Security-sensitive override: send_mail credentials from env/.env.
+        # MAIL_PROVIDER is handled separately: it ALWAYS overrides the config
+        # value because `provider` has a non-empty default ("smtp") that would
+        # prevent the standard "fill if empty" logic from ever applying.
+        _mail_provider_env = (
+            str(os.getenv("MAIL_PROVIDER", "")).strip()
+            or str(dotenv_values.get("MAIL_PROVIDER", "")).strip()
+        )
+        if _mail_provider_env:
+            config.tools.send_mail.provider = _mail_provider_env
+
         _mail_env_map = {
             "MAILGUN_API_KEY": "mailgun_api_key",
             "MAILGUN_DOMAIN": "mailgun_domain",
@@ -794,6 +804,15 @@ class Config(BaseSettings):
                             pass
                     else:
                         setattr(config.tools.send_mail, cfg_attr, val)
+
+        # Auto-detect provider from available credentials when the provider
+        # is still the default "smtp" and no explicit MAIL_PROVIDER was set.
+        sm = config.tools.send_mail
+        if not _mail_provider_env and sm.provider == "smtp":
+            if str(sm.mailgun_api_key or "").strip() and str(sm.mailgun_domain or "").strip():
+                sm.provider = "mailgun"
+            elif str(sm.sendgrid_api_key or "").strip():
+                sm.provider = "sendgrid"
 
         # Google OAuth env overrides.
         for env_key, cfg_attr in [

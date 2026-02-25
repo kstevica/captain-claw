@@ -15,7 +15,10 @@ These were extracted from ``agent_orchestration_mixin.py`` to keep the
 main orchestration loop focused on flow control.
 """
 
+import json
+import os
 import re
+from pathlib import Path
 from typing import Any
 
 from captain_claw.config import get_config
@@ -168,13 +171,39 @@ _SKIP_SCALE_DETECTION_RE = re.compile(
     r"send\s+(?:an?\s+)?(?:email|e-mail|message|notification)"
     r"|send\s+(?:via|using|through)\s+(?:mailgun|smtp|sendgrid|ses|postmark)"
     r"|(?:email|e-mail)\s+(?:via|using|through)\b"
-    r"|mailgun|sendgrid|smtp"
-    r"|combine\s+(?:per-day|all|the)\s+(?:the\s+)?(?:markdowns?|files|results)"
+    r"|mailgun|sendgrid|smtp|send_mail"
+    r"|send\b.*\bvia\s+(?:internal|the)\s+\w+\s+tool"
+    r"|combine\s+(?:per-day|all|the|both|two)\s+.*?(?:markdowns?|files?|results)"
+    r"|combine\s+(?:the\s+)?(?:\w+\s+){0,3}(?:markdowns?|files?|results)\s+into\b"
     r"|merge\s+(?:all\s+)?(?:the\s+)?(?:files|results|outputs)"
+    r"|assemble\s+(?:a\s+)?(?:single|one|final|combined|unified)\s+(?:markdown|file|document|report)"
+    r"|assemble\s+.*\bsection\s+per\b"
     r"|produce\s+\d+-paragraph\s+summary"
+    # File-discovery-only tasks: the worker just lists files and returns
+    # the list — it should NOT enter the scale micro-loop because there
+    # is no per-item processing to do.
+    r"|(?:use\s+(?:the\s+)?glob\b.*return\s+(?:the\s+)?(?:complete\s+)?(?:list|paths?|files?))"
+    r"|(?:find\s+(?:all|every)\s+.*files?\b.*return\s+(?:the\s+)?(?:list|paths?))"
+    r"|(?:locate\s+(?:all|every)\s+.*files?\b)"
+    r"|(?:return\s+(?:the\s+)?(?:complete\s+)?list\s+of\b.*(?:file|relative)\s*(?:paths?|names?))"
     r")",
     re.IGNORECASE,
 )
+
+# Marker that starts the dependency-output section injected by the
+# orchestrator into worker prompts.  Everything from this marker onward
+# is upstream task output and must be stripped before checking the skip
+# regex — otherwise upstream task titles (e.g. "Locate all PDF files")
+# falsely trigger skip patterns meant for the current task.
+_DEP_OUTPUT_MARKER = "Results from previous steps:"
+
+
+def _strip_dep_output_section(text: str) -> str:
+    """Return *text* with the dependency-output section removed."""
+    idx = text.find(_DEP_OUTPUT_MARKER)
+    if idx < 0:
+        return text
+    return text[:idx]
 
 
 class AgentScaleDetectionMixin:
@@ -264,10 +293,36 @@ class AgentScaleDetectionMixin:
         member_count = len(list_task_plan.get("members", []))
         _scale_cfg = get_config().scale
         large_from_members = member_count >= _scale_cfg.scale_advisory_min_members
-        large_from_input = self._input_suggests_large_scale(effective_user_input)
+        # IMPORTANT: check the STRIPPED text (without dependency output)
+        # for large-scale input patterns.  The dependency output from
+        # upstream tasks can contain dozens of URLs / file paths that
+        # falsely trigger the inline-URL-count heuristic, causing
+        # non-scale tasks (combine, send_mail) to enter the scale path.
+        _stripped_input = _strip_dep_output_section(effective_user_input)
+        large_from_input = self._input_suggests_large_scale(_stripped_input)
 
         if not large_from_members and not large_from_input:
             return ""
+
+        # Skip scale detection for tasks whose primary purpose is not
+        # per-item processing (e.g. file discovery, sending email, merging).
+        # Strip the "Results from previous steps:" dependency-output section
+        # before checking, otherwise titles of upstream tasks (e.g. "Locate
+        # all PDF files") can falsely match the skip patterns and prevent
+        # the scale loop from firing for the current task.
+        _skip_check_text = _stripped_input
+        if _SKIP_SCALE_DETECTION_RE.search(_skip_check_text):
+            # But DON'T skip when the stripped text also contains per-item
+            # processing language.  This handles combined tasks like
+            # "For each PDF, extract and summarize, then assemble a single
+            # Markdown file" — the "assemble" hits the skip regex, but the
+            # "for each PDF" signals real list-processing that needs the
+            # scale loop.
+            if not (
+                self._input_suggests_large_scale(_skip_check_text)
+                or self._is_list_processing_request(_skip_check_text)
+            ):
+                return ""
 
         # Use the known member count if available; otherwise use a
         # placeholder hint that prompts the LLM to discover the count
@@ -326,8 +381,19 @@ class AgentScaleDetectionMixin:
         # guard, the deferred init detects file paths/names in the session
         # as "members" and starts a useless micro-loop that prevents the
         # worker from completing its real job.
-        if _SKIP_SCALE_DETECTION_RE.search(effective_user_input):
-            return list_task_plan
+        # Strip dependency output section so upstream task titles don't
+        # falsely match skip patterns for the current task.
+        _skip_check_text = _strip_dep_output_section(effective_user_input)
+        if _SKIP_SCALE_DETECTION_RE.search(_skip_check_text):
+            # But DON'T skip when the text also contains per-item processing
+            # language — this is a combined process+assemble task that needs
+            # the scale loop (e.g. "for each PDF, extract and assemble into
+            # a single Markdown").
+            if not (
+                self._input_suggests_large_scale(_skip_check_text)
+                or self._is_list_processing_request(_skip_check_text)
+            ):
+                return list_task_plan
 
         # Limit attempts to avoid wasting tokens.  Allow up to 3 tries
         # because the LLM list extraction can randomly fail on the first
@@ -345,10 +411,14 @@ class AgentScaleDetectionMixin:
         ):
             # Scale already initialized with enough diverse items — nothing to do.
             return list_task_plan
-        # Only attempt re-detection if the input suggested list processing.
+        # Only attempt re-detection if the TASK's own input (without
+        # dependency output) suggests list processing.  Using the full
+        # effective_user_input would let upstream task output (which may
+        # contain "for each" language or dozens of URLs) falsely trigger
+        # re-extraction for non-scale tasks like combine/send.
         if not (
-            self._input_suggests_large_scale(effective_user_input)
-            or self._is_list_processing_request(effective_user_input)
+            self._input_suggests_large_scale(_skip_check_text)
+            or self._is_list_processing_request(_skip_check_text)
         ):
             return list_task_plan
 
@@ -447,6 +517,137 @@ class AgentScaleDetectionMixin:
         return new_plan
 
     # ------------------------------------------------------------------
+    # File-path member repair
+    # ------------------------------------------------------------------
+
+    _FILE_PATH_EXTS: frozenset[str] = frozenset({
+        ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+        ".txt", ".csv", ".md", ".json", ".xml", ".html", ".htm",
+        ".yaml", ".yml", ".toml", ".rtf", ".odt", ".ods",
+    })
+
+    def _repair_file_path_members(self, members: list[str]) -> list[str]:
+        """Fix file-path members that are missing a directory prefix.
+
+        The LLM member extractor sometimes strips a common directory prefix
+        from file paths (e.g. ``pdf-test/subdir/file.pdf`` becomes
+        ``subdir/file.pdf``).  Detect and repair by:
+
+        1. Checking whether the first few members resolve against the
+           workspace base path.
+        2. If they don't, scanning recent session messages for a prior
+           tool call that used a longer path ending with the same member
+           string — the difference is the missing prefix.
+        3. As a fallback, searching the filesystem (rglob) for the first
+           member's filename and deriving the prefix from the result.
+
+        Returns the (possibly repaired) member list.
+        """
+        if not members or len(members) < 2:
+            return members
+
+        # --- Are these file paths? ---
+        _file_count = sum(
+            1 for m in members
+            if os.path.splitext(m)[-1].lower() in self._FILE_PATH_EXTS
+        )
+        if _file_count < len(members) * 0.5:
+            return members  # Not predominantly file paths
+
+        base = getattr(self, "workspace_base_path", None)
+        if not base:
+            tools = getattr(self, "tools", None)
+            if tools:
+                base = getattr(tools, "runtime_base_path", None)
+        if not base:
+            return members
+        base = Path(base)
+
+        # --- Already correct? ---
+        test_member = next(
+            (m for m in members if os.path.splitext(m)[-1].lower() in self._FILE_PATH_EXTS),
+            members[0],
+        )
+        if (base / test_member).exists():
+            return members
+
+        # --- Strategy 1: find prefix from prior tool calls in session ---
+        prefix = self._find_prefix_from_session(test_member)
+        if prefix and (base / (prefix + test_member)).exists():
+            repaired = [prefix + m for m in members]
+            log.info(
+                "Repaired member file paths (from session)",
+                prefix=prefix,
+                count=len(members),
+            )
+            return repaired
+
+        # --- Strategy 2: rglob for the first member's filename ---
+        test_filename = Path(test_member).name
+        try:
+            found_list = list(base.rglob(test_filename))
+        except Exception:
+            found_list = []
+        for found_path in found_list:
+            try:
+                found_rel = str(found_path.relative_to(base))
+            except ValueError:
+                continue
+            if found_rel.endswith(test_member) and found_rel != test_member:
+                prefix = found_rel[: -len(test_member)]
+                # Verify prefix works for a second member too
+                if len(members) > 1:
+                    verify = next(
+                        (m for m in members[1:4]
+                         if os.path.splitext(m)[-1].lower() in self._FILE_PATH_EXTS),
+                        None,
+                    )
+                    if verify and not (base / (prefix + verify)).exists():
+                        continue
+                repaired = [prefix + m for m in members]
+                log.info(
+                    "Repaired member file paths (from rglob)",
+                    prefix=prefix,
+                    count=len(members),
+                )
+                return repaired
+
+        return members  # Could not repair
+
+    def _find_prefix_from_session(self, member: str) -> str:
+        """Scan session messages for a prior tool call whose path ends with *member*."""
+        session = getattr(self, "session", None)
+        if not session:
+            return ""
+        for msg in reversed(getattr(session, "messages", [])):
+            role = str(msg.get("role", "")).strip().lower()
+            if role == "assistant":
+                for tc in msg.get("tool_calls", []) or []:
+                    args = tc.get("arguments") or {}
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except Exception:
+                            continue
+                    path_arg = str(args.get("path", "")).strip()
+                    if path_arg and path_arg.endswith(member) and path_arg != member:
+                        return path_arg[: -len(member)]
+            # Also check tool result content — the dependency output from
+            # locate_pdfs may list full paths in the text.
+            if role in ("user", "system"):
+                content = str(msg.get("content", ""))
+                idx = content.find(member)
+                if idx > 0:
+                    # Walk backwards to find the start of the path segment
+                    start = idx - 1
+                    while start >= 0 and content[start] not in ("\n", "\r", "\t", " ", ",", "[", '"', "'"):
+                        start -= 1
+                    candidate = content[start + 1: idx]
+                    if candidate and "/" in candidate + member:
+                        return candidate
+        return ""
+
+    # ------------------------------------------------------------------
     # Scale-progress initialization helper
     # ------------------------------------------------------------------
 
@@ -466,6 +667,12 @@ class AgentScaleDetectionMixin:
                 explicit no-external-fetch signals (e.g. "do not follow links").
         """
         members = plan.get("members", [])
+
+        # Repair file-path members that the LLM extractor may have
+        # shortened by stripping a common directory prefix.
+        members = self._repair_file_path_members(members)
+        plan["members"] = members
+
         _out_strategy = str(plan.get("output_strategy", "single_file")).strip().lower()
         if _out_strategy not in ("file_per_item", "single_file", "no_file"):
             _out_strategy = "single_file"

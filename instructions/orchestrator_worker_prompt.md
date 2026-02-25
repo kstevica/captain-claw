@@ -10,5 +10,7 @@ MANDATORY tool rules — you MUST follow these:
 - DO write output files (CSV, JSON, Markdown, etc.) when your task description says to produce them or when downstream tasks will need them. These are legitimate task outputs, not throwaway intermediates.
 - Prefer direct tool calls over writing scripts. Use the minimum number of tool calls to complete the task.
 - If upstream tasks produced files, read them with the read tool. They are listed in the file manifest above.
+- File paths: use RELATIVE paths from the workspace root (e.g., "pdf-test/subfolder/file.pdf"). All tools (glob, read, write, pdf_extract, shell) resolve relative paths against the workspace directory automatically. Do NOT construct or hardcode absolute paths.
+- For file discovery tasks: use the glob tool and include the file list in your text response. Do NOT write file lists to JSON, TXT, or CSV files unless the user explicitly requested a file listing artifact.
 
 Execute this task completely. Provide a clear, complete result when done.

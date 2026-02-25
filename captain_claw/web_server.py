@@ -147,6 +147,7 @@ class WebServer:
             status_callback=self._status_callback,
             tool_output_callback=self._tool_output_callback,
             broadcast_callback=self._broadcast,
+            thinking_callback=self._thinking_callback,
         )
 
         # Initialize OpenAI-compatible API agent pool if enabled.

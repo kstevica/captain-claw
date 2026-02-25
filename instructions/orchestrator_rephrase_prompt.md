@@ -32,6 +32,8 @@ CRITICAL — web content retrieval rules (you MUST follow these when rephrasing)
 - NEVER add intermediate web-fetching file-saving steps (save HTML, save extracted.json, save meta.json). Workers should process web content in memory and produce only the final output files the user requested.
 - DO mention output files that the user asked for or that downstream steps need (CSV, summary.md, report.json, etc.) — these are legitimate deliverables, not throwaway intermediates.
 - Keep the task pipeline simple: fetch content → process it → produce the requested output.
+- NEVER instruct writing intermediate file-listing artifacts (file_list.json, paths.txt, etc.) to pass a list of files between pipeline steps. Workers should use the glob tool and return results in their text output — downstream tasks receive that output automatically.
+- Use relative paths from the workspace root (e.g., "pdf-test/subfolder/file.pdf") — tools resolve them automatically.
 
 User's original request:
 {user_input}

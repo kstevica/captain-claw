@@ -62,7 +62,7 @@ class AgentScaleLoopMixin:
 
     # Regex to extract an output filename from a task description.
     # Matches patterns like:
-    #   "write results to FinSMEs-30.07.2025.md"
+    #   "write results to report-2025-07-30.md"
     #   "output to report.csv"
     #   "save to summary.json"
     #   "name the output file report.md"
@@ -997,8 +997,8 @@ class AgentScaleLoopMixin:
         ``Task: {title}\\n``) and sanitizes it into a valid filename.
         Common action prefixes (e.g. "Fetch and extract", "Process")
         and filler words (e.g. "page", "data for") are stripped to
-        produce cleaner filenames like ``FinSMEs-31.07.2025.md``
-        instead of ``Fetch_and_extract_FinSMEs_page_31.07.2025.md``.
+        produce cleaner filenames like ``ProjectName-2025-07-31.md``
+        instead of ``Fetch_and_extract_ProjectName_page_2025-07-31.md``.
 
         Returns a sanitized filename or empty string if no title can
         be extracted.
@@ -1038,8 +1038,8 @@ class AgentScaleLoopMixin:
         title = _PREFIX_RE.sub("", title)
 
         # ---- Strip filler words that commonly wrap the core topic ----
-        # e.g. "FinSMEs page 31.07.2025" → "FinSMEs 31.07.2025"
-        #       "data for FinSMEs 31.07.2025" → "FinSMEs 31.07.2025"
+        # e.g. "Report page 2025-07-31" → "Report 2025-07-31"
+        #       "data for Report 2025-07-31" → "Report 2025-07-31"
         _FILLER_RE = re.compile(
             r"\b(?:page|pages|data\s+for|data\s+from|details?\s+from"
             r"|details?\s+for|info\s+from|info\s+for"

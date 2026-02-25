@@ -64,6 +64,7 @@ class SessionOrchestrator:
         status_callback: Callable[[str], None] | None = None,
         tool_output_callback: Callable[[str, dict[str, Any], str], None] | None = None,
         broadcast_callback: Callable[[dict[str, Any]], None] | None = None,
+        thinking_callback: Callable[[str, str, str], None] | None = None,
     ):
         cfg = get_config()
         orch_cfg = cfg.orchestrator
@@ -73,6 +74,7 @@ class SessionOrchestrator:
         self._status_callback = status_callback
         self._tool_output_callback = tool_output_callback
         self._broadcast_callback = broadcast_callback
+        self._thinking_callback = thinking_callback
         self._instructions = InstructionLoader()
         self._session_manager = get_session_manager()
 
@@ -86,6 +88,7 @@ class SessionOrchestrator:
             provider=self._provider,
             status_callback=status_callback,
             tool_output_callback=tool_output_callback,
+            thinking_callback=thinking_callback,
             deep_memory=_deep_memory,
         )
         self._max_parallel = max_parallel or orch_cfg.max_parallel
@@ -985,6 +988,22 @@ class SessionOrchestrator:
                 file_registry=self._file_registry,
             )
 
+            # Wire a per-task thinking callback so scale-loop progress
+            # and other worker steps are broadcast to the web UI with
+            # the correct task_id.
+            def _task_thinking_cb(
+                text: str, tool: str = "", phase: str = "tool",
+            ) -> None:
+                self._broadcast_event("task_step", {
+                    "task_id": task.id,
+                    "title": task.title,
+                    "text": text,
+                    "tool": tool,
+                    "phase": phase,
+                })
+
+            agent.thinking_callback = _task_thinking_cb
+
             # Apply per-task model override if specified.
             if task.model_id:
                 try:
@@ -1000,11 +1019,33 @@ class SessionOrchestrator:
                 if manifest_text:
                     file_manifest = f"\n\n{manifest_text}\n"
 
+            # Inject text output from dependency tasks so that downstream
+            # workers can use data (e.g. file lists, extracted info) produced
+            # by earlier tasks without needing intermediate files on disk.
+            dep_outputs_section = ""
+            if task.depends_on:
+                dep_parts: list[str] = []
+                for dep_id in task.depends_on:
+                    dep_task = graph.get_task(dep_id)
+                    if dep_task and dep_task.result and isinstance(dep_task.result, dict):
+                        dep_output = str(dep_task.result.get("output", "")).strip()
+                        if dep_output:
+                            # Truncate very long outputs to avoid blowing up the prompt
+                            if len(dep_output) > 12000:
+                                dep_output = dep_output[:12000] + "\n... [truncated]"
+                            dep_parts.append(
+                                f"--- Output from \"{dep_task.title}\" ({dep_id}) ---\n{dep_output}"
+                            )
+                if dep_parts:
+                    dep_outputs_section = (
+                        "\n\nResults from previous steps:\n" + "\n\n".join(dep_parts) + "\n"
+                    )
+
             worker_prompt = self._instructions.render(
                 "orchestrator_worker_prompt.md",
                 task_title=task.title,
                 task_description=task.description,
-                file_manifest=file_manifest,
+                file_manifest=file_manifest + dep_outputs_section,
             )
             # No asyncio.wait_for timeout — timeout management is handled
             # by tick_timeouts() in the execution loop, which provides
@@ -1064,6 +1105,12 @@ class SessionOrchestrator:
                 "task_id": task.id, "title": task.title, "error": str(e),
             })
         finally:
+            # Clear per-task thinking callback to avoid stale task_id
+            # references on pooled agents that may be reused later.
+            try:
+                agent.thinking_callback = None  # noqa: F821
+            except Exception:
+                pass
             await self._pool.release(task.session_id)
 
     # ------------------------------------------------------------------

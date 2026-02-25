@@ -37,6 +37,7 @@ class AgentPool:
         provider: LLMProvider | None = None,
         status_callback: Callable[[str], None] | None = None,
         tool_output_callback: Callable[[str, dict[str, Any], str], None] | None = None,
+        thinking_callback: Callable[[str, str, str], None] | None = None,
         session_name_prefix: str = "orchestrator",
         deep_memory: Any | None = None,
     ):
@@ -45,6 +46,7 @@ class AgentPool:
         self._provider = provider
         self._status_callback = status_callback
         self._tool_output_callback = tool_output_callback
+        self._thinking_callback = thinking_callback
         self._session_name_prefix = session_name_prefix
         self._deep_memory = deep_memory
         self._agents: dict[str, Any] = {}  # session_id → Agent
@@ -154,6 +156,7 @@ class AgentPool:
             provider=self._provider or get_provider(),
             status_callback=self._status_callback,
             tool_output_callback=self._tool_output_callback,
+            thinking_callback=self._thinking_callback,
             approval_callback=_auto_approve,
         )
 

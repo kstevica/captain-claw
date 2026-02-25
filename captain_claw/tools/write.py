@@ -18,6 +18,7 @@ class WriteTool(Tool):
 
     name = "write"
     description = "Create or overwrite a file with content."
+    timeout_seconds = 10.0  # local file write — 10 s is ample
     parameters = {
         "type": "object",
         "properties": {

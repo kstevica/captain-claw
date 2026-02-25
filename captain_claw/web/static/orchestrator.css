@@ -142,6 +142,74 @@ html, body {
     margin-bottom: 8px;
 }
 
+/* ─── Collapsible prompt section ─────────────────── */
+
+.orch-prompt-section {
+    position: relative;
+}
+
+.orch-prompt-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 4px;
+    cursor: pointer;
+    user-select: none;
+    border-radius: var(--radius-sm);
+    margin-bottom: 6px;
+}
+.orch-prompt-toggle:hover {
+    background: var(--bg-hover);
+}
+
+.orch-prompt-toggle-icon {
+    font-size: 14px;
+    color: var(--text-muted);
+    transition: transform 0.2s ease;
+    display: inline-block;
+    width: 16px;
+    text-align: center;
+}
+
+.orch-prompt-section.collapsed .orch-prompt-toggle-icon {
+    transform: rotate(-90deg);
+}
+
+.orch-prompt-toggle-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+}
+
+.orch-prompt-toggle-preview {
+    flex: 1;
+    font-size: 12px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: none;
+}
+
+.orch-prompt-section.collapsed .orch-prompt-toggle-preview {
+    display: block;
+}
+
+.orch-dual-pane {
+    overflow: hidden;
+    transition: max-height 0.25s ease, opacity 0.2s ease;
+    max-height: 500px;
+    opacity: 1;
+}
+
+.orch-prompt-section.collapsed .orch-dual-pane {
+    max-height: 0;
+    opacity: 0;
+    pointer-events: none;
+}
+
 /* ─── Dual-pane prompt layout ────────────────────── */
 
 .orch-dual-pane {
@@ -184,15 +252,15 @@ html, body {
 .orch-pane textarea {
     flex: 1;
     width: 100%;
-    padding: 10px 12px;
+    padding: 12px 14px;
     background: var(--bg-primary);
     border: none;
     color: var(--text-primary);
     font-family: var(--font);
-    font-size: 13px;
-    line-height: 1.5;
+    font-size: 14px;
+    line-height: 1.6;
     resize: none;
-    min-height: 80px;
+    min-height: 140px;
     outline: none;
     box-sizing: border-box;
 }
@@ -462,6 +530,35 @@ html, body {
     font-size: 11px;
     color: var(--text-muted);
     margin-top: 4px;
+}
+
+.task-card-step {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 280px;
+    font-family: var(--font-mono);
+    opacity: 0.8;
+}
+
+.detail-step-section {
+    margin-bottom: 12px;
+}
+
+.detail-step-text {
+    font-size: 12px;
+    font-family: var(--font-mono);
+    color: var(--yellow);
+    white-space: pre-wrap;
+    word-break: break-word;
+    padding: 8px 10px;
+    background: var(--bg-primary);
+    border-radius: 4px;
+    border-left: 3px solid var(--yellow);
+    line-height: 1.5;
 }
 
 /* ─── Detail panel ────────────────────────────────── */
@@ -1198,6 +1295,31 @@ html, body {
     min-width: 180px;
 }
 .orch-workflow-select:focus { border-color: var(--accent); }
+
+.orch-stop-btn {
+    padding: 8px 24px;
+    background: var(--red);
+    border: none;
+    border-radius: var(--radius-sm);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    white-space: nowrap;
+    animation: orchStopPulse 1.5s ease-in-out infinite;
+}
+.orch-stop-btn:hover {
+    background: #e04040;
+}
+.orch-stop-btn:disabled {
+    opacity: 0.4;
+    animation: none;
+    cursor: default;
+}
+@keyframes orchStopPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
 
 .orch-reset-btn {
     padding: 5px 12px;

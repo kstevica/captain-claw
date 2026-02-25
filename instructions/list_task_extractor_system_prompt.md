@@ -9,7 +9,7 @@ Return ONLY a JSON object (no markdown, no code fences):
   "recommended_strategy": "direct",
   "confidence": "high",
   "output_strategy": "file_per_item",
-  "output_filename_template": "FinSMEs-{member_label}.csv",
+  "output_filename_template": "report-{member_label}.csv",
   "output_file": "",
   "final_action": "write_file"
 }
@@ -18,6 +18,7 @@ Rules:
 - Use only the user request + provided context.
 - Extract only members relevant to the user request.
 - Deduplicate members and keep original readable names.
+- CRITICAL for file paths: when members are file paths, you MUST preserve the EXACT complete path as it appears in the source context, including ALL directory prefixes. Do NOT strip, shorten, or remove any leading directory segments. If all paths share a common prefix like "pdf-test/" or "data/reports/", every member MUST include that prefix. Example: if the source shows "pdf-test/subdir/file.pdf", the member must be "pdf-test/subdir/file.pdf", NOT "subdir/file.pdf".
 - IMPORTANT: When member items have associated URLs or website links in the source content, ALWAYS include the URL with the member name using the format `"Member Name — https://example.com"`. This is critical for research tasks — the URL is the primary source for gathering information about the member. Never discard URLs that appear alongside member names in the source material.
 - `member_context` — a JSON object mapping each member string (exactly as it appears in the `members` array) to a short context string extracted from the source material. Include any metadata the source provides: country/location, brief description, category, or other identifying details. This context is the AUTHORITATIVE source for member identity during research. If the source says "Startup X (Italy)" then the context should include "Italy". If the source provides a one-line description, include it. Keep each context string under 200 characters. If no extra context is available for a member, omit that member from the object (or use an empty string).
 - Prefer `"recommended_strategy": "direct"` by default.
@@ -32,8 +33,8 @@ Output strategy detection — carefully analyze the user's request to determine 
   - `"file_per_item"` — the user wants a SEPARATE output file for each member (e.g. "Name the output file X-[date].csv" where the name varies per item, or "create a file for each...")
   - `"single_file"` — the user wants ALL results combined into ONE output file (e.g. "write everything to results.csv", "append all to output.md")
   - `"no_file"` — the result should NOT be written to a file (e.g. "send the result to email", "index this on typesense", "post to API", "reply with the results")
-- `output_filename_template` — when `output_strategy` is `"file_per_item"`, provide the filename pattern with `{member_label}` as placeholder for the per-item identifier. Extract the pattern from the user's naming instruction (e.g. "FinSMEs-[provided_date].csv" → `"FinSMEs-{member_label}.csv"`). Leave empty for `"single_file"` or `"no_file"`.
-- `output_file` — when `output_strategy` is `"single_file"`, provide the output filename that the user wants (e.g. "results.md", "FinSMEs-31.07.2025.md"). Extract this from the user's request or task description. If the user doesn't specify a filename, derive one from the task context (e.g. task about "FinSMEs 31.07.2025" → "FinSMEs-31.07.2025.md"). Leave empty for `"file_per_item"` or `"no_file"`.
+- `output_filename_template` — when `output_strategy` is `"file_per_item"`, provide the filename pattern with `{member_label}` as placeholder for the per-item identifier. Extract the pattern from the user's naming instruction (e.g. "report-[date].csv" → `"report-{member_label}.csv"`). Leave empty for `"single_file"` or `"no_file"`.
+- `output_file` — when `output_strategy` is `"single_file"`, provide the output filename that the user wants (e.g. "results.md", "analysis-2025-07-31.md"). Extract this from the user's request or task description. If the user doesn't specify a filename, derive one from the task context (e.g. task about "Q3 report" → "Q3-report.md"). Leave empty for `"file_per_item"` or `"no_file"`.
 - `final_action` — what should happen with each processed result:
   - `"write_file"` — write to file(s) (default for file_per_item and single_file)
   - `"reply"` — return the result in the chat response

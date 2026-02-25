@@ -33,10 +33,23 @@ def _truncate_markdown(markdown: str, max_chars: int) -> str:
     return markdown[:keep] + suffix
 
 
-def _require_existing_file(path: str) -> tuple[Path | None, str | None]:
-    """Validate path points to an existing file and return resolved path."""
+def _require_existing_file(
+    path: str,
+    runtime_base_path: str | Path | None = None,
+) -> tuple[Path | None, str | None]:
+    """Validate path points to an existing file and return resolved path.
+
+    Relative paths are resolved against *runtime_base_path* (the workspace
+    root) when provided, falling back to the process CWD otherwise.
+    """
     try:
-        file_path = Path(path).expanduser().resolve()
+        raw = Path(path).expanduser()
+        if raw.is_absolute():
+            file_path = raw.resolve()
+        elif runtime_base_path is not None:
+            file_path = (Path(runtime_base_path) / raw).resolve()
+        else:
+            file_path = raw.resolve()
     except Exception as e:
         return None, f"Invalid path '{path}': {e}"
 
@@ -349,8 +362,8 @@ class PdfExtractTool(Tool):
         **kwargs: Any,
     ) -> ToolResult:
         """Execute PDF extraction."""
-        del kwargs
-        file_path, error = _require_existing_file(path)
+        _runtime_base = kwargs.get("_runtime_base_path")
+        file_path, error = _require_existing_file(path, runtime_base_path=_runtime_base)
         if error:
             return ToolResult(success=False, error=error)
         try:
@@ -384,8 +397,8 @@ class DocxExtractTool(Tool):
 
     async def execute(self, path: str, max_chars: int = 120000, **kwargs: Any) -> ToolResult:
         """Execute DOCX extraction."""
-        del kwargs
-        file_path, error = _require_existing_file(path)
+        _runtime_base = kwargs.get("_runtime_base_path")
+        file_path, error = _require_existing_file(path, runtime_base_path=_runtime_base)
         if error:
             return ToolResult(success=False, error=error)
         try:
@@ -423,8 +436,8 @@ class XlsxExtractTool(Tool):
         **kwargs: Any,
     ) -> ToolResult:
         """Execute XLSX extraction."""
-        del kwargs
-        file_path, error = _require_existing_file(path)
+        _runtime_base = kwargs.get("_runtime_base_path")
+        file_path, error = _require_existing_file(path, runtime_base_path=_runtime_base)
         if error:
             return ToolResult(success=False, error=error)
         try:
@@ -466,8 +479,8 @@ class PptxExtractTool(Tool):
         **kwargs: Any,
     ) -> ToolResult:
         """Execute PPTX extraction."""
-        del kwargs
-        file_path, error = _require_existing_file(path)
+        _runtime_base = kwargs.get("_runtime_base_path")
+        file_path, error = _require_existing_file(path, runtime_base_path=_runtime_base)
         if error:
             return ToolResult(success=False, error=error)
         try:

@@ -17,7 +17,9 @@ from captain_claw.tools.registry import (
 log = get_logger(__name__)
 
 # Commands that complete nearly instantly and should never hang for the
-# full config timeout.  We use a short timeout (15 s) for these.
+# full config timeout.  We use a short timeout (5 s) for these — they
+# finish in <1 s under normal conditions; the 5 s budget only matters
+# when the filesystem is extremely slow or the command hangs.
 _QUICK_COMMANDS: frozenset[str] = frozenset({
     "cd", "ls", "pwd", "echo", "printf", "cat", "head", "tail",
     "mkdir", "rmdir", "touch", "cp", "mv", "rm", "ln",
@@ -28,7 +30,7 @@ _QUICK_COMMANDS: frozenset[str] = frozenset({
     "true", "false", "test", "[",
     "export", "unset", "set", "alias",
 })
-_QUICK_TIMEOUT = 15
+_QUICK_TIMEOUT = 5
 
 
 class ShellTool(Tool):
@@ -148,15 +150,22 @@ class ShellTool(Tool):
         # Set up environment
         env = os.environ.copy()
         env["PATH"] = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
-        
+
+        # Resolve shell CWD to the workspace root so that relative paths
+        # in commands (e.g., "ls pdf-test/") behave consistently with other
+        # tools (glob, read, write) that also resolve against the workspace.
+        runtime_base = kwargs.get("_runtime_base_path")
+        shell_cwd: str | None = str(runtime_base) if runtime_base is not None else None
+
         try:
             log.info("Executing shell command", command=command, timeout=timeout)
-            
+
             process = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                cwd=shell_cwd,
             )
             
             communicate_task = asyncio.create_task(process.communicate())
