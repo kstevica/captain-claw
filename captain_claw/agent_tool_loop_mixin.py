@@ -336,6 +336,24 @@ class AgentToolLoopMixin:
         pattern2 = r'\{tool\s*=>\s*"([^"]+)"[^}]*args\s*=>\s*\{([^}]+)\}\}'
 
         # Pattern 3: ```tool\ncommand\n```
+        # Only match known tool names — NOT arbitrary code-fence language
+        # identifiers (js, json, bash, python, css, html, jsx, tsx, etc.)
+        # which the LLM uses as markdown syntax highlighting hints.
+        _CODE_FENCE_LANGS = frozenset({
+            "bash", "sh", "zsh", "fish",
+            "js", "javascript", "ts", "typescript", "jsx", "tsx",
+            "json", "jsonl", "yaml", "yml", "toml", "xml", "csv",
+            "py", "python", "rb", "ruby", "java", "go", "rust", "rs",
+            "c", "cpp", "cs", "csharp", "swift", "kotlin", "scala",
+            "html", "css", "scss", "sass", "less",
+            "sql", "graphql", "gql",
+            "md", "markdown", "txt", "text", "plaintext",
+            "diff", "patch", "log",
+            "r", "lua", "perl", "php", "dart", "elixir", "haskell",
+            "dockerfile", "makefile", "cmake",
+            "ini", "conf", "env", "properties",
+            "svg", "asm", "wasm",
+        })
         pattern3 = r'```(\w+)\s*\n(.*?)\n```'
 
         # Pattern 4: <invoke name="shell"><command>value</command></invoke>
@@ -370,6 +388,10 @@ class AgentToolLoopMixin:
                 elif pattern == pattern3:
                     tool_name = match.group(1).strip().lower()
                     command = match.group(2).strip()
+                    # Skip code-fence language identifiers that are NOT
+                    # tool names (e.g. ```js, ```bash, ```json).
+                    if tool_name in _CODE_FENCE_LANGS:
+                        continue
                     if tool_name and command:
                         _append_tool_call(tool_name, {"command": command})
 

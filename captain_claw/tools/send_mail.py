@@ -134,10 +134,18 @@ class SendMailTool(Tool):
                 file_path = raw.resolve()
             if not file_path.exists():
                 # Try workflow-run directory (orchestrated workflows write
-                # all files to one shared flat directory).
+                # files here preserving relative directory structure).
                 workflow_run_dir = kwargs.get("_workflow_run_dir")
                 if workflow_run_dir is not None:
-                    candidate = Path(workflow_run_dir) / Path(raw_path).name
+                    wrd = Path(workflow_run_dir)
+                    # 1. Try relative path under workflow-run dir.
+                    _rel = Path(raw_path).expanduser()
+                    if _rel.is_absolute():
+                        _rel = Path(*_rel.parts[1:])
+                    candidate = (wrd / _rel).resolve()
+                    if not candidate.exists():
+                        # 2. Flat filename fallback.
+                        candidate = wrd / Path(raw_path).name
                     if candidate.exists():
                         file_path = candidate
             if not file_path.exists() and file_registry is not None:

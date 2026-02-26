@@ -73,19 +73,36 @@ class GlobTool(Tool):
                 lambda: glob.glob(pattern, recursive=True)
             )
 
-            # When running inside an orchestrator workflow, filter to
-            # files created/modified after the workflow started.  This
-            # prevents downstream tasks from picking up stale files with
-            # matching names from earlier workflow runs.
+            # When running inside an orchestrator workflow, apply the
+            # timestamp filter ONLY to the workflow-run/ output directory
+            # to avoid picking up stale outputs from earlier runs.
+            # Pre-existing workspace files (user documents, config, etc.)
+            # are INPUTS and must never be filtered out.
             workflow_started_at: float | None = kwargs.get("_workflow_started_at")
-            if workflow_started_at is not None:
-                # Small buffer (2 s) to account for filesystem timestamp
-                # granularity and minor clock drift.
+            workflow_run_dir: str | None = kwargs.get("_workflow_run_dir")
+            if workflow_started_at is not None and workflow_run_dir is not None:
+                wrd_prefix = str(Path(workflow_run_dir).resolve()) + "/"
                 cutoff = workflow_started_at - 2.0
                 before_count = len(matches)
+
+                def _in_workflow_run(filepath: str) -> bool:
+                    """Check if *filepath* is inside the workflow-run dir.
+
+                    Uses resolve() to handle macOS /var → /private/var
+                    and other symlink discrepancies.
+                    """
+                    try:
+                        return str(Path(filepath).resolve()).startswith(wrd_prefix)
+                    except (OSError, ValueError):
+                        return False
+
                 matches = [
                     m for m in matches
-                    if _file_modified_after(m, cutoff)
+                    if (
+                        # Only timestamp-filter files inside workflow-run/
+                        not _in_workflow_run(m)
+                        or _file_modified_after(m, cutoff)
+                    )
                 ]
                 filtered_count = before_count - len(matches)
                 if filtered_count > 0:

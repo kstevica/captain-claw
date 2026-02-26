@@ -31,10 +31,12 @@ CRITICAL — no intermediate file formats:
 - Example of CORRECT decomposition: Task 1: "Find all PDFs." Task 2: "For each PDF, extract text, summarize, and append the summary as a Markdown section to pdf-test/summaries.md." Task 3: "Send pdf-test/summaries.md via email."
 - Example of WRONG decomposition: Task 1: "Find PDFs." Task 2: "Extract and summarize each PDF, write results to summaries_data.json." Task 3: "Read summaries_data.json and convert to summaries.md." Task 4: "Send summaries.md via email." — This creates an unnecessary JSON intermediate step.
 
-CRITICAL — file paths:
+CRITICAL — file paths and pre-existing workspace files:
 - All relative file paths in task descriptions are resolved against the workspace root directory.
 - Workers should use relative paths (e.g., "pdf-test/subfolder/file.pdf") — the tools resolve them automatically against the workspace.
 - Do NOT instruct workers to construct or resolve absolute paths. The tools handle path resolution internally.
+- When the user refers to files or folders that already exist in the workspace (shown in the "Workspace contents" section of the user prompt), reference them by their exact relative paths in task descriptions. Workers can read these files directly — they are pre-existing inputs, not outputs from other tasks.
+- For tasks that need to read pre-existing workspace files, include the exact file paths or folder names in the task description so the worker knows where to look (e.g., "Read pleis/checklist_pleis.txt to get the checklist requirements").
 
 Respond ONLY with valid JSON matching this schema:
 

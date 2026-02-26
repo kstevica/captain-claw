@@ -78,3 +78,55 @@ def test_extract_tool_calls_for_pocket_tts_input_mapping():
     assert calls[0].name == "pocket_tts"
     assert str(calls[0].arguments.get("text", "")) == "Hello from Captain Claw"
     assert str(calls[0].arguments.get("voice", "")) == "af_bella"
+
+
+def test_code_fence_language_ids_not_treated_as_tool_calls():
+    """Markdown code fences with language identifiers (```js, ```bash, etc.)
+    must NOT be parsed as embedded tool calls."""
+    agent = Agent(provider=NoopProvider())
+    content = """Here's the backend code:
+
+```js
+import express from 'express';
+const app = express();
+app.listen(3000);
+```
+
+And the config:
+
+```json
+{
+  "name": "my-app",
+  "version": "1.0.0"
+}
+```
+
+Run it with:
+
+```bash
+npm start
+```
+
+```txt
+Some output text
+```
+
+```jsx
+function App() { return <div>Hello</div>; }
+```
+"""
+    calls = agent._extract_tool_calls_from_content(content)
+    # None of js/json/bash/txt/jsx should be treated as tool calls
+    assert len(calls) == 0, f"Expected 0 calls, got {len(calls)}: {[(c.name, c.id) for c in calls]}"
+
+
+def test_real_tool_in_code_fence_still_matches():
+    """A genuine tool name inside a code fence should still be extracted."""
+    agent = Agent(provider=NoopProvider())
+    content = """```shell
+ls -la /tmp
+```"""
+    calls = agent._extract_tool_calls_from_content(content)
+    assert len(calls) == 1
+    assert calls[0].name == "shell"
+    assert calls[0].arguments.get("command") == "ls -la /tmp"

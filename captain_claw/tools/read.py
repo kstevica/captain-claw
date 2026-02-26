@@ -62,11 +62,19 @@ class ReadTool(Tool):
                     file_path = raw_path.resolve()
 
             if not file_path.exists():
-                # Try workflow-run directory first (orchestrated workflows
-                # write all files to one shared flat directory).
+                # Try workflow-run directory (orchestrated workflows write
+                # files here preserving relative directory structure).
                 workflow_run_dir = kwargs.get("_workflow_run_dir")
                 if workflow_run_dir is not None:
-                    candidate = Path(workflow_run_dir) / Path(path).name
+                    wrd = Path(workflow_run_dir)
+                    # 1. Try the path as-is under workflow-run dir.
+                    _rel = Path(path).expanduser()
+                    if _rel.is_absolute():
+                        _rel = Path(*_rel.parts[1:])
+                    candidate = (wrd / _rel).resolve()
+                    if not candidate.exists():
+                        # 2. Try just the filename (flat lookup).
+                        candidate = wrd / Path(path).name
                     if candidate.exists():
                         file_path = candidate
 

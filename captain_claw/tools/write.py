@@ -138,10 +138,32 @@ class WriteTool(Tool):
         """
         try:
             # Workflow-run override: bypass session scoping entirely.
+            # Preserve the relative directory structure (e.g.
+            # "backend/src/config/env.js") but strip absolute prefixes,
+            # "../" traversals, and any "saved/<category>/<session_id>"
+            # prefix the LLM may have injected.
             workflow_run_dir = kwargs.get("_workflow_run_dir")
             if workflow_run_dir is not None:
-                filename = Path(path).name  # flatten to filename only
-                file_path = Path(workflow_run_dir) / filename
+                requested = Path(path).expanduser()
+                # Strip absolute root so we keep only the relative parts.
+                if requested.is_absolute():
+                    parts = list(requested.parts[1:])  # drop "/"
+                else:
+                    parts = list(requested.parts)
+                # Remove ".." traversals for safety.
+                parts = [p for p in parts if p not in ("", ".", "..")]
+                # Strip any leading "saved/<category>/<session-id>" prefix
+                # the LLM might have added from observed tool output.
+                _categories = {"downloads", "media", "output", "scripts",
+                               "showcase", "skills", "tmp", "tools", "saved"}
+                while parts and parts[0].lower() in _categories:
+                    parts = parts[1:]
+                # Strip a UUID-shaped segment (session id) if it leads.
+                if parts and len(parts[0]) >= 32 and parts[0].count("-") >= 4:
+                    parts = parts[1:]
+                if not parts:
+                    parts = [Path(path).name or "output.txt"]
+                file_path = Path(workflow_run_dir).joinpath(*parts)
             else:
                 saved_root = self._resolve_saved_root(kwargs)
                 session_id = self._normalize_session_id(str(kwargs.get("_session_id", "")))

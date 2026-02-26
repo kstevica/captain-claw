@@ -82,6 +82,55 @@ _COMPLEXITY_SIGNALS: list[tuple[re.Pattern[str], int]] = [
 ]
 
 
+def _scan_workspace_tree(workspace_path: Path, max_depth: int = 3, max_entries: int = 200) -> str:
+    """Build a concise tree-style listing of the workspace directory.
+
+    Returns a human-readable string like:
+        pleis/
+          checklist_pleis.txt
+          founder_notes.docx
+        data/
+          sales.csv
+
+    Skips hidden dirs, __pycache__, node_modules, .git, and the
+    internal ``saved/``, ``workflow-run/``, ``output/`` dirs that are
+    managed by the framework.  Truncates at *max_entries* to keep the
+    prompt small.
+    """
+    _SKIP_DIRS = frozenset({
+        ".git", ".venv", "venv", "__pycache__", "node_modules",
+        ".mypy_cache", ".pytest_cache", ".tox",
+        "saved", "workflow-run", "output", ".cache",
+    })
+    lines: list[str] = []
+
+    def _walk(directory: Path, depth: int, prefix: str) -> None:
+        if depth > max_depth or len(lines) >= max_entries:
+            return
+        try:
+            entries = sorted(directory.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+        except PermissionError:
+            return
+        for entry in entries:
+            if entry.name.startswith(".") and entry.is_dir():
+                continue
+            if entry.is_dir():
+                if entry.name in _SKIP_DIRS:
+                    continue
+                lines.append(f"{prefix}{entry.name}/")
+                _walk(entry, depth + 1, prefix + "  ")
+            else:
+                lines.append(f"{prefix}{entry.name}")
+            if len(lines) >= max_entries:
+                lines.append(f"{prefix}... (truncated)")
+                return
+
+    _walk(workspace_path, 0, "  ")
+    if not lines:
+        return ""
+    return "Workspace contents:\n" + "\n".join(lines)
+
+
 def _estimate_task_iterations(description: str) -> int:
     """Estimate how many iterations a worker task will need.
 
@@ -161,6 +210,7 @@ class SessionOrchestrator:
         self._user_input: str = ""
         self._synthesis_instruction: str = ""
         self._workflow_variables: list[dict[str, Any]] = []
+        self._workspace_tree: str = ""   # cached workspace listing for prompts
 
     # ------------------------------------------------------------------
     # File registry persistence
@@ -636,11 +686,23 @@ class SessionOrchestrator:
         available_sessions = await self._list_available_sessions()
         log.debug("Available sessions for decompose", sessions=available_sessions[:300])
 
+        # Scan workspace for pre-existing files/folders so the
+        # decompose LLM knows what inputs are available.  Cache it
+        # on the orchestrator so worker prompts can include it too.
+        workspace_tree = ""
+        try:
+            cfg_ws = get_config().resolved_workspace_path()
+            workspace_tree = _scan_workspace_tree(cfg_ws)
+            self._workspace_tree = workspace_tree
+        except Exception as e:
+            log.debug("Workspace scan failed (non-fatal)", error=str(e))
+
         system_prompt = self._instructions.load("orchestrator_decompose_system_prompt.md")
         user_prompt = self._instructions.render(
             "orchestrator_decompose_user_prompt.md",
             user_input=user_input,
             available_sessions=available_sessions,
+            workspace_tree=workspace_tree,
         )
         log.debug("Decompose prompts ready",
                   system_prompt_len=len(system_prompt) if system_prompt else 0,
@@ -1123,11 +1185,17 @@ class SessionOrchestrator:
                         "\n\nResults from previous steps:\n" + "\n\n".join(dep_parts) + "\n"
                     )
 
+            # Include workspace tree so workers know about pre-existing
+            # files/folders they may need to read as inputs.
+            workspace_section = ""
+            if self._workspace_tree:
+                workspace_section = f"\n\n{self._workspace_tree}\n"
+
             worker_prompt = self._instructions.render(
                 "orchestrator_worker_prompt.md",
                 task_title=task.title,
                 task_description=task.description,
-                file_manifest=file_manifest + dep_outputs_section,
+                file_manifest=file_manifest + dep_outputs_section + workspace_section,
             )
 
             # Bump iteration budget for complex tasks that require
@@ -1143,12 +1211,14 @@ class SessionOrchestrator:
                 )
                 agent.max_iterations = estimated
 
-            # Skip the deferred scale init for tasks that are clearly
-            # non-scale (combine, send, assemble).  This prevents wasted
-            # LLM extraction calls after every tool call in those workers.
-            _check_text = f"{task.title} {task.description}"
-            if _NON_SCALE_TASK_RE.search(_check_text):
-                agent._skip_deferred_scale = True
+            # Skip the deferred scale init for ALL orchestrated workers.
+            # The orchestrator already decomposed the top-level request
+            # into a task DAG — individual workers should execute their
+            # assigned task, not re-extract lists and enter scale loops.
+            # Previously this only skipped "non-scale" tasks (combine,
+            # send, assemble) but code-generation and other workers were
+            # still triggering expensive, pointless micro-loops.
+            agent._skip_deferred_scale = True
 
             # No asyncio.wait_for timeout — timeout management is handled
             # by tick_timeouts() in the execution loop, which provides
