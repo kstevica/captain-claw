@@ -309,6 +309,22 @@ async def execute_telegram_command(server: WebServer, raw: str) -> str | None:
         if cmd in ("/approve",):
             return await handle_approve_command(server, args.strip())
 
+        if cmd in ("/todo",):
+            from captain_claw.web.slash_commands import handle_todo_command
+            return await handle_todo_command(server, args.strip())
+
+        if cmd in ("/contacts",):
+            from captain_claw.web.slash_commands import handle_contacts_command
+            return await handle_contacts_command(server, args.strip())
+
+        if cmd in ("/scripts",):
+            from captain_claw.web.slash_commands import handle_scripts_command
+            return await handle_scripts_command(server, args.strip())
+
+        if cmd in ("/apis",):
+            from captain_claw.web.slash_commands import handle_apis_command
+            return await handle_apis_command(server, args.strip())
+
         if cmd in ("/orchestrate",):
             return None
 
