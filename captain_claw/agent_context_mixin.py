@@ -1262,10 +1262,10 @@ class AgentContextMixin:
         return "\n".join(lines), "\n".join(debug_lines)
 
     def _requires_strict_tool_message_order(self) -> bool:
-        """Whether active provider enforces OpenAI tool-message sequencing rules."""
+        """Whether active provider enforces strict tool-message sequencing rules."""
         details = self.get_runtime_model_details()
         provider = str(details.get("provider", "")).strip().lower()
-        return provider == "openai"
+        return provider in {"openai", "anthropic"}
 
     @staticmethod
     def _normalize_session_tool_calls(raw_tool_calls: Any) -> list[dict[str, Any]]:
@@ -1324,6 +1324,42 @@ class AgentContextMixin:
                 },
             })
         return serialized
+
+    @staticmethod
+    def _ensure_user_message_last(
+        selected_messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Ensure conversation ends with a user message for Anthropic.
+
+        Trailing assistant messages without tool_calls (injected context
+        notes like memory, todo, planning) are converted to user role.
+        LiteLLM merges consecutive same-role messages for Anthropic.
+        """
+        if not selected_messages:
+            return selected_messages
+        last_role = str(selected_messages[-1].get("role", "")).strip().lower()
+        if last_role != "assistant":
+            return selected_messages
+
+        result = list(selected_messages)
+        i = len(result) - 1
+        while i >= 0:
+            msg = result[i]
+            if (
+                str(msg.get("role", "")).strip().lower() == "assistant"
+                and not msg.get("tool_calls")
+            ):
+                converted = dict(msg)
+                converted["role"] = "user"
+                content = str(converted.get("content", "")).strip()
+                if content:
+                    converted["content"] = f"[System context]\n{content}"
+                result[i] = converted
+                i -= 1
+            else:
+                break
+
+        return result
 
     def _normalize_selected_messages_for_provider(
         self,
@@ -1395,6 +1431,13 @@ class AgentContextMixin:
 
         if pending_tool_ids:
             _clear_pending_assistant_tool_calls()
+
+        # Anthropic: ensure conversation ends with a user message (no prefill).
+        # Must run AFTER tool chain normalization to avoid breaking tool sequences.
+        details = self.get_runtime_model_details()
+        provider = str(details.get("provider", "")).strip().lower()
+        if provider == "anthropic":
+            normalized = self._ensure_user_message_last(normalized)
 
         return normalized
 

@@ -3,7 +3,9 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from captain_claw.config import get_config
+import os
+
+from captain_claw.config import Config, get_config
 from captain_claw.llm import create_provider, set_provider
 
 
@@ -19,6 +21,24 @@ class AgentModelMixin:
             "googleai": "gemini",
         }
         return aliases.get(raw, raw)
+
+    @staticmethod
+    def _resolve_provider_api_key(normalized_provider: str) -> str | None:
+        """Resolve API key for a specific provider from env vars and .env file."""
+        env_keys: dict[str, list[str]] = {
+            "openai": ["OPENAI_API_KEY"],
+            "anthropic": ["ANTHROPIC_API_KEY"],
+            "gemini": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        }
+        keys = env_keys.get(normalized_provider, [])
+        if not keys:
+            return None
+        dotenv_values = Config._read_dotenv_file(".env")
+        for k in keys:
+            val = str(os.getenv(k, "")).strip() or str(dotenv_values.get(k, "")).strip()
+            if val:
+                return val
+        return None
 
     def _refresh_runtime_model_details(
         self,
@@ -143,10 +163,18 @@ class AgentModelMixin:
         resolved_temperature = float(cfg.model.temperature if temperature is None else temperature)
         resolved_max_tokens = int(cfg.model.max_tokens if max_tokens is None else max_tokens)
 
+        # If switching to a different provider, resolve the correct API key
+        # for that provider from env vars / .env instead of using the default
+        # model key (which may belong to a different provider).
+        if normalized_provider == normalized_cfg_provider:
+            resolved_api_key = cfg.model.api_key or None
+        else:
+            resolved_api_key = self._resolve_provider_api_key(normalized_provider) or cfg.model.api_key or None
+
         self.provider = create_provider(
             provider=provider,
             model=model,
-            api_key=cfg.model.api_key or None,
+            api_key=resolved_api_key,
             base_url=base_url or fallback_base_url or None,
             temperature=resolved_temperature,
             max_tokens=resolved_max_tokens,
