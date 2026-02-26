@@ -376,7 +376,7 @@ class AgentScaleDetectionMixin:
         Returns the updated ``list_task_plan`` (unchanged if no new members).
         """
         # ── Skip scale detection for non-scalable tasks ──
-        # Tasks like "send email via Mailgun" or "combine per-day markdowns"
+        # Tasks like "send an email" or "combine all markdowns into one file"
         # should NEVER be hijacked by the scale micro-loop.  Without this
         # guard, the deferred init detects file paths/names in the session
         # as "members" and starts a useless micro-loop that prevents the

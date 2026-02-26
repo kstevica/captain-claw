@@ -52,10 +52,11 @@ _COMPLEXITY_SIGNALS: list[tuple[re.Pattern[str], int]] = [
     # Multi-file operations
     (re.compile(r"\bread\b.*\bread\b", re.I), 2),      # read multiple files
     (re.compile(r"\bcombine\b|\bmerge\b|\bassemble\b", re.I), 1),
-    (re.compile(r"\bsummary\.md\b", re.I), 1),
+    # Explicit output file reference (any common extension)
+    (re.compile(r"\b\w+\.(md|txt|csv|json|html|pdf)\b", re.I), 1),
     # Sending / API calls
     (re.compile(r"\bsend\b.*\bemail\b|\bemail\b.*\bsend\b", re.I), 2),
-    (re.compile(r"\bmailgun\b|\bsendgrid\b|\bsmtp\b", re.I), 1),
+    (re.compile(r"\bsend_mail\b|\bsmtp\b", re.I), 1),
     (re.compile(r"\bcurl\b|\bshell\b", re.I), 1),
     (re.compile(r"\battach\b", re.I), 1),
     # File discovery
