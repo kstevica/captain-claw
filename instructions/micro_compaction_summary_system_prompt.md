@@ -1,0 +1,1 @@
+Produce compact conversation memory for an AI assistant. Return only the summary.

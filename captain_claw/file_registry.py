@@ -172,7 +172,10 @@ class FileRegistry:
             if not self._mappings:
                 return ""
 
-            lines = ["Files available from previous steps:"]
+            lines = [
+                "Files available from previous steps (use these paths for read, "
+                "send_mail attachments, etc. — do NOT search with glob for these files):"
+            ]
             for logical, physical in sorted(self._mappings.items()):
                 # Show logical path (what the LLM should use) and a
                 # hint about the physical location.

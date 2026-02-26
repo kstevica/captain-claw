@@ -44,6 +44,7 @@ class ContextConfig(BaseModel):
     max_tokens: int = 160000
     compaction_threshold: float = 0.8
     compaction_ratio: float = 0.4
+    micro_instructions: bool = False
 
 
 class MemoryEmbeddingsConfig(BaseModel):

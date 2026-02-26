@@ -11,28 +11,34 @@ if TYPE_CHECKING:
 
 
 async def list_instructions(server: WebServer, request: web.Request) -> web.Response:
-    """List instruction .md files, merging system and personal dirs."""
+    """List instruction .md files, merging system and personal dirs.
+
+    ``micro_*`` files are excluded from the listing; instead each standard
+    file gets a ``has_micro`` boolean that the frontend uses to show the
+    side-by-side micro editor.
+    """
     seen: dict[str, dict] = {}
+    micro_names: set[str] = set()
 
-    # System (base) directory first
-    if server._instructions_dir.is_dir():
-        for f in sorted(server._instructions_dir.iterdir()):
-            if f.suffix == ".md" and f.is_file():
-                seen[f.name] = {
-                    "name": f.name,
-                    "size": f.stat().st_size,
-                    "overridden": False,
-                }
+    # Collect all filenames from both directories first to discover micro_ variants.
+    for d, overridden in [(server._instructions_dir, False), (server._instructions_personal_dir, True)]:
+        if not d.is_dir():
+            continue
+        for f in sorted(d.iterdir()):
+            if f.suffix != ".md" or not f.is_file():
+                continue
+            if f.name.startswith("micro_"):
+                micro_names.add(f.name)
+                continue  # Don't list micro files directly
+            seen[f.name] = {
+                "name": f.name,
+                "size": f.stat().st_size,
+                "overridden": overridden,
+            }
 
-    # Personal overrides — update size and mark as overridden
-    if server._instructions_personal_dir.is_dir():
-        for f in sorted(server._instructions_personal_dir.iterdir()):
-            if f.suffix == ".md" and f.is_file():
-                seen[f.name] = {
-                    "name": f.name,
-                    "size": f.stat().st_size,
-                    "overridden": True,
-                }
+    # Tag standard files that have a micro counterpart.
+    for entry in seen.values():
+        entry["has_micro"] = f"micro_{entry['name']}" in micro_names
 
     files = sorted(seen.values(), key=lambda x: x["name"])
     return web.json_response(files)

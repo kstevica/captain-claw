@@ -79,7 +79,30 @@
                         <button class="instr-btn secondary" id="closeBtn" title="Close file">&#x2715;</button>
                     </div>
                 </div>
-                <textarea class="instr-textarea" id="instrTextarea" spellcheck="false"></textarea>
+                <!-- Dual editor container: standard + micro side by side -->
+                <div class="instr-dual-wrap" id="instrDualWrap">
+                    <!-- Standard (full) editor — always visible -->
+                    <div class="instr-dual-col" id="instrColStandard">
+                        <div class="instr-dual-label">Standard</div>
+                        <textarea class="instr-textarea" id="instrTextarea" spellcheck="false"></textarea>
+                    </div>
+                    <!-- Micro editor — visible only when a micro_ counterpart exists -->
+                    <div class="instr-dual-col hidden" id="instrColMicro">
+                        <div class="instr-dual-label-bar">
+                            <span class="instr-dual-label micro">Micro</span>
+                            <span class="instr-micro-dirty hidden" id="microDirty"
+                                  title="Unsaved micro changes">&#x25CF;</span>
+                            <span class="instr-micro-override hidden" id="microOverride"
+                                  title="Customized micro">customized</span>
+                            <span class="instr-micro-save-status" id="microSaveStatus"></span>
+                            <button class="instr-btn revert micro-revert hidden" id="microRevertBtn"
+                                    title="Revert micro to system default">Revert</button>
+                            <button class="instr-btn primary micro-save" id="microSaveBtn"
+                                    title="Save micro (Ctrl+Shift+S)">Save</button>
+                        </div>
+                        <textarea class="instr-textarea micro" id="microTextarea" spellcheck="false"></textarea>
+                    </div>
+                </div>
             </div>
         </main>
     </div>

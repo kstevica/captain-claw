@@ -122,6 +122,8 @@ class SendMailTool(Tool):
         max_bytes = int(mail_cfg.max_attachment_bytes or 26214400)
         runtime_base = kwargs.get("_runtime_base_path")
 
+        file_registry = kwargs.get("_file_registry")
+
         for raw_path in attachments or []:
             raw = Path(raw_path).expanduser()
             if raw.is_absolute():
@@ -130,6 +132,18 @@ class SendMailTool(Tool):
                 file_path = (Path(runtime_base) / raw).resolve()
             else:
                 file_path = raw.resolve()
+            if not file_path.exists() and file_registry is not None:
+                # Fall back to FileRegistry resolution (handles cross-session
+                # paths in orchestrated workflows where upstream tasks wrote
+                # files under session-scoped directories).
+                try:
+                    resolved = file_registry.resolve(raw_path)
+                except Exception:
+                    resolved = None
+                if resolved is not None:
+                    candidate = Path(resolved).expanduser().resolve()
+                    if candidate.exists():
+                        file_path = candidate
             if not file_path.exists():
                 return ToolResult(success=False, error=f"Attachment not found: {file_path}")
             if not file_path.is_file():

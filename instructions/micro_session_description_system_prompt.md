@@ -1,0 +1,1 @@
+Write concise operational session descriptions for future routing. Focus on topic, tasks performed, and what remains. Plain concrete language for automatic matching. Output only description text.

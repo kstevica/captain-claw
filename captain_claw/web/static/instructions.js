@@ -192,7 +192,10 @@
 
     var currentFile = null;
     var currentOverridden = false;
+    var currentHasMicro = false;
     var isDirty = false;
+    var isMicroDirty = false;
+    var microOverridden = false;
     var allFiles = [];
 
     // ── DOM References ────────────────────────────────────────────────
@@ -212,6 +215,15 @@
     var saveBtn = $('#saveBtn');
     var revertBtn = $('#revertBtn');
     var closeBtn = $('#closeBtn');
+
+    // Micro editor DOM
+    var colMicro = $('#instrColMicro');
+    var microTextarea = $('#microTextarea');
+    var microDirtyEl = $('#microDirty');
+    var microOverrideEl = $('#microOverride');
+    var microSaveStatus = $('#microSaveStatus');
+    var microSaveBtn = $('#microSaveBtn');
+    var microRevertBtn = $('#microRevertBtn');
 
     // ── Utilities ─────────────────────────────────────────────────────
 
@@ -235,10 +247,26 @@
         if (dirty) editorSaveStatus.textContent = '';
     }
 
+    function setMicroDirty(dirty) {
+        isMicroDirty = dirty;
+        microDirtyEl.classList.toggle('hidden', !dirty);
+        if (dirty) microSaveStatus.textContent = '';
+    }
+
     function updateOverrideUI(overridden) {
         currentOverridden = overridden;
         editorOverride.classList.toggle('hidden', !overridden);
         revertBtn.classList.toggle('hidden', !overridden);
+    }
+
+    function updateMicroOverrideUI(overridden) {
+        microOverridden = overridden;
+        microOverrideEl.classList.toggle('hidden', !overridden);
+        microRevertBtn.classList.toggle('hidden', !overridden);
+    }
+
+    function showMicroColumn(show) {
+        colMicro.classList.toggle('hidden', !show);
     }
 
     // ── Render Groups ─────────────────────────────────────────────────
@@ -268,6 +296,7 @@
                 desc: meta.desc,
                 badge: meta.badge,
                 overridden: !!f.overridden,
+                has_micro: !!f.has_micro,
             });
         }
 
@@ -303,6 +332,9 @@
                 if (item.overridden) {
                     html += ' <span class="instr-file-card-customized" title="Customized — saved to ~/.captain-claw/instructions/">customized</span>';
                 }
+                if (item.has_micro) {
+                    html += ' <span class="instr-file-card-micro" title="Has compact micro variant">micro</span>';
+                }
                 html += '</div>';
                 html += '<div class="instr-file-card-desc">' + escapeHtml(item.desc) + '</div>';
                 html += '</div>';
@@ -334,7 +366,7 @@
             (function (card) {
                 card.addEventListener('click', function () {
                     var name = card.dataset.name;
-                    if (isDirty && currentFile && currentFile !== name) {
+                    if ((isDirty || isMicroDirty) && currentFile && currentFile !== name) {
                         if (!confirm('Unsaved changes in "' + currentFile + '". Discard and open "' + name + '"?')) return;
                     }
                     openFile(name);
@@ -346,6 +378,14 @@
     // ── File Operations ───────────────────────────────────────────────
 
     function openFile(name) {
+        // Look up whether this file has a micro counterpart
+        var fileMeta = null;
+        for (var k = 0; k < allFiles.length; k++) {
+            if (allFiles[k].name === name) { fileMeta = allFiles[k]; break; }
+        }
+        var hasMicro = fileMeta ? !!fileMeta.has_micro : false;
+
+        // Fetch standard file
         fetch('/api/instructions/' + encodeURIComponent(name))
             .then(function (res) {
                 if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -354,6 +394,7 @@
             .then(function (data) {
                 var meta = getMeta(name);
                 currentFile = name;
+                currentHasMicro = hasMicro;
 
                 editorFilename.textContent = name;
                 editorDesc.textContent = meta.desc;
@@ -367,6 +408,17 @@
                 editorEmpty.style.display = 'none';
                 editorActive.classList.remove('hidden');
 
+                // Handle micro panel
+                if (hasMicro) {
+                    showMicroColumn(true);
+                    loadMicroFile(name);
+                } else {
+                    showMicroColumn(false);
+                    microTextarea.value = '';
+                    setMicroDirty(false);
+                    updateMicroOverrideUI(false);
+                }
+
                 // Highlight in sidebar
                 var allCards = instrGroups.querySelectorAll('.instr-file-card');
                 for (var i = 0; i < allCards.length; i++) {
@@ -378,6 +430,26 @@
             })
             .catch(function (e) {
                 alert('Failed to load "' + name + '": ' + e.message);
+            });
+    }
+
+    function loadMicroFile(standardName) {
+        var microName = 'micro_' + standardName;
+        fetch('/api/instructions/' + encodeURIComponent(microName))
+            .then(function (res) {
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                return res.json();
+            })
+            .then(function (data) {
+                microTextarea.value = data.content;
+                setMicroDirty(false);
+                updateMicroOverrideUI(!!data.overridden);
+            })
+            .catch(function () {
+                // Micro file doesn't exist — show empty
+                microTextarea.value = '';
+                setMicroDirty(false);
+                updateMicroOverrideUI(false);
             });
     }
 
@@ -407,6 +479,35 @@
             .finally(function () {
                 saveBtn.disabled = false;
                 saveBtn.textContent = 'Save';
+            });
+    }
+
+    function saveMicroFile() {
+        if (!currentFile || !currentHasMicro) return;
+        var microName = 'micro_' + currentFile;
+        microSaveBtn.disabled = true;
+        microSaveBtn.textContent = 'Saving\u2026';
+        fetch('/api/instructions/' + encodeURIComponent(microName), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: microTextarea.value }),
+        })
+            .then(function (res) {
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                return res.json();
+            })
+            .then(function (data) {
+                setMicroDirty(false);
+                updateMicroOverrideUI(!!data.overridden);
+                microSaveStatus.textContent = 'Saved \u2713';
+                setTimeout(function () { microSaveStatus.textContent = ''; }, 2000);
+            })
+            .catch(function (e) {
+                alert('Failed to save "' + microName + '": ' + e.message);
+            })
+            .finally(function () {
+                microSaveBtn.disabled = false;
+                microSaveBtn.textContent = 'Save';
             });
     }
 
@@ -441,13 +542,47 @@
             });
     }
 
+    function revertMicroFile() {
+        if (!currentFile || !currentHasMicro || !microOverridden) return;
+        var microName = 'micro_' + currentFile;
+        if (!confirm(
+            'Revert "' + microName + '" to the system default?\n\n' +
+            'Your customized micro version will be deleted.'
+        )) return;
+
+        microRevertBtn.disabled = true;
+        fetch('/api/instructions/' + encodeURIComponent(microName), {
+            method: 'DELETE',
+        })
+            .then(function (res) {
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                return res.json();
+            })
+            .then(function (data) {
+                microTextarea.value = data.content;
+                setMicroDirty(false);
+                updateMicroOverrideUI(false);
+                microSaveStatus.textContent = 'Reverted \u2713';
+                setTimeout(function () { microSaveStatus.textContent = ''; }, 2000);
+            })
+            .catch(function (e) {
+                alert('Failed to revert "' + microName + '": ' + e.message);
+            })
+            .finally(function () {
+                microRevertBtn.disabled = false;
+            });
+    }
+
     function closeFile() {
-        if (isDirty) {
+        if (isDirty || isMicroDirty) {
             if (!confirm('Unsaved changes in "' + currentFile + '". Discard?')) return;
         }
         currentFile = null;
         currentOverridden = false;
+        currentHasMicro = false;
         setDirty(false);
+        setMicroDirty(false);
+        showMicroColumn(false);
         editorActive.classList.add('hidden');
         editorEmpty.style.display = '';
 
@@ -476,27 +611,39 @@
     saveBtn.addEventListener('click', saveFile);
     revertBtn.addEventListener('click', revertFile);
     closeBtn.addEventListener('click', closeFile);
+    microSaveBtn.addEventListener('click', saveMicroFile);
+    microRevertBtn.addEventListener('click', revertMicroFile);
 
     textarea.addEventListener('input', function () { setDirty(true); });
+    microTextarea.addEventListener('input', function () { setMicroDirty(true); });
 
-    // Tab key inserts spaces
-    textarea.addEventListener('keydown', function (e) {
-        if (e.key === 'Tab') {
-            e.preventDefault();
-            var start = textarea.selectionStart;
-            var end = textarea.selectionEnd;
-            var value = textarea.value;
-            textarea.value = value.substring(0, start) + '    ' + value.substring(end);
-            textarea.selectionStart = textarea.selectionEnd = start + 4;
-            setDirty(true);
-        }
-    });
+    // Tab key inserts spaces (both textareas)
+    function handleTab(ta) {
+        ta.addEventListener('keydown', function (e) {
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                var start = ta.selectionStart;
+                var end = ta.selectionEnd;
+                var value = ta.value;
+                ta.value = value.substring(0, start) + '    ' + value.substring(end);
+                ta.selectionStart = ta.selectionEnd = start + 4;
+                if (ta === textarea) setDirty(true);
+                else setMicroDirty(true);
+            }
+        });
+    }
+    handleTab(textarea);
+    handleTab(microTextarea);
 
-    // Ctrl+S / Cmd+S
+    // Ctrl+S / Cmd+S → save standard; Ctrl+Shift+S → save micro
     document.addEventListener('keydown', function (e) {
         if ((e.ctrlKey || e.metaKey) && e.key === 's') {
             e.preventDefault();
-            if (currentFile) saveFile();
+            if (e.shiftKey) {
+                if (currentFile && currentHasMicro) saveMicroFile();
+            } else {
+                if (currentFile) saveFile();
+            }
         }
     });
 
@@ -511,7 +658,7 @@
 
     // Warn about unsaved changes on page leave
     window.addEventListener('beforeunload', function (e) {
-        if (isDirty) {
+        if (isDirty || isMicroDirty) {
             e.preventDefault();
             e.returnValue = '';
         }

@@ -331,6 +331,15 @@ html, body {
     margin-left: 4px;
 }
 
+.instr-file-card-micro {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    color: var(--green);
+    margin-left: 4px;
+}
+
 /* ─── Editor Pane ────────────────────────────────────── */
 
 .instr-editor-pane {
@@ -536,6 +545,94 @@ html, body {
     color: var(--text-primary);
 }
 
+/* ─── Dual Editor (Standard + Micro) ────────────────── */
+
+.instr-dual-wrap {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+}
+
+.instr-dual-col {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+}
+.instr-dual-col.hidden { display: none; }
+
+/* When micro column is visible, add a divider between the two */
+.instr-dual-col + .instr-dual-col:not(.hidden) {
+    border-left: 1px solid var(--border);
+}
+
+.instr-dual-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    padding: 4px 20px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-light);
+    flex-shrink: 0;
+}
+
+.instr-dual-label-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px 4px 20px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-light);
+    flex-shrink: 0;
+}
+
+.instr-dual-label-bar .instr-dual-label {
+    padding: 0;
+    background: none;
+    border-bottom: none;
+}
+.instr-dual-label.micro {
+    color: var(--green);
+}
+
+.instr-micro-dirty {
+    color: var(--orange);
+    font-size: 14px;
+    line-height: 1;
+}
+.instr-micro-dirty.hidden { display: none; }
+
+.instr-micro-override {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(247, 129, 102, 0.15);
+    color: var(--orange);
+    margin-left: auto;
+}
+.instr-micro-override.hidden { display: none; }
+
+.instr-micro-save-status {
+    font-size: 11px;
+    color: var(--green);
+    white-space: nowrap;
+}
+
+.instr-btn.micro-revert {
+    font-size: 10px;
+    padding: 2px 8px;
+}
+.instr-btn.micro-save {
+    font-size: 10px;
+    padding: 2px 8px;
+}
+
 /* Textarea */
 
 .instr-textarea {
@@ -554,6 +651,9 @@ html, body {
 }
 .instr-textarea:focus {
     box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.3);
+}
+.instr-textarea.micro:focus {
+    box-shadow: inset 0 0 0 1px rgba(63, 185, 80, 0.3);
 }
 
 /* ─── No Results ─────────────────────────────────────── */
@@ -614,5 +714,12 @@ html, body {
     .instr-editor-desc {
         order: 1;
         flex-basis: 100%;
+    }
+    .instr-dual-wrap {
+        flex-direction: column;
+    }
+    .instr-dual-col + .instr-dual-col:not(.hidden) {
+        border-left: none;
+        border-top: 1px solid var(--border);
     }
 }

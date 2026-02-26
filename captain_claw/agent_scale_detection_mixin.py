@@ -892,6 +892,11 @@ class AgentScaleDetectionMixin:
         Returns True when scale_progress is absent, empty, has fewer than
         3 items, or all items are just source URLs.
         """
+        # The orchestrator sets this flag on worker agents for non-scale
+        # tasks (combine, send, assemble) to avoid wasting LLM calls on
+        # list extraction that will never produce useful results.
+        if getattr(self, "_skip_deferred_scale", False):
+            return False
         sp = getattr(self, "_scale_progress", None)
         items = sp.get("items", []) if sp else []
         return (

@@ -47,6 +47,22 @@ _POLL_INTERVAL_SECONDS = 1.0
 _WORKER_DEFAULT_ITERATIONS = 5
 _WORKER_MAX_ITERATIONS = 20
 
+# Tasks whose primary purpose is NOT list-processing should skip the
+# deferred scale init entirely.  We set a flag on the worker agent so
+# that ``_needs_deferred_scale_init`` returns False immediately, avoiding
+# multiple wasted LLM extraction calls.
+_NON_SCALE_TASK_RE = re.compile(
+    r"(?:"
+    r"send\b.*\b(?:email|mail|message|mailgun|smtp|sendgrid)"
+    r"|combine\b.*\b(?:files?|markdowns?|results|outputs)"
+    r"|merge\b.*\b(?:files?|results|outputs)"
+    r"|assemble\b.*\b(?:file|document|report|summary)"
+    r"|produce\b.*\bsummary\b"
+    r"|create\b.*\bsummary\b.*\bsend\b"
+    r")",
+    re.IGNORECASE,
+)
+
 # Keywords / phrases that each imply at least one extra tool call.
 _COMPLEXITY_SIGNALS: list[tuple[re.Pattern[str], int]] = [
     # Multi-file operations
@@ -1077,6 +1093,24 @@ class SessionOrchestrator:
                             dep_parts.append(
                                 f"--- Output from \"{dep_task.title}\" ({dep_id}) ---\n{dep_output}"
                             )
+
+                        # Also inject file paths created by this dependency so
+                        # the downstream worker knows exactly where to read
+                        # upstream output files (avoids blind glob searches).
+                        if self._file_registry and dep_task.session_id:
+                            dep_files = [
+                                f for f in self._file_registry.list_files()
+                                if dep_task.session_id in f.get("physical", "")
+                            ]
+                            if dep_files:
+                                file_lines = "\n".join(
+                                    f"  - {f['logical']}  →  {f['physical']}"
+                                    for f in dep_files
+                                )
+                                dep_parts.append(
+                                    f"Output files from \"{dep_task.title}\" "
+                                    f"(use either path for read/send_mail):\n{file_lines}"
+                                )
                 if dep_parts:
                     dep_outputs_section = (
                         "\n\nResults from previous steps:\n" + "\n\n".join(dep_parts) + "\n"
@@ -1101,6 +1135,13 @@ class SessionOrchestrator:
                     estimated=estimated,
                 )
                 agent.max_iterations = estimated
+
+            # Skip the deferred scale init for tasks that are clearly
+            # non-scale (combine, send, assemble).  This prevents wasted
+            # LLM extraction calls after every tool call in those workers.
+            _check_text = f"{task.title} {task.description}"
+            if _NON_SCALE_TASK_RE.search(_check_text):
+                agent._skip_deferred_scale = True
 
             # No asyncio.wait_for timeout — timeout management is handled
             # by tick_timeouts() in the execution loop, which provides
