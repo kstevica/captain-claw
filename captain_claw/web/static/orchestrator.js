@@ -1177,10 +1177,12 @@
         orchRephrased.value = '';
 
         try {
+            const rephrasePayload = { input };
+            if (workflowModel) rephrasePayload.model = workflowModel;
             const resp = await fetch('/api/orchestrator/rephrase', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ input }),
+                body: JSON.stringify(rephrasePayload),
             });
 
             if (!resp.ok) {
@@ -1366,11 +1368,13 @@
             const skillsParam = getSelectedSkillsParam();
             const fullInput = input + skillsParam;
 
-            console.log('[orch-decompose] calling /api/orchestrator/prepare', { fullInputLen: fullInput.length, skills: skillsParam });
+            const preparePayload = { input: fullInput };
+            if (workflowModel) preparePayload.model = workflowModel;
+            console.log('[orch-decompose] calling /api/orchestrator/prepare', { fullInputLen: fullInput.length, skills: skillsParam, model: workflowModel || '(default)' });
             const resp = await fetch('/api/orchestrator/prepare', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ input: fullInput }),
+                body: JSON.stringify(preparePayload),
             });
 
             console.log('[orch-decompose] response status', resp.status, resp.statusText);

@@ -70,10 +70,32 @@ async def rephrase_orchestrator_input(server: WebServer, request: web.Request) -
     if not user_input:
         return web.json_response({"error": "Empty input"}, status=400)
 
+    model_selector = str(body.get("model", "")).strip() or None
+
     provider = server.agent.provider if server.agent else None
     if provider is None:
         from captain_claw.llm import get_provider
         provider = get_provider()
+
+    # If a model override was requested, resolve it and create a temp provider.
+    if model_selector and server.agent:
+        resolved = server.agent._resolve_allowed_model(model_selector)
+        if resolved:
+            from captain_claw.llm import create_provider
+            from captain_claw.config import get_config as _cfg
+            _c = _cfg()
+            provider = create_provider(
+                provider=str(resolved.get("provider", _c.model.provider)),
+                model=str(resolved.get("model", _c.model.model)),
+                api_key=server.agent._resolve_provider_api_key(
+                    server.agent._normalize_provider_key(str(resolved.get("provider", "")))
+                ) or _c.model.api_key or None,
+                base_url=str(resolved.get("base_url", "") or "") or _c.model.base_url or None,
+                temperature=float(resolved.get("temperature") if resolved.get("temperature") is not None else _c.model.temperature),
+                max_tokens=int(resolved.get("max_tokens") if resolved.get("max_tokens") is not None else _c.model.max_tokens),
+                tokens_per_minute=_c.model.tokens_per_minute,
+            )
+            log.info("Rephrase using model override", model=str(resolved.get("model", "")))
 
     loader = InstructionLoader()
     prompt = loader.render(
@@ -231,10 +253,11 @@ async def prepare_orchestrator(server: WebServer, request: web.Request) -> web.R
     if not user_input:
         log.warning("_prepare_orchestrator: empty input")
         return web.json_response({"ok": False, "error": "Missing input"}, status=400)
+    model = str(body.get("model", "")).strip() or None
     log.info("_prepare_orchestrator: calling prepare",
-             input_len=len(user_input), input_preview=user_input[:150])
+             input_len=len(user_input), input_preview=user_input[:150], model=model)
     try:
-        result = await server._orchestrator.prepare(user_input)
+        result = await server._orchestrator.prepare(user_input, model=model)
     except Exception as e:
         log.error("_prepare_orchestrator: prepare() raised exception",
                   error=str(e), error_type=type(e).__name__)

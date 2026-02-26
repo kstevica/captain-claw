@@ -341,21 +341,80 @@ class SessionOrchestrator:
             pass
 
     # ------------------------------------------------------------------
+    # Model resolution helper
+    # ------------------------------------------------------------------
+
+    def _resolve_model_provider(self, selector: str) -> LLMProvider | None:
+        """Create a temporary LLM provider for the given model selector.
+
+        Uses the main agent's allowed-models list to resolve the selector
+        and build a properly configured provider.  Returns ``None`` if the
+        selector cannot be resolved.
+        """
+        if not self._main_agent or not selector:
+            return None
+        try:
+            resolved = self._main_agent._resolve_allowed_model(selector)
+        except Exception:
+            return None
+        if not resolved:
+            log.warning("Could not resolve model selector", selector=selector)
+            return None
+        try:
+            from captain_claw.llm import create_provider as _create
+            cfg = get_config()
+            provider_name = str(resolved.get("provider", cfg.model.provider)).strip()
+            norm_key = self._main_agent._normalize_provider_key(provider_name)
+            api_key = (
+                self._main_agent._resolve_provider_api_key(norm_key)
+                or cfg.model.api_key or None
+            )
+            base_url = str(resolved.get("base_url", "") or "").strip() or cfg.model.base_url or None
+            temperature = resolved.get("temperature")
+            max_tokens = resolved.get("max_tokens")
+            p = _create(
+                provider=provider_name,
+                model=str(resolved.get("model", cfg.model.model)).strip(),
+                api_key=api_key,
+                base_url=base_url,
+                temperature=float(cfg.model.temperature if temperature is None else temperature),
+                max_tokens=int(cfg.model.max_tokens if max_tokens is None else max_tokens),
+            )
+            log.info("Resolved model override provider",
+                     selector=selector,
+                     provider=provider_name,
+                     model=str(resolved.get("model", "")))
+            return p
+        except Exception as e:
+            log.warning("Failed to create model override provider",
+                        selector=selector, error=str(e))
+            return None
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    async def prepare(self, user_input: str) -> dict[str, Any]:
+    async def prepare(self, user_input: str, model: str | None = None) -> dict[str, Any]:
         """Decompose a request and build the task graph for preview.
 
         Runs stages 1 (DECOMPOSE) and 2 (BUILD GRAPH) only.  The graph
         is stored internally so :meth:`execute` can run it later.
 
+        Args:
+            user_input: The user request to decompose.
+            model: Optional model selector override for decompose LLM call
+                and workflow-level task model.
+
         Returns:
             Dict with ``ok``, ``workflow_name``, ``summary``, ``tasks``,
             and ``synthesis_instruction``.
         """
+        # Apply workflow-level model override if provided.
+        if model:
+            self._workflow_model = model
+
         log.info("prepare() called", input_len=len(user_input),
-                 input_preview=user_input[:200])
+                 input_preview=user_input[:200], workflow_model=self._workflow_model)
         self._set_status("Orchestrator: decomposing request...")
         self._broadcast_event("decomposing", {"input": user_input[:500]})
 
@@ -432,6 +491,13 @@ class SessionOrchestrator:
         self._user_input = user_input
         self._synthesis_instruction = synthesis_instruction
         self._workflow_name = self._generate_workflow_name(summary)
+
+        # Apply workflow-level model to tasks so the preview shows
+        # the correct model instead of "Default" for each task.
+        if self._workflow_model:
+            for _tid, task in graph.tasks.items():
+                if not task.model_id:
+                    task.model_id = self._workflow_model
 
         self._emit_output(
             "orchestrator",
@@ -718,13 +784,19 @@ class SessionOrchestrator:
             Message(role="user", content=user_prompt),
         ]
 
+        # Use a model-specific provider if a workflow model override is set.
+        provider = self._provider
+        if self._workflow_model and self._main_agent:
+            provider = self._resolve_model_provider(self._workflow_model) or provider
+
         try:
             log.info("Calling LLM for decomposition...",
-                     provider=type(self._provider).__name__,
+                     provider=type(provider).__name__,
+                     model=getattr(provider, "model", "?"),
                      max_tokens=_DECOMPOSE_MAX_TOKENS,
                      timeout=_PLANNER_TIMEOUT_SECONDS)
             response = await asyncio.wait_for(
-                self._provider.complete(messages=messages, tools=None, max_tokens=_DECOMPOSE_MAX_TOKENS),
+                provider.complete(messages=messages, tools=None, max_tokens=_DECOMPOSE_MAX_TOKENS),
                 timeout=_PLANNER_TIMEOUT_SECONDS,
             )
             log.info("LLM decompose response received",
@@ -741,7 +813,7 @@ class SessionOrchestrator:
                     llm_log.set_session("orchestrator")
                     llm_log.log_call(
                         interaction_label="orchestrator_decompose",
-                        model=str(getattr(self._provider, "model", "") or ""),
+                        model=str(getattr(provider, "model", "") or ""),
                         messages=messages,
                         response=response,
                         instruction_files=["orchestrator_decompose_system_prompt.md", "orchestrator_decompose_user_prompt.md"],
@@ -1488,13 +1560,18 @@ class SessionOrchestrator:
         )
 
         # Use the main agent's provider for synthesis (keeps context in main session).
+        # Honour workflow-level model override when set.
+        provider = self._provider
+        if self._workflow_model and self._main_agent:
+            provider = self._resolve_model_provider(self._workflow_model) or provider
+
         messages = [
             Message(role="user", content=user_prompt),
         ]
 
         try:
             response = await asyncio.wait_for(
-                self._provider.complete(messages=messages, tools=None, max_tokens=_SYNTHESIZE_MAX_TOKENS),
+                provider.complete(messages=messages, tools=None, max_tokens=_SYNTHESIZE_MAX_TOKENS),
                 timeout=_PLANNER_TIMEOUT_SECONDS,
             )
             # File-based session logging
@@ -1504,7 +1581,7 @@ class SessionOrchestrator:
                     llm_log.set_session("orchestrator")
                     llm_log.log_call(
                         interaction_label="orchestrator_synthesize",
-                        model=str(getattr(self._provider, "model", "") or ""),
+                        model=str(getattr(provider, "model", "") or ""),
                         messages=messages,
                         response=response,
                         instruction_files=["orchestrator_synthesize_user_prompt.md"],

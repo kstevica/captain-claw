@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import time
 from abc import ABC, abstractmethod
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
@@ -59,8 +62,74 @@ class ToolDefinition:
     parameters: dict[str, Any]  # JSON Schema
 
 
+class TokenRateLimiter:
+    """Sliding-window token rate limiter (tokens per minute).
+
+    Tracks token consumption over a rolling 60-second window and blocks
+    callers via ``acquire()`` until capacity is available.  After the API
+    call completes, ``record_actual()`` corrects the estimate with the
+    real usage reported by the provider.
+    """
+
+    def __init__(self, tokens_per_minute: int) -> None:
+        self.tpm = max(0, tokens_per_minute)
+        self._lock = asyncio.Lock()
+        # Each entry: (monotonic_timestamp, token_count)
+        self._log: deque[tuple[float, int]] = deque()
+
+    @property
+    def enabled(self) -> bool:
+        return self.tpm > 0
+
+    def _purge_old(self, now: float) -> int:
+        """Remove entries older than 60 s and return current window total."""
+        cutoff = now - 60.0
+        while self._log and self._log[0][0] < cutoff:
+            self._log.popleft()
+        return sum(t for _, t in self._log)
+
+    async def acquire(self, estimated_tokens: int) -> None:
+        """Wait until the window has room for *estimated_tokens*."""
+        if not self.enabled:
+            return
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                used = self._purge_old(now)
+                if used + estimated_tokens <= self.tpm:
+                    self._log.append((now, estimated_tokens))
+                    return
+                # Calculate how long until enough capacity frees up.
+                deficit = (used + estimated_tokens) - self.tpm
+                wait = 0.0
+                freed = 0
+                for ts, tok in self._log:
+                    freed += tok
+                    if freed >= deficit:
+                        wait = (ts + 60.0) - now
+                        break
+            wait = max(0.1, wait)
+            log.info(
+                "rate-limiter: waiting %.1fs (used %d/%d TPM)",
+                wait,
+                used,
+                self.tpm,
+            )
+            await asyncio.sleep(wait)
+
+    def record_actual(self, actual_tokens: int, estimated_tokens: int) -> None:
+        """Correct the most-recent log entry with real usage."""
+        diff = actual_tokens - estimated_tokens
+        if diff == 0 or not self._log:
+            return
+        ts, tok = self._log[-1]
+        self._log[-1] = (ts, max(0, tok + diff))
+
+
 class LLMProvider(ABC):
     """Abstract base class for LLM providers."""
+
+    rate_limiter: TokenRateLimiter | None = None
 
     @abstractmethod
     async def complete(
@@ -85,6 +154,20 @@ class LLMProvider(ABC):
     @abstractmethod
     def count_tokens(self, text: str) -> int:
         pass
+
+    def _estimate_request_tokens(
+        self,
+        messages: list[Message],
+        max_tokens: int | None = None,
+    ) -> int:
+        """Rough estimate of total tokens a request will consume."""
+        prompt_tokens = 0
+        for msg in messages:
+            text = msg.content if isinstance(msg, Message) else str(msg.get("content", ""))
+            prompt_tokens += self.count_tokens(text) if text else 0
+        # Add a conservative estimate for the completion side.
+        completion_budget = max_tokens or 4096
+        return prompt_tokens + completion_budget
 
 
 def _obj_get(obj: Any, key: str, default: Any = None) -> Any:
@@ -313,6 +396,7 @@ class OllamaProvider(LLMProvider):
         max_tokens: int = 32000,
         num_ctx: int = 160000,
         api_key: str | None = None,
+        tokens_per_minute: int = 0,
     ):
         self.provider = "ollama"
         self.model = model
@@ -322,6 +406,7 @@ class OllamaProvider(LLMProvider):
         self.num_ctx = max(1, int(num_ctx))
         self.api_key = api_key
         self.client = httpx.AsyncClient(timeout=120.0, follow_redirects=True)
+        self.rate_limiter = TokenRateLimiter(tokens_per_minute) if tokens_per_minute > 0 else None
 
     async def complete(
         self,
@@ -353,6 +438,11 @@ class OllamaProvider(LLMProvider):
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+
+        estimated = 0
+        if self.rate_limiter:
+            estimated = self._estimate_request_tokens(messages, max_tokens or self.max_tokens)
+            await self.rate_limiter.acquire(estimated)
 
         try:
             response = await self.client.post(url, json=body, headers=headers)
@@ -386,6 +476,8 @@ class OllamaProvider(LLMProvider):
                 "total_tokens": int(_obj_get(data, "prompt_eval_count", 0) or 0)
                 + int(_obj_get(data, "eval_count", 0) or 0),
             }
+            if self.rate_limiter:
+                self.rate_limiter.record_actual(usage.get("total_tokens", 0), estimated)
             finish_reason = str(_obj_get(data, "done_reason", "") or "")
             return LLMResponse(
                 content=str(content),
@@ -434,6 +526,10 @@ class OllamaProvider(LLMProvider):
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
+        if self.rate_limiter:
+            estimated = self._estimate_request_tokens(messages, max_tokens or self.max_tokens)
+            await self.rate_limiter.acquire(estimated)
+
         try:
             async with self.client.stream("POST", url, json=body, headers=headers) as response:
                 if not response.is_success:
@@ -479,6 +575,7 @@ class LiteLLMProvider(LLMProvider):
         base_url: str | None = None,
         temperature: float = 0.7,
         max_tokens: int = 32000,
+        tokens_per_minute: int = 0,
     ):
         self.provider = _normalize_provider_name(provider)
         self.model = _provider_model_name(self.provider, model)
@@ -490,6 +587,7 @@ class LiteLLMProvider(LLMProvider):
             temperature,
         )
         self.max_tokens = max_tokens
+        self.rate_limiter = TokenRateLimiter(tokens_per_minute) if tokens_per_minute > 0 else None
 
         # Google OAuth / Vertex AI credentials (set via set_vertex_credentials).
         self._vertex_credentials: dict[str, Any] | None = None
@@ -568,6 +666,11 @@ class LiteLLMProvider(LLMProvider):
         except Exception as e:
             raise LLMError(f"LiteLLM is required for provider '{self.provider}': {e}")
 
+        estimated = 0
+        if self.rate_limiter:
+            estimated = self._estimate_request_tokens(messages, max_tokens or self.max_tokens)
+            await self.rate_limiter.acquire(estimated)
+
         try:
             response = await acompletion(
                 **self._request_kwargs(
@@ -601,11 +704,14 @@ class LiteLLMProvider(LLMProvider):
                     arguments=arguments,
                 ))
 
+            usage = _extract_usage(_obj_get(response, "usage", None))
+            if self.rate_limiter:
+                self.rate_limiter.record_actual(usage.get("total_tokens", 0), estimated)
             return LLMResponse(
                 content=str(content),
                 tool_calls=tool_calls,
                 model=str(_obj_get(response, "model", self.model) or self.model),
-                usage=_extract_usage(_obj_get(response, "usage", None)),
+                usage=usage,
                 finish_reason=finish_reason,
             )
         except Exception as e:
@@ -626,6 +732,10 @@ class LiteLLMProvider(LLMProvider):
             from litellm import acompletion
         except Exception as e:
             raise LLMError(f"LiteLLM is required for provider '{self.provider}': {e}")
+
+        if self.rate_limiter:
+            estimated = self._estimate_request_tokens(messages, max_tokens or self.max_tokens)
+            await self.rate_limiter.acquire(estimated)
 
         try:
             stream = await acompletion(
@@ -680,6 +790,7 @@ def create_provider(
     temperature: float = 0.7,
     max_tokens: int = 32000,
     num_ctx: int = 160000,
+    tokens_per_minute: int = 0,
 ) -> LLMProvider:
     """Create an LLM provider.
 
@@ -699,6 +810,7 @@ def create_provider(
             max_tokens=max_tokens,
             num_ctx=num_ctx,
             api_key=api_key,
+            tokens_per_minute=tokens_per_minute,
         )
 
     if normalized in {"openai", "anthropic", "gemini"}:
@@ -709,6 +821,7 @@ def create_provider(
             base_url=base_url,
             temperature=temperature,
             max_tokens=max_tokens,
+            tokens_per_minute=tokens_per_minute,
         )
 
     raise ValueError(
@@ -736,6 +849,7 @@ def get_provider() -> LLMProvider:
             num_ctx=cfg.context.max_tokens,
             api_key=cfg.model.api_key or None,
             base_url=cfg.model.base_url or None,
+            tokens_per_minute=cfg.model.tokens_per_minute,
         )
     return _provider
 

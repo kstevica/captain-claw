@@ -90,6 +90,9 @@ def _build_schema() -> list[dict[str, Any]]:
                         _field("model.api_key", "API Key"),
                         _field("model.base_url", "Base URL", type="text",
                                placeholder="Leave empty for provider default"),
+                        _field("model.tokens_per_minute", "Tokens per minute",
+                               type="number", min=0, max=10000000,
+                               hint="Provider rate limit (0 = unlimited)"),
                     ],
                 },
                 {

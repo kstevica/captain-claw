@@ -35,6 +35,7 @@ class ModelConfig(BaseModel):
     max_tokens: int = 32000
     api_key: str = ""
     base_url: str = ""
+    tokens_per_minute: int = 0  # 0 = unlimited (no rate limiting)
     allowed: list[AllowedModelConfig] = Field(default_factory=list)
 
 

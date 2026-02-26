@@ -179,6 +179,7 @@ class AgentModelMixin:
             temperature=resolved_temperature,
             max_tokens=resolved_max_tokens,
             num_ctx=cfg.context.max_tokens,
+            tokens_per_minute=cfg.model.tokens_per_minute,
         )
         set_provider(self.provider)
         self._refresh_runtime_model_details(source=source, model_id=model_id)
