@@ -60,6 +60,10 @@ class FileRegistry:
         # orchestrator so that tools like glob can filter out files
         # created before this run (avoids stale results from prior runs).
         self.workflow_started_at: float | None = None
+        # Shared directory for all files in this workflow run.  When set,
+        # tools write directly here (no per-session scoping).  Set by the
+        # orchestrator in prepare().
+        self.workflow_run_dir: Path | None = None
 
     # ------------------------------------------------------------------
     # Public API

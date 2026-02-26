@@ -435,7 +435,7 @@ class AgentOrchestrationMixin:
         _early_items = _sp_early.get("items", []) if _sp_early else []
         _can_early_takeover = (
             _sp_early is not None
-            and len(_early_items) >= 3
+            and len(_early_items) >= 2
             and not self._items_are_source_urls_only(_early_items)
         )
         if _can_early_takeover:
@@ -767,7 +767,7 @@ class AgentOrchestrationMixin:
                     _deferred_items = _sp_deferred.get("items", []) if _sp_deferred else []
                     if (
                         _sp_deferred is not None
-                        and len(_deferred_items) >= 3
+                        and len(_deferred_items) >= 2
                         and not self._items_are_source_urls_only(_deferred_items)
                     ):
                         micro_result = await self._run_micro_loop_and_summarize(
@@ -873,7 +873,7 @@ class AgentOrchestrationMixin:
                     _deferred_items2 = _sp_deferred2.get("items", []) if _sp_deferred2 else []
                     if (
                         _sp_deferred2 is not None
-                        and len(_deferred_items2) >= 3
+                        and len(_deferred_items2) >= 2
                         and not self._items_are_source_urls_only(_deferred_items2)
                     ):
                         micro_result = await self._run_micro_loop_and_summarize(

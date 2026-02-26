@@ -406,7 +406,7 @@ class AgentScaleDetectionMixin:
         _existing_items = sp.get("items", []) if sp else []
         if (
             sp is not None
-            and len(_existing_items) >= 3
+            and len(_existing_items) >= 2
             and not self._items_are_source_urls_only(_existing_items)
         ):
             # Scale already initialized with enough diverse items — nothing to do.
@@ -457,7 +457,11 @@ class AgentScaleDetectionMixin:
             max_tokens_override=min(6000, int(get_config().model.max_tokens)),
         )
         new_members = new_plan.get("members", [])
-        if len(new_members) < 3:
+        # Accept 2+ real members — the source-URL guard (below and in
+        # _needs_deferred_scale_init) already catches the degenerate case
+        # where extraction just echoed the source URLs.  A threshold of 3
+        # incorrectly rejects legitimate 2-item tasks.
+        if len(new_members) < 2:
             log.info(
                 "Deferred scale init: too few members from re-extraction",
                 members=len(new_members),
@@ -890,7 +894,7 @@ class AgentScaleDetectionMixin:
         """Check whether deferred scale initialization should be attempted.
 
         Returns True when scale_progress is absent, empty, has fewer than
-        3 items, or all items are just source URLs.
+        2 items, or all items are just source URLs.
         """
         # The orchestrator sets this flag on worker agents for non-scale
         # tasks (combine, send, assemble) to avoid wasting LLM calls on
@@ -902,6 +906,6 @@ class AgentScaleDetectionMixin:
         return (
             sp is None
             or not items
-            or len(items) < 3
+            or len(items) < 2
             or self._items_are_source_urls_only(items)
         )

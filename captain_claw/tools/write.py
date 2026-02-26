@@ -1,6 +1,7 @@
 """Write tool for writing file contents."""
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any
 
@@ -136,13 +137,24 @@ class WriteTool(Tool):
             ToolResult with status
         """
         try:
-            saved_root = self._resolve_saved_root(kwargs)
-            session_id = self._normalize_session_id(str(kwargs.get("_session_id", "")))
-            file_path = self._normalize_under_saved(path, saved_root, session_id)
+            # Workflow-run override: bypass session scoping entirely.
+            workflow_run_dir = kwargs.get("_workflow_run_dir")
+            if workflow_run_dir is not None:
+                filename = Path(path).name  # flatten to filename only
+                file_path = Path(workflow_run_dir) / filename
+            else:
+                saved_root = self._resolve_saved_root(kwargs)
+                session_id = self._normalize_session_id(str(kwargs.get("_session_id", "")))
+                file_path = self._normalize_under_saved(path, saved_root, session_id)
             
             # Ensure parent directory exists
             file_path.parent.mkdir(parents=True, exist_ok=True)
             
+            # Sanitize content: strip C0/C1 control characters that the LLM
+            # may emit when it fails to reproduce Unicode (e.g. £→\x00a3,
+            # €→\x01, '→\x02).  Preserve normal whitespace (\t \n \r).
+            content = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', content)
+
             # Write file
             mode = "a" if append else "w"
             with open(file_path, mode, encoding="utf-8") as f:

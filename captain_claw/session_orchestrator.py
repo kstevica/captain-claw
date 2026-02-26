@@ -317,6 +317,13 @@ class SessionOrchestrator:
             persist_callback=self._make_persist_callback(),
         )
 
+        # Create a shared workflow-run directory so all workers write to
+        # one flat location instead of per-session scoped paths.
+        cfg_ws = get_config().resolved_workspace_path()
+        workflow_run_dir = cfg_ws / "workflow-run" / orch_run_id
+        workflow_run_dir.mkdir(parents=True, exist_ok=True)
+        self._file_registry.workflow_run_dir = workflow_run_dir
+
         # 1. DECOMPOSE
         plan = await self._decompose(user_input)
         if plan is None:

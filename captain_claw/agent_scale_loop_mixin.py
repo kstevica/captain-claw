@@ -1891,9 +1891,9 @@ class AgentScaleLoopMixin:
         if sp is None:
             return False
         items = sp.get("items", [])
-        if len(items) < 3:
-            # Need at least 3 items for a meaningful scale loop.
-            # Fewer items likely means the extractor only found the
+        if len(items) < 2:
+            # Need at least 2 items for a meaningful scale loop.
+            # A single item likely means the extractor only found the
             # source URL, not the actual list members.
             return False
         # Do NOT take over when all items are just the source URL repeated.

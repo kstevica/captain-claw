@@ -62,6 +62,15 @@ class ReadTool(Tool):
                     file_path = raw_path.resolve()
 
             if not file_path.exists():
+                # Try workflow-run directory first (orchestrated workflows
+                # write all files to one shared flat directory).
+                workflow_run_dir = kwargs.get("_workflow_run_dir")
+                if workflow_run_dir is not None:
+                    candidate = Path(workflow_run_dir) / Path(path).name
+                    if candidate.exists():
+                        file_path = candidate
+
+            if not file_path.exists():
                 # Attempt file registry resolution before giving up.
                 file_registry = kwargs.get("_file_registry")
                 resolved_path: str | None = None

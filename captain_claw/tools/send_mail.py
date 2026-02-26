@@ -132,6 +132,14 @@ class SendMailTool(Tool):
                 file_path = (Path(runtime_base) / raw).resolve()
             else:
                 file_path = raw.resolve()
+            if not file_path.exists():
+                # Try workflow-run directory (orchestrated workflows write
+                # all files to one shared flat directory).
+                workflow_run_dir = kwargs.get("_workflow_run_dir")
+                if workflow_run_dir is not None:
+                    candidate = Path(workflow_run_dir) / Path(raw_path).name
+                    if candidate.exists():
+                        file_path = candidate
             if not file_path.exists() and file_registry is not None:
                 # Fall back to FileRegistry resolution (handles cross-session
                 # paths in orchestrated workflows where upstream tasks wrote

@@ -297,11 +297,17 @@ class AgentContextMixin:
             return ""
         import asyncio
         try:
-            items = asyncio.get_event_loop().run_until_complete(
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Already inside an event loop — use a sync-safe approach.
+                # Check BEFORE creating the coroutine to avoid
+                # "coroutine was never awaited" warnings.
+                return self._build_todo_context_note_sync_cache()
+            items = loop.run_until_complete(
                 sm.get_todo_summary(session_id, cfg.todo.max_items_in_prompt)
             )
         except RuntimeError:
-            # Already inside an event loop — use a sync-safe approach.
+            # Fallback for edge cases (e.g. no current event loop).
             return self._build_todo_context_note_sync_cache()
         return self._format_todo_note(items)
 
