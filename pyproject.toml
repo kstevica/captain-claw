@@ -78,8 +78,8 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
 
-[tool.setuptools]
-packages = ["captain_claw", "captain_claw.web"]
+[tool.setuptools.packages.find]
+include = ["captain_claw*"]
 
 [tool.setuptools.package-data]
 captain_claw = ["web/static/**/*"]

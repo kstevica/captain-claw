@@ -32,17 +32,15 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 
 ## Quick Start
 
-### 1. Clone and install
-
-```bash
-git clone https://github.com/kstevica/captain-claw
-cd captain-claw
-python -m venv venv
-source venv/bin/activate
-pip install -e .
-```
+### 1. Install
 
 Requires **Python 3.11** or higher.
+
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install captain-claw
+```
 
 ### 2. Set an API key
 
@@ -58,7 +56,9 @@ Use only the keys you need. For Ollama, no key is required — just set `provide
 ### 3. Launch
 
 ```bash
-captain-claw
+captain-claw-web   # Web UI (default: http://127.0.0.1:23080)
+captain-claw       # Interactive terminal
+captain-claw --tui # Terminal UI
 ```
 
 First run starts interactive onboarding automatically. The web UI redirects to `/onboarding` on first launch too. To re-run it later: `captain-claw --onboarding`.
@@ -83,13 +83,9 @@ Each session keeps its own model, context, and history.
 
 ### 5. Open the Web UI
 
-The web UI starts by default at **http://127.0.0.1:23080**. Use `Ctrl+K` for the command palette, `Ctrl+B` for the sidebar, and edit instruction files live in the Instructions tab.
+Run `captain-claw-web` to start the web UI at **http://127.0.0.1:23080**. Use `Ctrl+K` for the command palette, `Ctrl+B` for the sidebar, and edit instruction files live in the Instructions tab.
 
-To use the terminal UI instead, pass `--tui`:
-
-```bash
-captain-claw --tui
-```
+For the terminal, use `captain-claw` (interactive) or `captain-claw --tui` (TUI mode).
 
 ## How It Works
 
@@ -273,11 +269,9 @@ See [USAGE.md](USAGE.md) for comprehensive documentation of every command, tool,
 ## Get Started
 
 ```bash
-git clone https://github.com/kstevica/captain-claw
-cd captain-claw
 python -m venv venv && source venv/bin/activate
-pip install -e .
-captain-claw
+pip install captain-claw
+captain-claw-web
 ```
 
 If Captain Claw is useful to you, [give the repo a star](https://github.com/kstevica/captain-claw) to help others find it.
