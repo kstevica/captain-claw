@@ -156,7 +156,7 @@ def _scan_workspace_tree(workspace_path: Path, max_depth: int = 3, max_entries: 
     _walk(workspace_path, 0, "  ")
     if not lines:
         return ""
-    return "Workspace contents:\n" + "\n".join(lines)
+    return "Workspace contents (pre-existing user files — search these with default glob):\n" + "\n".join(lines)
 
 
 def _estimate_task_iterations(description: str) -> int:

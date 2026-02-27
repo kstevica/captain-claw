@@ -34,6 +34,8 @@ CRITICAL — web content retrieval rules (you MUST follow these when rephrasing)
 - Keep the task pipeline simple: fetch content → process it → produce the requested output.
 - NEVER instruct writing intermediate file-listing artifacts (file_list.json, paths.txt, etc.) to pass a list of files between pipeline steps. Workers should use the glob tool and return results in their text output — downstream tasks receive that output automatically.
 - Use relative paths from the workspace root (e.g., "pdf-test/subfolder/file.pdf") — tools resolve them automatically.
+- When the request involves processing pre-existing files (user's own documents), reference them by name/folder. The orchestrator knows these are workspace files.
+- When the request involves a multi-step pipeline where early steps produce files that later steps consume, make the data flow explicit (e.g., "extract data from each page and write results to individual files, then combine all extracted files from the previous steps into a single report"). Do NOT specify internal file paths or workflow directories — the orchestrator handles file routing automatically.
 
 User's original request:
 {user_input}

@@ -38,6 +38,19 @@ CRITICAL — file paths and pre-existing workspace files:
 - When the user refers to files or folders that already exist in the workspace (shown in the "Workspace contents" section of the user prompt), reference them by their exact relative paths in task descriptions. Workers can read these files directly — they are pre-existing inputs, not outputs from other tasks.
 - For tasks that need to read pre-existing workspace files, include the exact file paths or folder names in the task description so the worker knows where to look (e.g., "Read pleis/checklist_pleis.txt to get the checklist requirements").
 
+CRITICAL — file source awareness (workspace vs. workflow output):
+- There are TWO distinct file locations workers can access:
+  1. **Workspace files** — pre-existing files the user already has (shown in "Workspace contents"). Workers search these with the glob tool using the default scope.
+  2. **Workflow output files** — files created by earlier tasks in this workflow run. These are stored in a separate workflow output directory and are listed in the file manifest that downstream workers receive automatically.
+- When a task needs to process FILES CREATED BY EARLIER TASKS in this workflow:
+  - Prefer telling the worker to "use the file paths from the previous step" — downstream workers receive exact paths from the manifest and dependency outputs automatically.
+  - If the worker must glob for generated files (e.g., pattern-based discovery of many generated files), explicitly include in the task description: "use the glob tool with scope='workflow' to find files matching '<pattern>' in the workflow output directory."
+- When a task needs to discover PRE-EXISTING USER FILES in the workspace:
+  - Use standard glob instructions: "use the glob tool to find files matching '<pattern>' in <folder>."
+  - Do NOT add scope='workflow' — the default workspace scope is correct.
+- NEVER instruct a worker to glob for workflow-generated files without specifying scope='workflow'. The default glob scope searches the workspace root where these files do not exist.
+- Rule of thumb: if the files were mentioned in the user's original request as something they already have → workspace scope (default). If the files are being produced by an earlier task in this decomposition → manifest paths or scope='workflow'.
+
 Respond ONLY with valid JSON matching this schema:
 
 ```json

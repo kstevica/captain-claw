@@ -4,4 +4,6 @@ User request:
 Reusable sessions:
 {available_sessions}
 
+{workspace_tree}
+
 Decompose into parallel tasks. JSON only.

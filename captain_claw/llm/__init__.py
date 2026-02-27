@@ -668,48 +668,68 @@ class LiteLLMProvider(LLMProvider):
         finish_reason = ""
         model = self.model
 
-        async for chunk in stream:
-            choices = _obj_get(chunk, "choices", [])
-            if not choices:
-                continue
-            first = choices[0]
-            delta = _obj_get(first, "delta", {})
+        try:
+            async for chunk in stream:
+                choices = _obj_get(chunk, "choices", [])
+                if not choices:
+                    continue
+                first = choices[0]
+                delta = _obj_get(first, "delta", {})
 
-            # Content text
-            c = _obj_get(delta, "content", "")
-            if c:
-                content_parts.append(str(c))
+                # Content text — may be a string or a list of parts
+                # (Gemini sometimes returns list of content parts).
+                c = _obj_get(delta, "content", "")
+                if c:
+                    if isinstance(c, str):
+                        content_parts.append(c)
+                    elif isinstance(c, list):
+                        for part in c:
+                            text = _obj_get(part, "text", "")
+                            if text:
+                                content_parts.append(str(text))
+                    else:
+                        content_parts.append(str(c))
 
-            # Finish reason (last chunk wins)
-            fr = _obj_get(first, "finish_reason", "")
-            if fr:
-                finish_reason = str(fr)
+                # Finish reason (last chunk wins)
+                fr = _obj_get(first, "finish_reason", "")
+                if fr:
+                    finish_reason = str(fr)
 
-            # Streamed tool calls — accumulated by index
-            tc_list = _obj_get(delta, "tool_calls", []) or []
-            for tc in tc_list:
-                idx = int(_obj_get(tc, "index", 0) or 0)
-                fn = _obj_get(tc, "function", {}) or {}
-                if idx not in collected_tool_calls:
-                    collected_tool_calls[idx] = {
-                        "id": str(_obj_get(tc, "id", f"call_{idx}") or f"call_{idx}"),
-                        "function": {"name": "", "arguments": ""},
-                    }
-                name = str(_obj_get(fn, "name", "") or "")
-                if name:
-                    collected_tool_calls[idx]["function"]["name"] = name
-                args = str(_obj_get(fn, "arguments", "") or "")
-                if args:
-                    collected_tool_calls[idx]["function"]["arguments"] += args
+                # Streamed tool calls — accumulated by index
+                tc_list = _obj_get(delta, "tool_calls", []) or []
+                for tc in tc_list:
+                    idx = int(_obj_get(tc, "index", 0) or 0)
+                    fn = _obj_get(tc, "function", {}) or {}
+                    if idx not in collected_tool_calls:
+                        collected_tool_calls[idx] = {
+                            "id": str(_obj_get(tc, "id", f"call_{idx}") or f"call_{idx}"),
+                            "function": {"name": "", "arguments": ""},
+                        }
+                    name = str(_obj_get(fn, "name", "") or "")
+                    if name:
+                        collected_tool_calls[idx]["function"]["name"] = name
+                    args = str(_obj_get(fn, "arguments", "") or "")
+                    if args:
+                        collected_tool_calls[idx]["function"]["arguments"] += args
 
-            # Usage (typically on the final chunk)
-            u = _obj_get(chunk, "usage", None)
-            if u is not None:
-                usage_obj = u
+                # Usage (typically on the final chunk)
+                u = _obj_get(chunk, "usage", None)
+                if u is not None:
+                    usage_obj = u
 
-            m = str(_obj_get(chunk, "model", "") or "")
-            if m:
-                model = m
+                m = str(_obj_get(chunk, "model", "") or "")
+                if m:
+                    model = m
+        except Exception as e:
+            # Preserve whatever we collected so far rather than losing
+            # the entire response.  Log so we can diagnose.
+            log.warning(
+                "Stream collection interrupted, returning partial content",
+                error=str(e),
+                content_parts_collected=len(content_parts),
+                provider=self.provider,
+                model=self.model,
+            )
 
         tc_out = (
             [collected_tool_calls[i] for i in sorted(collected_tool_calls)]
@@ -746,19 +766,30 @@ class LiteLLMProvider(LLMProvider):
             await self.rate_limiter.acquire(estimated)
 
         try:
-            response = await acompletion(
-                **self._request_kwargs(
-                    messages=messages,
-                    tools=tools,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    stream=False,
-                )
+            kwargs = self._request_kwargs(
+                messages=messages,
+                tools=tools,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=False,
             )
 
-            # Safety: some providers (e.g. Gemini via LiteLLM) may return
-            # a streaming object even when stream=False.  Detect and collect
-            # all chunks into a single unified response.
+            if self.provider == "gemini":
+                # Gemini via LiteLLM's acompletion() has persistent
+                # issues: truncated content, unexpected streaming objects.
+                # Use the synchronous completion() in a thread to ensure
+                # we block until the full response is available.
+                from litellm import completion as sync_completion
+                import asyncio as _asyncio
+                loop = _asyncio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None, lambda: sync_completion(**kwargs)
+                )
+            else:
+                response = await acompletion(**kwargs)
+
+            # Safety fallback: if any provider still returns a streaming
+            # object despite stream=False, collect it.
             if hasattr(response, "__aiter__"):
                 log.warning(
                     "Provider returned streaming response with stream=False, "
@@ -769,7 +800,17 @@ class LiteLLMProvider(LLMProvider):
 
             first_choice = _obj_get(response, "choices", [{}])[0]
             choice = _obj_get(first_choice, "message", {})
-            content = _obj_get(choice, "content", "") or ""
+            raw_content = _obj_get(choice, "content", "") or ""
+            # Some providers return content as a list of parts.
+            if isinstance(raw_content, list):
+                text_parts = []
+                for part in raw_content:
+                    t = _obj_get(part, "text", "")
+                    if t:
+                        text_parts.append(str(t))
+                content = "".join(text_parts)
+            else:
+                content = str(raw_content) if raw_content else ""
             finish_reason = str(_obj_get(first_choice, "finish_reason", "") or "")
 
             tool_calls: list[ToolCall] = []

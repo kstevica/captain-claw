@@ -28,7 +28,16 @@ class GlobTool(Tool):
             },
             "root": {
                 "type": "string",
-                "description": "Root directory to search from (default: current directory)",
+                "description": "Root directory to search from (default: workspace root)",
+            },
+            "scope": {
+                "type": "string",
+                "enum": ["workspace", "workflow"],
+                "description": (
+                    "Where to search. 'workspace' (default) searches pre-existing "
+                    "user files in the workspace. 'workflow' searches ONLY the "
+                    "workflow output directory where earlier tasks wrote files."
+                ),
             },
             "limit": {
                 "type": "number",
@@ -42,6 +51,7 @@ class GlobTool(Tool):
         self,
         pattern: str,
         root: str | None = None,
+        scope: str | None = None,
         limit: int = 100,
         **kwargs: Any,
     ) -> ToolResult:
@@ -50,19 +60,42 @@ class GlobTool(Tool):
         Args:
             pattern: Glob pattern
             root: Optional root directory
+            scope: Where to search — ``"workspace"`` (default) for
+                pre-existing user files, ``"workflow"`` for files created
+                by earlier tasks in the current orchestration run.
             limit: Max results
 
         Returns:
             ToolResult with matching files
         """
         try:
-            # Set root — fall back to workspace base path when no explicit
-            # root is given so that relative patterns like "pdf-test/**/*.pdf"
-            # resolve against the workspace directory, not the process cwd.
-            if not root:
+            workflow_run_dir: str | None = kwargs.get("_workflow_run_dir")
+            if isinstance(workflow_run_dir, Path):
+                workflow_run_dir = str(workflow_run_dir)
+
+            # Preserve the raw pattern before root is joined — used for
+            # the cross-scope hint when the primary search finds nothing.
+            raw_pattern = pattern
+
+            # Resolve root based on scope.
+            if scope == "workflow":
+                if workflow_run_dir is not None:
+                    root = workflow_run_dir
+                else:
+                    return ToolResult(
+                        success=True,
+                        content=(
+                            "No workflow output directory available. "
+                            "scope='workflow' is only valid during orchestrated "
+                            "workflows. Use the default scope to search the workspace."
+                        ),
+                    )
+            elif not root:
+                # Default / "workspace" scope: search from workspace root.
                 runtime_base = kwargs.get("_runtime_base_path")
                 if runtime_base is not None:
                     root = str(runtime_base)
+
             if root:
                 pattern = str(Path(root) / pattern)
 
@@ -79,7 +112,6 @@ class GlobTool(Tool):
             # Pre-existing workspace files (user documents, config, etc.)
             # are INPUTS and must never be filtered out.
             workflow_started_at: float | None = kwargs.get("_workflow_started_at")
-            workflow_run_dir: str | None = kwargs.get("_workflow_run_dir")
             if workflow_started_at is not None and workflow_run_dir is not None:
                 wrd_prefix = str(Path(workflow_run_dir).resolve()) + "/"
                 cutoff = workflow_started_at - 2.0
@@ -118,9 +150,27 @@ class GlobTool(Tool):
             matches = matches[:limit]
 
             if not matches:
+                # Cross-scope hint: if we searched workspace and found
+                # nothing, check whether the workflow output directory has
+                # matches for the same pattern.  This helps the LLM
+                # self-correct by retrying with scope='workflow'.
+                hint = ""
+                if scope != "workflow" and workflow_run_dir is not None:
+                    wrd_pattern = str(Path(workflow_run_dir) / raw_pattern)
+                    wrd_matches = await loop.run_in_executor(
+                        None,
+                        lambda p=wrd_pattern: glob.glob(p, recursive=True),
+                    )
+                    if wrd_matches:
+                        hint = (
+                            f"\n\nHint: {len(wrd_matches)} file(s) matching "
+                            f"'{raw_pattern}' exist in the workflow output "
+                            f"directory (files created by earlier tasks). "
+                            f"Retry with scope='workflow' to find them."
+                        )
                 return ToolResult(
                     success=True,
-                    content=f"No files found matching: {pattern}",
+                    content=f"No files found matching: {raw_pattern}{hint}",
                 )
 
             # Return workspace-relative paths when the root was auto-resolved
@@ -135,8 +185,11 @@ class GlobTool(Tool):
                     for m in matches
                 ]
 
-            # Format output
-            output = f"Found {len(matches)} file(s):\n"
+            # Format output with scope-aware label.
+            if scope == "workflow":
+                output = f"Found {len(matches)} file(s) in workflow output:\n"
+            else:
+                output = f"Found {len(matches)} file(s):\n"
             output += "\n".join(f"  {m}" for m in matches)
 
             return ToolResult(

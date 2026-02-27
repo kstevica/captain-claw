@@ -16,7 +16,8 @@ Web rules:
 - Download binary → "use curl via shell".
 - No scripts/Playwright for fetching. No intermediate artifacts. No file-listing artifacts.
 - DO mention user-requested output files (CSV, reports, etc.).
-- Relative paths from workspace root.
+- Relative paths from workspace root. Reference pre-existing user files by name/folder.
+- Multi-step pipelines: make data flow between steps explicit. Don't specify internal paths.
 
 User's request:
 {user_input}

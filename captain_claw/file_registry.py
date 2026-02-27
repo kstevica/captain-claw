@@ -177,8 +177,8 @@ class FileRegistry:
                 return ""
 
             lines = [
-                "Files available from previous steps (use these paths for read, "
-                "send_mail attachments, etc. — do NOT search with glob for these files):"
+                "Files created by earlier workflow tasks (use these exact paths — "
+                "do NOT search with glob for these files, they are NOT in the workspace root):"
             ]
             for logical, physical in sorted(self._mappings.items()):
                 # Show logical path (what the LLM should use) and a

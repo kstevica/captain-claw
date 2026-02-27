@@ -26,6 +26,10 @@ No intermediate formats:
 File paths:
 - Use relative paths from workspace root. Tools resolve them automatically.
 
+File source awareness:
+- Pre-existing user files → default glob (no scope). Workflow-generated files from earlier tasks → tell worker to use manifest paths or glob with scope='workflow'.
+- NEVER instruct a worker to glob for earlier-task outputs without scope='workflow'. They don't live in the workspace root.
+
 Respond ONLY with JSON:
 ```json
 {

@@ -11,8 +11,8 @@ Tool rules:
 - DO write output files when task requires them.
 - Write final content directly. Do NOT create placeholder files.
 - Prefer direct tool calls. Minimum calls needed.
-- Use file paths from the manifest above. Do NOT glob for files already listed in the manifest. Pass manifest paths directly to read, send_mail attachments, or any tool needing file paths.
-- Use RELATIVE paths. All tools (read, write, send_mail, glob) resolve against workspace and file registry automatically.
+- Manifest files = from earlier tasks (NOT in workspace root). Use these paths directly, don't glob for them. Workspace contents = pre-existing user files, use default glob. If task says scope='workflow', pass it to the glob tool to search workflow output only.
+- Use RELATIVE paths. All tools (read, write, send_mail, glob, pdf_extract, shell) resolve against workspace and file registry automatically.
 - File discovery → glob tool, return file paths in response text. No file-list files.
 
 Execute completely. Provide clear result.
