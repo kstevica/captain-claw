@@ -54,9 +54,10 @@ class Session:
         tool_calls: list[dict[str, Any]] | None = None,
         tool_arguments: dict[str, Any] | None = None,
         token_count: int | None = None,
+        model: str = "",
     ) -> None:
         """Add a message to the session."""
-        self.messages.append({
+        msg: dict[str, Any] = {
             "role": role,
             "content": content,
             "tool_call_id": tool_call_id,
@@ -65,7 +66,10 @@ class Session:
             "tool_arguments": tool_arguments,
             "token_count": token_count,
             "timestamp": _utcnow_iso(),
-        })
+        }
+        if model:
+            msg["model"] = model
+        self.messages.append(msg)
         self.updated_at = _utcnow_iso()
 
     def to_dict(self) -> dict[str, Any]:

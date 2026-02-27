@@ -11,6 +11,8 @@
     let suggestionIndex = -1;
     let paletteIndex = -1;
     let currentApprovalId = null;
+    let allowedModels = [];
+    let activeModelLabel = '';
 
     // ── DOM references ──────────────────────────────────────
     const $ = (sel) => document.querySelector(sel);
@@ -89,7 +91,7 @@
                 handleWelcome(data);
                 break;
             case 'chat_message':
-                addChatMessage(data.role, data.content, data.replay);
+                addChatMessage(data.role, data.content, data.replay, data.timestamp, data.model);
                 break;
             case 'command_result':
                 addCommandResult(data.command, data.content);
@@ -130,13 +132,18 @@
 
     function handleWelcome(data) {
         commands = data.commands || [];
+        allowedModels = data.models || [];
+        // Set a fallback active model label from the models list.
+        if (allowedModels.length && !activeModelLabel) {
+            const active = allowedModels.find(m => m.id === 'default') || allowedModels[0];
+            activeModelLabel = `${active.provider}:${active.model}`;
+            modelName.textContent = activeModelLabel;
+        }
+        // Session info may override the active model (e.g. per-session selection).
         if (data.session) {
             updateSessionInfo(data.session);
         }
-        if (data.models && data.models.length) {
-            const active = data.models.find(m => m.id === 'default') || data.models[0];
-            modelName.textContent = `${active.provider}:${active.model}`;
-        }
+        buildModelDropdown();
         buildCommandReference();
     }
 
@@ -144,7 +151,28 @@
 
     let msgCount = 0;
 
-    function addChatMessage(role, content, isReplay) {
+    function formatTimestamp(isoStr) {
+        if (!isoStr) return '';
+        try {
+            const d = new Date(isoStr);
+            if (isNaN(d.getTime())) return '';
+            const now = new Date();
+            const isToday = d.toDateString() === now.toDateString();
+            const yesterday = new Date(now);
+            yesterday.setDate(yesterday.getDate() - 1);
+            const isYesterday = d.toDateString() === yesterday.toDateString();
+
+            const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            if (isToday) return time;
+            if (isYesterday) return `Yesterday ${time}`;
+            const date = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+            return `${date} ${time}`;
+        } catch {
+            return '';
+        }
+    }
+
+    function addChatMessage(role, content, isReplay, timestamp, model) {
         // Remove thinking indicator(s) when assistant or error message arrives.
         if (role === 'assistant' || role === 'error') {
             removeThinkingIndicator();
@@ -164,15 +192,36 @@
         div.className = `msg ${role}`;
         if (isReplay) div.style.animation = 'none';
 
-        const label = document.createElement('div');
+        // Header row: label + meta (timestamp, model)
+        const header = document.createElement('div');
+        header.className = 'msg-header';
+
+        const label = document.createElement('span');
         label.className = 'msg-label';
-        label.textContent = role === 'user' ? 'You' : role === 'error' ? 'Error' : 'Captain Claw';
+        if (role === 'user') {
+            label.textContent = 'You';
+        } else if (role === 'error') {
+            label.textContent = 'Error';
+        } else {
+            label.innerHTML = '<span class="msg-avatar">&#x1F980;</span> Captain Claw';
+        }
+
+        const meta = document.createElement('span');
+        meta.className = 'msg-meta';
+        const timeStr = formatTimestamp(timestamp);
+        const parts = [];
+        if (timeStr) parts.push(timeStr);
+        if (model && role === 'assistant') parts.push(model);
+        meta.textContent = parts.join(' \u00b7 ');
+
+        header.appendChild(label);
+        header.appendChild(meta);
 
         const bubble = document.createElement('div');
         bubble.className = 'msg-bubble';
         bubble.innerHTML = renderMarkdown(content);
 
-        div.appendChild(label);
+        div.appendChild(header);
         div.appendChild(bubble);
         chatMessages.appendChild(div);
         chatMessages.scrollTop = chatMessages.scrollHeight;
@@ -393,8 +442,68 @@
         if (info.name) sessionName.textContent = info.name;
         if (info.model) {
             const provider = info.provider || '';
-            modelName.textContent = provider ? `${provider}:${info.model}` : info.model;
+            activeModelLabel = provider ? `${provider}:${info.model}` : info.model;
+            modelName.textContent = activeModelLabel;
+            highlightActiveModelInDropdown();
         }
+    }
+
+    // ── Model Selector ────────────────────────────────────────
+
+    const modelDropdown = $('#modelDropdown');
+    const modelBadge = $('#modelBadge');
+
+    function buildModelDropdown() {
+        if (!allowedModels.length) {
+            modelDropdown.innerHTML = '<div class="model-dropdown-empty">No models configured</div>';
+            return;
+        }
+        modelDropdown.innerHTML = allowedModels.map((m, i) => {
+            const label = `${m.provider}:${m.model}`;
+            const desc = m.description || '';
+            const isActive = label === activeModelLabel;
+            return `<div class="model-option${isActive ? ' active' : ''}" data-selector="${escapeHtml(m.id || String(i + 1))}" data-label="${escapeHtml(label)}" title="${escapeHtml(desc || label)}">
+                <span class="model-option-name">${escapeHtml(label)}</span>
+                ${desc ? `<span class="model-option-desc">${escapeHtml(desc)}</span>` : ''}
+                ${isActive ? '<span class="model-option-check">&#x2713;</span>' : ''}
+            </div>`;
+        }).join('');
+
+        modelDropdown.querySelectorAll('.model-option').forEach(el => {
+            el.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const selector = el.dataset.selector;
+                send({ type: 'set_model', selector: selector });
+                activeModelLabel = el.dataset.label;
+                modelName.textContent = activeModelLabel;
+                highlightActiveModelInDropdown();
+                hideModelDropdown();
+            });
+        });
+    }
+
+    function highlightActiveModelInDropdown() {
+        modelDropdown.querySelectorAll('.model-option').forEach(el => {
+            const isActive = el.dataset.label === activeModelLabel;
+            el.classList.toggle('active', isActive);
+            const check = el.querySelector('.model-option-check');
+            if (isActive && !check) {
+                const span = document.createElement('span');
+                span.className = 'model-option-check';
+                span.innerHTML = '&#x2713;';
+                el.appendChild(span);
+            } else if (!isActive && check) {
+                check.remove();
+            }
+        });
+    }
+
+    function toggleModelDropdown() {
+        modelDropdown.classList.toggle('hidden');
+    }
+
+    function hideModelDropdown() {
+        modelDropdown.classList.add('hidden');
     }
 
     // ── Input Handling ──────────────────────────────────────
@@ -949,6 +1058,7 @@
             // Escape - close modals/palette
             if (e.key === 'Escape') {
                 if (!approvalModal.classList.contains('hidden')) return; // Don't close approval modal with Esc
+                if (!modelDropdown.classList.contains('hidden')) { hideModelDropdown(); return; }
                 if (!commandPalette.classList.contains('hidden')) { hidePalette(); return; }
                 if (!sidebar.classList.contains('hidden')) { sidebar.classList.add('hidden'); return; }
             }
@@ -973,6 +1083,18 @@
         $('#sidebarClose').addEventListener('click', () => sidebar.classList.add('hidden'));
         $$('.sidebar-tab').forEach(tab => {
             tab.addEventListener('click', () => switchTab(tab.dataset.tab));
+        });
+
+        // Model badge toggles model selector dropdown
+        modelBadge.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleModelDropdown();
+        });
+        // Close model dropdown on outside click
+        document.addEventListener('click', (e) => {
+            if (!modelDropdown.contains(e.target) && e.target !== modelBadge) {
+                hideModelDropdown();
+            }
         });
 
         // Session badge opens sidebar to sessions tab

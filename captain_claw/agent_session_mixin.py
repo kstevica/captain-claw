@@ -800,6 +800,14 @@ class AgentSessionMixin:
         """Append message to session with per-message token metadata."""
         if not self.session:
             return
+        # Attach model label for assistant messages so the UI can display it.
+        model_label = ""
+        if role == "assistant":
+            details = getattr(self, "_runtime_model_details", None) or {}
+            provider = details.get("provider", "")
+            model = details.get("model", "")
+            if provider and model:
+                model_label = f"{provider}:{model}"
         self.session.add_message(
             role=role,
             content=content,
@@ -808,6 +816,7 @@ class AgentSessionMixin:
             tool_calls=tool_calls,
             tool_arguments=tool_arguments,
             token_count=self._count_tokens(content),
+            model=model_label,
         )
         memory = getattr(self, "memory", None)
         if memory is not None:

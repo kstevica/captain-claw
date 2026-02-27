@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from aiohttp import web
@@ -44,6 +45,7 @@ async def handle_chat(server: WebServer, ws: web.WebSocketResponse, content: str
         "type": "chat_message",
         "role": "user",
         "content": content,
+        "timestamp": datetime.now(UTC).isoformat(),
     })
 
     # Launch the heavy work as a background task — do NOT await it here
@@ -58,6 +60,10 @@ async def handle_chat(server: WebServer, ws: web.WebSocketResponse, content: str
 async def _run_agent(server: WebServer, content: str) -> None:
     """Background coroutine that drives the agent and finalises the turn."""
     try:
+        # Capture model details before running the agent.
+        model_details = server.agent.get_runtime_model_details() if server.agent else {}
+        model_label = f"{model_details.get('provider', '')}:{model_details.get('model', '')}" if model_details else ""
+
         # Route /orchestrate requests to the orchestrator.
         stripped = content.strip()
         if stripped.lower().startswith("/orchestrate ") and server._orchestrator:
@@ -73,6 +79,8 @@ async def _run_agent(server: WebServer, content: str) -> None:
                     "type": "chat_message",
                     "role": "assistant",
                     "content": response,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "model": model_label,
                 })
         else:
             # Use complete() which handles tool calls and guards
@@ -82,6 +90,8 @@ async def _run_agent(server: WebServer, content: str) -> None:
                 "type": "chat_message",
                 "role": "assistant",
                 "content": response,
+                "timestamp": datetime.now(UTC).isoformat(),
+                "model": model_label,
             })
 
         # Send updated usage/session info

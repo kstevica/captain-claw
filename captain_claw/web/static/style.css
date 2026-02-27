@@ -93,7 +93,14 @@ html, body {
 .session-badge:hover { background: var(--bg-hover); }
 .session-icon { color: var(--green); font-size: 8px; }
 
+.model-selector-wrap {
+    position: relative;
+}
+
 .model-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     padding: 4px 10px;
     background: var(--accent-subtle);
     border: 1px solid var(--accent);
@@ -101,6 +108,91 @@ html, body {
     font-size: 12px;
     color: var(--accent);
     font-family: var(--font-mono);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.model-badge:hover {
+    background: rgba(56, 139, 253, 0.2);
+    border-color: var(--accent-hover);
+}
+.model-caret {
+    font-size: 10px;
+    opacity: 0.7;
+}
+
+/* ─── Model Dropdown ─────────────────────────────────── */
+
+.model-dropdown {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    min-width: 280px;
+    max-width: 400px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    z-index: 40;
+    overflow: hidden;
+    animation: dropdownFadeIn 0.15s ease;
+}
+.model-dropdown.hidden { display: none; }
+@keyframes dropdownFadeIn {
+    from { opacity: 0; transform: translateX(-50%) translateY(-4px); }
+    to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+.model-dropdown-empty {
+    padding: 12px 16px;
+    color: var(--text-muted);
+    font-size: 13px;
+    text-align: center;
+}
+
+.model-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--border-light);
+    transition: background 0.1s;
+    font-size: 13px;
+}
+.model-option:last-child { border-bottom: none; }
+.model-option:hover { background: var(--bg-hover); }
+.model-option.active {
+    background: var(--accent-subtle);
+}
+
+.model-option-name {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-primary);
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.model-option.active .model-option-name {
+    color: var(--accent);
+    font-weight: 600;
+}
+.model-option-desc {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 120px;
+}
+.model-option-check {
+    color: var(--accent);
+    font-size: 14px;
+    font-weight: 700;
+    flex-shrink: 0;
 }
 
 .status-indicator {
@@ -212,11 +304,11 @@ html, body {
 
 .msg {
     max-width: 85%;
-    margin-bottom: 16px;
-    animation: fadeIn 0.2s ease;
+    margin-bottom: 20px;
+    animation: fadeIn 0.25s ease;
 }
 @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(4px); }
+    from { opacity: 0; transform: translateY(6px); }
     to { opacity: 1; transform: translateY(0); }
 }
 
@@ -231,22 +323,33 @@ html, body {
     max-width: 95%;
 }
 
+.msg-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+    gap: 8px;
+}
+
 .msg-bubble {
-    padding: 10px 14px;
+    padding: 12px 16px;
     border-radius: var(--radius);
     font-size: 14px;
     line-height: 1.6;
     word-break: break-word;
+    position: relative;
 }
 .msg.user .msg-bubble {
-    background: var(--user-bg);
+    background: linear-gradient(135deg, var(--user-bg) 0%, #1a2f4a 100%);
     border: 1px solid #264e78;
     border-radius: var(--radius) var(--radius-sm) var(--radius) var(--radius);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.15);
 }
 .msg.assistant .msg-bubble {
-    background: var(--assistant-bg);
+    background: linear-gradient(135deg, var(--assistant-bg) 0%, #1a2030 100%);
     border: 1px solid var(--border-light);
     border-radius: var(--radius-sm) var(--radius) var(--radius) var(--radius);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.15);
 }
 .msg.command-result .msg-bubble {
     background: var(--bg-tertiary);
@@ -256,18 +359,43 @@ html, body {
     font-size: 13px;
 }
 .msg.error .msg-bubble {
-    background: #2d1215;
+    background: linear-gradient(135deg, #2d1215 0%, #351520 100%);
     border: 1px solid var(--red);
     border-left: 3px solid var(--red);
     color: #ffa198;
+    box-shadow: 0 1px 3px rgba(248,81,73,0.1);
 }
 
 .msg-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+.msg.user .msg-label {
+    color: var(--accent);
+}
+.msg.assistant .msg-label {
+    color: var(--green);
+}
+.msg.error .msg-label {
+    color: var(--red);
+}
+
+.msg-avatar {
+    font-size: 14px;
+    line-height: 1;
+}
+
+.msg-meta {
     font-size: 11px;
     color: var(--text-muted);
-    margin-bottom: 4px;
-    text-transform: uppercase;
-    letter-spacing: 0.3px;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    opacity: 0.7;
 }
 
 /* Markdown-ish rendering inside messages */

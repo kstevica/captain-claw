@@ -39,12 +39,16 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
             role = msg.get("role", "")
             content = msg.get("content", "")
             tool_name = msg.get("tool_name", "")
+            timestamp = msg.get("timestamp", "")
+            model = msg.get("model", "")
             if role in ("user", "assistant"):
                 await server._send(ws, {
                     "type": "chat_message",
                     "role": role,
                     "content": content,
                     "replay": True,
+                    "timestamp": timestamp,
+                    "model": model,
                 })
             elif role == "tool" and tool_name == "task_rephrase":
                 # Replay task rephrase as a visible chat panel.
@@ -105,6 +109,19 @@ async def handle_ws_message(
         if command:
             from captain_claw.web.slash_commands import handle_command
             await handle_command(server, ws, command)
+
+    elif msg_type == "set_model":
+        # Switch model for the current session via direct WebSocket message.
+        selector = str(data.get("selector", "")).strip()
+        if selector and server.agent:
+            ok, msg = await server.agent.set_session_model(selector, persist=True)
+            if ok:
+                server._broadcast({"type": "session_info", **server._session_info()})
+            await server._send(ws, {
+                "type": "command_result",
+                "command": "/session model",
+                "content": msg,
+            })
 
     elif msg_type == "cancel":
         if server.agent and hasattr(server.agent, "cancel_event"):

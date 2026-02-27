@@ -21,9 +21,13 @@
             </span>
         </div>
         <div class="header-center">
-            <span class="model-badge" id="modelBadge" title="Active model">
-                <span id="modelName">-</span>
-            </span>
+            <div class="model-selector-wrap">
+                <button class="model-badge" id="modelBadge" title="Click to change model">
+                    <span id="modelName">-</span>
+                    <span class="model-caret">&#x25BE;</span>
+                </button>
+                <div class="model-dropdown hidden" id="modelDropdown"></div>
+            </div>
         </div>
         <div class="header-right">
             <span class="status-indicator" id="statusIndicator" title="Agent status">

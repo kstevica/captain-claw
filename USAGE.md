@@ -64,7 +64,7 @@ For a quick overview and installation guide, see [README.md](README.md).
 - [Web UI](#web-ui)
 - [Remote Integrations](#remote-integrations)
 - [OpenAI-Compatible API Proxy](#openai-compatible-api-proxy)
-- [Google OAuth and Google Drive](#google-oauth-and-google-drive)
+- [Google OAuth, Drive, Calendar, and Gmail](#google-oauth-drive-calendar-and-gmail)
 - [Send Mail](#send-mail)
 - [File Output Policy](#file-output-policy)
 - [Environment Variables Reference](#environment-variables-reference)
@@ -101,6 +101,7 @@ pip install -e ".[dev]"
 | `captain-claw --tui` | Start with terminal UI |
 | `captain-claw --onboarding` | Re-run first-time setup wizard |
 | `captain-claw-web` | Web UI only (standalone entry point) |
+| `captain-claw-orchestrate` | Headless orchestrator for cron jobs and scripting |
 
 ---
 
@@ -468,6 +469,48 @@ Interact with Google Drive. Requires Google OAuth connection.
 
 **Read behavior:** Google Docs export as markdown, Sheets as CSV, Slides as plain text. Office files (DOCX, XLSX, PPTX) are downloaded and parsed by the corresponding extract tools. Plain text files are downloaded directly.
 
+### google_calendar
+
+Interact with Google Calendar. Requires Google OAuth connection with Calendar scope.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `list_events`, `search_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `list_calendars` |
+| `calendar_id` | string | no | Calendar ID (default: `primary`). Use `list_calendars` to find others. |
+| `event_id` | string | for get/update/delete | Event ID |
+| `query` | string | for search_events | Free-text search query |
+| `summary` | string | for create_event | Event title |
+| `description` | string | no | Event description/notes |
+| `location` | string | no | Event location |
+| `start` | string | for create_event | ISO 8601 datetime (e.g. `2026-02-24T10:00:00+01:00`) or date-only for all-day events (e.g. `2026-02-24`) |
+| `end` | string | no | ISO 8601 datetime or date-only. Defaults to start + 1 hour (timed) or start + 1 day (all-day). |
+| `timezone` | string | no | IANA timezone (e.g. `Europe/Berlin`). Used when start/end don't include an offset. |
+| `attendees` | list[string] | no | Attendee email addresses |
+| `reminders` | list[object] | no | Custom reminders: `[{"method": "popup", "minutes": 10}]` |
+| `recurrence` | list[string] | no | RRULE strings (e.g. `["RRULE:FREQ=WEEKLY;COUNT=10"]`) |
+| `max_results` | number | no | Max results (default: 10, max: 100) |
+| `time_min` | string | no | Lower bound for event start time (ISO 8601). Defaults to now for `list_events`. |
+| `time_max` | string | no | Upper bound for event end time (ISO 8601) |
+| `color_id` | string | no | Event color ID (1-11) |
+
+All-day event end dates are exclusive — an end of `2026-02-25` means the event covers `2026-02-24` only. Uses Google Calendar REST API v3 via httpx (no Google SDK dependency).
+
+### google_mail
+
+Read-only Gmail access. Requires Google OAuth connection with `gmail.readonly` scope. No send, modify, or delete operations.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `list_messages`, `search`, `read_message`, `get_thread`, `list_labels` |
+| `query` | string | for search | Gmail search query (e.g. `from:alice subject:report`, `is:unread has:attachment`) |
+| `message_id` | string | for read_message | Message ID |
+| `thread_id` | string | for get_thread | Thread ID |
+| `label` | string | no | Label/folder for `list_messages` (default: `INBOX`). Common: `SENT`, `DRAFT`, `STARRED`, `UNREAD`, `SPAM`, `TRASH`. |
+| `max_results` | number | no | Max results (default: 10, max: 50) |
+| `include_body` | boolean | no | Include message body in list/search results (default: false). Always true for `read_message`. |
+
+Handles MIME multipart emails, extracts text/plain and text/html parts, and converts HTML to plain text automatically. Message bodies are truncated at 30,000 characters.
+
 ### todo
 
 Persistent cross-session to-do list. The agent uses this tool to manage tasks that survive across sessions.
@@ -687,6 +730,8 @@ tools:
     - pocket_tts
     - send_mail
     - google_drive
+    - google_calendar
+    - google_mail
     - todo
     - contacts
     - scripts
@@ -927,6 +972,8 @@ google_oauth:
   scopes:
     - "https://www.googleapis.com/auth/cloud-platform"
     - "https://www.googleapis.com/auth/drive"
+    - "https://www.googleapis.com/auth/calendar"
+    - "https://www.googleapis.com/auth/gmail.readonly"
     - "openid"
     - "email"
 ```
@@ -1494,6 +1541,37 @@ The orchestrator dashboard at `/orchestrator` shows:
 
 Tasks can access files created by other tasks via the file registry. Files are registered with logical paths and resolved across sessions automatically.
 
+### Headless CLI
+
+The orchestrator can run without the web server or TUI, useful for cron jobs and scripting:
+
+```bash
+# Ad-hoc orchestration
+captain-claw-orchestrate "Fetch competitor pricing, analyze margins, draft memo"
+
+# Run a saved workflow
+captain-claw-orchestrate --workflow my-workflow
+
+# List saved workflows
+captain-claw-orchestrate --list
+
+# JSON output for scripting
+captain-claw-orchestrate --json "Research and compare the top 5 CI providers"
+```
+
+| Option | Description |
+|---|---|
+| `--workflow`, `-w` | Name of a saved workflow to execute |
+| `--config`, `-c` | Path to config YAML |
+| `--model`, `-m` | Override model name |
+| `--provider`, `-p` | Override LLM provider |
+| `--max-parallel` | Max parallel workers (0 = use config default) |
+| `--quiet`, `-q` | Suppress stderr status output |
+| `--json` | Output result as JSON |
+| `--list` | List saved workflows and exit |
+
+Status updates go to stderr; the synthesis result goes to stdout.
+
 ### Configuration
 
 ```yaml
@@ -1648,7 +1726,7 @@ Requests are proxied through the Captain Claw agent pool. Each API request gets 
 
 ---
 
-## Google OAuth and Google Drive
+## Google OAuth, Drive, Calendar, and Gmail
 
 ### Setup
 
@@ -1691,6 +1769,36 @@ Once connected, the `google_drive` tool is available with these actions:
 | `upload` | Upload a local file to Drive |
 | `create` | Create a new file on Drive |
 | `update` | Update an existing file's content |
+
+### Google Calendar Tool
+
+Once connected, the `google_calendar` tool is available with these actions:
+
+| Action | Description |
+|---|---|
+| `list_events` | List upcoming events (defaults to now onwards) |
+| `search_events` | Find events by free-text query |
+| `get_event` | Get full event details by ID |
+| `create_event` | Create a new event with attendees, reminders, recurrence |
+| `update_event` | Partial patch of an existing event |
+| `delete_event` | Remove an event |
+| `list_calendars` | List all accessible calendars |
+
+Supports timed events (ISO 8601 datetime) and all-day events (date-only). See [google_calendar tool reference](#google_calendar) for full parameters.
+
+### Google Mail (Gmail) Tool
+
+Once connected, the `google_mail` tool provides read-only Gmail access:
+
+| Action | Description |
+|---|---|
+| `list_messages` | List recent emails from a label (default: INBOX) |
+| `search` | Search using Gmail query syntax (`from:`, `subject:`, `is:unread`, etc.) |
+| `read_message` | Get full message content, headers, and attachment list |
+| `get_thread` | Get all messages in a conversation thread |
+| `list_labels` | List available Gmail labels/folders |
+
+Only the `gmail.readonly` scope is required — no send, modify, or delete operations. See [google_mail tool reference](#google_mail) for full parameters.
 
 ### Vertex AI
 
