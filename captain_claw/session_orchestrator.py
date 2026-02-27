@@ -79,6 +79,11 @@ _COMPLEXITY_SIGNALS: list[tuple[re.Pattern[str], int]] = [
     (re.compile(r"\bfind\b.*\bfiles?\b|\bglob\b|\bsearch\b.*\bfiles?\b", re.I), 1),
     # General multi-step markers
     (re.compile(r"\bthen\b", re.I), 1),
+    # Per-item processing: "fetch/read each article/page/url" or
+    # "for each of the N items" — each item needs ~2 iterations
+    # (tool call + process result).
+    (re.compile(r"\beach\b.*\b(?:article|page|url|item|link|entry|result)", re.I), 8),
+    (re.compile(r"\b(?:web_fetch|fetch|scrape)\b", re.I), 4),
 ]
 
 
@@ -1375,32 +1380,54 @@ class SessionOrchestrator:
             # by tick_timeouts() in the execution loop, which provides
             # a warning phase and user-postpone flow before restarting.
             response = await agent.complete(worker_prompt)
+            worker_success = getattr(agent, "_last_complete_success", True)
+            output_text = str(response or "").strip()
             result = {
-                "success": True,
-                "output": str(response or "").strip(),
+                "success": worker_success,
+                "output": output_text,
             }
-            graph.complete_task(task.id, result)
 
             # Collect usage metrics from the worker agent.
             usage = getattr(agent, "last_usage", {}) or {}
             ctx = getattr(agent, "last_context_window", {}) or {}
 
-            self._emit_output(
-                "orchestrator",
-                {"event": "worker_done", "task_id": task.id, "title": task.title},
-                f"Completed: {task.title}",
-            )
-            self._broadcast_event("task_completed", {
-                "task_id": task.id, "title": task.title,
-                "output": str(response or "").strip(),
-                "usage": usage,
-                "context": {
-                    "prompt_tokens": ctx.get("prompt_tokens", 0),
-                    "budget": ctx.get("context_budget_tokens", 0),
-                    "utilization": round(ctx.get("utilization", 0) * 100, 1),
-                    "messages": ctx.get("included_messages", 0),
-                },
-            })
+            if worker_success:
+                graph.complete_task(task.id, result)
+                self._emit_output(
+                    "orchestrator",
+                    {"event": "worker_done", "task_id": task.id, "title": task.title},
+                    f"Completed: {task.title}",
+                )
+                self._broadcast_event("task_completed", {
+                    "task_id": task.id, "title": task.title,
+                    "output": output_text,
+                    "usage": usage,
+                    "context": {
+                        "prompt_tokens": ctx.get("prompt_tokens", 0),
+                        "budget": ctx.get("context_budget_tokens", 0),
+                        "utilization": round(ctx.get("utilization", 0) * 100, 1),
+                        "messages": ctx.get("included_messages", 0),
+                    },
+                })
+            else:
+                error_msg = output_text or "Worker completed without success"
+                log.warning(
+                    "Worker returned success=False",
+                    task_id=task.id,
+                    title=task.title,
+                    output_preview=output_text[:200],
+                )
+                graph.fail_task(task.id, error=error_msg)
+                self._emit_output(
+                    "orchestrator",
+                    {"event": "worker_failed", "task_id": task.id, "title": task.title},
+                    f"Failed: {task.title}",
+                )
+                self._broadcast_event("task_failed", {
+                    "task_id": task.id, "title": task.title,
+                    "error": error_msg,
+                    "usage": usage,
+                })
         except asyncio.CancelledError:
             log.info("Worker cancelled", task_id=task.id, title=task.title)
             if task.status == RUNNING:

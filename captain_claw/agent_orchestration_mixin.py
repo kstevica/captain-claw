@@ -55,6 +55,8 @@ class AgentOrchestrationMixin:
         # detect the LLM re-requesting the exact same tool call and stop it
         # before wasting resources on an infinite re-fetch loop.
         self._turn_tool_call_counts: dict[str, int] = {}
+        # Reset per-turn success flag (updated by finish()).
+        self._last_complete_success = True
         # Scale-progress tracker: populated when the scale advisory fires.
         # The tool loop uses this to emit "3 of 27 (11%)" progress.
         self._scale_progress: dict[str, Any] | None = None
@@ -119,6 +121,7 @@ class AgentOrchestrationMixin:
                 self._finalize_pipeline(planning_pipeline, success=success)
             self._finalize_turn_usage(turn_usage)
             _restore_skill_env_once()
+            self._last_complete_success = success
             return text
 
         async def attempt_finalize(
@@ -222,35 +225,40 @@ class AgentOrchestrationMixin:
         # context was merged, otherwise the assistant's previous response
         # (which may list many URLs) leaks into the member list and causes
         # unwanted scale-loop processing of all items.
-        url_extraction_source = user_input if clarification_context_applied else effective_user_input
-        input_urls = self._extract_urls(url_extraction_source)
-        if len(input_urls) > len(list_task_plan.get("members", [])):
-            existing_members = set(
-                str(m).strip() for m in list_task_plan.get("members", [])
-            )
-            augmented = list(list_task_plan.get("members", []))
-            for url in input_urls:
-                if url not in existing_members:
-                    augmented.append(url)
-                    existing_members.add(url)
-            if len(augmented) > len(list_task_plan.get("members", [])):
-                list_task_plan["members"] = augmented[:150]
-                list_task_plan["enabled"] = True
-                if not list_task_plan.get("per_member_action"):
-                    list_task_plan["per_member_action"] = "fetch and process"
-                self._emit_tool_output(
-                    "task_contract",
-                    {
-                        "step": "list_members_augmented_from_input_urls",
-                        "llm_extracted": len(existing_members),
-                        "augmented_total": len(augmented),
-                    },
-                    (
-                        "step=list_members_augmented_from_input_urls\n"
-                        f"llm_extracted={len(existing_members)}\n"
-                        f"augmented_total={len(augmented)}"
-                    ),
+        # Skip for workers — they execute a single focused task; URL
+        # extraction from the worker prompt would re-enable the list task
+        # plan that was intentionally disabled above, causing endless
+        # coverage-check loops on simple fetch-and-summarize tasks.
+        if not is_worker:
+            url_extraction_source = user_input if clarification_context_applied else effective_user_input
+            input_urls = self._extract_urls(url_extraction_source)
+            if len(input_urls) > len(list_task_plan.get("members", [])):
+                existing_members = set(
+                    str(m).strip() for m in list_task_plan.get("members", [])
                 )
+                augmented = list(list_task_plan.get("members", []))
+                for url in input_urls:
+                    if url not in existing_members:
+                        augmented.append(url)
+                        existing_members.add(url)
+                if len(augmented) > len(list_task_plan.get("members", [])):
+                    list_task_plan["members"] = augmented[:150]
+                    list_task_plan["enabled"] = True
+                    if not list_task_plan.get("per_member_action"):
+                        list_task_plan["per_member_action"] = "fetch and process"
+                    self._emit_tool_output(
+                        "task_contract",
+                        {
+                            "step": "list_members_augmented_from_input_urls",
+                            "llm_extracted": len(existing_members),
+                            "augmented_total": len(augmented),
+                        },
+                        (
+                            "step=list_members_augmented_from_input_urls\n"
+                            f"llm_extracted={len(existing_members)}\n"
+                            f"augmented_total={len(augmented)}"
+                        ),
+                    )
         extracted_strategy = str(list_task_plan.get("strategy", "none")).strip().lower()
         if extracted_strategy == "script" and not explicit_script_request:
             self._emit_tool_output(
@@ -931,6 +939,24 @@ class AgentOrchestrationMixin:
                     if finalized:
                         return finish(final_text, success=finish_success)
                     continue
+
+                # ── Worker finalization for embedded tool calls ────
+                # Workers execute a single focused task.  When the LLM
+                # response contained text *and* embedded tool-like
+                # patterns, the text portion is the actual answer but
+                # the embedded extraction prevented the text-only
+                # finalization path from being reached.  Try to
+                # finalize using the response text so workers don't
+                # loop endlessly on spurious embedded tool matches.
+                if is_worker and str(response.content or "").strip():
+                    finalized, final_text, finish_success = await attempt_finalize(
+                        output_text=response.content,
+                        iteration=iteration,
+                        finish_success=True,
+                    )
+                    if finalized:
+                        return finish(final_text, success=finish_success)
+
                 continue
 
             # ── Inline command fallback ────────────────────────────

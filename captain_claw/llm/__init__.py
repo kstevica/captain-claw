@@ -798,7 +798,13 @@ class LiteLLMProvider(LLMProvider):
                 )
                 response = await self._collect_streaming_response(response)
 
-            first_choice = _obj_get(response, "choices", [{}])[0]
+            choices = _obj_get(response, "choices", [{}])
+            if not choices:
+                raise LLMError(
+                    f"{self.provider} returned empty choices array "
+                    f"(model={self.model})"
+                )
+            first_choice = choices[0]
             choice = _obj_get(first_choice, "message", {})
             raw_content = _obj_get(choice, "content", "") or ""
             # Some providers return content as a list of parts.
