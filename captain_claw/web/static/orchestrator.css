@@ -1282,6 +1282,75 @@ html, body {
 }
 .orch-workflow-model-select:focus { outline: none; border-color: var(--accent); }
 .orch-workflow-model-select:hover { border-color: var(--text-muted); }
+.orch-workflow-model-select.disabled-by-auto {
+    opacity: 0.4;
+    pointer-events: none;
+}
+
+/* ─── Auto-select model toggle ──────────────────── */
+
+.orch-auto-model-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    user-select: none;
+    padding: 2px 0;
+}
+
+.orch-auto-model-toggle input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+    position: absolute;
+}
+
+.orch-auto-model-track {
+    position: relative;
+    width: 36px;
+    height: 20px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+}
+
+.orch-auto-model-track::after {
+    content: '';
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    left: 2px;
+    top: 2px;
+    background: var(--text-muted);
+    border-radius: 50%;
+    transition: all 0.2s ease;
+}
+
+.orch-auto-model-toggle input:checked + .orch-auto-model-track {
+    background: rgba(35, 134, 54, 0.4);
+    border-color: #2ea043;
+}
+
+.orch-auto-model-toggle input:checked + .orch-auto-model-track::after {
+    left: 18px;
+    background: var(--green);
+}
+
+.orch-auto-model-toggle:hover .orch-auto-model-track {
+    border-color: var(--text-muted);
+}
+
+.orch-auto-model-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.orch-auto-model-toggle input:checked ~ .orch-auto-model-label {
+    color: var(--green);
+}
 
 .orch-workflow-select {
     padding: 5px 10px;

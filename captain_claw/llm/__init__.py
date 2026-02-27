@@ -654,6 +654,80 @@ class LiteLLMProvider(LLMProvider):
             kwargs["api_base"] = self.base_url
         return kwargs
 
+    async def _collect_streaming_response(self, stream: Any) -> dict[str, Any]:
+        """Collect an async streaming response into a unified response dict.
+
+        Some providers (notably Gemini via LiteLLM) may return a streaming
+        object even when ``stream=False``.  This helper iterates the stream
+        and reassembles the chunks into the standard non-streaming format
+        expected by :meth:`complete`.
+        """
+        content_parts: list[str] = []
+        collected_tool_calls: dict[int, dict[str, Any]] = {}
+        usage_obj: Any = None
+        finish_reason = ""
+        model = self.model
+
+        async for chunk in stream:
+            choices = _obj_get(chunk, "choices", [])
+            if not choices:
+                continue
+            first = choices[0]
+            delta = _obj_get(first, "delta", {})
+
+            # Content text
+            c = _obj_get(delta, "content", "")
+            if c:
+                content_parts.append(str(c))
+
+            # Finish reason (last chunk wins)
+            fr = _obj_get(first, "finish_reason", "")
+            if fr:
+                finish_reason = str(fr)
+
+            # Streamed tool calls — accumulated by index
+            tc_list = _obj_get(delta, "tool_calls", []) or []
+            for tc in tc_list:
+                idx = int(_obj_get(tc, "index", 0) or 0)
+                fn = _obj_get(tc, "function", {}) or {}
+                if idx not in collected_tool_calls:
+                    collected_tool_calls[idx] = {
+                        "id": str(_obj_get(tc, "id", f"call_{idx}") or f"call_{idx}"),
+                        "function": {"name": "", "arguments": ""},
+                    }
+                name = str(_obj_get(fn, "name", "") or "")
+                if name:
+                    collected_tool_calls[idx]["function"]["name"] = name
+                args = str(_obj_get(fn, "arguments", "") or "")
+                if args:
+                    collected_tool_calls[idx]["function"]["arguments"] += args
+
+            # Usage (typically on the final chunk)
+            u = _obj_get(chunk, "usage", None)
+            if u is not None:
+                usage_obj = u
+
+            m = str(_obj_get(chunk, "model", "") or "")
+            if m:
+                model = m
+
+        tc_out = (
+            [collected_tool_calls[i] for i in sorted(collected_tool_calls)]
+            if collected_tool_calls
+            else None
+        )
+        return {
+            "choices": [{
+                "message": {
+                    "content": "".join(content_parts),
+                    "tool_calls": tc_out,
+                },
+                "finish_reason": finish_reason,
+            }],
+            "usage": usage_obj,
+            "model": model,
+        }
+
     async def complete(
         self,
         messages: list[Message],
@@ -681,6 +755,18 @@ class LiteLLMProvider(LLMProvider):
                     stream=False,
                 )
             )
+
+            # Safety: some providers (e.g. Gemini via LiteLLM) may return
+            # a streaming object even when stream=False.  Detect and collect
+            # all chunks into a single unified response.
+            if hasattr(response, "__aiter__"):
+                log.warning(
+                    "Provider returned streaming response with stream=False, "
+                    "collecting full output",
+                    provider=self.provider, model=self.model,
+                )
+                response = await self._collect_streaming_response(response)
+
             first_choice = _obj_get(response, "choices", [{}])[0]
             choice = _obj_get(first_choice, "message", {})
             content = _obj_get(choice, "content", "") or ""

@@ -561,6 +561,121 @@ html, body {
     margin-top: 8px;
 }
 
+/* ─── Model cards ────────────────────────────────────── */
+
+.st-model-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.st-model-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-primary);
+    overflow: hidden;
+}
+
+.st-model-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    cursor: default;
+    gap: 10px;
+    min-height: 42px;
+}
+
+.st-model-card-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.st-model-id-badge {
+    display: inline-block;
+    padding: 1px 8px;
+    background: rgba(88, 166, 255, 0.12);
+    color: var(--accent);
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.st-model-name {
+    font-size: 13px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.st-model-card-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.st-model-card-desc {
+    padding: 0 14px 8px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.4;
+}
+
+.st-model-card-body {
+    border-top: 1px solid var(--border);
+    padding: 14px;
+}
+
+.st-model-card-body.collapsed {
+    display: none;
+}
+
+.st-model-card-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px 16px;
+}
+
+.st-model-card-field {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.st-model-card-label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.st-model-card-hint {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-bottom: 2px;
+}
+
+.st-model-card-field .st-input {
+    font-size: 12px;
+    padding: 5px 8px;
+}
+
+.st-model-card-field .st-input[type="number"] {
+    max-width: none;
+}
+
+@media (max-width: 600px) {
+    .st-model-card-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
 /* ─── Readonly badge ─────────────────────────────────── */
 
 .st-readonly-badge {

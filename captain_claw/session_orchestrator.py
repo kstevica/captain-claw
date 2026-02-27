@@ -82,6 +82,34 @@ _COMPLEXITY_SIGNALS: list[tuple[re.Pattern[str], int]] = [
 ]
 
 
+_AUTO_SELECT_MODEL_ADDENDUM = """\
+CRITICAL — automatic model selection:
+You MUST assign the most suitable model to each task by setting the "model_id" field in every task.
+Analyze each task's complexity, requirements, and nature, then pick the best model from the catalog below.
+
+Guidelines for model selection:
+- Match the task description against model "best for" descriptions.
+- Prefer models with reasoning capabilities for analysis, planning, math, or coding tasks.
+- Prefer faster/cheaper models for simple tasks like file I/O, sending emails, or data formatting.
+- If a task has no clear match, pick the most general-purpose model.
+- EVERY task MUST have a "model_id" field set to one of the IDs from the catalog.
+
+Available models:
+{model_catalog}
+
+Updated JSON schema — each task now MUST include "model_id":
+```json
+{{
+  "id": "task_id",
+  "title": "Short task title",
+  "description": "Detailed instructions for the worker agent",
+  "depends_on": [],
+  "session_name": "optional: name of existing session to reuse",
+  "model_id": "id from the model catalog above"
+}}
+```"""
+
+
 def _scan_workspace_tree(workspace_path: Path, max_depth: int = 3, max_entries: int = 200) -> str:
     """Build a concise tree-style listing of the workspace directory.
 
@@ -394,7 +422,12 @@ class SessionOrchestrator:
     # Public API
     # ------------------------------------------------------------------
 
-    async def prepare(self, user_input: str, model: str | None = None) -> dict[str, Any]:
+    async def prepare(
+        self,
+        user_input: str,
+        model: str | None = None,
+        auto_select_model: bool = False,
+    ) -> dict[str, Any]:
         """Decompose a request and build the task graph for preview.
 
         Runs stages 1 (DECOMPOSE) and 2 (BUILD GRAPH) only.  The graph
@@ -404,6 +437,9 @@ class SessionOrchestrator:
             user_input: The user request to decompose.
             model: Optional model selector override for decompose LLM call
                 and workflow-level task model.
+            auto_select_model: When True, inject available model descriptions
+                into the decompose prompt so the LLM assigns the best
+                ``model_id`` to each task.
 
         Returns:
             Dict with ``ok``, ``workflow_name``, ``summary``, ``tasks``,
@@ -434,7 +470,7 @@ class SessionOrchestrator:
         self._file_registry.workflow_run_dir = workflow_run_dir
 
         # 1. DECOMPOSE
-        plan = await self._decompose(user_input)
+        plan = await self._decompose(user_input, auto_select_model=auto_select_model)
         if plan is None:
             log.error("prepare() failed: _decompose returned None")
             self._broadcast_event("error", {"message": "Could not decompose the request into tasks."})
@@ -463,6 +499,7 @@ class SessionOrchestrator:
                 description=str(task_data.get("description", "")).strip(),
                 depends_on=list(task_data.get("depends_on", [])),
                 session_name=str(task_data.get("session_name", "")).strip(),
+                model_id=str(task_data.get("model_id", "")).strip(),
                 timeout_seconds=self._worker_timeout,
                 max_retries=self._worker_max_retries,
             )
@@ -744,10 +781,15 @@ class SessionOrchestrator:
     # 1. DECOMPOSE
     # ------------------------------------------------------------------
 
-    async def _decompose(self, user_input: str) -> dict[str, Any] | None:
+    async def _decompose(
+        self,
+        user_input: str,
+        auto_select_model: bool = False,
+    ) -> dict[str, Any] | None:
         """Use LLM to decompose user_input into a task plan (JSON)."""
         log.info("Decompose started", input_len=len(user_input),
-                 input_preview=user_input[:200])
+                 input_preview=user_input[:200],
+                 auto_select_model=auto_select_model)
 
         available_sessions = await self._list_available_sessions()
         log.debug("Available sessions for decompose", sessions=available_sessions[:300])
@@ -763,7 +805,44 @@ class SessionOrchestrator:
         except Exception as e:
             log.debug("Workspace scan failed (non-fatal)", error=str(e))
 
+        # Build the model catalog section if auto-select is enabled.
+        model_catalog = ""
+        if auto_select_model and self._main_agent:
+            try:
+                models = self._main_agent.get_allowed_models()
+                if models:
+                    lines = []
+                    for m in models:
+                        mid = m.get("id", "")
+                        provider = m.get("provider", "")
+                        model_name = m.get("model", "")
+                        desc = m.get("description", "")
+                        reasoning = m.get("reasoning_level", "")
+                        max_ctx = m.get("max_context", 0)
+                        max_out = m.get("max_output_tokens", 0)
+                        parts = [f"- id: \"{mid}\" ({provider}/{model_name})"]
+                        if desc:
+                            parts.append(f"  best for: {desc}")
+                        if reasoning:
+                            parts.append(f"  reasoning: {reasoning}")
+                        if max_ctx:
+                            parts.append(f"  context: {max_ctx} tokens")
+                        if max_out:
+                            parts.append(f"  max output: {max_out} tokens")
+                        lines.append("\n".join(parts))
+                    model_catalog = "\n".join(lines)
+            except Exception as e:
+                log.debug("Failed to build model catalog", error=str(e))
+
         system_prompt = self._instructions.load("orchestrator_decompose_system_prompt.md")
+
+        # Append model selection instructions to the system prompt
+        # when auto-select is enabled and we have a model catalog.
+        if auto_select_model and model_catalog:
+            system_prompt += "\n\n" + _AUTO_SELECT_MODEL_ADDENDUM.format(
+                model_catalog=model_catalog,
+            )
+
         user_prompt = self._instructions.render(
             "orchestrator_decompose_user_prompt.md",
             user_input=user_input,

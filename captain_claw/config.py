@@ -28,6 +28,11 @@ class ModelConfig(BaseModel):
         base_url: str = ""
         temperature: float | None = None
         max_tokens: int | None = None
+        tokens_per_minute: int = 0  # 0 = use global default
+        max_context: int = 0  # 0 = use global context.max_tokens
+        max_output_tokens: int = 0  # 0 = use model.max_tokens
+        reasoning_level: str = ""  # "", "low", "medium", "high"
+        description: str = ""  # what tasks this model is best for
 
     provider: str = "ollama"
     model: str = "minimax-m2.5:cloud"

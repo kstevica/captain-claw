@@ -304,6 +304,14 @@
 
     // ── Array section (model.allowed) ───────────────────
     function renderArraySection(card, section) {
+        if (section.layout === 'cards') {
+            renderCardArraySection(card, section);
+        } else {
+            renderTableArraySection(card, section);
+        }
+    }
+
+    function renderTableArraySection(card, section) {
         const arrKey = section.array_key;
         const items = Array.isArray(values[arrKey]) ? [...values[arrKey]] : [];
         const fields = section.item_fields || [];
@@ -318,12 +326,10 @@
             } else {
                 const table = document.createElement('table');
                 table.className = 'st-array-table';
-                // Header
                 let thead = '<tr>';
                 for (const f of fields) thead += '<th>' + esc(f.label) + '</th>';
                 thead += '<th></th></tr>';
                 table.innerHTML = thead;
-                // Rows
                 for (let i = 0; i < items.length; i++) {
                     const tr = document.createElement('tr');
                     for (const f of fields) {
@@ -354,7 +360,6 @@
                         }
                         tr.appendChild(td);
                     }
-                    // Delete button
                     const delTd = document.createElement('td');
                     const delBtn = document.createElement('button');
                     delBtn.className = 'st-btn danger sm';
@@ -371,12 +376,11 @@
                 tableWrap.appendChild(table);
             }
 
-            // Add button
             const actions = document.createElement('div');
             actions.className = 'st-array-actions';
             const addBtn = document.createElement('button');
             addBtn.className = 'st-btn sm';
-            addBtn.textContent = '+ Add model';
+            addBtn.textContent = '+ Add';
             addBtn.addEventListener('click', () => {
                 const newItem = {};
                 for (const f of fields) newItem[f.key] = '';
@@ -390,6 +394,193 @@
 
         rebuild();
         card.appendChild(tableWrap);
+    }
+
+    // ── Card-based array (rich model editor) ─────────────
+    function renderCardArraySection(card, section) {
+        const arrKey = section.array_key;
+        const items = Array.isArray(values[arrKey]) ? [...values[arrKey]] : [];
+        const fields = section.item_fields || [];
+
+        const wrap = document.createElement('div');
+        wrap.className = 'st-model-cards';
+
+        function rebuild() {
+            wrap.innerHTML = '';
+
+            if (!items.length) {
+                wrap.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:8px 0;">No models configured.</div>';
+            }
+
+            for (let i = 0; i < items.length; i++) {
+                const mcard = document.createElement('div');
+                mcard.className = 'st-model-card';
+
+                // ── Card header: ID badge + provider:model + collapse/remove ──
+                const header = document.createElement('div');
+                header.className = 'st-model-card-header';
+
+                const titleArea = document.createElement('div');
+                titleArea.className = 'st-model-card-title';
+                const idVal = items[i].id || 'model-' + (i + 1);
+                const provVal = items[i].provider || '?';
+                const modVal = items[i].model || '?';
+                titleArea.innerHTML =
+                    '<span class="st-model-id-badge">' + esc(idVal) + '</span> ' +
+                    '<span class="st-model-name">' + esc(provVal) + ' / ' + esc(modVal) + '</span>';
+                header.appendChild(titleArea);
+
+                const headerActions = document.createElement('div');
+                headerActions.className = 'st-model-card-actions';
+
+                const collapseBtn = document.createElement('button');
+                collapseBtn.className = 'st-btn sm';
+                collapseBtn.textContent = '▾';
+                collapseBtn.title = 'Expand / Collapse';
+                headerActions.appendChild(collapseBtn);
+
+                const delBtn = document.createElement('button');
+                delBtn.className = 'st-btn danger sm';
+                delBtn.textContent = 'Remove';
+                delBtn.addEventListener('click', () => {
+                    items.splice(i, 1);
+                    markDirty(arrKey, [...items]);
+                    rebuild();
+                });
+                headerActions.appendChild(delBtn);
+                header.appendChild(headerActions);
+                mcard.appendChild(header);
+
+                // ── Description preview (if set) ──
+                const descVal = items[i].description || '';
+                if (descVal) {
+                    const descPreview = document.createElement('div');
+                    descPreview.className = 'st-model-card-desc';
+                    descPreview.textContent = descVal;
+                    mcard.appendChild(descPreview);
+                }
+
+                // ── Card body (collapsible) ──
+                const body = document.createElement('div');
+                body.className = 'st-model-card-body collapsed';
+
+                // Render fields in a two-column grid
+                const grid = document.createElement('div');
+                grid.className = 'st-model-card-grid';
+
+                for (const f of fields) {
+                    const fieldWrap = document.createElement('div');
+                    fieldWrap.className = 'st-model-card-field';
+
+                    const label = document.createElement('label');
+                    label.className = 'st-model-card-label';
+                    label.textContent = f.label;
+                    fieldWrap.appendChild(label);
+
+                    if (f.hint) {
+                        const hint = document.createElement('div');
+                        hint.className = 'st-model-card-hint';
+                        hint.textContent = f.hint;
+                        fieldWrap.appendChild(hint);
+                    }
+
+                    const control = _makeCardControl(f, items, i, arrKey);
+                    fieldWrap.appendChild(control);
+                    grid.appendChild(fieldWrap);
+                }
+
+                body.appendChild(grid);
+                mcard.appendChild(body);
+
+                // Collapse toggle
+                collapseBtn.addEventListener('click', () => {
+                    const isCollapsed = body.classList.toggle('collapsed');
+                    collapseBtn.textContent = isCollapsed ? '▾' : '▴';
+                });
+
+                wrap.appendChild(mcard);
+            }
+
+            // ── Add model button ──
+            const actions = document.createElement('div');
+            actions.className = 'st-array-actions';
+            const addBtn = document.createElement('button');
+            addBtn.className = 'st-btn sm';
+            addBtn.textContent = '+ Add model';
+            addBtn.addEventListener('click', () => {
+                const newItem = {};
+                for (const f of fields) newItem[f.key] = f.type === 'number' ? 0 : '';
+                items.push(newItem);
+                markDirty(arrKey, [...items]);
+                rebuild();
+                // Auto-expand the new card
+                const cards = wrap.querySelectorAll('.st-model-card');
+                const last = cards[cards.length - 1];
+                if (last) {
+                    const bodyEl = last.querySelector('.st-model-card-body');
+                    const btn = last.querySelector('.st-model-card-actions .st-btn');
+                    if (bodyEl) bodyEl.classList.remove('collapsed');
+                    if (btn) btn.textContent = '▴';
+                }
+            });
+            actions.appendChild(addBtn);
+            wrap.appendChild(actions);
+        }
+
+        function _makeCardControl(f, items, idx, arrKey) {
+            if (f.type === 'select') {
+                const sel = document.createElement('select');
+                sel.className = 'st-input';
+                for (const opt of f.options || []) {
+                    const o = document.createElement('option');
+                    o.value = opt;
+                    o.textContent = opt || '—';
+                    if (String(items[idx][f.key] || '') === String(opt)) o.selected = true;
+                    sel.appendChild(o);
+                }
+                sel.addEventListener('change', () => {
+                    items[idx][f.key] = sel.value;
+                    markDirty(arrKey, [...items]);
+                    // Refresh header title when provider/model/id change
+                    if (f.key === 'provider' || f.key === 'model' || f.key === 'id') {
+                        rebuild();
+                    }
+                });
+                return sel;
+            }
+            const inp = document.createElement('input');
+            inp.className = 'st-input';
+            inp.type = f.type === 'number' ? 'number' : 'text';
+            if (f.placeholder) inp.placeholder = f.placeholder;
+            if (f.min != null) inp.min = f.min;
+            if (f.max != null) inp.max = f.max;
+            if (f.step != null) inp.step = f.step;
+            const raw = items[idx][f.key];
+            inp.value = raw != null && raw !== 0 && raw !== '' ? raw : '';
+            // For number fields show empty instead of 0 (means "use default")
+            if (f.type === 'number' && (raw === 0 || raw === '0' || raw === '')) {
+                inp.value = '';
+                inp.placeholder = f.placeholder || '0';
+            }
+            inp.addEventListener('input', () => {
+                if (f.type === 'number') {
+                    items[idx][f.key] = inp.value === '' ? 0 : Number(inp.value);
+                } else {
+                    items[idx][f.key] = inp.value;
+                }
+                markDirty(arrKey, [...items]);
+            });
+            // Refresh header when id/model change
+            inp.addEventListener('change', () => {
+                if (f.key === 'id' || f.key === 'model' || f.key === 'description') {
+                    rebuild();
+                }
+            });
+            return inp;
+        }
+
+        rebuild();
+        card.appendChild(wrap);
     }
 
     // ── Conditional sections ────────────────────────────

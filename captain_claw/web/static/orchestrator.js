@@ -26,6 +26,7 @@
     let availableModels = [];     // [{id, provider, model}]
     let workflowVariables = [];   // [{name, label, default}]
     let variableValues = {};      // name → current input value
+    let autoSelectModel = false;  // auto-select best model per task
 
     // ── DOM ──────────────────────────────────────────────────
     const $ = (sel) => document.querySelector(sel);
@@ -54,6 +55,7 @@
     const orchWorkflowNameInput = $('#orchWorkflowNameInput');
     const orchSaveWorkflowBtn = $('#orchSaveWorkflowBtn');
     const orchWorkflowModelSelect = $('#orchWorkflowModelSelect');
+    const orchAutoModelCheck = $('#orchAutoModelCheck');
     const orchLoadWorkflowSelect = $('#orchLoadWorkflowSelect');
     const orchExecuteBtn = $('#orchExecuteBtn');
     const orchStopBtn = $('#orchStopBtn');
@@ -1370,7 +1372,8 @@
 
             const preparePayload = { input: fullInput };
             if (workflowModel) preparePayload.model = workflowModel;
-            console.log('[orch-decompose] calling /api/orchestrator/prepare', { fullInputLen: fullInput.length, skills: skillsParam, model: workflowModel || '(default)' });
+            if (autoSelectModel) preparePayload.auto_select_model = true;
+            console.log('[orch-decompose] calling /api/orchestrator/prepare', { fullInputLen: fullInput.length, skills: skillsParam, model: workflowModel || '(default)', autoSelectModel });
             const resp = await fetch('/api/orchestrator/prepare', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1994,6 +1997,20 @@
         if (orchWorkflowModelSelect) {
             orchWorkflowModelSelect.addEventListener('change', function () {
                 workflowModel = orchWorkflowModelSelect.value;
+            });
+        }
+
+        // Auto-select model toggle
+        if (orchAutoModelCheck) {
+            orchAutoModelCheck.addEventListener('change', function () {
+                autoSelectModel = orchAutoModelCheck.checked;
+                if (orchWorkflowModelSelect) {
+                    if (autoSelectModel) {
+                        orchWorkflowModelSelect.classList.add('disabled-by-auto');
+                    } else {
+                        orchWorkflowModelSelect.classList.remove('disabled-by-auto');
+                    }
+                }
             });
         }
 

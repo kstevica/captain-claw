@@ -97,6 +97,11 @@ class AgentModelMixin:
                 "base_url": base_url,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
+                "tokens_per_minute": int(_pick(item, "tokens_per_minute", 0) or 0),
+                "max_context": int(_pick(item, "max_context", 0) or 0),
+                "max_output_tokens": int(_pick(item, "max_output_tokens", 0) or 0),
+                "reasoning_level": str(_pick(item, "reasoning_level", "") or "").strip(),
+                "description": str(_pick(item, "description", "") or "").strip(),
             })
 
         if options:
@@ -109,6 +114,11 @@ class AgentModelMixin:
             "base_url": str(cfg.model.base_url or ""),
             "temperature": cfg.model.temperature,
             "max_tokens": cfg.model.max_tokens,
+            "tokens_per_minute": cfg.model.tokens_per_minute,
+            "max_context": 0,
+            "max_output_tokens": 0,
+            "reasoning_level": "",
+            "description": "",
         }]
 
     def _resolve_allowed_model(self, selector: str) -> dict[str, Any] | None:
@@ -171,6 +181,15 @@ class AgentModelMixin:
         else:
             resolved_api_key = self._resolve_provider_api_key(normalized_provider) or cfg.model.api_key or None
 
+        # Per-model overrides: tokens_per_minute, max_context, max_output_tokens
+        model_tpm = int(option.get("tokens_per_minute", 0) or 0)
+        resolved_tpm = model_tpm if model_tpm > 0 else cfg.model.tokens_per_minute
+        model_ctx = int(option.get("max_context", 0) or 0)
+        resolved_num_ctx = model_ctx if model_ctx > 0 else cfg.context.max_tokens
+        model_out = int(option.get("max_output_tokens", 0) or 0)
+        if model_out > 0:
+            resolved_max_tokens = model_out
+
         self.provider = create_provider(
             provider=provider,
             model=model,
@@ -178,8 +197,8 @@ class AgentModelMixin:
             base_url=base_url or fallback_base_url or None,
             temperature=resolved_temperature,
             max_tokens=resolved_max_tokens,
-            num_ctx=cfg.context.max_tokens,
-            tokens_per_minute=cfg.model.tokens_per_minute,
+            num_ctx=resolved_num_ctx,
+            tokens_per_minute=resolved_tpm,
         )
         set_provider(self.provider)
         self._refresh_runtime_model_details(source=source, model_id=model_id)
@@ -202,6 +221,10 @@ class AgentModelMixin:
             "base_url": str(raw.get("base_url", "") or "").strip(),
             "temperature": raw.get("temperature"),
             "max_tokens": raw.get("max_tokens"),
+            "tokens_per_minute": int(raw.get("tokens_per_minute", 0) or 0),
+            "max_context": int(raw.get("max_context", 0) or 0),
+            "max_output_tokens": int(raw.get("max_output_tokens", 0) or 0),
+            "reasoning_level": str(raw.get("reasoning_level", "") or "").strip(),
         }
 
     def _apply_default_config_model_if_needed(self) -> None:
@@ -258,6 +281,10 @@ class AgentModelMixin:
             "base_url": details.get("base_url", ""),
             "temperature": details.get("temperature"),
             "max_tokens": details.get("max_tokens"),
+            "tokens_per_minute": int(option.get("tokens_per_minute", 0) or 0),
+            "max_context": int(option.get("max_context", 0) or 0),
+            "max_output_tokens": int(option.get("max_output_tokens", 0) or 0),
+            "reasoning_level": str(option.get("reasoning_level", "") or ""),
             "updated_at": datetime.now(UTC).isoformat(),
         }
         if persist:

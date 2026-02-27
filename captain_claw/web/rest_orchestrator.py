@@ -254,10 +254,14 @@ async def prepare_orchestrator(server: WebServer, request: web.Request) -> web.R
         log.warning("_prepare_orchestrator: empty input")
         return web.json_response({"ok": False, "error": "Missing input"}, status=400)
     model = str(body.get("model", "")).strip() or None
+    auto_select_model = bool(body.get("auto_select_model", False))
     log.info("_prepare_orchestrator: calling prepare",
-             input_len=len(user_input), input_preview=user_input[:150], model=model)
+             input_len=len(user_input), input_preview=user_input[:150],
+             model=model, auto_select_model=auto_select_model)
     try:
-        result = await server._orchestrator.prepare(user_input, model=model)
+        result = await server._orchestrator.prepare(
+            user_input, model=model, auto_select_model=auto_select_model,
+        )
     except Exception as e:
         log.error("_prepare_orchestrator: prepare() raised exception",
                   error=str(e), error_type=type(e).__name__)
