@@ -780,6 +780,41 @@ class AgentContextMixin:
         )
         log.debug("Auto-captured API from web_fetch", url=base_url[:60])
 
+    # ── Datastore context injection ──────────────────────────────────
+
+    async def _refresh_datastore_context_cache(self) -> None:
+        """Pre-fetch datastore table listing for context injection."""
+        cfg = get_config()
+        if not cfg.datastore.enabled or not cfg.datastore.inject_table_list:
+            return
+        try:
+            from captain_claw.datastore import get_datastore_manager
+            dm = get_datastore_manager()
+            self._datastore_context_cache = await dm.get_tables_summary()
+        except Exception:
+            self._datastore_context_cache = []
+
+    def _build_datastore_context_note(self) -> str:
+        """Build context note listing available datastore tables."""
+        cfg = get_config()
+        if not cfg.datastore.enabled or not cfg.datastore.inject_table_list:
+            return ""
+        tables = getattr(self, "_datastore_context_cache", None)
+        if not tables:
+            return ""
+        return self._format_datastore_note(tables)
+
+    @staticmethod
+    def _format_datastore_note(tables: list[Any]) -> str:
+        if not tables:
+            return ""
+        lines = ["Available datastore tables:"]
+        for t in tables:
+            col_names = ", ".join(c.name for c in t.columns)
+            lines.append(f"- {t.name} ({t.row_count} rows): [{col_names}]")
+        lines.append('Use the "datastore" tool to query or modify these tables.')
+        return "\n".join(lines)
+
     def _build_semantic_memory_note(
         self,
         query: str | None,
@@ -903,6 +938,7 @@ class AgentContextMixin:
         await self._refresh_contacts_context_cache()
         await self._refresh_scripts_context_cache()
         await self._refresh_apis_context_cache()
+        await self._refresh_datastore_context_cache()
 
         self._initialized = True
         log.info("Agent initialized", session_id=self.session.id)
@@ -930,6 +966,7 @@ class AgentContextMixin:
         "scripts": ["scripts"],
         "apis": ["apis"],
         "typesense": ["typesense"],
+        "datastore": ["datastore"],
     }
 
     def _register_default_tools(self) -> None:
@@ -950,6 +987,7 @@ class AgentContextMixin:
             ContactsTool,
             ScriptsTool,
             ApisTool,
+            DatastoreTool,
             WebFetchTool,
             WebGetTool,
             WebSearchTool,
@@ -1009,6 +1047,8 @@ class AgentContextMixin:
                     except Exception as _e:
                         log.warning("Failed to ensure deep memory collection at startup", error=str(_e))
                 self.tools.register(TypesenseTool(deep_memory=dm))
+            elif tool_name == "datastore":
+                self.tools.register(DatastoreTool())
         self._register_plugin_tools()
 
     def reload_tools(self) -> None:
@@ -1615,6 +1655,14 @@ class AgentContextMixin:
                 "content": apis_note,
                 "tool_name": "apis_context",
                 "token_count": self._count_tokens(apis_note),
+            })
+        datastore_note = self._build_datastore_context_note()
+        if datastore_note:
+            candidate_messages.append({
+                "role": "assistant",
+                "content": datastore_note,
+                "tool_name": "datastore_context",
+                "token_count": self._count_tokens(datastore_note),
             })
 
         selected_reversed: list[dict[str, Any]] = []

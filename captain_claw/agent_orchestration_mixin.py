@@ -190,6 +190,7 @@ class AgentOrchestrationMixin:
         await self._refresh_contacts_context_cache()
         await self._refresh_scripts_context_cache()
         await self._refresh_apis_context_cache()
+        await self._refresh_datastore_context_cache()
         if clarification_context_applied:
             self._emit_tool_output(
                 "task_contract",

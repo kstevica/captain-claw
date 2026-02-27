@@ -30,6 +30,7 @@ from captain_claw.tools.contacts import ContactsTool
 from captain_claw.tools.scripts import ScriptsTool
 from captain_claw.tools.apis import ApisTool
 from captain_claw.tools.typesense import TypesenseTool
+from captain_claw.tools.datastore import DatastoreTool
 
 __all__ = [
     "Tool",
@@ -59,4 +60,5 @@ __all__ = [
     "ScriptsTool",
     "ApisTool",
     "TypesenseTool",
+    "DatastoreTool",
 ]

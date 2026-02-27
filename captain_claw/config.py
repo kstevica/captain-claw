@@ -481,6 +481,18 @@ class DeepMemoryConfig(BaseModel):
     auto_embed: bool = True
 
 
+class DatastoreConfig(BaseModel):
+    """User-facing relational datastore settings."""
+
+    enabled: bool = True
+    path: str = "~/.captain-claw/datastore.db"
+    inject_table_list: bool = True
+    max_rows_per_table: int = 100_000
+    max_tables: int = 50
+    max_query_rows: int = 500
+    max_export_rows: int = 50_000
+
+
 class OrchestratorConfig(BaseModel):
     """Parallel session orchestration settings."""
 
@@ -548,6 +560,7 @@ class Config(BaseSettings):
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
     scale: ScaleConfig = Field(default_factory=ScaleConfig)
     deep_memory: DeepMemoryConfig = Field(default_factory=DeepMemoryConfig)
+    datastore: DatastoreConfig = Field(default_factory=DatastoreConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="CLAW_",

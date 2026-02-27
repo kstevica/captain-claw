@@ -110,6 +110,7 @@ tools:
   - scripts
   - apis
   - typesense
+  - datastore
   read:
     max_file_bytes: 200000
   shell:
@@ -301,3 +302,11 @@ deep_memory:
   collection_name: captain_claw_deep_memory
   embedding_dims: 1536
   auto_embed: true
+datastore:
+  enabled: true
+  path: ~/.captain-claw/datastore.db
+  inject_table_list: true
+  max_rows_per_table: 100000
+  max_tables: 50
+  max_query_rows: 500
+  max_export_rows: 50000

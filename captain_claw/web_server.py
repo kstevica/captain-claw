@@ -628,6 +628,55 @@ class WebServer:
         from captain_claw.web.static_pages import serve_onboarding
         return await serve_onboarding(self, request)
 
+    async def _serve_datastore(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_datastore
+        return await serve_datastore(self, request)
+
+    # Datastore REST
+    async def _ds_list_tables(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_datastore import list_tables
+        return await list_tables(self, request)
+
+    async def _ds_describe_table(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_datastore import describe_table
+        return await describe_table(self, request)
+
+    async def _ds_create_table(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_datastore import create_table
+        return await create_table(self, request)
+
+    async def _ds_drop_table(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_datastore import drop_table
+        return await drop_table(self, request)
+
+    async def _ds_query_rows(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_datastore import query_rows
+        return await query_rows(self, request)
+
+    async def _ds_insert_rows(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_datastore import insert_rows
+        return await insert_rows(self, request)
+
+    async def _ds_update_rows(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_datastore import update_rows
+        return await update_rows(self, request)
+
+    async def _ds_delete_rows(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_datastore import delete_rows
+        return await delete_rows(self, request)
+
+    async def _ds_add_column(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_datastore import add_column
+        return await add_column(self, request)
+
+    async def _ds_drop_column(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_datastore import drop_column
+        return await drop_column(self, request)
+
+    async def _ds_run_sql(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_datastore import run_sql
+        return await run_sql(self, request)
+
     # Onboarding REST
     async def _get_onboarding_status(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_onboarding import get_onboarding_status
@@ -754,6 +803,18 @@ class WebServer:
         app.router.add_post("/api/loops/start", self._start_loop)
         app.router.add_get("/api/loops/status", self._get_loop_status)
         app.router.add_post("/api/loops/stop", self._stop_loop)
+        # Datastore
+        app.router.add_get("/api/datastore/tables", self._ds_list_tables)
+        app.router.add_post("/api/datastore/tables", self._ds_create_table)
+        app.router.add_get("/api/datastore/tables/{name}", self._ds_describe_table)
+        app.router.add_delete("/api/datastore/tables/{name}", self._ds_drop_table)
+        app.router.add_get("/api/datastore/tables/{name}/rows", self._ds_query_rows)
+        app.router.add_post("/api/datastore/tables/{name}/rows", self._ds_insert_rows)
+        app.router.add_patch("/api/datastore/tables/{name}/rows", self._ds_update_rows)
+        app.router.add_delete("/api/datastore/tables/{name}/rows", self._ds_delete_rows)
+        app.router.add_post("/api/datastore/tables/{name}/columns", self._ds_add_column)
+        app.router.add_delete("/api/datastore/tables/{name}/columns/{col}", self._ds_drop_column)
+        app.router.add_post("/api/datastore/sql", self._ds_run_sql)
         if self.config.web.api_enabled and self._api_pool:
             app.router.add_post("/v1/chat/completions", self._api_chat_completions)
             app.router.add_get("/v1/models", self._api_list_models)
@@ -778,6 +839,7 @@ class WebServer:
             app.router.add_get("/sessions", self._serve_sessions)
             app.router.add_get("/files", self._serve_files)
             app.router.add_get("/onboarding", self._serve_onboarding)
+            app.router.add_get("/datastore", self._serve_datastore)
             app.router.add_get("/favicon.ico", self._serve_favicon)
         return app
 

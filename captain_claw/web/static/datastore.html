@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Datastore - Captain Claw</title>
+    <link rel="stylesheet" href="/static/datastore.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<header class="ds-header">
+    <div class="ds-header-left">
+        <a href="/" class="ds-logo-link"><img src="/static/logo.svg" width="28" height="28"></a>
+        <h1>Datastore</h1>
+    </div>
+    <div class="ds-header-right">
+        <a href="/chat" class="ds-nav-link">&larr; Chat</a>
+    </div>
+</header>
+
+<div class="ds-layout">
+    <!-- Panel 1: Table list -->
+    <aside class="ds-sidebar" id="dsSidebar">
+        <div class="ds-sidebar-header">
+            <span class="ds-sidebar-title">Tables</span>
+            <button class="ds-add-btn" id="dsNewTableBtn" title="Create table">+</button>
+        </div>
+        <div class="ds-table-list" id="dsTableList">
+            <div class="ds-loading" id="dsTableLoading">Loading...</div>
+        </div>
+    </aside>
+
+    <!-- Panel 2: Main content -->
+    <main class="ds-main" id="dsMain">
+        <!-- Empty state -->
+        <div class="ds-empty" id="dsEmpty">
+            <div class="ds-empty-icon">&#x1F5C4;</div>
+            <div class="ds-empty-text">Select a table to browse data</div>
+            <div class="ds-empty-sub">or click + to create a new table</div>
+        </div>
+
+        <!-- Table view -->
+        <div class="ds-table-view" id="dsTableView" style="display:none;">
+            <!-- Toolbar -->
+            <div class="ds-toolbar">
+                <div class="ds-toolbar-left">
+                    <h2 class="ds-table-name" id="dsTableName"></h2>
+                    <span class="ds-table-meta" id="dsTableMeta"></span>
+                </div>
+                <div class="ds-toolbar-right">
+                    <div class="ds-tab-group">
+                        <button class="ds-tab active" data-tab="data" id="dsTabData">Data</button>
+                        <button class="ds-tab" data-tab="schema" id="dsTabSchema">Schema</button>
+                    </div>
+                    <button class="ds-btn primary" id="dsAddRowBtn">+ Row</button>
+                    <button class="ds-btn danger" id="dsDropTableBtn">Drop Table</button>
+                </div>
+            </div>
+
+            <!-- Data tab -->
+            <div class="ds-tab-content" id="dsDataTab">
+                <div class="ds-grid-wrap" id="dsGridWrap">
+                    <table class="ds-grid" id="dsGrid">
+                        <thead id="dsGridHead"></thead>
+                        <tbody id="dsGridBody"></tbody>
+                    </table>
+                </div>
+                <div class="ds-pagination" id="dsPagination">
+                    <button class="ds-btn secondary" id="dsPrevBtn" disabled>&larr; Prev</button>
+                    <span class="ds-page-info" id="dsPageInfo"></span>
+                    <button class="ds-btn secondary" id="dsNextBtn" disabled>Next &rarr;</button>
+                </div>
+            </div>
+
+            <!-- Schema tab -->
+            <div class="ds-tab-content" id="dsSchemaTab" style="display:none;">
+                <div class="ds-schema-list" id="dsSchemaList"></div>
+                <div class="ds-schema-actions">
+                    <button class="ds-btn primary" id="dsAddColBtn">+ Add Column</button>
+                </div>
+            </div>
+        </div>
+    </main>
+</div>
+
+<!-- Create table modal -->
+<div class="ds-modal-overlay" id="dsCreateTableModal" style="display:none;">
+    <div class="ds-modal">
+        <div class="ds-modal-title">Create Table</div>
+        <div class="ds-modal-body">
+            <div class="ds-form-group">
+                <label class="ds-form-label">Table Name<span class="required">*</span></label>
+                <input type="text" class="ds-input" id="dsNewTableName" placeholder="e.g. clients">
+            </div>
+            <div class="ds-form-group">
+                <label class="ds-form-label">Columns</label>
+                <div id="dsNewTableCols">
+                    <div class="ds-col-row">
+                        <input type="text" class="ds-input col-name" placeholder="Column name">
+                        <select class="ds-select col-type">
+                            <option value="text">text</option>
+                            <option value="integer">integer</option>
+                            <option value="real">real</option>
+                            <option value="boolean">boolean</option>
+                            <option value="date">date</option>
+                            <option value="datetime">datetime</option>
+                            <option value="json">json</option>
+                        </select>
+                        <button class="ds-col-remove" title="Remove">&times;</button>
+                    </div>
+                </div>
+                <button class="ds-btn secondary ds-add-col-btn" id="dsAddNewCol">+ Column</button>
+            </div>
+        </div>
+        <div class="ds-modal-actions">
+            <button class="ds-btn secondary" id="dsCreateTableCancel">Cancel</button>
+            <button class="ds-btn primary" id="dsCreateTableSave">Create</button>
+        </div>
+    </div>
+</div>
+
+<!-- Add/Edit row modal -->
+<div class="ds-modal-overlay" id="dsRowModal" style="display:none;">
+    <div class="ds-modal ds-modal-wide">
+        <div class="ds-modal-title" id="dsRowModalTitle">Add Row</div>
+        <div class="ds-modal-body" id="dsRowModalFields"></div>
+        <div class="ds-modal-actions">
+            <button class="ds-btn secondary" id="dsRowModalCancel">Cancel</button>
+            <button class="ds-btn primary" id="dsRowModalSave">Save</button>
+        </div>
+    </div>
+</div>
+
+<!-- Add column modal -->
+<div class="ds-modal-overlay" id="dsAddColModal" style="display:none;">
+    <div class="ds-modal">
+        <div class="ds-modal-title">Add Column</div>
+        <div class="ds-modal-body">
+            <div class="ds-form-group">
+                <label class="ds-form-label">Column Name<span class="required">*</span></label>
+                <input type="text" class="ds-input" id="dsAddColName" placeholder="e.g. city">
+            </div>
+            <div class="ds-form-group">
+                <label class="ds-form-label">Type</label>
+                <select class="ds-select" id="dsAddColType">
+                    <option value="text">text</option>
+                    <option value="integer">integer</option>
+                    <option value="real">real</option>
+                    <option value="boolean">boolean</option>
+                    <option value="date">date</option>
+                    <option value="datetime">datetime</option>
+                    <option value="json">json</option>
+                </select>
+            </div>
+            <div class="ds-form-group">
+                <label class="ds-form-label">Default Value</label>
+                <input type="text" class="ds-input" id="dsAddColDefault" placeholder="(optional)">
+            </div>
+        </div>
+        <div class="ds-modal-actions">
+            <button class="ds-btn secondary" id="dsAddColCancel">Cancel</button>
+            <button class="ds-btn primary" id="dsAddColSave">Add</button>
+        </div>
+    </div>
+</div>
+
+<!-- Confirm modal -->
+<div class="ds-modal-overlay" id="dsConfirmModal" style="display:none;">
+    <div class="ds-modal">
+        <div class="ds-modal-title" id="dsConfirmTitle">Confirm</div>
+        <div class="ds-modal-body" id="dsConfirmBody"></div>
+        <div class="ds-modal-actions">
+            <button class="ds-btn secondary" id="dsConfirmCancel">Cancel</button>
+            <button class="ds-btn danger" id="dsConfirmOk">Confirm</button>
+        </div>
+    </div>
+</div>
+
+<!-- Toast -->
+<div class="ds-toast" id="dsToast"></div>
+
+<script src="/static/datastore.js"></script>
+</body>
+</html>
