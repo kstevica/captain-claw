@@ -624,6 +624,23 @@ class WebServer:
         from captain_claw.web.static_pages import serve_files
         return await serve_files(self, request)
 
+    async def _serve_onboarding(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_onboarding
+        return await serve_onboarding(self, request)
+
+    # Onboarding REST
+    async def _get_onboarding_status(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_onboarding import get_onboarding_status
+        return await get_onboarding_status(self, request)
+
+    async def _post_onboarding_validate(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_onboarding import post_onboarding_validate
+        return await post_onboarding_validate(self, request)
+
+    async def _post_onboarding_save(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_onboarding import post_onboarding_save
+        return await post_onboarding_save(self, request)
+
     # Sessions REST
     async def _get_session_detail(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_sessions import get_session_detail
@@ -740,6 +757,9 @@ class WebServer:
         if self.config.web.api_enabled and self._api_pool:
             app.router.add_post("/v1/chat/completions", self._api_chat_completions)
             app.router.add_get("/v1/models", self._api_list_models)
+        app.router.add_get("/api/onboarding/status", self._get_onboarding_status)
+        app.router.add_post("/api/onboarding/validate", self._post_onboarding_validate)
+        app.router.add_post("/api/onboarding/save", self._post_onboarding_save)
         app.router.add_get("/auth/google/login", self._auth_google_login)
         app.router.add_get("/auth/google/callback", self._auth_google_callback)
         app.router.add_get("/auth/google/status", self._auth_google_status)
@@ -757,6 +777,7 @@ class WebServer:
             app.router.add_get("/settings", self._serve_settings)
             app.router.add_get("/sessions", self._serve_sessions)
             app.router.add_get("/files", self._serve_files)
+            app.router.add_get("/onboarding", self._serve_onboarding)
             app.router.add_get("/favicon.ico", self._serve_favicon)
         return app
 

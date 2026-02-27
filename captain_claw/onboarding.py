@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-
-from rich.console import Console
-from rich.panel import Panel
-from rich.prompt import Confirm, Prompt
-from rich.table import Table
+from typing import Any
 
 from captain_claw.config import DEFAULT_CONFIG_PATH, LOCAL_CONFIG_FILENAME, Config
+
+log = logging.getLogger(__name__)
 
 _ONBOARDING_STATE_FILENAME = "onboarding_state.json"
 
@@ -24,16 +24,25 @@ _PROVIDER_LABELS = {
     "ollama": "Ollama (local/self-hosted)",
 }
 _PROVIDER_DEFAULT_MODELS = {
-    "openai": "gpt-5-mini",
-    "anthropic": "claude-3-5-sonnet-latest",
-    "gemini": "gemini-2.0-flash",
+    "openai": "gpt-4.1-mini",
+    "anthropic": "claude-sonnet-4-20250514",
+    "gemini": "gemini-2.5-flash-preview-05-20",
     "ollama": "llama3.2",
+}
+_PROVIDER_ENV_VARS = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "gemini": "GOOGLE_API_KEY or GEMINI_API_KEY",
+    "ollama": "(none required)",
 }
 _PROVIDER_ALIASES = {
     "chatgpt": "openai",
     "claude": "anthropic",
     "google": "gemini",
 }
+
+
+# ── Path resolution helpers ──────────────────────────────────────────
 
 
 def _resolve_state_path(state_path: Path | str | None = None) -> Path:
@@ -46,6 +55,9 @@ def _resolve_global_config_path(global_config_path: Path | str | None = None) ->
     if global_config_path is not None:
         return Path(global_config_path).expanduser()
     return DEFAULT_CONFIG_PATH.expanduser()
+
+
+# ── State checks ─────────────────────────────────────────────────────
 
 
 def is_onboarding_completed(state_path: Path | str | None = None) -> bool:
@@ -116,7 +128,155 @@ def _normalize_provider(provider: str) -> str:
     return "openai"
 
 
-def _select_config_path(console: Console, config_path: Path | str | None = None) -> Path:
+# ── Shared validation helper ─────────────────────────────────────────
+
+
+async def validate_provider_connection(
+    provider: str,
+    model: str,
+    api_key: str = "",
+    base_url: str = "",
+) -> tuple[bool, str | None]:
+    """Test an LLM provider connection with a lightweight request.
+
+    For Ollama, hits ``GET {base_url}/api/tags`` instead of a completion.
+    Returns ``(ok, error_message | None)``.
+    """
+    normalized = _normalize_provider(provider)
+
+    if normalized == "ollama":
+        return await _validate_ollama(base_url or "http://127.0.0.1:11434")
+
+    try:
+        from captain_claw.llm import Message, create_provider
+
+        llm = create_provider(
+            provider=normalized,
+            model=model,
+            api_key=api_key or None,
+            base_url=base_url or None,
+            temperature=0.0,
+            max_tokens=5,
+        )
+        resp = await llm.complete(
+            messages=[Message(role="user", content="Say OK")],
+            max_tokens=5,
+        )
+        if resp and resp.content:
+            return True, None
+        return False, "Empty response from provider."
+    except Exception as exc:
+        return False, str(exc)
+
+
+async def _validate_ollama(base_url: str) -> tuple[bool, str | None]:
+    """Validate Ollama connectivity by hitting /api/tags."""
+    import httpx
+
+    url = base_url.rstrip("/") + "/api/tags"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                return True, None
+            return False, f"Ollama returned status {resp.status_code}"
+    except Exception as exc:
+        return False, f"Cannot reach Ollama at {base_url}: {exc}"
+
+
+def validate_provider_connection_sync(
+    provider: str,
+    model: str,
+    api_key: str = "",
+    base_url: str = "",
+) -> tuple[bool, str | None]:
+    """Synchronous wrapper around :func:`validate_provider_connection`."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(
+                asyncio.run,
+                validate_provider_connection(provider, model, api_key, base_url),
+            ).result(timeout=30)
+    return asyncio.run(
+        validate_provider_connection(provider, model, api_key, base_url)
+    )
+
+
+# ── Shared save helper ───────────────────────────────────────────────
+
+
+def save_onboarding_config(
+    values: dict[str, Any],
+    config_path: Path | str | None = None,
+    state_path: Path | str | None = None,
+) -> Path:
+    """Build a Config from onboarding values, save to YAML, mark completed.
+
+    ``values`` keys:
+        provider, model, api_key, base_url, workspace_path,
+        enable_guards, allowed_models (list of dicts with
+        provider/model/api_key fields).
+
+    Returns the config file path.
+    """
+    target = Path(config_path).expanduser() if config_path else DEFAULT_CONFIG_PATH
+    cfg = Config.from_yaml(target)
+
+    cfg.model.provider = values.get("provider", cfg.model.provider)
+    cfg.model.model = values.get("model", cfg.model.model)
+    cfg.model.api_key = values.get("api_key", "")
+    cfg.model.base_url = values.get("base_url", "")
+
+    workspace = values.get("workspace_path", "").strip()
+    if workspace:
+        cfg.workspace.path = workspace
+
+    enable_guards = values.get("enable_guards", False)
+    if enable_guards:
+        cfg.guards.input.enabled = True
+        cfg.guards.input.level = "ask_for_approval"
+        cfg.guards.output.enabled = True
+        cfg.guards.output.level = "ask_for_approval"
+        cfg.guards.script_tool.enabled = True
+        cfg.guards.script_tool.level = "ask_for_approval"
+    else:
+        cfg.guards.input.enabled = False
+        cfg.guards.output.enabled = False
+        cfg.guards.script_tool.enabled = False
+
+    allowed = values.get("allowed_models") or []
+    if allowed:
+        from captain_claw.config import Config as _Cfg
+
+        AllowedModel = _Cfg.ModelConfig.AllowedModelConfig if hasattr(_Cfg, "ModelConfig") else type(cfg.model).AllowedModelConfig
+        new_entries = []
+        for idx, entry in enumerate(allowed):
+            am = AllowedModel(
+                id=entry.get("id") or f"{entry['provider']}-{idx + 1}",
+                provider=entry["provider"],
+                model=entry["model"],
+            )
+            new_entries.append(am)
+        cfg.model.allowed = list(cfg.model.allowed) + new_entries
+
+    cfg.save(target)
+    mark_onboarding_completed(state_path=state_path)
+    return target
+
+
+# ── TUI wizard helpers ───────────────────────────────────────────────
+
+
+def _select_config_path(console, config_path: Path | str | None = None) -> Path:  # type: ignore[type-arg]
+    from rich.prompt import Prompt
+    from rich.table import Table
+
     if config_path:
         return Path(config_path).expanduser()
 
@@ -139,18 +299,27 @@ def _select_config_path(console: Console, config_path: Path | str | None = None)
     return global_path if choice == "1" else local_path
 
 
-def _select_provider(console: Console, current_provider: str) -> str:
+def _select_provider(console, current_provider: str) -> str:  # type: ignore[type-arg]
+    from rich.prompt import Prompt
+    from rich.table import Table
+
     table = Table(title="Model Provider", show_header=True, header_style="bold cyan")
     table.add_column("Option", justify="center")
     table.add_column("Provider")
     table.add_column("Suggested model")
+    table.add_column("Env var")
 
     normalized_current = _normalize_provider(current_provider)
     default_index = 1
     for idx, key in enumerate(_PROVIDER_ORDER, start=1):
         if key == normalized_current:
             default_index = idx
-        table.add_row(str(idx), _PROVIDER_LABELS[key], _PROVIDER_DEFAULT_MODELS[key])
+        table.add_row(
+            str(idx),
+            _PROVIDER_LABELS[key],
+            _PROVIDER_DEFAULT_MODELS[key],
+            _PROVIDER_ENV_VARS[key],
+        )
     console.print(table)
 
     choice = Prompt.ask(
@@ -161,12 +330,69 @@ def _select_provider(console: Console, current_provider: str) -> str:
     return _PROVIDER_ORDER[int(choice) - 1]
 
 
+def _run_validation_spinner(console, provider: str, model: str, api_key: str, base_url: str) -> tuple[bool, str | None]:  # type: ignore[type-arg]
+    """Run provider validation with a Rich spinner."""
+    from rich.live import Live
+    from rich.spinner import Spinner
+
+    result: tuple[bool, str | None] = (False, "Validation did not complete")
+
+    with Live(Spinner("dots", text="Validating connection..."), console=console, refresh_per_second=10):
+        result = validate_provider_connection_sync(provider, model, api_key, base_url)
+
+    return result
+
+
+def _collect_additional_models(console) -> list[dict[str, str]]:  # type: ignore[type-arg]
+    """Prompt for up to 3 additional models."""
+    from rich.prompt import Confirm, Prompt
+
+    models: list[dict[str, str]] = []
+    for i in range(3):
+        if not Confirm.ask(
+            f"Add {'another' if i > 0 else 'an additional'} model?",
+            default=False,
+        ):
+            break
+
+        provider = _select_provider(console, "openai")
+        default_model = _PROVIDER_DEFAULT_MODELS[provider]
+        model = Prompt.ask("Model id/name", default=default_model).strip() or default_model
+
+        api_key = ""
+        if provider != "ollama":
+            store_key = Confirm.ask("Store API key for this model?", default=False)
+            if store_key:
+                api_key = Prompt.ask("API key", password=True).strip()
+
+        console.print("[dim]Validating...[/dim]")
+        ok, error = validate_provider_connection_sync(provider, model, api_key, "")
+        if ok:
+            console.print(f"[green]Connected to {provider}/{model}.[/green]")
+        else:
+            console.print(f"[yellow]Validation failed: {error}[/yellow]")
+            if not Confirm.ask("Add this model anyway?", default=False):
+                continue
+
+        models.append({"provider": provider, "model": model, "api_key": api_key})
+
+    return models
+
+
+# ── Main TUI wizard ──────────────────────────────────────────────────
+
+
 def run_onboarding_wizard(
     config_path: Path | str | None = None,
     state_path: Path | str | None = None,
     require_interactive: bool = False,
 ) -> Path | None:
     """Run interactive onboarding and persist selected configuration."""
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.prompt import Confirm, Prompt
+    from rich.table import Table
+
     console = Console()
     if not can_run_onboarding_interactively():
         message = "Onboarding wizard requires an interactive terminal."
@@ -175,17 +401,23 @@ def run_onboarding_wizard(
         console.print(f"[yellow]{message} Skipping automatic onboarding.[/yellow]")
         return None
 
+    # Step 1 — Welcome
     intro = Panel(
         "[bold cyan]Captain Claw Onboarding[/bold cyan]\n"
-        "This wizard configures your default model provider, workspace, safety settings, web search, and Telegram integration.",
+        "Let's get Captain Claw ready. This takes about a minute.\n"
+        "The only requirement is one working model — everything else is optional.",
         border_style="cyan",
     )
     console.print(intro)
 
+    # Step 2 — Config location
     target_config_path = _select_config_path(console, config_path=config_path)
     cfg = Config.from_yaml(target_config_path)
 
+    # Step 3 — Provider
     provider = _select_provider(console, cfg.model.provider)
+
+    # Step 4 — Model name
     default_model = (
         cfg.model.model.strip()
         if _normalize_provider(cfg.model.provider) == provider and cfg.model.model.strip()
@@ -193,11 +425,19 @@ def run_onboarding_wizard(
     )
     model_name = Prompt.ask("Default model id/name", default=default_model).strip() or default_model
 
+    # Step 5 — API key / base URL
     existing_api_key = cfg.model.api_key.strip()
     api_key = ""
-    if provider != "ollama":
+    base_url = ""
+
+    if provider == "ollama":
+        default_base_url = cfg.model.base_url.strip() or "http://127.0.0.1:11434"
+        base_url = Prompt.ask("Ollama base URL", default=default_base_url).strip()
+    else:
+        env_var = _PROVIDER_ENV_VARS.get(provider, "")
+        console.print(f"[dim]Tip: You can also set {env_var} as an environment variable.[/dim]")
         store_api_key = Confirm.ask(
-            "Store provider API key in config file? (you can use env vars instead)",
+            "Store provider API key in config file?",
             default=bool(existing_api_key),
         )
         if store_api_key:
@@ -210,137 +450,91 @@ def run_onboarding_wizard(
                 or existing_api_key
             )
 
-    if provider == "ollama":
-        default_base_url = cfg.model.base_url.strip() or "http://127.0.0.1:11434"
-        base_url = Prompt.ask("Ollama base URL", default=default_base_url).strip()
+    # Step 6 — Validate connection
+    console.print()
+    ok, error = _run_validation_spinner(console, provider, model_name, api_key, base_url)
+    if ok:
+        console.print("[bold green]Connection successful.[/bold green]")
     else:
-        use_custom_base = Confirm.ask(
-            "Set a custom provider base URL?",
-            default=bool(cfg.model.base_url.strip()),
-        )
-        if use_custom_base:
-            base_url = Prompt.ask("Provider base URL", default=cfg.model.base_url.strip()).strip()
+        console.print(f"[bold red]Connection failed:[/bold red] {error}")
+        retry = Confirm.ask("Re-enter API key?", default=True)
+        if retry and provider != "ollama":
+            api_key = Prompt.ask("API key", password=True).strip()
+            ok, error = _run_validation_spinner(console, provider, model_name, api_key, base_url)
+            if ok:
+                console.print("[bold green]Connection successful.[/bold green]")
+            else:
+                console.print(f"[yellow]Still failing: {error}. Continuing anyway.[/yellow]")
+        elif retry and provider == "ollama":
+            base_url = Prompt.ask("Ollama base URL", default=base_url).strip()
+            ok, error = _run_validation_spinner(console, provider, model_name, api_key, base_url)
+            if ok:
+                console.print("[bold green]Connection successful.[/bold green]")
+            else:
+                console.print(f"[yellow]Still failing: {error}. Continuing anyway.[/yellow]")
         else:
-            base_url = ""
+            console.print("[yellow]Skipping validation. You can fix this later in /settings.[/yellow]")
 
-    workspace_path = Prompt.ask("Workspace path", default=cfg.workspace.path).strip() or "./workspace"
+    # Step 7 — Additional models (optional)
+    console.print()
+    additional_models: list[dict[str, str]] = []
+    if Confirm.ask("Add extra models for multi-session use?", default=False):
+        additional_models = _collect_additional_models(console)
 
+    # Step 8 — Safety guards
+    console.print()
     guards_default = bool(
         cfg.guards.input.enabled or cfg.guards.output.enabled or cfg.guards.script_tool.enabled
     )
     enable_guards = Confirm.ask(
-        "Enable safety guards (approval mode) for input/output/script checks?",
+        "Enable safety guards? (recommended for shared environments)",
         default=guards_default,
     )
 
-    existing_brave_key = cfg.tools.web_search.api_key.strip()
-    configure_brave = Confirm.ask(
-        "Configure Brave Search API key for web search?",
-        default=bool(existing_brave_key),
-    )
-    brave_api_key = existing_brave_key
-    if configure_brave:
-        brave_api_key = (
-            Prompt.ask(
-                "Brave Search API key",
-                default=existing_brave_key,
-                password=True,
-            ).strip()
-            or existing_brave_key
-        )
-    else:
-        brave_api_key = ""
-
-    existing_telegram_token = cfg.telegram.bot_token.strip()
-    telegram_enabled_default = bool(cfg.telegram.enabled or existing_telegram_token)
-    configure_telegram = Confirm.ask(
-        "Configure Telegram bot integration now?",
-        default=telegram_enabled_default,
-    )
-    telegram_enabled = cfg.telegram.enabled
-    telegram_token = existing_telegram_token
-    if configure_telegram:
-        telegram_enabled = Confirm.ask(
-            "Enable Telegram integration now?",
-            default=True if not telegram_enabled_default else telegram_enabled_default,
-        )
-        store_telegram_token = Confirm.ask(
-            "Store Telegram bot token in config file? (or use TELEGRAM_BOT_TOKEN env var)",
-            default=bool(existing_telegram_token),
-        )
-        if store_telegram_token:
-            telegram_token = (
-                Prompt.ask(
-                    "Telegram bot token",
-                    default=existing_telegram_token,
-                    password=True,
-                ).strip()
-                or existing_telegram_token
-            )
-        else:
-            telegram_token = ""
-
+    # Step 9 — Summary
+    console.print()
     summary = Table(title="Onboarding Summary", show_header=False, box=None)
     summary.add_column("Setting", style="bold")
     summary.add_column("Value", overflow="fold")
     summary.add_row("Config file", str(target_config_path))
     summary.add_row("Provider", provider)
     summary.add_row("Model", model_name)
-    summary.add_row("API key stored", "yes" if bool(api_key) else "no (env var recommended)")
+    summary.add_row("API key stored", "yes" if bool(api_key) else "no (env var)")
     summary.add_row("Base URL", base_url or "(provider default)")
-    summary.add_row("Workspace", workspace_path)
     summary.add_row(
         "Safety guards",
         "enabled (ask_for_approval)" if enable_guards else "disabled",
     )
-    summary.add_row(
-        "Brave Search API key",
-        "stored" if bool(brave_api_key) else "no (env var BRAVE_API_KEY recommended)",
-    )
-    summary.add_row(
-        "Telegram integration",
-        "enabled" if telegram_enabled else "disabled",
-    )
-    summary.add_row(
-        "Telegram token stored",
-        "yes" if bool(telegram_token) else "no (env var recommended)",
-    )
+    if additional_models:
+        for idx, am in enumerate(additional_models, start=1):
+            summary.add_row(f"Extra model #{idx}", f"{am['provider']} / {am['model']}")
     console.print(summary)
 
     if not Confirm.ask("Save configuration and finish onboarding?", default=True):
         console.print("[yellow]Onboarding skipped. No changes were saved.[/yellow]")
         return None
 
-    cfg.model.provider = provider
-    cfg.model.model = model_name
-    cfg.model.api_key = api_key
-    cfg.model.base_url = base_url
-    cfg.workspace.path = workspace_path
-    cfg.tools.web_search.api_key = brave_api_key
-    if configure_telegram:
-        cfg.telegram.enabled = telegram_enabled
-        cfg.telegram.bot_token = telegram_token
-
-    if enable_guards:
-        cfg.guards.input.enabled = True
-        cfg.guards.input.level = "ask_for_approval"
-        cfg.guards.output.enabled = True
-        cfg.guards.output.level = "ask_for_approval"
-        cfg.guards.script_tool.enabled = True
-        cfg.guards.script_tool.level = "ask_for_approval"
-    else:
-        cfg.guards.input.enabled = False
-        cfg.guards.output.enabled = False
-        cfg.guards.script_tool.enabled = False
-
-    cfg.save(target_config_path)
-    mark_onboarding_completed(state_path=state_path)
+    # Save
+    result = save_onboarding_config(
+        values={
+            "provider": provider,
+            "model": model_name,
+            "api_key": api_key,
+            "base_url": base_url,
+            "workspace_path": cfg.workspace.path,
+            "enable_guards": enable_guards,
+            "allowed_models": additional_models,
+        },
+        config_path=target_config_path,
+        state_path=state_path,
+    )
 
     console.print(
         Panel(
             "[bold green]Setup complete.[/bold green]\n"
-            f"Configuration saved to [cyan]{target_config_path}[/cyan]",
+            f"Configuration saved to [cyan]{result}[/cyan]\n\n"
+            "[dim]Change settings anytime: edit config.yaml or open /settings in the web UI.[/dim]",
             border_style="green",
         )
     )
-    return target_config_path
+    return result

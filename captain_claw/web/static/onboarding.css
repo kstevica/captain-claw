@@ -1,0 +1,473 @@
+/* Onboarding wizard – Captain Claw */
+
+:root {
+    --ob-bg: #0d1117;
+    --ob-surface: #161b22;
+    --ob-border: #30363d;
+    --ob-text: #e6edf3;
+    --ob-text-dim: #8b949e;
+    --ob-accent: #58a6ff;
+    --ob-accent-hover: #79c0ff;
+    --ob-green: #3fb950;
+    --ob-red: #f85149;
+    --ob-orange: #f78166;
+    --ob-radius: 8px;
+    --ob-radius-sm: 4px;
+    --ob-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    --ob-mono: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    font-family: var(--ob-font);
+    background: var(--ob-bg);
+    color: var(--ob-text);
+    line-height: 1.5;
+    font-size: 14px;
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 40px 16px;
+}
+
+/* ── Container ─────────────────────────────────────────── */
+
+.ob-container {
+    width: 100%;
+    max-width: 560px;
+    margin: 0 auto;
+}
+
+/* ── Progress dots ─────────────────────────────────────── */
+
+.ob-progress {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    margin-bottom: 32px;
+}
+
+.ob-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--ob-border);
+    transition: background 0.2s, transform 0.2s;
+}
+
+.ob-dot.active {
+    background: var(--ob-accent);
+    transform: scale(1.2);
+}
+
+.ob-dot.done {
+    background: var(--ob-green);
+}
+
+/* ── Steps ─────────────────────────────────────────────── */
+
+.ob-step {
+    display: none;
+    animation: ob-fade-in 0.25s ease;
+}
+
+.ob-step.visible {
+    display: block;
+}
+
+@keyframes ob-fade-in {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.ob-step h2 {
+    font-size: 22px;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.ob-step p.ob-desc {
+    color: var(--ob-text-dim);
+    margin-bottom: 24px;
+    font-size: 14px;
+}
+
+/* ── Welcome step ──────────────────────────────────────── */
+
+.ob-welcome {
+    text-align: center;
+    padding-top: 40px;
+}
+
+.ob-welcome img {
+    width: 100px;
+    height: 100px;
+    margin-bottom: 16px;
+}
+
+.ob-welcome h1 {
+    font-size: 28px;
+    font-weight: 700;
+    margin-bottom: 8px;
+}
+
+.ob-welcome p {
+    color: var(--ob-text-dim);
+    margin-bottom: 32px;
+    font-size: 15px;
+}
+
+/* ── Provider cards ────────────────────────────────────── */
+
+.ob-providers {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 24px;
+}
+
+.ob-provider-card {
+    background: var(--ob-surface);
+    border: 2px solid var(--ob-border);
+    border-radius: var(--ob-radius);
+    padding: 16px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+    text-align: center;
+}
+
+.ob-provider-card:hover {
+    border-color: var(--ob-accent);
+}
+
+.ob-provider-card.selected {
+    border-color: var(--ob-accent);
+    background: rgba(88, 166, 255, 0.08);
+}
+
+.ob-provider-card .ob-prov-name {
+    font-weight: 600;
+    font-size: 15px;
+    margin-bottom: 4px;
+}
+
+.ob-provider-card .ob-prov-model {
+    font-size: 12px;
+    color: var(--ob-text-dim);
+    font-family: var(--ob-mono);
+}
+
+.ob-provider-card .ob-prov-env {
+    font-size: 11px;
+    color: var(--ob-text-dim);
+    margin-top: 6px;
+}
+
+/* ── Form elements ─────────────────────────────────────── */
+
+.ob-field {
+    margin-bottom: 16px;
+}
+
+.ob-field label {
+    display: block;
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 6px;
+    color: var(--ob-text-dim);
+}
+
+.ob-field input[type="text"],
+.ob-field input[type="password"] {
+    width: 100%;
+    padding: 10px 12px;
+    background: var(--ob-surface);
+    border: 1px solid var(--ob-border);
+    border-radius: var(--ob-radius-sm);
+    color: var(--ob-text);
+    font-size: 14px;
+    font-family: var(--ob-mono);
+    outline: none;
+    transition: border-color 0.15s;
+}
+
+.ob-field input:focus {
+    border-color: var(--ob-accent);
+}
+
+.ob-field .ob-hint {
+    font-size: 12px;
+    color: var(--ob-text-dim);
+    margin-top: 4px;
+}
+
+.ob-toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 16px;
+}
+
+.ob-toggle-row input[type="checkbox"] {
+    accent-color: var(--ob-accent);
+    width: 16px;
+    height: 16px;
+}
+
+.ob-toggle-row label {
+    font-size: 14px;
+    cursor: pointer;
+}
+
+/* ── Validation status ─────────────────────────────────── */
+
+.ob-validation {
+    text-align: center;
+    padding: 40px 0;
+}
+
+.ob-spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid var(--ob-border);
+    border-top-color: var(--ob-accent);
+    border-radius: 50%;
+    animation: ob-spin 0.7s linear infinite;
+    margin: 0 auto 16px;
+}
+
+@keyframes ob-spin {
+    to { transform: rotate(360deg); }
+}
+
+.ob-validation .ob-status {
+    font-size: 15px;
+    margin-bottom: 16px;
+}
+
+.ob-validation .ob-status.ok {
+    color: var(--ob-green);
+}
+
+.ob-validation .ob-status.fail {
+    color: var(--ob-red);
+}
+
+/* ── Extra models accordion ────────────────────────────── */
+
+.ob-extra-models {
+    margin-bottom: 16px;
+}
+
+.ob-extra-model-entry {
+    background: var(--ob-surface);
+    border: 1px solid var(--ob-border);
+    border-radius: var(--ob-radius-sm);
+    padding: 12px;
+    margin-bottom: 8px;
+    position: relative;
+}
+
+.ob-extra-model-entry .ob-remove-model {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: none;
+    border: none;
+    color: var(--ob-text-dim);
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    padding: 2px 6px;
+}
+
+.ob-extra-model-entry .ob-remove-model:hover {
+    color: var(--ob-red);
+}
+
+.ob-extra-model-entry .ob-mini-providers {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+
+.ob-mini-prov {
+    padding: 4px 10px;
+    border: 1px solid var(--ob-border);
+    border-radius: var(--ob-radius-sm);
+    font-size: 12px;
+    cursor: pointer;
+    background: transparent;
+    color: var(--ob-text-dim);
+    transition: all 0.15s;
+}
+
+.ob-mini-prov.selected {
+    border-color: var(--ob-accent);
+    color: var(--ob-accent);
+    background: rgba(88, 166, 255, 0.08);
+}
+
+.ob-extra-inline {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.ob-extra-inline input {
+    flex: 1;
+    padding: 6px 8px;
+    background: var(--ob-bg);
+    border: 1px solid var(--ob-border);
+    border-radius: var(--ob-radius-sm);
+    color: var(--ob-text);
+    font-size: 13px;
+    font-family: var(--ob-mono);
+    outline: none;
+}
+
+.ob-extra-inline input:focus {
+    border-color: var(--ob-accent);
+}
+
+.ob-extra-status {
+    font-size: 12px;
+    margin-top: 6px;
+}
+
+.ob-extra-status.ok { color: var(--ob-green); }
+.ob-extra-status.fail { color: var(--ob-red); }
+.ob-extra-status.pending { color: var(--ob-text-dim); }
+
+/* ── Summary card ──────────────────────────────────────── */
+
+.ob-summary-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 24px;
+}
+
+.ob-summary-table tr {
+    border-bottom: 1px solid var(--ob-border);
+}
+
+.ob-summary-table td {
+    padding: 8px 0;
+    font-size: 14px;
+}
+
+.ob-summary-table td:first-child {
+    color: var(--ob-text-dim);
+    padding-right: 16px;
+    white-space: nowrap;
+    width: 140px;
+}
+
+.ob-summary-table td:last-child {
+    font-family: var(--ob-mono);
+    font-size: 13px;
+    word-break: break-all;
+}
+
+/* ── Buttons ───────────────────────────────────────────── */
+
+.ob-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 24px;
+}
+
+.ob-btn {
+    padding: 10px 24px;
+    border-radius: var(--ob-radius-sm);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    border: none;
+    transition: background 0.15s, color 0.15s;
+}
+
+.ob-btn-primary {
+    background: var(--ob-accent);
+    color: #fff;
+}
+
+.ob-btn-primary:hover {
+    background: var(--ob-accent-hover);
+}
+
+.ob-btn-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.ob-btn-secondary {
+    background: transparent;
+    color: var(--ob-text-dim);
+    border: 1px solid var(--ob-border);
+}
+
+.ob-btn-secondary:hover {
+    color: var(--ob-text);
+    border-color: var(--ob-text-dim);
+}
+
+.ob-btn-text {
+    background: none;
+    border: none;
+    color: var(--ob-accent);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 4px 8px;
+}
+
+.ob-btn-text:hover {
+    color: var(--ob-accent-hover);
+    text-decoration: underline;
+}
+
+.ob-skip {
+    font-size: 13px;
+    color: var(--ob-text-dim);
+    cursor: pointer;
+    background: none;
+    border: none;
+    text-decoration: underline;
+}
+
+.ob-skip:hover {
+    color: var(--ob-text);
+}
+
+/* ── Done step ─────────────────────────────────────────── */
+
+.ob-done {
+    text-align: center;
+    padding-top: 20px;
+}
+
+.ob-done .ob-check {
+    font-size: 48px;
+    margin-bottom: 16px;
+    color: var(--ob-green);
+}
+
+.ob-done p {
+    color: var(--ob-text-dim);
+    margin-bottom: 24px;
+}
+
+/* ── Responsive ────────────────────────────────────────── */
+
+@media (max-width: 480px) {
+    .ob-providers {
+        grid-template-columns: 1fr;
+    }
+    body {
+        padding: 20px 12px;
+    }
+}

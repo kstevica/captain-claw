@@ -91,6 +91,15 @@
     </div>
 
     <script>
+    // Redirect to onboarding if first launch
+    (async function() {
+        try {
+            var r = await fetch('/api/onboarding/status');
+            var d = await r.json();
+            if (d.needed) { window.location.href = '/onboarding'; return; }
+        } catch(e) {}
+    })();
+
     (async function() {
         var section = document.getElementById('google-auth');
         var card = document.getElementById('google-card');

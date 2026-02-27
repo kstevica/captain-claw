@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Captain Claw — Setup</title>
+    <link rel="stylesheet" href="/static/onboarding.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+    <div class="ob-container">
+        <!-- Progress dots -->
+        <div class="ob-progress" id="progress"></div>
+
+        <!-- Step 0: Welcome -->
+        <div class="ob-step visible" data-step="0">
+            <div class="ob-welcome">
+                <img src="/static/logo.svg" alt="Captain Claw">
+                <h1>Captain Claw</h1>
+                <p>Let's get your AI agent ready. This takes about a minute.</p>
+                <button class="ob-btn ob-btn-primary" onclick="OB.next()">Get Started</button>
+            </div>
+        </div>
+
+        <!-- Step 1: Provider -->
+        <div class="ob-step" data-step="1">
+            <h2>Choose a Model Provider</h2>
+            <p class="ob-desc">Pick the provider for your primary model. You can add more later.</p>
+            <div class="ob-providers" id="provider-grid"></div>
+            <div class="ob-actions">
+                <button class="ob-btn ob-btn-secondary" onclick="OB.prev()">Back</button>
+                <button class="ob-btn ob-btn-primary" onclick="OB.next()">Next</button>
+            </div>
+        </div>
+
+        <!-- Step 2: Model + Key -->
+        <div class="ob-step" data-step="2">
+            <h2>Model &amp; API Key</h2>
+            <p class="ob-desc">Configure your default model and authentication.</p>
+            <div class="ob-field">
+                <label for="model-name">Model name</label>
+                <input type="text" id="model-name" placeholder="e.g. gpt-4.1-mini">
+                <div class="ob-hint" id="model-hint"></div>
+            </div>
+            <div id="api-key-section">
+                <div class="ob-field">
+                    <label for="api-key">API Key</label>
+                    <input type="password" id="api-key" placeholder="sk-...">
+                    <div class="ob-hint" id="key-hint"></div>
+                </div>
+                <div class="ob-toggle-row">
+                    <input type="checkbox" id="use-env-var">
+                    <label for="use-env-var">I'll use an environment variable instead</label>
+                </div>
+            </div>
+            <div id="base-url-section" style="display:none;">
+                <div class="ob-field">
+                    <label for="base-url">Base URL</label>
+                    <input type="text" id="base-url" value="http://127.0.0.1:11434">
+                </div>
+            </div>
+            <div class="ob-actions">
+                <button class="ob-btn ob-btn-secondary" onclick="OB.prev()">Back</button>
+                <button class="ob-btn ob-btn-primary" onclick="OB.validate()">Validate &amp; Continue</button>
+            </div>
+        </div>
+
+        <!-- Step 3: Validate -->
+        <div class="ob-step" data-step="3">
+            <h2>Testing Connection</h2>
+            <div class="ob-validation" id="validation-area">
+                <div class="ob-spinner" id="val-spinner"></div>
+                <div class="ob-status" id="val-status">Connecting to provider...</div>
+            </div>
+            <div class="ob-actions" id="val-actions" style="display:none;">
+                <button class="ob-btn ob-btn-secondary" onclick="OB.prev()">Back</button>
+                <button class="ob-btn ob-btn-primary" id="val-next-btn" onclick="OB.next()">Next</button>
+            </div>
+        </div>
+
+        <!-- Step 4: Extra Models -->
+        <div class="ob-step" data-step="4">
+            <h2>Additional Models</h2>
+            <p class="ob-desc">Want to add more models for multi-session use? You can always add them later in Settings.</p>
+            <div class="ob-extra-models" id="extra-models-list"></div>
+            <button class="ob-btn-text" id="add-model-btn" onclick="OB.addExtraModel()">+ Add a model</button>
+            <div class="ob-actions">
+                <button class="ob-btn ob-btn-secondary" onclick="OB.prev()">Back</button>
+                <div>
+                    <button class="ob-skip" onclick="OB.next()">Skip</button>
+                    <button class="ob-btn ob-btn-primary" onclick="OB.next()" style="margin-left:8px;">Next</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 5: Guards -->
+        <div class="ob-step" data-step="5">
+            <h2>Safety Guards</h2>
+            <p class="ob-desc">Guards check input, output, and tool calls before execution. Recommended for shared or production environments.</p>
+            <div class="ob-toggle-row">
+                <input type="checkbox" id="enable-guards">
+                <label for="enable-guards">Enable safety guards (ask-for-approval mode)</label>
+            </div>
+            <div class="ob-actions">
+                <button class="ob-btn ob-btn-secondary" onclick="OB.prev()">Back</button>
+                <div>
+                    <button class="ob-skip" onclick="OB.next()">Skip</button>
+                    <button class="ob-btn ob-btn-primary" onclick="OB.next()" style="margin-left:8px;">Next</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 6: Summary + Save -->
+        <div class="ob-step" data-step="6">
+            <h2>Ready to Go</h2>
+            <p class="ob-desc">Review your setup and launch Captain Claw.</p>
+            <table class="ob-summary-table" id="summary-table"></table>
+            <div class="ob-actions">
+                <button class="ob-btn ob-btn-secondary" onclick="OB.prev()">Back</button>
+                <button class="ob-btn ob-btn-primary" id="save-btn" onclick="OB.save()">Save &amp; Launch</button>
+            </div>
+            <p style="text-align:center; margin-top:16px; font-size:12px; color:var(--ob-text-dim);">
+                Fine-tune everything later in <a href="/settings" style="color:var(--ob-accent);">Settings</a>.
+            </p>
+        </div>
+
+        <!-- Step 7: Done -->
+        <div class="ob-step" data-step="7">
+            <div class="ob-done">
+                <div class="ob-check">&#10003;</div>
+                <h2>Setup Complete</h2>
+                <p>Captain Claw is configured and ready.</p>
+                <a href="/chat" class="ob-btn ob-btn-primary" style="display:inline-block; text-decoration:none;">Open Chat</a>
+                <br><br>
+                <a href="/" style="color:var(--ob-text-dim); font-size:13px;">Go to Dashboard</a>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/onboarding.js"></script>
+</body>
+</html>

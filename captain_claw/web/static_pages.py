@@ -62,3 +62,7 @@ async def serve_sessions(server: WebServer, request: web.Request) -> web.FileRes
 
 async def serve_files(server: WebServer, request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "files.html")
+
+
+async def serve_onboarding(server: WebServer, request: web.Request) -> web.FileResponse:
+    return web.FileResponse(STATIC_DIR / "onboarding.html")

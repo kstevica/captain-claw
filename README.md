@@ -50,6 +50,7 @@ Requires **Python 3.11** or higher.
 export OPENAI_API_KEY="your-openai-key"
 export ANTHROPIC_API_KEY="your-anthropic-key"
 export GOOGLE_API_KEY="your-google-key"
+export GEMINI_API_KEY="your-gemini-key"
 ```
 
 Use only the keys you need. For Ollama, no key is required — just set `provider: ollama` in `config.yaml`.
@@ -60,7 +61,7 @@ Use only the keys you need. For Ollama, no key is required — just set `provide
 captain-claw
 ```
 
-First run starts interactive onboarding automatically. To re-run it later: `captain-claw --onboarding`.
+First run starts interactive onboarding automatically. The web UI redirects to `/onboarding` on first launch too. To re-run it later: `captain-claw --onboarding`.
 
 ### 4. Try it
 
