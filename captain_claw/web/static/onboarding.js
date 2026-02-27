@@ -10,7 +10,7 @@
         { id: 'ollama',    name: 'Ollama (local/self-hosted)',   model: 'llama3.2',                       env: '' }
     ];
 
-    var TOTAL_STEPS = 8; // 0-7
+    var TOTAL_STEPS = 9; // 0-8
     var currentStep = 0;
     var state = {
         provider: 'openai',
@@ -20,7 +20,10 @@
         use_env: false,
         validated: false,
         enable_guards: false,
-        extra_models: []  // {provider, model, api_key}
+        extra_models: [],  // {provider, model, api_key}
+        telegram_enabled: false,
+        telegram_token: '',
+        telegram_use_env: false
     };
 
     // ── Initialise ────────────────────────────────────────
@@ -34,6 +37,17 @@
             state.use_env = this.checked;
             document.getElementById('api-key').disabled = this.checked;
             if (this.checked) document.getElementById('api-key').value = '';
+        });
+
+        document.getElementById('enable-telegram').addEventListener('change', function () {
+            state.telegram_enabled = this.checked;
+            document.getElementById('telegram-token-section').style.display = this.checked ? '' : 'none';
+        });
+
+        document.getElementById('telegram-use-env').addEventListener('change', function () {
+            state.telegram_use_env = this.checked;
+            document.getElementById('telegram-token').disabled = this.checked;
+            if (this.checked) document.getElementById('telegram-token').value = '';
         });
     }
 
@@ -68,7 +82,7 @@
 
         // Hook: populate fields when entering certain steps
         if (n === 2) populateModelStep();
-        if (n === 6) populateSummary();
+        if (n === 7) populateSummary();
     }
 
     // ── Provider grid ─────────────────────────────────────
@@ -269,8 +283,15 @@
 
     // ── Summary ───────────────────────────────────────────
 
+    function readTelegramStep() {
+        state.telegram_enabled = document.getElementById('enable-telegram').checked;
+        state.telegram_use_env = document.getElementById('telegram-use-env').checked;
+        state.telegram_token = state.telegram_use_env ? '' : document.getElementById('telegram-token').value.trim();
+    }
+
     function populateSummary() {
         readExtraModels();
+        readTelegramStep();
         state.enable_guards = document.getElementById('enable-guards').checked;
 
         var rows = [
@@ -286,6 +307,12 @@
             rows.push(['Extra model #' + (i + 1), m.provider + ' / ' + (m.model || findProvider(m.provider).model)]);
         });
 
+        if (state.telegram_enabled) {
+            rows.push(['Telegram', state.telegram_token ? 'enabled (token stored)' : 'enabled (env var)']);
+        } else {
+            rows.push(['Telegram', 'disabled']);
+        }
+
         var table = document.getElementById('summary-table');
         table.innerHTML = rows.map(function (r) {
             return '<tr><td>' + r[0] + '</td><td>' + r[1] + '</td></tr>';
@@ -300,6 +327,7 @@
         btn.textContent = 'Saving...';
 
         readExtraModels();
+        readTelegramStep();
         state.enable_guards = document.getElementById('enable-guards').checked;
 
         var allowed = state.extra_models.map(function (m) {
@@ -315,13 +343,15 @@
                 api_key: state.api_key,
                 base_url: state.base_url,
                 enable_guards: state.enable_guards,
-                allowed_models: allowed
+                allowed_models: allowed,
+                telegram_enabled: state.telegram_enabled,
+                telegram_token: state.telegram_token
             })
         })
         .then(function (r) { return r.json(); })
         .then(function (data) {
             if (data.ok) {
-                showStep(7);
+                showStep(8);
             } else {
                 btn.disabled = false;
                 btn.textContent = 'Save & Launch';

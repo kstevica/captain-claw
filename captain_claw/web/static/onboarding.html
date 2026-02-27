@@ -110,8 +110,36 @@
             </div>
         </div>
 
-        <!-- Step 6: Summary + Save -->
+        <!-- Step 6: Telegram -->
         <div class="ob-step" data-step="6">
+            <h2>Telegram Bot</h2>
+            <p class="ob-desc">Connect a Telegram bot to chat with Captain Claw from your phone. You can set this up later in Settings.</p>
+            <div class="ob-toggle-row">
+                <input type="checkbox" id="enable-telegram">
+                <label for="enable-telegram">Enable Telegram integration</label>
+            </div>
+            <div id="telegram-token-section" style="display:none;">
+                <div class="ob-field">
+                    <label for="telegram-token">Bot Token</label>
+                    <input type="password" id="telegram-token" placeholder="123456:ABC-DEF1234...">
+                    <div class="ob-hint">Get a token from <a href="https://t.me/BotFather" target="_blank" rel="noopener" style="color:var(--ob-accent);">@BotFather</a> on Telegram. Or set TELEGRAM_BOT_TOKEN env var.</div>
+                </div>
+                <div class="ob-toggle-row">
+                    <input type="checkbox" id="telegram-use-env">
+                    <label for="telegram-use-env">I'll use the TELEGRAM_BOT_TOKEN environment variable instead</label>
+                </div>
+            </div>
+            <div class="ob-actions">
+                <button class="ob-btn ob-btn-secondary" onclick="OB.prev()">Back</button>
+                <div>
+                    <button class="ob-skip" onclick="OB.next()">Skip</button>
+                    <button class="ob-btn ob-btn-primary" onclick="OB.next()" style="margin-left:8px;">Next</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 7: Summary + Save -->
+        <div class="ob-step" data-step="7">
             <h2>Ready to Go</h2>
             <p class="ob-desc">Review your setup and launch Captain Claw.</p>
             <table class="ob-summary-table" id="summary-table"></table>
@@ -124,8 +152,8 @@
             </p>
         </div>
 
-        <!-- Step 7: Done -->
-        <div class="ob-step" data-step="7">
+        <!-- Step 8: Done -->
+        <div class="ob-step" data-step="8">
             <div class="ob-done">
                 <div class="ob-check">&#10003;</div>
                 <h2>Setup Complete</h2>

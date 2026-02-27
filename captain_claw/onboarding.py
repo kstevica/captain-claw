@@ -221,7 +221,8 @@ def save_onboarding_config(
     ``values`` keys:
         provider, model, api_key, base_url, workspace_path,
         enable_guards, allowed_models (list of dicts with
-        provider/model/api_key fields).
+        provider/model/api_key fields), telegram_enabled,
+        telegram_token.
 
     Returns the config file path.
     """
@@ -264,6 +265,13 @@ def save_onboarding_config(
             )
             new_entries.append(am)
         cfg.model.allowed = list(cfg.model.allowed) + new_entries
+
+    # Telegram
+    if "telegram_enabled" in values:
+        cfg.telegram.enabled = bool(values["telegram_enabled"])
+    telegram_token = values.get("telegram_token", "").strip()
+    if telegram_token:
+        cfg.telegram.bot_token = telegram_token
 
     cfg.save(target)
     mark_onboarding_completed(state_path=state_path)
