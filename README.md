@@ -43,6 +43,13 @@ source venv/bin/activate
 pip install captain-claw
 ```
 
+**Optional extras:**
+
+```bash
+pip install captain-claw[tts]      # Local text-to-speech (pocket-tts, requires PyTorch)
+pip install captain-claw[vector]   # Vector memory / RAG (numpy, scikit-learn)
+```
+
 ### 2. Set an API key
 
 ```bash

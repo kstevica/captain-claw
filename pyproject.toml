@@ -1,6 +1,6 @@
 [project]
 name = "captain-claw"
-version = "0.2.5"
+version = "0.2.6"
 description = "A powerful console-based AI agent"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -34,11 +34,13 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "glob2>=0.7",
     "tenacity>=8.0.0",
-    "pocket-tts>=1.0.3",
     "aiohttp>=3.9.0",
 ]
 
 [project.optional-dependencies]
+tts = [
+    "pocket-tts>=1.0.3",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
