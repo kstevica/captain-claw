@@ -1,4 +1,11 @@
-"""Telegram bridge integration for the web server."""
+"""Telegram bridge integration for the web server.
+
+Each approved Telegram user gets a dedicated Agent instance bound to
+their own session.  Agents are created lazily on first message and
+cached for the lifetime of the server process.  Per-user asyncio locks
+serialise requests from the same user while allowing different users to
+run concurrently.
+"""
 
 from __future__ import annotations
 
@@ -8,13 +15,23 @@ import secrets
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from captain_claw.instructions import InstructionLoader
 from captain_claw.logging import get_logger
+from captain_claw.session import Session, get_session_manager
 from captain_claw.telegram_bridge import TelegramBridge, TelegramMessage
 
 if TYPE_CHECKING:
+    from captain_claw.agent import Agent
     from captain_claw.web_server import WebServer
 
 log = get_logger(__name__)
+
+# Commands disabled for Telegram users (per-user sessions, no switching).
+_TG_DISABLED_COMMANDS = frozenset({"/new", "/sessions"})
+_TG_DISABLED_SESSION_SUBCMDS = frozenset({"list", "switch", "load", "new"})
+
+
+# ── Lifecycle ────────────────────────────────────────────────────
 
 
 async def start_telegram(server: WebServer) -> None:
@@ -35,6 +52,7 @@ async def start_telegram(server: WebServer) -> None:
         server._pending_telegram_pairings = await _tg_load_state(
             server, "telegram_pending_pairings"
         )
+        server._telegram_user_sessions = await _tg_load_user_sessions(server)
         _tg_cleanup_expired(server)
         await _tg_save_state(server)
     server._telegram_poll_task = asyncio.create_task(_telegram_poll_loop(server))
@@ -54,6 +72,9 @@ async def stop_telegram(server: WebServer) -> None:
                 pass
     if server._telegram_bridge:
         await server._telegram_bridge.close()
+
+
+# ── Polling / dispatch ───────────────────────────────────────────
 
 
 async def _telegram_poll_loop(server: WebServer) -> None:
@@ -92,6 +113,86 @@ async def _telegram_worker(server: WebServer) -> None:
             log.error("Telegram worker error", error=str(exc))
 
 
+# ── Per-user agent management ────────────────────────────────────
+
+
+async def _tg_get_or_create_agent(server: WebServer, message: TelegramMessage) -> Agent:
+    """Return a cached Agent for this Telegram user, creating one if needed.
+
+    Each approved Telegram user gets their own lightweight Agent that
+    shares the main agent's provider, session manager and tool registry
+    but has its own session, usage counters and runtime flags.
+    """
+    from captain_claw.agent import Agent as AgentCls
+
+    user_id_key = str(message.user_id)
+
+    # Fast path: already cached.
+    if user_id_key in server._telegram_agents:
+        return server._telegram_agents[user_id_key]
+
+    # ── Resolve or create the user's session ──
+    sm = get_session_manager()
+    session: Session | None = None
+    session_id = server._telegram_user_sessions.get(user_id_key)
+    if session_id:
+        session = await sm.load_session(session_id)
+
+    if session is None:
+        user_info = server._approved_telegram_users.get(user_id_key, {})
+        username = str(user_info.get("username", "")).strip()
+        first_name = str(user_info.get("first_name", "")).strip()
+        label = username or first_name or user_id_key
+        session = await sm.create_session(name=f"tg-{label}")
+        server._telegram_user_sessions[user_id_key] = session.id
+        await _tg_save_user_sessions(server)
+
+    # ── Build a lightweight agent (mirrors AgentPool pattern) ──
+    agent = AgentCls(
+        provider=server.agent.provider,  # shared LLM provider
+        status_callback=None,            # TG users don't drive the web status bar
+        tool_output_callback=server._tool_output_callback,
+        thinking_callback=server._thinking_callback,
+    )
+    agent.session = session
+    agent.session_manager = sm
+    agent._sync_runtime_flags_from_session()
+
+    # Share deep-memory index if available.
+    main_dm = getattr(server.agent, "_deep_memory", None)
+    if main_dm is not None:
+        agent._deep_memory = main_dm
+
+    agent._register_default_tools()
+    agent.instructions = InstructionLoader()
+    agent._initialized = True
+    # NOT a worker — full interactive agent (keeps default max_iterations).
+
+    server._telegram_agents[user_id_key] = agent
+
+    # Ensure a per-user lock exists.
+    if user_id_key not in server._telegram_user_locks:
+        server._telegram_user_locks[user_id_key] = asyncio.Lock()
+
+    log.info(
+        "Created Telegram user agent",
+        user_id=user_id_key, session_id=session.id, session_name=session.name,
+    )
+    return agent
+
+
+def _tg_get_user_lock(server: WebServer, user_id: str) -> asyncio.Lock:
+    """Return the per-user asyncio lock, creating it if necessary."""
+    lock = server._telegram_user_locks.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        server._telegram_user_locks[user_id] = lock
+    return lock
+
+
+# ── Message handling ─────────────────────────────────────────────
+
+
 async def _handle_telegram_message(server: WebServer, message: TelegramMessage) -> None:
     """Process a single Telegram message."""
     bridge = server._telegram_bridge
@@ -111,24 +212,22 @@ async def _handle_telegram_message(server: WebServer, message: TelegramMessage) 
             await _tg_pair_unknown_user(server, message)
             return
 
+        # Resolve per-user agent (creates on first use).
+        user_agent = await _tg_get_or_create_agent(server, message)
+
         text = message.text.strip()
 
-        # Download attached photo if present.
+        # Download attached photo into the user's session media folder.
         image_path: str | None = None
         if message.photo_file_id:
             try:
                 from datetime import UTC, datetime
-                from pathlib import Path
 
                 from captain_claw.config import get_config
 
                 cfg = get_config()
                 workspace = cfg.resolved_workspace_path()
-                session_id = ""
-                if server.agent and server.agent.session:
-                    session_id = server.agent.session.id or ""
-                if not session_id:
-                    session_id = "uploads"
+                session_id = user_agent.session.id if user_agent.session else "uploads"
                 stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
                 dest_dir = workspace / "saved" / "media" / session_id
                 dest = dest_dir / f"tg-photo-{stamp}.jpg"
@@ -141,6 +240,7 @@ async def _handle_telegram_message(server: WebServer, message: TelegramMessage) 
         if not text and not image_path:
             return
 
+        # Strip @botname suffix from commands.
         if text.startswith("/") and "@" in text.split()[0]:
             parts = text.split(None, 1)
             command_word = parts[0].split("@")[0]
@@ -148,23 +248,25 @@ async def _handle_telegram_message(server: WebServer, message: TelegramMessage) 
 
         lowered = text.lower()
         if lowered == "/start" or lowered.startswith("/start "):
+            session_name = user_agent.session.name if user_agent.session else "none"
             await _tg_send(
                 server, message.chat_id,
-                "Captain Claw connected (web mode).\nSend plain text to chat.",
+                f"Captain Claw connected.\nYour session: {session_name}\nSend plain text to chat.",
                 reply_to_message_id=message.message_id,
             )
             return
         if lowered == "/help" or lowered.startswith("/help "):
             await _tg_send(
                 server, message.chat_id,
-                "Send any text to chat with the current session.\n"
-                "Full command support is available in the Web UI.",
+                "Send any text to chat with your session.\n"
+                "Commands: /clear, /history, /compact, /config, /session\n"
+                "Each Telegram user has a dedicated session.",
                 reply_to_message_id=message.message_id,
             )
             return
 
         if text.startswith("/"):
-            result = await execute_telegram_command(server, text)
+            result = await execute_telegram_command(server, text, user_agent)
             if result is not None:
                 await _tg_send(
                     server, message.chat_id, result,
@@ -185,7 +287,11 @@ async def _handle_telegram_message(server: WebServer, message: TelegramMessage) 
             "content": f"[TG {user_label}] {effective_text}",
         })
 
-        await _tg_process_with_typing(server, message.chat_id, effective_text, message.message_id)
+        await _tg_process_with_typing(
+            server, message.chat_id, effective_text, message.message_id,
+            user_agent=user_agent,
+            user_id=str(message.user_id),
+        )
 
     except Exception as exc:
         log.error("Telegram message handler failed", error=str(exc))
@@ -199,42 +305,58 @@ async def _handle_telegram_message(server: WebServer, message: TelegramMessage) 
             pass
 
 
-async def execute_telegram_command(server: WebServer, raw: str) -> str | None:
-    """Execute a slash command from Telegram, returning the response text.
+# ── Commands ─────────────────────────────────────────────────────
+
+
+async def execute_telegram_command(
+    server: WebServer, raw: str, user_agent: Agent,
+) -> str | None:
+    """Execute a slash command from Telegram.
 
     Returns ``None`` only when the command should fall through to the
     agent (e.g. ``/orchestrate``).
-    """
-    if not server.agent:
-        return "Agent not ready."
 
+    Each Telegram user operates on their own *user_agent*. Commands that
+    create or switch sessions are disabled.
+    """
     parts = raw.strip().split(None, 1)
     cmd = parts[0].lower()
     args = parts[1] if len(parts) > 1 else ""
 
+    session = user_agent.session
+
     try:
+        # ── Disabled commands ────────────────────────────────────
+        if cmd in _TG_DISABLED_COMMANDS:
+            return "Not available on Telegram. Each user has a dedicated session."
+
+        # ── /clear ───────────────────────────────────────────────
         if cmd in ("/clear",):
-            if server.agent.session:
-                if server.agent.is_session_memory_protected():
+            if session:
+                if session.metadata and session.metadata.get("memory_protection"):
                     return "Session memory is protected. Disable with /session protect off."
-                server.agent.session.messages.clear()
-                await server.agent.session_manager.save_session(server.agent.session)
-                server.agent.last_usage = server.agent._empty_usage()
-                server.agent.last_context_window = {}
+                session.messages.clear()
+                session.metadata = {}
+                await user_agent.session_manager.save_session(session)
+                user_agent.refresh_session_runtime_flags()
+                user_agent.last_usage = user_agent._empty_usage()
+                user_agent.last_context_window = {}
                 return "Session messages cleared."
             return "No active session."
 
+        # ── /config ──────────────────────────────────────────────
         if cmd in ("/config",):
-            details = server.agent.get_runtime_model_details()
+            details = user_agent.get_runtime_model_details()
             return (
                 f"Model: {details.get('provider', '')}:{details.get('model', '')}\n"
-                f"Session: {server.agent.session.name if server.agent.session else 'none'}\n"
-                f"Pipeline: {server.agent.pipeline_mode}"
+                f"Session: {session.name if session else 'none'}\n"
+                f"Pipeline: {user_agent.pipeline_mode}"
             )
 
+        # ── /history ─────────────────────────────────────────────
         if cmd in ("/history",):
-            if server.agent.session:
-                msgs = server.agent.session.messages[-20:]
+            if session:
+                msgs = session.messages[-20:]
                 if not msgs:
                     return "Session history is empty."
                 lines = []
@@ -245,9 +367,12 @@ async def execute_telegram_command(server: WebServer, raw: str) -> str | None:
                 return "\n".join(lines)
             return "No active session."
 
+        # ── /compact ─────────────────────────────────────────────
         if cmd in ("/compact",):
-            if server.agent.session:
-                compacted, stats = await server.agent.compact_session(force=True, trigger="telegram")
+            if session:
+                compacted, stats = await user_agent.compact_session(
+                    force=True, trigger="telegram",
+                )
                 if compacted:
                     return (
                         f"Session compacted ({int(stats.get('before_tokens', 0))} "
@@ -256,44 +381,24 @@ async def execute_telegram_command(server: WebServer, raw: str) -> str | None:
                 return f"Compaction skipped: {stats.get('reason', 'not_needed')}"
             return "No active session."
 
-        if cmd in ("/new",):
-            name = args.strip() or "default"
-            session = await server.agent.session_manager.create_session(name=name)
-            server.agent.session = session
-            server.agent.refresh_session_runtime_flags()
-            await server.agent.session_manager.set_last_active_session(session.id)
-            server.agent.last_usage = server.agent._empty_usage()
-            server.agent.last_context_window = {}
-            server._broadcast({"type": "session_info", **server._session_info()})
-            return f"New session: {session.name} ({session.id[:12]})"
-
+        # ── /session ─────────────────────────────────────────────
         if cmd in ("/session",):
             if not args.strip():
-                if not server.agent.session:
+                if not session:
                     return "No active session."
-                details = server.agent.get_runtime_model_details()
+                details = user_agent.get_runtime_model_details()
                 return (
-                    f"Session: {server.agent.session.name}\n"
-                    f"ID: {server.agent.session.id}\n"
-                    f"Messages: {len(server.agent.session.messages)}\n"
+                    f"Session: {session.name}\n"
+                    f"ID: {session.id}\n"
+                    f"Messages: {len(session.messages)}\n"
                     f"Model: {details.get('provider')}/{details.get('model')}"
                 )
-            from captain_claw.web.slash_commands import handle_session_subcommand
-            return await handle_session_subcommand(server, args.strip())
+            return await _tg_handle_session_subcommand(server, args.strip(), user_agent)
 
-        if cmd in ("/sessions",):
-            sessions = await server.agent.session_manager.list_sessions(limit=20)
-            if not sessions:
-                return "No sessions found."
-            lines = ["Sessions:"]
-            for i, s in enumerate(sessions, 1):
-                marker = "*" if (server.agent.session and s.id == server.agent.session.id) else " "
-                lines.append(f"{marker} [{i}] {s.name} ({s.id}) messages={len(s.messages)}")
-            return "\n".join(lines)
-
+        # ── /models ──────────────────────────────────────────────
         if cmd in ("/models",):
-            models = server.agent.get_allowed_models()
-            details = server.agent.get_runtime_model_details()
+            models = user_agent.get_allowed_models()
+            details = user_agent.get_runtime_model_details()
             lines = ["Allowed models:"]
             for i, m in enumerate(models, 1):
                 marker = ""
@@ -309,22 +414,22 @@ async def execute_telegram_command(server: WebServer, raw: str) -> str | None:
             if args.strip():
                 mode = args.strip().lower()
                 if mode in ("loop", "contracts"):
-                    await server.agent.set_pipeline_mode(mode)
+                    await user_agent.set_pipeline_mode(mode)
                     return f"Pipeline mode set to {mode}."
                 return "Invalid mode. Use /pipeline loop|contracts"
-            return f"Pipeline mode: {server.agent.pipeline_mode}"
+            return f"Pipeline mode: {user_agent.pipeline_mode}"
 
         if cmd in ("/planning",):
             if args.strip().lower() == "on":
-                await server.agent.set_pipeline_mode("contracts")
+                await user_agent.set_pipeline_mode("contracts")
                 return "Pipeline mode set to contracts."
             if args.strip().lower() == "off":
-                await server.agent.set_pipeline_mode("loop")
+                await user_agent.set_pipeline_mode("loop")
                 return "Pipeline mode set to loop."
-            return f"Planning: {'on' if server.agent.pipeline_mode == 'contracts' else 'off'}"
+            return f"Planning: {'on' if user_agent.pipeline_mode == 'contracts' else 'off'}"
 
         if cmd in ("/skills",):
-            skills = server.agent.list_user_invocable_skills()
+            skills = user_agent.list_user_invocable_skills()
             if not skills:
                 return "No user-invocable skills available."
             lines = ["Available skills:"]
@@ -366,25 +471,116 @@ async def execute_telegram_command(server: WebServer, raw: str) -> str | None:
         return f"Command error: {e}"
 
 
+async def _tg_handle_session_subcommand(
+    server: WebServer, args: str, user_agent: Agent,
+) -> str:
+    """Handle /session subcommands for Telegram (restricted subset)."""
+    parts = args.split(None, 1)
+    subcmd = parts[0].lower()
+    subargs = parts[1].strip() if len(parts) > 1 else ""
+    session = user_agent.session
+
+    if subcmd in _TG_DISABLED_SESSION_SUBCMDS:
+        return "Not available on Telegram. Each user has a dedicated session."
+
+    if subcmd in ("rename",):
+        if not subargs:
+            return "Usage: /session rename <new-name>"
+        session.name = subargs
+        await user_agent.session_manager.save_session(session)
+        return f"Session renamed to {subargs}."
+
+    if subcmd in ("description",):
+        if not subargs:
+            return "Usage: /session description <text>"
+        if subargs.lower() == "auto":
+            desc = await user_agent._auto_generate_session_description()
+            return f"Auto-generated description: {desc}"
+        session.metadata = session.metadata or {}
+        session.metadata["description"] = subargs
+        await user_agent.session_manager.save_session(session)
+        return f"Description set to: {subargs}"
+
+    if subcmd in ("model",):
+        if not subargs:
+            details = user_agent.get_runtime_model_details()
+            return f"Active model: {details.get('provider', '')}:{details.get('model', '')}"
+        await user_agent.set_session_model(subargs, persist=True)
+        details = user_agent.get_runtime_model_details()
+        return f"Model set to {details.get('provider', '')}:{details.get('model', '')}"
+
+    if subcmd in ("protect",):
+        if session:
+            if subargs.lower() == "on":
+                session.metadata = session.metadata or {}
+                session.metadata["memory_protection"] = True
+                await user_agent.session_manager.save_session(session)
+                return "Memory protection enabled."
+            elif subargs.lower() == "off":
+                session.metadata = session.metadata or {}
+                session.metadata["memory_protection"] = False
+                await user_agent.session_manager.save_session(session)
+                return "Memory protection disabled."
+            return "Usage: /session protect on|off"
+        return "No active session."
+
+    if subcmd in ("export",):
+        if not session:
+            return "No active session."
+        mode = subargs.strip().lower() or "all"
+        from captain_claw.session_export import export_session_history
+
+        try:
+            written = export_session_history(
+                mode=mode,
+                session_id=session.id,
+                session_name=session.name,
+                messages=session.messages,
+                saved_base_path=user_agent.tools.get_saved_base_path(create=True),
+            )
+        except Exception as e:
+            return f"Export failed: {e}"
+        if not written:
+            return "No files exported."
+        lines = [f"Exported {len(written)} file(s):"]
+        for p in written:
+            lines.append(f"- {p}")
+        return "\n".join(lines)
+
+    return f"Unknown session subcommand: {subcmd}"
+
+
+# ── Agent processing ─────────────────────────────────────────────
+
+
 async def _tg_process_with_typing(
-    server: WebServer, chat_id: int, text: str, reply_to_message_id: int | None = None,
+    server: WebServer,
+    chat_id: int,
+    text: str,
+    reply_to_message_id: int | None = None,
+    *,
+    user_agent: Agent,
+    user_id: str,
 ) -> None:
-    """Run agent.complete() with Telegram typing indicator, respecting busy state."""
+    """Run user_agent.complete() with typing indicator and per-user lock.
+
+    Different Telegram users run concurrently.  Requests from the *same*
+    user are serialised by a per-user asyncio lock.
+    """
     bridge = server._telegram_bridge
-    if not bridge or not server.agent:
+    if not bridge:
         return
 
-    if server._busy:
+    lock = _tg_get_user_lock(server, user_id)
+
+    if lock.locked():
         await _tg_send(
             server, chat_id,
-            "Agent is busy processing another request. Your message is queued\u2026",
+            "Your previous request is still running. This message is queued\u2026",
             reply_to_message_id=reply_to_message_id,
         )
 
-    async with server._busy_lock:
-        server._busy = True
-        server._broadcast({"type": "status", "status": "thinking"})
-
+    async with lock:
         stop_typing = asyncio.Event()
 
         async def _typing_heartbeat() -> None:
@@ -417,17 +613,17 @@ async def _tg_process_with_typing(
                         "content": response,
                     })
             else:
-                turn_start_idx = len(server.agent.session.messages) if server.agent.session else 0
-                log.info("Telegram agent.complete() start", text_len=len(text))
-                response = await server.agent.complete(text)
-                log.info("Telegram agent.complete() done", response_len=len(response or ""))
+                turn_start_idx = len(user_agent.session.messages) if user_agent.session else 0
+                log.info("Telegram agent.complete() start", user_id=user_id, text_len=len(text))
+                response = await user_agent.complete(text)
+                log.info("Telegram agent.complete() done", user_id=user_id, response_len=len(response or ""))
 
                 await _tg_send(server, chat_id, response, reply_to_message_id=reply_to_message_id)
 
                 # Send any generated images back to Telegram.
                 from captain_claw.platform_adapter import collect_turn_generated_image_paths
-                if server.agent.session and server._telegram_bridge:
-                    for img_path in collect_turn_generated_image_paths(server.agent.session, turn_start_idx):
+                if user_agent.session and server._telegram_bridge:
+                    for img_path in collect_turn_generated_image_paths(user_agent.session, turn_start_idx):
                         try:
                             await server._telegram_bridge.send_photo(
                                 chat_id, img_path, reply_to_message_id=reply_to_message_id,
@@ -440,17 +636,14 @@ async def _tg_process_with_typing(
                     "role": "assistant",
                     "content": response,
                 })
+
             server._broadcast({
                 "type": "usage",
-                "last": server.agent.last_usage,
-                "total": server.agent.total_usage,
-            })
-            server._broadcast({
-                "type": "session_info",
-                **server._session_info(),
+                "last": user_agent.last_usage,
+                "total": user_agent.total_usage,
             })
         except Exception as exc:
-            log.error("Telegram agent error", error=str(exc))
+            log.error("Telegram agent error", user_id=user_id, error=str(exc))
             await _tg_send(
                 server, chat_id, f"Error: {str(exc)}", reply_to_message_id=reply_to_message_id,
             )
@@ -462,8 +655,6 @@ async def _tg_process_with_typing(
                 await heartbeat
             except asyncio.CancelledError:
                 pass
-            server._busy = False
-            server._broadcast({"type": "status", "status": "ready"})
 
 
 # ── Telegram helpers ──────────────────────────────────────────────
@@ -494,6 +685,32 @@ async def _tg_load_state(server: WebServer, key: str) -> dict[str, dict[str, obj
     return parsed if isinstance(parsed, dict) else {}
 
 
+async def _tg_load_user_sessions(server: WebServer) -> dict[str, str]:
+    """Load the user_id -> session_id mapping from app_state."""
+    if not server.agent:
+        return {}
+    raw = await server.agent.session_manager.get_app_state("telegram_user_sessions")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    if isinstance(parsed, dict):
+        return {str(k): str(v) for k, v in parsed.items()}
+    return {}
+
+
+async def _tg_save_user_sessions(server: WebServer) -> None:
+    """Persist the user_id -> session_id mapping."""
+    if not server.agent:
+        return
+    await server.agent.session_manager.set_app_state(
+        "telegram_user_sessions",
+        json.dumps(server._telegram_user_sessions, ensure_ascii=True, sort_keys=True),
+    )
+
+
 async def _tg_save_state(server: WebServer) -> None:
     if not server.agent:
         return
@@ -505,6 +722,7 @@ async def _tg_save_state(server: WebServer) -> None:
         "telegram_pending_pairings",
         json.dumps(server._pending_telegram_pairings, ensure_ascii=True, sort_keys=True),
     )
+    await _tg_save_user_sessions(server)
 
 
 def _tg_cleanup_expired(server: WebServer) -> None:

@@ -113,6 +113,9 @@ class WebServer:
         self._telegram_offset: int | None = None
         self._approved_telegram_users: dict[str, dict[str, object]] = {}
         self._pending_telegram_pairings: dict[str, dict[str, object]] = {}
+        self._telegram_user_sessions: dict[str, str] = {}  # user_id -> session_id
+        self._telegram_agents: dict[str, Any] = {}  # user_id -> Agent
+        self._telegram_user_locks: dict[str, asyncio.Lock] = {}  # user_id -> Lock
         self._telegram_poll_task: asyncio.Task[None] | None = None
         self._telegram_worker_task: asyncio.Task[None] | None = None
         # Orchestrator (lazy init in _init_agent)
