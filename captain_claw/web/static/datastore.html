@@ -54,6 +54,7 @@
                         <button class="ds-tab" data-tab="schema" id="dsTabSchema">Schema</button>
                     </div>
                     <button class="ds-btn primary" id="dsAddRowBtn">+ Row</button>
+                    <button class="ds-btn secondary" id="dsProtectionsBtn" title="Manage protections">&#128274;</button>
                     <button class="ds-btn danger" id="dsDropTableBtn">Drop Table</button>
                 </div>
             </div>
@@ -173,6 +174,25 @@
         <div class="ds-modal-actions">
             <button class="ds-btn secondary" id="dsConfirmCancel">Cancel</button>
             <button class="ds-btn danger" id="dsConfirmOk">Confirm</button>
+        </div>
+    </div>
+</div>
+
+<!-- Protections modal -->
+<div class="ds-modal-overlay" id="dsProtectionsModal" style="display:none;">
+    <div class="ds-modal ds-modal-wide">
+        <div class="ds-modal-title">Protections</div>
+        <div class="ds-modal-body">
+            <div class="ds-protection-toggle" id="dsProtTableToggle">
+                <label class="ds-toggle-label">
+                    <input type="checkbox" id="dsProtTableCheck">
+                    <span>Table-level protection (blocks all mutations)</span>
+                </label>
+            </div>
+            <div class="ds-protection-list" id="dsProtectionsList"></div>
+        </div>
+        <div class="ds-modal-actions">
+            <button class="ds-btn secondary" id="dsProtectionsClose">Close</button>
         </div>
     </div>
 </div>

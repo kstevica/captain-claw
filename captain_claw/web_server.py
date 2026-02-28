@@ -677,6 +677,18 @@ class WebServer:
         from captain_claw.web.rest_datastore import run_sql
         return await run_sql(self, request)
 
+    async def _ds_list_protections(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_datastore import list_protections
+        return await list_protections(self, request)
+
+    async def _ds_add_protection(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_datastore import add_protection
+        return await add_protection(self, request)
+
+    async def _ds_remove_protection(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_datastore import remove_protection
+        return await remove_protection(self, request)
+
     # Onboarding REST
     async def _get_onboarding_status(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_onboarding import get_onboarding_status
@@ -815,6 +827,9 @@ class WebServer:
         app.router.add_post("/api/datastore/tables/{name}/columns", self._ds_add_column)
         app.router.add_delete("/api/datastore/tables/{name}/columns/{col}", self._ds_drop_column)
         app.router.add_post("/api/datastore/sql", self._ds_run_sql)
+        app.router.add_get("/api/datastore/tables/{name}/protections", self._ds_list_protections)
+        app.router.add_post("/api/datastore/tables/{name}/protections", self._ds_add_protection)
+        app.router.add_delete("/api/datastore/tables/{name}/protections", self._ds_remove_protection)
         if self.config.web.api_enabled and self._api_pool:
             app.router.add_post("/v1/chat/completions", self._api_chat_completions)
             app.router.add_get("/v1/models", self._api_list_models)

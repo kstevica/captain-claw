@@ -345,6 +345,85 @@ html, body {
     user-select: none;
 }
 
+/* Sortable headers */
+.ds-grid th.sortable {
+    cursor: pointer;
+    position: relative;
+    padding-right: 22px;
+    transition: color 0.15s, background 0.15s;
+}
+
+.ds-grid th.sortable:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.ds-grid th.sortable::after {
+    content: '';
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 10px;
+    opacity: 0.3;
+}
+
+.ds-grid th.sortable:hover::after {
+    content: '\25B2';
+    opacity: 0.5;
+}
+
+.ds-grid th.sort-asc {
+    color: var(--accent);
+}
+
+.ds-grid th.sort-asc::after {
+    content: '\25B2';
+    opacity: 1;
+    color: var(--accent);
+}
+
+.ds-grid th.sort-desc {
+    color: var(--accent);
+}
+
+.ds-grid th.sort-desc::after {
+    content: '\25BC';
+    opacity: 1;
+    color: var(--accent);
+}
+
+/* Filter row */
+.ds-filter-row td {
+    background: var(--bg-secondary);
+    padding: 4px 6px;
+    border-bottom: 1px solid var(--border);
+}
+
+.ds-filter-input {
+    width: 100%;
+    padding: 4px 8px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    outline: none;
+    transition: border-color 0.15s;
+    box-sizing: border-box;
+}
+
+.ds-filter-input:focus {
+    border-color: var(--accent);
+}
+
+.ds-filter-input::placeholder {
+    color: var(--text-muted);
+    font-style: italic;
+    font-family: var(--font);
+}
+
 .ds-grid td {
     padding: 6px 12px;
     border-bottom: 1px solid var(--border);
@@ -386,7 +465,7 @@ html, body {
 
 .ds-grid th.col-actions,
 .ds-grid td.col-actions {
-    width: 90px;
+    width: 120px;
     text-align: right;
     white-space: nowrap;
 }
@@ -696,6 +775,142 @@ html, body {
 .ds-toast.show { opacity: 1; transform: translateY(0); }
 .ds-toast.success { border-color: var(--green); }
 .ds-toast.error { border-color: var(--red); }
+
+/* ─── Protections ────────────────────────────────────── */
+
+/* Sidebar: protected table lock icon */
+.ds-table-item.protected .ds-table-item-name::before {
+    content: '\1F512 ';
+    font-size: 11px;
+}
+
+/* Protected row highlight */
+.ds-protected-row {
+    background: rgba(210, 153, 34, 0.06);
+}
+
+.ds-protected-row:hover td {
+    background: rgba(210, 153, 34, 0.10);
+}
+
+.ds-protected-row .ds-row-action:not(.ds-lock-btn) {
+    /* Edit / Del buttons greyed out (handled via ds-btn-disabled) */
+}
+
+/* Protected cell indicator */
+.ds-protected-cell {
+    position: relative;
+    background: rgba(210, 153, 34, 0.04);
+    border-left: 2px solid var(--yellow) !important;
+    cursor: context-menu;
+}
+
+/* Protected column header */
+.ds-protected-col::before {
+    content: '\1F512 ';
+    font-size: 10px;
+}
+
+/* Protected column in schema view */
+.ds-schema-row.ds-protected-col {
+    background: rgba(210, 153, 34, 0.04);
+    border-left: 3px solid var(--yellow);
+}
+
+/* Disabled button (protection-based) */
+.ds-btn-disabled,
+.ds-btn-disabled:hover {
+    opacity: 0.35;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+/* Lock button (row / column toggle) */
+.ds-lock-btn {
+    font-size: 12px;
+    padding: 2px 6px;
+    border-color: transparent;
+    background: transparent;
+    cursor: pointer;
+    transition: all 0.15s;
+    opacity: 0.5;
+}
+
+.ds-lock-btn:hover {
+    opacity: 1;
+    border-color: var(--border);
+}
+
+.ds-lock-btn.active {
+    opacity: 1;
+    background: rgba(210, 153, 34, 0.12);
+    border-color: var(--yellow);
+}
+
+/* Protected input field in row modal */
+.ds-input-protected {
+    opacity: 0.45;
+    cursor: not-allowed;
+    border-color: var(--yellow) !important;
+    background: rgba(210, 153, 34, 0.06);
+}
+
+/* ─── Protections modal ─────────────────────────────── */
+
+.ds-protection-toggle {
+    padding: 10px 0 14px 0;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 12px;
+}
+
+.ds-toggle-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-primary);
+}
+
+.ds-toggle-label input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--yellow);
+    cursor: pointer;
+}
+
+.ds-protection-list {
+    max-height: 320px;
+    overflow-y: auto;
+}
+
+.ds-protection-list::-webkit-scrollbar { width: 5px; }
+.ds-protection-list::-webkit-scrollbar-track { background: transparent; }
+.ds-protection-list::-webkit-scrollbar-thumb { background: var(--bg-hover); border-radius: 3px; }
+
+.ds-protection-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+    gap: 12px;
+}
+
+.ds-protection-item:last-child {
+    border-bottom: none;
+}
+
+.ds-protection-info {
+    font-size: 12px;
+    font-family: var(--font-mono);
+    color: var(--text-secondary);
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
 
 /* ─── Responsive ──────────────────────────────────────── */
 

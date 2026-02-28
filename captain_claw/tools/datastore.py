@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from captain_claw.datastore import get_datastore_manager
+from captain_claw.datastore import ProtectedError, get_datastore_manager
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 
@@ -88,10 +88,12 @@ class DatastoreTool(Tool):
     description = (
         "Manage persistent relational data tables in a local database. "
         "Create tables, insert/update/delete rows, query with filters, "
-        "run raw SELECT queries, and import/export CSV or XLSX files. "
+        "run raw SELECT queries, import/export CSV or XLSX files, and "
+        "manage data protection rules. "
         "Actions: list_tables, describe, create_table, drop_table, "
         "add_column, rename_column, drop_column, change_column_type, "
-        "insert, update, update_column, delete, query, sql, import_file, export."
+        "insert, update, update_column, delete, query, sql, import_file, export, "
+        "protect, unprotect, list_protections."
     )
     timeout_seconds = 60.0
 
@@ -105,6 +107,7 @@ class DatastoreTool(Tool):
                     "add_column", "rename_column", "drop_column", "change_column_type",
                     "insert", "update", "update_column", "delete",
                     "query", "sql", "import_file", "export",
+                    "protect", "unprotect", "list_protections",
                 ],
                 "description": "Operation to perform.",
             },
@@ -191,49 +194,90 @@ class DatastoreTool(Tool):
                 "enum": ["csv", "xlsx"],
                 "description": "Export format (default: csv).",
             },
+            "level": {
+                "type": "string",
+                "enum": ["table", "column", "row", "cell"],
+                "description": "Protection level (for protect/unprotect).",
+            },
+            "row_id": {
+                "type": "integer",
+                "description": "Row ID (for row/cell protection).",
+            },
+            "reason": {
+                "type": "string",
+                "description": "Reason for protection (optional, for protect).",
+            },
         },
         "required": ["action"],
     }
 
     async def execute(self, action: str, **kwargs: Any) -> ToolResult:
         dm = get_datastore_manager()
+
+        # Log invocation
+        _log_args = {k: v for k, v in kwargs.items() if not k.startswith("_") and v is not None}
+        log.info("Datastore tool call", action=action, **_log_args)
+
         try:
             if action == "list_tables":
-                return await self._list_tables(dm)
-            if action == "describe":
-                return await self._describe(dm, kwargs.get("table"))
-            if action == "create_table":
-                return await self._create_table(dm, kwargs.get("table"), kwargs.get("columns"))
-            if action == "drop_table":
-                return await self._drop_table(dm, kwargs.get("table"))
-            if action == "add_column":
-                return await self._add_column(dm, kwargs)
-            if action == "rename_column":
-                return await self._rename_column(dm, kwargs)
-            if action == "drop_column":
-                return await self._drop_column(dm, kwargs)
-            if action == "change_column_type":
-                return await self._change_column_type(dm, kwargs)
-            if action == "insert":
-                return await self._insert(dm, kwargs)
-            if action == "update":
-                return await self._update(dm, kwargs)
-            if action == "update_column":
-                return await self._update_column(dm, kwargs)
-            if action == "delete":
-                return await self._delete(dm, kwargs)
-            if action == "query":
-                return await self._query(dm, kwargs)
-            if action == "sql":
-                return await self._sql(dm, kwargs)
-            if action == "import_file":
-                return await self._import_file(dm, kwargs)
-            if action == "export":
-                return await self._export(dm, kwargs)
-            return ToolResult(success=False, error=f"Unknown action: {action}")
+                result = await self._list_tables(dm)
+            elif action == "describe":
+                result = await self._describe(dm, kwargs.get("table"))
+            elif action == "create_table":
+                result = await self._create_table(dm, kwargs.get("table"), kwargs.get("columns"))
+            elif action == "drop_table":
+                result = await self._drop_table(dm, kwargs.get("table"))
+            elif action == "add_column":
+                result = await self._add_column(dm, kwargs)
+            elif action == "rename_column":
+                result = await self._rename_column(dm, kwargs)
+            elif action == "drop_column":
+                result = await self._drop_column(dm, kwargs)
+            elif action == "change_column_type":
+                result = await self._change_column_type(dm, kwargs)
+            elif action == "insert":
+                result = await self._insert(dm, kwargs)
+            elif action == "update":
+                result = await self._update(dm, kwargs)
+            elif action == "update_column":
+                result = await self._update_column(dm, kwargs)
+            elif action == "delete":
+                result = await self._delete(dm, kwargs)
+            elif action == "query":
+                result = await self._query(dm, kwargs)
+            elif action == "sql":
+                result = await self._sql(dm, kwargs)
+            elif action == "import_file":
+                result = await self._import_file(dm, kwargs)
+            elif action == "export":
+                result = await self._export(dm, kwargs)
+            elif action == "protect":
+                result = await self._protect(dm, kwargs)
+            elif action == "unprotect":
+                result = await self._unprotect(dm, kwargs)
+            elif action == "list_protections":
+                result = await self._list_protections(dm, kwargs)
+            else:
+                result = ToolResult(success=False, error=f"Unknown action: {action}")
+        except ProtectedError as e:
+            log.warning("Datastore BLOCKED by protection", action=action, error=str(e))
+            result = ToolResult(
+                success=False,
+                error=f"BLOCKED: {e}. The operation was NOT performed. Inform the user that the data is protected.",
+            )
         except Exception as e:
             log.error("Datastore tool error", action=action, error=str(e))
-            return ToolResult(success=False, error=str(e))
+            result = ToolResult(success=False, error=str(e))
+
+        # Log result
+        if result.success:
+            # Truncate long content for log readability
+            _content_preview = result.content[:200] + "..." if len(result.content) > 200 else result.content
+            log.info("Datastore tool result", action=action, success=True, content=_content_preview)
+        else:
+            log.warning("Datastore tool result", action=action, success=False, error=result.error)
+
+        return result
 
     # ── action handlers ──────────────────────────────────────────────
 
@@ -495,3 +539,74 @@ class DatastoreTool(Tool):
             success=True,
             content=f"Exported **{table}** to {path}",
         )
+
+    # ── protection handlers ──────────────────────────────────────────
+
+    @staticmethod
+    async def _protect(dm: Any, kwargs: dict[str, Any]) -> ToolResult:
+        table = kwargs.get("table")
+        level = kwargs.get("level")
+        if not table:
+            return ToolResult(success=False, error="'table' is required.")
+        if not level:
+            return ToolResult(success=False, error="'level' is required (table, column, row, cell).")
+
+        row_id = kwargs.get("row_id")
+        if isinstance(row_id, str):
+            row_id = int(row_id)
+        col_name = kwargs.get("column")
+        reason = kwargs.get("reason")
+
+        result = await dm.protect(
+            table, level, row_id=row_id, col_name=col_name, reason=reason,
+        )
+        parts = [f"Protected **{table}** at level **{level}**"]
+        if result.get("row_id") is not None:
+            parts.append(f"row_id={result['row_id']}")
+        if result.get("col_name"):
+            parts.append(f"column={result['col_name']}")
+        if reason:
+            parts.append(f"reason: {reason}")
+        return ToolResult(success=True, content=", ".join(parts))
+
+    @staticmethod
+    async def _unprotect(dm: Any, kwargs: dict[str, Any]) -> ToolResult:
+        table = kwargs.get("table")
+        level = kwargs.get("level")
+        if not table:
+            return ToolResult(success=False, error="'table' is required.")
+        if not level:
+            return ToolResult(success=False, error="'level' is required (table, column, row, cell).")
+
+        row_id = kwargs.get("row_id")
+        if isinstance(row_id, str):
+            row_id = int(row_id)
+        col_name = kwargs.get("column")
+
+        removed = await dm.unprotect(table, level, row_id=row_id, col_name=col_name)
+        if removed:
+            return ToolResult(success=True, content=f"Removed {level}-level protection from **{table}**.")
+        return ToolResult(
+            success=False,
+            error=f"No matching {level}-level protection found on **{table}**.",
+        )
+
+    @staticmethod
+    async def _list_protections(dm: Any, kwargs: dict[str, Any]) -> ToolResult:
+        table = kwargs.get("table")
+        protections = await dm.list_protections(table)
+        if not protections:
+            scope = f" for **{table}**" if table else ""
+            return ToolResult(success=True, content=f"No protections{scope}.")
+
+        lines: list[str] = []
+        for p in protections:
+            parts = [f"- **{p['table_name']}** [{p['level']}]"]
+            if p.get("row_id") is not None:
+                parts.append(f"row_id={p['row_id']}")
+            if p.get("col_name"):
+                parts.append(f"column={p['col_name']}")
+            if p.get("reason"):
+                parts.append(f"({p['reason']})")
+            lines.append(" ".join(parts))
+        return ToolResult(success=True, content="\n".join(lines))

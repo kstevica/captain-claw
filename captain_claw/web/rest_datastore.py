@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
-from captain_claw.datastore import get_datastore_manager
+from captain_claw.datastore import ProtectedError, get_datastore_manager
 
 if TYPE_CHECKING:
     from captain_claw.web_server import WebServer
@@ -94,6 +94,8 @@ async def drop_table(server: WebServer, request: web.Request) -> web.Response:
     mgr = get_datastore_manager()
     try:
         await mgr.drop_table(name)
+    except ProtectedError as exc:
+        return web.json_response({"error": str(exc), "protected": True}, status=403)
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=400)
     return web.json_response({"ok": True})
@@ -119,13 +121,20 @@ async def query_rows(server: WebServer, request: web.Request) -> web.Response:
         except Exception:
             return web.json_response({"error": "Invalid where JSON"}, status=400)
 
+    # Build order_by in the format the query method expects:
+    # "colname" for ASC, "-colname" for DESC
+    if order_dir.upper() == "DESC":
+        order_param = ["-" + order_by]
+    else:
+        order_param = [order_by]
+
     mgr = get_datastore_manager()
     try:
         result = await mgr.query(
             table_name=name,
             columns=None,
             where=where,
-            order_by=[f"{order_by} {order_dir}"],
+            order_by=order_param,
             limit=limit,
             offset=offset,
         )
@@ -159,6 +168,8 @@ async def insert_rows(server: WebServer, request: web.Request) -> web.Response:
     mgr = get_datastore_manager()
     try:
         count = await mgr.insert_rows(name, rows)
+    except ProtectedError as exc:
+        return web.json_response({"error": str(exc), "protected": True}, status=403)
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=400)
     return web.json_response({"inserted": count}, status=201, dumps=_JSON_DUMPS)
@@ -182,6 +193,8 @@ async def update_rows(server: WebServer, request: web.Request) -> web.Response:
     mgr = get_datastore_manager()
     try:
         count = await mgr.update_rows(name, set_values, where)
+    except ProtectedError as exc:
+        return web.json_response({"error": str(exc), "protected": True}, status=403)
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=400)
     return web.json_response({"updated": count}, dumps=_JSON_DUMPS)
@@ -202,6 +215,8 @@ async def delete_rows(server: WebServer, request: web.Request) -> web.Response:
     mgr = get_datastore_manager()
     try:
         count = await mgr.delete_rows(name, where)
+    except ProtectedError as exc:
+        return web.json_response({"error": str(exc), "protected": True}, status=403)
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=400)
     return web.json_response({"deleted": count}, dumps=_JSON_DUMPS)
@@ -227,6 +242,8 @@ async def add_column(server: WebServer, request: web.Request) -> web.Response:
     mgr = get_datastore_manager()
     try:
         await mgr.add_column(name, col_name, col_type, default)
+    except ProtectedError as exc:
+        return web.json_response({"error": str(exc), "protected": True}, status=403)
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=400)
     info = await mgr.describe_table(name)
@@ -249,6 +266,8 @@ async def drop_column(server: WebServer, request: web.Request) -> web.Response:
     mgr = get_datastore_manager()
     try:
         await mgr.drop_column(table_name, col_name)
+    except ProtectedError as exc:
+        return web.json_response({"error": str(exc), "protected": True}, status=403)
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=400)
     return web.json_response({"ok": True})
@@ -274,3 +293,70 @@ async def run_sql(server: WebServer, request: web.Request) -> web.Response:
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=400)
     return web.json_response(result, dumps=_JSON_DUMPS)
+
+
+# ── Protections ────────────────────────────────────────────────────
+
+
+async def list_protections(server: WebServer, request: web.Request) -> web.Response:
+    """GET /api/datastore/tables/{name}/protections — list protections."""
+    name = request.match_info.get("name", "")
+    mgr = get_datastore_manager()
+    try:
+        protections = await mgr.list_protections(name)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    return web.json_response(protections, dumps=_JSON_DUMPS)
+
+
+async def add_protection(server: WebServer, request: web.Request) -> web.Response:
+    """POST /api/datastore/tables/{name}/protections — add a protection."""
+    name = request.match_info.get("name", "")
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    level = str(body.get("level", "")).strip()
+    if not level:
+        return web.json_response({"error": "level is required"}, status=400)
+
+    row_id = body.get("row_id")
+    col_name = body.get("col_name")
+    reason = body.get("reason")
+
+    mgr = get_datastore_manager()
+    try:
+        result = await mgr.protect(
+            name, level, row_id=row_id, col_name=col_name, reason=reason,
+        )
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    return web.json_response(result, status=201, dumps=_JSON_DUMPS)
+
+
+async def remove_protection(server: WebServer, request: web.Request) -> web.Response:
+    """DELETE /api/datastore/tables/{name}/protections — remove a protection."""
+    name = request.match_info.get("name", "")
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    level = str(body.get("level", "")).strip()
+    if not level:
+        return web.json_response({"error": "level is required"}, status=400)
+
+    row_id = body.get("row_id")
+    col_name = body.get("col_name")
+
+    mgr = get_datastore_manager()
+    try:
+        removed = await mgr.unprotect(name, level, row_id=row_id, col_name=col_name)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    if removed:
+        return web.json_response({"ok": True})
+    return web.json_response(
+        {"error": "No matching protection found"}, status=404,
+    )

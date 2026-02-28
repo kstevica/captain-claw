@@ -25,6 +25,10 @@ from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
 
+
+class ProtectedError(Exception):
+    """Raised when an operation violates a protection rule."""
+
 # ── Column type mapping ──────────────────────────────────────────────
 # user-facing type → SQLite affinity
 TYPE_MAP: dict[str, str] = {
@@ -101,6 +105,19 @@ class DatastoreManager:
                 position    INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (table_name, col_name),
                 FOREIGN KEY (table_name) REFERENCES _ds_tables(name) ON DELETE CASCADE
+            )
+        """)
+        await self._db.execute("""
+            CREATE TABLE IF NOT EXISTS _ds_protections (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                table_name  TEXT NOT NULL,
+                level       TEXT NOT NULL CHECK(level IN ('table','column','row','cell')),
+                row_id      INTEGER,
+                col_name    TEXT,
+                reason      TEXT,
+                created_at  TEXT NOT NULL,
+                FOREIGN KEY (table_name) REFERENCES _ds_tables(name) ON DELETE CASCADE,
+                UNIQUE(table_name, level, row_id, col_name)
             )
         """)
         await self._db.commit()
@@ -253,6 +270,7 @@ class DatastoreManager:
     async def drop_table(self, name: str) -> bool:
         safe, internal = await self._resolve_table(name)
         assert self._db is not None
+        await self._check_table_protected(safe)
         await self._db.execute(f'DROP TABLE IF EXISTS "{internal}"')
         await self._db.execute("DELETE FROM _ds_columns WHERE table_name = ?", (safe,))
         await self._db.execute("DELETE FROM _ds_tables WHERE name = ?", (safe,))
@@ -267,6 +285,7 @@ class DatastoreManager:
     ) -> bool:
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
+        await self._check_table_protected(safe)
         col_name = self._safe_name(col_name)
         col_type = col_type.lower().strip()
         if col_type not in VALID_TYPES:
@@ -301,8 +320,10 @@ class DatastoreManager:
     async def rename_column(self, table_name: str, old_name: str, new_name: str) -> bool:
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
+        await self._check_table_protected(safe)
         old_safe = self._safe_name(old_name)
         new_safe = self._safe_name(new_name)
+        await self._check_column_protected(safe, old_safe)
         if new_safe.startswith("_"):
             raise ValueError(f"Column name cannot start with underscore: {new_safe}")
 
@@ -329,7 +350,9 @@ class DatastoreManager:
     async def drop_column(self, table_name: str, col_name: str) -> bool:
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
+        await self._check_table_protected(safe)
         col_safe = self._safe_name(col_name)
+        await self._check_column_protected(safe, col_safe)
 
         existing = await self._table_columns(safe)
         if not any(c.name == col_safe for c in existing):
@@ -355,7 +378,9 @@ class DatastoreManager:
         """Change a column's type via table rebuild with CAST."""
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
+        await self._check_table_protected(safe)
         col_safe = self._safe_name(col_name)
+        await self._check_column_protected(safe, col_safe)
         new_type = new_type.lower().strip()
         if new_type not in VALID_TYPES:
             raise ValueError(f"Invalid type: {new_type}")
@@ -453,6 +478,245 @@ class DatastoreManager:
             return str(value)
         return "'" + str(value).replace("'", "''") + "'"
 
+    # ── protection checks ────────────────────────────────────────────
+
+    async def _check_table_protected(self, safe_name: str) -> None:
+        """Raise ProtectedError if the table has table-level protection."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT reason FROM _ds_protections "
+            "WHERE table_name = ? AND level = 'table'",
+            (safe_name,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row:
+            reason = row[0] or "table is protected"
+            raise ProtectedError(
+                f"Table '{safe_name}' is protected: {reason}"
+            )
+
+    async def _check_column_protected(
+        self, safe_name: str, col_name: str,
+    ) -> None:
+        """Raise ProtectedError if the column has column-level protection."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT reason FROM _ds_protections "
+            "WHERE table_name = ? AND level = 'column' AND col_name = ?",
+            (safe_name, col_name),
+        ) as cur:
+            row = await cur.fetchone()
+        if row:
+            reason = row[0] or "column is protected"
+            raise ProtectedError(
+                f"Column '{col_name}' in table '{safe_name}' is protected: {reason}"
+            )
+
+    async def _get_protected_row_ids(self, safe_name: str) -> set[int]:
+        """Return set of row IDs with row-level protection."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT row_id FROM _ds_protections "
+            "WHERE table_name = ? AND level = 'row' AND row_id IS NOT NULL",
+            (safe_name,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return {r[0] for r in rows}
+
+    async def _get_protected_cells(
+        self, safe_name: str,
+    ) -> dict[int, set[str]]:
+        """Return {row_id: {col_name, ...}} for cell-level protections."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT row_id, col_name FROM _ds_protections "
+            "WHERE table_name = ? AND level = 'cell' "
+            "AND row_id IS NOT NULL AND col_name IS NOT NULL",
+            (safe_name,),
+        ) as cur:
+            rows = await cur.fetchall()
+        result: dict[int, set[str]] = {}
+        for row_id, col_name in rows:
+            result.setdefault(row_id, set()).add(col_name)
+        return result
+
+    async def _resolve_affected_ids(
+        self, internal: str, where: dict[str, Any],
+        col_names: set[str],
+    ) -> list[int]:
+        """Get the _id values of rows matching a WHERE clause."""
+        assert self._db is not None
+        where_clause, where_params = self._build_where(where, col_names)
+        sql = f'SELECT _id FROM "{internal}" {where_clause}'
+        async with self._db.execute(sql, where_params) as cur:
+            rows = await cur.fetchall()
+        return [r[0] for r in rows]
+
+    async def _check_row_protection(
+        self, safe_name: str, affected_ids: list[int],
+    ) -> None:
+        """Raise ProtectedError if any affected row is row-protected."""
+        protected = await self._get_protected_row_ids(safe_name)
+        blocked = protected & set(affected_ids)
+        if blocked:
+            ids_str = ", ".join(str(i) for i in sorted(blocked)[:5])
+            raise ProtectedError(
+                f"Row(s) {ids_str} in table '{safe_name}' are protected"
+            )
+
+    async def _check_cell_protection(
+        self, safe_name: str, affected_ids: list[int],
+        update_cols: set[str],
+    ) -> None:
+        """Raise ProtectedError if any affected cell is cell-protected."""
+        cells = await self._get_protected_cells(safe_name)
+        for rid in affected_ids:
+            if rid in cells:
+                overlap = cells[rid] & update_cols
+                if overlap:
+                    cols_str = ", ".join(sorted(overlap))
+                    raise ProtectedError(
+                        f"Cell(s) {cols_str} in row {rid} of table "
+                        f"'{safe_name}' are protected"
+                    )
+
+    # ── protection CRUD ──────────────────────────────────────────────
+
+    async def protect(
+        self, table_name: str, level: str,
+        row_id: int | None = None,
+        col_name: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Add a protection rule. Returns the created protection dict."""
+        valid_levels = {"table", "column", "row", "cell"}
+        if level not in valid_levels:
+            raise ValueError(f"Invalid protection level: {level}. Valid: {sorted(valid_levels)}")
+
+        safe, _ = await self._resolve_table(table_name)
+        assert self._db is not None
+
+        # Validate parameter combinations
+        if level == "table":
+            row_id = None
+            col_name = None
+        elif level == "column":
+            row_id = None
+            if not col_name:
+                raise ValueError("col_name is required for column-level protection")
+            col_name = self._safe_name(col_name)
+            # Verify column exists
+            columns = await self._table_columns(safe)
+            if not any(c.name == col_name for c in columns):
+                raise ValueError(f"Column not found: {col_name}")
+        elif level == "row":
+            if row_id is None:
+                raise ValueError("row_id is required for row-level protection")
+            col_name = None
+        elif level == "cell":
+            if row_id is None:
+                raise ValueError("row_id is required for cell-level protection")
+            if not col_name:
+                raise ValueError("col_name is required for cell-level protection")
+            col_name = self._safe_name(col_name)
+            columns = await self._table_columns(safe)
+            if not any(c.name == col_name for c in columns):
+                raise ValueError(f"Column not found: {col_name}")
+
+        now = self._now()
+        try:
+            await self._db.execute(
+                "INSERT INTO _ds_protections "
+                "(table_name, level, row_id, col_name, reason, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (safe, level, row_id, col_name, reason, now),
+            )
+            await self._db.commit()
+        except Exception as e:
+            if "UNIQUE constraint" in str(e):
+                raise ValueError("This protection already exists") from e
+            raise
+
+        return {
+            "table_name": safe,
+            "level": level,
+            "row_id": row_id,
+            "col_name": col_name,
+            "reason": reason,
+            "created_at": now,
+        }
+
+    async def unprotect(
+        self, table_name: str, level: str,
+        row_id: int | None = None,
+        col_name: str | None = None,
+    ) -> bool:
+        """Remove a protection rule. Returns True if removed, False if not found."""
+        safe, _ = await self._resolve_table(table_name)
+        assert self._db is not None
+
+        if col_name:
+            col_name = self._safe_name(col_name)
+
+        # Normalize NULLs for matching
+        if level == "table":
+            row_id = None
+            col_name = None
+        elif level == "column":
+            row_id = None
+        elif level == "row":
+            col_name = None
+
+        cursor = await self._db.execute(
+            "DELETE FROM _ds_protections "
+            "WHERE table_name = ? AND level = ? "
+            "AND row_id IS ? AND col_name IS ?",
+            (safe, level, row_id, col_name),
+        )
+        removed = cursor.rowcount > 0
+        if removed:
+            await self._db.commit()
+        return removed
+
+    async def list_protections(
+        self, table_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List protection rules, optionally filtered by table."""
+        await self._ensure_db()
+        assert self._db is not None
+
+        if table_name:
+            safe = self._safe_name(table_name)
+            sql = (
+                "SELECT id, table_name, level, row_id, col_name, reason, created_at "
+                "FROM _ds_protections WHERE table_name = ? "
+                "ORDER BY table_name, level, row_id, col_name"
+            )
+            params: tuple[Any, ...] = (safe,)
+        else:
+            sql = (
+                "SELECT id, table_name, level, row_id, col_name, reason, created_at "
+                "FROM _ds_protections "
+                "ORDER BY table_name, level, row_id, col_name"
+            )
+            params = ()
+
+        async with self._db.execute(sql, params) as cur:
+            rows = await cur.fetchall()
+
+        return [
+            {
+                "id": r[0],
+                "table_name": r[1],
+                "level": r[2],
+                "row_id": r[3],
+                "col_name": r[4],
+                "reason": r[5],
+                "created_at": r[6],
+            }
+            for r in rows
+        ]
+
     # ── data operations ──────────────────────────────────────────────
 
     async def insert_rows(
@@ -460,6 +724,7 @@ class DatastoreManager:
     ) -> int:
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
+        await self._check_table_protected(safe)
         cfg = get_config()
 
         if not rows:
@@ -506,6 +771,7 @@ class DatastoreManager:
     ) -> int:
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
+        await self._check_table_protected(safe)
 
         if not set_values:
             raise ValueError("set_values cannot be empty")
@@ -513,6 +779,8 @@ class DatastoreManager:
         columns = await self._table_columns(safe)
         col_names = {c.name for c in columns}
 
+        # Determine which columns are being updated (safe names)
+        update_col_set: set[str] = set()
         set_clauses: list[str] = []
         set_params: list[Any] = []
         for k, v in set_values.items():
@@ -521,11 +789,21 @@ class DatastoreManager:
                 raise ValueError(f"Unknown column: {k}")
             set_clauses.append(f'"{col}" = ?')
             set_params.append(v)
+            update_col_set.add(col)
 
         where_clause = ""
         where_params: list[Any] = []
         if where:
             where_clause, where_params = self._build_where(where, col_names)
+
+        # Check row-level and cell-level protections
+        if where:
+            affected_ids = await self._resolve_affected_ids(
+                internal, where, col_names,
+            )
+            if affected_ids:
+                await self._check_row_protection(safe, affected_ids)
+                await self._check_cell_protection(safe, affected_ids, update_col_set)
 
         sql = f'UPDATE "{internal}" SET {", ".join(set_clauses)} {where_clause}'
         cursor = await self._db.execute(sql, set_params + where_params)
@@ -544,11 +822,22 @@ class DatastoreManager:
     ) -> int:
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
+        await self._check_table_protected(safe)
         col_safe = self._safe_name(col_name)
+        await self._check_column_protected(safe, col_safe)
 
         columns = await self._table_columns(safe)
         if not any(c.name == col_safe for c in columns):
             raise ValueError(f"Column not found: {col_safe}")
+
+        # Block if any rows are row-protected (update_column affects all rows)
+        protected_rows = await self._get_protected_row_ids(safe)
+        if protected_rows:
+            ids_str = ", ".join(str(i) for i in sorted(protected_rows)[:5])
+            raise ProtectedError(
+                f"Cannot update entire column '{col_safe}': row(s) {ids_str} "
+                f"in table '{safe}' are row-protected"
+            )
 
         if expression:
             # Raw expression -- only allow simple math/string ops
@@ -573,6 +862,7 @@ class DatastoreManager:
     ) -> int:
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
+        await self._check_table_protected(safe)
 
         columns = await self._table_columns(safe)
         col_names = {c.name for c in columns}
@@ -581,11 +871,25 @@ class DatastoreManager:
             raise ValueError("WHERE clause required. Pass {\"_all\": true} to delete all rows.")
 
         if where.get("_all") is True:
+            # Check if any rows in the table are row-protected
+            protected_rows = await self._get_protected_row_ids(safe)
+            if protected_rows:
+                ids_str = ", ".join(str(i) for i in sorted(protected_rows)[:5])
+                raise ProtectedError(
+                    f"Cannot delete all rows: row(s) {ids_str} "
+                    f"in table '{safe}' are row-protected"
+                )
             cursor = await self._db.execute(f'DELETE FROM "{internal}"')
         else:
             where_clause, where_params = self._build_where(where, col_names)
             if not where_clause:
                 raise ValueError("Empty WHERE clause. Pass {\"_all\": true} to delete all rows.")
+            # Check row-level protections for targeted rows
+            affected_ids = await self._resolve_affected_ids(
+                internal, where, col_names,
+            )
+            if affected_ids:
+                await self._check_row_protection(safe, affected_ids)
             cursor = await self._db.execute(f'DELETE FROM "{internal}" {where_clause}', where_params)
 
         affected = cursor.rowcount
@@ -618,12 +922,12 @@ class DatastoreManager:
         if columns:
             select_cols = []
             for c in columns:
-                c_safe = self._safe_name(c)
+                c_safe = "_id" if c == "_id" else self._safe_name(c)
                 if c_safe not in col_names and c_safe != "_id":
                     raise ValueError(f"Unknown column: {c}")
                 select_cols.append(f'"{c_safe}"')
             select_clause = ", ".join(select_cols)
-            result_col_names = [self._safe_name(c) for c in columns]
+            result_col_names = [("_id" if c == "_id" else self._safe_name(c)) for c in columns]
         else:
             select_clause = '"_id", ' + ", ".join(f'"{c.name}"' for c in table_cols)
             result_col_names = ["_id"] + [c.name for c in table_cols]
@@ -641,11 +945,14 @@ class DatastoreManager:
             for ob in order_by:
                 ob = str(ob).strip()
                 if ob.startswith("-"):
-                    col = self._safe_name(ob[1:])
-                    parts.append(f'"{col}" DESC')
+                    raw_col = ob[1:]
+                    direction = "DESC"
                 else:
-                    col = self._safe_name(ob)
-                    parts.append(f'"{col}" ASC')
+                    raw_col = ob
+                    direction = "ASC"
+                # _id is the auto-generated primary key — pass through directly
+                col = "_id" if raw_col == "_id" else self._safe_name(raw_col)
+                parts.append(f'"{col}" {direction}')
             order_clause = "ORDER BY " + ", ".join(parts)
 
         # Limit
