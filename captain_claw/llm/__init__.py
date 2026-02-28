@@ -639,6 +639,12 @@ class LiteLLMProvider(LLMProvider):
         if tools:
             kwargs["tools"] = _convert_tools_for_openai_style(tools)
 
+        # Force text-only output for Gemini so it uses function tools
+        # (e.g. image_gen) instead of native image generation, which
+        # returns image bytes that our response parser cannot handle.
+        if self.provider == "gemini":
+            kwargs["modalities"] = ["text"]
+
         # Always use the API key for Gemini (Google AI Studio).
         # Vertex AI routing is disabled — use api_key directly.
         if self.api_key:
