@@ -33,6 +33,7 @@ class ModelConfig(BaseModel):
         max_output_tokens: int = 0  # 0 = use model.max_tokens
         reasoning_level: str = ""  # "", "low", "medium", "high"
         description: str = ""  # what tasks this model is best for
+        model_type: str = "llm"  # llm, image, video, audio, multimodal
 
     provider: str = "ollama"
     model: str = "minimax-m2.5:cloud"
@@ -182,6 +183,14 @@ class PocketTTSToolConfig(BaseModel):
     timeout_seconds: int = 600
 
 
+class ImageGenToolConfig(BaseModel):
+    """Image generation tool configuration."""
+
+    timeout_seconds: int = 120
+    default_size: str = "1024x1024"
+    default_quality: str = ""  # empty = let provider choose
+
+
 class SendMailToolConfig(BaseModel):
     """Send mail tool configuration."""
 
@@ -233,6 +242,7 @@ class ToolsConfig(BaseModel):
         "xlsx_extract",
         "pptx_extract",
         "pocket_tts",
+        "image_gen",
         "send_mail",
         "google_drive",
         "google_calendar",
@@ -243,6 +253,7 @@ class ToolsConfig(BaseModel):
     web_fetch: WebFetchToolConfig = Field(default_factory=WebFetchToolConfig)
     web_search: WebSearchToolConfig = Field(default_factory=WebSearchToolConfig)
     pocket_tts: PocketTTSToolConfig = Field(default_factory=PocketTTSToolConfig)
+    image_gen: ImageGenToolConfig = Field(default_factory=ImageGenToolConfig)
     send_mail: SendMailToolConfig = Field(default_factory=SendMailToolConfig)
     typesense: TypesenseToolConfig = Field(default_factory=TypesenseToolConfig)
     require_confirmation: list[str] = ["shell", "write"]

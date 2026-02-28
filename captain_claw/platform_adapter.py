@@ -108,6 +108,61 @@ def collect_turn_generated_audio_paths(session: Any, turn_start_idx: int) -> lis
     return paths
 
 
+_IMAGE_EXTENSIONS: set[str] = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+
+
+def extract_image_paths_from_tool_output(content: str) -> list[Path]:
+    """Extract resolved image paths from image_gen tool output text."""
+    text = str(content or "")
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.lower().startswith("path:"):
+            continue
+        raw_path = stripped.split(":", 1)[1].strip()
+        if " (requested:" in raw_path:
+            raw_path = raw_path.split(" (requested:", 1)[0].strip()
+        if not raw_path:
+            continue
+        try:
+            resolved = Path(raw_path).expanduser().resolve()
+        except Exception:
+            continue
+        if not resolved.exists() or not resolved.is_file():
+            continue
+        if resolved.suffix.lower() not in _IMAGE_EXTENSIONS:
+            continue
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(resolved)
+    return paths
+
+
+def collect_turn_generated_image_paths(session: Any, turn_start_idx: int) -> list[Path]:
+    """Collect image_gen generated image files from current turn tool outputs."""
+    if not session:
+        return []
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for msg in session.messages[max(0, int(turn_start_idx)):]:
+        if str(msg.get("role", "")).strip().lower() != "tool":
+            continue
+        if str(msg.get("tool_name", "")).strip().lower() != "image_gen":
+            continue
+        if str(msg.get("content", "")).strip().lower().startswith("error:"):
+            continue
+        for path in extract_image_paths_from_tool_output(str(msg.get("content", ""))):
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            paths.append(path)
+    return paths
+
+
 def cleanup_expired_pairings(pending_map: dict[str, dict[str, object]]) -> None:
     if not pending_map:
         return
@@ -352,6 +407,82 @@ class PlatformAdapter:
             )
             self.ctx.ui.append_system_line(f"{self.platform.title()} audio send failed: {e}")
             return False
+
+    # -- Send image file --------------------------------------------------
+
+    async def send_image_file(
+        self,
+        channel_id: Any,
+        path: Path,
+        *,
+        caption: str = "",
+        reply_to: Any = None,
+    ) -> bool:
+        if not self.bridge:
+            return False
+        try:
+            if self.platform == "telegram":
+                await self.send_chat_action(channel_id, action="upload_photo")
+                await self.bridge.send_photo(
+                    chat_id=int(channel_id),
+                    file_path=path,
+                    caption=caption,
+                    reply_to_message_id=reply_to,
+                )
+            elif self.platform == "slack":
+                if hasattr(self.bridge, "send_image_file"):
+                    await self.bridge.send_image_file(
+                        channel_id=str(channel_id),
+                        file_path=path,
+                        caption=caption,
+                    )
+            elif self.platform == "discord":
+                if hasattr(self.bridge, "send_image_file"):
+                    await self.bridge.send_image_file(
+                        channel_id=str(channel_id),
+                        file_path=path,
+                        caption=caption,
+                        reply_to_message_id=str(reply_to or ""),
+                    )
+            size_bytes = 0
+            try:
+                size_bytes = int(path.stat().st_size)
+            except Exception:
+                pass
+            await self.monitor_event(
+                "outgoing_image",
+                **self._channel_kwargs(channel_id),
+                **self._reply_kwargs(reply_to),
+                path=str(path),
+                size_bytes=size_bytes,
+            )
+            return True
+        except Exception as e:
+            await self.monitor_event(
+                "outgoing_image_error",
+                **self._channel_kwargs(channel_id),
+                **self._reply_kwargs(reply_to),
+                path=str(path),
+                error=str(e),
+            )
+            self.ctx.ui.append_system_line(f"{self.platform.title()} image send failed: {e}")
+            return False
+
+    # -- Auto images for turn ---------------------------------------------
+
+    async def maybe_send_images_for_turn(
+        self,
+        channel_id: Any,
+        reply_to: Any,
+        turn_start_idx: int,
+    ) -> None:
+        generated_paths = collect_turn_generated_image_paths(
+            self.ctx.agent.session, turn_start_idx,
+        )
+        for path in generated_paths:
+            await self.send_image_file(
+                channel_id, path, caption="Generated image", reply_to=reply_to,
+            )
 
     # -- Auto TTS for turn ------------------------------------------------
 

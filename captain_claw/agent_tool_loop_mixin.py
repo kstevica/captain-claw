@@ -118,6 +118,9 @@ class AgentToolLoopMixin:
         # ── Media ──────────────────────────────────────────
         if name == "pocket_tts":
             return "Text-to-speech"
+        if name == "image_gen":
+            prompt = str(arguments.get("prompt", "")).strip()
+            return f"Generating image: {prompt[:50]}" if prompt else "Generating image"
         # ── Approval ───────────────────────────────────────
         if name == "approval":
             return "Auto-approved action"

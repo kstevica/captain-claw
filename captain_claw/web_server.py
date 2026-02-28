@@ -200,6 +200,14 @@ class WebServer:
                 "role": "rephrase",
                 "content": str(output or ""),
             })
+        if normalized == "image_gen" and output and not str(output).strip().lower().startswith("error"):
+            from captain_claw.platform_adapter import extract_image_paths_from_tool_output
+            for img_path in extract_image_paths_from_tool_output(str(output)):
+                self._broadcast({
+                    "type": "chat_message",
+                    "role": "image",
+                    "content": str(img_path),
+                })
         if normalized not in self._THINKING_SILENT_TOOLS:
             from captain_claw.agent_tool_loop_mixin import AgentToolLoopMixin
             summary = AgentToolLoopMixin._tool_thinking_summary(tool_name, arguments or {})
@@ -536,6 +544,10 @@ class WebServer:
         from captain_claw.web.rest_files import download_file
         return await download_file(self, request)
 
+    async def _serve_media(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_files import serve_media
+        return await serve_media(self, request)
+
     # Loop runner
     async def _start_loop(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_loops import start_loop
@@ -848,6 +860,7 @@ class WebServer:
         app.router.add_get("/api/files", self._list_files)
         app.router.add_get("/api/files/content", self._get_file_content)
         app.router.add_get("/api/files/download", self._download_file)
+        app.router.add_get("/api/media", self._serve_media)
         app.router.add_post("/api/loops/start", self._start_loop)
         app.router.add_get("/api/loops/status", self._get_loop_status)
         app.router.add_post("/api/loops/stop", self._stop_loop)

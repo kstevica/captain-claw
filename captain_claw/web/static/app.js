@@ -188,6 +188,12 @@
             return;
         }
 
+        // Image messages render as inline images.
+        if (role === 'image') {
+            addImagePanel(content, isReplay);
+            return;
+        }
+
         const div = document.createElement('div');
         div.className = `msg ${role}`;
         if (isReplay) div.style.animation = 'none';
@@ -263,6 +269,45 @@
         panel.appendChild(body);
         chatMessages.appendChild(panel);
         chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    function addImagePanel(imagePath, isReplay) {
+        chatEmpty.style.display = 'none';
+        const div = document.createElement('div');
+        div.className = 'msg assistant';
+        if (isReplay) div.style.animation = 'none';
+
+        const header = document.createElement('div');
+        header.className = 'msg-header';
+        const label = document.createElement('span');
+        label.className = 'msg-label';
+        label.innerHTML = '<span class="msg-avatar">&#x1F980;</span> Captain Claw';
+        header.appendChild(label);
+
+        const bubble = document.createElement('div');
+        bubble.className = 'msg-bubble';
+
+        const img = document.createElement('img');
+        img.src = '/api/media?path=' + encodeURIComponent(imagePath);
+        img.alt = 'Generated image';
+        img.style.cssText = 'max-width:100%;border-radius:8px;cursor:pointer;';
+        img.addEventListener('click', function() {
+            window.open(img.src, '_blank');
+        });
+        img.onerror = function() {
+            const fallback = document.createElement('div');
+            fallback.style.cssText = 'padding:12px;color:#aaa;font-size:13px;';
+            fallback.textContent = 'Image: ' + imagePath;
+            bubble.replaceChild(fallback, img);
+        };
+        bubble.appendChild(img);
+
+        div.appendChild(header);
+        div.appendChild(bubble);
+        chatMessages.appendChild(div);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+        msgCount++;
+        chatCount.textContent = `${msgCount} messages`;
     }
 
     function addCommandResult(command, content) {
@@ -945,6 +990,20 @@
         html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
             `<pre><code>${code}</code></pre>`
         );
+
+        // Images: ![alt](path) — route saved/ and output/ paths through /api/media
+        html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, function(_, alt, src) {
+            var url = src;
+            if (/^saved\/|^output\//.test(src)) {
+                url = '/api/media?path=' + encodeURIComponent(src);
+            }
+            return '<img src="' + url + '" alt="' + alt +
+                '" style="max-width:100%;border-radius:8px;cursor:pointer;" ' +
+                'onclick="window.open(this.src,\'_blank\')">';
+        });
+
+        // Links: [text](url)
+        html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
 
         // Inline code
         html = html.replace(/`([^`]+)`/g, '<code>$1</code>');

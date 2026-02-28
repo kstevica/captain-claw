@@ -166,6 +166,47 @@ class TelegramBridge:
             )
         response.raise_for_status()
 
+    async def send_photo(
+        self,
+        chat_id: int,
+        file_path: str | Path,
+        *,
+        caption: str = "",
+        reply_to_message_id: int | None = None,
+    ) -> None:
+        """Upload an image file to Telegram using sendPhoto."""
+        photo_path = Path(file_path).expanduser().resolve()
+        if not photo_path.exists() or not photo_path.is_file():
+            raise FileNotFoundError(f"Telegram photo file not found: {photo_path}")
+        payload: dict[str, Any] = {"chat_id": int(chat_id)}
+        caption_text = str(caption or "").strip()
+        if caption_text:
+            payload["caption"] = caption_text
+        if reply_to_message_id:
+            payload["reply_to_message_id"] = int(reply_to_message_id)
+        mime_types = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+        }
+        mime = mime_types.get(photo_path.suffix.lower(), "image/png")
+        with photo_path.open("rb") as handle:
+            files = {
+                "photo": (
+                    photo_path.name,
+                    handle,
+                    mime,
+                )
+            }
+            response = await self._client.post(
+                self._url("sendPhoto"),
+                data=payload,
+                files=files,
+            )
+        response.raise_for_status()
+
     async def read_business_message(
         self,
         business_connection_id: str,

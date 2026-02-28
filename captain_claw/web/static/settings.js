@@ -527,6 +527,33 @@
             wrap.appendChild(actions);
         }
 
+        function _refreshCardHeader(el, items, idx) {
+            const card = el.closest('.st-model-card');
+            if (!card) return;
+            const titleEl = card.querySelector('.st-model-card-title');
+            if (titleEl) {
+                const idVal = items[idx].id || 'model-' + (idx + 1);
+                const provVal = items[idx].provider || '?';
+                const modVal = items[idx].model || '?';
+                titleEl.innerHTML =
+                    '<span class="st-model-id-badge">' + esc(idVal) + '</span> ' +
+                    '<span class="st-model-name">' + esc(provVal) + ' / ' + esc(modVal) + '</span>';
+            }
+            let descEl = card.querySelector('.st-model-card-desc');
+            const descVal = items[idx].description || '';
+            if (descVal) {
+                if (!descEl) {
+                    descEl = document.createElement('div');
+                    descEl.className = 'st-model-card-desc';
+                    const header = card.querySelector('.st-model-card-header');
+                    if (header) header.after(descEl);
+                }
+                descEl.textContent = descVal;
+            } else if (descEl) {
+                descEl.remove();
+            }
+        }
+
         function _makeCardControl(f, items, idx, arrKey) {
             if (f.type === 'select') {
                 const sel = document.createElement('select');
@@ -543,7 +570,7 @@
                     markDirty(arrKey, [...items]);
                     // Refresh header title when provider/model/id change
                     if (f.key === 'provider' || f.key === 'model' || f.key === 'id') {
-                        rebuild();
+                        _refreshCardHeader(sel, items, idx);
                     }
                 });
                 return sel;
@@ -570,10 +597,10 @@
                 }
                 markDirty(arrKey, [...items]);
             });
-            // Refresh header when id/model change
+            // Refresh header when id/model/description change
             inp.addEventListener('change', () => {
                 if (f.key === 'id' || f.key === 'model' || f.key === 'description') {
-                    rebuild();
+                    _refreshCardHeader(inp, items, idx);
                 }
             });
             return inp;

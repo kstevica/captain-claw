@@ -101,6 +101,7 @@ tools:
   - xlsx_extract
   - pptx_extract
   - pocket_tts
+  - image_gen
   - send_mail
   - google_drive
   - google_calendar

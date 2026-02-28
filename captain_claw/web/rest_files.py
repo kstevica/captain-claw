@@ -188,3 +188,69 @@ async def download_file(server: WebServer, request: web.Request) -> web.Response
             "Content-Disposition": f'attachment; filename="{p.name}"',
         },
     )
+
+
+# Allowed media extensions for the /api/media endpoint.
+_MEDIA_EXTENSIONS: set[str] = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg",
+    ".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac",
+    ".mp4", ".webm", ".mov",
+}
+
+
+async def serve_media(server: WebServer, request: web.Request) -> web.Response:
+    """GET /api/media?path=<absolute_path> — serve media files from saved/ directory.
+
+    Unlike /api/files/download this does NOT require file registry lookup.
+    Security is enforced by requiring the resolved path to be under the
+    workspace ``saved/`` or ``output/`` directories with an allowed media
+    extension.
+    """
+    raw_path = request.query.get("path", "").strip()
+    if not raw_path:
+        return web.json_response({"error": "Missing 'path' parameter"}, status=400)
+
+    # Determine workspace root from config (workspace.path, e.g. ./workspace).
+    from captain_claw.config import get_config
+    cfg = get_config()
+    workspace = cfg.resolved_workspace_path()
+    saved_root = (workspace / "saved").resolve()
+    output_root = (workspace / "output").resolve()
+
+    # Support both absolute and relative paths (relative to workspace root).
+    raw = Path(raw_path)
+    if raw.is_absolute():
+        p = raw.resolve()
+    else:
+        p = (workspace / raw).resolve()
+
+    # Security: path must be under saved/ or output/.
+    try:
+        p.relative_to(saved_root)
+    except ValueError:
+        try:
+            p.relative_to(output_root)
+        except ValueError:
+            return web.json_response(
+                {"error": "Path not under workspace saved/ or output/"},
+                status=403,
+            )
+
+    # Extension check.
+    if p.suffix.lower() not in _MEDIA_EXTENSIONS:
+        return web.json_response(
+            {"error": f"Extension '{p.suffix}' not allowed for media serving"},
+            status=403,
+        )
+
+    if not p.is_file():
+        return web.json_response({"error": "File not found on disk"}, status=404)
+
+    mime = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
+    return web.FileResponse(
+        p,
+        headers={
+            "Content-Type": mime,
+            "Cache-Control": "private, max-age=3600",
+        },
+    )

@@ -957,6 +957,7 @@ class AgentContextMixin:
         "xlsx_extract": ["xlsx_extract"],
         "pptx_extract": ["pptx_extract"],
         "pocket_tts": ["pocket_tts"],
+        "image_gen": ["image_gen"],
         "send_mail": ["send_mail"],
         "google_drive": ["google_drive"],
         "google_calendar": ["google_calendar"],
@@ -977,6 +978,7 @@ class AgentContextMixin:
             GoogleCalendarTool,
             GoogleDriveTool,
             GoogleMailTool,
+            ImageGenTool,
             PdfExtractTool,
             PocketTTSTool,
             PptxExtractTool,
@@ -1022,6 +1024,8 @@ class AgentContextMixin:
                 self.tools.register(PptxExtractTool())
             elif tool_name == "pocket_tts":
                 self.tools.register(PocketTTSTool())
+            elif tool_name == "image_gen":
+                self.tools.register(ImageGenTool())
             elif tool_name == "send_mail":
                 self.tools.register(SendMailTool())
             elif tool_name == "google_drive":

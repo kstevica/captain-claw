@@ -888,6 +888,10 @@ async def handle_platform_message(
         channel_id = adapter._message_channel_id(message)
         reply_to = adapter._message_reply_id(message)
 
+        async def _after_turn(ti: int, up: str, at: str) -> None:
+            await adapter.maybe_send_images_for_turn(channel_id, reply_to, ti)
+            await adapter.maybe_send_audio_for_turn(channel_id, reply_to, up, at, ti)
+
         # Slash command
         if text.startswith("/"):
             async def _execute_prompt(prompt: str, display_prompt: str) -> None:
@@ -895,9 +899,7 @@ async def handle_platform_message(
                     ctx, prompt,
                     display_prompt=display_prompt,
                     on_assistant_text=lambda out: adapter.send(channel_id, out, reply_to=reply_to),
-                    after_turn=lambda ti, up, at: adapter.maybe_send_audio_for_turn(
-                        channel_id, reply_to, up, at, ti,
-                    ),
+                    after_turn=_after_turn,
                 )
 
             platform_labels = {"telegram": "Telegram", "slack": "Slack", "discord": "Discord"}
@@ -926,9 +928,7 @@ async def handle_platform_message(
                 ctx, text,
                 display_prompt=f"[{label} {user_label}] {text}",
                 on_assistant_text=lambda out: adapter.send(channel_id, out, reply_to=reply_to),
-                after_turn=lambda ti, up, at: adapter.maybe_send_audio_for_turn(
-                    channel_id, reply_to, up, at, ti,
-                ),
+                after_turn=_after_turn,
             ),
         )
     except Exception as e:
