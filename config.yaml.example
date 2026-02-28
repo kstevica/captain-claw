@@ -7,6 +7,18 @@ model:
   base_url: ''
   tokens_per_minute: 0
   allowed:
+  - id: ollama-cloud
+    provider: ollama
+    model: minimax-m2.5:cloud
+    base_url: ''
+    temperature: null
+    max_tokens: null
+    tokens_per_minute: 0
+    max_context: 0
+    max_output_tokens: 0
+    reasoning_level: ''
+    description: ''
+    model_type: llm
   - id: gpt-5-mini
     provider: openai
     model: gpt-5-mini
@@ -154,6 +166,7 @@ context:
   max_tokens: 160000
   compaction_threshold: 0.8
   compaction_ratio: 0.4
+  micro_instructions: false
 memory:
   enabled: true
   path: ~/.captain-claw/memory.db
@@ -221,23 +234,18 @@ tools:
   - xlsx_extract
   - pptx_extract
   - pocket_tts
-  - image_gen
-  - image_ocr
-  - image_vision
   - send_mail
   - google_drive
   - google_calendar
   - google_mail
-  - todo
-  - contacts
-  - scripts
-  - apis
-  - typesense
   - datastore
-  read:
-    max_file_bytes: 200000
+  - typesense
+  - image_gen
+  - image_ocr
+  - image_vision
+  - todo
   shell:
-    timeout: 120
+    timeout: 30
     blocked:
     - rm -rf /
     - mkfs
@@ -250,8 +258,10 @@ tools:
     deny_patterns:
     - rm -rf *
     - sudo *
+  read:
+    max_file_bytes: 200000
   web_fetch:
-    max_chars: 200000
+    max_chars: 100000
   web_search:
     provider: brave
     api_key: ''
@@ -266,7 +276,7 @@ tools:
     mp3_bitrate_kbps: 128
     timeout_seconds: 600
   send_mail:
-    provider: mailgun
+    provider: smtp
     from_address: ''
     from_name: ''
     mailgun_api_key: ''
@@ -285,8 +295,8 @@ tools:
     host: localhost
     port: 8108
     protocol: http
-    api_key: 'xyz'
-    default_collection: captain_claw_deep_memory
+    api_key: ''
+    default_collection: ''
     timeout: 30
     connection_timeout: 5
   require_confirmation:
@@ -312,26 +322,26 @@ skills:
   max_skill_file_bytes: 131072
   max_candidates_per_root: 2048
   max_skills_loaded_per_source: 256
-  search_source_url: https://raw.githubusercontent.com/VoltAgent/awesome-openclaw-skills/refs/heads/main/README.md
+  search_source_url: https://github.com/VoltAgent/awesome-openclaw-skills
   search_limit: 10
   search_max_candidates: 5000
   search_http_timeout_seconds: 20
 guards:
   input:
     enabled: false
-    level: ask_for_approval
+    level: stop_suspicious
   output:
     enabled: false
-    level: ask_for_approval
+    level: stop_suspicious
   script_tool:
     enabled: false
     level: stop_suspicious
 session:
   storage: sqlite
-  path: ~/.captain-claw/sessions.db
+  path: /Users/kstevica/.captain-claw/sessions.db
   auto_save: true
 workspace:
-  path: ./workspace/
+  path: ./workspace
 ui:
   theme: dark
   show_tokens: true
@@ -348,10 +358,10 @@ execution_queue:
 logging:
   level: INFO
   format: console
-  llm_session_logging: false
+  llm_session_logging: true
 telegram:
-  enabled: false
-  bot_token: ''
+  enabled: true
+  bot_token: 8335055432:AAF6ecJeNeWzrBEw3SaHmrRqdGAyoAvrvXQ
   api_base_url: https://api.telegram.org
   poll_timeout_seconds: 25
   pairing_ttl_minutes: 30
@@ -383,6 +393,13 @@ google_oauth:
   client_secret: ''
   project_id: ''
   location: us-central1
+  scopes:
+  - https://www.googleapis.com/auth/cloud-platform
+  - https://www.googleapis.com/auth/drive
+  - https://www.googleapis.com/auth/calendar
+  - https://www.googleapis.com/auth/gmail.readonly
+  - openid
+  - email
 todo:
   enabled: true
   auto_capture: true
@@ -412,27 +429,19 @@ orchestrator:
   timeout_grace_seconds: 150.0
   worker_max_retries: 2
 scale:
-  scale_advisory_min_members: 3
-  lightweight_progress_min_members: 2
+  scale_advisory_min_members: 7
+  lightweight_progress_min_members: 3
   task_rephrase_enabled: true
   task_rephrase_min_chars: 120
   research_search_results: 10
-  research_max_chars_per_fetch: 25000
+  research_max_chars_per_fetch: 15000
   research_query_keywords: 10
 deep_memory:
-  enabled: false
+  enabled: true
   host: localhost
   port: 8108
   protocol: http
-  api_key: 'xyz'
+  api_key: xyz
   collection_name: captain_claw_deep_memory
   embedding_dims: 1536
   auto_embed: true
-datastore:
-  enabled: true
-  path: ~/.captain-claw/datastore.db
-  inject_table_list: true
-  max_rows_per_table: 100000
-  max_tables: 5000
-  max_query_rows: 500
-  max_export_rows: 50000
