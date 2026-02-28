@@ -113,7 +113,7 @@ def _build_schema() -> list[dict[str, Any]]:
                                hint="What tasks is this model best for",
                                placeholder="e.g. Fast coding tasks, deep reasoning"),
                         _field("model_type", "Type", type="select",
-                               options=["llm", "image", "video", "audio", "multimodal"],
+                               options=["llm", "image", "video", "audio", "multimodal", "ocr", "vision"],
                                hint="Model capability type"),
                         _field("tokens_per_minute", "Tokens / min", type="number",
                                min=0, max=10000000,

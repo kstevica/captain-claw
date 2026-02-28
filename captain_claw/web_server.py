@@ -548,6 +548,10 @@ class WebServer:
         from captain_claw.web.rest_files import serve_media
         return await serve_media(self, request)
 
+    async def _image_upload(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_image_upload import upload_image
+        return await upload_image(self, request)
+
     # Loop runner
     async def _start_loop(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_loops import start_loop
@@ -861,6 +865,7 @@ class WebServer:
         app.router.add_get("/api/files/content", self._get_file_content)
         app.router.add_get("/api/files/download", self._download_file)
         app.router.add_get("/api/media", self._serve_media)
+        app.router.add_post("/api/image/upload", self._image_upload)
         app.router.add_post("/api/loops/start", self._start_loop)
         app.router.add_get("/api/loops/status", self._get_loop_status)
         app.router.add_post("/api/loops/stop", self._stop_loop)

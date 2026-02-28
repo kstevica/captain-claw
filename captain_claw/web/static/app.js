@@ -557,6 +557,10 @@
     const uploadBtn = $('#uploadBtn');
     const dropOverlay = $('#dropOverlay');
     const chatPane = $('#chatPane');
+    const attachmentPreview = $('#attachmentPreview');
+
+    var pendingImagePath = null;
+    var _IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'];
 
     function formatFileSize(bytes) {
         if (bytes < 1024) return bytes + ' B';
@@ -564,18 +568,84 @@
         return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
     }
 
+    function showAttachmentChip(filename, path, objectUrl) {
+        pendingImagePath = path;
+        attachmentPreview.innerHTML = '';
+        var chip = document.createElement('div');
+        chip.className = 'attachment-chip';
+        if (objectUrl) {
+            var thumb = document.createElement('img');
+            thumb.src = objectUrl;
+            thumb.className = 'attachment-thumb';
+            chip.appendChild(thumb);
+        }
+        var name = document.createElement('span');
+        name.className = 'attachment-name';
+        name.textContent = filename;
+        chip.appendChild(name);
+        var removeBtn = document.createElement('button');
+        removeBtn.className = 'attachment-remove';
+        removeBtn.textContent = '\u2715';
+        removeBtn.title = 'Remove attachment';
+        removeBtn.addEventListener('click', function() {
+            clearAttachment();
+        });
+        chip.appendChild(removeBtn);
+        attachmentPreview.appendChild(chip);
+        attachmentPreview.classList.remove('hidden');
+    }
+
+    function clearAttachment() {
+        pendingImagePath = null;
+        attachmentPreview.innerHTML = '';
+        attachmentPreview.classList.add('hidden');
+        fileInput.value = '';
+    }
+
     async function uploadFile(file) {
         if (!file) return;
         var ext = file.name.split('.').pop().toLowerCase();
-        if (ext !== 'csv' && ext !== 'xlsx') {
-            addChatMessage('assistant', '**Error:** Only `.csv` and `.xlsx` files are supported.');
+        var isImage = _IMAGE_EXTS.indexOf(ext) !== -1;
+        var isData = (ext === 'csv' || ext === 'xlsx');
+
+        if (!isImage && !isData) {
+            addChatMessage('assistant', '**Error:** Supported files: images (.png, .jpg, .jpeg, .webp, .gif, .bmp) and data (.csv, .xlsx).');
             return;
         }
 
-        // Show user message
-        addChatMessage('user', 'Uploading file: **' + file.name + '** (' + formatFileSize(file.size) + ')');
+        if (isImage) {
+            // Upload image and stage as attachment (don't auto-submit).
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = '\u23F3';
 
-        // Disable upload button
+            var formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                var res = await fetch('/api/image/upload', {
+                    method: 'POST',
+                    body: formData,
+                });
+                var data = await res.json();
+                if (!res.ok) {
+                    addChatMessage('assistant', '**Upload failed:** ' + (data.error || 'Unknown error'));
+                } else {
+                    var objectUrl = URL.createObjectURL(file);
+                    showAttachmentChip(file.name, data.path, objectUrl);
+                    messageInput.focus();
+                }
+            } catch (err) {
+                addChatMessage('assistant', '**Upload failed:** ' + err.message);
+            } finally {
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = '\uD83D\uDCCE';
+                fileInput.value = '';
+            }
+            return;
+        }
+
+        // Data file (csv/xlsx) — existing datastore import flow.
+        addChatMessage('user', 'Uploading file: **' + file.name + '** (' + formatFileSize(file.size) + ')');
         uploadBtn.disabled = true;
         uploadBtn.textContent = '\u23F3';
 
@@ -591,13 +661,11 @@
             if (!res.ok) {
                 addChatMessage('assistant', '**Import failed:** ' + (data.error || 'Unknown error'));
             }
-            // Success message comes via WebSocket broadcast from backend
         } catch (err) {
             addChatMessage('assistant', '**Upload failed:** ' + err.message);
         } finally {
             uploadBtn.disabled = false;
             uploadBtn.textContent = '\uD83D\uDCCE';
-            // Reset file input so same file can be re-selected
             fileInput.value = '';
         }
     }
@@ -606,7 +674,7 @@
 
     function handleSend() {
         const text = messageInput.value.trim();
-        if (!text) return;
+        if (!text && !pendingImagePath) return;
         if (!isConnected) return;
 
         hideSuggestions();
@@ -614,10 +682,15 @@
         if (text.startsWith('/')) {
             send({ type: 'command', command: text });
         } else {
-            send({ type: 'chat', content: text });
+            var msg = { type: 'chat', content: text || '' };
+            if (pendingImagePath) {
+                msg.image_path = pendingImagePath;
+            }
+            send(msg);
         }
 
         messageInput.value = '';
+        clearAttachment();
         autoResizeInput();
     }
 
@@ -1271,6 +1344,29 @@
             dropOverlay.classList.add('hidden');
             if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {
                 uploadFile(e.dataTransfer.files[0]);
+            }
+        });
+
+        // Paste image from clipboard into chat input
+        messageInput.addEventListener('paste', (e) => {
+            var items = e.clipboardData && e.clipboardData.items;
+            if (!items) return;
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf('image/') === 0) {
+                    e.preventDefault();
+                    var file = items[i].getAsFile();
+                    if (file) {
+                        // Give pasted images a sensible name if missing.
+                        if (!file.name || file.name === 'image.png') {
+                            var ext = file.type.split('/')[1] || 'png';
+                            if (ext === 'jpeg') ext = 'jpg';
+                            var ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+                            file = new File([file], 'pasted-' + ts + '.' + ext, { type: file.type });
+                        }
+                        uploadFile(file);
+                    }
+                    return;
+                }
             }
         });
 

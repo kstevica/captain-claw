@@ -16,7 +16,13 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 
-async def handle_chat(server: WebServer, ws: web.WebSocketResponse, content: str) -> None:
+async def handle_chat(
+    server: WebServer,
+    ws: web.WebSocketResponse,
+    content: str,
+    *,
+    image_path: str | None = None,
+) -> None:
     """Process a chat message through the agent.
 
     The actual work is launched as a background asyncio task so that the
@@ -34,6 +40,13 @@ async def handle_chat(server: WebServer, ws: web.WebSocketResponse, content: str
         })
         return
 
+    # When an image is attached, prepend the path context so the agent
+    # knows a file is available for tools like image_ocr.
+    effective_content = content
+    if image_path:
+        prefix = f"[Attached image: {image_path}]\n"
+        effective_content = prefix + (content or "Please analyze this image.")
+
     # Mark busy *before* spawning the task so that a second chat message
     # arriving immediately is rejected.
     server._busy = True
@@ -44,14 +57,14 @@ async def handle_chat(server: WebServer, ws: web.WebSocketResponse, content: str
     server._broadcast({
         "type": "chat_message",
         "role": "user",
-        "content": content,
+        "content": effective_content,
         "timestamp": datetime.now(UTC).isoformat(),
     })
 
     # Launch the heavy work as a background task — do NOT await it here
     # so the caller (the WebSocket read-loop) can keep processing
     # incoming messages such as cancel/stop.
-    task = asyncio.create_task(_run_agent(server, content))
+    task = asyncio.create_task(_run_agent(server, effective_content))
 
     # Store a reference so it isn't garbage-collected.
     server._active_task = task

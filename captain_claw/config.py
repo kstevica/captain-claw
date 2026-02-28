@@ -191,6 +191,14 @@ class ImageGenToolConfig(BaseModel):
     default_quality: str = ""  # empty = let provider choose
 
 
+class ImageOcrToolConfig(BaseModel):
+    """Image OCR tool configuration."""
+
+    timeout_seconds: int = 120
+    max_chars: int = 120000
+    default_prompt: str = ""  # empty = use built-in default
+
+
 class SendMailToolConfig(BaseModel):
     """Send mail tool configuration."""
 
@@ -243,6 +251,7 @@ class ToolsConfig(BaseModel):
         "pptx_extract",
         "pocket_tts",
         "image_gen",
+        "image_ocr",
         "send_mail",
         "google_drive",
         "google_calendar",
@@ -254,6 +263,7 @@ class ToolsConfig(BaseModel):
     web_search: WebSearchToolConfig = Field(default_factory=WebSearchToolConfig)
     pocket_tts: PocketTTSToolConfig = Field(default_factory=PocketTTSToolConfig)
     image_gen: ImageGenToolConfig = Field(default_factory=ImageGenToolConfig)
+    image_ocr: ImageOcrToolConfig = Field(default_factory=ImageOcrToolConfig)
     send_mail: SendMailToolConfig = Field(default_factory=SendMailToolConfig)
     typesense: TypesenseToolConfig = Field(default_factory=TypesenseToolConfig)
     require_confirmation: list[str] = ["shell", "write"]

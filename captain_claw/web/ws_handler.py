@@ -95,14 +95,15 @@ async def handle_ws_message(
 
     if msg_type == "chat":
         content = str(data.get("content", "")).strip()
-        if not content:
+        image_path = str(data.get("image_path", "")).strip() or None
+        if not content and not image_path:
             return
         if content.startswith("/"):
             from captain_claw.web.slash_commands import handle_command
             await handle_command(server, ws, content)
         else:
             from captain_claw.web.chat_handler import handle_chat
-            await handle_chat(server, ws, content)
+            await handle_chat(server, ws, content, image_path=image_path)
 
     elif msg_type == "command":
         command = str(data.get("command", "")).strip()

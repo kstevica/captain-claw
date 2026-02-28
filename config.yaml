@@ -102,6 +102,7 @@ tools:
   - pptx_extract
   - pocket_tts
   - image_gen
+  - image_ocr
   - send_mail
   - google_drive
   - google_calendar

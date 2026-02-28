@@ -92,6 +92,7 @@
         <div id="inputArea">
             <!-- Command suggestions dropdown -->
             <div id="commandSuggestions" class="suggestions-dropdown hidden"></div>
+            <div id="attachmentPreview" class="attachment-preview hidden"></div>
             <div class="input-row">
                 <textarea id="messageInput"
                     placeholder="Type a message or /command... (Ctrl+K command palette)"
@@ -99,8 +100,8 @@
                     autocomplete="off"
                     spellcheck="true"></textarea>
                 <div class="input-buttons">
-                    <input type="file" id="fileInput" accept=".csv,.xlsx" style="display:none" />
-                    <button class="icon-btn upload-btn" id="uploadBtn" title="Upload CSV/XLSX to datastore">&#x1F4CE;</button>
+                    <input type="file" id="fileInput" accept=".csv,.xlsx,.png,.jpg,.jpeg,.webp,.gif,.bmp" style="display:none" />
+                    <button class="icon-btn upload-btn" id="uploadBtn" title="Attach file">&#x1F4CE;</button>
                     <button class="icon-btn send-btn" id="sendBtn" title="Send message (Enter)">&#x27A4;</button>
                     <button class="icon-btn stop-btn" id="stopBtn" title="Stop processing (Esc)" style="display:none;">&#x25A0;</button>
                     <button class="icon-btn" id="paletteBtn" title="Command palette (Ctrl+K)">&#x2318;K</button>

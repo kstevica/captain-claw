@@ -121,6 +121,10 @@ class AgentToolLoopMixin:
         if name == "image_gen":
             prompt = str(arguments.get("prompt", "")).strip()
             return f"Generating image: {prompt[:50]}" if prompt else "Generating image"
+        if name == "image_ocr":
+            path = str(arguments.get("path", "")).strip()
+            fname = path.rsplit("/", 1)[-1] if "/" in path else path
+            return f"OCR: {fname[:50]}" if fname else "Extracting text from image"
         # ── Approval ───────────────────────────────────────
         if name == "approval":
             return "Auto-approved action"
