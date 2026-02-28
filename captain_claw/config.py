@@ -265,6 +265,12 @@ class ToolsConfig(BaseModel):
         "google_drive",
         "google_calendar",
         "google_mail",
+        "todo",
+        "contacts",
+        "scripts",
+        "apis",
+        "typesense",
+        "datastore",
     ]
     shell: ShellToolConfig = Field(default_factory=ShellToolConfig)
     read: ReadToolConfig = Field(default_factory=ReadToolConfig)
