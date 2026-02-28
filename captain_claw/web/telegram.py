@@ -112,7 +112,33 @@ async def _handle_telegram_message(server: WebServer, message: TelegramMessage) 
             return
 
         text = message.text.strip()
-        if not text:
+
+        # Download attached photo if present.
+        image_path: str | None = None
+        if message.photo_file_id:
+            try:
+                from datetime import UTC, datetime
+                from pathlib import Path
+
+                from captain_claw.config import get_config
+
+                cfg = get_config()
+                workspace = cfg.resolved_workspace_path()
+                session_id = ""
+                if server.agent and server.agent.session:
+                    session_id = server.agent.session.id or ""
+                if not session_id:
+                    session_id = "uploads"
+                stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+                dest_dir = workspace / "saved" / "media" / session_id
+                dest = dest_dir / f"tg-photo-{stamp}.jpg"
+                await bridge.download_file(message.photo_file_id, dest)
+                image_path = str(dest)
+                log.info("Telegram photo downloaded", path=image_path)
+            except Exception as dl_exc:
+                log.warning("Telegram photo download failed", error=str(dl_exc))
+
+        if not text and not image_path:
             return
 
         if text.startswith("/") and "@" in text.split()[0]:
@@ -146,14 +172,20 @@ async def _handle_telegram_message(server: WebServer, message: TelegramMessage) 
                 )
                 return
 
+        # Build effective text with image context if present.
+        effective_text = text
+        if image_path:
+            prefix = f"[Attached image: {image_path}]\n"
+            effective_text = prefix + (text or "Please analyze this image.")
+
         user_label = message.username or message.first_name or str(message.user_id)
         server._broadcast({
             "type": "chat_message",
             "role": "user",
-            "content": f"[TG {user_label}] {text}",
+            "content": f"[TG {user_label}] {effective_text}",
         })
 
-        await _tg_process_with_typing(server, message.chat_id, text, message.message_id)
+        await _tg_process_with_typing(server, message.chat_id, effective_text, message.message_id)
 
     except Exception as exc:
         log.error("Telegram message handler failed", error=str(exc))
@@ -385,9 +417,23 @@ async def _tg_process_with_typing(
                         "content": response,
                     })
             else:
+                turn_start_idx = len(server.agent.session.messages) if server.agent.session else 0
+                log.info("Telegram agent.complete() start", text_len=len(text))
                 response = await server.agent.complete(text)
+                log.info("Telegram agent.complete() done", response_len=len(response or ""))
 
                 await _tg_send(server, chat_id, response, reply_to_message_id=reply_to_message_id)
+
+                # Send any generated images back to Telegram.
+                from captain_claw.platform_adapter import collect_turn_generated_image_paths
+                if server.agent.session and server._telegram_bridge:
+                    for img_path in collect_turn_generated_image_paths(server.agent.session, turn_start_idx):
+                        try:
+                            await server._telegram_bridge.send_photo(
+                                chat_id, img_path, reply_to_message_id=reply_to_message_id,
+                            )
+                        except Exception as img_exc:
+                            log.warning("Telegram send_photo failed", path=str(img_path), error=str(img_exc))
 
                 server._broadcast({
                     "type": "chat_message",

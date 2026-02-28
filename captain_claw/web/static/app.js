@@ -491,6 +491,36 @@
             modelName.textContent = activeModelLabel;
             highlightActiveModelInDropdown();
         }
+        if (info.tools) updateToolsBar(info.tools);
+        if (info.skills) updateSkillsBar(info.skills);
+    }
+
+    function updateToolsBar(tools) {
+        var list = $('#toolsList');
+        if (!list) return;
+        if (!tools || !tools.length) {
+            list.innerHTML = '<span class="tools-empty">No tools enabled</span>';
+            return;
+        }
+        list.innerHTML = tools.slice().sort().map(function(t) {
+            return '<span class="tool-chip" title="' + escapeHtml(t) + '">' + escapeHtml(t) + '</span>';
+        }).join('');
+    }
+
+    function updateSkillsBar(skills) {
+        var bar = $('#skillsBar');
+        var list = $('#skillsList');
+        if (!list || !bar) return;
+        if (!skills || !skills.length) {
+            bar.style.display = 'none';
+            return;
+        }
+        bar.style.display = '';
+        list.innerHTML = skills.slice().sort(function(a, b) { return a.name.localeCompare(b.name); }).map(function(s) {
+            var tip = '/' + escapeHtml(s.name);
+            if (s.description) tip += ' \u2014 ' + escapeHtml(s.description);
+            return '<span class="tool-chip skill-chip" title="' + tip + '">/' + escapeHtml(s.name) + '</span>';
+        }).join('');
     }
 
     // ── Model Selector ────────────────────────────────────────

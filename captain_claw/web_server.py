@@ -258,6 +258,11 @@ class WebServer:
             "provider": model_details.get("provider", ""),
             "description": (s.metadata or {}).get("description", ""),
             "message_count": len(s.messages),
+            "tools": self.agent.tools.list_tools() if self.agent else [],
+            "skills": [
+                {"name": cmd.name, "skill": cmd.skill_name, "description": cmd.description}
+                for cmd in (self.agent.list_user_invocable_skills() if self.agent else [])
+            ],
         }
 
     # ── Cron runtime context ─────────────────────────────────────────

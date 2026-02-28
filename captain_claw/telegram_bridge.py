@@ -20,6 +20,7 @@ class TelegramMessage:
     username: str
     first_name: str
     text: str
+    photo_file_id: str = ""
     business_connection_id: str = ""
 
 
@@ -65,8 +66,19 @@ class TelegramBridge:
                 msg = item.get("business_message")
             if not isinstance(msg, dict):
                 continue
+            # Extract text, or caption + photo for image messages.
             text = str(msg.get("text", "")).strip()
-            if not text:
+            photo_file_id = ""
+            photo_array = msg.get("photo")
+            if isinstance(photo_array, list) and photo_array:
+                # Telegram sends multiple sizes; pick the largest (last).
+                largest = photo_array[-1]
+                if isinstance(largest, dict):
+                    photo_file_id = str(largest.get("file_id", "")).strip()
+                # Use caption as text for photo messages.
+                if not text:
+                    text = str(msg.get("caption", "")).strip()
+            if not text and not photo_file_id:
                 continue
             from_user = msg.get("from")
             chat = msg.get("chat")
@@ -85,6 +97,7 @@ class TelegramBridge:
                     username=str(from_user.get("username", "")).strip(),
                     first_name=str(from_user.get("first_name", "")).strip(),
                     text=text,
+                    photo_file_id=photo_file_id,
                     business_connection_id=str(msg.get("business_connection_id", "")).strip(),
                 )
             )
@@ -206,6 +219,27 @@ class TelegramBridge:
                 files=files,
             )
         response.raise_for_status()
+
+    async def download_file(self, file_id: str, dest: Path) -> Path:
+        """Download a Telegram file by file_id to a local path."""
+        # Step 1: getFile to get file_path on Telegram servers.
+        resp = await self._client.post(
+            self._url("getFile"), json={"file_id": file_id},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict) or not data.get("ok"):
+            raise RuntimeError(f"getFile failed: {data}")
+        file_path = data.get("result", {}).get("file_path", "")
+        if not file_path:
+            raise RuntimeError("getFile returned no file_path")
+        # Step 2: Download the file bytes.
+        download_url = f"{self.api_base_url}/file/bot{self.token}/{file_path}"
+        dl_resp = await self._client.get(download_url)
+        dl_resp.raise_for_status()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(dl_resp.content)
+        return dest
 
     async def read_business_message(
         self,

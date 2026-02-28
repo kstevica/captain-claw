@@ -244,6 +244,57 @@ html, body {
     flex-direction: column;
 }
 
+/* ─── Tools Bar ─────────────────────────────────────── */
+
+.tools-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 12px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    flex-shrink: 0;
+}
+
+.tools-bar-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.tools-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+}
+
+.tool-chip {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    white-space: nowrap;
+}
+
+.skill-chip {
+    color: var(--purple);
+    border-color: var(--purple);
+    background: rgba(188, 140, 255, 0.08);
+}
+
+.tools-empty {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
 #panes {
     flex: 1;
     display: flex;
