@@ -35,6 +35,7 @@ def _build_runtime_arg_parser() -> argparse.ArgumentParser:
         help="Run interactive onboarding wizard before starting",
     )
     parser.add_argument("--version", action="store_true", help="Show version information and exit")
+    parser.add_argument("--port", type=int, default=0, help="Override web server port")
     parser.add_argument("--tui", action="store_true", help="Start the terminal UI instead of the web UI")
     parser.add_argument("-h", "--help", action="store_true", help="Show this help message and exit")
 
@@ -79,6 +80,7 @@ def main(
     no_stream: bool = False,
     verbose: bool = False,
     onboarding: bool = False,
+    port: int = 0,
     tui: bool = False,
 ) -> None:
     """Start Captain Claw interactive session."""
@@ -153,6 +155,7 @@ def main(
         no_stream = bool(parsed.no_stream)
         verbose = bool(parsed.verbose)
         onboarding = bool(parsed.onboarding)
+        port = int(parsed.port or 0)
         tui = bool(parsed.tui)
         if unknown:
             print(f"Warning: ignoring unsupported arguments: {' '.join(unknown)}")
@@ -201,6 +204,8 @@ def main(
         cfg.model.provider = provider
     if no_stream:
         cfg.ui.streaming = False
+    if port:
+        cfg.web.port = port
 
     # Set global config
     set_config(cfg)

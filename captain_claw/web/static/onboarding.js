@@ -6,7 +6,7 @@
     var PROVIDERS = [
         { id: 'openai',    name: 'OpenAI / ChatGPT',           model: 'gpt-4.1-mini',                  env: 'OPENAI_API_KEY' },
         { id: 'anthropic', name: 'Anthropic / Claude',          model: 'claude-sonnet-4-20250514',       env: 'ANTHROPIC_API_KEY' },
-        { id: 'gemini',    name: 'Google / Gemini',             model: 'gemini-2.5-flash-preview-05-20', env: 'GOOGLE_API_KEY' },
+        { id: 'gemini',    name: 'Google / Gemini',             model: 'gemini-3-flash-preview',         env: 'GOOGLE_API_KEY' },
         { id: 'ollama',    name: 'Ollama (local/self-hosted)',   model: 'llama3.2',                       env: '' }
     ];
 
@@ -302,6 +302,7 @@
 
         if (state.base_url) rows.push(['Base URL', state.base_url]);
         rows.push(['Safety guards', state.enable_guards ? 'enabled (ask_for_approval)' : 'disabled']);
+        rows.push(['Pre-configured models', '12 (OpenAI, Anthropic, Gemini + image/OCR/vision)']);
 
         state.extra_models.forEach(function (m, i) {
             rows.push(['Extra model #' + (i + 1), m.provider + ' / ' + (m.model || findProvider(m.provider).model)]);

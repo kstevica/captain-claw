@@ -961,8 +961,18 @@ async def _run_server(config: Config) -> None:
 
     host = config.web.host
     port = config.web.port
-    site = web.TCPSite(runner, host, port)
-    await site.start()
+    max_retries = 10
+    for attempt in range(max_retries):
+        try:
+            site = web.TCPSite(runner, host, port)
+            await site.start()
+            break
+        except OSError as exc:
+            if attempt < max_retries - 1:
+                log.warning("Port unavailable, trying next", port=port, next_port=port + 1, error=str(exc))
+                port += 1
+            else:
+                raise
 
     print(f"\n  Captain Claw Web UI running at http://{host}:{port}")
     if config.web.api_enabled and server._api_pool:

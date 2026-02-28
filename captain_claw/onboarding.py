@@ -26,7 +26,7 @@ _PROVIDER_LABELS = {
 _PROVIDER_DEFAULT_MODELS = {
     "openai": "gpt-4.1-mini",
     "anthropic": "claude-sonnet-4-20250514",
-    "gemini": "gemini-2.5-flash-preview-05-20",
+    "gemini": "gemini-3-flash-preview",
     "ollama": "llama3.2",
 }
 _PROVIDER_ENV_VARS = {
@@ -40,6 +40,87 @@ _PROVIDER_ALIASES = {
     "claude": "anthropic",
     "google": "gemini",
 }
+
+# Default allowed models seeded during onboarding so every fresh install
+# gets a useful multi-model configuration out of the box.
+_DEFAULT_ALLOWED_MODELS: list[dict[str, Any]] = [
+    {
+        "id": "gpt-5-mini",
+        "provider": "openai",
+        "model": "gpt-5-mini",
+        "reasoning_level": "high",
+        "description": "Good for everyday tasks, light coding, reasoning",
+    },
+    {
+        "id": "gpt-5-nano",
+        "provider": "openai",
+        "model": "gpt-5-nano",
+        "description": "good for classification of data, making lists",
+    },
+    {
+        "id": "gpt-5.3-codex",
+        "provider": "openai",
+        "model": "gpt-5.3-codex",
+        "reasoning_level": "high",
+        "description": "extremely good for coding and deep reasoning",
+    },
+    {
+        "id": "claude-sonnet",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+    },
+    {
+        "id": "gemini-flash",
+        "provider": "gemini",
+        "model": "gemini-3-flash-preview",
+    },
+    {
+        "id": "claude-opus",
+        "provider": "anthropic",
+        "model": "claude-opus-4-6",
+    },
+    {
+        "id": "claude-haiku",
+        "provider": "anthropic",
+        "model": "claude-haiku-4-5",
+    },
+    {
+        "id": "gemini-flash-lite",
+        "provider": "gemini",
+        "model": "gemini-2.5-flash-lite",
+        "temperature": 0,
+        "description": "simple and fast model",
+    },
+    {
+        "id": "gemini-pro",
+        "provider": "gemini",
+        "model": "gemini-2.5-pro",
+        "temperature": 0,
+        "description": "the best model, can handle really complex tasks, but it's expensive",
+    },
+    {
+        "id": "image",
+        "provider": "gemini",
+        "model": "imagen-4.0-fast-generate-001",
+        "temperature": 0,
+        "description": "image generation",
+        "model_type": "image",
+    },
+    {
+        "id": "gemini-ocr",
+        "provider": "gemini",
+        "model": "gemini-3-flash-preview",
+        "temperature": 0,
+        "model_type": "ocr",
+    },
+    {
+        "id": "gemini-vision",
+        "provider": "gemini",
+        "model": "gemini-3-flash-preview",
+        "temperature": 0,
+        "model_type": "vision",
+    },
+]
 
 
 # ── Path resolution helpers ──────────────────────────────────────────
@@ -266,6 +347,13 @@ def save_onboarding_config(
             new_entries.append(am)
         cfg.model.allowed = list(cfg.model.allowed) + new_entries
 
+    # Seed default allowed models when the config has none yet.
+    if not cfg.model.allowed:
+        AllowedModel = type(cfg.model).AllowedModelConfig
+        cfg.model.allowed = [
+            AllowedModel(**entry) for entry in _DEFAULT_ALLOWED_MODELS
+        ]
+
     # Telegram
     if "telegram_enabled" in values:
         cfg.telegram.enabled = bool(values["telegram_enabled"])
@@ -485,8 +573,12 @@ def run_onboarding_wizard(
 
     # Step 7 — Additional models (optional)
     console.print()
+    console.print(
+        f"[dim]Captain Claw comes pre-configured with {len(_DEFAULT_ALLOWED_MODELS)} additional models "
+        f"(OpenAI, Anthropic, Gemini + image/OCR/vision). You can manage them later in /settings.[/dim]"
+    )
     additional_models: list[dict[str, str]] = []
-    if Confirm.ask("Add extra models for multi-session use?", default=False):
+    if Confirm.ask("Add extra models beyond the defaults?", default=False):
         additional_models = _collect_additional_models(console)
 
     # Step 8 — Safety guards
@@ -512,6 +604,10 @@ def run_onboarding_wizard(
     summary.add_row(
         "Safety guards",
         "enabled (ask_for_approval)" if enable_guards else "disabled",
+    )
+    summary.add_row(
+        "Pre-configured models",
+        f"{len(_DEFAULT_ALLOWED_MODELS)} (OpenAI, Anthropic, Gemini + image/OCR/vision)",
     )
     if additional_models:
         for idx, am in enumerate(additional_models, start=1):
