@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
 from captain_claw.datastore import ProtectedError, get_datastore_manager
+from captain_claw.logging import get_logger
 
 if TYPE_CHECKING:
     from captain_claw.web_server import WebServer
+
+log = get_logger(__name__)
 
 _JSON_DUMPS = lambda obj: json.dumps(obj, default=str)
 
@@ -360,3 +366,175 @@ async def remove_protection(server: WebServer, request: web.Request) -> web.Resp
     return web.json_response(
         {"error": "No matching protection found"}, status=404,
     )
+
+
+# ── File Upload & Import ──────────────────────────────────────────
+
+
+def _build_import_chat_message(result: dict[str, Any]) -> str:
+    """Build a Markdown summary for the chat broadcast."""
+    action = result.get("action", "imported")
+    table = result.get("table", "unknown")
+    rows = result.get("rows_imported", 0)
+    columns = result.get("columns", [])
+    warnings = result.get("warnings", [])
+
+    if action == "appended":
+        matched = result.get("matched_table", table)
+        score = result.get("match_score", 0)
+        msg = (
+            f"**Imported {rows} rows** into existing table **{matched}** "
+            f"(match score: {score:.0%})\n\n"
+        )
+    else:
+        msg = f"**Created table** **{table}** with **{rows} rows**\n\n"
+
+    msg += f"**Columns** ({len(columns)}): `{'`, `'.join(columns)}`"
+
+    if warnings:
+        msg += "\n\n**Warnings:**\n"
+        for w in warnings:
+            msg += f"- {w}\n"
+
+    return msg
+
+
+async def upload_and_import(server: WebServer, request: web.Request) -> web.Response:
+    """POST /api/datastore/upload — upload CSV/XLSX and import into datastore."""
+    tmp_path: str | None = None
+    try:
+        reader = await request.multipart()
+        if reader is None:
+            return web.json_response({"error": "Multipart body required"}, status=400)
+
+        file_field = None
+        table_name_override: str | None = None
+        force_new = False
+
+        # Read multipart fields
+        while True:
+            field = await reader.next()
+            if field is None:
+                break
+            if field.name == "file":
+                file_field = field
+                break
+            elif field.name == "table_name":
+                table_name_override = (await field.text()).strip() or None
+            elif field.name == "force_new":
+                force_new = (await field.text()).strip().lower() in ("true", "1", "yes")
+
+        if file_field is None:
+            return web.json_response({"error": "No file field in upload"}, status=400)
+
+        original_name = file_field.filename or "upload"
+        file_stem = Path(original_name).stem
+        file_ext = Path(original_name).suffix.lower()
+
+        if file_ext not in (".csv", ".xlsx"):
+            return web.json_response(
+                {"error": f"Unsupported file type '{file_ext}'. Only .csv and .xlsx are accepted."},
+                status=400,
+            )
+
+        file_type = "csv" if file_ext == ".csv" else "xlsx"
+
+        # Stream file to temp location
+        suffix = file_ext
+        fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+        try:
+            with os.fdopen(fd, "wb") as tmp_file:
+                while True:
+                    chunk = await file_field.read_chunk(8192)
+                    if not chunk:
+                        break
+                    tmp_file.write(chunk)
+        except Exception:
+            os.close(fd)
+            raise
+
+        tmp_file_path = Path(tmp_path)
+        log.info("File uploaded for import", filename=original_name, temp_path=tmp_path, file_type=file_type)
+
+        mgr = get_datastore_manager()
+
+        # Parse headers
+        try:
+            headers = await mgr.parse_headers(tmp_file_path, file_type)
+        except Exception as exc:
+            return web.json_response({"error": f"Failed to parse file headers: {exc}"}, status=400)
+
+        if not headers:
+            return web.json_response({"error": "File contains no columns"}, status=400)
+
+        result: dict[str, Any]
+        use_name = table_name_override or file_stem
+
+        # Try to find matching table
+        match = None
+        if not force_new:
+            match = await mgr.find_matching_table(headers, use_name)
+
+        if match:
+            # Append to existing table
+            log.info(
+                "Matched existing table for import",
+                table=match["name"],
+                match_type=match["match_type"],
+                score=match["score"],
+            )
+            import_result = await mgr.import_to_existing_table(
+                tmp_file_path, file_type, match["name"],
+            )
+            result = {
+                "action": "appended",
+                "table": match["name"],
+                "rows_imported": import_result["rows_imported"],
+                "columns": import_result["columns"],
+                "warnings": import_result.get("warnings", []),
+                "matched_table": match["name"],
+                "match_score": match["score"],
+            }
+        else:
+            # Create new table
+            log.info("No matching table found, creating new", table_name=use_name)
+            if file_type == "csv":
+                import_result = await mgr.import_csv(tmp_file_path, use_name)
+            else:
+                import_result = await mgr.import_xlsx(tmp_file_path, use_name)
+            result = {
+                "action": "created",
+                "table": import_result.get("table", use_name),
+                "rows_imported": import_result.get("rows_imported", 0),
+                "columns": import_result.get("columns", []),
+                "warnings": import_result.get("warnings", []),
+            }
+
+        # Broadcast import summary to chat
+        chat_msg = _build_import_chat_message(result)
+        server._broadcast({
+            "type": "chat_message",
+            "role": "assistant",
+            "content": chat_msg,
+        })
+
+        log.info(
+            "File import complete",
+            action=result["action"],
+            table=result["table"],
+            rows=result["rows_imported"],
+        )
+
+        return web.json_response(result, dumps=_JSON_DUMPS)
+
+    except web.HTTPException:
+        raise
+    except Exception as exc:
+        log.error("File upload/import failed", error=str(exc), exc_info=True)
+        return web.json_response({"error": str(exc)}, status=500)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass

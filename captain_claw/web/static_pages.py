@@ -52,6 +52,10 @@ async def serve_memory(server: WebServer, request: web.Request) -> web.FileRespo
     return web.FileResponse(STATIC_DIR / "memory.html")
 
 
+async def serve_deep_memory(server: WebServer, request: web.Request) -> web.FileResponse:
+    return web.FileResponse(STATIC_DIR / "deep-memory.html")
+
+
 async def serve_settings(server: WebServer, request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "settings.html")
 

@@ -506,6 +506,57 @@
         modelDropdown.classList.add('hidden');
     }
 
+    // ── File Upload ──────────────────────────────────────────
+
+    const fileInput = $('#fileInput');
+    const uploadBtn = $('#uploadBtn');
+    const dropOverlay = $('#dropOverlay');
+    const chatPane = $('#chatPane');
+
+    function formatFileSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    async function uploadFile(file) {
+        if (!file) return;
+        var ext = file.name.split('.').pop().toLowerCase();
+        if (ext !== 'csv' && ext !== 'xlsx') {
+            addChatMessage('assistant', '**Error:** Only `.csv` and `.xlsx` files are supported.');
+            return;
+        }
+
+        // Show user message
+        addChatMessage('user', 'Uploading file: **' + file.name + '** (' + formatFileSize(file.size) + ')');
+
+        // Disable upload button
+        uploadBtn.disabled = true;
+        uploadBtn.textContent = '\u23F3';
+
+        var formData = new FormData();
+        formData.append('file', file);
+
+        try {
+            var res = await fetch('/api/datastore/upload', {
+                method: 'POST',
+                body: formData,
+            });
+            var data = await res.json();
+            if (!res.ok) {
+                addChatMessage('assistant', '**Import failed:** ' + (data.error || 'Unknown error'));
+            }
+            // Success message comes via WebSocket broadcast from backend
+        } catch (err) {
+            addChatMessage('assistant', '**Upload failed:** ' + err.message);
+        } finally {
+            uploadBtn.disabled = false;
+            uploadBtn.textContent = '\uD83D\uDCCE';
+            // Reset file input so same file can be re-selected
+            fileInput.value = '';
+        }
+    }
+
     // ── Input Handling ──────────────────────────────────────
 
     function handleSend() {
@@ -1127,6 +1178,41 @@
             btn.addEventListener('click', () => {
                 send({ type: 'command', command: btn.dataset.command });
             });
+        });
+
+        // File upload button
+        uploadBtn.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files && fileInput.files[0]) {
+                uploadFile(fileInput.files[0]);
+            }
+        });
+
+        // Drag and drop on chat pane
+        var dragCounter = 0;
+        chatPane.addEventListener('dragenter', (e) => {
+            e.preventDefault();
+            dragCounter++;
+            dropOverlay.classList.remove('hidden');
+        });
+        chatPane.addEventListener('dragover', (e) => {
+            e.preventDefault();
+        });
+        chatPane.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            dragCounter--;
+            if (dragCounter <= 0) {
+                dragCounter = 0;
+                dropOverlay.classList.add('hidden');
+            }
+        });
+        chatPane.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dragCounter = 0;
+            dropOverlay.classList.add('hidden');
+            if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {
+                uploadFile(e.dataTransfer.files[0]);
+            }
         });
 
         // Monitor clear

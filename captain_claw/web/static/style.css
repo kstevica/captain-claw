@@ -259,6 +259,7 @@ html, body {
     flex-direction: column;
     min-width: 300px;
     border-right: 1px solid var(--border);
+    position: relative;
 }
 
 .pane-header {
@@ -1324,6 +1325,30 @@ html, body {
     padding: 20px;
     color: var(--text-muted);
     font-size: 13px;
+}
+
+/* ─── Upload Button & Drop Overlay ───────────────────── */
+
+.upload-btn { font-size: 16px; }
+.upload-btn:disabled { opacity: 0.5; cursor: wait; }
+
+.drop-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(88, 166, 255, 0.08);
+    border: 2px dashed var(--accent);
+    border-radius: var(--radius);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    pointer-events: none;
+}
+.drop-overlay.hidden { display: none; }
+.drop-overlay-text {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--accent);
 }
 
 /* ─── Misc Utilities ─────────────────────────────────── */

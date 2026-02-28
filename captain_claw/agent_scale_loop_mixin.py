@@ -584,6 +584,25 @@ class AgentScaleLoopMixin:
         r")",
         re.IGNORECASE,
     )
+    # User-level signals that indicate save/store/create intent — the user
+    # wants to PERSIST already-known data, NOT research or search the web.
+    # When this matches user_input, research mode is suppressed for plain-text
+    # entities because the items are already the data to be saved.
+    _SAVE_INTENT_RE = re.compile(
+        r"(?:"
+        # "save this/these/it/them", "store this", "create a table"
+        r"(?:save|store|persist|keep|insert|put)\s+(?:this|these|it|them|the\s+(?:data|results?|items?|list|info))"
+        r"|create\s+(?:a\s+)?(?:table|datastore|dataset|database|spreadsheet|csv)"
+        r"|(?:save|store|write|add|import|insert)\s+(?:to|into|in)\s+(?:a\s+)?(?:table|datastore|dataset|database|spreadsheet|file|csv)"
+        r"|(?:make|build)\s+(?:a\s+)?(?:table|spreadsheet|csv)\s+(?:from|with|of)"
+        r"|(?:put|add)\s+(?:this|these|it|them|the\s+(?:data|results?|items?|list))\s+(?:to|into|in)"
+        # "save to datastore", "write to table"
+        r"|(?:save|write|export)\s+(?:it\s+)?(?:to|into)\s+(?:a\s+)?(?:table|datastore|file)"
+        # "just save/store", "only save/store"
+        r"|(?:just|only)\s+(?:save|store|create|write|keep)"
+        r")",
+        re.IGNORECASE,
+    )
 
     @staticmethod
     def _classify_item_extraction_mode(
@@ -620,6 +639,11 @@ class AgentScaleLoopMixin:
         "read only that page").  These override entity-name heuristics
         so that named URLs are treated as plain URLs (no research).
 
+        When ``user_input`` contains save/store/create intent signals
+        (e.g. "create a table and save this", "store to datastore"),
+        research mode is suppressed because the user wants to persist
+        already-known data, not search the web for more information.
+
         The result is stored once in ``_scale_progress["_extraction_mode"]``
         so the micro-loop knows which extraction strategy to use.
         """
@@ -643,6 +667,16 @@ class AgentScaleLoopMixin:
             AgentScaleLoopMixin._NO_EXTERNAL_FETCH_RE.search(user_input)
         ) if user_input else False
         if _user_forbids_external:
+            _action_says_fetch_only = True
+
+        # ── Check user_input for save/store/create intent ──
+        # When the user wants to persist existing data (e.g. "create a table
+        # and save this"), research mode is suppressed.  The items are already
+        # the data to store — no need to web-search each entity.
+        _user_wants_save = bool(
+            AgentScaleLoopMixin._SAVE_INTENT_RE.search(user_input)
+        ) if user_input else False
+        if _user_wants_save and not _action_says_research:
             _action_says_fetch_only = True
 
         sample = items[:10]
@@ -703,6 +737,15 @@ class AgentScaleLoopMixin:
                 return "inline"
             return "url"
         if research_count >= n * 0.5:
+            # Suppress research mode when:
+            # - User wants to save/store existing data (not research it)
+            # - per_member_action says fetch-only (without explicit research signal)
+            # In these cases the items are treated as data to be processed
+            # without web searches — falls through to "file" mode.
+            if _user_wants_save and not _action_says_research:
+                return "file"
+            if _action_says_fetch_only and not _action_says_research:
+                return "file"
             return "research"
         return "file"
 
@@ -769,13 +812,15 @@ class AgentScaleLoopMixin:
             tool_name, arg_name = self._SCALE_ITEM_EXTRACTOR[ext]
             return tool_name, {arg_name: item}
         # If the item has no path separators and no file extension it is
-        # likely a plain-text entity (company name, product, etc.).  Return
-        # web_search as a safety-net fallback for cases where this method is
-        # called outside the research-mode micro-loop path.
+        # likely a plain-text entity (company name, product, etc.).
+        # Return a no-op sentinel ("_passthrough") so the micro-loop uses
+        # the item text itself as content without triggering a web search.
+        # Web search is only used in explicit "research" extraction mode,
+        # which has its own dedicated path in the micro-loop.
         if "/" not in item and "\\" not in item:
             ext = os.path.splitext(item)[-1].lower()
             if not ext:
-                return "web_search", {"query": item}
+                return "_passthrough", {"text": item}
         # Default: plain file read
         return "read", {"path": item}
 
@@ -1367,50 +1412,78 @@ class AgentScaleLoopMixin:
             else:
                 # Standard mode: single-tool extraction (read, web_fetch, pdf_extract, etc.)
                 tool_name, tool_args = self._detect_item_extractor(item)
-                try:
-                    extract_result = await self._execute_tool_with_guard(
-                        name=tool_name,
-                        arguments=tool_args,
-                        interaction_label=f"scale_extract_{item_num}",
-                        turn_usage=turn_usage,
-                        session_policy=session_policy,
-                        task_policy=task_policy,
-                    )
-                except Exception as e:
-                    log.warning(
-                        "Scale micro-loop extract failed",
-                        item=item_label,
-                        error=str(e),
-                    )
+
+                # _passthrough: the item is a plain-text entity (not a file
+                # or URL).  Use the item text itself + any member_context as
+                # content — no external tool call needed.
+                if tool_name == "_passthrough":
+                    _member_ctx_map_pt: dict[str, str] = sp.get("_member_context", {}) if sp else {}
+                    _pt_ctx = _member_ctx_map_pt.get(item, "")
+                    if not _pt_ctx and item_label != item:
+                        _pt_ctx = _member_ctx_map_pt.get(item_label, "")
+                    extracted_content = _pt_ctx if _pt_ctx else tool_args.get("text", item)
+                    # Jump past the tool-execution block below.
+                    _t_extract_end = _time.monotonic()
+                    _extract_sec = round(_t_extract_end - _t_extract_start, 2)
+                    _extract_chars = len(extracted_content)
                     self._emit_tool_output(
                         "scale_micro_loop",
-                        {"item": item_label, "step": "extract", "tool": tool_name},
-                        f"[{item_num}/{total}] EXTRACT FAILED: {item_label}\nError: {e}",
+                        {"item": item_label, "step": "extract", "mode": _extraction_mode},
+                        f"[{item_num}/{total}] Passthrough {_extract_chars:,} chars — {item_label}",
                     )
-                    errors.append({"item": item_label, "phase": "extract", "error": str(e)})
-                    failed += 1
-                    done_items.add(item)
-                    sp["done_items"] = done_items
-                    continue
+                    # Skip the empty-content check for passthrough — the LLM
+                    # will receive the item name and any available context.
+                    if not extracted_content.strip():
+                        extracted_content = item
+                    # Skip to Step 2 (LLM call) by jumping past extract block.
+                    # We use a flag to avoid executing the tool-call block.
+                    tool_name = None  # sentinel to skip tool execution below
 
-                if not extract_result.success:
-                    log.warning(
-                        "Scale micro-loop extract error",
-                        item=item_label,
-                        error=extract_result.error,
-                    )
-                    self._emit_tool_output(
-                        "scale_micro_loop",
-                        {"item": item_label, "step": "extract", "tool": tool_name},
-                        f"[{item_num}/{total}] EXTRACT ERROR: {item_label}\nError: {extract_result.error}",
-                    )
-                    errors.append({"item": item_label, "phase": "extract", "error": extract_result.error})
-                    failed += 1
-                    done_items.add(item)
-                    sp["done_items"] = done_items
-                    continue
+                if tool_name is not None:
+                    try:
+                        extract_result = await self._execute_tool_with_guard(
+                            name=tool_name,
+                            arguments=tool_args,
+                            interaction_label=f"scale_extract_{item_num}",
+                            turn_usage=turn_usage,
+                            session_policy=session_policy,
+                            task_policy=task_policy,
+                        )
+                    except Exception as e:
+                        log.warning(
+                            "Scale micro-loop extract failed",
+                            item=item_label,
+                            error=str(e),
+                        )
+                        self._emit_tool_output(
+                            "scale_micro_loop",
+                            {"item": item_label, "step": "extract", "tool": tool_name},
+                            f"[{item_num}/{total}] EXTRACT FAILED: {item_label}\nError: {e}",
+                        )
+                        errors.append({"item": item_label, "phase": "extract", "error": str(e)})
+                        failed += 1
+                        done_items.add(item)
+                        sp["done_items"] = done_items
+                        continue
 
-                extracted_content = extract_result.content or ""
+                    if not extract_result.success:
+                        log.warning(
+                            "Scale micro-loop extract error",
+                            item=item_label,
+                            error=extract_result.error,
+                        )
+                        self._emit_tool_output(
+                            "scale_micro_loop",
+                            {"item": item_label, "step": "extract", "tool": tool_name},
+                            f"[{item_num}/{total}] EXTRACT ERROR: {item_label}\nError: {extract_result.error}",
+                        )
+                        errors.append({"item": item_label, "phase": "extract", "error": extract_result.error})
+                        failed += 1
+                        done_items.add(item)
+                        sp["done_items"] = done_items
+                        continue
+
+                    extracted_content = extract_result.content or ""
 
             _t_extract_end = _time.monotonic()
             _extract_sec = round(_t_extract_end - _t_extract_start, 2)

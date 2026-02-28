@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Deep Memory - Captain Claw</title>
+    <link rel="stylesheet" href="/static/deep-memory.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<header class="dm-header">
+    <div class="dm-header-left">
+        <a href="/" class="dm-logo-link"><img src="/static/logo.svg" width="28" height="28"></a>
+        <h1>Deep Memory</h1>
+        <span class="dm-status" id="dmStatus">
+            <span class="dm-status-dot" id="dmStatusDot"></span>
+            <span id="dmStatusText">connecting...</span>
+        </span>
+    </div>
+    <div class="dm-header-right">
+        <a href="/chat" class="dm-nav-link">&larr; Chat</a>
+    </div>
+</header>
+
+<div class="dm-layout">
+    <!-- Panel 1: Sidebar — stats + filters -->
+    <aside class="dm-sidebar" id="dmSidebar">
+        <!-- Stats card -->
+        <div class="dm-stats-card" id="dmStatsCard">
+            <div class="dm-stats-title">Collection</div>
+            <div class="dm-stats-row">
+                <span class="dm-stats-label">Name</span>
+                <span class="dm-stats-value" id="dmCollectionName">-</span>
+            </div>
+            <div class="dm-stats-row">
+                <span class="dm-stats-label">Documents</span>
+                <span class="dm-stats-value" id="dmDocCount">-</span>
+            </div>
+        </div>
+
+        <!-- Source filter -->
+        <div class="dm-filter-section">
+            <div class="dm-filter-title">Sources</div>
+            <div class="dm-filter-list" id="dmSourceFilter">
+                <div class="dm-filter-item selected" data-source="">
+                    <span class="dm-filter-label">All</span>
+                    <span class="dm-filter-count" id="dmSourceAllCount">-</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tag filter -->
+        <div class="dm-filter-section">
+            <div class="dm-filter-title">Tags</div>
+            <div class="dm-tag-list" id="dmTagFilter"></div>
+        </div>
+    </aside>
+
+    <!-- Panel 2: Document list -->
+    <aside class="dm-list-panel" id="dmListPanel">
+        <div class="dm-list-header">
+            <input type="text" class="dm-search" id="dmSearch"
+                   placeholder="Search documents..." autocomplete="off">
+            <button class="dm-add-btn" id="dmAddBtn" title="Index new document">+</button>
+        </div>
+        <div class="dm-item-list" id="dmItemList">
+            <div class="dm-loading" id="dmLoading">Loading...</div>
+        </div>
+        <div class="dm-list-footer" id="dmListFooter" style="display:none;">
+            <span id="dmResultInfo">-</span>
+        </div>
+    </aside>
+
+    <!-- Panel 3: Detail / Index form -->
+    <main class="dm-detail" id="dmDetail">
+        <!-- Empty state -->
+        <div class="dm-empty" id="dmEmpty">
+            <div class="dm-empty-icon">&#x1F4C0;</div>
+            <div class="dm-empty-text">Select a document to view its content and chunks</div>
+        </div>
+
+        <!-- Not connected state -->
+        <div class="dm-not-connected" id="dmNotConnected" style="display:none;">
+            <div class="dm-empty-icon">&#x26A0;&#xFE0F;</div>
+            <div class="dm-empty-text">Deep Memory is not connected</div>
+            <div class="dm-empty-sub" id="dmNotConnectedMsg">Check Typesense configuration in Settings.</div>
+        </div>
+
+        <!-- Document detail view -->
+        <div class="dm-detail-view" id="dmDetailView" style="display:none;">
+            <div class="dm-detail-toolbar">
+                <div class="dm-detail-title-area">
+                    <h2 class="dm-detail-title" id="dmDetailTitle"></h2>
+                    <div class="dm-detail-meta" id="dmDetailMeta"></div>
+                </div>
+                <div class="dm-detail-actions">
+                    <button class="dm-btn danger" id="dmDeleteBtn">Delete</button>
+                </div>
+            </div>
+            <div class="dm-detail-info" id="dmDetailInfo"></div>
+            <div class="dm-chunks-area" id="dmChunksArea">
+                <div class="dm-chunks-header">
+                    <span class="dm-chunks-title">Chunks</span>
+                    <span class="dm-chunks-count" id="dmChunksCount">0</span>
+                </div>
+                <div class="dm-chunks-list" id="dmChunksList"></div>
+            </div>
+        </div>
+
+        <!-- Index form -->
+        <div class="dm-index-form" id="dmIndexForm" style="display:none;">
+            <div class="dm-form-toolbar">
+                <h2 class="dm-form-title">Index New Document</h2>
+                <div class="dm-form-actions">
+                    <button class="dm-btn secondary" id="dmIndexCancel">Cancel</button>
+                    <button class="dm-btn primary" id="dmIndexSubmit">Index</button>
+                </div>
+            </div>
+            <div class="dm-form-fields">
+                <div class="dm-form-group">
+                    <label class="dm-form-label">Text <span class="required">*</span></label>
+                    <textarea class="dm-textarea" id="dmIndexText" rows="10"
+                              placeholder="Paste or type text content to index..."></textarea>
+                </div>
+                <div class="dm-form-row">
+                    <div class="dm-form-group dm-form-half">
+                        <label class="dm-form-label">Source</label>
+                        <input class="dm-input" id="dmIndexSource" type="text"
+                               placeholder="manual" value="manual">
+                    </div>
+                    <div class="dm-form-group dm-form-half">
+                        <label class="dm-form-label">Reference</label>
+                        <input class="dm-input" id="dmIndexRef" type="text"
+                               placeholder="URL, file path, or label...">
+                    </div>
+                </div>
+                <div class="dm-form-group">
+                    <label class="dm-form-label">Tags</label>
+                    <input class="dm-input" id="dmIndexTags" type="text"
+                           placeholder="Comma-separated tags...">
+                </div>
+            </div>
+        </div>
+    </main>
+</div>
+
+<!-- Delete confirmation modal -->
+<div class="dm-modal-overlay" id="dmModalOverlay" style="display:none;">
+    <div class="dm-modal">
+        <div class="dm-modal-title">Confirm Delete</div>
+        <div class="dm-modal-body" id="dmModalBody">
+            Are you sure you want to delete this document and all its chunks?
+        </div>
+        <div class="dm-modal-actions">
+            <button class="dm-btn secondary" id="dmModalCancel">Cancel</button>
+            <button class="dm-btn danger" id="dmModalConfirm">Delete</button>
+        </div>
+    </div>
+</div>
+
+<!-- Toast notification -->
+<div class="dm-toast" id="dmToast"></div>
+
+<script src="/static/deep-memory.js"></script>
+</body>
+</html>

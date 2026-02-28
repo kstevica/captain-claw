@@ -49,6 +49,9 @@
                     <span class="pane-title">Chat</span>
                     <span class="pane-hint" id="chatCount">0 messages</span>
                 </div>
+                <div id="dropOverlay" class="drop-overlay hidden">
+                    <div class="drop-overlay-text">Drop CSV or XLSX to import into datastore</div>
+                </div>
                 <div id="chatMessages" class="messages-area">
                     <div class="empty-state" id="chatEmpty">
                         <div class="empty-icon">&#x1F980;</div>
@@ -96,6 +99,8 @@
                     autocomplete="off"
                     spellcheck="true"></textarea>
                 <div class="input-buttons">
+                    <input type="file" id="fileInput" accept=".csv,.xlsx" style="display:none" />
+                    <button class="icon-btn upload-btn" id="uploadBtn" title="Upload CSV/XLSX to datastore">&#x1F4CE;</button>
                     <button class="icon-btn send-btn" id="sendBtn" title="Send message (Enter)">&#x27A4;</button>
                     <button class="icon-btn stop-btn" id="stopBtn" title="Stop processing (Esc)" style="display:none;">&#x25A0;</button>
                     <button class="icon-btn" id="paletteBtn" title="Command palette (Ctrl+K)">&#x2318;K</button>

@@ -612,6 +612,34 @@ class WebServer:
         from captain_claw.web.static_pages import serve_memory
         return await serve_memory(self, request)
 
+    async def _serve_deep_memory(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_deep_memory
+        return await serve_deep_memory(self, request)
+
+    async def _dm_status(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_deep_memory import get_status
+        return await get_status(self, request)
+
+    async def _dm_documents(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_deep_memory import list_documents
+        return await list_documents(self, request)
+
+    async def _dm_document_detail(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_deep_memory import get_document
+        return await get_document(self, request)
+
+    async def _dm_document_delete(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_deep_memory import delete_document
+        return await delete_document(self, request)
+
+    async def _dm_facets(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_deep_memory import get_facets
+        return await get_facets(self, request)
+
+    async def _dm_index(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_deep_memory import index_document
+        return await index_document(self, request)
+
     async def _serve_settings(self, request: web.Request) -> web.FileResponse:
         from captain_claw.web.static_pages import serve_settings
         return await serve_settings(self, request)
@@ -689,6 +717,10 @@ class WebServer:
         from captain_claw.web.rest_datastore import remove_protection
         return await remove_protection(self, request)
 
+    async def _ds_upload_and_import(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_datastore import upload_and_import
+        return await upload_and_import(self, request)
+
     # Onboarding REST
     async def _get_onboarding_status(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_onboarding import get_onboarding_status
@@ -742,7 +774,7 @@ class WebServer:
     # ── App setup ────────────────────────────────────────────────────
 
     def create_app(self) -> web.Application:
-        app = web.Application()
+        app = web.Application(client_max_size=50 * 1024 * 1024)  # 50 MB for file uploads
         app.router.add_get("/ws", self.ws_handler)
         app.router.add_get("/api/instructions", self.list_instructions)
         app.router.add_get("/api/instructions/{name}", self.get_instruction)
@@ -830,6 +862,14 @@ class WebServer:
         app.router.add_get("/api/datastore/tables/{name}/protections", self._ds_list_protections)
         app.router.add_post("/api/datastore/tables/{name}/protections", self._ds_add_protection)
         app.router.add_delete("/api/datastore/tables/{name}/protections", self._ds_remove_protection)
+        app.router.add_post("/api/datastore/upload", self._ds_upload_and_import)
+        # Deep memory (Typesense) API
+        app.router.add_get("/api/deep-memory/status", self._dm_status)
+        app.router.add_get("/api/deep-memory/facets", self._dm_facets)
+        app.router.add_get("/api/deep-memory/documents", self._dm_documents)
+        app.router.add_get("/api/deep-memory/documents/{doc_id}", self._dm_document_detail)
+        app.router.add_delete("/api/deep-memory/documents/{doc_id}", self._dm_document_delete)
+        app.router.add_post("/api/deep-memory/index", self._dm_index)
         if self.config.web.api_enabled and self._api_pool:
             app.router.add_post("/v1/chat/completions", self._api_chat_completions)
             app.router.add_get("/v1/models", self._api_list_models)
@@ -850,6 +890,7 @@ class WebServer:
             app.router.add_get("/workflows", self._serve_workflows)
             app.router.add_get("/loop-runner", self._serve_loop_runner)
             app.router.add_get("/memory", self._serve_memory)
+            app.router.add_get("/deep-memory", self._serve_deep_memory)
             app.router.add_get("/settings", self._serve_settings)
             app.router.add_get("/sessions", self._serve_sessions)
             app.router.add_get("/files", self._serve_files)

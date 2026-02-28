@@ -704,6 +704,12 @@ class AgentScaleDetectionMixin:
         if _out_strategy == "no_file":
             progress["_sink_collection"] = ""
             progress["_sink_email_to"] = ""
+        log.info(
+            "Scale progress initialized",
+            total=len(members),
+            extraction_mode=progress["_extraction_mode"],
+            output_strategy=_out_strategy,
+        )
         return progress
 
     # ------------------------------------------------------------------

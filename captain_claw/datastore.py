@@ -1031,6 +1031,140 @@ class DatastoreManager:
             "total": len(rows),
         }
 
+    # ── import helpers (upload flow) ─────────────────────────────────
+
+    async def parse_headers(self, file_path: Path, file_type: str) -> list[str]:
+        """Extract normalised column headers from a CSV or XLSX file.
+
+        Returns safe-named header strings (fast — reads only the first row).
+        """
+        if file_type == "csv":
+            with open(file_path, encoding="utf-8", errors="replace") as f:
+                reader = csv.reader(f)
+                raw = next(reader, None)
+            if not raw:
+                raise ValueError("CSV file has no headers")
+            return [self._safe_name(h) for h in raw if h.strip()]
+        if file_type == "xlsx":
+            headers, _ = self._parse_xlsx(file_path)
+            if not headers:
+                raise ValueError("XLSX file has no data")
+            return [self._safe_name(h) for h in headers if h.strip()]
+        raise ValueError(f"Unsupported file type: {file_type}")
+
+    async def find_matching_table(
+        self, file_headers: list[str], file_stem: str,
+    ) -> dict[str, Any] | None:
+        """Find an existing table that matches the file by name or column overlap.
+
+        Uses Jaccard similarity on column names plus a bonus for exact name
+        match.  Returns ``None`` if no table exceeds the threshold.
+        """
+        tables = await self.list_tables()
+        if not tables:
+            return None
+
+        safe_stem = self._safe_name(file_stem)
+        file_set = set(file_headers)
+        best: dict[str, Any] | None = None
+        best_score = 0.0
+
+        for t in tables:
+            table_cols = {c.name for c in t.columns}
+            intersection = file_set & table_cols
+            union = file_set | table_cols
+            jaccard = len(intersection) / len(union) if union else 0.0
+
+            is_name_match = t.name == safe_stem
+            score = jaccard + (0.3 if is_name_match else 0.0)
+
+            if score > best_score:
+                best_score = score
+                best = {
+                    "name": t.name,
+                    "match_type": "exact_name" if is_name_match else "column_overlap",
+                    "score": round(min(jaccard, 1.0), 3),
+                    "matched_columns": sorted(intersection),
+                    "unmatched_file_cols": sorted(file_set - table_cols),
+                    "unmatched_table_cols": sorted(table_cols - file_set),
+                    "table_columns": [c.name for c in t.columns],
+                    "row_count": t.row_count,
+                }
+
+        if best:
+            if best["match_type"] == "exact_name" and best["score"] > 0:
+                return best
+            if best["score"] >= 0.7:
+                return best
+        return None
+
+    async def import_to_existing_table(
+        self,
+        file_path: Path,
+        file_type: str,
+        table_name: str,
+        column_mapping: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Import file data into an existing table.
+
+        *column_mapping* maps ``{file_safe_col: table_col}``.  If ``None``
+        an identity mapping on matching safe names is used.
+        """
+        if file_type == "csv":
+            text = file_path.read_text(encoding="utf-8", errors="replace")
+            reader = csv.DictReader(io.StringIO(text))
+            if not reader.fieldnames:
+                raise ValueError("CSV file has no headers")
+            raw_headers = list(reader.fieldnames)
+            all_rows_raw: list[dict[str, Any]] = list(reader)
+        elif file_type == "xlsx":
+            headers_raw, data_rows = self._parse_xlsx(file_path)
+            raw_headers = headers_raw
+            all_rows_raw = [
+                {headers_raw[i]: v for i, v in enumerate(row) if i < len(headers_raw)}
+                for row in data_rows
+            ]
+        else:
+            raise ValueError(f"Unsupported file type: {file_type}")
+
+        # Build orig→safe lookup
+        safe_map: dict[str, str] = {}  # safe_name → original header
+        for h in raw_headers:
+            safe_map[self._safe_name(h)] = h
+
+        # Resolve column mapping (identity by default)
+        if column_mapping is None:
+            # Map every safe file col that exists in the target table
+            info = await self.describe_table(table_name)
+            if info is None:
+                raise ValueError(f"Table '{table_name}' not found")
+            table_col_set = {c.name for c in info.columns}
+            column_mapping = {sc: sc for sc in safe_map if sc in table_col_set}
+
+        warnings: list[str] = []
+        skipped = [sc for sc in safe_map if sc not in column_mapping]
+        if skipped:
+            warnings.append(f"Skipped file columns not in table: {', '.join(skipped)}")
+
+        rows_to_insert: list[dict[str, Any]] = []
+        for row in all_rows_raw:
+            cleaned: dict[str, Any] = {}
+            for safe_col, orig_col in safe_map.items():
+                if safe_col in column_mapping:
+                    target = column_mapping[safe_col]
+                    val = row.get(orig_col)
+                    cleaned[target] = self._coerce_value(val)
+            if cleaned:
+                rows_to_insert.append(cleaned)
+
+        inserted = await self.insert_rows(table_name, rows_to_insert)
+        return {
+            "table": table_name,
+            "rows_imported": inserted,
+            "columns": sorted(column_mapping.values()),
+            "warnings": warnings,
+        }
+
     # ── import / export ──────────────────────────────────────────────
 
     async def import_csv(
