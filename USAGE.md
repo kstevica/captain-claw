@@ -48,10 +48,14 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [google_oauth](#google_oauth)
   - [orchestrator](#orchestrator)
   - [scale](#scale)
+  - [datastore](#datastore-1)
   - [deep_memory](#deep_memory)
 - [Guard System](#guard-system)
 - [Skills System](#skills-system)
+- [Datastore](#datastore)
+  - [Datastore Dashboard](#datastore-dashboard)
 - [Deep Memory (Typesense)](#deep-memory-typesense)
+  - [Deep Memory Dashboard](#deep-memory-dashboard)
 - [Memory and RAG](#memory-and-rag)
 - [Cross-Session Todo Memory](#cross-session-todo-memory)
 - [Cross-Session Address Book](#cross-session-address-book)
@@ -609,6 +613,46 @@ Index, search, and delete documents in deep memory (Typesense). All operations u
 
 Requires a running Typesense instance. Set the API key in `config.yaml` or via `TYPESENSE_API_KEY` env var. The tool is also used as the sink for the scale loop `no_file` output strategy when `final_action: api_call`. Indexing is routed through `DeepMemoryIndex` for proper chunking, timestamping, and embedding.
 
+### datastore
+
+Manage persistent relational data tables in a local SQLite database. Create tables, insert/update/delete rows, query with filters, run raw SELECT queries, import/export CSV or XLSX files, and manage data protection rules.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `list_tables`, `describe`, `create_table`, `drop_table`, `add_column`, `rename_column`, `drop_column`, `change_column_type`, `insert`, `update`, `update_column`, `delete`, `query`, `sql`, `import_file`, `export`, `protect`, `unprotect`, `list_protections` |
+| `table` | string | for most actions | Target table name |
+| `columns` | string | for create_table/query | For create_table: JSON array of `{"name": "col", "type": "text"}`. For query/export: comma-separated column names. |
+| `column` | string | for column actions | Column name (for add/rename/drop/change_column_type/update_column) |
+| `new_name` | string | for rename_column | New column name |
+| `col_type` | string | for add/change_column_type | Column type: `text`, `integer`, `real`, `boolean`, `date`, `datetime`, `json` |
+| `default_value` | string | no | Default value for new column (for add_column) |
+| `rows` | string | for insert | JSON array of row objects: `[{"name": "Alice", "age": 30}]` |
+| `set_values` | string | for update | JSON object of column=value pairs: `{"status": "done"}` |
+| `value` | string | for update_column | Literal value to set across matching rows |
+| `expression` | string | for update_column | SQL expression (e.g. `price * 1.1`) |
+| `where` | string | for query/update/delete | JSON filter: `{"age": {"op": ">", "value": 25}}` or equality shorthand `{"name": "Alice"}` |
+| `order_by` | string | no | Comma-separated columns for ordering (prefix with `-` for DESC) |
+| `limit` | integer | no | Max rows to return |
+| `offset` | integer | no | Rows to skip |
+| `sql_query` | string | for sql | Raw SELECT SQL query (read-only, DML blocked) |
+| `file_path` | string | for import_file | Path to CSV/XLSX file |
+| `sheet` | string | no | Sheet name for XLSX import (default: first sheet) |
+| `append` | boolean | no | Append to existing table on import |
+| `format` | string | no | Export format: `csv` (default) or `xlsx` |
+| `level` | string | for protect/unprotect | Protection level: `table`, `column`, `row`, `cell` |
+| `row_id` | integer | for row/cell protection | Row ID for row or cell-level protection |
+| `reason` | string | no | Reason for protection (optional) |
+
+**Column types:** `text`, `integer`, `real`, `boolean` (stored as 0/1), `date` (ISO date string), `datetime` (ISO datetime string), `json` (JSON-encoded string).
+
+**Where clause format:** Supports structured filters with operators (`=`, `!=`, `<`, `>`, `<=`, `>=`, `LIKE`, `NOT LIKE`, `IN`, `NOT IN`, `IS NULL`, `IS NOT NULL`) or simple equality shorthand. Example: `{"age": {"op": ">", "value": 25}, "status": "active"}`.
+
+**Raw SQL (`sql` action):** Read-only SELECT queries. DML keywords (INSERT, UPDATE, DELETE, DROP, ALTER, CREATE) are blocked. Table names are auto-rewritten to the internal `ds_` prefix. A configurable LIMIT is auto-appended.
+
+**Protection system:** Four levels prevent accidental data modification. Protected operations return `success=false` with a blocking message. See [Datastore](#datastore) for details.
+
+Enabled by default. Stored at `~/.captain-claw/datastore.db`. Table list is automatically injected into the LLM context when `datastore.inject_table_list` is true.
+
 ---
 
 ## Configuration Reference
@@ -736,6 +780,7 @@ tools:
     - contacts
     - scripts
     - apis
+    - datastore
   require_confirmation:           # tools that require user approval
     - shell
     - write
@@ -1016,6 +1061,19 @@ scale:
   lightweight_progress_min_members: 3  # activate progress indicators only
 ```
 
+### datastore
+
+```yaml
+datastore:
+  enabled: true                     # enable the relational datastore
+  path: "~/.captain-claw/datastore.db"  # SQLite database path
+  inject_table_list: true           # inject table names into LLM context
+  max_rows_per_table: 100000        # max rows allowed per table
+  max_tables: 50                    # max number of tables
+  max_query_rows: 500               # max rows returned per query
+  max_export_rows: 50000            # max rows in CSV/XLSX export
+```
+
 ### deep_memory
 
 Typesense-backed long-term archive for persistent searchable content. Deep memory is an **additional layer** on top of the SQLite-backed semantic memory — it is NOT a replacement. Content is indexed via the Typesense tool or the scale loop `no_file` sink, and searched only when the user explicitly requests it.
@@ -1170,6 +1228,155 @@ Skills are installed to `~/.captain-claw/skills/` by default.
 
 ---
 
+## Datastore
+
+Captain Claw includes a built-in relational datastore backed by a dedicated SQLite database. The agent can create tables, insert and query data, import spreadsheets, run read-only SQL, and protect data from accidental modification — all through the `datastore` tool or the web dashboard.
+
+The datastore is completely separate from the session and memory databases.
+
+### Data Types
+
+| Type | SQLite affinity | Notes |
+|---|---|---|
+| `text` | TEXT | Default type |
+| `integer` | INTEGER | Whole numbers |
+| `real` | REAL | Floating-point numbers |
+| `boolean` | INTEGER | Stored as 0/1 |
+| `date` | TEXT | ISO date string (e.g. `2026-02-28`) |
+| `datetime` | TEXT | ISO datetime string (e.g. `2026-02-28T14:30:00Z`) |
+| `json` | TEXT | JSON-encoded string |
+
+### Table Management
+
+Tables are created, modified, and dropped via the `datastore` tool:
+
+- **`create_table`** — define table name and column definitions as JSON
+- **`describe`** — inspect a table's schema, row count, and timestamps
+- **`drop_table`** — remove a table and all its data (blocked if protected)
+- **`add_column`** / **`rename_column`** / **`drop_column`** / **`change_column_type`** — schema mutations
+
+All table names are sanitized to `[a-z0-9_]` and internally prefixed with `ds_` to avoid clashing with metadata tables.
+
+### CRUD Operations
+
+- **`insert`** — insert one or more rows as JSON objects
+- **`update`** — update rows matching a WHERE filter with new values
+- **`update_column`** — set a column to a literal value or SQL expression across matching rows
+- **`delete`** — delete rows matching a WHERE filter
+- **`query`** — select rows with optional column selection, WHERE filters, ORDER BY, LIMIT, and OFFSET
+
+**WHERE clause format:**
+
+```json
+{
+  "age": {"op": ">", "value": 25},
+  "status": "active",
+  "name": {"op": "LIKE", "value": "%smith%"}
+}
+```
+
+Simple equality uses `{"column": "value"}` shorthand. Structured filters support operators: `=`, `!=`, `<`, `>`, `<=`, `>=`, `LIKE`, `NOT LIKE`, `IN`, `NOT IN`, `IS NULL`, `IS NOT NULL`.
+
+### Raw SQL Queries
+
+The `sql` action executes read-only SELECT queries:
+
+- DML keywords (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `CREATE`) are blocked
+- Table names in the query are auto-rewritten to the internal `ds_` prefix
+- A configurable LIMIT is auto-appended (default: `max_query_rows: 500`)
+
+### Import and Export
+
+**Import** (`import_file` action):
+- Supports CSV and XLSX files
+- Auto-detects column names from headers
+- Creates a new table or appends to an existing one (`append: true`)
+- XLSX import supports sheet selection
+
+**Export** (`export` action):
+- Formats: `csv` (default) or `xlsx`
+- Respects `max_export_rows` limit (default: 50,000)
+- Files saved to the session output directory
+
+The web dashboard also supports drag-and-drop CSV/XLSX upload with automatic table matching — if an uploaded file's headers closely match an existing table, rows are appended automatically.
+
+### Protection System
+
+The datastore includes a four-level protection system that prevents accidental modification of important data:
+
+| Level | Scope | What it protects |
+|---|---|---|
+| `table` | Entire table | Blocks drop, insert, update, delete, schema changes |
+| `column` | Single column | Blocks drop, rename, type change, updates to that column |
+| `row` | Single row (by `_id`) | Blocks update and delete of that row |
+| `cell` | Single cell (row + column) | Blocks update of that specific cell |
+
+**Commands:**
+- **`protect`** — add a protection rule with an optional reason
+- **`unprotect`** — remove a protection rule
+- **`list_protections`** — show all active protections for a table
+
+When a protected operation is attempted, the tool returns `success=false` with a `BLOCKED` message instructing the agent to inform the user. Protections must be explicitly removed before the data can be modified.
+
+### Context Injection
+
+When `datastore.inject_table_list` is enabled (default: `true`), the agent receives a compact summary of all datastore tables at the start of each turn. This allows the agent to know what tables exist and suggest relevant queries without the user having to list them.
+
+### Configuration
+
+```yaml
+datastore:
+  enabled: true                     # enable the relational datastore
+  path: "~/.captain-claw/datastore.db"  # SQLite database path
+  inject_table_list: true           # inject table names into LLM context
+  max_rows_per_table: 100000        # max rows allowed per table
+  max_tables: 50                    # max number of tables
+  max_query_rows: 500               # max rows returned per query
+  max_export_rows: 50000            # max rows in CSV/XLSX export
+```
+
+### Datastore Dashboard
+
+The web UI includes a Datastore dashboard at `/datastore` (also linked from the homepage). It provides a visual interface for browsing tables, editing data, running SQL queries, and uploading files.
+
+**Layout:**
+
+| Panel | Content |
+|---|---|
+| **Sidebar** (left) | Table list with row counts, create table button |
+| **Main area** (right) | Table view with paginated rows, column headers with types, inline editing |
+
+**Features:**
+- **Table browser** — click any table to view its schema and rows
+- **Row pagination** — configurable page size with offset navigation
+- **Inline editing** — add, update, and delete rows through the UI
+- **Schema management** — add and drop columns, create and drop tables
+- **SQL console** — run raw SELECT queries with tabular results
+- **File upload** — drag-and-drop CSV/XLSX import with automatic table matching
+- **Protection management** — view, add, and remove protection rules per table
+
+**REST API endpoints** (used by the dashboard):
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/datastore/tables` | List all tables with schema and row counts |
+| `POST` | `/api/datastore/tables` | Create a new table |
+| `GET` | `/api/datastore/tables/{name}` | Describe a single table |
+| `DELETE` | `/api/datastore/tables/{name}` | Drop a table |
+| `GET` | `/api/datastore/tables/{name}/rows` | Query rows with pagination, filtering, and ordering |
+| `POST` | `/api/datastore/tables/{name}/rows` | Insert rows |
+| `PATCH` | `/api/datastore/tables/{name}/rows` | Update rows matching a WHERE filter |
+| `DELETE` | `/api/datastore/tables/{name}/rows` | Delete rows matching a WHERE filter |
+| `POST` | `/api/datastore/tables/{name}/columns` | Add a column |
+| `DELETE` | `/api/datastore/tables/{name}/columns/{col}` | Drop a column |
+| `POST` | `/api/datastore/sql` | Execute a raw SELECT query |
+| `GET` | `/api/datastore/tables/{name}/protections` | List protections for a table |
+| `POST` | `/api/datastore/tables/{name}/protections` | Add a protection rule |
+| `DELETE` | `/api/datastore/tables/{name}/protections` | Remove a protection rule |
+| `POST` | `/api/datastore/upload` | Upload and import a CSV/XLSX file |
+
+---
+
 ## Deep Memory (Typesense)
 
 Captain Claw has two memory layers:
@@ -1225,6 +1432,38 @@ User prompt → list-task planner → scale loop → micro-loop → Typesense si
 ```
 
 Each processed item is indexed as a document with `source: "scale_loop"`, `reference: <item_label>`, and the processed text as `text`.
+
+### Deep Memory Dashboard
+
+The web UI includes a dedicated Deep Memory dashboard at `/deep-memory` (also linked from the homepage). It provides a visual interface for browsing, searching, and managing all content in the Typesense-backed archive.
+
+**Three-panel layout:**
+
+| Panel | Content |
+|---|---|
+| **Sidebar** (left) | Collection stats (name, document count), source filter list, tag filter chips |
+| **Document list** (middle) | Search bar with debounced input, scrollable document list with source badges, chunk counts, tags, and relative timestamps. Scroll pagination loads more results automatically. |
+| **Detail view** (right) | Document metadata (ID, source, path, tags, last updated), all chunks displayed in monospace with chunk index and line range badges. Delete button with confirmation modal. |
+
+**Features:**
+- **Connection status** — header indicator shows Typesense connectivity (green dot = connected, red = disconnected)
+- **Full-text search** — debounced 300ms search across all indexed content
+- **Source filtering** — click a source in the sidebar (manual, web_fetch, pdf, scale, etc.) to filter the document list
+- **Tag filtering** — click tag chips to filter by tag; click again to deselect
+- **Document detail** — click any document to view all its chunks with full text content
+- **Delete** — remove a document and all its chunks with a confirmation modal
+- **Manual indexing** — click "+" to open the index form: paste text, set source, reference, and tags, then submit to index directly into Typesense
+
+**REST API endpoints** (used by the dashboard):
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/deep-memory/status` | Typesense connectivity and collection stats |
+| `GET` | `/api/deep-memory/documents` | List documents grouped by `doc_id` with search, source/tag filters, pagination |
+| `GET` | `/api/deep-memory/documents/{doc_id}` | Get all chunks for a specific document |
+| `DELETE` | `/api/deep-memory/documents/{doc_id}` | Delete a document and all its chunks |
+| `GET` | `/api/deep-memory/facets` | Source and tag facet values for filter dropdowns |
+| `POST` | `/api/deep-memory/index` | Index a new document manually (auto-chunked) |
 
 ---
 
@@ -1642,6 +1881,25 @@ The web UI launches by default at `http://127.0.0.1:23080`. To disable it, set `
 - **Tool approvals:** Modal dialog appears when a guard requires approval
 - **Session replay:** Full history replayed on connect/reconnect
 - **Resize handle:** Drag the divider between chat and monitor panes
+
+### Dashboard Pages
+
+The homepage at `/` provides card-based navigation to all dashboard pages:
+
+| Page | Path | Description |
+|---|---|---|
+| Chat | `/chat` | Interactive conversation with the agent |
+| Sessions | `/sessions` | Browse and manage all conversation sessions |
+| Orchestrator | `/orchestrator` | Parallel DAG task execution with real-time monitoring |
+| Instructions | `/instructions` | Browse and edit instruction templates |
+| Cron | `/cron` | Schedule and monitor recurring tasks |
+| Workflows | `/workflows` | Browse saved workflows and execution outputs |
+| Loop Runner | `/loop-runner` | Execute workflows with variable iteration |
+| Memory | `/memory` | Browse to-dos, contacts, scripts, and API registrations |
+| Deep Memory | `/deep-memory` | Browse and search Typesense-backed long-term archive |
+| Datastore | `/datastore` | Browse and manage structured data tables |
+| Files | `/files` | Browse agent-created files and download outputs |
+| Settings | `/settings` | Configure models, tools, and system options |
 
 ### Configuration
 

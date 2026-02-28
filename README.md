@@ -18,15 +18,16 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Per-session model selection | Keep one session on Claude, another on GPT, another on Ollama |
 | Persistent multi-session workflows | Resume any session exactly where you left off |
 | Built-in safety guards | Input, output, and script/tool checks before anything runs |
-| 21 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, Google Drive/Calendar/Gmail, todo, contacts, scripts, APIs, deep memory |
+| 22 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, Google Drive/Calendar/Gmail, todo, contacts, scripts, APIs, datastore, deep memory |
 | Skills system | OpenClaw-compatible skills with auto-discovery and GitHub install |
 | Orchestrator / DAG mode | Decompose complex tasks into parallel multi-session execution |
 | Memory / RAG | Hybrid vector + text retrieval across workspace and sessions |
-| Web UI | Chat, monitor pane, instruction editor, command palette |
+| Web UI | Chat, monitor pane, instruction editor, command palette, datastore browser, deep memory dashboard |
 | Remote integrations | Telegram, Slack, Discord with secure pairing |
 | Cross-session to-do memory | Persistent task list shared across sessions with auto-capture |
 | Cross-session script memory | Persistent script/file tracking with auto-capture from write tool |
 | Cross-session API memory | Persistent API endpoint tracking with auto-capture from web_fetch |
+| Datastore | SQLite-backed relational tables managed by the agent, with protection rules, import/export, and web dashboard |
 | Cron scheduling | Interval, daily, and weekly tasks inside the runtime |
 | OpenAI-compatible API | `POST /v1/chat/completions` proxy with agent pool |
 
@@ -104,7 +105,7 @@ Sessions are first-class. Create named sessions for separate projects, switch in
 
 ### Tools
 
-Captain Claw ships with 21 built-in tools. The agent picks the right tool for each task automatically.
+Captain Claw ships with 22 built-in tools. The agent picks the right tool for each task automatically.
 
 | Tool | What it does |
 |---|---|
@@ -126,6 +127,7 @@ Captain Claw ships with 21 built-in tools. The agent picks the right tool for ea
 | `contacts` | Persistent cross-session address book with auto-capture |
 | `scripts` | Persistent cross-session script/file memory with auto-capture |
 | `apis` | Persistent cross-session API memory with auto-capture |
+| `datastore` | Manage relational data tables with CRUD, import/export, raw SQL, and protection rules |
 | `typesense` | Index, search, and manage documents in deep memory (Typesense) |
 
 See [USAGE.md](USAGE.md#tools-reference) for full parameters and configuration.
@@ -166,7 +168,8 @@ tools:
   enabled: ["shell", "read", "write", "glob", "web_fetch", "web_search",
             "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract",
             "pocket_tts", "send_mail", "google_drive", "google_calendar",
-            "google_mail", "todo", "contacts", "scripts", "apis"]
+            "google_mail", "todo", "contacts", "scripts", "apis",
+            "datastore"]
 
 web:
   enabled: true
@@ -209,7 +212,9 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 
 - **[Google Mail (Gmail)](USAGE.md#tools-reference)** — Read-only Gmail access — search, read messages, browse threads and labels. No send/modify/delete scope required.
 
-- **[Deep Memory (Typesense)](USAGE.md#deep-memory-typesense)** — Long-term searchable archive backed by Typesense. Indexes processed items from the scale loop, web fetches, and manual input. Hybrid keyword + vector search. Separate from the SQLite-backed semantic memory.
+- **[Datastore](USAGE.md#datastore)** — SQLite-backed relational data tables managed entirely by the agent. 19 tool actions cover schema management, CRUD operations, raw SELECT queries, CSV/XLSX import and export, and a four-level protection system (table, column, row, cell). Includes a [web dashboard](USAGE.md#datastore-dashboard) for browsing tables, editing rows, running SQL, and uploading files.
+
+- **[Deep Memory (Typesense)](USAGE.md#deep-memory-typesense)** — Long-term searchable archive backed by Typesense. Indexes processed items from the scale loop, web fetches, and manual input. Hybrid keyword + vector search. Separate from the SQLite-backed semantic memory. Includes a [web dashboard](USAGE.md#deep-memory-dashboard) for browsing, searching, and managing indexed documents.
 
 - **[Send mail](USAGE.md#send-mail)** — SMTP, Mailgun, or SendGrid. Supports attachments up to 25 MB.
 
@@ -233,11 +238,12 @@ ruff check captain_claw/
 |---|---|
 | `captain_claw/agent.py` | Main orchestration logic |
 | `captain_claw/llm/` | Provider abstraction (OpenAI, Anthropic, Gemini, Ollama) |
-| `captain_claw/tools/` | Tool registry and 21 tool implementations |
+| `captain_claw/tools/` | Tool registry and 22 tool implementations |
 | `captain_claw/session/` | SQLite-backed session persistence |
 | `captain_claw/skills.py` | Skill discovery, loading, and invocation |
 | `captain_claw/session_orchestrator.py` | Parallel multi-session DAG orchestrator |
 | `captain_claw/semantic_memory.py` | Hybrid vector + text retrieval (RAG) |
+| `captain_claw/datastore.py` | SQLite-backed relational datastore |
 | `captain_claw/deep_memory.py` | Typesense-backed long-term archive |
 | `captain_claw/google_oauth_manager.py` | Google OAuth token management |
 | `captain_claw/cli.py` | Terminal UI |
