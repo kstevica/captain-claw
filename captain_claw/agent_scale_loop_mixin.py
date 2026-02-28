@@ -257,6 +257,10 @@ class AgentScaleLoopMixin:
         sp = getattr(self, "_scale_progress", None)
         if sp is None:
             return None
+        # Passthrough mode: the main LLM handles items directly — don't
+        # intercept its tool calls with scale guard redirects.
+        if str(sp.get("_extraction_mode", "")).strip() == "passthrough":
+            return None
         items: list[str] = sp.get("items", [])
         if not items:
             return None
@@ -418,6 +422,12 @@ class AgentScaleLoopMixin:
             return ""
         items: list[str] = sp.get("items", [])
         if not items:
+            return ""
+        # Passthrough mode: the main LLM handles items directly (e.g.
+        # datastore tool calls) — don't inject the scale progress note
+        # as it would confuse the LLM into thinking it should follow the
+        # scale extract→write pattern.
+        if str(sp.get("_extraction_mode", "")).strip() == "passthrough":
             return ""
         done_items: set[str] = sp.get("done_items", set())
         total = len(items)
@@ -592,10 +602,13 @@ class AgentScaleLoopMixin:
         r"(?:"
         # "save this/these/it/them", "store this", "create a table"
         r"(?:save|store|persist|keep|insert|put)\s+(?:this|these|it|them|the\s+(?:data|results?|items?|list|info))"
-        r"|create\s+(?:a\s+)?(?:table|datastore|dataset|database|spreadsheet|csv)"
+        # "create a [optional words] table" — allows "create a shopping list table"
+        r"|create\s+(?:a\s+)?(?:\w+\s+){0,3}(?:table|datastore|dataset|database|spreadsheet|csv)"
         r"|(?:save|store|write|add|import|insert)\s+(?:to|into|in)\s+(?:a\s+)?(?:table|datastore|dataset|database|spreadsheet|file|csv)"
-        r"|(?:make|build)\s+(?:a\s+)?(?:table|spreadsheet|csv)\s+(?:from|with|of)"
-        r"|(?:put|add)\s+(?:this|these|it|them|the\s+(?:data|results?|items?|list))\s+(?:to|into|in)"
+        # "make/build a [optional words] table from/with/of"
+        r"|(?:make|build)\s+(?:a\s+)?(?:\w+\s+){0,3}(?:table|spreadsheet|csv)\s+(?:from|with|of)"
+        # "put/add this/these [optional words] to/into/in" — allows "add these items to it"
+        r"|(?:put|add)\s+(?:this|these|it|them|the\s+(?:data|results?|items?|list))(?:\s+\w+){0,3}\s+(?:to|into|in)\b"
         # "save to datastore", "write to table"
         r"|(?:save|write|export)\s+(?:it\s+)?(?:to|into)\s+(?:a\s+)?(?:table|datastore|file)"
         # "just save/store", "only save/store"
@@ -613,14 +626,18 @@ class AgentScaleLoopMixin:
         """Classify list items into an extraction mode.
 
         Samples up to 10 items and votes:
-        - ``"url"``      — majority are pure HTTP(S) URLs (no name prefix),
+        - ``"url"``         — majority are pure HTTP(S) URLs (no name prefix),
           OR labelled URLs where the prefix is a date/metadata label
-        - ``"inline"``   — same as ``"url"`` but the user explicitly forbade
+        - ``"inline"``      — same as ``"url"`` but the user explicitly forbade
           external fetching; each item is processed using only the
           ``_member_context`` snippet from the already-fetched page
-        - ``"file"``     — majority contain path separators or known extensions
-        - ``"research"`` — majority are plain-text entities (names, titles),
+        - ``"file"``        — majority contain path separators or known extensions
+        - ``"research"``    — majority are plain-text entities (names, titles),
           OR entities with accompanying URLs (``"Name — https://…"``)
+        - ``"passthrough"`` — plain-text entities where the user wants to
+          save/store them (e.g. "create a table and add these items").
+          The micro-loop is skipped and the main LLM handles the items
+          directly with tool calls (datastore, todo, etc.).
 
         Items that have BOTH a text prefix and an embedded URL are examined
         further: if the prefix is a date, numeric label, or metadata tag
@@ -741,9 +758,12 @@ class AgentScaleLoopMixin:
             # - User wants to save/store existing data (not research it)
             # - per_member_action says fetch-only (without explicit research signal)
             # In these cases the items are treated as data to be processed
-            # without web searches — falls through to "file" mode.
+            # without web searches.
+            # When save intent is detected, return "passthrough" so the
+            # micro-loop is skipped entirely and the main LLM handles the
+            # items directly (e.g. via datastore tool calls).
             if _user_wants_save and not _action_says_research:
-                return "file"
+                return "passthrough"
             if _action_says_fetch_only and not _action_says_research:
                 return "file"
             return "research"
@@ -2011,6 +2031,11 @@ class AgentScaleLoopMixin:
         # Do NOT take over when all items are just the source URL repeated.
         # This means the real list members haven't been extracted yet.
         if self._items_are_source_urls_only(items):
+            return False
+        # Do NOT take over when extraction mode is "passthrough" — the
+        # user wants to save/store items (e.g. create a datastore table)
+        # and the main LLM should handle it directly with tool calls.
+        if str(sp.get("_extraction_mode", "")).strip() == "passthrough":
             return False
 
         output_strategy = str(sp.get("_output_strategy", "single_file")).strip().lower()

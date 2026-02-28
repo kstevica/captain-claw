@@ -442,10 +442,18 @@ class AgentOrchestrationMixin:
         # ── Early micro-loop takeover ─────────────────────────────
         _sp_early = getattr(self, "_scale_progress", None)
         _early_items = _sp_early.get("items", []) if _sp_early else []
+        # Skip micro-loop when extraction mode is "passthrough" — the user
+        # wants to save/store items (e.g. create a datastore table) and the
+        # main LLM should handle it directly with tool calls.
+        _early_passthrough = (
+            _sp_early is not None
+            and str(_sp_early.get("_extraction_mode", "")).strip() == "passthrough"
+        )
         _can_early_takeover = (
             _sp_early is not None
             and len(_early_items) >= 2
             and not self._items_are_source_urls_only(_early_items)
+            and not _early_passthrough
         )
         if _can_early_takeover:
             log.info("Early scale micro-loop takeover", items=len(_early_items))
@@ -772,12 +780,18 @@ class AgentOrchestrationMixin:
                     # If deferred init populated REAL items (not just source
                     # URLs), enter micro-loop.  The source-URL guard prevents
                     # entering the micro-loop with the article URL repeated.
+                    # Skip when extraction mode is "passthrough" (save/store intent).
                     _sp_deferred = getattr(self, "_scale_progress", None)
                     _deferred_items = _sp_deferred.get("items", []) if _sp_deferred else []
+                    _deferred_passthrough = (
+                        _sp_deferred is not None
+                        and str(_sp_deferred.get("_extraction_mode", "")).strip() == "passthrough"
+                    )
                     if (
                         _sp_deferred is not None
                         and len(_deferred_items) >= 2
                         and not self._items_are_source_urls_only(_deferred_items)
+                        and not _deferred_passthrough
                     ):
                         micro_result = await self._run_micro_loop_and_summarize(
                             effective_user_input=effective_user_input,
@@ -880,10 +894,15 @@ class AgentOrchestrationMixin:
                     )
                     _sp_deferred2 = getattr(self, "_scale_progress", None)
                     _deferred_items2 = _sp_deferred2.get("items", []) if _sp_deferred2 else []
+                    _deferred_passthrough2 = (
+                        _sp_deferred2 is not None
+                        and str(_sp_deferred2.get("_extraction_mode", "")).strip() == "passthrough"
+                    )
                     if (
                         _sp_deferred2 is not None
                         and len(_deferred_items2) >= 2
                         and not self._items_are_source_urls_only(_deferred_items2)
+                        and not _deferred_passthrough2
                     ):
                         micro_result = await self._run_micro_loop_and_summarize(
                             effective_user_input=effective_user_input,
