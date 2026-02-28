@@ -721,6 +721,10 @@ class WebServer:
         from captain_claw.web.rest_datastore import upload_and_import
         return await upload_and_import(self, request)
 
+    async def _ds_export_table(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_datastore import export_table
+        return await export_table(self, request)
+
     # Onboarding REST
     async def _get_onboarding_status(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_onboarding import get_onboarding_status
@@ -850,6 +854,7 @@ class WebServer:
         # Datastore
         app.router.add_get("/api/datastore/tables", self._ds_list_tables)
         app.router.add_post("/api/datastore/tables", self._ds_create_table)
+        app.router.add_get("/api/datastore/tables/{name}/export", self._ds_export_table)
         app.router.add_get("/api/datastore/tables/{name}", self._ds_describe_table)
         app.router.add_delete("/api/datastore/tables/{name}", self._ds_drop_table)
         app.router.add_get("/api/datastore/tables/{name}/rows", self._ds_query_rows)

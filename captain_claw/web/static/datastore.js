@@ -56,6 +56,21 @@
         $('dsAddColBtn').addEventListener('click', showAddColumnModal);
         $('dsProtectionsBtn').addEventListener('click', showProtectionsModal);
         $('dsProtectionsClose').addEventListener('click', function () { hideModal('dsProtectionsModal'); });
+
+        // Export dropdown
+        $('dsExportBtn').addEventListener('click', function (e) {
+            e.stopPropagation();
+            $('dsExportMenu').classList.toggle('open');
+        });
+        document.querySelectorAll('#dsExportMenu .ds-dropdown-item').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                $('dsExportMenu').classList.remove('open');
+                exportTable(btn.dataset.format);
+            });
+        });
+        document.addEventListener('click', function () {
+            $('dsExportMenu').classList.remove('open');
+        });
         $('dsProtTableCheck').addEventListener('change', onToggleTableProtection);
 
         // Tabs
@@ -1061,6 +1076,19 @@
 
             listEl.appendChild(row);
         });
+    }
+
+    // ── Export ────────────────────────────────────────────────────────
+
+    function exportTable(format) {
+        if (!selectedTable) return;
+        var url = '/api/datastore/tables/' + encodeURIComponent(selectedTable.name) + '/export?format=' + format;
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = selectedTable.name + '.' + format;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
     }
 
     // ── API utility ──────────────────────────────────────────────────

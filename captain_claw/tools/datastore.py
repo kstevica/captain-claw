@@ -191,7 +191,7 @@ class DatastoreTool(Tool):
             },
             "format": {
                 "type": "string",
-                "enum": ["csv", "xlsx"],
+                "enum": ["csv", "json", "xlsx"],
                 "description": "Export format (default: csv).",
             },
             "level": {
@@ -515,7 +515,7 @@ class DatastoreTool(Tool):
             return ToolResult(success=False, error="'table' is required.")
 
         fmt = kwargs.get("format", "csv").lower()
-        if fmt not in ("csv", "xlsx"):
+        if fmt not in ("csv", "json", "xlsx"):
             return ToolResult(success=False, error=f"Unsupported format: {fmt}")
 
         columns = _parse_columns(kwargs.get("columns"))
@@ -532,6 +532,8 @@ class DatastoreTool(Tool):
 
         if fmt == "csv":
             path = await dm.export_csv(table, output_path, columns, where)
+        elif fmt == "json":
+            path = await dm.export_json(table, output_path, columns, where)
         else:
             path = await dm.export_xlsx(table, output_path, columns, where)
 

@@ -54,6 +54,14 @@
                         <button class="ds-tab" data-tab="schema" id="dsTabSchema">Schema</button>
                     </div>
                     <button class="ds-btn primary" id="dsAddRowBtn">+ Row</button>
+                    <div class="ds-dropdown" id="dsExportDropdown">
+                        <button class="ds-btn secondary" id="dsExportBtn" title="Export table">&#x2B07; Export</button>
+                        <div class="ds-dropdown-menu" id="dsExportMenu">
+                            <button class="ds-dropdown-item" data-format="csv">CSV</button>
+                            <button class="ds-dropdown-item" data-format="json">JSON</button>
+                            <button class="ds-dropdown-item" data-format="xlsx">Excel (XLSX)</button>
+                        </div>
+                    </div>
                     <button class="ds-btn secondary" id="dsProtectionsBtn" title="Manage protections">&#128274;</button>
                     <button class="ds-btn danger" id="dsDropTableBtn">Drop Table</button>
                 </div>

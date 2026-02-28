@@ -926,3 +926,41 @@ html, body {
     .ds-modal { min-width: 300px; max-width: 95vw; }
     .ds-modal-wide { min-width: 300px; max-width: 95vw; }
 }
+
+/* Export dropdown */
+.ds-dropdown {
+    position: relative;
+    display: inline-block;
+}
+.ds-dropdown-menu {
+    display: none;
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 4px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    min-width: 140px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    z-index: 100;
+    overflow: hidden;
+}
+.ds-dropdown-menu.open {
+    display: block;
+}
+.ds-dropdown-item {
+    display: block;
+    width: 100%;
+    padding: 8px 14px;
+    border: none;
+    background: none;
+    color: var(--text-primary);
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+}
+.ds-dropdown-item:hover {
+    background: var(--accent);
+    color: #fff;
+}

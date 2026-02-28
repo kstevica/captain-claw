@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 import tempfile
@@ -536,5 +538,74 @@ async def upload_and_import(server: WebServer, request: web.Request) -> web.Resp
         if tmp_path and os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+# ── Export ──────────────────────────────────────────────────────────
+
+
+async def export_table(server: WebServer, request: web.Request) -> web.Response:
+    """GET /api/datastore/tables/{name}/export?format=csv|json|xlsx"""
+    table_name = request.match_info["name"]
+    fmt = request.query.get("format", "csv").lower()
+    if fmt not in ("csv", "json", "xlsx"):
+        return web.json_response(
+            {"error": f"Unsupported format: {fmt}. Use csv, json, or xlsx."},
+            status=400,
+        )
+
+    mgr = get_datastore_manager()
+    cfg_mod = __import__("captain_claw.config", fromlist=["get_config"])
+    cfg = cfg_mod.get_config()
+
+    try:
+        result = await mgr.query(
+            table_name, limit=cfg.datastore.max_export_rows,
+        )
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+
+    columns = result["columns"]
+    rows = result["rows"]
+    filename = f"{table_name}.{fmt}"
+
+    if fmt == "csv":
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(columns)
+        writer.writerows(rows)
+        return web.Response(
+            body=buf.getvalue().encode("utf-8"),
+            content_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    if fmt == "json":
+        data = [dict(zip(columns, row)) for row in rows]
+        body = json.dumps(data, indent=2, ensure_ascii=False, default=str)
+        return web.Response(
+            body=body.encode("utf-8"),
+            content_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    # xlsx — write to temp file, read bytes, delete
+    tmp = None
+    try:
+        tmp = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+        tmp.close()
+        tmp_path = Path(tmp.name)
+        mgr._write_xlsx(tmp_path, columns, rows)
+        data_bytes = tmp_path.read_bytes()
+        return web.Response(
+            body=data_bytes,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    finally:
+        if tmp and os.path.exists(tmp.name):
+            try:
+                os.unlink(tmp.name)
             except OSError:
                 pass

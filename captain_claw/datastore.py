@@ -1284,6 +1284,23 @@ class DatastoreManager:
         self._write_xlsx(output_path, result["columns"], result["rows"])
         return output_path
 
+    async def export_json(
+        self, table_name: str, output_path: Path,
+        columns: list[str] | None = None,
+        where: dict[str, Any] | None = None,
+    ) -> Path:
+        cfg = get_config()
+        result = await self.query(
+            table_name, columns=columns, where=where,
+            limit=cfg.datastore.max_export_rows,
+        )
+        cols = result["columns"]
+        rows = [dict(zip(cols, row)) for row in result["rows"]]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(rows, f, indent=2, ensure_ascii=False, default=str)
+        return output_path
+
     # ── summary for context injection ────────────────────────────────
 
     async def get_tables_summary(self) -> list[TableInfo]:
