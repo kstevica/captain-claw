@@ -361,7 +361,7 @@ logging:
   llm_session_logging: true
 telegram:
   enabled: true
-  bot_token: 8335055432:AAF6ecJeNeWzrBEw3SaHmrRqdGAyoAvrvXQ
+  bot_token: ''
   api_base_url: https://api.telegram.org
   poll_timeout_seconds: 25
   pairing_ttl_minutes: 30
