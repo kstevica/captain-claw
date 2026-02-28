@@ -82,6 +82,21 @@ For a quick overview and installation guide, see [README.md](README.md).
 
 - Python **>= 3.11**
 
+### Install from PyPI
+
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install captain-claw
+```
+
+**Optional extras:**
+
+```bash
+pip install captain-claw[tts]      # Local text-to-speech (pocket-tts, requires PyTorch)
+pip install captain-claw[vector]   # Vector memory / RAG (numpy, scikit-learn)
+```
+
 ### Install from source
 
 ```bash
@@ -91,6 +106,8 @@ python -m venv venv
 source venv/bin/activate
 pip install -e .
 ```
+
+Optional extras work the same way from source: `pip install -e ".[tts]"` or `pip install -e ".[vector]"`.
 
 ### Development dependencies
 
@@ -104,9 +121,12 @@ pip install -e ".[dev]"
 |---|---|
 | `captain-claw` | Web UI (default) |
 | `captain-claw --tui` | Start with terminal UI |
+| `captain-claw --port <PORT>` | Override web server port |
 | `captain-claw --onboarding` | Re-run first-time setup wizard |
 | `captain-claw-web` | Web UI only (standalone entry point) |
 | `captain-claw-orchestrate` | Headless orchestrator for cron jobs and scripting |
+
+If the configured port is busy, Captain Claw automatically tries the next available port (up to 10 attempts).
 
 ---
 

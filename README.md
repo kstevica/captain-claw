@@ -64,12 +64,15 @@ Use only the keys you need. For Ollama, no key is required — just set `provide
 ### 3. Launch
 
 ```bash
-captain-claw-web   # Web UI (default: http://127.0.0.1:23080)
-captain-claw       # Interactive terminal
-captain-claw --tui # Terminal UI
+captain-claw-web          # Web UI (default: http://127.0.0.1:23080)
+captain-claw              # Interactive terminal
+captain-claw --tui        # Terminal UI
+captain-claw --port 8080  # Override web server port
 ```
 
-First run starts interactive onboarding automatically. The web UI redirects to `/onboarding` on first launch too. To re-run it later: `captain-claw --onboarding`.
+First run starts interactive onboarding automatically — it pre-configures 12 models across OpenAI, Anthropic, and Gemini (including image generation, OCR, and vision). The web UI redirects to `/onboarding` on first launch too. To re-run it later: `captain-claw --onboarding`.
+
+If the configured port is busy, Captain Claw automatically tries the next available port (up to 10 attempts).
 
 ### 4. Try it
 
