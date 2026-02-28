@@ -18,16 +18,16 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Per-session model selection | Keep one session on Claude, another on GPT, another on Ollama |
 | Persistent multi-session workflows | Resume any session exactly where you left off |
 | Built-in safety guards | Input, output, and script/tool checks before anything runs |
-| 22 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, Google Drive/Calendar/Gmail, todo, contacts, scripts, APIs, datastore, deep memory |
+| 25 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, image gen/OCR/vision, Google Drive/Calendar/Gmail, todo, contacts, scripts, APIs, datastore, deep memory |
 | Skills system | OpenClaw-compatible skills with auto-discovery and GitHub install |
 | Orchestrator / DAG mode | Decompose complex tasks into parallel multi-session execution |
 | Memory / RAG | Hybrid vector + text retrieval across workspace and sessions |
 | Web UI | Chat, monitor pane, instruction editor, command palette, datastore browser, deep memory dashboard |
-| Remote integrations | Telegram, Slack, Discord with secure pairing |
+| Remote integrations | Telegram (per-user sessions), Slack, Discord with secure pairing |
 | Cross-session to-do memory | Persistent task list shared across sessions with auto-capture |
 | Cross-session script memory | Persistent script/file tracking with auto-capture from write tool |
 | Cross-session API memory | Persistent API endpoint tracking with auto-capture from web_fetch |
-| Datastore | SQLite-backed relational tables managed by the agent, with protection rules, import/export, and web dashboard |
+| Datastore | SQLite-backed relational tables managed by the agent, with protection rules, import/export, web dashboard, and table export via UI |
 | Cron scheduling | Interval, daily, and weekly tasks inside the runtime |
 | OpenAI-compatible API | `POST /v1/chat/completions` proxy with agent pool |
 
@@ -105,7 +105,7 @@ Sessions are first-class. Create named sessions for separate projects, switch in
 
 ### Tools
 
-Captain Claw ships with 22 built-in tools. The agent picks the right tool for each task automatically.
+Captain Claw ships with 25 built-in tools. The agent picks the right tool for each task automatically.
 
 | Tool | What it does |
 |---|---|
@@ -118,6 +118,9 @@ Captain Claw ships with 22 built-in tools. The agent picks the right tool for ea
 | `docx_extract` | Extract Word documents to markdown |
 | `xlsx_extract` | Extract Excel sheets to markdown tables |
 | `pptx_extract` | Extract PowerPoint slides to markdown |
+| `image_gen` | Generate images from text prompts (DALL-E 3, gpt-image-1) |
+| `image_ocr` | Extract text from images via vision-capable LLMs |
+| `image_vision` | Analyze and describe images via vision-capable LLMs |
 | `pocket_tts` | Generate speech audio (MP3) locally |
 | `send_mail` | Send email via SMTP, Mailgun, or SendGrid |
 | `google_drive` | List, search, read, upload, and manage Google Drive files |
@@ -167,6 +170,7 @@ model:
 tools:
   enabled: ["shell", "read", "write", "glob", "web_fetch", "web_search",
             "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract",
+            "image_gen", "image_ocr", "image_vision",
             "pocket_tts", "send_mail", "google_drive", "google_calendar",
             "google_mail", "todo", "contacts", "scripts", "apis",
             "datastore"]
@@ -202,7 +206,7 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 
 - **[Execution queue](USAGE.md#execution-queue-1)** — Five queue modes (steer, followup, collect, interrupt, queue) control how follow-up messages are handled during agent execution.
 
-- **[Remote integrations](USAGE.md#remote-integrations)** — Connect Telegram, Slack, or Discord bots. Unknown users get a pairing token; the operator approves locally with `/approve user`.
+- **[Remote integrations](USAGE.md#remote-integrations)** — Connect Telegram, Slack, or Discord bots. Telegram users get isolated per-user sessions with concurrent agent execution. Unknown users get a pairing token; the operator approves locally with `/approve user`.
 
 - **[OpenAI-compatible API](USAGE.md#openai-compatible-api-proxy)** — `POST /v1/chat/completions` endpoint proxied through the Captain Claw agent pool. Streaming supported.
 
@@ -212,7 +216,7 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 
 - **[Google Mail (Gmail)](USAGE.md#tools-reference)** — Read-only Gmail access — search, read messages, browse threads and labels. No send/modify/delete scope required.
 
-- **[Datastore](USAGE.md#datastore)** — SQLite-backed relational data tables managed entirely by the agent. 19 tool actions cover schema management, CRUD operations, raw SELECT queries, CSV/XLSX import and export, and a four-level protection system (table, column, row, cell). Includes a [web dashboard](USAGE.md#datastore-dashboard) for browsing tables, editing rows, running SQL, and uploading files.
+- **[Datastore](USAGE.md#datastore)** — SQLite-backed relational data tables managed entirely by the agent. 19 tool actions cover schema management, CRUD operations, raw SELECT queries, CSV/XLSX import and export, and a four-level protection system (table, column, row, cell). Includes a [web dashboard](USAGE.md#datastore-dashboard) for browsing tables, editing rows, running SQL, uploading files, and exporting tables as CSV/XLSX/JSON.
 
 - **[Deep Memory (Typesense)](USAGE.md#deep-memory-typesense)** — Long-term searchable archive backed by Typesense. Indexes processed items from the scale loop, web fetches, and manual input. Hybrid keyword + vector search. Separate from the SQLite-backed semantic memory. Includes a [web dashboard](USAGE.md#deep-memory-dashboard) for browsing, searching, and managing indexed documents.
 
@@ -238,7 +242,7 @@ ruff check captain_claw/
 |---|---|
 | `captain_claw/agent.py` | Main orchestration logic |
 | `captain_claw/llm/` | Provider abstraction (OpenAI, Anthropic, Gemini, Ollama) |
-| `captain_claw/tools/` | Tool registry and 22 tool implementations |
+| `captain_claw/tools/` | Tool registry and 25 tool implementations |
 | `captain_claw/session/` | SQLite-backed session persistence |
 | `captain_claw/skills.py` | Skill discovery, loading, and invocation |
 | `captain_claw/session_orchestrator.py` | Parallel multi-session DAG orchestrator |

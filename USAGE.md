@@ -67,6 +67,7 @@ For a quick overview and installation guide, see [README.md](README.md).
 - [Orchestrator / DAG Mode](#orchestrator--dag-mode)
 - [Web UI](#web-ui)
 - [Remote Integrations](#remote-integrations)
+  - [Telegram: Per-User Sessions](#telegram-per-user-sessions)
 - [OpenAI-Compatible API Proxy](#openai-compatible-api-proxy)
 - [Google OAuth, Drive, Calendar, and Gmail](#google-oauth-drive-calendar-and-gmail)
 - [Send Mail](#send-mail)
@@ -425,6 +426,43 @@ Extract PowerPoint slides to markdown.
 
 Output includes `## Slide N` headers with bullet-point text.
 
+### image_gen
+
+Generate images from text prompts using an AI image model (e.g. DALL-E 3, gpt-image-1).
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `prompt` | string | yes | Text description of the image to generate |
+| `size` | string | no | Image dimensions: `1024x1024` (default), `1536x1024` (landscape), `1024x1536` (portrait) |
+| `quality` | string | no | Image quality: `auto` (default), `high`, `medium`, `low`, `hd`, `standard` |
+| `output_path` | string | no | Output path (normalized under `saved/media/<session-id>/`, saved as `.png`) |
+
+Requires a model with `model_type: "image"` in `model.allowed`. Output saved to `saved/media/<session-id>/`. Generated images are automatically sent back to Telegram users.
+
+### image_ocr
+
+Extract text from images using OCR via a vision-capable LLM.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `path` | string | yes | Path to the image file (.png, .jpg, .jpeg, .webp, .gif, .bmp) |
+| `prompt` | string | no | Instruction for the vision model (default: "Extract all text from this image.") |
+| `max_chars` | number | no | Maximum characters to return (default: 120000) |
+
+Requires a model with `model_type: "ocr"` or `"vision"` in `model.allowed`.
+
+### image_vision
+
+Analyze and describe images using a vision-capable LLM. Supports scene description, object identification, chart reading, and visual Q&A.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `path` | string | yes | Path to the image file (.png, .jpg, .jpeg, .webp, .gif, .bmp) |
+| `prompt` | string | no | Question or instruction about the image (default: "Describe this image in detail.") |
+| `max_chars` | number | no | Maximum characters to return (default: 120000) |
+
+Requires a model with `model_type: "vision"` in `model.allowed`. Telegram photo attachments are automatically processed through this tool.
+
 ### pocket_tts
 
 Generate speech audio locally and save as MP3.
@@ -691,9 +729,19 @@ model:
       model: "claude-sonnet-4-20250514"
       temperature: 0.5            # per-model override
       max_tokens: 64000           # per-model override
+    - id: "dalle"
+      provider: "openai"
+      model: "gpt-image-1"
+      model_type: "image"         # used by image_gen tool
+    - id: "gpt-vision"
+      provider: "openai"
+      model: "gpt-4o"
+      model_type: "vision"        # used by image_ocr and image_vision tools
 ```
 
 **Provider aliases:** `chatgpt` = `openai`, `claude` = `anthropic`, `google` = `gemini`.
+
+**Model types:** `llm` (default), `image` (for `image_gen`), `vision` (for `image_vision` and `image_ocr`), `ocr` (for `image_ocr` only).
 
 ### context
 
@@ -771,6 +819,9 @@ tools:
     - docx_extract
     - xlsx_extract
     - pptx_extract
+    - image_gen
+    - image_ocr
+    - image_vision
     - pocket_tts
     - send_mail
     - google_drive
@@ -807,6 +858,18 @@ tools:
     max_results: 5
     timeout: 20
     safesearch: "moderate"        # off, moderate, strict
+  image_gen:
+    timeout_seconds: 120
+    default_size: "1024x1024"     # 1024x1024, 1536x1024, 1024x1536
+    default_quality: ""           # auto, high, medium, low, hd, standard
+  image_ocr:
+    timeout_seconds: 120
+    max_chars: 120000
+    default_prompt: ""            # empty = "Extract all text from this image."
+  image_vision:
+    timeout_seconds: 120
+    max_chars: 120000
+    default_prompt: ""            # empty = "Describe this image in detail."
   pocket_tts:
     max_chars: 4000
     default_voice: ""
@@ -1353,6 +1416,7 @@ The web UI includes a Datastore dashboard at `/datastore` (also linked from the 
 - **Schema management** — add and drop columns, create and drop tables
 - **SQL console** — run raw SELECT queries with tabular results
 - **File upload** — drag-and-drop CSV/XLSX import with automatic table matching
+- **Table export** — export tables as CSV, XLSX, or JSON directly from the dashboard
 - **Protection management** — view, add, and remove protection rules per table
 
 **REST API endpoints** (used by the dashboard):
@@ -1373,6 +1437,7 @@ The web UI includes a Datastore dashboard at `/datastore` (also linked from the 
 | `GET` | `/api/datastore/tables/{name}/protections` | List protections for a table |
 | `POST` | `/api/datastore/tables/{name}/protections` | Add a protection rule |
 | `DELETE` | `/api/datastore/tables/{name}/protections` | Remove a protection rule |
+| `GET` | `/api/datastore/tables/{name}/export` | Export table as CSV, XLSX, or JSON (`?format=csv\|xlsx\|json`) |
 | `POST` | `/api/datastore/upload` | Upload and import a CSV/XLSX file |
 
 ---
@@ -1940,11 +2005,25 @@ Captain Claw can run alongside Telegram, Slack, and Discord bots.
    ```
 4. After approval, the remote user can send prompts and slash commands
 
+### Telegram: Per-User Sessions
+
+Each Telegram user automatically gets a dedicated session and agent instance:
+
+- **Isolated sessions** — users cannot see or switch to other users' sessions
+- **Concurrent execution** — different Telegram users can interact simultaneously (no "Agent is busy" blocking between users)
+- **Per-user locks** — requests from the same user are serialized; requests from different users run in parallel
+- **Disabled commands** — `/new` and session switching (`/session list`, `/session switch`, `/session load`, `/session new`) are not available on Telegram
+- **Available session commands** — `/clear`, `/history`, `/compact`, `/session info`, `/session rename` operate on the user's own session
+- **Photo attachments** — images sent to the bot are processed through the `image_vision` tool
+- **Generated images** — images created by `image_gen` are automatically sent back to the user
+
 ### Supported Remote Commands
 
 Remote users can use: `/help`, `/config`, `/history`, `/compact`, `/models`, `/sessions`, `/session info`, `/session select`, `/session rename`, `/skills`, `/skill`, `/skill search`, `/cron`, `/todo`, `/contacts`, `/scripts`, `/apis`, `/pipeline`, `/planning`, `/orchestrate`.
 
 Local-only commands (not available remotely): `/exit`, `/approve user`, `/session run`, `/session procreate`, `/session protect`, `/session export`, `/session queue`, `/monitor`, `/cron add/list/history/pause/resume/remove`.
+
+**Telegram-only restrictions:** `/new` and `/sessions` are disabled. Session switching subcommands (`list`, `switch`, `load`, `new`) are disabled.
 
 ---
 
