@@ -92,7 +92,7 @@ jobs:
             INTERNAL="dist/captain-claw"
           fi
           test -d "$INTERNAL/captain_claw/web/static"
-          test -d "$INTERNAL/instructions"
+          test -d "$INTERNAL/captain_claw/instructions"
           echo "All checks passed."
 
       - name: Smoke test — version

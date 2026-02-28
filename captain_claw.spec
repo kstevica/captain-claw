@@ -23,13 +23,13 @@ block_cipher = None
 PROJECT_ROOT = os.path.abspath(".")
 PKG_DIR = os.path.join(PROJECT_ROOT, "captain_claw")
 STATIC_DIR = os.path.join(PKG_DIR, "web", "static")
-INSTRUCTIONS_DIR = os.path.join(PROJECT_ROOT, "instructions")
+INSTRUCTIONS_DIR = os.path.join(PKG_DIR, "instructions")
 
 # ── Data files to bundle ────────────────────────────────────────
 # (source, dest_in_bundle)
 datas = [
     (STATIC_DIR, os.path.join("captain_claw", "web", "static")),
-    (INSTRUCTIONS_DIR, "instructions"),
+    (INSTRUCTIONS_DIR, os.path.join("captain_claw", "instructions")),
 ]
 
 # ── Hidden imports ──────────────────────────────────────────────

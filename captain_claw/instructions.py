@@ -81,7 +81,7 @@ class InstructionLoader:
         env_dir = os.getenv("CAPTAIN_CLAW_INSTRUCTIONS_DIR")
         if env_dir:
             return Path(env_dir).expanduser().resolve()
-        return (Path(__file__).resolve().parent.parent / "instructions").resolve()
+        return (Path(__file__).resolve().parent / "instructions").resolve()
 
     def _path(self, name: str) -> Path:
         """Return the effective file path.

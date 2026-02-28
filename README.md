@@ -261,7 +261,7 @@ ruff check captain_claw/
 | `captain_claw/web/` | Web server (WebSocket + REST + static) |
 | `captain_claw/orchestrator_cli.py` | Headless orchestrator CLI |
 | `captain_claw/config.py` | Configuration and env overrides |
-| `instructions/` | Externalized prompt and instruction templates |
+| `captain_claw/instructions/` | Externalized prompt and instruction templates |
 
 ## FAQ
 
