@@ -562,6 +562,30 @@
     var pendingImagePath = null;
     var _IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'];
 
+    function resizeImageFile(file, maxSide) {
+        return new Promise(function(resolve, reject) {
+            var img = new Image();
+            var url = URL.createObjectURL(file);
+            img.onload = function() {
+                URL.revokeObjectURL(url);
+                var w = img.width, h = img.height;
+                var needsResize = (w > maxSide || h > maxSide);
+                var scale = needsResize ? maxSide / Math.max(w, h) : 1;
+                var nw = Math.round(w * scale), nh = Math.round(h * scale);
+                var canvas = document.createElement('canvas');
+                canvas.width = nw; canvas.height = nh;
+                canvas.getContext('2d').drawImage(img, 0, 0, nw, nh);
+                var outName = file.name.replace(/\.[^.]+$/, '.jpg');
+                canvas.toBlob(function(blob) {
+                    if (!blob) { resolve(file); return; }
+                    resolve(new File([blob], outName, { type: 'image/jpeg' }));
+                }, 'image/jpeg', 0.85);
+            };
+            img.onerror = function() { URL.revokeObjectURL(url); reject(new Error('load')); };
+            img.src = url;
+        });
+    }
+
     function formatFileSize(bytes) {
         if (bytes < 1024) return bytes + ' B';
         if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
@@ -617,6 +641,11 @@
             // Upload image and stage as attachment (don't auto-submit).
             uploadBtn.disabled = true;
             uploadBtn.textContent = '\u23F3';
+
+            // Resize so longest side is max 1024px to save LLM tokens.
+            try {
+                file = await resizeImageFile(file, 1024);
+            } catch (_) { /* use original on error */ }
 
             var formData = new FormData();
             formData.append('file', file);
@@ -1072,6 +1101,14 @@
             }
             return '<img src="' + url + '" alt="' + alt +
                 '" style="max-width:100%;border-radius:8px;cursor:pointer;" ' +
+                'onclick="window.open(this.src,\'_blank\')">';
+        });
+
+        // Attached image: [Attached image: /path/to/file.jpg]
+        html = html.replace(/\[Attached image: ([^\]]+)\]/g, function(_, path) {
+            var url = '/api/media?path=' + encodeURIComponent(path.trim());
+            return '<img src="' + url + '" alt="Attached image" ' +
+                'style="max-width:100%;max-height:300px;border-radius:8px;cursor:pointer;display:block;margin:6px 0;" ' +
                 'onclick="window.open(this.src,\'_blank\')">';
         });
 

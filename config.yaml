@@ -103,6 +103,7 @@ tools:
   - pocket_tts
   - image_gen
   - image_ocr
+  - image_vision
   - send_mail
   - google_drive
   - google_calendar

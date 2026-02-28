@@ -22,7 +22,7 @@ from captain_claw.tools.document_extract import (
 )
 from captain_claw.tools.pocket_tts import PocketTTSTool
 from captain_claw.tools.image_gen import ImageGenTool
-from captain_claw.tools.image_ocr import ImageOcrTool
+from captain_claw.tools.image_ocr import ImageOcrTool, ImageVisionTool
 from captain_claw.tools.send_mail import SendMailTool
 from captain_claw.tools.google_drive import GoogleDriveTool
 from captain_claw.tools.google_calendar import GoogleCalendarTool
@@ -55,6 +55,7 @@ __all__ = [
     "PocketTTSTool",
     "ImageGenTool",
     "ImageOcrTool",
+    "ImageVisionTool",
     "SendMailTool",
     "GoogleDriveTool",
     "GoogleCalendarTool",

@@ -959,6 +959,7 @@ class AgentContextMixin:
         "pocket_tts": ["pocket_tts"],
         "image_gen": ["image_gen"],
         "image_ocr": ["image_ocr"],
+        "image_vision": ["image_vision"],
         "send_mail": ["send_mail"],
         "google_drive": ["google_drive"],
         "google_calendar": ["google_calendar"],
@@ -981,6 +982,7 @@ class AgentContextMixin:
             GoogleMailTool,
             ImageGenTool,
             ImageOcrTool,
+            ImageVisionTool,
             PdfExtractTool,
             PocketTTSTool,
             PptxExtractTool,
@@ -1030,6 +1032,8 @@ class AgentContextMixin:
                 self.tools.register(ImageGenTool())
             elif tool_name == "image_ocr":
                 self.tools.register(ImageOcrTool())
+            elif tool_name == "image_vision":
+                self.tools.register(ImageVisionTool())
             elif tool_name == "send_mail":
                 self.tools.register(SendMailTool())
             elif tool_name == "google_drive":

@@ -125,6 +125,10 @@ class AgentToolLoopMixin:
             path = str(arguments.get("path", "")).strip()
             fname = path.rsplit("/", 1)[-1] if "/" in path else path
             return f"OCR: {fname[:50]}" if fname else "Extracting text from image"
+        if name == "image_vision":
+            path = str(arguments.get("path", "")).strip()
+            fname = path.rsplit("/", 1)[-1] if "/" in path else path
+            return f"Analyzing image: {fname[:50]}" if fname else "Analyzing image"
         # ── Approval ───────────────────────────────────────
         if name == "approval":
             return "Auto-approved action"

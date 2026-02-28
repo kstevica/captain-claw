@@ -1,4 +1,4 @@
-"""Image OCR tool — extract text from images via a vision-capable LLM."""
+"""Image analysis tools — OCR and vision via multimodal LLMs."""
 
 import asyncio
 import base64
@@ -15,57 +15,34 @@ log = get_logger(__name__)
 _IMAGE_EXTENSIONS: set[str] = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 
 
-class ImageOcrTool(Tool):
-    """Extract text from images using a vision-capable LLM."""
+class _BaseImageLLMTool(Tool):
+    """Shared base for tools that send an image to a vision-capable LLM.
 
-    name = "image_ocr"
-    timeout_seconds = 120.0
-    description = (
-        "Extract text from an image file using OCR via a vision-capable model. "
-        "Provide the path to a local image file (.png, .jpg, .jpeg, .webp, .gif, .bmp)."
-    )
-    parameters = {
-        "type": "object",
-        "properties": {
-            "path": {
-                "type": "string",
-                "description": "Path to the image file to extract text from.",
-            },
-            "prompt": {
-                "type": "string",
-                "description": (
-                    "Optional instruction for the vision model. "
-                    "Default: 'Extract all text from this image.'"
-                ),
-            },
-            "max_chars": {
-                "type": "number",
-                "description": "Maximum characters to return (default: 120000).",
-            },
-        },
-        "required": ["path"],
-    }
+    Subclasses set ``name``, ``description``, ``parameters``, and override
+    ``_config_key``, ``_model_types``, and ``_default_prompt``.
+    """
+
+    # Subclasses must set these.
+    _config_key: str = ""          # e.g. "image_ocr"
+    _model_types: list[str] = []   # e.g. ["ocr", "vision"] — tried in order
+    _default_prompt: str = ""
+    _no_model_error: str = ""
 
     def __init__(self):
         cfg = get_config()
-        tool_cfg = getattr(cfg.tools, "image_ocr", None)
+        tool_cfg = getattr(cfg.tools, self._config_key, None)
         if tool_cfg is not None:
             self.timeout_seconds = float(
                 getattr(tool_cfg, "timeout_seconds", 120) or 120
             )
 
-    @staticmethod
-    def _find_ocr_model():
-        """Find the first allowed model with model_type 'ocr' or 'vision'."""
+    def _find_model(self):
+        """Find the first allowed model matching any of ``_model_types``."""
         cfg = get_config()
-        # Prefer explicit 'ocr' type first.
-        for m in cfg.model.allowed:
-            if getattr(m, "model_type", "llm") == "ocr":
-                return m
-        # Fall back to 'vision' type.
-        for m in cfg.model.allowed:
-            if getattr(m, "model_type", "llm") == "vision":
-                return m
+        for model_type in self._model_types:
+            for m in cfg.model.allowed:
+                if getattr(m, "model_type", "llm") == model_type:
+                    return m
         return None
 
     async def execute(
@@ -75,7 +52,7 @@ class ImageOcrTool(Tool):
         max_chars: int | None = None,
         **kwargs: Any,
     ) -> ToolResult:
-        """Read an image and extract text via a vision LLM."""
+        """Send an image to a vision LLM and return the response."""
         path_str = str(path or "").strip()
         if not path_str:
             return ToolResult(success=False, error="Missing required argument: path")
@@ -91,19 +68,12 @@ class ImageOcrTool(Tool):
                 error=f"Unsupported image format '{file_path.suffix}'. Supported: {', '.join(sorted(_IMAGE_EXTENSIONS))}",
             )
 
-        model_cfg = self._find_ocr_model()
+        model_cfg = self._find_model()
         if model_cfg is None:
-            return ToolResult(
-                success=False,
-                error=(
-                    "No OCR/vision model configured. "
-                    "Add a model with model_type: 'ocr' or 'vision' to "
-                    "model.allowed in settings."
-                ),
-            )
+            return ToolResult(success=False, error=self._no_model_error)
 
         cfg = get_config()
-        tool_cfg = getattr(cfg.tools, "image_ocr", None)
+        tool_cfg = getattr(cfg.tools, self._config_key, None)
 
         # Resolve prompt.
         default_prompt = (
@@ -112,7 +82,7 @@ class ImageOcrTool(Tool):
         effective_prompt = (
             str(prompt or "").strip()
             or default_prompt
-            or "Extract all text from this image."
+            or self._default_prompt
         )
 
         # Resolve max_chars.
@@ -120,7 +90,7 @@ class ImageOcrTool(Tool):
         effective_max = int(max_chars or cfg_max)
 
         log.info(
-            "Image OCR requested",
+            "%s requested", self.name,
             provider=model_cfg.provider,
             model=model_cfg.model,
             path=str(file_path),
@@ -191,7 +161,7 @@ class ImageOcrTool(Tool):
             if not extracted.strip():
                 return ToolResult(
                     success=True,
-                    content="No text was detected in the image.",
+                    content="The model returned no content for this image.",
                 )
 
             # Truncate if needed.
@@ -200,7 +170,7 @@ class ImageOcrTool(Tool):
 
             size_kb = len(image_bytes) / 1024.0
             log.info(
-                "Image OCR completed",
+                "%s completed", self.name,
                 path=str(file_path),
                 model=model_cfg.model,
                 chars=len(extracted),
@@ -208,12 +178,98 @@ class ImageOcrTool(Tool):
             return ToolResult(
                 success=True,
                 content=(
-                    f"OCR results from {file_path.name} "
+                    f"{self.name} results from {file_path.name} "
                     f"({size_kb:.1f} KB, model: {model_cfg.model}):\n\n"
                     f"{extracted}"
                 ),
             )
 
         except Exception as e:
-            log.error("Image OCR failed", error=str(e))
+            log.error("%s failed", self.name, error=str(e))
             return ToolResult(success=False, error=str(e))
+
+
+# ── Concrete tools ────────────────────────────────────────────
+
+
+class ImageOcrTool(_BaseImageLLMTool):
+    """Extract text from images using OCR via a vision-capable LLM."""
+
+    name = "image_ocr"
+    timeout_seconds = 120.0
+    description = (
+        "Extract text from an image file using OCR via a vision-capable model. "
+        "Provide the path to a local image file (.png, .jpg, .jpeg, .webp, .gif, .bmp)."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Path to the image file to extract text from.",
+            },
+            "prompt": {
+                "type": "string",
+                "description": (
+                    "Optional instruction for the vision model. "
+                    "Default: 'Extract all text from this image.'"
+                ),
+            },
+            "max_chars": {
+                "type": "number",
+                "description": "Maximum characters to return (default: 120000).",
+            },
+        },
+        "required": ["path"],
+    }
+
+    _config_key = "image_ocr"
+    _model_types = ["ocr", "vision"]
+    _default_prompt = "Extract all text from this image."
+    _no_model_error = (
+        "No OCR/vision model configured. "
+        "Add a model with model_type: 'ocr' or 'vision' to "
+        "model.allowed in settings."
+    )
+
+
+class ImageVisionTool(_BaseImageLLMTool):
+    """Analyze and describe images using a vision-capable LLM."""
+
+    name = "image_vision"
+    timeout_seconds = 120.0
+    description = (
+        "Analyze an image using a vision model to describe scenes, identify objects, "
+        "read signs, understand charts, or answer questions about visual content. "
+        "Provide the path to a local image file (.png, .jpg, .jpeg, .webp, .gif, .bmp)."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Path to the image file to analyze.",
+            },
+            "prompt": {
+                "type": "string",
+                "description": (
+                    "Question or instruction about the image. "
+                    "Default: 'Describe this image in detail.'"
+                ),
+            },
+            "max_chars": {
+                "type": "number",
+                "description": "Maximum characters to return (default: 120000).",
+            },
+        },
+        "required": ["path"],
+    }
+
+    _config_key = "image_vision"
+    _model_types = ["vision", "ocr"]
+    _default_prompt = "Describe this image in detail."
+    _no_model_error = (
+        "No vision model configured. "
+        "Add a model with model_type: 'vision' to "
+        "model.allowed in settings."
+    )

@@ -199,6 +199,14 @@ class ImageOcrToolConfig(BaseModel):
     default_prompt: str = ""  # empty = use built-in default
 
 
+class ImageVisionToolConfig(BaseModel):
+    """Image vision tool configuration."""
+
+    timeout_seconds: int = 120
+    max_chars: int = 120000
+    default_prompt: str = ""  # empty = use built-in default
+
+
 class SendMailToolConfig(BaseModel):
     """Send mail tool configuration."""
 
@@ -252,6 +260,7 @@ class ToolsConfig(BaseModel):
         "pocket_tts",
         "image_gen",
         "image_ocr",
+        "image_vision",
         "send_mail",
         "google_drive",
         "google_calendar",
@@ -264,6 +273,7 @@ class ToolsConfig(BaseModel):
     pocket_tts: PocketTTSToolConfig = Field(default_factory=PocketTTSToolConfig)
     image_gen: ImageGenToolConfig = Field(default_factory=ImageGenToolConfig)
     image_ocr: ImageOcrToolConfig = Field(default_factory=ImageOcrToolConfig)
+    image_vision: ImageVisionToolConfig = Field(default_factory=ImageVisionToolConfig)
     send_mail: SendMailToolConfig = Field(default_factory=SendMailToolConfig)
     typesense: TypesenseToolConfig = Field(default_factory=TypesenseToolConfig)
     require_confirmation: list[str] = ["shell", "write"]
