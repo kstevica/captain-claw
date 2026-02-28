@@ -639,15 +639,9 @@ class LiteLLMProvider(LLMProvider):
         if tools:
             kwargs["tools"] = _convert_tools_for_openai_style(tools)
 
-        # When Google OAuth credentials are available for Gemini, route
-        # through Vertex AI instead of the Google AI Studio endpoint.
-        if self._vertex_credentials and self.provider == "gemini":
-            # Swap prefix: gemini/model-name → vertex_ai/model-name
-            kwargs["model"] = self.model.replace("gemini/", "vertex_ai/", 1)
-            kwargs["vertex_credentials"] = json.dumps(self._vertex_credentials)
-            kwargs["vertex_project"] = self._vertex_project
-            kwargs["vertex_location"] = self._vertex_location
-        elif self.api_key:
+        # Always use the API key for Gemini (Google AI Studio).
+        # Vertex AI routing is disabled — use api_key directly.
+        if self.api_key:
             kwargs["api_key"] = self.api_key
 
         if self.base_url:
