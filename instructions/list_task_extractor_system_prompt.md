@@ -11,7 +11,8 @@ Return ONLY a JSON object (no markdown, no code fences):
   "output_strategy": "file_per_item",
   "output_filename_template": "report-{member_label}.csv",
   "output_file": "",
-  "final_action": "write_file"
+  "final_action": "write_file",
+  "processing_mode": "summarize"
 }
 
 Rules:
@@ -45,5 +46,11 @@ Key signals for detecting output_strategy:
 - File-per-item: filename includes a variable part that changes per member (date, name, ID), explicit "for each" file naming
 - Single-file: "write to [filename]", "append to", "create a report with all", one output filename with no variable parts
 - No-file: "send email", "reply with", "index on", "post to", "return the results"
+
+Processing mode detection — determine whether the LLM needs to process/transform each item's content:
+- `processing_mode` must be one of:
+  - `"summarize"` (default) — the LLM should read/analyze each item's content and produce a processed summary, report, or transformed output. Use for: analysis, summarization, extraction of specific fields, reformatting, translation, or any task that requires understanding the content.
+  - `"raw"` — the item's content should be passed through as-is without LLM processing. Use when the task is purely about storing/indexing/archiving the raw content without transformation. Key signals: "index in deep memory", "store in typesense", "archive these files", "save to deep memory", "index them", "add to archive" — with NO analysis, summarization, or transformation requested.
+- When in doubt, default to `"summarize"`. Only use `"raw"` when the user explicitly wants raw content indexed/archived without any processing.
 
 - IMPORTANT: A single follow-up message referencing one item (article, link, topic) from a previous response is NOT list work. Only flag has_list_work=true when the user explicitly asks for per-member processing of multiple items.

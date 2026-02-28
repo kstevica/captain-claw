@@ -1352,6 +1352,7 @@ class AgentReasoningMixin:
         output_strategy = "single_file"
         output_filename_template = ""
         final_action = "write_file"
+        processing_mode = "summarize"
         if isinstance(payload, dict):
             has_list_work = bool(payload.get("has_list_work", False))
             members = self._normalize_list_members(payload.get("members"))
@@ -1365,6 +1366,9 @@ class AgentReasoningMixin:
             final_action = str(payload.get("final_action", "write_file")).strip().lower()
             if final_action not in ("write_file", "reply", "email", "api_call"):
                 final_action = "write_file"
+            processing_mode = str(payload.get("processing_mode", "summarize")).strip().lower()
+            if processing_mode not in ("raw", "summarize"):
+                processing_mode = "summarize"
             # member_context: optional dict mapping member → brief context from
             # the source article (country, description, etc.)
             _raw_ctx = payload.get("member_context")
@@ -1396,6 +1400,7 @@ class AgentReasoningMixin:
             "output_strategy": output_strategy,
             "output_filename_template": output_filename_template,
             "final_action": final_action,
+            "processing_mode": processing_mode,
         }
         preview = ", ".join(members[:8]) if members else "(none)"
         if len(members) > 8:
@@ -1411,6 +1416,7 @@ class AgentReasoningMixin:
                 "output_strategy": output_strategy,
                 "output_filename_template": output_filename_template,
                 "final_action": final_action,
+                "processing_mode": processing_mode,
             },
             (
                 "step=list_extract_done\n"
@@ -1421,6 +1427,7 @@ class AgentReasoningMixin:
                 f"output_strategy={output_strategy}\n"
                 f"output_filename_template={output_filename_template}\n"
                 f"final_action={final_action}\n"
+                f"processing_mode={processing_mode}\n"
                 f"members_preview={preview}"
             ),
         )

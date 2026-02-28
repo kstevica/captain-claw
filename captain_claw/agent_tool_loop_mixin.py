@@ -707,6 +707,9 @@ class AgentToolLoopMixin:
                     _scale_write_hint = True  # will append hint after execution
             elif sp is not None and _tool_lower == "write":
                 sp["_last_action"] = "write"
+            elif sp is not None and _tool_lower == "typesense":
+                # typesense index acts as a sink (like write) for no_file flows
+                sp["_last_action"] = "write"
 
             try:
                 # Execute tool
@@ -956,6 +959,48 @@ class AgentToolLoopMixin:
                         # lean and prevent the LLM from "forgetting"
                         # where it is in the list.
                         self._trim_processed_extracts_in_session()
+
+                    elif tool_lower == "typesense" and isinstance(arguments, dict):
+                        # Track typesense index calls for scale progress —
+                        # same purpose as the write tracking above.
+                        ts_action = str(arguments.get("action", "")).strip().lower()
+                        if ts_action == "index" and result.success:
+                            sp["completed"] = sp.get("completed", 0) + 1
+                            # Match the indexed item against the known item list
+                            # using the 'reference' argument (which the LLM passes
+                            # as the item label, e.g. the file path).
+                            reference = str(arguments.get("reference", "")).strip()
+                            done_items: set[str] = sp.get("done_items", set())
+                            items: list[str] = sp.get("items", [])
+                            ref_lower = reference.lower()
+                            for item in items:
+                                if item in done_items:
+                                    continue
+                                item_lower = item.lower()
+                                # Match: exact, ends-with (relative path),
+                                # or filename match.
+                                filename_part = item.rsplit("/", 1)[-1].lower() if "/" in item else item_lower
+                                if (
+                                    ref_lower == item_lower
+                                    or item_lower.endswith(ref_lower)
+                                    or ref_lower.endswith(item_lower)
+                                    or (filename_part and filename_part in ref_lower)
+                                    or (ref_lower and ref_lower in item_lower)
+                                ):
+                                    done_items.add(item)
+                                    break
+                            sp["done_items"] = done_items
+                            total = sp.get("total", 0)
+                            done = sp["completed"]
+                            label = reference[:60] if reference else "indexed"
+                            if total >= 3 and done <= total:
+                                pct = int(done / total * 100)
+                                progress_text = f"{done} of {total} ({pct}%)"
+                            else:
+                                progress_text = f"{done} items indexed"
+                            display = f"📀 {progress_text} — {label}"
+                            self._emit_thinking(display, tool="progress", phase="tool")
+                            self._trim_processed_extracts_in_session()
 
                 # Auto-capture contacts from send_mail usage.
                 if result.success and hasattr(self, "_auto_capture_contacts_from_tool_call"):

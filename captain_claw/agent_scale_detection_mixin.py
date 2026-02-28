@@ -700,6 +700,7 @@ class AgentScaleDetectionMixin:
                 user_input=user_input,
             ),
             "_member_context": plan.get("member_context") or {},
+            "_processing_mode": str(plan.get("processing_mode", "summarize")).strip().lower(),
         }
         if _out_strategy == "no_file":
             progress["_sink_collection"] = ""
@@ -709,6 +710,7 @@ class AgentScaleDetectionMixin:
             total=len(members),
             extraction_mode=progress["_extraction_mode"],
             output_strategy=_out_strategy,
+            processing_mode=progress["_processing_mode"],
         )
         return progress
 

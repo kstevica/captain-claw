@@ -1240,6 +1240,7 @@ class AgentScaleLoopMixin:
         _is_no_file = _output_strategy == "no_file"
         _final_action = str(sp.get("_final_action", "reply")).strip()
         _extraction_mode = str(sp.get("_extraction_mode", "file")).strip()
+        _processing_mode = str(sp.get("_processing_mode", "summarize")).strip().lower()
         _sink_collection = str(sp.get("_sink_collection", "")).strip()
         # For file_per_item, resolve the output directory from the first
         # written file or from the output_file path.
@@ -1262,9 +1263,17 @@ class AgentScaleLoopMixin:
             output_file=output_file,
             output_strategy=_output_strategy,
             extraction_mode=_extraction_mode,
+            processing_mode=_processing_mode,
             is_file_per_item=_is_file_per_item,
             filename_template=_filename_template,
         )
+        if _processing_mode == "raw":
+            log.info(
+                "Tool-to-tool mode active — no LLM calls per item",
+                remaining=len(remaining),
+                extraction=_extraction_mode,
+                sink=_final_action,
+            )
 
         # ── Research mode: extract search keywords once via LLM ──
         if _extraction_mode == "research" and not sp.get("_research_keywords"):
@@ -1515,100 +1524,130 @@ class AgentScaleLoopMixin:
                 _consume_cancel()
                 break
 
-            # ── Step 2: Isolated LLM call to process ────────────
+            # ── Step 2: Process content (LLM call or raw passthrough) ─
             _t_llm_start = _time.monotonic()
-            self._emit_thinking(
-                f"scale_micro_loop: Processing ({item_num}/{total})\n"
-                f"{item_label}\n"
-                f"extracted {_extract_chars:,} chars in {_extract_sec}s{_eta_suffix}",
-                tool="scale_micro_loop",
-                phase="tool",
-            )
 
-            # Look up per-item context from the source article (if available).
-            _member_ctx_map: dict[str, str] = sp.get("_member_context", {}) if sp else {}
-            _item_source_context = _member_ctx_map.get(item, "")
-            # Also try matching by item_label (which may differ from item)
-            if not _item_source_context and item_label != item:
-                _item_source_context = _member_ctx_map.get(item_label, "")
-
-            item_messages = self._build_scale_item_prompt(
-                task_description=task_description,
-                item_label=item_label,
-                extracted_content=extracted_content,
-                is_first_item=(item_num == 1),
-                previous_summary_sample=last_summary,
-                output_strategy=_output_strategy,
-                extraction_mode=_extraction_mode,
-                source_context=_item_source_context,
-            )
-
-            # Log context size for this micro-call
-            _item_prompt_tokens = sum(
-                self._count_tokens(m.content) for m in item_messages
-            )
-            log.info(
-                "Scale micro-loop LLM call",
-                item_num=item_num,
-                total=total,
-                item=item_label[-80:],
-                extract_chars=_extract_chars,
-                extract_sec=_extract_sec,
-                prompt_tokens=_item_prompt_tokens,
-                prompt_kb=round(_item_prompt_tokens * 4 / 1024, 1),
-            )
-
-            try:
-                response = await self._complete_with_guards(
-                    messages=item_messages,
-                    tools=None,  # No tools — just produce text
-                    interaction_label=f"scale_process_{item_num}",
-                    turn_usage=turn_usage,
+            if _processing_mode == "raw":
+                # ── Raw passthrough: skip LLM, use extracted content as-is ──
+                self._emit_thinking(
+                    f"scale_micro_loop: Passthrough ({item_num}/{total})\n"
+                    f"{item_label}\n"
+                    f"extracted {_extract_chars:,} chars in {_extract_sec}s — raw mode, no LLM{_eta_suffix}",
+                    tool="scale_micro_loop",
+                    phase="tool",
                 )
-            except Exception as e:
+                summary_text = extracted_content
+                _llm_sec = 0.0
+                _item_prompt_tokens = 0
+                _response_tokens = 0
+                log.info(
+                    "Tool-to-tool passthrough (no LLM)",
+                    item_num=item_num,
+                    total=total,
+                    item=item_label[-80:],
+                    extract_chars=_extract_chars,
+                    llm_tokens=0,
+                )
+                self._emit_tool_output(
+                    "scale_micro_loop",
+                    {"item": item_label, "step": "passthrough"},
+                    f"[{item_num}/{total}] Passthrough ({_extract_chars:,} chars) — {item_label}",
+                )
+
+            else:
+                # ── Standard mode: isolated LLM call to process/summarize ──
+                self._emit_thinking(
+                    f"scale_micro_loop: Processing ({item_num}/{total})\n"
+                    f"{item_label}\n"
+                    f"extracted {_extract_chars:,} chars in {_extract_sec}s{_eta_suffix}",
+                    tool="scale_micro_loop",
+                    phase="tool",
+                )
+
+                # Look up per-item context from the source article (if available).
+                _member_ctx_map: dict[str, str] = sp.get("_member_context", {}) if sp else {}
+                _item_source_context = _member_ctx_map.get(item, "")
+                # Also try matching by item_label (which may differ from item)
+                if not _item_source_context and item_label != item:
+                    _item_source_context = _member_ctx_map.get(item_label, "")
+
+                item_messages = self._build_scale_item_prompt(
+                    task_description=task_description,
+                    item_label=item_label,
+                    extracted_content=extracted_content,
+                    is_first_item=(item_num == 1),
+                    previous_summary_sample=last_summary,
+                    output_strategy=_output_strategy,
+                    extraction_mode=_extraction_mode,
+                    source_context=_item_source_context,
+                )
+
+                # Log context size for this micro-call
+                _item_prompt_tokens = sum(
+                    self._count_tokens(m.content) for m in item_messages
+                )
+                log.info(
+                    "Scale micro-loop LLM call",
+                    item_num=item_num,
+                    total=total,
+                    item=item_label[-80:],
+                    extract_chars=_extract_chars,
+                    extract_sec=_extract_sec,
+                    prompt_tokens=_item_prompt_tokens,
+                    prompt_kb=round(_item_prompt_tokens * 4 / 1024, 1),
+                )
+
+                try:
+                    response = await self._complete_with_guards(
+                        messages=item_messages,
+                        tools=None,  # No tools — just produce text
+                        interaction_label=f"scale_process_{item_num}",
+                        turn_usage=turn_usage,
+                    )
+                except Exception as e:
+                    _t_llm_end = _time.monotonic()
+                    _llm_fail_sec = round(_t_llm_end - _t_llm_start, 2)
+                    log.warning(
+                        "Scale micro-loop LLM call failed",
+                        item=item_label,
+                        error=str(e),
+                        llm_sec=_llm_fail_sec,
+                    )
+                    self._emit_tool_output(
+                        "scale_micro_loop",
+                        {"item": item_label, "step": "llm"},
+                        f"[{item_num}/{total}] LLM FAILED in {_llm_fail_sec}s: {item_label}\nError: {e}",
+                    )
+                    errors.append({"item": item_label, "phase": "llm", "error": str(e)})
+                    failed += 1
+                    done_items.add(item)
+                    sp["done_items"] = done_items
+                    continue
+
                 _t_llm_end = _time.monotonic()
-                _llm_fail_sec = round(_t_llm_end - _t_llm_start, 2)
-                log.warning(
-                    "Scale micro-loop LLM call failed",
-                    item=item_label,
-                    error=str(e),
-                    llm_sec=_llm_fail_sec,
-                )
+                _llm_sec = round(_t_llm_end - _t_llm_start, 2)
+
+                summary_text = (response.content or "").strip()
+                _response_tokens = self._count_tokens(summary_text)
+
                 self._emit_tool_output(
                     "scale_micro_loop",
-                    {"item": item_label, "step": "llm"},
-                    f"[{item_num}/{total}] LLM FAILED in {_llm_fail_sec}s: {item_label}\nError: {e}",
+                    {"item": item_label, "step": "llm", "prompt_tokens": _item_prompt_tokens},
+                    f"[{item_num}/{total}] LLM done in {_llm_sec}s — {_item_prompt_tokens} prompt / {_response_tokens} response tokens — {item_label}",
                 )
-                errors.append({"item": item_label, "phase": "llm", "error": str(e)})
-                failed += 1
-                done_items.add(item)
-                sp["done_items"] = done_items
-                continue
 
-            _t_llm_end = _time.monotonic()
-            _llm_sec = round(_t_llm_end - _t_llm_start, 2)
-
-            summary_text = (response.content or "").strip()
-            _response_tokens = self._count_tokens(summary_text)
-
-            self._emit_tool_output(
-                "scale_micro_loop",
-                {"item": item_label, "step": "llm", "prompt_tokens": _item_prompt_tokens},
-                f"[{item_num}/{total}] LLM done in {_llm_sec}s — {_item_prompt_tokens} prompt / {_response_tokens} response tokens — {item_label}",
-            )
-
-            if not summary_text:
-                log.warning("Scale micro-loop: empty LLM response", item=item_label)
-                self._emit_tool_output(
-                    "scale_micro_loop",
-                    {"item": item_label, "step": "llm"},
-                    f"[{item_num}/{total}] EMPTY LLM RESPONSE: {item_label}",
-                )
-                errors.append({"item": item_label, "phase": "llm", "error": "empty response"})
-                failed += 1
-                done_items.add(item)
-                sp["done_items"] = done_items
-                continue
+                if not summary_text:
+                    log.warning("Scale micro-loop: empty LLM response", item=item_label)
+                    self._emit_tool_output(
+                        "scale_micro_loop",
+                        {"item": item_label, "step": "llm"},
+                        f"[{item_num}/{total}] EMPTY LLM RESPONSE: {item_label}",
+                    )
+                    errors.append({"item": item_label, "phase": "llm", "error": "empty response"})
+                    failed += 1
+                    done_items.add(item)
+                    sp["done_items"] = done_items
+                    continue
 
             # ── Cancellation check (after LLM) ───────────────
             if _check_cancel():
