@@ -384,6 +384,8 @@ web:
   enabled: true
   host: 127.0.0.1
   port: 23080
+  auth_token: ''          # set a secret to enable auth (e.g. 'my-secret-token')
+  auth_cookie_max_age: 90 # days the browser stays authenticated
   api_enabled: true
   api_pool_max_agents: 50
   api_pool_idle_seconds: 600.0

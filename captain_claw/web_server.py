@@ -852,6 +852,9 @@ class WebServer:
 
     def create_app(self) -> web.Application:
         app = web.Application(client_max_size=50 * 1024 * 1024)  # 50 MB for file uploads
+        if self.config.web.auth_token:
+            from captain_claw.web.auth import create_auth_middleware
+            app.middlewares.append(create_auth_middleware(self.config.web))
         app.router.add_get("/ws", self.ws_handler)
         app.router.add_get("/api/instructions", self.list_instructions)
         app.router.add_get("/api/instructions/{name}", self.get_instruction)
@@ -1035,6 +1038,8 @@ async def _run_server(config: Config) -> None:
                 raise
 
     print(f"\n  Captain Claw Web UI running at http://{host}:{port}")
+    if config.web.auth_token:
+        print(f"  Authentication enabled. Access via: http://{host}:{port}/?token=<your-token>")
     if config.web.api_enabled and server._api_pool:
         print(f"  OpenAI-compatible API at http://{host}:{port}/v1")
     if server._oauth_manager:

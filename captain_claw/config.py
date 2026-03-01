@@ -586,6 +586,9 @@ class WebConfig(BaseModel):
     api_enabled: bool = True
     api_pool_max_agents: int = 50
     api_pool_idle_seconds: float = 600.0
+    # Authentication – set auth_token to enable; empty string = auth disabled
+    auth_token: str = ""
+    auth_cookie_max_age: int = 90  # days
 
 
 class Config(BaseSettings):
