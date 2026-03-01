@@ -933,6 +933,11 @@ html, body {
     border-radius: 4px;
 }
 
+.attachment-file-icon {
+    font-size: 24px;
+    line-height: 36px;
+}
+
 .attachment-name {
     font-size: 12px;
     color: var(--text-secondary);

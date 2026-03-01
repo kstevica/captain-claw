@@ -761,6 +761,7 @@
     const attachmentPreview = $('#attachmentPreview');
 
     var pendingImagePath = null;
+    var pendingFilePath = null;
     var _IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'];
 
     function resizeImageFile(file, maxSide) {
@@ -793,8 +794,12 @@
         return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
     }
 
-    function showAttachmentChip(filename, path, objectUrl) {
-        pendingImagePath = path;
+    function showAttachmentChip(filename, path, objectUrl, isFile) {
+        if (isFile) {
+            pendingFilePath = path;
+        } else {
+            pendingImagePath = path;
+        }
         attachmentPreview.innerHTML = '';
         var chip = document.createElement('div');
         chip.className = 'attachment-chip';
@@ -803,6 +808,11 @@
             thumb.src = objectUrl;
             thumb.className = 'attachment-thumb';
             chip.appendChild(thumb);
+        } else if (isFile) {
+            var icon = document.createElement('span');
+            icon.className = 'attachment-file-icon';
+            icon.textContent = '\uD83D\uDCC4';
+            chip.appendChild(icon);
         }
         var name = document.createElement('span');
         name.className = 'attachment-name';
@@ -822,6 +832,7 @@
 
     function clearAttachment() {
         pendingImagePath = null;
+        pendingFilePath = null;
         attachmentPreview.innerHTML = '';
         attachmentPreview.classList.add('hidden');
         fileInput.value = '';
@@ -874,8 +885,8 @@
             return;
         }
 
-        // Data file (csv/xlsx) — existing datastore import flow.
-        addChatMessage('user', 'Uploading file: **' + file.name + '** (' + formatFileSize(file.size) + ')');
+        // Data file (csv/xlsx) — upload and stage as attachment, let the user
+        // decide what to do (datastore import, deep memory indexing, extraction, etc.).
         uploadBtn.disabled = true;
         uploadBtn.textContent = '\u23F3';
 
@@ -883,13 +894,16 @@
         formData.append('file', file);
 
         try {
-            var res = await fetch('/api/datastore/upload', {
+            var res = await fetch('/api/file/upload', {
                 method: 'POST',
                 body: formData,
             });
             var data = await res.json();
             if (!res.ok) {
-                addChatMessage('assistant', '**Import failed:** ' + (data.error || 'Unknown error'));
+                addChatMessage('assistant', '**Upload failed:** ' + (data.error || 'Unknown error'));
+            } else {
+                showAttachmentChip(file.name, data.path, null, true);
+                messageInput.focus();
             }
         } catch (err) {
             addChatMessage('assistant', '**Upload failed:** ' + err.message);
@@ -904,7 +918,7 @@
 
     function handleSend() {
         const text = messageInput.value.trim();
-        if (!text && !pendingImagePath) return;
+        if (!text && !pendingImagePath && !pendingFilePath) return;
         if (!isConnected) return;
 
         hideSuggestions();
@@ -915,6 +929,9 @@
             var msg = { type: 'chat', content: text || '' };
             if (pendingImagePath) {
                 msg.image_path = pendingImagePath;
+            }
+            if (pendingFilePath) {
+                msg.file_path = pendingFilePath;
             }
             send(msg);
         }

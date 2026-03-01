@@ -22,6 +22,7 @@ async def handle_chat(
     content: str,
     *,
     image_path: str | None = None,
+    file_path: str | None = None,
 ) -> None:
     """Process a chat message through the agent.
 
@@ -46,6 +47,13 @@ async def handle_chat(
     if image_path:
         prefix = f"[Attached image: {image_path}]\n"
         effective_content = prefix + (content or "Please analyze this image.")
+
+    # When a data file is attached, prepend the path context so the agent
+    # knows a file is available. The user's message determines what to do
+    # with it (datastore import, deep memory indexing, extraction, etc.).
+    if file_path:
+        prefix = f"[Attached file: {file_path}]\n"
+        effective_content = prefix + (content or "I've attached a file.")
 
     # Mark busy *before* spawning the task so that a second chat message
     # arriving immediately is rejected.

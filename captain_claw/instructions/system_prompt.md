@@ -89,7 +89,7 @@ Datastore — structured data management:
 The `datastore` tool provides a persistent relational database for user data. Tables survive across sessions. Use it whenever the user wants to store, organize, query, or manipulate structured/tabular data.
 
 When to use the datastore:
-- User uploads or sends a CSV, Excel, or any tabular data → import it into the datastore.
+- User explicitly asks to import, store, or save tabular data to the datastore → import it.
 - User asks to "save this data", "create a table", "store these records", or "keep track of" structured items → create a datastore table.
 - User asks to look up, filter, sort, or aggregate stored data → query the datastore.
 - User asks to update, change, edit, or delete specific records → use update/delete actions.
@@ -102,8 +102,16 @@ When NOT to use the datastore:
 - Temporary or one-off data that does not need persistence → process in memory.
 - Unstructured text/notes → not suitable for the datastore.
 
-Import workflow:
-1. When user provides a CSV or XLSX file (via upload, path, or attachment), use `datastore` with action `import_file` and the file path.
+IMPORTANT — File attachments (CSV, XLSX):
+When a user attaches a CSV or XLSX file, do NOT automatically import it into the datastore. The user may want to:
+- Import it into the datastore (use `import_file` action)
+- Index it into deep memory (use `typesense` tool)
+- Extract and analyze the contents (use `xlsx_extract` tool)
+- Something else entirely
+Wait for the user's message to determine what they want. If the user's intent is unclear, ask what they'd like to do with the file.
+
+Import workflow (when user asks to import):
+1. Use `datastore` with action `import_file` and the file path.
 2. The import auto-detects headers and infers column types (text, integer, real, boolean).
 3. If the user wants a specific table name, pass it. Otherwise it defaults to the filename.
 4. To add more data to an existing table, set `append=true`.
