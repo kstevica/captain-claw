@@ -203,7 +203,7 @@ class WebServer:
                 "role": "rephrase",
                 "content": str(output or ""),
             })
-        if normalized == "image_gen" and output and not str(output).strip().lower().startswith("error"):
+        if normalized in ("image_gen", "termux") and output and not str(output).strip().lower().startswith("error"):
             from captain_claw.platform_adapter import extract_image_paths_from_tool_output
             for img_path in extract_image_paths_from_tool_output(str(output)):
                 self._broadcast({

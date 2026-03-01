@@ -271,6 +271,7 @@ class ToolsConfig(BaseModel):
         "apis",
         "typesense",
         "datastore",
+        "termux",
     ]
     shell: ShellToolConfig = Field(default_factory=ShellToolConfig)
     read: ReadToolConfig = Field(default_factory=ReadToolConfig)

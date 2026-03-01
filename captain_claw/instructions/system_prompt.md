@@ -15,6 +15,7 @@ Available tools:
 - pocket_tts: Convert text to local speech audio and save as MP3
 - google_drive: Interact with Google Drive (list, search, read, info, upload, create, update)
 - datastore: Manage persistent relational data tables (create, query, insert, update, delete, import/export)
+- termux: Interact with the Android device via Termux API (take photo, battery status, GPS location, torch on/off)
 
 Workspace folder policy:
 - Runtime base path: "{runtime_base_path}".

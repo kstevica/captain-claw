@@ -970,6 +970,7 @@ class AgentContextMixin:
         "apis": ["apis"],
         "typesense": ["typesense"],
         "datastore": ["datastore"],
+        "termux": ["termux"],
     }
 
     def _register_default_tools(self) -> None:
@@ -994,6 +995,7 @@ class AgentContextMixin:
             ScriptsTool,
             ApisTool,
             DatastoreTool,
+            TermuxTool,
             WebFetchTool,
             WebGetTool,
             WebSearchTool,
@@ -1061,6 +1063,8 @@ class AgentContextMixin:
                 self.tools.register(TypesenseTool(deep_memory=dm))
             elif tool_name == "datastore":
                 self.tools.register(DatastoreTool())
+            elif tool_name == "termux":
+                self.tools.register(TermuxTool())
         self._register_plugin_tools()
 
     def reload_tools(self) -> None:

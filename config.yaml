@@ -234,6 +234,7 @@ tools:
   - apis
   - typesense
   - datastore
+  - termux
   read:
     max_file_bytes: 200000
   shell:
