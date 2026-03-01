@@ -11,10 +11,8 @@ import re
 import shlex
 import shutil
 import sys
-import termios
 import textwrap
 import time
-import tty
 from typing import Any
 
 from captain_claw.config import get_config
@@ -814,6 +812,9 @@ Commands:
         if not self.can_capture_escape():
             await asyncio.sleep(3600)
             return False
+
+        import termios
+        import tty
 
         fd = sys.stdin.fileno()
         loop = asyncio.get_running_loop()
