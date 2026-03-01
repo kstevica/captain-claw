@@ -78,9 +78,17 @@ def _build_schema() -> list[dict[str, Any]]:
                 {
                     "id": "personality_editor",
                     "title": "Agent Personality",
-                    "description": "Define the agent's identity, background, and expertise areas.",
+                    "description": "Define the agent's default identity, background, and expertise areas.",
                     "type": "custom",
                     "custom_id": "personality",
+                    "fields": [],
+                },
+                {
+                    "id": "user_personalities_editor",
+                    "title": "User Profiles",
+                    "description": "User profiles for approved Telegram users. Tells the agent who it is talking to — their expertise, background, and perspective.",
+                    "type": "custom",
+                    "custom_id": "user_personalities",
                     "fields": [],
                 },
             ],
@@ -787,6 +795,11 @@ async def put_settings(server: WebServer, request: web.Request) -> web.Response:
         if dotted_key in _SECRET_FIELDS and value == SECRET_MASK:
             continue
         _set_nested(data, dotted_key, value)
+
+    # Personality tool is always available — re-inject if the user removed it.
+    tools_enabled = _get_nested(data, "tools.enabled")
+    if isinstance(tools_enabled, list) and "personality" not in tools_enabled:
+        tools_enabled.append("personality")
 
     # ── Validate against merged result (local base + home overlay) ──
     local_path = Path.cwd() / LOCAL_CONFIG_FILENAME

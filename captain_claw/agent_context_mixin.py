@@ -1066,7 +1066,11 @@ class AgentContextMixin:
             elif tool_name == "datastore":
                 self.tools.register(DatastoreTool())
             elif tool_name == "personality":
-                self.tools.register(PersonalityTool())
+                pt = PersonalityTool()
+                uid = getattr(self, "_user_id", None)
+                if uid:
+                    pt.set_user_mode(uid)
+                self.tools.register(pt)
             elif tool_name == "termux":
                 self.tools.register(TermuxTool())
         self._register_plugin_tools()
@@ -1239,8 +1243,23 @@ class AgentContextMixin:
 
         saved_root = self.tools.get_saved_base_path(create=False)
 
-        from captain_claw.personality import load_personality, personality_to_prompt_block
+        from captain_claw.personality import (
+            load_personality,
+            load_user_personality,
+            personality_to_prompt_block,
+            user_context_to_prompt_block,
+        )
+        # Agent identity always comes from the global personality.
         personality_block = personality_to_prompt_block(load_personality())
+
+        # User context: describes WHO the agent is talking to (user profile).
+        # _active_personality_id (web UI) takes precedence over _user_id (Telegram).
+        user_context_block = ""
+        active_uid = getattr(self, "_active_personality_id", None) or getattr(self, "_user_id", None)
+        if active_uid:
+            user_p = load_user_personality(active_uid)
+            if user_p is not None:
+                user_context_block = user_context_to_prompt_block(user_p)
 
         base_prompt = self.instructions.render(
             "system_prompt.md",
@@ -1250,6 +1269,7 @@ class AgentContextMixin:
             session_id=session_id,
             planning_block=planning_block,
             personality_block=personality_block,
+            user_context_block=user_context_block,
         )
         skills_section = ""
         build_skills = getattr(self, "_build_skills_system_prompt_section", None)

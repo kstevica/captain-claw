@@ -18,11 +18,12 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Per-session model selection | Keep one session on Claude, another on GPT, another on Ollama |
 | Persistent multi-session workflows | Resume any session exactly where you left off |
 | Built-in safety guards | Input, output, and script/tool checks before anything runs |
-| 26 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, image gen/OCR/vision, Google Drive/Calendar/Gmail, todo, contacts, scripts, APIs, datastore, deep memory, Termux (Android) |
+| 27 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, image gen/OCR/vision, Google Drive/Calendar/Gmail, todo, contacts, scripts, APIs, datastore, deep memory, personality, Termux (Android) |
+| Personality system | Dual-profile system — global agent identity plus per-user profiles for tailored responses |
 | Skills system | OpenClaw-compatible skills with auto-discovery and GitHub install |
 | Orchestrator / DAG mode | Decompose complex tasks into parallel multi-session execution |
 | Memory / RAG | Hybrid vector + text retrieval across workspace and sessions |
-| Web UI | Chat, monitor pane, instruction editor, command palette, datastore browser, deep memory dashboard |
+| Web UI | Chat, monitor pane, instruction editor, command palette, persona selector, datastore browser, deep memory dashboard |
 | Remote integrations | Telegram (per-user sessions), Slack, Discord with secure pairing |
 | Cross-session to-do memory | Persistent task list shared across sessions with auto-capture |
 | Cross-session script memory | Persistent script/file tracking with auto-capture from write tool |
@@ -116,7 +117,7 @@ Sessions are first-class. Create named sessions for separate projects, switch in
 
 ### Tools
 
-Captain Claw ships with 26 built-in tools. The agent picks the right tool for each task automatically.
+Captain Claw ships with 27 built-in tools. The agent picks the right tool for each task automatically.
 
 | Tool | What it does |
 |---|---|
@@ -142,6 +143,7 @@ Captain Claw ships with 26 built-in tools. The agent picks the right tool for ea
 | `scripts` | Persistent cross-session script/file memory with auto-capture |
 | `apis` | Persistent cross-session API memory with auto-capture |
 | `datastore` | Manage relational data tables with CRUD, import/export, raw SQL, and protection rules |
+| `personality` | Read or update the agent personality and per-user profiles |
 | `typesense` | Index, search, and manage documents in deep memory (Typesense) |
 | `termux` | Interact with Android device via Termux API (camera, battery, GPS, torch) |
 
@@ -185,7 +187,7 @@ tools:
             "image_gen", "image_ocr", "image_vision",
             "pocket_tts", "send_mail", "google_drive", "google_calendar",
             "google_mail", "todo", "contacts", "scripts", "apis",
-            "datastore", "termux"]
+            "datastore", "personality", "termux"]
 
 web:
   enabled: true
@@ -240,6 +242,8 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 
 - **[Context compaction](USAGE.md#context-compaction)** — Auto-compacts long sessions at configurable thresholds. Manual compaction with `/compact`.
 
+- **[Personality system](USAGE.md#personality-system)** — Dual-profile system with a global agent identity (name, background, expertise) and per-user profiles that tailor responses to each user's perspective. Editable via the `personality` tool, REST API, or the Settings page. Telegram users get automatic per-user profiles.
+
 - **[Session export](USAGE.md#session-commands)** — Export chat, monitor, pipeline trace, or pipeline summary to files.
 
 ## Development
@@ -256,7 +260,8 @@ ruff check captain_claw/
 |---|---|
 | `captain_claw/agent.py` | Main orchestration logic |
 | `captain_claw/llm/` | Provider abstraction (OpenAI, Anthropic, Gemini, Ollama) |
-| `captain_claw/tools/` | Tool registry and 26 tool implementations |
+| `captain_claw/tools/` | Tool registry and 27 tool implementations |
+| `captain_claw/personality.py` | Agent and per-user personality profiles |
 | `captain_claw/session/` | SQLite-backed session persistence |
 | `captain_claw/skills.py` | Skill discovery, loading, and invocation |
 | `captain_claw/session_orchestrator.py` | Parallel multi-session DAG orchestrator |

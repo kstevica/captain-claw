@@ -5,6 +5,9 @@ at ``~/.captain-claw/personality.md``.  The file uses a simple section
 format with ``# Name``, ``# Description``, ``# Background``, and
 ``# Expertise`` headings.
 
+Per-user (Telegram) personalities are stored as individual ``.md`` files
+under ``~/.captain-claw/personalities/{user_id}.md``.
+
 When no file exists on disk, a built-in default is used.  The loaded
 personality is cached in memory and automatically refreshed when the
 file's modification time changes.
@@ -21,6 +24,7 @@ from typing import Any
 
 _PERSONALITY_DIR = Path("~/.captain-claw").expanduser()
 PERSONALITY_PATH = _PERSONALITY_DIR / "personality.md"
+_USER_PERSONALITIES_DIR = _PERSONALITY_DIR / "personalities"
 
 # ── Data model ────────────────────────────────────────────────────────
 
@@ -185,6 +189,28 @@ def personality_to_prompt_block(p: Personality) -> str:
     )
 
 
+def user_context_to_prompt_block(p: Personality) -> str:
+    """Render a user personality as context about the *user* (not the agent).
+
+    This tells the LLM who it is talking to — the user's name, expertise,
+    and background — so it can tailor responses to that perspective.
+    The returned string replaces the ``{{user_context_block}}`` placeholder.
+    """
+
+    def _esc(s: str) -> str:
+        return s.replace("{", "{{").replace("}", "}}")
+
+    expertise_list = ", ".join(_esc(e) for e in p.expertise) if p.expertise else "various topics"
+
+    return (
+        f"\nThe user you are talking to is {_esc(p.name)}.\n"
+        f"{_esc(p.description)}\n"
+        f"Background: {_esc(p.background)}\n"
+        f"Areas of expertise: {expertise_list}.\n"
+        f"Tailor your responses to their level of expertise and perspective."
+    )
+
+
 # ── File I/O with caching ────────────────────────────────────────────
 
 _cached_personality: Personality | None = None
@@ -238,3 +264,99 @@ def save_personality(p: Personality) -> None:
         _cached_mtime = PERSONALITY_PATH.stat().st_mtime
     except OSError:
         _cached_mtime = 0.0
+
+
+# ── Per-user (Telegram) personalities ────────────────────────────────
+
+_user_cache: dict[str, tuple[Personality, float]] = {}  # user_id → (personality, mtime)
+
+
+def _user_personality_path(user_id: str) -> Path:
+    """Return the file path for a user's personality."""
+    # Sanitize user_id to prevent path traversal.
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "", user_id)
+    return _USER_PERSONALITIES_DIR / f"{safe_id}.md"
+
+
+def load_user_personality(user_id: str) -> Personality | None:
+    """Load a user personality from disk, returning ``None`` if not set."""
+    path = _user_personality_path(user_id)
+    if not path.is_file():
+        _user_cache.pop(user_id, None)
+        return None
+
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return _user_cache.get(user_id, (None, 0.0))[0]
+
+    cached = _user_cache.get(user_id)
+    if cached is not None and cached[1] == mtime:
+        return cached[0]
+
+    try:
+        text = path.read_text(encoding="utf-8")
+        p = parse_personality_markdown(text)
+        _user_cache[user_id] = (p, mtime)
+        return p
+    except Exception:
+        return None
+
+
+def save_user_personality(user_id: str, p: Personality) -> None:
+    """Write a user personality to ``~/.captain-claw/personalities/{user_id}.md``."""
+    _USER_PERSONALITIES_DIR.mkdir(parents=True, exist_ok=True)
+    path = _user_personality_path(user_id)
+    content = personality_to_markdown(p)
+    path.write_text(content, encoding="utf-8")
+
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    _user_cache[user_id] = (p, mtime)
+
+
+def delete_user_personality(user_id: str) -> bool:
+    """Delete a user personality file.  Returns ``True`` if removed."""
+    path = _user_personality_path(user_id)
+    _user_cache.pop(user_id, None)
+    if path.is_file():
+        path.unlink()
+        return True
+    return False
+
+
+def list_user_personalities() -> list[dict[str, Any]]:
+    """Return a list of all user personalities with their user IDs.
+
+    Each entry is a dict: ``{"user_id": ..., "name": ..., ...}``.
+    """
+    result: list[dict[str, Any]] = []
+    if not _USER_PERSONALITIES_DIR.is_dir():
+        return result
+
+    for md_file in sorted(_USER_PERSONALITIES_DIR.glob("*.md")):
+        user_id = md_file.stem
+        try:
+            text = md_file.read_text(encoding="utf-8")
+            p = parse_personality_markdown(text)
+            entry = personality_to_dict(p)
+            entry["user_id"] = user_id
+            result.append(entry)
+        except Exception:
+            continue
+    return result
+
+
+def load_effective_personality(user_id: str | None = None) -> Personality:
+    """Load the effective personality for a request.
+
+    If *user_id* is provided and that user has a custom personality,
+    it takes precedence.  Otherwise the global personality is returned.
+    """
+    if user_id:
+        user_p = load_user_personality(user_id)
+        if user_p is not None:
+            return user_p
+    return load_personality()

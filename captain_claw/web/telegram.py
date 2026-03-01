@@ -163,6 +163,7 @@ async def _tg_get_or_create_agent(server: WebServer, message: TelegramMessage) -
     if main_dm is not None:
         agent._deep_memory = main_dm
 
+    agent._user_id = user_id_key  # Per-user personality lookup
     agent._register_default_tools()
     agent.instructions = InstructionLoader()
     agent._initialized = True

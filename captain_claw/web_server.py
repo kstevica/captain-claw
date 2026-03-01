@@ -254,6 +254,15 @@ class WebServer:
             return {}
         s = self.agent.session
         model_details = self.agent.get_runtime_model_details()
+
+        # Active user profile for the web UI (describes who the agent talks to).
+        active_pid = getattr(self.agent, "_active_personality_id", None)
+        personality_name = ""
+        if active_pid:
+            from captain_claw.personality import load_user_personality
+            up = load_user_personality(active_pid)
+            personality_name = up.name if up else ""
+
         return {
             "id": s.id,
             "name": s.name,
@@ -266,6 +275,8 @@ class WebServer:
                 {"name": cmd.name, "skill": cmd.skill_name, "description": cmd.description}
                 for cmd in (self.agent.list_user_invocable_skills() if self.agent else [])
             ],
+            "personality_id": active_pid or "",
+            "personality_name": personality_name,
         }
 
     # ── Cron runtime context ─────────────────────────────────────────
@@ -488,6 +499,27 @@ class WebServer:
     async def _put_personality(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_personality import put_personality
         return await put_personality(self, request)
+
+    # User personalities
+    async def _list_user_personalities(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_personality import list_user_personalities
+        return await list_user_personalities(self, request)
+
+    async def _get_user_personality(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_personality import get_user_personality
+        return await get_user_personality(self, request)
+
+    async def _put_user_personality(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_personality import put_user_personality
+        return await put_user_personality(self, request)
+
+    async def _delete_user_personality(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_personality import delete_user_personality
+        return await delete_user_personality(self, request)
+
+    async def _list_telegram_users(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_personality import list_telegram_users
+        return await list_telegram_users(self, request)
 
     # Scripts
     async def _list_scripts(self, request: web.Request) -> web.Response:
@@ -883,6 +915,12 @@ class WebServer:
         # Personality
         app.router.add_get("/api/personality", self._get_personality)
         app.router.add_put("/api/personality", self._put_personality)
+        # User personalities
+        app.router.add_get("/api/user-personalities", self._list_user_personalities)
+        app.router.add_get("/api/user-personalities/{user_id}", self._get_user_personality)
+        app.router.add_put("/api/user-personalities/{user_id}", self._put_user_personality)
+        app.router.add_delete("/api/user-personalities/{user_id}", self._delete_user_personality)
+        app.router.add_get("/api/telegram-users", self._list_telegram_users)
         app.router.add_get("/api/workflow-browser", self._list_workflow_outputs)
         app.router.add_get("/api/workflow-browser/output/{filename}", self._get_workflow_output)
         app.router.add_get("/api/files", self._list_files)

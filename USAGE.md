@@ -61,6 +61,7 @@ For a quick overview and installation guide, see [README.md](README.md).
 - [Cross-Session Address Book](#cross-session-address-book)
 - [Cross-Session Script Memory](#cross-session-script-memory)
 - [Cross-Session API Memory](#cross-session-api-memory)
+- [Personality System](#personality-system)
 - [Session Management](#session-management)
 - [Context Compaction](#context-compaction)
 - [Execution Queue](#execution-queue-1)
@@ -709,6 +710,24 @@ Photos are saved to `saved/media/<session_id>/` with automatic timestamped filen
 >     - termux
 > ```
 
+### personality
+
+Read or update the agent personality and per-user profiles. The personality tool is always enabled and context-aware — in global mode (console/CLI) it operates on the agent's own identity, and in user mode (Telegram, web UI persona selector) it operates on the current user's profile.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `get` (view current personality) or `update` (modify fields) |
+| `name` | string | for update | Name (agent name or user name depending on mode) |
+| `description` | string | for update | Short description (role, title, etc.) |
+| `background` | string | for update | Background, origin story, or experience |
+| `expertise` | string | for update | Comma-separated list of expertise areas |
+
+In **agent mode** (default): Reads/updates the global agent personality stored at `~/.captain-claw/personality.md`. The agent's name automatically gets "of the Captain Claw family" appended in the system prompt unless the name already contains "Captain Claw".
+
+In **user mode** (Telegram, web UI persona): Reads/updates the current user's profile stored at `~/.captain-claw/personalities/{user_id}.md`. This tells the agent who it is talking to, enabling tailored responses based on the user's expertise and perspective.
+
+See [Personality System](#personality-system) for details.
+
 ### datastore
 
 Manage persistent relational data tables in a local SQLite database. Create tables, insert/update/delete rows, query with filters, run raw SELECT queries, import/export CSV or XLSX files, and manage data protection rules.
@@ -890,6 +909,7 @@ tools:
     - scripts
     - apis
     - datastore
+    - personality
     - termux
   require_confirmation:           # tools that require user approval
     - shell
@@ -1743,6 +1763,67 @@ The `/apis` command and `apis` tool are available across all interfaces: CLI, We
 
 ---
 
+## Personality System
+
+Captain Claw includes a dual-profile personality system that separates **agent identity** (who is responding) from **user context** (who is being talked to).
+
+### Two Profile Types
+
+| Profile | Scope | Storage | Purpose |
+|---|---|---|---|
+| **Agent personality** | Global | `~/.captain-claw/personality.md` | The agent's name, description, background, and expertise. Shared across all sessions and users. |
+| **User profiles** | Per-user | `~/.captain-claw/personalities/{user_id}.md` | Individual profiles describing each user's name, expertise, background, and perspective. Enables tailored responses. |
+
+### Profile Fields
+
+Each profile (agent or user) contains four fields:
+
+| Field | Description |
+|---|---|
+| `name` | Display name |
+| `description` | Short description or role |
+| `background` | Background, origin story, or experience |
+| `expertise` | List of expertise areas |
+
+### How It Works
+
+1. **Agent identity** is always injected into the system prompt. The agent's name automatically gets "of the Captain Claw family" appended unless the name already contains "Captain Claw".
+2. **User context** is injected when a user profile is active (Telegram user with a profile, or web UI persona selector). This tells the LLM who it is talking to and instructs it to tailor responses to that user's expertise level and perspective.
+3. Both profiles are stored as Markdown files with `# Name`, `# Description`, `# Background`, and `# Expertise` section headings.
+
+### Managing Profiles
+
+**Via the personality tool** — the agent can read and update profiles during conversation:
+- In CLI/console: the tool operates on the agent personality
+- In Telegram: the tool operates on the current Telegram user's profile
+- In web UI: the tool operates on the active persona (selected via the persona dropdown)
+
+**Via the web UI:**
+- The **Settings** page includes an agent personality editor and a user personalities section for managing per-user profiles
+- The **persona selector** dropdown in the chat header lets you switch between user profiles on the fly
+
+**Via REST API:**
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/personality` | Retrieve agent personality |
+| `PUT` | `/api/personality` | Update agent personality |
+| `GET` | `/api/user-personalities` | List all user personalities |
+| `GET` | `/api/user-personalities/{user_id}` | Get specific user personality |
+| `PUT` | `/api/user-personalities/{user_id}` | Create or update a user personality |
+| `DELETE` | `/api/user-personalities/{user_id}` | Remove a user personality |
+| `GET` | `/api/telegram-users` | List approved Telegram users (for persona picker) |
+
+### Telegram Integration
+
+Each approved Telegram user can have a personality profile. When a Telegram user sends a message, their profile (if configured) is automatically loaded and the personality tool switches to user mode. Configure user profiles from the web UI Settings page — approved Telegram users appear in the user personalities section.
+
+### Caching
+
+Profiles are cached in memory and automatically refreshed when the underlying file's modification time changes. User IDs are sanitized to prevent path traversal.
+
+---
+
 ## Session Management
 
 ### Lifecycle
@@ -2006,6 +2087,7 @@ The web UI launches by default at `http://127.0.0.1:23080`. To disable it, set `
 - **Command suggestions:** Type `/` to see an inline dropdown of all available commands
 - **Command palette:** `Ctrl+K` opens a fuzzy-search palette for all commands
 - **Instruction editor:** Edit instruction `.md` files live; changes take effect immediately
+- **Persona selector:** Dropdown in the chat header to switch between user profiles for tailored responses
 - **Tool approvals:** Modal dialog appears when a guard requires approval
 - **Session replay:** Full history replayed on connect/reconnect
 - **Resize handle:** Drag the divider between chat and monitor panes
@@ -2027,7 +2109,7 @@ The homepage at `/` provides card-based navigation to all dashboard pages:
 | Deep Memory | `/deep-memory` | Browse and search Typesense-backed long-term archive |
 | Datastore | `/datastore` | Browse and manage structured data tables |
 | Files | `/files` | Browse agent-created files and download outputs |
-| Settings | `/settings` | Configure models, tools, and system options |
+| Settings | `/settings` | Configure models, tools, agent personality, user profiles, and system options |
 
 ### Configuration
 

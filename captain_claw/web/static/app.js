@@ -13,6 +13,9 @@
     let currentApprovalId = null;
     let allowedModels = [];
     let activeModelLabel = '';
+    let personalities = [];
+    let activePersonalityId = '';
+    let activePersonalityName = 'No profile';
 
     // ── DOM references ──────────────────────────────────────
     const $ = (sel) => document.querySelector(sel);
@@ -133,6 +136,7 @@
     function handleWelcome(data) {
         commands = data.commands || [];
         allowedModels = data.models || [];
+        personalities = data.personalities || [];
         // Set a fallback active model label from the models list.
         if (allowedModels.length && !activeModelLabel) {
             const active = allowedModels.find(m => m.id === 'default') || allowedModels[0];
@@ -144,6 +148,7 @@
             updateSessionInfo(data.session);
         }
         buildModelDropdown();
+        buildPersonaDropdown();
         buildCommandReference();
     }
 
@@ -493,6 +498,13 @@
         }
         if (info.tools) updateToolsBar(info.tools);
         if (info.skills) updateSkillsBar(info.skills);
+        // User profile updates (who the agent is talking to).
+        if ('personality_id' in info) {
+            activePersonalityId = info.personality_id || '';
+            activePersonalityName = info.personality_name || 'No profile';
+            personaName.textContent = activePersonalityName;
+            highlightActivePersonaInDropdown();
+        }
     }
 
     function updateToolsBar(tools) {
@@ -579,6 +591,165 @@
 
     function hideModelDropdown() {
         modelDropdown.classList.add('hidden');
+    }
+
+    // ── Persona Selector ───────────────────────────────────────
+
+    const personaDropdown = $('#personaDropdown');
+    const personaBadge = $('#personaBadge');
+    const personaName = $('#personaName');
+
+    function buildPersonaDropdown() {
+        let html = '';
+
+        // "No profile" option — clears user context.
+        const isNoneActive = !activePersonalityId;
+        html += `<div class="model-option${isNoneActive ? ' active' : ''}" data-pid="" title="No user profile — generic responses">
+            <span class="model-option-name">No profile</span>
+            <span class="model-option-desc">Generic context</span>
+            ${isNoneActive ? '<span class="model-option-check">&#x2713;</span>' : ''}
+        </div>`;
+
+        // User profiles — these describe who the agent is talking to.
+        const userProfiles = personalities.filter(p => p.id);
+        if (userProfiles.length) {
+            html += '<div class="pd-section-label">User Profiles</div>';
+            userProfiles.forEach(p => {
+                const isActive = activePersonalityId === p.id;
+                const desc = p.description ? p.description.slice(0, 60) : '';
+                html += `<div class="model-option${isActive ? ' active' : ''}" data-pid="${escapeHtml(p.id)}" title="${escapeHtml(p.description || p.name)}">
+                    <span class="model-option-name">${escapeHtml(p.name)}</span>
+                    ${desc ? `<span class="model-option-desc">${escapeHtml(desc)}</span>` : ''}
+                    ${isActive ? '<span class="model-option-check">&#x2713;</span>' : ''}
+                </div>`;
+            });
+        }
+
+        // "Create new" button.
+        html += '<div class="pd-create-btn" id="pdCreateBtn">&#x2795; Create new user profile</div>';
+
+        personaDropdown.innerHTML = html;
+
+        // Bind click handlers for personality options.
+        personaDropdown.querySelectorAll('.model-option').forEach(el => {
+            el.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const pid = el.dataset.pid;
+                selectPersonality(pid);
+            });
+        });
+
+        // Bind "Create new" button.
+        const createBtn = personaDropdown.querySelector('#pdCreateBtn');
+        if (createBtn) {
+            createBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                showPersonaCreateForm();
+            });
+        }
+    }
+
+    function selectPersonality(pid) {
+        activePersonalityId = pid;
+        const p = personalities.find(pp => pp.id === pid);
+        activePersonalityName = p ? p.name : 'No profile';
+        if (!pid) activePersonalityName = 'No profile';
+        personaName.textContent = activePersonalityName;
+        send({ type: 'set_personality', personality_id: pid });
+        highlightActivePersonaInDropdown();
+        hidePersonaDropdown();
+    }
+
+    function highlightActivePersonaInDropdown() {
+        personaDropdown.querySelectorAll('.model-option').forEach(el => {
+            const isActive = (el.dataset.pid || '') === (activePersonalityId || '');
+            el.classList.toggle('active', isActive);
+            const check = el.querySelector('.model-option-check');
+            if (isActive && !check) {
+                const span = document.createElement('span');
+                span.className = 'model-option-check';
+                span.innerHTML = '&#x2713;';
+                el.appendChild(span);
+            } else if (!isActive && check) {
+                check.remove();
+            }
+        });
+    }
+
+    function togglePersonaDropdown() {
+        personaDropdown.classList.toggle('hidden');
+    }
+
+    function hidePersonaDropdown() {
+        personaDropdown.classList.add('hidden');
+        // Remove any open create form.
+        const form = personaDropdown.querySelector('.pd-create-form');
+        if (form) form.remove();
+    }
+
+    function showPersonaCreateForm() {
+        // Don't add a second form.
+        if (personaDropdown.querySelector('.pd-create-form')) return;
+
+        const form = document.createElement('div');
+        form.className = 'pd-create-form';
+        form.innerHTML = `
+            <input type="text" placeholder="Your name (e.g. Mile Kekin)" class="pd-name-input" />
+            <textarea placeholder="Short description (role, title)" rows="2" class="pd-desc-input"></textarea>
+            <textarea placeholder="Background &amp; experience" rows="2" class="pd-bg-input"></textarea>
+            <input type="text" placeholder="Expertise areas (comma-separated)" class="pd-exp-input" />
+            <div class="pd-form-actions">
+                <button class="pd-cancel-btn">Cancel</button>
+                <button class="primary pd-save-btn">Create</button>
+            </div>
+        `;
+
+        personaDropdown.appendChild(form);
+
+        // Stop clicks inside form from propagating.
+        form.addEventListener('click', (e) => e.stopPropagation());
+
+        form.querySelector('.pd-cancel-btn').addEventListener('click', () => {
+            form.remove();
+        });
+
+        form.querySelector('.pd-save-btn').addEventListener('click', async () => {
+            const nameVal = form.querySelector('.pd-name-input').value.trim();
+            if (!nameVal) { form.querySelector('.pd-name-input').focus(); return; }
+
+            const descVal = form.querySelector('.pd-desc-input').value.trim();
+            const bgVal = form.querySelector('.pd-bg-input').value.trim();
+            const expVal = form.querySelector('.pd-exp-input').value.trim();
+
+            // Create a web-prefixed personality via REST API.
+            const pid = 'web_' + Date.now();
+            const body = { name: nameVal };
+            if (descVal) body.description = descVal;
+            if (bgVal) body.background = bgVal;
+            if (expVal) body.expertise = expVal;
+
+            try {
+                const resp = await fetch('/api/user-personalities/' + encodeURIComponent(pid), {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                if (!resp.ok) throw new Error('Failed to create user profile');
+                const created = await resp.json();
+                // Add to our local list.
+                created.id = pid;
+                personalities.push(created);
+                // Rebuild and select.
+                buildPersonaDropdown();
+                selectPersonality(pid);
+            } catch (err) {
+                console.error('Failed to create user profile:', err);
+                addChatMessage('error', 'Failed to create user profile: ' + err.message);
+            }
+        });
+
+        // Focus on name input.
+        setTimeout(() => form.querySelector('.pd-name-input').focus(), 50);
     }
 
     // ── File Upload ──────────────────────────────────────────
@@ -1308,6 +1479,7 @@
             // Escape - close modals/palette
             if (e.key === 'Escape') {
                 if (!approvalModal.classList.contains('hidden')) return; // Don't close approval modal with Esc
+                if (!personaDropdown.classList.contains('hidden')) { hidePersonaDropdown(); return; }
                 if (!modelDropdown.classList.contains('hidden')) { hideModelDropdown(); return; }
                 if (!commandPalette.classList.contains('hidden')) { hidePalette(); return; }
                 if (!sidebar.classList.contains('hidden')) { sidebar.classList.add('hidden'); return; }
@@ -1338,12 +1510,26 @@
         // Model badge toggles model selector dropdown
         modelBadge.addEventListener('click', (e) => {
             e.stopPropagation();
+            hidePersonaDropdown();
             toggleModelDropdown();
         });
         // Close model dropdown on outside click
         document.addEventListener('click', (e) => {
             if (!modelDropdown.contains(e.target) && e.target !== modelBadge) {
                 hideModelDropdown();
+            }
+        });
+
+        // Persona badge toggles persona selector dropdown
+        personaBadge.addEventListener('click', (e) => {
+            e.stopPropagation();
+            hideModelDropdown();
+            togglePersonaDropdown();
+        });
+        // Close persona dropdown on outside click
+        document.addEventListener('click', (e) => {
+            if (!personaDropdown.contains(e.target) && e.target !== personaBadge) {
+                hidePersonaDropdown();
             }
         });
 

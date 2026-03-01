@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Paths
@@ -290,6 +290,17 @@ class ToolsConfig(BaseModel):
     typesense: TypesenseToolConfig = Field(default_factory=TypesenseToolConfig)
     require_confirmation: list[str] = ["shell", "write"]
     plugin_dirs: list[str] = ["skills/tools"]
+
+    # Personality tool is always available — re-inject if removed by user.
+    _ALWAYS_ENABLED: frozenset[str] = frozenset({"personality"})
+
+    @model_validator(mode="after")
+    def _ensure_always_enabled(self) -> "ToolsConfig":
+        for tool in self._ALWAYS_ENABLED:
+            if tool not in self.enabled:
+                self.enabled.append(tool)
+        return self
+
     duplicate_call_max: int = Field(
         default=1,
         description=(

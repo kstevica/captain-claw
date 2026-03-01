@@ -195,6 +195,125 @@ html, body {
     flex-shrink: 0;
 }
 
+/* ─── Persona Selector ──────────────────────────────── */
+
+.persona-selector-wrap {
+    position: relative;
+}
+
+.persona-badge {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    background: rgba(139, 92, 246, 0.08);
+    border: 1px solid rgba(139, 92, 246, 0.4);
+    border-radius: var(--radius);
+    font-size: 12px;
+    color: rgb(139, 92, 246);
+    font-family: var(--font);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.persona-badge:hover {
+    background: rgba(139, 92, 246, 0.16);
+    border-color: rgba(139, 92, 246, 0.6);
+}
+.persona-icon {
+    font-size: 13px;
+}
+
+.persona-dropdown {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    min-width: 260px;
+    max-width: 360px;
+    max-height: 360px;
+    overflow-y: auto;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    z-index: 40;
+    overflow-x: hidden;
+    animation: dropdownFadeIn 0.15s ease;
+}
+.persona-dropdown.hidden { display: none; }
+
+.persona-dropdown .model-option-name {
+    font-family: var(--font);
+}
+
+.persona-dropdown .pd-section-label {
+    padding: 8px 14px 4px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border-light);
+}
+
+.persona-dropdown .pd-create-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 14px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--accent);
+    transition: background 0.1s;
+}
+.persona-dropdown .pd-create-btn:hover {
+    background: var(--bg-hover);
+}
+
+/* ─── Persona create inline form ──────────────────── */
+
+.pd-create-form {
+    padding: 10px 14px;
+    border-top: 1px solid var(--border-light);
+}
+.pd-create-form input,
+.pd-create-form textarea {
+    width: 100%;
+    box-sizing: border-box;
+    margin-bottom: 6px;
+    padding: 6px 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 12px;
+}
+.pd-create-form textarea {
+    resize: vertical;
+    min-height: 40px;
+}
+.pd-create-form .pd-form-actions {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+    margin-top: 4px;
+}
+.pd-create-form .pd-form-actions button {
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+}
+.pd-create-form .pd-form-actions button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
 .status-indicator {
     display: flex;
     align-items: center;

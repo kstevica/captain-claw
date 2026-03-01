@@ -114,6 +114,8 @@
             // Fields, array, or custom component
             if (section.type === 'custom' && section.custom_id === 'personality') {
                 renderPersonalityEditor(card);
+            } else if (section.type === 'custom' && section.custom_id === 'user_personalities') {
+                renderUserPersonalitiesEditor(card);
             } else if (section.type === 'array') {
                 renderArraySection(card, section);
             } else {
@@ -997,6 +999,273 @@
         row.appendChild(ctrl);
         return row;
     }
+
+    // ── User personalities editor (custom component) ────
+    function renderUserPersonalitiesEditor(container) {
+        var wrap = document.createElement('div');
+        wrap.className = 'st-personality-editor st-user-personalities';
+        wrap.innerHTML = '<div class="st-personality-loading">Loading user personalities...</div>';
+        container.appendChild(wrap);
+
+        // Fetch both user personalities and telegram users in parallel.
+        Promise.all([
+            fetch('/api/user-personalities').then(function (r) { return r.json(); }),
+            fetch('/api/telegram-users').then(function (r) { return r.json(); })
+        ])
+        .then(function (results) {
+            var personalities = results[0];
+            var telegramUsers = results[1];
+            _renderUserPersonalitiesList(wrap, personalities, telegramUsers);
+        })
+        .catch(function (err) {
+            wrap.innerHTML =
+                '<div class="st-personality-loading" style="color:var(--red)">' +
+                'Failed to load: ' + esc(err.message) + '</div>';
+        });
+    }
+
+    function _renderUserPersonalitiesList(wrap, personalities, telegramUsers) {
+        wrap.innerHTML = '';
+
+        // Build lookup: user_id → personality data.
+        var personalityMap = {};
+        personalities.forEach(function (p) { personalityMap[p.user_id] = p; });
+
+        // Build set of user_ids from Telegram users.
+        var telegramIds = {};
+        telegramUsers.forEach(function (u) { telegramIds[u.user_id] = u; });
+
+        // 1) Show all approved Telegram users (configured first, then unconfigured).
+        var configuredUsers = [];
+        var unconfiguredUsers = [];
+        telegramUsers.forEach(function (u) {
+            if (personalityMap[u.user_id]) {
+                configuredUsers.push(u);
+            } else {
+                unconfiguredUsers.push(u);
+            }
+        });
+
+        configuredUsers.forEach(function (u) {
+            var p = personalityMap[u.user_id];
+            // Enrich personality with telegram info for label.
+            p.username = p.username || u.username;
+            p.first_name = p.first_name || u.first_name;
+            wrap.appendChild(_renderUserPersonalityCard(p, wrap, personalities, telegramUsers));
+        });
+
+        unconfiguredUsers.forEach(function (u) {
+            wrap.appendChild(_renderUnconfiguredUserCard(u, wrap, personalities, telegramUsers));
+        });
+
+        // 2) Show personalities for non-Telegram users (e.g. web-created profiles).
+        personalities.forEach(function (p) {
+            if (!telegramIds[p.user_id]) {
+                wrap.appendChild(_renderUserPersonalityCard(p, wrap, personalities, telegramUsers));
+            }
+        });
+
+        // Empty state.
+        if (telegramUsers.length === 0 && personalities.length === 0) {
+            var empty = document.createElement('div');
+            empty.className = 'st-personality-loading';
+            empty.textContent = 'No approved Telegram users yet. Pair a Telegram account first.';
+            wrap.appendChild(empty);
+        }
+
+        // Manual add button for arbitrary user IDs.
+        var addRow = document.createElement('div');
+        addRow.className = 'st-personality-actions';
+        var addBtn = document.createElement('button');
+        addBtn.className = 'st-btn secondary';
+        addBtn.textContent = '+ Add by User ID';
+        addBtn.addEventListener('click', function () {
+            var userId = prompt('Enter user ID:');
+            if (!userId || !userId.trim()) return;
+            userId = userId.trim();
+            if (personalityMap[userId]) { toast('Personality already exists for this user', 'error'); return; }
+            var payload = { name: 'New User', description: '', background: '', expertise: [] };
+            fetch('/api/user-personalities/' + userId, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+            .then(function (r) { return r.json(); })
+            .then(function (result) {
+                if (result.error) { toast(result.error, 'error'); return; }
+                toast('User personality created', 'success');
+                fetch('/api/user-personalities').then(function (r) { return r.json(); })
+                    .then(function (fresh) { _renderUserPersonalitiesList(wrap, fresh, telegramUsers); });
+            })
+            .catch(function (err) { toast('Failed: ' + err.message, 'error'); });
+        });
+        addRow.appendChild(addBtn);
+        wrap.appendChild(addRow);
+    }
+
+    function _renderUnconfiguredUserCard(u, wrap, personalities, telegramUsers) {
+        var card = document.createElement('div');
+        card.className = 'st-up-card st-up-card-unconfigured';
+
+        var hdr = document.createElement('div');
+        hdr.className = 'st-up-card-header';
+        var title = document.createElement('span');
+        title.className = 'st-up-card-title';
+        title.textContent = _userLabel(u);
+        hdr.appendChild(title);
+
+        var badge = document.createElement('span');
+        badge.className = 'st-up-badge-none';
+        badge.textContent = 'No profile';
+        hdr.appendChild(badge);
+
+        var setupBtn = document.createElement('button');
+        setupBtn.className = 'st-btn sm primary';
+        setupBtn.textContent = 'Set Up';
+        setupBtn.addEventListener('click', function () {
+            var payload = {
+                name: u.first_name || u.username || 'User ' + u.user_id,
+                description: '',
+                background: '',
+                expertise: []
+            };
+            fetch('/api/user-personalities/' + u.user_id, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+            .then(function (r) { return r.json(); })
+            .then(function (result) {
+                if (result.error) { toast(result.error, 'error'); return; }
+                toast('Profile created for ' + _userLabel(u), 'success');
+                fetch('/api/user-personalities').then(function (r) { return r.json(); })
+                    .then(function (fresh) { _renderUserPersonalitiesList(wrap, fresh, telegramUsers); });
+            })
+            .catch(function (err) { toast('Failed: ' + err.message, 'error'); });
+        });
+        hdr.appendChild(setupBtn);
+
+        card.appendChild(hdr);
+        return card;
+    }
+
+    function _userLabel(p) {
+        var parts = [];
+        if (p.username) parts.push('@' + p.username);
+        if (p.first_name) parts.push(p.first_name);
+        if (parts.length === 0) parts.push(p.user_id);
+        return parts.join(' — ');
+    }
+
+    function _renderUserPersonalityCard(p, wrap, personalities, telegramUsers) {
+        var card = document.createElement('div');
+        card.className = 'st-up-card';
+
+        // Header
+        var hdr = document.createElement('div');
+        hdr.className = 'st-up-card-header';
+        var title = document.createElement('span');
+        title.className = 'st-up-card-title';
+        title.textContent = p.name + ' (' + _userLabel(p) + ')';
+        hdr.appendChild(title);
+
+        var toggleBtn = document.createElement('button');
+        toggleBtn.className = 'st-btn sm';
+        toggleBtn.textContent = 'Edit';
+        toggleBtn.addEventListener('click', function () {
+            var body = card.querySelector('.st-up-card-body');
+            var isOpen = body.style.display !== 'none';
+            body.style.display = isOpen ? 'none' : '';
+            toggleBtn.textContent = isOpen ? 'Edit' : 'Collapse';
+        });
+        hdr.appendChild(toggleBtn);
+
+        var delBtn = document.createElement('button');
+        delBtn.className = 'st-btn sm danger';
+        delBtn.textContent = 'Delete';
+        delBtn.addEventListener('click', function () {
+            if (!confirm('Remove personality for ' + _userLabel(p) + '?')) return;
+            fetch('/api/user-personalities/' + p.user_id, { method: 'DELETE' })
+                .then(function (r) { return r.json(); })
+                .then(function () {
+                    toast('User personality removed', 'success');
+                    // Refresh list.
+                    fetch('/api/user-personalities').then(function (r) { return r.json(); })
+                        .then(function (fresh) { _renderUserPersonalitiesList(wrap, fresh, telegramUsers); });
+                })
+                .catch(function (err) { toast('Failed: ' + err.message, 'error'); });
+        });
+        hdr.appendChild(delBtn);
+        card.appendChild(hdr);
+
+        // Body (collapsed by default)
+        var body = document.createElement('div');
+        body.className = 'st-up-card-body';
+        body.style.display = 'none';
+
+        var nameRow = _pField('Name', 'text');
+        var nameInp = nameRow.querySelector('input');
+        nameInp.value = p.name || '';
+        nameInp.placeholder = 'e.g. Toby McDev';
+        body.appendChild(nameRow);
+
+        var descRow = _pField('Description', 'textarea');
+        var descInp = descRow.querySelector('textarea');
+        descInp.value = p.description || '';
+        descInp.rows = 3;
+        body.appendChild(descRow);
+
+        var bgRow = _pField('Background', 'textarea');
+        var bgInp = bgRow.querySelector('textarea');
+        bgInp.value = p.background || '';
+        bgInp.rows = 3;
+        body.appendChild(bgRow);
+
+        var expRow = _pField('Expertise', 'textarea');
+        var expInp = expRow.querySelector('textarea');
+        expInp.value = (p.expertise || []).join('\n');
+        expInp.rows = 4;
+        expInp.placeholder = 'One expertise per line';
+        body.appendChild(expRow);
+
+        var actions = document.createElement('div');
+        actions.className = 'st-personality-actions';
+        var saveBtn = document.createElement('button');
+        saveBtn.className = 'st-btn primary';
+        saveBtn.textContent = 'Save';
+        saveBtn.addEventListener('click', function () {
+            var payload = {
+                name: nameInp.value.trim(),
+                description: descInp.value.trim(),
+                background: bgInp.value.trim(),
+                expertise: expInp.value.split('\n').map(function (e) { return e.trim(); }).filter(function (e) { return e.length > 0; })
+            };
+            if (!payload.name) { toast('Name is required', 'error'); return; }
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Saving...';
+            fetch('/api/user-personalities/' + p.user_id, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+            .then(function (r) { return r.json(); })
+            .then(function (result) {
+                if (result.error) { toast(result.error, 'error'); }
+                else {
+                    toast('Saved personality for ' + _userLabel(p), 'success');
+                    title.textContent = (result.name || p.name) + ' (' + _userLabel(p) + ')';
+                }
+            })
+            .catch(function (err) { toast('Failed: ' + err.message, 'error'); })
+            .finally(function () { saveBtn.disabled = false; saveBtn.textContent = 'Save'; });
+        });
+        actions.appendChild(saveBtn);
+        body.appendChild(actions);
+
+        card.appendChild(body);
+        return card;
+    }
+
 
     // ── Helpers ──────────────────────────────────────────
     function getVal(key) {

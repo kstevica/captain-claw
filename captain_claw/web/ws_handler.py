@@ -26,11 +26,21 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
     from captain_claw.web_server import COMMANDS
 
     models = server.agent.get_allowed_models() if server.agent else []
+
+    # Available user profiles for the persona selector.
+    # These describe who the agent is talking to (not the agent's identity).
+    from captain_claw.personality import list_user_personalities
+    user_personalities = list_user_personalities()
+    for up in user_personalities:
+        up["id"] = up.get("user_id", "")
+    personalities = user_personalities
+
     await server._send(ws, {
         "type": "welcome",
         "session": server._session_info(),
         "models": models,
         "commands": COMMANDS,
+        "personalities": personalities,
     })
 
     # Replay existing session messages for the connecting client
@@ -122,6 +132,32 @@ async def handle_ws_message(
                 "type": "command_result",
                 "command": "/session model",
                 "content": msg,
+            })
+
+    elif msg_type == "set_personality":
+        # Switch the active user profile for the web chat session.
+        # This does NOT change the agent's identity — it sets context
+        # about who the agent is talking to (user's expertise/background).
+        personality_id = str(data.get("personality_id", "")).strip() or None
+        if server.agent:
+            server.agent._active_personality_id = personality_id
+            # Clear instruction caches so the prompt rebuilds with new user context.
+            if hasattr(server.agent, "instructions") and hasattr(server.agent.instructions, "_cache"):
+                server.agent.instructions._cache.pop("system_prompt.md", None)
+                server.agent.instructions._cache.pop("micro_system_prompt.md", None)
+            server._broadcast({"type": "session_info", **server._session_info()})
+            # Report the change.
+            if personality_id:
+                from captain_claw.personality import load_user_personality
+                up = load_user_personality(personality_id)
+                label = up.name if up else personality_id
+                msg_text = f"User profile set to **{label}**. Responses will be tailored to this user's perspective."
+            else:
+                msg_text = "User profile cleared. Using default context."
+            await server._send(ws, {
+                "type": "command_result",
+                "command": "/user-profile",
+                "content": msg_text,
             })
 
     elif msg_type == "cancel":

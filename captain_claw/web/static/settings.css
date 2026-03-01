@@ -853,6 +853,62 @@ html, body {
     padding: 12px 0 4px;
 }
 
+/* ─── User personality cards ────────────────────────── */
+
+.st-up-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 10px;
+    overflow: hidden;
+}
+
+.st-up-card-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    background: var(--bg-secondary, #f9f9f9);
+    cursor: default;
+}
+
+.st-up-card-title {
+    flex: 1;
+    font-weight: 500;
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.st-up-card-body {
+    padding: 10px 14px;
+    border-top: 1px solid var(--border);
+}
+
+.st-up-card-unconfigured {
+    opacity: 0.7;
+    border-style: dashed;
+}
+
+.st-up-badge-none {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--bg-tertiary);
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.st-btn.danger {
+    color: var(--red, #e74c3c);
+    border-color: var(--red, #e74c3c);
+}
+
+.st-btn.danger:hover {
+    background: var(--red, #e74c3c);
+    color: #fff;
+}
+
 @media (max-width: 768px) {
     .st-sidebar {
         width: 56px;
