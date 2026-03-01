@@ -48,7 +48,7 @@ pip install captain-claw
 ```bash
 pip install captain-claw[tts]      # Local text-to-speech (pocket-tts, requires PyTorch)
 pip install captain-claw[vector]   # Vector memory / RAG (numpy, scikit-learn)
-pip install captain-claw[vision]   # Image resize before LLM calls (Pillow)
+pip install captain-claw[vision]   # Image resize before LLM calls (Pillow; or use ImageMagick)
 ```
 
 ### 2. Set an API key

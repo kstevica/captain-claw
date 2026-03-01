@@ -4,6 +4,8 @@ import asyncio
 import base64
 import io
 import mimetypes
+import shutil
+import subprocess
 from typing import Any
 
 from captain_claw.config import get_config
@@ -22,6 +24,87 @@ except ImportError:
     _HAS_PILLOW = False
 
 
+def _resize_with_pillow(
+    image_bytes: bytes,
+    max_pixels: int,
+    jpeg_quality: int,
+) -> tuple[bytes, str] | None:
+    """Try resizing with Pillow.  Returns None on failure."""
+    if not _HAS_PILLOW:
+        return None
+    try:
+        img = _PILImage.open(io.BytesIO(image_bytes))
+        w, h = img.size
+
+        if max(w, h) <= max_pixels:
+            return image_bytes, ""  # no resize needed
+
+        if w >= h:
+            new_w = max_pixels
+            new_h = int(h * (max_pixels / w))
+        else:
+            new_h = max_pixels
+            new_w = int(w * (max_pixels / h))
+
+        img = img.resize((new_w, new_h), _PILImage.LANCZOS)
+        if img.mode in ("RGBA", "P", "LA"):
+            img = img.convert("RGB")
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=jpeg_quality)
+        resized = buf.getvalue()
+
+        if len(resized) == 0:
+            log.warning("Pillow produced 0-byte output, falling back")
+            return None
+
+        log.info(
+            "image resized (pillow)",
+            original=f"{w}x{h}", resized=f"{new_w}x{new_h}",
+            orig_kb=f"{len(image_bytes)/1024:.0f}",
+            new_kb=f"{len(resized)/1024:.0f}",
+        )
+        return resized, "image/jpeg"
+    except Exception as exc:
+        log.warning("Pillow resize failed, falling back", error=str(exc))
+        return None
+
+
+def _resize_with_imagemagick(
+    image_bytes: bytes,
+    max_pixels: int,
+    jpeg_quality: int,
+) -> tuple[bytes, str] | None:
+    """Try resizing with ImageMagick ``convert`` via subprocess (stdin/stdout)."""
+    convert_bin = shutil.which("convert") or shutil.which("magick")
+    if not convert_bin:
+        return None
+    try:
+        args = [convert_bin]
+        if "magick" in convert_bin:
+            args.append("convert")
+        args += [
+            "-",                                    # read from stdin
+            "-resize", f"{max_pixels}x{max_pixels}>",  # shrink only
+            "-quality", str(jpeg_quality),
+            "jpeg:-",                               # write JPEG to stdout
+        ]
+        proc = subprocess.run(
+            args, input=image_bytes,
+            capture_output=True, timeout=15,
+        )
+        if proc.returncode == 0 and len(proc.stdout) > 0:
+            log.info(
+                "image resized (imagemagick)",
+                orig_kb=f"{len(image_bytes)/1024:.0f}",
+                new_kb=f"{len(proc.stdout)/1024:.0f}",
+            )
+            return proc.stdout, "image/jpeg"
+    except Exception as exc:
+        log.warning("ImageMagick resize failed", error=str(exc))
+    return None
+
+
 def _maybe_resize_image(
     image_bytes: bytes,
     max_pixels: int,
@@ -29,44 +112,25 @@ def _maybe_resize_image(
 ) -> tuple[bytes, str]:
     """Resize an image if its longest edge exceeds *max_pixels*.
 
-    Returns ``(processed_bytes, mime_type)``.  When Pillow is not installed or
-    *max_pixels* is 0 the original bytes are returned untouched.
+    Tries Pillow first, then ImageMagick subprocess, then returns
+    original bytes untouched.
     """
-    if not _HAS_PILLOW or max_pixels <= 0:
+    if max_pixels <= 0:
         return image_bytes, ""
 
-    img = _PILImage.open(io.BytesIO(image_bytes))
-    w, h = img.size
+    # Strategy 1: Pillow
+    result = _resize_with_pillow(image_bytes, max_pixels, jpeg_quality)
+    if result is not None:
+        return result
 
-    if max(w, h) <= max_pixels:
-        return image_bytes, ""
+    # Strategy 2: ImageMagick CLI (works on Termux with pkg install imagemagick)
+    result = _resize_with_imagemagick(image_bytes, max_pixels, jpeg_quality)
+    if result is not None:
+        return result
 
-    # Compute new dimensions preserving aspect ratio.
-    if w >= h:
-        new_w = max_pixels
-        new_h = int(h * (max_pixels / w))
-    else:
-        new_h = max_pixels
-        new_w = int(w * (max_pixels / h))
-
-    img = img.resize((new_w, new_h), _PILImage.LANCZOS)
-
-    # Convert to RGB if needed (e.g. RGBA PNGs → JPEG).
-    if img.mode in ("RGBA", "P", "LA"):
-        img = img.convert("RGB")
-
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=jpeg_quality)
-    resized = buf.getvalue()
-
-    log.info(
-        "image resized for LLM",
-        original=f"{w}x{h}",
-        resized=f"{new_w}x{new_h}",
-        orig_kb=f"{len(image_bytes)/1024:.0f}",
-        new_kb=f"{len(resized)/1024:.0f}",
-    )
-    return resized, "image/jpeg"
+    # No resize available — send raw.
+    log.info("no image resize backend available, sending raw")
+    return image_bytes, ""
 
 
 class _BaseImageLLMTool(Tool):

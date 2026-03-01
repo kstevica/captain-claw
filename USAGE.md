@@ -96,7 +96,23 @@ pip install captain-claw
 ```bash
 pip install captain-claw[tts]      # Local text-to-speech (pocket-tts, requires PyTorch)
 pip install captain-claw[vector]   # Vector memory / RAG (numpy, scikit-learn)
+pip install captain-claw[vision]   # Image resize before LLM calls (Pillow)
 ```
+
+**ImageMagick** can be used instead of (or alongside) Pillow for image resizing before vision/OCR LLM calls. This is especially useful on Termux/Android where Pillow's JPEG encoder may not work correctly.
+
+```bash
+# macOS
+brew install imagemagick
+
+# Ubuntu / Debian
+sudo apt install imagemagick
+
+# Termux (Android)
+pkg install imagemagick
+```
+
+If neither Pillow nor ImageMagick is available, images are sent to the LLM as-is (providers resize server-side).
 
 ### Install from source
 
@@ -470,7 +486,7 @@ Extract text from images using OCR via a vision-capable LLM.
 | `prompt` | string | no | Instruction for the vision model (default: "Extract all text from this image.") |
 | `max_chars` | number | no | Maximum characters to return (default: 120000) |
 
-Requires a model with `model_type: "ocr"` or `"vision"` in `model.allowed`. When Pillow is installed (`pip install captain-claw[vision]`), images larger than `max_pixels` (default: 1568px longest edge) are resized and compressed to JPEG at `jpeg_quality` (default: 85) before sending to the LLM. This reduces token cost and upload time, especially for high-resolution camera photos. Without Pillow, images are sent as-is (LLM providers resize server-side).
+Requires a model with `model_type: "ocr"` or `"vision"` in `model.allowed`. Images larger than `max_pixels` (default: 1568px longest edge) are automatically resized and compressed to JPEG at `jpeg_quality` (default: 85) before sending to the LLM. Two resize backends are tried in order: **Pillow** (`pip install captain-claw[vision]`), then **ImageMagick** (`convert` CLI — on Termux: `pkg install imagemagick`). If neither is available, images are sent as-is (LLM providers resize server-side). This reduces token cost and upload time, especially for high-resolution camera photos.
 
 ### image_vision
 
@@ -482,7 +498,7 @@ Analyze and describe images using a vision-capable LLM. Supports scene descripti
 | `prompt` | string | no | Question or instruction about the image (default: "Describe this image in detail.") |
 | `max_chars` | number | no | Maximum characters to return (default: 120000) |
 
-Requires a model with `model_type: "vision"` in `model.allowed`. Telegram photo attachments are automatically processed through this tool. Same image resizing applies as `image_ocr` above — configurable via `max_pixels` and `jpeg_quality` in settings.
+Requires a model with `model_type: "vision"` in `model.allowed`. Telegram photo attachments are automatically processed through this tool. Same image resizing applies as `image_ocr` above (Pillow → ImageMagick → raw) — configurable via `max_pixels` and `jpeg_quality` in settings.
 
 ### pocket_tts
 
@@ -909,13 +925,13 @@ tools:
     timeout_seconds: 120
     max_chars: 120000
     default_prompt: ""            # empty = "Extract all text from this image."
-    max_pixels: 1568              # longest edge cap before sending to LLM (0 = no resize, requires Pillow)
+    max_pixels: 1568              # longest edge cap before sending to LLM (0 = no resize; uses Pillow or ImageMagick)
     jpeg_quality: 85              # JPEG quality for resized images (1-100)
   image_vision:
     timeout_seconds: 120
     max_chars: 120000
     default_prompt: ""            # empty = "Describe this image in detail."
-    max_pixels: 1568              # longest edge cap before sending to LLM (0 = no resize, requires Pillow)
+    max_pixels: 1568              # longest edge cap before sending to LLM (0 = no resize; uses Pillow or ImageMagick)
     jpeg_quality: 85              # JPEG quality for resized images (1-100)
   pocket_tts:
     max_chars: 4000

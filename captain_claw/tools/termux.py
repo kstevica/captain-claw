@@ -158,7 +158,7 @@ class TermuxTool(Tool):
 
         abort_event = kwargs.get("_abort_event")
         success, stdout, stderr = await self._run_command(
-            cmd, timeout=15.0, abort_event=abort_event,
+            cmd, timeout=30.0, abort_event=abort_event,
         )
 
         if not success:
