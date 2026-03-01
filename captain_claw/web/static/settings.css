@@ -828,6 +828,31 @@ html, body {
 
 /* ─── Responsive ─────────────────────────────────────── */
 
+/* ─── Personality editor ─────────────────────────────── */
+
+.st-personality-editor {
+    padding: 4px 0;
+}
+
+.st-personality-loading {
+    padding: 16px;
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+.st-personality-editor .st-textarea {
+    resize: vertical;
+    min-height: 60px;
+    font-family: var(--font);
+    line-height: 1.5;
+}
+
+.st-personality-actions {
+    display: flex;
+    justify-content: flex-end;
+    padding: 12px 0 4px;
+}
+
 @media (max-width: 768px) {
     .st-sidebar {
         width: 56px;

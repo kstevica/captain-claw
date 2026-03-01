@@ -235,6 +235,7 @@ tools:
   - typesense
   - datastore
   - termux
+  - personality
   read:
     max_file_bytes: 200000
   shell:

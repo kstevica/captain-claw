@@ -69,6 +69,22 @@ def _field(key: str, label: str, **kw: Any) -> dict[str, Any]:
 def _build_schema() -> list[dict[str, Any]]:
     """Return the full settings schema grouped for the UI."""
     return [
+        # ── 0. Personality ──────────────────────────────────────
+        {
+            "id": "personality",
+            "title": "Personality",
+            "icon": "\U0001F3AD",
+            "sections": [
+                {
+                    "id": "personality_editor",
+                    "title": "Agent Personality",
+                    "description": "Define the agent's identity, background, and expertise areas.",
+                    "type": "custom",
+                    "custom_id": "personality",
+                    "fields": [],
+                },
+            ],
+        },
         # ── 1. Model & LLM ──────────────────────────────────────
         {
             "id": "model_llm",

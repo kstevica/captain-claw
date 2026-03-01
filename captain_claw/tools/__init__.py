@@ -27,6 +27,7 @@ from captain_claw.tools.send_mail import SendMailTool
 from captain_claw.tools.google_drive import GoogleDriveTool
 from captain_claw.tools.google_calendar import GoogleCalendarTool
 from captain_claw.tools.google_mail import GoogleMailTool
+from captain_claw.tools.personality import PersonalityTool
 from captain_claw.tools.todo import TodoTool
 from captain_claw.tools.contacts import ContactsTool
 from captain_claw.tools.scripts import ScriptsTool
@@ -57,6 +58,7 @@ __all__ = [
     "ImageGenTool",
     "ImageOcrTool",
     "ImageVisionTool",
+    "PersonalityTool",
     "SendMailTool",
     "GoogleDriveTool",
     "GoogleCalendarTool",

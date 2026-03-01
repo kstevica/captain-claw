@@ -90,7 +90,7 @@ class DatastoreTool(Tool):
         "Create tables, insert/update/delete rows, query with filters, "
         "run raw SELECT queries, import/export CSV or XLSX files, and "
         "manage data protection rules. "
-        "Actions: list_tables, describe, create_table, drop_table, "
+        "Actions: list_tables, describe, create_table, drop_table, rename_table, "
         "add_column, rename_column, drop_column, change_column_type, "
         "insert, update, update_column, delete, query, sql, import_file, export, "
         "protect, unprotect, list_protections."
@@ -103,7 +103,7 @@ class DatastoreTool(Tool):
             "action": {
                 "type": "string",
                 "enum": [
-                    "list_tables", "describe", "create_table", "drop_table",
+                    "list_tables", "describe", "create_table", "drop_table", "rename_table",
                     "add_column", "rename_column", "drop_column", "change_column_type",
                     "insert", "update", "update_column", "delete",
                     "query", "sql", "import_file", "export",
@@ -128,7 +128,7 @@ class DatastoreTool(Tool):
             },
             "new_name": {
                 "type": "string",
-                "description": "New column name (for rename_column).",
+                "description": "New name (for rename_column or rename_table).",
             },
             "col_type": {
                 "type": "string",
@@ -227,6 +227,8 @@ class DatastoreTool(Tool):
                 result = await self._create_table(dm, kwargs.get("table"), kwargs.get("columns"))
             elif action == "drop_table":
                 result = await self._drop_table(dm, kwargs.get("table"))
+            elif action == "rename_table":
+                result = await self._rename_table(dm, kwargs)
             elif action == "add_column":
                 result = await self._add_column(dm, kwargs)
             elif action == "rename_column":
@@ -327,6 +329,20 @@ class DatastoreTool(Tool):
             return ToolResult(success=False, error="'table' is required for drop_table.")
         await dm.drop_table(table)
         return ToolResult(success=True, content=f"Dropped table **{table}**.")
+
+    @staticmethod
+    async def _rename_table(dm: Any, kwargs: dict[str, Any]) -> ToolResult:
+        table = kwargs.get("table")
+        new_name = kwargs.get("new_name")
+        if not table:
+            return ToolResult(success=False, error="'table' is required.")
+        if not new_name:
+            return ToolResult(success=False, error="'new_name' is required.")
+        info = await dm.rename_table(table, new_name)
+        return ToolResult(
+            success=True,
+            content=f"Renamed table **{table}** to **{info.name}**.",
+        )
 
     @staticmethod
     async def _add_column(dm: Any, kwargs: dict[str, Any]) -> ToolResult:

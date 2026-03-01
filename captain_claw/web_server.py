@@ -480,6 +480,15 @@ class WebServer:
         from captain_claw.web.rest_entities import delete_contact
         return await delete_contact(self, request)
 
+    # Personality
+    async def _get_personality(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_personality import get_personality
+        return await get_personality(self, request)
+
+    async def _put_personality(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_personality import put_personality
+        return await put_personality(self, request)
+
     # Scripts
     async def _list_scripts(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_entities import list_scripts
@@ -701,6 +710,10 @@ class WebServer:
         from captain_claw.web.rest_datastore import drop_table
         return await drop_table(self, request)
 
+    async def _ds_rename_table(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_datastore import rename_table
+        return await rename_table(self, request)
+
     async def _ds_query_rows(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_datastore import query_rows
         return await query_rows(self, request)
@@ -867,6 +880,9 @@ class WebServer:
         app.router.add_get("/api/apis/{id}", self._get_api_api)
         app.router.add_patch("/api/apis/{id}", self._update_api_api)
         app.router.add_delete("/api/apis/{id}", self._delete_api_api)
+        # Personality
+        app.router.add_get("/api/personality", self._get_personality)
+        app.router.add_put("/api/personality", self._put_personality)
         app.router.add_get("/api/workflow-browser", self._list_workflow_outputs)
         app.router.add_get("/api/workflow-browser/output/{filename}", self._get_workflow_output)
         app.router.add_get("/api/files", self._list_files)
@@ -883,6 +899,7 @@ class WebServer:
         app.router.add_get("/api/datastore/tables/{name}/export", self._ds_export_table)
         app.router.add_get("/api/datastore/tables/{name}", self._ds_describe_table)
         app.router.add_delete("/api/datastore/tables/{name}", self._ds_drop_table)
+        app.router.add_patch("/api/datastore/tables/{name}", self._ds_rename_table)
         app.router.add_get("/api/datastore/tables/{name}/rows", self._ds_query_rows)
         app.router.add_post("/api/datastore/tables/{name}/rows", self._ds_insert_rows)
         app.router.add_patch("/api/datastore/tables/{name}/rows", self._ds_update_rows)

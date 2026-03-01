@@ -277,6 +277,55 @@ class DatastoreManager:
         await self._db.commit()
         return True
 
+    async def rename_table(self, old_name: str, new_name: str) -> TableInfo:
+        """Rename a user table (both meta-data and the physical SQLite table)."""
+        old_safe, old_internal = await self._resolve_table(old_name)
+        assert self._db is not None
+        await self._check_table_protected(old_safe)
+
+        new_safe = self._safe_name(new_name)
+        if not new_safe:
+            raise ValueError("Invalid new table name")
+        if new_safe == old_safe:
+            raise ValueError("New name is the same as the current name")
+
+        # Check new name doesn't already exist
+        async with self._db.execute(
+            "SELECT 1 FROM _ds_tables WHERE name = ?", (new_safe,)
+        ) as cur:
+            if await cur.fetchone():
+                raise ValueError(f"Table already exists: {new_safe}")
+
+        new_internal = self._internal_name(new_safe)
+        now = self._now()
+
+        # Temporarily disable foreign keys so we can update the parent
+        # and children without constraint violations (no ON UPDATE CASCADE).
+        await self._db.execute("PRAGMA foreign_keys=OFF")
+        try:
+            # Rename the physical SQLite table
+            await self._db.execute(
+                f'ALTER TABLE "{old_internal}" RENAME TO "{new_internal}"'
+            )
+            # Update meta-tables (parent + children together)
+            await self._db.execute(
+                "UPDATE _ds_tables SET name = ?, updated_at = ? WHERE name = ?",
+                (new_safe, now, old_safe),
+            )
+            await self._db.execute(
+                "UPDATE _ds_columns SET table_name = ? WHERE table_name = ?",
+                (new_safe, old_safe),
+            )
+            await self._db.execute(
+                "UPDATE _ds_protections SET table_name = ? WHERE table_name = ?",
+                (new_safe, old_safe),
+            )
+            await self._db.commit()
+        finally:
+            await self._db.execute("PRAGMA foreign_keys=ON")
+
+        return await self.describe_table(new_safe)
+
     # ── schema changes ───────────────────────────────────────────────
 
     async def add_column(

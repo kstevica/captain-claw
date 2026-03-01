@@ -109,6 +109,37 @@ async def drop_table(server: WebServer, request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def rename_table(server: WebServer, request: web.Request) -> web.Response:
+    """PATCH /api/datastore/tables/{name} — rename a table."""
+    name = request.match_info.get("name", "")
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    new_name = str(body.get("new_name", "")).strip()
+    if not new_name:
+        return web.json_response({"error": "new_name is required"}, status=400)
+
+    mgr = get_datastore_manager()
+    try:
+        info = await mgr.rename_table(name, new_name)
+    except ProtectedError as exc:
+        return web.json_response({"error": str(exc), "protected": True}, status=403)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    return web.json_response(
+        {
+            "name": info.name,
+            "columns": [{"name": c.name, "type": c.col_type, "position": c.position} for c in info.columns],
+            "row_count": info.row_count,
+            "created_at": info.created_at,
+            "updated_at": info.updated_at,
+        },
+        dumps=_JSON_DUMPS,
+    )
+
+
 # ── Rows ────────────────────────────────────────────────────────────
 
 

@@ -259,6 +259,20 @@ html, body {
     text-overflow: ellipsis;
 }
 
+.ds-btn-icon {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 14px;
+    padding: 2px 4px;
+    border-radius: 4px;
+    line-height: 1;
+}
+.ds-btn-icon:hover { color: var(--text-primary); background: var(--bg-hover); }
+.ds-btn-icon.ds-btn-disabled,
+.ds-btn-icon:disabled { opacity: 0.4; cursor: not-allowed; }
+
 .ds-table-meta {
     font-size: 12px;
     color: var(--text-muted);

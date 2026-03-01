@@ -111,8 +111,10 @@
             }
             card.appendChild(hdr);
 
-            // Fields or array
-            if (section.type === 'array') {
+            // Fields, array, or custom component
+            if (section.type === 'custom' && section.custom_id === 'personality') {
+                renderPersonalityEditor(card);
+            } else if (section.type === 'array') {
                 renderArraySection(card, section);
             } else {
                 for (const field of section.fields || []) {
@@ -871,6 +873,129 @@
 
     function collectWizardValues() {
         // Values are collected via input handlers above; nothing extra needed.
+    }
+
+    // ── Personality editor (custom component) ─────────────
+    function renderPersonalityEditor(container) {
+        var wrap = document.createElement('div');
+        wrap.className = 'st-personality-editor';
+        wrap.innerHTML =
+            '<div class="st-personality-loading">Loading personality...</div>';
+        container.appendChild(wrap);
+
+        fetch('/api/personality')
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                wrap.innerHTML = '';
+
+                // Name
+                var nameRow = _pField('Name', 'text');
+                var nameInp = nameRow.querySelector('input');
+                nameInp.value = data.name || '';
+                nameInp.placeholder = 'e.g. Toby McDev';
+                wrap.appendChild(nameRow);
+
+                // Description
+                var descRow = _pField('Description', 'textarea');
+                var descInp = descRow.querySelector('textarea');
+                descInp.value = data.description || '';
+                descInp.rows = 3;
+                wrap.appendChild(descRow);
+
+                // Background
+                var bgRow = _pField('Background', 'textarea');
+                var bgInp = bgRow.querySelector('textarea');
+                bgInp.value = data.background || '';
+                bgInp.rows = 4;
+                wrap.appendChild(bgRow);
+
+                // Expertise (one per line)
+                var expRow = _pField('Expertise', 'textarea');
+                var expInp = expRow.querySelector('textarea');
+                expInp.value = (data.expertise || []).join('\n');
+                expInp.rows = 5;
+                expInp.placeholder = 'One expertise per line';
+                wrap.appendChild(expRow);
+
+                // Save button
+                var actions = document.createElement('div');
+                actions.className = 'st-personality-actions';
+                var savePersonalityBtn = document.createElement('button');
+                savePersonalityBtn.className = 'st-btn primary';
+                savePersonalityBtn.textContent = 'Save Personality';
+                savePersonalityBtn.addEventListener('click', function () {
+                    var name = nameInp.value.trim();
+                    if (!name) {
+                        toast('Name is required', 'error');
+                        return;
+                    }
+                    var expertise = expInp.value
+                        .split('\n')
+                        .map(function (e) { return e.trim(); })
+                        .filter(function (e) { return e.length > 0; });
+
+                    var body = {
+                        name: name,
+                        description: descInp.value.trim(),
+                        background: bgInp.value.trim(),
+                        expertise: expertise
+                    };
+
+                    savePersonalityBtn.disabled = true;
+                    savePersonalityBtn.textContent = 'Saving...';
+
+                    fetch('/api/personality', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body)
+                    })
+                        .then(function (r) { return r.json(); })
+                        .then(function (result) {
+                            if (result.error) {
+                                toast(result.error, 'error');
+                            } else {
+                                toast('Personality saved', 'success');
+                            }
+                        })
+                        .catch(function (err) {
+                            toast('Failed: ' + err.message, 'error');
+                        })
+                        .finally(function () {
+                            savePersonalityBtn.disabled = false;
+                            savePersonalityBtn.textContent = 'Save Personality';
+                        });
+                });
+                actions.appendChild(savePersonalityBtn);
+                wrap.appendChild(actions);
+            })
+            .catch(function (err) {
+                wrap.innerHTML =
+                    '<div class="st-personality-loading" style="color:var(--red)">' +
+                    'Failed to load personality: ' + esc(err.message) + '</div>';
+            });
+    }
+
+    function _pField(label, type) {
+        var row = document.createElement('div');
+        row.className = 'st-field';
+        var lbl = document.createElement('div');
+        lbl.className = 'st-field-label';
+        lbl.textContent = label;
+        row.appendChild(lbl);
+        var ctrl = document.createElement('div');
+        ctrl.className = 'st-field-control';
+        var el;
+        if (type === 'textarea') {
+            el = document.createElement('textarea');
+            el.className = 'st-input st-textarea';
+        } else {
+            el = document.createElement('input');
+            el.className = 'st-input';
+            el.type = type || 'text';
+        }
+        ctrl.appendChild(el);
+        row.appendChild(ctrl);
+        return row;
     }
 
     // ── Helpers ──────────────────────────────────────────

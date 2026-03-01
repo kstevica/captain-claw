@@ -53,6 +53,9 @@
         $('dsNewTableBtn').addEventListener('click', showCreateTableModal);
         $('dsAddRowBtn').addEventListener('click', function () { showRowModal(null); });
         $('dsDropTableBtn').addEventListener('click', onDropTable);
+        $('dsRenameTableBtn').addEventListener('click', showRenameTableModal);
+        $('dsRenameTableCancel').addEventListener('click', function () { hideModal('dsRenameTableModal'); });
+        $('dsRenameTableSave').addEventListener('click', onRenameTable);
         $('dsAddColBtn').addEventListener('click', showAddColumnModal);
         $('dsProtectionsBtn').addEventListener('click', showProtectionsModal);
         $('dsProtectionsClose').addEventListener('click', function () { hideModal('dsProtectionsModal'); });
@@ -108,7 +111,7 @@
         // Escape key
         document.addEventListener('keydown', function (e) {
             if (e.key === 'Escape') {
-                ['dsCreateTableModal', 'dsRowModal', 'dsAddColModal', 'dsConfirmModal', 'dsProtectionsModal'].forEach(function (id) {
+                ['dsCreateTableModal', 'dsRowModal', 'dsAddColModal', 'dsConfirmModal', 'dsRenameTableModal', 'dsProtectionsModal'].forEach(function (id) {
                     $(id).style.display = 'none';
                 });
                 confirmCallback = null;
@@ -206,14 +209,17 @@
         var tableProt = isTableProtected();
         $('dsAddRowBtn').disabled = tableProt;
         $('dsDropTableBtn').disabled = tableProt;
+        $('dsRenameTableBtn').disabled = tableProt;
         $('dsAddColBtn').disabled = tableProt;
         if (tableProt) {
             $('dsAddRowBtn').classList.add('ds-btn-disabled');
             $('dsDropTableBtn').classList.add('ds-btn-disabled');
+            $('dsRenameTableBtn').classList.add('ds-btn-disabled');
             $('dsAddColBtn').classList.add('ds-btn-disabled');
         } else {
             $('dsAddRowBtn').classList.remove('ds-btn-disabled');
             $('dsDropTableBtn').classList.remove('ds-btn-disabled');
+            $('dsRenameTableBtn').classList.remove('ds-btn-disabled');
             $('dsAddColBtn').classList.remove('ds-btn-disabled');
         }
         switchTab(activeTab);
@@ -641,6 +647,37 @@
                 })
                 .catch(function (err) { showToast('Failed: ' + (err.message || err), 'error'); });
         });
+    }
+
+    // ── Rename table ─────────────────────────────────────────────────
+
+    function showRenameTableModal() {
+        if (!selectedTable) return;
+        $('dsRenameTableName').value = selectedTable.name;
+        showModal('dsRenameTableModal');
+        $('dsRenameTableName').focus();
+        $('dsRenameTableName').select();
+    }
+
+    function onRenameTable() {
+        if (!selectedTable) return;
+        var newName = $('dsRenameTableName').value.trim();
+        if (!newName) { showToast('Table name is required', 'error'); return; }
+        if (newName === selectedTable.name) { hideModal('dsRenameTableModal'); return; }
+
+        apiFetch('/api/datastore/tables/' + encodeURIComponent(selectedTable.name), {
+            method: 'PATCH',
+            body: { new_name: newName },
+        }).then(function (result) {
+            if (result.error) { showToast(result.error, 'error'); return; }
+            hideModal('dsRenameTableModal');
+            showToast('Table renamed', 'success');
+            selectedTable = result;
+            columns = result.columns || [];
+            loadTables();
+            showTableView();
+            loadProtections(function () { loadRows(); });
+        }).catch(function (err) { showToast('Failed: ' + (err.message || err), 'error'); });
     }
 
     // ── Row modal (add / edit) ───────────────────────────────────────

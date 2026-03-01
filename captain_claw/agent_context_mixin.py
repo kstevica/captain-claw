@@ -970,6 +970,7 @@ class AgentContextMixin:
         "apis": ["apis"],
         "typesense": ["typesense"],
         "datastore": ["datastore"],
+        "personality": ["personality"],
         "termux": ["termux"],
     }
 
@@ -985,6 +986,7 @@ class AgentContextMixin:
             ImageOcrTool,
             ImageVisionTool,
             PdfExtractTool,
+            PersonalityTool,
             PocketTTSTool,
             PptxExtractTool,
             ReadTool,
@@ -1063,6 +1065,8 @@ class AgentContextMixin:
                 self.tools.register(TypesenseTool(deep_memory=dm))
             elif tool_name == "datastore":
                 self.tools.register(DatastoreTool())
+            elif tool_name == "personality":
+                self.tools.register(PersonalityTool())
             elif tool_name == "termux":
                 self.tools.register(TermuxTool())
         self._register_plugin_tools()
@@ -1235,6 +1239,9 @@ class AgentContextMixin:
 
         saved_root = self.tools.get_saved_base_path(create=False)
 
+        from captain_claw.personality import load_personality, personality_to_prompt_block
+        personality_block = personality_to_prompt_block(load_personality())
+
         base_prompt = self.instructions.render(
             "system_prompt.md",
             runtime_base_path=self.runtime_base_path,
@@ -1242,6 +1249,7 @@ class AgentContextMixin:
             saved_root=saved_root,
             session_id=session_id,
             planning_block=planning_block,
+            personality_block=personality_block,
         )
         skills_section = ""
         build_skills = getattr(self, "_build_skills_system_prompt_section", None)

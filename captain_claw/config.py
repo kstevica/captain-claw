@@ -275,6 +275,7 @@ class ToolsConfig(BaseModel):
         "apis",
         "typesense",
         "datastore",
+        "personality",
         "termux",
     ]
     shell: ShellToolConfig = Field(default_factory=ShellToolConfig)

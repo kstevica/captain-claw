@@ -46,6 +46,7 @@
             <div class="ds-toolbar">
                 <div class="ds-toolbar-left">
                     <h2 class="ds-table-name" id="dsTableName"></h2>
+                    <button class="ds-btn-icon" id="dsRenameTableBtn" title="Rename table">&#x270E;</button>
                     <span class="ds-table-meta" id="dsTableMeta"></span>
                 </div>
                 <div class="ds-toolbar-right">
@@ -182,6 +183,23 @@
         <div class="ds-modal-actions">
             <button class="ds-btn secondary" id="dsConfirmCancel">Cancel</button>
             <button class="ds-btn danger" id="dsConfirmOk">Confirm</button>
+        </div>
+    </div>
+</div>
+
+<!-- Rename table modal -->
+<div class="ds-modal-overlay" id="dsRenameTableModal" style="display:none;">
+    <div class="ds-modal">
+        <div class="ds-modal-title">Rename Table</div>
+        <div class="ds-modal-body">
+            <div class="ds-form-group">
+                <label class="ds-form-label">New Name<span class="required">*</span></label>
+                <input type="text" class="ds-input" id="dsRenameTableName" placeholder="e.g. clients">
+            </div>
+        </div>
+        <div class="ds-modal-actions">
+            <button class="ds-btn secondary" id="dsRenameTableCancel">Cancel</button>
+            <button class="ds-btn primary" id="dsRenameTableSave">Rename</button>
         </div>
     </div>
 </div>
