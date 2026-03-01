@@ -129,6 +129,19 @@ class AgentToolLoopMixin:
             path = str(arguments.get("path", "")).strip()
             fname = path.rsplit("/", 1)[-1] if "/" in path else path
             return f"Analyzing image: {fname[:50]}" if fname else "Analyzing image"
+        if name == "termux":
+            action = str(arguments.get("action", "")).strip()
+            if action == "photo":
+                cam = "front" if arguments.get("camera_id") == 1 else "back"
+                return f"Taking photo ({cam} camera)"
+            if action == "battery":
+                return "Checking battery status"
+            if action == "location":
+                return "Getting device location"
+            if action == "torch":
+                state = str(arguments.get("state", "on")).strip()
+                return f"Torch {state}"
+            return f"Termux: {action}" if action else "Termux API call"
         # ── Approval ───────────────────────────────────────
         if name == "approval":
             return "Auto-approved action"

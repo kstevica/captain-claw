@@ -71,7 +71,7 @@ class TermuxTool(Tool):
     async def _run_command(
         self,
         cmd: str,
-        timeout: float = 30.0,
+        timeout: float = 15.0,
         abort_event: asyncio.Event | None = None,
     ) -> tuple[bool, str, str]:
         """Run a shell command and return (success, stdout, stderr)."""
@@ -158,7 +158,7 @@ class TermuxTool(Tool):
 
         abort_event = kwargs.get("_abort_event")
         success, stdout, stderr = await self._run_command(
-            cmd, timeout=30.0, abort_event=abort_event,
+            cmd, timeout=15.0, abort_event=abort_event,
         )
 
         if not success:
@@ -222,7 +222,7 @@ class TermuxTool(Tool):
 
         abort_event = kwargs.get("_abort_event")
         success, stdout, stderr = await self._run_command(
-            cmd, timeout=45.0, abort_event=abort_event,
+            cmd, timeout=15.0, abort_event=abort_event,
         )
 
         if not success:
