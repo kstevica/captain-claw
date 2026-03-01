@@ -71,6 +71,7 @@ For a quick overview and installation guide, see [README.md](README.md).
 - [OpenAI-Compatible API Proxy](#openai-compatible-api-proxy)
 - [Google OAuth, Drive, Calendar, and Gmail](#google-oauth-drive-calendar-and-gmail)
 - [Send Mail](#send-mail)
+- [Termux](#termux)
 - [File Output Policy](#file-output-policy)
 - [Environment Variables Reference](#environment-variables-reference)
 
@@ -469,7 +470,7 @@ Extract text from images using OCR via a vision-capable LLM.
 | `prompt` | string | no | Instruction for the vision model (default: "Extract all text from this image.") |
 | `max_chars` | number | no | Maximum characters to return (default: 120000) |
 
-Requires a model with `model_type: "ocr"` or `"vision"` in `model.allowed`.
+Requires a model with `model_type: "ocr"` or `"vision"` in `model.allowed`. When Pillow is installed (`pip install captain-claw[vision]`), images larger than `max_pixels` (default: 1568px longest edge) are resized and compressed to JPEG at `jpeg_quality` (default: 85) before sending to the LLM. This reduces token cost and upload time, especially for high-resolution camera photos. Without Pillow, images are sent as-is (LLM providers resize server-side).
 
 ### image_vision
 
@@ -481,7 +482,7 @@ Analyze and describe images using a vision-capable LLM. Supports scene descripti
 | `prompt` | string | no | Question or instruction about the image (default: "Describe this image in detail.") |
 | `max_chars` | number | no | Maximum characters to return (default: 120000) |
 
-Requires a model with `model_type: "vision"` in `model.allowed`. Telegram photo attachments are automatically processed through this tool.
+Requires a model with `model_type: "vision"` in `model.allowed`. Telegram photo attachments are automatically processed through this tool. Same image resizing applies as `image_ocr` above — configurable via `max_pixels` and `jpeg_quality` in settings.
 
 ### pocket_tts
 
@@ -671,6 +672,27 @@ Index, search, and delete documents in deep memory (Typesense). All operations u
 
 Requires a running Typesense instance. Set the API key in `config.yaml` or via `TYPESENSE_API_KEY` env var. The tool is also used as the sink for the scale loop `no_file` output strategy when `final_action: api_call`. Indexing is routed through `DeepMemoryIndex` for proper chunking, timestamping, and embedding.
 
+### termux
+
+Interact with an Android device via Termux API. Requires the [Termux:API](https://wiki.termux.com/wiki/Termux:API) app and `termux-api` package (`pkg install termux-api`). Supports camera photo capture, battery status, GPS/network location, and flashlight (torch) control.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `photo`, `battery`, `location`, `torch` |
+| `camera_id` | integer | for photo | Camera ID: `0` = back (default), `1` = front/selfie |
+| `provider` | string | for location | Location provider: `gps` (default, outdoor), `network` (WiFi/cell, indoor), `passive` (cached, fastest) |
+| `state` | string | for torch | Torch state: `on` (default) or `off` |
+
+Photos are saved to `saved/media/<session_id>/` with automatic timestamped filenames and are delivered as image attachments in Telegram and the web UI.
+
+> **Enabling on mobile:** If the web UI settings page is not accessible on the mobile browser, add `"termux"` to the `tools.enabled` list in `~/.captain-claw/config.yaml`:
+>
+> ```yaml
+> tools:
+>   enabled:
+>     - termux
+> ```
+
 ### datastore
 
 Manage persistent relational data tables in a local SQLite database. Create tables, insert/update/delete rows, query with filters, run raw SELECT queries, import/export CSV or XLSX files, and manage data protection rules.
@@ -852,6 +874,7 @@ tools:
     - scripts
     - apis
     - datastore
+    - termux
   require_confirmation:           # tools that require user approval
     - shell
     - write
@@ -886,10 +909,14 @@ tools:
     timeout_seconds: 120
     max_chars: 120000
     default_prompt: ""            # empty = "Extract all text from this image."
+    max_pixels: 1568              # longest edge cap before sending to LLM (0 = no resize, requires Pillow)
+    jpeg_quality: 85              # JPEG quality for resized images (1-100)
   image_vision:
     timeout_seconds: 120
     max_chars: 120000
     default_prompt: ""            # empty = "Describe this image in detail."
+    max_pixels: 1568              # longest edge cap before sending to LLM (0 = no resize, requires Pillow)
+    jpeg_quality: 85              # JPEG quality for resized images (1-100)
   pocket_tts:
     max_chars: 4000
     default_voice: ""

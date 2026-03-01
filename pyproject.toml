@@ -1,6 +1,6 @@
 [project]
 name = "captain-claw"
-version = "0.2.6.3.2"
+version = "0.2.6.3.3"
 description = "A powerful console-based AI agent"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -51,6 +51,9 @@ dev = [
 vector = [
     "numpy>=1.24.0",
     "scikit-learn>=1.3.0",
+]
+vision = [
+    "Pillow>=10.0.0",
 ]
 
 [project.scripts]

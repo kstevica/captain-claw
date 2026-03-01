@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import io
 import mimetypes
 from typing import Any
 
@@ -13,6 +14,59 @@ from captain_claw.tools.registry import Tool, ToolResult
 log = get_logger(__name__)
 
 _IMAGE_EXTENSIONS: set[str] = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+
+try:
+    from PIL import Image as _PILImage  # type: ignore[import-untyped]
+    _HAS_PILLOW = True
+except ImportError:
+    _HAS_PILLOW = False
+
+
+def _maybe_resize_image(
+    image_bytes: bytes,
+    max_pixels: int,
+    jpeg_quality: int,
+) -> tuple[bytes, str]:
+    """Resize an image if its longest edge exceeds *max_pixels*.
+
+    Returns ``(processed_bytes, mime_type)``.  When Pillow is not installed or
+    *max_pixels* is 0 the original bytes are returned untouched.
+    """
+    if not _HAS_PILLOW or max_pixels <= 0:
+        return image_bytes, ""
+
+    img = _PILImage.open(io.BytesIO(image_bytes))
+    w, h = img.size
+
+    if max(w, h) <= max_pixels:
+        return image_bytes, ""
+
+    # Compute new dimensions preserving aspect ratio.
+    if w >= h:
+        new_w = max_pixels
+        new_h = int(h * (max_pixels / w))
+    else:
+        new_h = max_pixels
+        new_w = int(w * (max_pixels / h))
+
+    img = img.resize((new_w, new_h), _PILImage.LANCZOS)
+
+    # Convert to RGB if needed (e.g. RGBA PNGs → JPEG).
+    if img.mode in ("RGBA", "P", "LA"):
+        img = img.convert("RGB")
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=jpeg_quality)
+    resized = buf.getvalue()
+
+    log.info(
+        "image resized for LLM",
+        original=f"{w}x{h}",
+        resized=f"{new_w}x{new_h}",
+        orig_kb=f"{len(image_bytes)/1024:.0f}",
+        new_kb=f"{len(resized)/1024:.0f}",
+    )
+    return resized, "image/jpeg"
 
 
 class _BaseImageLLMTool(Tool):
@@ -110,10 +164,18 @@ class _BaseImageLLMTool(Tool):
             model_name = _provider_model_name(provider, model_cfg.model)
             api_key = _resolve_api_key(provider, None)
 
-            # Read and encode image.
+            # Read, optionally resize, and encode image.
             image_bytes = await asyncio.to_thread(file_path.read_bytes)
+            original_size = len(image_bytes)
+
+            max_px = int(getattr(tool_cfg, "max_pixels", 1568) if tool_cfg else 1568)
+            jpg_q = int(getattr(tool_cfg, "jpeg_quality", 85) if tool_cfg else 85)
+            image_bytes, resized_mime = await asyncio.to_thread(
+                _maybe_resize_image, image_bytes, max_px, jpg_q,
+            )
+
             b64_data = base64.b64encode(image_bytes).decode("ascii")
-            mime = mimetypes.guess_type(str(file_path))[0] or "image/png"
+            mime = resized_mime or mimetypes.guess_type(str(file_path))[0] or "image/png"
 
             call_kwargs: dict[str, Any] = {
                 "model": model_name,

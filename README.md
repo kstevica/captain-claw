@@ -18,7 +18,7 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Per-session model selection | Keep one session on Claude, another on GPT, another on Ollama |
 | Persistent multi-session workflows | Resume any session exactly where you left off |
 | Built-in safety guards | Input, output, and script/tool checks before anything runs |
-| 25 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, image gen/OCR/vision, Google Drive/Calendar/Gmail, todo, contacts, scripts, APIs, datastore, deep memory |
+| 26 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, image gen/OCR/vision, Google Drive/Calendar/Gmail, todo, contacts, scripts, APIs, datastore, deep memory, Termux (Android) |
 | Skills system | OpenClaw-compatible skills with auto-discovery and GitHub install |
 | Orchestrator / DAG mode | Decompose complex tasks into parallel multi-session execution |
 | Memory / RAG | Hybrid vector + text retrieval across workspace and sessions |
@@ -48,6 +48,7 @@ pip install captain-claw
 ```bash
 pip install captain-claw[tts]      # Local text-to-speech (pocket-tts, requires PyTorch)
 pip install captain-claw[vector]   # Vector memory / RAG (numpy, scikit-learn)
+pip install captain-claw[vision]   # Image resize before LLM calls (Pillow)
 ```
 
 ### 2. Set an API key
@@ -115,7 +116,7 @@ Sessions are first-class. Create named sessions for separate projects, switch in
 
 ### Tools
 
-Captain Claw ships with 25 built-in tools. The agent picks the right tool for each task automatically.
+Captain Claw ships with 26 built-in tools. The agent picks the right tool for each task automatically.
 
 | Tool | What it does |
 |---|---|
@@ -142,6 +143,7 @@ Captain Claw ships with 25 built-in tools. The agent picks the right tool for ea
 | `apis` | Persistent cross-session API memory with auto-capture |
 | `datastore` | Manage relational data tables with CRUD, import/export, raw SQL, and protection rules |
 | `typesense` | Index, search, and manage documents in deep memory (Typesense) |
+| `termux` | Interact with Android device via Termux API (camera, battery, GPS, torch) |
 
 See [USAGE.md](USAGE.md#tools-reference) for full parameters and configuration.
 
@@ -183,7 +185,7 @@ tools:
             "image_gen", "image_ocr", "image_vision",
             "pocket_tts", "send_mail", "google_drive", "google_calendar",
             "google_mail", "todo", "contacts", "scripts", "apis",
-            "datastore"]
+            "datastore", "termux"]
 
 web:
   enabled: true
@@ -232,6 +234,8 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 
 - **[Send mail](USAGE.md#send-mail)** — SMTP, Mailgun, or SendGrid. Supports attachments up to 25 MB.
 
+- **[Termux (Android)](USAGE.md#termux)** — Run Captain Claw on Android via Termux. Take photos with front/back camera (auto-sent to Telegram), get GPS location, check battery status, and toggle the flashlight — all through the Termux API.
+
 - **[Document extraction](USAGE.md#tools-reference)** — PDF, DOCX, XLSX, PPTX converted to markdown for agent consumption.
 
 - **[Context compaction](USAGE.md#context-compaction)** — Auto-compacts long sessions at configurable thresholds. Manual compaction with `/compact`.
@@ -252,7 +256,7 @@ ruff check captain_claw/
 |---|---|
 | `captain_claw/agent.py` | Main orchestration logic |
 | `captain_claw/llm/` | Provider abstraction (OpenAI, Anthropic, Gemini, Ollama) |
-| `captain_claw/tools/` | Tool registry and 25 tool implementations |
+| `captain_claw/tools/` | Tool registry and 26 tool implementations |
 | `captain_claw/session/` | SQLite-backed session persistence |
 | `captain_claw/skills.py` | Skill discovery, loading, and invocation |
 | `captain_claw/session_orchestrator.py` | Parallel multi-session DAG orchestrator |

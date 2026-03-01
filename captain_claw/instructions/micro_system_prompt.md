@@ -9,6 +9,9 @@ Workspace:
 - Uncategorized → saved/tmp/{session_id}/. Never write outside saved root.
 {planning_block}
 
+Termux policy:
+- ALWAYS use the `termux` tool for termux-camera-photo, termux-battery-status, termux-location, termux-torch. NEVER use shell for these.
+
 Web policy:
 - web_fetch = default for reading pages (returns text). web_get = only for raw HTML/DOM.
 - NEVER write scripts/Playwright to fetch pages. web_fetch handles it.

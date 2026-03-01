@@ -197,6 +197,8 @@ class ImageOcrToolConfig(BaseModel):
     timeout_seconds: int = 120
     max_chars: int = 120000
     default_prompt: str = ""  # empty = use built-in default
+    max_pixels: int = 1568  # longest edge cap before sending to LLM (0 = no resize)
+    jpeg_quality: int = 85  # JPEG compression quality (1-100) for resized images
 
 
 class ImageVisionToolConfig(BaseModel):
@@ -205,6 +207,8 @@ class ImageVisionToolConfig(BaseModel):
     timeout_seconds: int = 120
     max_chars: int = 120000
     default_prompt: str = ""  # empty = use built-in default
+    max_pixels: int = 1568  # longest edge cap before sending to LLM (0 = no resize)
+    jpeg_quality: int = 85  # JPEG compression quality (1-100) for resized images
 
 
 class SendMailToolConfig(BaseModel):
