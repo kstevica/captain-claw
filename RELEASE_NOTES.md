@@ -1,49 +1,80 @@
-# Captain Claw v0.2.6.3 Release Notes
+# Captain Claw v0.3.0 Release Notes
+
+**Release title:** Chunked Processing, Personality System & Termux
 
 **Release date:** 2026-03-01
 
 ## Highlights
 
-Packaging and installation overhaul — lighter default install, pre-configured multi-model onboarding, resilient port binding, and full pip compatibility.
+Major feature release — small-context models (20k-32k tokens) can now handle arbitrarily large content via automatic chunked processing, a dual-profile personality system tailors responses per user, and the new Termux tool brings Captain Claw to Android devices. Plus: web UI authentication, XLSX upload to datastore, and image auto-resize before vision calls.
 
 ## New Features
 
-### Pre-Configured Multi-Model Setup
-- Onboarding now seeds **12 default allowed models** across OpenAI, Anthropic, and Gemini — including image generation, OCR, and vision models
-- Fresh installs get a ready-to-use multi-model configuration out of the box
-- Both TUI and web onboarding wizards inform users about the pre-configured models
-- Users can still add custom models during onboarding or later in Settings
+### Chunked Processing Pipeline
+- Enables small-context models (20k-32k tokens) to process content that far exceeds their context window
+- Context budget guard automatically detects when content exceeds available space and triggers chunking
+- Map phase splits content into sequential overlapping chunks and processes each with full instructions via isolated LLM calls
+- Reduce phase combines partial results via LLM synthesis (summarize) or simple join (concatenate)
+- Hooks into both the normal conversation flow (tool result interception) and the scale loop micro-loop
+- Content-extraction tools automatically chunked: `read`, `pdf_extract`, `docx_extract`, `xlsx_extract`, `pptx_extract`, `web_fetch`, `web_get`
+- Configurable: auto-threshold, output reserve, chunk overlap, max chunks, and combine strategy
+- New settings UI section under Model & LLM for all chunked processing parameters
+- Tested: 108k token file split into 9 chunks, processed in 48.5 seconds, reduced to 5.7k tokens
 
-### Port Auto-Retry
-- Web server now automatically tries the next port (up to 10 attempts) if the configured port is already in use
-- New `--port` CLI argument to override the web server port at launch
+### Personality System
+- Dual-profile architecture: global agent identity (name, background, expertise) plus per-user profiles
+- Per-user profiles tailor responses to each user's perspective and preferences
+- New `personality` tool for reading and updating profiles from conversation
+- REST API endpoints for personality management
+- Settings page integration for editing agent and user profiles from the web UI
+- Telegram users get automatic per-user profiles
 
-### Lighter Default Install
-- `pocket-tts` (and its heavy PyTorch/NumPy/SciPy dependencies) moved to an optional extra
-- Default `pip install captain-claw` is now significantly lighter (~2 GB+ smaller)
-- Install TTS support explicitly with `pip install captain-claw[tts]`
+### Termux Tool (Android)
+- Run Captain Claw on Android via Termux
+- Take photos with front/back camera (auto-sent to Telegram)
+- Get GPS location, check battery status, toggle flashlight
+- All operations via Termux API integration
 
-### Example Configuration
-- New `config.yaml.example` with full annotated reference of all configuration options
-- Enriched master `config.yaml` with additional settings documentation
+### Web UI Authentication
+- Optional authentication layer for the web UI
+- Protects web interface when exposed on a network
 
-### Usage Guide
-- New `USAGE.md` with detailed usage instructions and examples
+### XLSX Upload to Datastore
+- Upload Excel files directly to datastore tables from the web dashboard
+- Automatic column detection and data import
 
-## Fixes
+### Image Auto-Resize
+- Images are automatically resized before being sent to vision-capable LLMs
+- Reduces token usage and speeds up processing for large images
 
-### pip Install Compatibility
-- **Instruction templates now load correctly** when installed via pip — previously the `instructions/` folder lived at the project root and was not included in the package distribution
-- Moved `instructions/` into the `captain_claw/` package and updated path resolution, package-data, PyInstaller spec, and CI verification
-- All 6 missing tools (`todo`, `contacts`, `scripts`, `apis`, `typesense`, `datastore`) are now included in the default enabled tools list for fresh installations
+## Improvements
 
-### Onboarding
-- Updated Gemini default model to `gemini-3-flash-preview`
-- Summary step now shows the count of pre-configured models
+### Gemini Timeout Handling
+- Added 180-second timeout wrapper for Gemini sync completion calls
+- Previously the agent could hang indefinitely if the Gemini API was slow or unresponsive
+- Both `asyncio.wait_for` and litellm `timeout` kwarg applied
+
+### Scale Loop Enhancements
+- Improved micro-loop integration with chunked processing support
+- Better handling of large content items in multi-step processing
+
+### Mobile Usage
+- Updated usage instructions with mobile-specific guidance
 
 ## Internal
 
-- Updated `pyproject.toml` package-data to include `instructions/**/*`
-- Updated PyInstaller spec (`captain_claw.spec`) for new instructions path
-- Updated GitHub Actions build workflow verification path
-- Updated `README.md` with optional extras install instructions and corrected architecture paths
+- New `agent_chunked_processing_mixin.py` (837 lines) — full chunked processing pipeline
+- New `personality.py` — personality profile management
+- New `tools/personality.py` — personality tool implementation
+- New `tools/termux.py` — Termux API tool
+- New `web/auth.py` — web authentication middleware
+- New `web/rest_personality.py` — personality REST endpoints
+- New `web/rest_file_upload.py` — file upload handling for datastore
+- Updated `agent.py` — added `AgentChunkedProcessingMixin` to Agent class MRO
+- Updated `agent_tool_loop_mixin.py` — chunked processing hook in `_handle_tool_calls()`
+- Updated `agent_scale_loop_mixin.py` — scale loop micro-loop chunked processing integration
+- Updated `config.py` — added `ChunkedProcessingConfig` with 6 settings
+- Updated `llm/__init__.py` — Gemini timeout fix
+- Updated `web/rest_settings.py` — chunked processing settings UI section
+- Updated `README.md` and `USAGE.md` — documentation for all new features
+- 43 files changed, 4,035 insertions, 88 deletions

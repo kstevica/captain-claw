@@ -156,7 +156,7 @@ context:
   compaction_ratio: 0.4
   chunked_processing:
     #auto_threshold: 64000  # auto-enable for any model with context <= 64k
-    enabled: true
+    enabled: false
     output_reserve_tokens: 4000
     chunk_overlap_tokens: 200
     max_chunks: 12
