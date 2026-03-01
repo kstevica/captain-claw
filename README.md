@@ -29,6 +29,7 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Cross-session script memory | Persistent script/file tracking with auto-capture from write tool |
 | Cross-session API memory | Persistent API endpoint tracking with auto-capture from web_fetch |
 | Datastore | SQLite-backed relational tables managed by the agent, with protection rules, import/export, web dashboard, and table export via UI |
+| Chunked processing pipeline | Run small-context models (20k–32k tokens) on large content via automatic content chunking |
 | Cron scheduling | Interval, daily, and weekly tasks inside the runtime |
 | OpenAI-compatible API | `POST /v1/chat/completions` proxy with agent pool |
 
@@ -240,6 +241,8 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 
 - **[Document extraction](USAGE.md#tools-reference)** — PDF, DOCX, XLSX, PPTX converted to markdown for agent consumption.
 
+- **[Chunked processing pipeline](USAGE.md#chunked-processing-pipeline)** — Enables small-context models (20k–32k tokens) to process large content. A context budget guard detects when content exceeds the available window, splits it into sequential chunks, processes each with full instructions, and combines partial results via LLM synthesis or concatenation. Integrates transparently with the scale loop micro-loop.
+
 - **[Context compaction](USAGE.md#context-compaction)** — Auto-compacts long sessions at configurable thresholds. Manual compaction with `/compact`.
 
 - **[Personality system](USAGE.md#personality-system)** — Dual-profile system with a global agent identity (name, background, expertise) and per-user profiles that tailor responses to each user's perspective. Editable via the `personality` tool, REST API, or the Settings page. Telegram users get automatic per-user profiles.
@@ -272,6 +275,7 @@ ruff check captain_claw/
 | `captain_claw/cli.py` | Terminal UI |
 | `captain_claw/web/` | Web server (WebSocket + REST + static) |
 | `captain_claw/orchestrator_cli.py` | Headless orchestrator CLI |
+| `captain_claw/agent_chunked_processing_mixin.py` | Chunked processing pipeline for small-context models |
 | `captain_claw/config.py` | Configuration and env overrides |
 | `captain_claw/instructions/` | Externalized prompt and instruction templates |
 

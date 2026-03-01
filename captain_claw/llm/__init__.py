@@ -635,6 +635,7 @@ class LiteLLMProvider(LLMProvider):
             "temperature": resolved_temperature,
             "max_tokens": max_tokens or self.max_tokens,
             "stream": stream,
+            "timeout": 180,
         }
         if tools:
             kwargs["tools"] = _convert_tools_for_openai_style(tools)
@@ -782,9 +783,20 @@ class LiteLLMProvider(LLMProvider):
                 from litellm import completion as sync_completion
                 import asyncio as _asyncio
                 loop = _asyncio.get_event_loop()
-                response = await loop.run_in_executor(
-                    None, lambda: sync_completion(**kwargs)
-                )
+                _gemini_timeout = 180  # seconds
+                try:
+                    response = await _asyncio.wait_for(
+                        loop.run_in_executor(
+                            None, lambda: sync_completion(**kwargs)
+                        ),
+                        timeout=_gemini_timeout,
+                    )
+                except _asyncio.TimeoutError:
+                    raise LLMError(
+                        f"Gemini completion timed out after {_gemini_timeout}s "
+                        f"(model={self.model}). The model may be overloaded or "
+                        f"the request may be too large."
+                    )
             else:
                 response = await acompletion(**kwargs)
 

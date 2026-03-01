@@ -1606,55 +1606,176 @@ class AgentScaleLoopMixin:
                 _item_prompt_tokens = sum(
                     self._count_tokens(m.content) for m in item_messages
                 )
-                log.info(
-                    "Scale micro-loop LLM call",
-                    item_num=item_num,
-                    total=total,
-                    item=item_label[-80:],
-                    extract_chars=_extract_chars,
-                    extract_sec=_extract_sec,
-                    prompt_tokens=_item_prompt_tokens,
-                    prompt_kb=round(_item_prompt_tokens * 4 / 1024, 1),
+
+                # ── Chunked processing guard ──────────────────
+                # Check whether the content overflows the context budget
+                # and should be processed via the chunked pipeline instead
+                # of a single LLM call.
+                _content_tokens = self._count_tokens(extracted_content)
+                _instruction_tokens = _item_prompt_tokens - _content_tokens
+                _use_chunked = self._chunked_processing_needed(
+                    instruction_tokens=_instruction_tokens,
+                    content_tokens=_content_tokens,
                 )
 
-                try:
-                    response = await self._complete_with_guards(
-                        messages=item_messages,
-                        tools=None,  # No tools — just produce text
-                        interaction_label=f"scale_process_{item_num}",
-                        turn_usage=turn_usage,
-                    )
-                except Exception as e:
-                    _t_llm_end = _time.monotonic()
-                    _llm_fail_sec = round(_t_llm_end - _t_llm_start, 2)
-                    log.warning(
-                        "Scale micro-loop LLM call failed",
-                        item=item_label,
-                        error=str(e),
-                        llm_sec=_llm_fail_sec,
+                if _use_chunked:
+                    # ── Chunked pipeline path ─────────────────
+                    log.info(
+                        "Scale micro-loop: routing to chunked pipeline",
+                        item_num=item_num,
+                        total=total,
+                        item=item_label[-80:],
+                        extract_chars=_extract_chars,
+                        instruction_tokens=_instruction_tokens,
+                        content_tokens=_content_tokens,
+                        prompt_tokens=_item_prompt_tokens,
                     )
                     self._emit_tool_output(
                         "scale_micro_loop",
-                        {"item": item_label, "step": "llm"},
-                        f"[{item_num}/{total}] LLM FAILED in {_llm_fail_sec}s: {item_label}\nError: {e}",
+                        {
+                            "item": item_label,
+                            "step": "chunked_pipeline",
+                            "instruction_tokens": _instruction_tokens,
+                            "content_tokens": _content_tokens,
+                        },
+                        (
+                            f"[{item_num}/{total}] Content exceeds context budget "
+                            f"({_content_tokens} content tok + {_instruction_tokens} "
+                            f"instruction tok) — routing to chunked pipeline"
+                        ),
                     )
-                    errors.append({"item": item_label, "phase": "llm", "error": str(e)})
-                    failed += 1
-                    done_items.add(item)
-                    sp["done_items"] = done_items
-                    continue
 
-                _t_llm_end = _time.monotonic()
-                _llm_sec = round(_t_llm_end - _t_llm_start, 2)
+                    # Decompose the prompt built by _build_scale_item_prompt
+                    # into system_text (for the chunked pipeline's system message)
+                    # and task_preamble + task_suffix (wrapping the content).
+                    _sys_text = item_messages[0].content
+                    _user_text = item_messages[1].content if len(item_messages) > 1 else ""
 
-                summary_text = (response.content or "").strip()
-                _response_tokens = self._count_tokens(summary_text)
+                    # The user message contains sections separated by
+                    # "EXTRACTED CONTENT:\n===\n" and closed by "\n===\n".
+                    # Split at the content markers to isolate the preamble
+                    # and suffix.
+                    _content_start_marker = "EXTRACTED CONTENT:\n===\n"
+                    _content_end_marker = "\n===\n"
+                    _cs_idx = _user_text.find(_content_start_marker)
+                    if _cs_idx >= 0:
+                        _task_preamble = _user_text[:_cs_idx].rstrip()
+                        _after_marker = _user_text[_cs_idx + len(_content_start_marker):]
+                        _ce_idx = _after_marker.rfind(_content_end_marker)
+                        if _ce_idx >= 0:
+                            _task_suffix = _after_marker[_ce_idx + len(_content_end_marker):].strip()
+                        else:
+                            _task_suffix = ""
+                    else:
+                        # Fallback: use the whole user text as preamble
+                        _task_preamble = _user_text
+                        _task_suffix = ""
 
-                self._emit_tool_output(
-                    "scale_micro_loop",
-                    {"item": item_label, "step": "llm", "prompt_tokens": _item_prompt_tokens},
-                    f"[{item_num}/{total}] LLM done in {_llm_sec}s — {_item_prompt_tokens} prompt / {_response_tokens} response tokens — {item_label}",
-                )
+                    try:
+                        summary_text, _chunked_stats = await self._chunked_process_content(
+                            system_text=_sys_text,
+                            task_preamble=_task_preamble,
+                            extracted_content=extracted_content,
+                            task_suffix=_task_suffix,
+                            item_label=item_label,
+                            interaction_label=f"scale_process_{item_num}",
+                            turn_usage=turn_usage,
+                        )
+                    except Exception as e:
+                        _t_llm_end = _time.monotonic()
+                        _llm_fail_sec = round(_t_llm_end - _t_llm_start, 2)
+                        log.warning(
+                            "Scale micro-loop chunked pipeline failed",
+                            item=item_label,
+                            error=str(e),
+                            llm_sec=_llm_fail_sec,
+                        )
+                        self._emit_tool_output(
+                            "scale_micro_loop",
+                            {"item": item_label, "step": "chunked_pipeline_error"},
+                            f"[{item_num}/{total}] CHUNKED PIPELINE FAILED in {_llm_fail_sec}s: {item_label}\nError: {e}",
+                        )
+                        errors.append({"item": item_label, "phase": "chunked_pipeline", "error": str(e)})
+                        failed += 1
+                        done_items.add(item)
+                        sp["done_items"] = done_items
+                        continue
+
+                    _t_llm_end = _time.monotonic()
+                    _llm_sec = round(_t_llm_end - _t_llm_start, 2)
+                    summary_text = (summary_text or "").strip()
+                    _response_tokens = self._count_tokens(summary_text)
+
+                    # Override prompt/response tokens from chunked stats
+                    _item_prompt_tokens = _chunked_stats.get("total_prompt_tokens", _item_prompt_tokens)
+                    _chunked_info = (
+                        f" [chunked: {_chunked_stats.get('num_chunks', '?')} chunks, "
+                        f"strategy={_chunked_stats.get('combine_strategy', '?')}]"
+                    )
+
+                    self._emit_tool_output(
+                        "scale_micro_loop",
+                        {
+                            "item": item_label,
+                            "step": "llm",
+                            "prompt_tokens": _item_prompt_tokens,
+                            "chunked": True,
+                            "num_chunks": _chunked_stats.get("num_chunks"),
+                        },
+                        f"[{item_num}/{total}] LLM done in {_llm_sec}s — {_item_prompt_tokens} prompt / {_response_tokens} response tokens — {item_label}{_chunked_info}",
+                    )
+
+                else:
+                    # ── Normal single-call path (unchanged) ───
+                    log.info(
+                        "Scale micro-loop LLM call",
+                        item_num=item_num,
+                        total=total,
+                        item=item_label[-80:],
+                        extract_chars=_extract_chars,
+                        extract_sec=_extract_sec,
+                        prompt_tokens=_item_prompt_tokens,
+                        prompt_kb=round(_item_prompt_tokens * 4 / 1024, 1),
+                    )
+
+                    try:
+                        response = await self._complete_with_guards(
+                            messages=item_messages,
+                            tools=None,  # No tools — just produce text
+                            interaction_label=f"scale_process_{item_num}",
+                            turn_usage=turn_usage,
+                        )
+                    except Exception as e:
+                        _t_llm_end = _time.monotonic()
+                        _llm_fail_sec = round(_t_llm_end - _t_llm_start, 2)
+                        log.warning(
+                            "Scale micro-loop LLM call failed",
+                            item=item_label,
+                            error=str(e),
+                            llm_sec=_llm_fail_sec,
+                        )
+                        self._emit_tool_output(
+                            "scale_micro_loop",
+                            {"item": item_label, "step": "llm"},
+                            f"[{item_num}/{total}] LLM FAILED in {_llm_fail_sec}s: {item_label}\nError: {e}",
+                        )
+                        errors.append({"item": item_label, "phase": "llm", "error": str(e)})
+                        failed += 1
+                        done_items.add(item)
+                        sp["done_items"] = done_items
+                        continue
+
+                    _t_llm_end = _time.monotonic()
+                    _llm_sec = round(_t_llm_end - _t_llm_start, 2)
+
+                    summary_text = (response.content or "").strip()
+                    _response_tokens = self._count_tokens(summary_text)
+
+                    self._emit_tool_output(
+                        "scale_micro_loop",
+                        {"item": item_label, "step": "llm", "prompt_tokens": _item_prompt_tokens},
+                        f"[{item_num}/{total}] LLM done in {_llm_sec}s — {_item_prompt_tokens} prompt / {_response_tokens} response tokens — {item_label}",
+                    )
 
                 if not summary_text:
                     log.warning("Scale micro-loop: empty LLM response", item=item_label)

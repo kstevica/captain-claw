@@ -45,6 +45,24 @@ class ModelConfig(BaseModel):
     allowed: list[AllowedModelConfig] = Field(default_factory=list)
 
 
+class ChunkedProcessingConfig(BaseModel):
+    """Chunked processing pipeline for small-context models.
+
+    When enabled, content that exceeds the model's context window is
+    automatically split into sequential chunks, each processed with
+    the full instruction set, and the partial results are combined
+    into a single output.  This allows models with 20k–32k context
+    windows to handle documents that would otherwise be truncated.
+    """
+
+    enabled: bool = False  # master switch; "auto" behavior via auto_threshold
+    auto_threshold: int = 0  # auto-enable when context.max_tokens <= this (0 = manual only)
+    output_reserve_tokens: int = 4000  # tokens reserved for model output per chunk call
+    chunk_overlap_tokens: int = 200  # continuity overlap between sequential chunks
+    max_chunks: int = 12  # safety cap to prevent runaway splitting
+    combine_strategy: str = "summarize"  # summarize | concatenate
+
+
 class ContextConfig(BaseModel):
     """Context window configuration."""
 
@@ -52,6 +70,9 @@ class ContextConfig(BaseModel):
     compaction_threshold: float = 0.8
     compaction_ratio: float = 0.4
     micro_instructions: bool = False
+    chunked_processing: ChunkedProcessingConfig = Field(
+        default_factory=ChunkedProcessingConfig,
+    )
 
 
 class MemoryEmbeddingsConfig(BaseModel):

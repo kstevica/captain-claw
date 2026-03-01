@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from typing import Callable
 
+from captain_claw.agent_chunked_processing_mixin import AgentChunkedProcessingMixin
 from captain_claw.agent_completion_mixin import AgentCompletionMixin
 from captain_claw.agent_context_mixin import AgentContextMixin
 from captain_claw.agent_file_ops_mixin import AgentFileOpsMixin
@@ -41,6 +42,7 @@ class Agent(
     AgentResearchMixin,
     AgentScaleDetectionMixin,
     AgentScaleLoopMixin,
+    AgentChunkedProcessingMixin,
     AgentSessionMixin,
     AgentSkillsMixin,
     AgentToolLoopMixin,

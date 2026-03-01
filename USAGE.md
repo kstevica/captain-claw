@@ -63,6 +63,7 @@ For a quick overview and installation guide, see [README.md](README.md).
 - [Cross-Session API Memory](#cross-session-api-memory)
 - [Personality System](#personality-system)
 - [Session Management](#session-management)
+- [Chunked Processing Pipeline](#chunked-processing-pipeline)
 - [Context Compaction](#context-compaction)
 - [Execution Queue](#execution-queue-1)
 - [Orchestrator / DAG Mode](#orchestrator--dag-mode)
@@ -827,7 +828,16 @@ context:
   max_tokens: 160000              # total context window budget
   compaction_threshold: 0.8       # trigger compaction at 80% usage
   compaction_ratio: 0.4           # keep 40% recent messages after compaction
+  chunked_processing:
+    enabled: false                # master switch (or use auto_threshold)
+    auto_threshold: 0             # auto-enable when max_tokens <= this value (0 = off)
+    output_reserve_tokens: 4000   # tokens reserved for LLM output per chunk call
+    chunk_overlap_tokens: 200     # overlap between consecutive chunks (continuity)
+    max_chunks: 12                # hard cap on number of chunks per item
+    combine_strategy: "summarize" # "summarize" (LLM synthesis) or "concatenate"
 ```
+
+See [Chunked Processing Pipeline](#chunked-processing-pipeline) for a full explanation.
 
 ### memory
 
@@ -1206,6 +1216,8 @@ scale:
   scale_advisory_min_members: 7   # activate full scale loop (guards + micro-loop)
   lightweight_progress_min_members: 3  # activate progress indicators only
 ```
+
+**Chunked processing integration:** When `context.chunked_processing` is active, the micro-loop automatically detects items whose content exceeds the model's available context window and routes them through the [chunked processing pipeline](#chunked-processing-pipeline). This is transparent — items that fit in one call are processed normally; only oversized items trigger chunking.
 
 ### datastore
 
@@ -1865,6 +1877,76 @@ Each session can use a different model. Selection persists across restarts.
 ### Execution Queue
 
 Per-session queue controls how follow-up messages are handled while the agent is processing. See [Execution Queue](#execution-queue-1).
+
+---
+
+## Chunked Processing Pipeline
+
+Enables small-context models (20k–32k tokens) to process content that would otherwise exceed their context window. When active, a **context budget guard** checks every item before processing and automatically routes oversized content through a sequential map-reduce pipeline.
+
+### How It Works
+
+1. **Context budget guard** — Before each LLM call the pipeline computes: `available = context_budget - instruction_tokens - output_reserve`. If `content_tokens > available`, chunking is triggered.
+2. **Semantic-aware splitting** — Content is split at paragraph boundaries (double newlines), falling back to single newlines, then hard character splits. Consecutive chunks overlap by `chunk_overlap_tokens` to preserve continuity.
+3. **Sequential map phase** — Each chunk is sent as an isolated LLM call with the full instruction set and a chunk header (e.g. "Processing chunk 2 of 5").
+4. **Combine phase** — Partial results are combined using the configured strategy:
+   - `summarize` (default) — An LLM synthesis call merges all partial results into a single coherent output. Falls back to concatenation if the combined partials would themselves overflow the context.
+   - `concatenate` — Simple join with chunk separators. No additional LLM call.
+
+### When It Activates
+
+The pipeline activates when **both** conditions are met:
+
+- **Feature is on** — Either `enabled: true` explicitly, or `auto_threshold` is set and `context.max_tokens <= auto_threshold`.
+- **Content exceeds budget** — The context budget guard detects that instruction tokens + content tokens + output reserve > `max_tokens`.
+
+Items that fit in a single call are processed normally with zero overhead.
+
+### Configuration
+
+```yaml
+context:
+  max_tokens: 32000               # small model context window
+  chunked_processing:
+    enabled: true                 # or use auto_threshold instead
+    auto_threshold: 32000         # auto-enable when max_tokens <= 32k (0 = off)
+    output_reserve_tokens: 4000   # tokens reserved for LLM output per chunk
+    chunk_overlap_tokens: 200     # overlap between consecutive chunks
+    max_chunks: 12                # hard cap on chunks per item
+    combine_strategy: "summarize" # "summarize" or "concatenate"
+```
+
+| Setting | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Master switch. Enables chunked processing regardless of model size. |
+| `auto_threshold` | `0` | Auto-enable when `context.max_tokens` is at or below this value. Set to `32000` to activate for 32k models. `0` disables auto-detection. |
+| `output_reserve_tokens` | `4000` | Tokens reserved for the LLM response in each chunk call. Larger values leave less room for content per chunk. |
+| `chunk_overlap_tokens` | `200` | Token overlap between consecutive chunks to maintain continuity across boundaries. |
+| `max_chunks` | `12` | Maximum number of chunks per item. If content requires more, the last chunk absorbs the remainder. |
+| `combine_strategy` | `"summarize"` | How partial results are merged. `"summarize"` uses an LLM call; `"concatenate"` joins with separators. |
+
+### Scale Loop Integration
+
+The chunked processing pipeline integrates transparently with the [scale loop](#scale) micro-loop. When the micro-loop processes an item:
+
+1. It builds the per-item prompt (instructions + extracted content).
+2. The context budget guard checks whether it fits in one call.
+3. If yes — normal single-call processing (zero overhead).
+4. If no — the content is routed through the chunked pipeline and the combined result is returned to the micro-loop as if it came from a single call.
+
+This means you can use small-context models (e.g. Ollama with 20k–32k context) on large-scale list-processing tasks without any changes to your prompts or workflow.
+
+### Logging
+
+Every step of the pipeline is logged verbosely for debugging:
+
+- **Activation**: Logs when chunking is triggered, including token counts (instruction, content, available, budget).
+- **Splitting**: Logs chunk count, sizes, overlap, and the splitting strategy used (paragraph, newline, or hard-split).
+- **Map phase**: Logs each chunk call with its index, token size, and result length.
+- **Combine phase**: Logs the combine strategy, input sizes, and final output length.
+- **Stats**: A diagnostics summary is emitted after each chunked item with chunk count, total input/output tokens, and combine method.
+
+All chunked processing events appear in the monitor/pipeline trace with source `chunked_processing`.
 
 ---
 

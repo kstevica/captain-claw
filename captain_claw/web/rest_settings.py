@@ -176,6 +176,37 @@ def _build_schema() -> list[dict[str, Any]]:
                                hint="Use compact instruction prompts (~66% fewer tokens). Faster and cheaper but less detailed guidance for the LLM."),
                     ],
                 },
+                {
+                    "id": "chunked_processing",
+                    "title": "Chunked Processing",
+                    "description": "Process large content with small-context models by splitting it into sequential chunks. "
+                                   "Activates automatically when content exceeds the model's available context window.",
+                    "fields": [
+                        _field("context.chunked_processing.enabled", "Enabled",
+                               type="toggle",
+                               hint="Master switch. Enable chunked processing regardless of model size."),
+                        _field("context.chunked_processing.auto_threshold", "Auto-threshold (tokens)",
+                               type="number", min=0, max=2000000,
+                               hint="Auto-enable when context.max_tokens is at or below this value. "
+                                    "E.g. 64000 to activate for any model with context <= 64k. 0 = off."),
+                        _field("context.chunked_processing.output_reserve_tokens", "Output reserve (tokens)",
+                               type="number", min=500, max=100000,
+                               hint="Tokens reserved for LLM output in each chunk call. "
+                                    "Larger values leave less room for content per chunk."),
+                        _field("context.chunked_processing.chunk_overlap_tokens", "Chunk overlap (tokens)",
+                               type="number", min=0, max=2000,
+                               hint="Overlap between consecutive chunks to preserve continuity across boundaries."),
+                        _field("context.chunked_processing.max_chunks", "Max chunks",
+                               type="number", min=1, max=100,
+                               hint="Hard cap on number of chunks per item. "
+                                    "If content requires more, the last chunk absorbs the remainder."),
+                        _field("context.chunked_processing.combine_strategy", "Combine strategy",
+                               type="select",
+                               options=["summarize", "concatenate"],
+                               hint="How partial results are merged. 'summarize' uses an LLM synthesis call; "
+                                    "'concatenate' joins with separators."),
+                    ],
+                },
             ],
         },
         # ── 2. Memory ────────────────────────────────────────────

@@ -749,6 +749,45 @@ class AgentToolLoopMixin:
 
                 # Add result to session
                 _result_content = result.content if result.success else f"Error: {result.error}"
+
+                # ── Chunked processing: reduce oversized tool results ──
+                # When a content-extraction tool returns more text than
+                # fits in the model's context window, run the chunked
+                # processing pipeline to produce a condensed version
+                # that the LLM can actually see on the next turn.
+                _CONTENT_TOOLS = {
+                    "read", "pdf_extract", "docx_extract",
+                    "xlsx_extract", "pptx_extract", "web_fetch", "web_get",
+                }
+                if (
+                    result.success
+                    and _tool_lower in _CONTENT_TOOLS
+                    and hasattr(self, "_chunked_reduce_tool_result")
+                ):
+                    # Get the user's original query from session messages
+                    _user_query = ""
+                    if self.session:
+                        for _m in reversed(self.session.messages):
+                            if str(_m.get("role", "")) == "user":
+                                _user_query = str(_m.get("content", ""))
+                                break
+                    if _user_query:
+                        try:
+                            _reduced = await self._chunked_reduce_tool_result(
+                                tool_name=tc.name,
+                                tool_content=_result_content,
+                                user_query=_user_query,
+                                turn_usage=turn_usage,
+                            )
+                            if _reduced is not None:
+                                _result_content = _reduced
+                        except Exception as _chunk_err:
+                            log.warning(
+                                "Chunked tool result reduction failed, using original",
+                                tool=tc.name,
+                                error=str(_chunk_err),
+                            )
+
                 # Append a soft write-reminder when the LLM skipped writing
                 # the previous item's result before reading a new one.
                 # This is a HINT, not a hard block — execution still happened.
