@@ -1,6 +1,6 @@
 [project]
 name = "captain-claw"
-version = "0.3.1.1"
+version = "0.3.1.2"
 description = "A powerful AI agentic system"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -35,7 +35,6 @@ dependencies = [
     "glob2>=0.7",
     "tenacity>=8.0.0",
     "aiohttp>=3.9.0",
-    "botport>=0.3.1.1",
 ]
 
 [project.optional-dependencies]
@@ -64,6 +63,7 @@ build = [
 captain-claw = "captain_claw.main:main"
 captain-claw-web = "captain_claw.web_server:main"
 captain-claw-orchestrate = "captain_claw.orchestrator_cli:cli_orchestrate"
+botport = "botport.server:main"
 
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
@@ -88,7 +88,9 @@ warn_unused_configs = true
 disallow_untyped_defs = false
 
 [tool.setuptools.packages.find]
-include = ["captain_claw*"]
+where = [".", "botport"]
+include = ["captain_claw*", "botport", "botport.dashboard"]
 
 [tool.setuptools.package-data]
 captain_claw = ["web/static/**/*", "instructions/**/*"]
+botport = ["dashboard/static/**/*"]
