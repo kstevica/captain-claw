@@ -183,7 +183,7 @@ class BotPortServer:
                 )
 
         if failed:
-            log.info(
+            log.warning(
                 "Instance %s disconnected, failed %d concerns",
                 name, len(failed),
             )
@@ -437,6 +437,65 @@ class BotPortServer:
         log.info("BotPort server shut down.")
 
 
+# ── Logging ──────────────────────────────────────────────────────
+
+# ANSI colors matching Captain Claw's structlog ConsoleRenderer.
+_RST = "\033[0m"
+_BRIGHT = "\033[1m"
+_DIM = "\033[2m"
+_RED = "\033[31m"
+_GREEN = "\033[32m"
+_YELLOW = "\033[33m"
+_BLUE = "\033[34m"
+_CYAN = "\033[36m"
+_MAGENTA = "\033[35m"
+
+_LEVEL_COLORS = {
+    "DEBUG": _DIM + _GREEN,
+    "INFO": _GREEN,
+    "WARNING": _YELLOW,
+    "ERROR": _RED,
+    "CRITICAL": _RED + _BRIGHT,
+}
+
+
+class _ColorFormatter(logging.Formatter):
+    """Colored console formatter à la structlog ConsoleRenderer."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        ts = self.formatTime(record, "%Y-%m-%dT%H:%M:%S")
+        lvl = record.levelname
+        color = _LEVEL_COLORS.get(lvl, "")
+        name = record.name.replace("botport.", "")
+        msg = record.getMessage()
+        line = (
+            f"{_DIM}{ts}{_RST} "
+            f"[{color}{lvl:<8s}{_RST}] "
+            f"{_BLUE}{name}{_RST}  "
+            f"{_BRIGHT}{msg}{_RST}"
+        )
+        if record.exc_info and record.exc_info[1]:
+            line += "\n" + self.formatException(record.exc_info)
+        return line
+
+
+def _setup_logging(config: BotPortConfig) -> None:
+    """Configure colored logging, suppress noisy aiohttp/ws chatter."""
+    log_level = getattr(logging, config.logging.level.upper(), logging.INFO)
+
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(_ColorFormatter())
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(log_level)
+
+    # Suppress noisy aiohttp access logs and websocket internals.
+    for noisy in ("aiohttp.access", "aiohttp.server", "aiohttp.web", "aiohttp"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
 # ── Entry point ──────────────────────────────────────────────────
 
 
@@ -463,13 +522,8 @@ def main() -> None:
 
     set_config(config)
 
-    # Configure logging.
-    log_level = getattr(logging, config.logging.level.upper(), logging.INFO)
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    # Configure logging with colored output.
+    _setup_logging(config)
 
     try:
         asyncio.run(_run_server(config))
@@ -482,7 +536,7 @@ async def _run_server(config: BotPortConfig) -> None:
     """Async server lifecycle."""
     server = BotPortServer(config)
     app = server.create_app()
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(app, access_log=None)
     await runner.setup()
 
     host = config.server.host
@@ -520,6 +574,21 @@ async def _run_server(config: BotPortConfig) -> None:
 
     cleanup_task = asyncio.create_task(_cleanup_loop())
 
+    # Purge disconnected instances after 60s.
+    async def _purge_loop() -> None:
+        while True:
+            try:
+                await asyncio.sleep(15)
+                purged = server.connections.purge_stale(max_age_seconds=60.0)
+                for iid in purged:
+                    log.info("Purged stale instance %s", iid[:8])
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.error("Purge error: %s", exc)
+
+    purge_task = asyncio.create_task(_purge_loop())
+
     print(f"BotPort v{__version__} running on http://{host}:{port}")
     if config.server.dashboard_enabled:
         print(f"  Dashboard: http://{host}:{port}/")
@@ -543,10 +612,12 @@ async def _run_server(config: BotPortConfig) -> None:
 
     print("\nShutting down BotPort...")
     cleanup_task.cancel()
-    try:
-        await cleanup_task
-    except asyncio.CancelledError:
-        pass
+    purge_task.cancel()
+    for t in (cleanup_task, purge_task):
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
 
     await server.shutdown()
     try:

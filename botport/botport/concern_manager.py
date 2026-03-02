@@ -74,7 +74,7 @@ class ConcernManager:
         await self._store.save_concern(concern)
         await self._store.save_exchange(concern.id, exchange)
 
-        log.info("Concern created: %s from %s", concern.id[:8], from_instance)
+        log.debug("Concern created: %s from %s", concern.id[:8], from_instance)
         return concern
 
     async def assign_concern(
@@ -94,7 +94,7 @@ class ConcernManager:
         self._refresh_timeout(concern)
 
         await self._store.save_concern(concern)
-        log.info(
+        log.debug(
             "Concern %s assigned to %s (%s)",
             concern_id[:8], instance_name or instance_id, instance_id[:8],
         )
@@ -144,7 +144,7 @@ class ConcernManager:
         await self._store.save_concern(concern)
         await self._store.save_exchange(concern_id, exchange)
 
-        log.info("Concern %s got result (%d chars)", concern_id[:8], len(response))
+        log.debug("Concern %s got result (%d chars)", concern_id[:8], len(response))
         return True
 
     async def add_follow_up(
@@ -180,7 +180,7 @@ class ConcernManager:
         await self._store.save_concern(concern)
         await self._store.save_exchange(concern_id, exchange)
 
-        log.info("Follow-up added to concern %s", concern_id[:8])
+        log.debug("Follow-up added to concern %s", concern_id[:8])
         return True
 
     async def add_context_request(
@@ -245,7 +245,7 @@ class ConcernManager:
         concern.metadata["close_reason"] = reason
 
         await self._store.save_concern(concern)
-        log.info("Concern %s closed: %s", concern_id[:8], reason)
+        log.debug("Concern %s closed: %s", concern_id[:8], reason)
         return True
 
     async def fail_concern(self, concern_id: str, reason: str = "failed") -> bool:
@@ -272,7 +272,7 @@ class ConcernManager:
         concern.touch()
 
         await self._store.save_concern(concern)
-        log.info("Concern %s timed out", concern_id[:8])
+        log.warning("Concern %s timed out", concern_id[:8])
         return True
 
     def get_concern(self, concern_id: str) -> Concern | None:

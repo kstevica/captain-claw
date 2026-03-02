@@ -55,7 +55,7 @@ class ConnectionManager:
         self._instances[instance_id] = info
         self._ws_to_instance[id(ws)] = instance_id
 
-        log.info("Instance registered: %s (%s)", info.name, instance_id)
+        log.debug("Instance registered: %s (%s)", info.name, instance_id)
         return info
 
     async def unregister(self, instance_id: str) -> InstanceInfo | None:
@@ -63,14 +63,43 @@ class ConnectionManager:
         info = self._instances.get(instance_id)
         if info:
             info.status = "disconnected"
+            info.disconnected_at = _utcnow_iso()
 
         ws = self._connections.pop(instance_id, None)
         if ws is not None:
             self._ws_to_instance.pop(id(ws), None)
 
         if info:
-            log.info("Instance unregistered: %s (%s)", info.name, instance_id)
+            log.debug("Instance unregistered: %s (%s)", info.name, instance_id)
         return info
+
+    def purge_stale(self, max_age_seconds: float = 60.0) -> list[str]:
+        """Remove instances that have been disconnected longer than *max_age_seconds*.
+
+        Returns a list of purged instance IDs.
+        """
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        purged: list[str] = []
+        for iid, info in list(self._instances.items()):
+            if info.status != "disconnected":
+                continue
+            disc_at = getattr(info, "disconnected_at", "")
+            if not disc_at:
+                # No timestamp — remove immediately.
+                del self._instances[iid]
+                purged.append(iid)
+                continue
+            try:
+                dt = datetime.fromisoformat(disc_at)
+                if (now - dt).total_seconds() >= max_age_seconds:
+                    del self._instances[iid]
+                    purged.append(iid)
+            except (ValueError, TypeError):
+                del self._instances[iid]
+                purged.append(iid)
+        return purged
 
     def get_instance_id_for_ws(self, ws: web.WebSocketResponse) -> str | None:
         """Look up instance_id by WebSocket object."""

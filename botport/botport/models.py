@@ -51,6 +51,7 @@ class InstanceInfo:
     status: str = "connected"  # connected | disconnected
     connected_at: str = field(default_factory=_utcnow_iso)
     last_heartbeat: str = field(default_factory=_utcnow_iso)
+    disconnected_at: str = ""
 
     @property
     def has_capacity(self) -> bool:

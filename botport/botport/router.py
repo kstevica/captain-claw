@@ -44,7 +44,7 @@ class Router:
             )
             if matches:
                 best, score = matches[0]
-                log.info(
+                log.debug(
                     "Tag match: concern %s -> %s (score=%d)",
                     concern.id[:8], best.name, score,
                 )
@@ -60,7 +60,7 @@ class Router:
         # Strategy 3: Least-loaded fallback (only if there are available instances).
         fallback = self._registry.get_least_loaded(exclude_instance=exclude)
         if fallback:
-            log.info(
+            log.debug(
                 "Fallback routing: concern %s -> %s (least loaded)",
                 concern.id[:8], fallback.name,
             )
@@ -106,7 +106,7 @@ class Router:
 
             for inst in available:
                 if inst.name.lower() == chosen_name.lower():
-                    log.info(
+                    log.debug(
                         "LLM routing: concern %s -> %s",
                         concern.id[:8], inst.name,
                     )
