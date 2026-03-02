@@ -19,6 +19,16 @@ from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
 
+# Tools that bring in new external / document content and may warrant
+# deferred scale re-extraction.  Lightweight tools like datastore, glob,
+# shell, todo do NOT qualify — they return structured local data that
+# should never trigger the research micro-loop.
+_CONTENT_FETCH_TOOLS: frozenset[str] = frozenset({
+    "web_fetch", "web_get", "read",
+    "pdf_extract", "docx_extract", "pptx_extract",
+    "xlsx_extract", "pocket_tts",
+})
+
 
 class AgentOrchestrationMixin:
     """Core request orchestration: complete() and stream()."""
@@ -763,10 +773,22 @@ class AgentOrchestrationMixin:
                         )
 
                 # ── Deferred scale init after fetch ───────────────
-                _needs_def = self._needs_deferred_scale_init()
+                # Only consider deferred scale init when a content-
+                # fetching tool ran (web_fetch, web_get, read,
+                # pdf_extract, etc.).  Datastore / glob / shell / todo
+                # results don't bring in new article content that
+                # warrants list re-extraction.
+                _had_content_fetch = _tool_results and any(
+                    str(r.get("tool_name", "")).lower() in _CONTENT_FETCH_TOOLS
+                    for r in _tool_results
+                )
+                _needs_def = (
+                    _had_content_fetch and self._needs_deferred_scale_init()
+                )
                 log.info(
                     "Post-tool deferred check",
                     needs_deferred=_needs_def,
+                    had_content_fetch=_had_content_fetch,
                     scale_items=len(
                         (getattr(self, "_scale_progress", None) or {}).get("items", [])
                     ),

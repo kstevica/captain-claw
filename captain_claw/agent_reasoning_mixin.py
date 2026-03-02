@@ -845,7 +845,7 @@ class AgentReasoningMixin:
             r"\bevery\b",
             r"\ball\b",
             r"\bper\b",
-            r"\blist\b",
+            r"\blist\s+(?:all|of|out|every|each|the|them|these|those)\b",
             r"\bextract\b.{0,30}\bnames?\b",
             r"\bcompanies?\b",
             r"\bcities?\b",
