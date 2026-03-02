@@ -26,26 +26,50 @@ class Registry:
     ) -> list[tuple[InstanceInfo, int]]:
         """Find available instances matching expertise tags.
 
+        Uses fuzzy matching: a query tag matches an instance tag if either
+        is a substring of the other (e.g. "m&a" matches "m&a / deal advisory",
+        "valuation" matches "valuation support").
+
         Returns list of (instance, match_count) sorted by match_count descending,
         then by active_concerns ascending (prefer least loaded).
         """
         if not tags:
             return []
 
-        query_tags = {t.lower().strip() for t in tags if t.strip()}
+        query_tags = [t.lower().strip() for t in tags if t.strip()]
         if not query_tags:
             return []
 
         candidates: list[tuple[InstanceInfo, int]] = []
         for instance in self._connections.list_available(exclude=exclude_instance):
-            instance_tags = instance.all_expertise_tags()
-            overlap = len(query_tags & instance_tags)
-            if overlap > 0:
-                candidates.append((instance, overlap))
+            instance_tags = list(instance.all_expertise_tags())
+            matched = self._count_fuzzy_matches(query_tags, instance_tags)
+            if matched > 0:
+                candidates.append((instance, matched))
 
         # Sort by match count (desc), then active concerns (asc).
         candidates.sort(key=lambda x: (-x[1], x[0].active_concerns))
         return candidates
+
+    @staticmethod
+    def _count_fuzzy_matches(
+        query_tags: list[str],
+        instance_tags: list[str],
+    ) -> int:
+        """Count how many query tags fuzzy-match at least one instance tag.
+
+        A match occurs if:
+          - exact equality, OR
+          - query tag is a substring of an instance tag, OR
+          - an instance tag is a substring of the query tag
+        """
+        matched = 0
+        for qt in query_tags:
+            for it in instance_tags:
+                if qt == it or qt in it or it in qt:
+                    matched += 1
+                    break  # one match per query tag is enough
+        return matched
 
     def find_by_tool(
         self,

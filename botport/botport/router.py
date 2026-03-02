@@ -48,13 +48,20 @@ class Router:
             result = self._tag_route(concern, exclude)
             if result:
                 return result
+            log.debug("Tag matching: no strong match for concern %s", concern.id[:8])
 
         # Strategy 2: LLM-assisted routing.
         cfg = get_config()
         if cfg.llm.enabled:
+            log.info(
+                "LLM routing: attempting for concern %s (model=%s)",
+                concern.id[:8], cfg.llm.model,
+            )
             result = await self._llm_route(concern, exclude)
             if result:
                 return result
+        else:
+            log.debug("LLM routing: disabled, skipping for concern %s", concern.id[:8])
 
         # Strategy 3: Least-loaded fallback.
         fallback = self._registry.get_least_loaded(exclude_instance=exclude)
