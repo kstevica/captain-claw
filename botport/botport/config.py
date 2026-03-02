@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_CONFIG_PATH = Path("~/.botport/config.yaml").expanduser()
@@ -61,15 +61,35 @@ class LoggingConfig(BaseModel):
 
 
 class LLMConfig(BaseModel):
-    """LLM settings for smart routing."""
+    """LLM settings for smart routing via litellm.
+
+    Model names use litellm's ``provider/model`` format, e.g.:
+      - ``ollama/llama3.2``
+      - ``gemini/gemini-2.0-flash``
+      - ``openai/gpt-4o-mini``
+      - ``anthropic/claude-3-haiku-20240307``
+
+    For backward compatibility the old ``provider`` + ``model`` fields are
+    merged automatically (e.g. provider="gemini", model="gemini-2.0-flash"
+    → model="gemini/gemini-2.0-flash").
+    """
 
     enabled: bool = False
-    provider: str = "ollama"  # ollama | openai | anthropic
-    model: str = "llama3.2"
+    provider: str = ""  # legacy — merged into model if set
+    model: str = "ollama/llama3.2"
     api_key: str = ""
-    base_url: str = "http://127.0.0.1:11434"
+    base_url: str = ""  # empty = let litellm use its provider defaults
     temperature: float = 0.3
     max_tokens: int = 1000
+    timeout: int = 30
+
+    @model_validator(mode="after")
+    def _merge_provider_into_model(self) -> "LLMConfig":
+        """Merge legacy ``provider`` field into ``model`` for litellm compat."""
+        if self.provider and "/" not in self.model:
+            self.model = f"{self.provider}/{self.model}"
+            self.provider = ""
+        return self
 
 
 class BotPortConfig(BaseSettings):

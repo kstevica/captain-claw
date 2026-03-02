@@ -40,7 +40,7 @@ from botport.protocol import (
     serialize_message,
 )
 from botport.registry import Registry
-from botport.router import Router
+from botport.router import RouteResult, Router
 from botport.store import BotPortStore
 
 log = logging.getLogger(__name__)
@@ -254,9 +254,9 @@ class BotPortServer:
         await self.store.save_concern(concern)
 
         # Route to best instance.
-        target = await self.router.route(concern, exclude_instance=instance_id)
+        route_result = await self.router.route(concern, exclude_instance=instance_id)
 
-        if target is None:
+        if route_result is None:
             await self.concerns.fail_concern(concern.id, reason="no_available_instance")
             await self.connections.send_to(instance_id, ConcernAckMessage(
                 concern_id=concern.id,
@@ -265,13 +265,13 @@ class BotPortServer:
             ))
             return
 
+        target = route_result.instance
+        persona_hint = route_result.persona_name
+
         # Assign and dispatch.
         concern.assigned_instance_name = target.name
         await self.concerns.assign_concern(concern.id, target.id, target.name)
         self.connections.increment_active(target.id)
-
-        # Determine persona hint (best matching persona name).
-        persona_hint = self._pick_persona_hint(target, concern.expertise_tags)
 
         # Send ack to CC-A.
         await self.connections.send_to(instance_id, ConcernAckMessage(
@@ -290,8 +290,9 @@ class BotPortServer:
         ))
 
         log.info(
-            "Concern %s routed: %s -> %s (persona: %s)",
-            concern.id[:8], from_name, target.name, persona_hint or "auto",
+            "Concern %s routed: %s -> %s (persona: %s, reason: %s)",
+            concern.id[:8], from_name, target.name,
+            persona_hint or "auto", route_result.reason,
         )
 
     async def _handle_result(self, instance_id: str, msg: ResultMessage) -> None:
@@ -422,28 +423,6 @@ class BotPortServer:
                 concern_id=concern.id,
                 reason="closed_by_originator",
             ))
-
-    # ── Helpers ───────────────────────────────────────────────────
-
-    def _pick_persona_hint(
-        self, instance: Any, expertise_tags: list[str],
-    ) -> str:
-        """Pick the best persona name from instance based on expertise overlap."""
-        if not expertise_tags or not instance.personas:
-            return instance.personas[0].name if instance.personas else ""
-
-        query_tags = {t.lower() for t in expertise_tags}
-        best_name = ""
-        best_score = 0
-
-        for persona in instance.personas:
-            persona_tags = {t.lower() for t in persona.expertise_tags}
-            overlap = len(query_tags & persona_tags)
-            if overlap > best_score:
-                best_score = overlap
-                best_name = persona.name
-
-        return best_name or (instance.personas[0].name if instance.personas else "")
 
     async def shutdown(self) -> None:
         """Graceful shutdown."""
@@ -617,7 +596,8 @@ async def _run_server(config: BotPortConfig) -> None:
     if config.server.dashboard_enabled:
         print(f"  Dashboard: http://{host}:{port}/")
     print(f"  WebSocket: ws://{host}:{port}/ws")
-    print(f"  Routing strategy: {config.routing.strategy}")
+    llm_info = f"LLM routing: {config.llm.model}" if config.llm.enabled else "LLM routing: disabled"
+    print(f"  Routing: tags -> {'LLM' if config.llm.enabled else 'skip'} -> fallback  ({llm_info})")
     if config.auth.enabled:
         print(f"  Auth: enabled ({len(config.auth.keys)} keys)")
     else:

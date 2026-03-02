@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass, field
 from typing import Any
-
-import httpx
 
 from botport.config import get_config
 from botport.models import Concern, InstanceInfo
@@ -15,155 +14,266 @@ from botport.registry import Registry
 log = logging.getLogger(__name__)
 
 
+@dataclass
+class RouteResult:
+    """Result of routing a concern — includes both target instance and persona."""
+
+    instance: InstanceInfo
+    persona_name: str = ""
+    reason: str = ""
+
+
 class Router:
     """Routes concerns to the best available CC instance."""
 
     def __init__(self, registry: Registry) -> None:
         self._registry = registry
-        self._http_client: httpx.AsyncClient | None = None
 
     async def route(
         self,
         concern: Concern,
         exclude_instance: str | None = None,
-    ) -> InstanceInfo | None:
+    ) -> RouteResult | None:
         """Find the best instance to handle a concern.
 
         Strategy chain:
-        1. Tag matching against persona expertise
-        2. LLM-assisted classification (if enabled and tag match fails)
+        1. Strong tag matching (≥50% tag overlap) against persona expertise
+        2. LLM-assisted routing (if enabled)
         3. Least-loaded fallback
         """
-        # Use the concern's originating instance as exclusion.
         exclude = exclude_instance or concern.from_instance
 
-        # Strategy 1: Tag matching.
+        # Strategy 1: Strong tag matching.
         if concern.expertise_tags:
-            matches = self._registry.find_by_expertise(
-                concern.expertise_tags, exclude_instance=exclude,
-            )
-            if matches:
-                best, score = matches[0]
-                log.debug(
-                    "Tag match: concern %s -> %s (score=%d)",
-                    concern.id[:8], best.name, score,
-                )
-                return best
+            result = self._tag_route(concern, exclude)
+            if result:
+                return result
 
         # Strategy 2: LLM-assisted routing.
         cfg = get_config()
-        if cfg.llm.enabled and cfg.routing.strategy == "llm_assisted":
+        if cfg.llm.enabled:
             result = await self._llm_route(concern, exclude)
             if result:
                 return result
 
-        # Strategy 3: Least-loaded fallback (only if there are available instances).
+        # Strategy 3: Least-loaded fallback.
         fallback = self._registry.get_least_loaded(exclude_instance=exclude)
         if fallback:
+            persona_name = self._pick_best_persona(fallback, concern.expertise_tags)
             log.debug(
                 "Fallback routing: concern %s -> %s (least loaded)",
                 concern.id[:8], fallback.name,
             )
-            return fallback
+            return RouteResult(
+                instance=fallback,
+                persona_name=persona_name,
+                reason="least_loaded_fallback",
+            )
 
         log.warning("No available instance for concern %s", concern.id[:8])
         return None
+
+    def _tag_route(
+        self,
+        concern: Concern,
+        exclude_instance: str,
+    ) -> RouteResult | None:
+        """Strong tag matching — only if ≥50% of requested tags match."""
+        matches = self._registry.find_by_expertise(
+            concern.expertise_tags, exclude_instance=exclude_instance,
+        )
+        if not matches:
+            return None
+
+        best, score = matches[0]
+        required = len(concern.expertise_tags)
+
+        # Require at least 50% tag overlap for a "strong" match.
+        if required > 0 and score / required < 0.5:
+            log.debug(
+                "Tag match too weak for concern %s: %d/%d (%.0f%%)",
+                concern.id[:8], score, required, score / required * 100,
+            )
+            return None
+
+        persona_name = self._pick_best_persona(best, concern.expertise_tags)
+        log.debug(
+            "Tag match: concern %s -> %s (score=%d/%d, persona=%s)",
+            concern.id[:8], best.name, score, required, persona_name,
+        )
+        return RouteResult(
+            instance=best,
+            persona_name=persona_name,
+            reason=f"tag_match ({score}/{required})",
+        )
 
     async def _llm_route(
         self,
         concern: Concern,
         exclude_instance: str,
-    ) -> InstanceInfo | None:
+    ) -> RouteResult | None:
         """Use LLM to classify the concern and pick the best instance."""
-        cfg = get_config()
         available = self._registry._connections.list_available(exclude=exclude_instance)
         if not available:
             return None
 
-        # Build instance descriptions for the prompt.
-        instance_descriptions: list[str] = []
-        for inst in available:
-            personas_desc = ", ".join(
-                f"{p.name} ({', '.join(p.expertise_tags)})" for p in inst.personas
-            )
-            instance_descriptions.append(
-                f"- {inst.name}: personas=[{personas_desc}], "
-                f"tools=[{', '.join(inst.tools[:10])}], "
-                f"load={inst.active_concerns}/{inst.max_concurrent}"
-            )
+        # Build the rich prompt.
+        system_msg = (
+            "You are a routing assistant for a multi-agent system. Select the best agent "
+            "instance AND persona to handle a task based on expertise, background, and workload.\n"
+            "- Pick the instance/persona whose expertise best matches the task.\n"
+            "- Prefer lower-load instances when expertise is similar.\n"
+            "- If NO instance is a good fit, respond with NONE.\n"
+            "- Respond ONLY with valid JSON, no markdown fences."
+        )
 
-        prompt = (
-            "You are a routing assistant. Given a task and available agent instances, "
-            "pick the single best instance to handle the task.\n\n"
+        # Build instance descriptions with full persona details.
+        instance_blocks: list[str] = []
+        for inst in available:
+            load_status = "available" if inst.active_concerns < inst.max_concurrent else "full"
+            block = f"Instance: {inst.name}\n"
+            block += f"  Load: {inst.active_concerns}/{inst.max_concurrent} ({load_status})\n"
+
+            if inst.personas:
+                block += "  Personas:\n"
+                for p in inst.personas:
+                    block += f"    - Persona: {p.name}\n"
+                    if p.description:
+                        block += f"      Description: {p.description}\n"
+                    if p.background:
+                        block += f"      Background: {p.background}\n"
+                    if p.expertise_tags:
+                        block += f"      Expertise: {', '.join(p.expertise_tags)}\n"
+            else:
+                block += "  Personas: (none defined)\n"
+
+            instance_blocks.append(block)
+
+        user_msg = (
             f"Task: {concern.task}\n\n"
-            f"Available instances:\n" + "\n".join(instance_descriptions) + "\n\n"
-            "Respond with ONLY the instance name (nothing else)."
+            f"Available agents:\n\n"
+            + "\n".join(instance_blocks) + "\n"
+            'Respond with JSON: {"instance_name": "<name>", "persona_name": "<name>", "reason": "<brief>"}\n'
+            'Or if no agent fits: {"instance_name": "NONE", "persona_name": "", "reason": "<why>"}'
         )
 
         try:
-            chosen_name = await self._call_llm(prompt, cfg)
-            chosen_name = chosen_name.strip().strip('"').strip("'")
-
-            for inst in available:
-                if inst.name.lower() == chosen_name.lower():
-                    log.debug(
-                        "LLM routing: concern %s -> %s",
-                        concern.id[:8], inst.name,
-                    )
-                    return inst
-
-            log.warning("LLM returned unknown instance name: %r", chosen_name)
+            raw = await self._call_llm(system_msg, user_msg)
+            return self._parse_llm_response(raw, available)
         except Exception as exc:
             log.warning("LLM routing failed: %s", exc)
+            return None
 
+    async def _call_llm(self, system_msg: str, user_msg: str) -> str:
+        """Make a single LLM completion call via litellm."""
+        from litellm import acompletion
+
+        cfg = get_config().llm
+
+        kwargs: dict[str, Any] = {
+            "model": cfg.model,
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            "temperature": cfg.temperature,
+            "max_tokens": cfg.max_tokens,
+            "timeout": cfg.timeout,
+        }
+
+        if cfg.api_key:
+            kwargs["api_key"] = cfg.api_key
+        if cfg.base_url:
+            kwargs["api_base"] = cfg.base_url
+
+        response = await acompletion(**kwargs)
+        content = response.choices[0].message.content or ""
+        return content.strip()
+
+    def _parse_llm_response(
+        self,
+        raw: str,
+        available: list[InstanceInfo],
+    ) -> RouteResult | None:
+        """Parse LLM JSON response and validate against available instances."""
+        # Strip markdown code fences if present.
+        text = raw.strip()
+        if text.startswith("```"):
+            lines = text.split("\n")
+            # Remove first line (```json) and last line (```)
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            text = "\n".join(lines).strip()
+
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            log.warning("LLM returned non-JSON: %s", raw[:200])
+            return None
+
+        instance_name = str(data.get("instance_name", "")).strip()
+        persona_name = str(data.get("persona_name", "")).strip()
+        reason = str(data.get("reason", "")).strip()
+
+        # Check for explicit NONE response.
+        if instance_name.upper() == "NONE":
+            log.info("LLM says no suitable agent: %s", reason)
+            return None
+
+        # Find matching instance.
+        for inst in available:
+            if inst.name.lower() == instance_name.lower():
+                # Validate persona exists if specified.
+                if persona_name:
+                    persona_found = any(
+                        p.name.lower() == persona_name.lower()
+                        for p in inst.personas
+                    )
+                    if not persona_found:
+                        # LLM hallucinated a persona — fall back to best match.
+                        log.debug(
+                            "LLM picked non-existent persona %r, using best match",
+                            persona_name,
+                        )
+                        persona_name = self._pick_best_persona(inst, [])
+
+                log.info(
+                    "LLM routing: concern -> %s (persona=%s, reason=%s)",
+                    inst.name, persona_name or "auto", reason,
+                )
+                return RouteResult(
+                    instance=inst,
+                    persona_name=persona_name,
+                    reason=f"llm: {reason}",
+                )
+
+        log.warning("LLM returned unknown instance name: %r", instance_name)
         return None
 
-    async def _call_llm(self, prompt: str, cfg: Any) -> str:
-        """Make a single LLM completion call for routing."""
-        if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=30.0)
+    def _pick_best_persona(
+        self,
+        instance: InstanceInfo,
+        expertise_tags: list[str],
+    ) -> str:
+        """Pick the best persona name from instance based on expertise overlap."""
+        if not instance.personas:
+            return ""
 
-        llm_cfg = cfg.llm
-        provider = llm_cfg.provider.lower().strip()
-        base_url = llm_cfg.base_url.rstrip("/")
+        if not expertise_tags:
+            return instance.personas[0].name
 
-        if provider == "ollama":
-            url = f"{base_url}/api/chat"
-            body = {
-                "model": llm_cfg.model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-                "options": {
-                    "temperature": llm_cfg.temperature,
-                    "num_predict": llm_cfg.max_tokens,
-                },
-            }
-            resp = await self._http_client.post(url, json=body)
-            resp.raise_for_status()
-            data = resp.json()
-            return str((data.get("message") or {}).get("content", ""))
+        query_tags = {t.lower() for t in expertise_tags}
+        best_name = ""
+        best_score = 0
 
-        # OpenAI-compatible (openai, anthropic via litellm proxy, etc.)
-        url = f"{base_url}/v1/chat/completions"
-        headers: dict[str, str] = {}
-        if llm_cfg.api_key:
-            headers["Authorization"] = f"Bearer {llm_cfg.api_key}"
+        for persona in instance.personas:
+            persona_tags = {t.lower() for t in persona.expertise_tags}
+            overlap = len(query_tags & persona_tags)
+            if overlap > best_score:
+                best_score = overlap
+                best_name = persona.name
 
-        body = {
-            "model": llm_cfg.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": llm_cfg.temperature,
-            "max_tokens": llm_cfg.max_tokens,
-        }
-        resp = await self._http_client.post(url, json=body, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
-        choices = data.get("choices") or []
-        if choices:
-            return str((choices[0].get("message") or {}).get("content", ""))
-        return ""
+        return best_name or instance.personas[0].name
 
     async def close(self) -> None:
-        if self._http_client:
-            await self._http_client.aclose()
-            self._http_client = None
+        """No-op — litellm manages its own connections."""
+        pass

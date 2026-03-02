@@ -7,11 +7,10 @@ server:
   dashboard_enabled: true
 
 routing:
-  # Strategy: "tag_match" (default) or "llm_assisted"
-  # tag_match: routes based on expertise tag overlap between concern and instance personas
-  # llm_assisted: uses an LLM to classify the concern and pick the best instance
-  strategy: "tag_match"
-  fallback_to_least_loaded: true
+  # Routing uses a strategy chain: tag matching -> LLM (if enabled) -> least-loaded fallback.
+  # The "strategy" field is kept for logging but routing always tries all strategies in order.
+  strategy: "auto"
+  fallback: "reject"           # "reject" (fail if no match) or "queue_until_available"
 
 concerns:
   idle_timeout_seconds: 300    # 5 minutes - timeout concerns with no activity
@@ -36,10 +35,20 @@ logging:
   concern_history: true        # log concern exchanges to store
   retention_days: 30           # auto-cleanup concerns older than this
 
-# LLM configuration (only needed when routing.strategy = "llm_assisted")
+# LLM-powered routing (uses litellm — supports all major providers).
+# When enabled, the LLM picks the best agent + persona for each concern.
+# Falls back to tag matching / least-loaded if LLM is disabled or fails.
 llm:
-  provider: "ollama"           # "ollama" or "litellm"
-  model: "llama3.2"
-  base_url: "http://localhost:11434"
-  api_key: ""                  # required for litellm / hosted providers
+  enabled: false
+  # Model uses litellm's "provider/model" format. Examples:
+  #   ollama/llama3.2              (local Ollama)
+  #   gemini/gemini-2.0-flash      (Google Gemini)
+  #   openai/gpt-4o-mini           (OpenAI)
+  #   anthropic/claude-3-haiku-20240307  (Anthropic)
+  #   groq/llama-3.1-8b-instant    (Groq)
+  # See https://docs.litellm.ai/docs/providers for full list.
+  model: "ollama/llama3.2"
+  base_url: ""                 # optional — override provider's default URL
+  api_key: ""                  # required for cloud providers (set via env var or here)
   temperature: 0.1
+  timeout: 30                  # seconds
