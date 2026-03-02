@@ -72,6 +72,7 @@ captain-claw-web          # Web UI (default: http://127.0.0.1:23080)
 captain-claw              # Interactive terminal
 captain-claw --tui        # Terminal UI
 captain-claw --port 8080  # Override web server port
+botport                   # BotPort agent-to-agent routing hub
 ```
 
 First run starts interactive onboarding automatically — it pre-configures 12 models across OpenAI, Anthropic, and Gemini (including image generation, OCR, and vision). The web UI redirects to `/onboarding` on first launch too. To re-run it later: `captain-claw --onboarding`.
@@ -223,7 +224,7 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 
 - **[Execution queue](USAGE.md#execution-queue-1)** — Five queue modes (steer, followup, collect, interrupt, queue) control how follow-up messages are handled during agent execution.
 
-- **[BotPort (agent-to-agent)](USAGE.md#botport)** — Connect multiple Captain Claw instances through the BotPort routing hub. Agents can delegate tasks to specialist instances based on expertise tags, persona matching, or LLM-powered routing. Supports bidirectional follow-ups, context negotiation, and concern lifecycle management. Install separately with `pip install botport` and connect via WebSocket (e.g. `wss://botport.kstevica.com/ws`).
+- **[BotPort (agent-to-agent)](USAGE.md#botport)** — Connect multiple Captain Claw instances through the BotPort routing hub. Agents can delegate tasks to specialist instances based on expertise tags, persona matching, or LLM-powered routing. Supports bidirectional follow-ups, context negotiation, and concern lifecycle management. Included with `pip install captain-claw` — run `botport` to start a hub, then connect instances via WebSocket (e.g. `wss://botport.kstevica.com/ws`).
 
 - **[Remote integrations](USAGE.md#remote-integrations)** — Connect Telegram, Slack, or Discord bots. Telegram users get isolated per-user sessions with concurrent agent execution. Unknown users get a pairing token; the operator approves locally with `/approve user`.
 

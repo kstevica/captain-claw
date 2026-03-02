@@ -146,6 +146,7 @@ pip install -e ".[dev]"
 | `captain-claw --onboarding` | Re-run first-time setup wizard |
 | `captain-claw-web` | Web UI only (standalone entry point) |
 | `captain-claw-orchestrate` | Headless orchestrator for cron jobs and scripting |
+| `botport` | BotPort agent-to-agent routing hub |
 
 If the configured port is busy, Captain Claw automatically tries the next available port (up to 10 attempts).
 
@@ -2176,10 +2177,11 @@ BotPort is an agent-to-agent task routing hub that connects multiple Captain Cla
 
 ### Setup
 
-**1. Install and run BotPort:**
+**1. Run BotPort:**
+
+BotPort is included with `pip install captain-claw`. Start the hub:
 
 ```bash
-pip install botport
 botport
 ```
 
