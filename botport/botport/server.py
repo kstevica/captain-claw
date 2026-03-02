@@ -222,6 +222,20 @@ class BotPortServer:
 
     async def _handle_concern(self, instance_id: str, msg: ConcernSubmitMessage) -> None:
         """CC-A submits a concern -> route to CC-B."""
+        from_info = self.connections.get_instance(instance_id)
+        from_name = from_info.name if from_info else instance_id[:8]
+
+        # Deduplication: reject if same instance already has an active concern
+        # with the exact same task text.
+        for existing in self.concerns.get_concerns_from_instance(instance_id):
+            if existing.is_active and existing.task == msg.task:
+                await self.connections.send_to(instance_id, ConcernAckMessage(
+                    concern_id=msg.concern_id or existing.id,
+                    ok=False,
+                    error="Duplicate concern — identical task already active",
+                ))
+                return
+
         concern = await self.concerns.create_concern(
             from_instance=instance_id,
             task=msg.task,
@@ -229,20 +243,20 @@ class BotPortServer:
             expertise_tags=list(msg.expertise_tags),
             from_session=msg.from_session,
         )
+        concern.from_instance_name = from_name
 
         # Override concern ID if client provided one (for tracking).
         if msg.concern_id:
-            # Re-key in the manager.
             self.concerns._concerns.pop(concern.id, None)
             concern.id = msg.concern_id
             self.concerns._concerns[concern.id] = concern
-            await self.store.save_concern(concern)
+
+        await self.store.save_concern(concern)
 
         # Route to best instance.
         target = await self.router.route(concern, exclude_instance=instance_id)
 
         if target is None:
-            # No instance available.
             await self.concerns.fail_concern(concern.id, reason="no_available_instance")
             await self.connections.send_to(instance_id, ConcernAckMessage(
                 concern_id=concern.id,
@@ -252,6 +266,7 @@ class BotPortServer:
             return
 
         # Assign and dispatch.
+        concern.assigned_instance_name = target.name
         await self.concerns.assign_concern(concern.id, target.id, target.name)
         self.connections.increment_active(target.id)
 
@@ -266,9 +281,6 @@ class BotPortServer:
         ))
 
         # Dispatch to CC-B.
-        from_info = self.connections.get_instance(instance_id)
-        from_name = from_info.name if from_info else instance_id[:8]
-
         await self.connections.send_to(target.id, DispatchMessage(
             concern_id=concern.id,
             from_instance_name=from_name,
@@ -300,8 +312,14 @@ class BotPortServer:
             ))
             return
 
+        # Store persona name in concern metadata for dashboard.
+        result_metadata = dict(msg.metadata)
+        if msg.persona_name:
+            result_metadata["persona_name"] = msg.persona_name
+            concern.metadata["persona_name"] = msg.persona_name
+
         await self.concerns.record_result(
-            concern.id, msg.response, msg.metadata, from_instance=instance_id,
+            concern.id, msg.response, result_metadata, from_instance=instance_id,
         )
 
         from_info = self.connections.get_instance(instance_id)
@@ -311,9 +329,15 @@ class BotPortServer:
             concern_id=concern.id,
             response=msg.response,
             from_instance_name=from_name,
-            metadata=msg.metadata,
+            persona_name=msg.persona_name,
+            metadata=result_metadata,
             ok=True,
         ))
+
+        log.info(
+            "Result relayed: concern=%s persona=%s",
+            concern.id[:8], msg.persona_name or "unknown",
+        )
 
     # ── Follow-ups ───────────────────────────────────────────────
 

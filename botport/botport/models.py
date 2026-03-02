@@ -144,8 +144,10 @@ class Concern:
 
     id: str
     from_instance: str
+    from_instance_name: str = ""
     from_session: str = ""
     assigned_instance: str | None = None
+    assigned_instance_name: str = ""
     assigned_session: str | None = None
     task: str = ""
     context: dict = field(default_factory=dict)
@@ -172,8 +174,10 @@ class Concern:
         return {
             "id": self.id,
             "from_instance": self.from_instance,
+            "from_instance_name": self.from_instance_name,
             "from_session": self.from_session,
             "assigned_instance": self.assigned_instance,
+            "assigned_instance_name": self.assigned_instance_name,
             "assigned_session": self.assigned_session,
             "task": self.task,
             "context": dict(self.context),
@@ -191,8 +195,10 @@ class Concern:
         return cls(
             id=str(data.get("id", "")),
             from_instance=str(data.get("from_instance", "")),
+            from_instance_name=str(data.get("from_instance_name", "")),
             from_session=str(data.get("from_session", "")),
             assigned_instance=data.get("assigned_instance"),
+            assigned_instance_name=str(data.get("assigned_instance_name", "")),
             assigned_session=data.get("assigned_session"),
             task=str(data.get("task", "")),
             context=dict(data.get("context") or {}),

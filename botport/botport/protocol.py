@@ -98,6 +98,7 @@ class ResultMessage(BaseMessage):
     type: str = "result"
     concern_id: str = ""
     response: str = ""
+    persona_name: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
     ok: bool = True
     error: str = ""
@@ -110,6 +111,7 @@ class ConcernResultMessage(BaseMessage):
     concern_id: str = ""
     response: str = ""
     from_instance_name: str = ""
+    persona_name: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
     ok: bool = True
     error: str = ""

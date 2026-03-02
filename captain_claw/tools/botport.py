@@ -129,11 +129,15 @@ class BotPortTool(Tool):
         if result.get("ok"):
             concern_id = result.get("concern_id", "")
             from_name = result.get("from_instance_name", "specialist")
+            persona_name = result.get("persona_name", "")
             response = result.get("response", "")
+            attribution = from_name
+            if persona_name and persona_name != from_name:
+                attribution = f"{from_name} (persona: {persona_name})"
             return ToolResult(
                 success=True,
                 content=(
-                    f"Response from {from_name} (concern_id: {concern_id}):\n\n"
+                    f"Response from {attribution} (concern_id: {concern_id}):\n\n"
                     f"{response}"
                 ),
             )
@@ -162,9 +166,11 @@ class BotPortTool(Tool):
 
         if result.get("ok"):
             response = result.get("response", "")
+            persona_name = result.get("persona_name", "")
+            persona_info = f" [persona: {persona_name}]" if persona_name else ""
             return ToolResult(
                 success=True,
-                content=f"Follow-up response (concern_id: {concern_id}):\n\n{response}",
+                content=f"Follow-up response{persona_info} (concern_id: {concern_id}):\n\n{response}",
             )
         else:
             return ToolResult(

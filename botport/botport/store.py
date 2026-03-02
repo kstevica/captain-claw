@@ -37,8 +37,10 @@ class BotPortStore:
             CREATE TABLE IF NOT EXISTS concerns (
                 id           TEXT PRIMARY KEY,
                 from_instance TEXT NOT NULL,
+                from_instance_name TEXT DEFAULT '',
                 from_session TEXT DEFAULT '',
                 assigned_instance TEXT,
+                assigned_instance_name TEXT DEFAULT '',
                 assigned_session TEXT,
                 task         TEXT DEFAULT '',
                 context      TEXT DEFAULT '{}',
@@ -66,6 +68,14 @@ class BotPortStore:
             CREATE INDEX IF NOT EXISTS idx_concerns_assigned ON concerns(assigned_instance);
             CREATE INDEX IF NOT EXISTS idx_concern_messages_cid ON concern_messages(concern_id);
         """)
+        # Migrate: add name columns if upgrading from older schema.
+        for col in ("from_instance_name", "assigned_instance_name"):
+            try:
+                await self._db.execute(
+                    f"ALTER TABLE concerns ADD COLUMN {col} TEXT DEFAULT ''"
+                )
+            except Exception:
+                pass  # Column already exists.
         await self._db.commit()
 
     async def save_concern(self, concern: Concern) -> None:
@@ -73,12 +83,15 @@ class BotPortStore:
         db = await self._ensure_db()
         await db.execute(
             """INSERT INTO concerns
-               (id, from_instance, from_session, assigned_instance, assigned_session,
+               (id, from_instance, from_instance_name, from_session,
+                assigned_instance, assigned_instance_name, assigned_session,
                 task, context, expertise_tags, status, created_at, updated_at,
                 timeout_at, metadata)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
+                 from_instance_name = excluded.from_instance_name,
                  assigned_instance = excluded.assigned_instance,
+                 assigned_instance_name = excluded.assigned_instance_name,
                  assigned_session = excluded.assigned_session,
                  status = excluded.status,
                  updated_at = excluded.updated_at,
@@ -88,8 +101,10 @@ class BotPortStore:
             (
                 concern.id,
                 concern.from_instance,
+                concern.from_instance_name,
                 concern.from_session,
                 concern.assigned_instance,
+                concern.assigned_instance_name,
                 concern.assigned_session,
                 concern.task,
                 json.dumps(concern.context),
@@ -149,8 +164,10 @@ class BotPortStore:
         return Concern(
             id=row["id"],
             from_instance=row["from_instance"],
+            from_instance_name=row["from_instance_name"] or "",
             from_session=row["from_session"] or "",
             assigned_instance=row["assigned_instance"],
+            assigned_instance_name=row["assigned_instance_name"] or "",
             assigned_session=row["assigned_session"],
             task=row["task"] or "",
             context=json.loads(row["context"] or "{}"),
@@ -191,8 +208,10 @@ class BotPortStore:
                 concerns.append(Concern(
                     id=row["id"],
                     from_instance=row["from_instance"],
+                    from_instance_name=row["from_instance_name"] or "",
                     from_session=row["from_session"] or "",
                     assigned_instance=row["assigned_instance"],
+                    assigned_instance_name=row["assigned_instance_name"] or "",
                     assigned_session=row["assigned_session"],
                     task=row["task"] or "",
                     context=json.loads(row["context"] or "{}"),

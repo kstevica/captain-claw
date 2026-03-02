@@ -74,6 +74,7 @@ class BotPortClient:
         # CC-B state: dispatch agents and sessions.
         self._dispatch_agents: dict[str, Any] = {}  # concern_id -> Agent
         self._dispatch_sessions: dict[str, str] = {}  # concern_id -> session_id
+        self._dispatch_personas: dict[str, str] = {}  # concern_id -> persona name
 
     @property
     def connected(self) -> bool:
@@ -418,6 +419,7 @@ class BotPortClient:
                 "ok": data.get("ok", True),
                 "response": data.get("response", ""),
                 "from_instance_name": data.get("from_instance_name", ""),
+                "persona_name": data.get("persona_name", ""),
                 "metadata": data.get("metadata", {}),
                 "error": data.get("error", ""),
             })
@@ -463,6 +465,7 @@ class BotPortClient:
                 concern_id, task, context, from_instance, persona_hint,
             )
             self._dispatch_agents[concern_id] = agent
+            self._dispatch_personas[concern_id] = persona_hint or self._config.instance_name
 
             # Build effective input with context.
             effective_input = task
@@ -473,12 +476,13 @@ class BotPortClient:
             # Run the agent.
             response = await agent.complete(effective_input)
 
-            # Send result back.
+            # Send result back, including persona name that handled it.
             if self._ws and not self._ws.closed:
                 await self._ws.send_str(json.dumps({
                     "type": "result",
                     "concern_id": concern_id,
                     "response": response or "",
+                    "persona_name": persona_hint or self._config.instance_name,
                     "ok": True,
                     "metadata": {
                         "model_used": getattr(agent, "_last_model_used", ""),
@@ -508,6 +512,9 @@ class BotPortClient:
             log.warning("Follow-up for unknown dispatch concern %s", concern_id[:8])
             return
 
+        # Retrieve persona hint from the agent's dispatch context.
+        persona_name = self._dispatch_personas.get(concern_id, self._config.instance_name)
+
         try:
             response = await agent.complete(message)
 
@@ -516,6 +523,7 @@ class BotPortClient:
                     "type": "result",
                     "concern_id": concern_id,
                     "response": response or "",
+                    "persona_name": persona_name,
                     "ok": True,
                 }))
         except Exception as exc:
@@ -533,6 +541,7 @@ class BotPortClient:
         concern_id = data.get("concern_id", "")
         self._dispatch_agents.pop(concern_id, None)
         self._dispatch_sessions.pop(concern_id, None)
+        self._dispatch_personas.pop(concern_id, None)
         log.info("Dispatch concern %s closed, agent cleaned up", concern_id[:8])
 
     async def _handle_context_reply(self, data: dict[str, Any]) -> None:

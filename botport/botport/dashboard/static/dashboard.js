@@ -85,21 +85,28 @@ function renderConcerns(concerns) {
     el.innerHTML = '<p class="empty-state">No active concerns</p>';
     return;
   }
-  el.innerHTML = concerns.map((c) => `
+  el.innerHTML = concerns.map((c) => {
+    const fromLabel = c.from_instance_name || shortId(c.from_instance);
+    const toLabel = c.assigned_instance_name || shortId(c.assigned_instance);
+    const personaName = (c.metadata && c.metadata.persona_name) ? c.metadata.persona_name : "";
+    const personaBadge = personaName
+      ? `<span class="persona-badge" title="Answered by persona">${esc(personaName)}</span>`
+      : "";
+    return `
     <div class="concern-card" onclick="showConcern('${esc(c.id)}')">
       <div class="concern-header">
         <span class="concern-id">${shortId(c.id)}</span>
+        ${personaBadge}
         <span class="concern-status status-${c.status}">${c.status}</span>
       </div>
       <div class="concern-task" title="${esc(c.task)}">${esc(truncate(c.task, 120))}</div>
       <div class="concern-meta">
-        <span>from: ${esc(c.from_instance || "?")}</span>
-        <span>to: ${esc(c.assigned_instance || "—")}</span>
+        <span>${esc(fromLabel)} &rarr; ${esc(toLabel)}</span>
         <span>${timeAgo(c.updated_at)}</span>
       </div>
       ${renderTags(c.expertise_tags)}
-    </div>
-  `).join("");
+    </div>`;
+  }).join("");
 }
 
 function renderHistory(concerns) {
@@ -108,19 +115,27 @@ function renderHistory(concerns) {
     el.innerHTML = '<p class="empty-state">No concerns yet</p>';
     return;
   }
-  el.innerHTML = concerns.map((c) => `
+  el.innerHTML = concerns.map((c) => {
+    const fromLabel = c.from_instance_name || shortId(c.from_instance);
+    const toLabel = c.assigned_instance_name || shortId(c.assigned_instance);
+    const personaName = (c.metadata && c.metadata.persona_name) ? c.metadata.persona_name : "";
+    const personaBadge = personaName
+      ? `<span class="persona-badge" title="Answered by persona">${esc(personaName)}</span>`
+      : "";
+    return `
     <div class="concern-card" onclick="showConcern('${esc(c.id)}')">
       <div class="concern-header">
         <span class="concern-id">${shortId(c.id)}</span>
+        ${personaBadge}
         <span class="concern-status status-${c.status}">${c.status}</span>
       </div>
       <div class="concern-task" title="${esc(c.task)}">${esc(truncate(c.task, 100))}</div>
       <div class="concern-meta">
-        <span>${esc(c.from_instance || "?")} &rarr; ${esc(c.assigned_instance || "—")}</span>
+        <span>${esc(fromLabel)} &rarr; ${esc(toLabel)}</span>
         <span>${timeAgo(c.created_at)}</span>
       </div>
-    </div>
-  `).join("");
+    </div>`;
+  }).join("");
 }
 
 function renderTags(tags) {
@@ -151,12 +166,20 @@ async function showConcern(id) {
   if (!data || data.error) return;
 
   $("#modal-title").textContent = `Concern ${shortId(data.id)}`;
+  const fromLabel = data.from_instance_name
+    ? `${data.from_instance_name} (${shortId(data.from_instance)})`
+    : data.from_instance;
+  const toLabel = data.assigned_instance_name
+    ? `${data.assigned_instance_name} (${shortId(data.assigned_instance)})`
+    : (data.assigned_instance || "—");
+  const personaName = (data.metadata && data.metadata.persona_name) || "—";
   const fields = [
     { label: "ID", value: data.id },
     { label: "Status", value: data.status },
     { label: "Task", value: data.task },
-    { label: "From Instance", value: data.from_instance },
-    { label: "Assigned Instance", value: data.assigned_instance || "—" },
+    { label: "From", value: fromLabel },
+    { label: "Assigned To", value: toLabel },
+    { label: "Persona", value: personaName },
     { label: "Created", value: data.created_at },
     { label: "Updated", value: data.updated_at },
     { label: "Expertise", value: (data.expertise_tags || []).join(", ") || "—" },

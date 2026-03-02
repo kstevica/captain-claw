@@ -288,6 +288,13 @@ class ConcernManager:
             if c.is_active and c.assigned_instance == instance_id
         ]
 
+    def get_concerns_from_instance(self, instance_id: str) -> list[Concern]:
+        """Get all active concerns originated by an instance (as CC-A)."""
+        return [
+            c for c in self._concerns.values()
+            if c.is_active and c.from_instance == instance_id
+        ]
+
     async def get_stats(self) -> dict[str, Any]:
         """Stats for the dashboard."""
         active = self.get_active_concerns()
@@ -332,7 +339,11 @@ class ConcernManager:
                     concern.timeout_at.replace("Z", "+00:00")
                 )
                 if timeout_dt <= now:
-                    await self.timeout_concern(concern.id)
+                    if concern.status == "responded":
+                        # Successfully answered — close gracefully.
+                        await self.close_concern(concern.id, reason="idle_after_response")
+                    else:
+                        await self.timeout_concern(concern.id)
                     timed_out.append(concern.id)
             except (ValueError, TypeError):
                 continue
