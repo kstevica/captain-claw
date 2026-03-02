@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BotPort Dashboard</title>
+  <link rel="stylesheet" href="/dashboard.css">
+</head>
+<body>
+  <header>
+    <h1>BotPort</h1>
+    <div id="header-stats">
+      <span id="stat-instances" class="stat-badge" title="Connected instances">0 instances</span>
+      <span id="stat-active" class="stat-badge" title="Active concerns">0 active</span>
+      <span id="stat-success" class="stat-badge" title="Success rate">--% success</span>
+      <span id="stat-version" class="stat-badge dim">--</span>
+    </div>
+  </header>
+
+  <main>
+    <section id="instances-panel" class="panel">
+      <h2>Connected Instances</h2>
+      <div id="instances-list" class="card-list">
+        <p class="empty-state">No instances connected</p>
+      </div>
+    </section>
+
+    <section id="concerns-panel" class="panel">
+      <h2>Active Concerns</h2>
+      <div id="concerns-list" class="card-list">
+        <p class="empty-state">No active concerns</p>
+      </div>
+    </section>
+
+    <section id="history-panel" class="panel">
+      <h2>Recent History</h2>
+      <div id="history-list" class="card-list">
+        <p class="empty-state">No concerns yet</p>
+      </div>
+    </section>
+  </main>
+
+  <div id="concern-modal" class="modal hidden">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content">
+      <button class="modal-close">&times;</button>
+      <h3 id="modal-title">Concern Detail</h3>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+
+  <script src="/dashboard.js"></script>
+</body>
+</html>

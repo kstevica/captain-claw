@@ -1,0 +1,45 @@
+# BotPort Configuration
+# Copy to ~/.botport/config.yaml or ./config.yaml
+
+server:
+  host: "0.0.0.0"
+  port: 9800
+  dashboard_enabled: true
+
+routing:
+  # Strategy: "tag_match" (default) or "llm_assisted"
+  # tag_match: routes based on expertise tag overlap between concern and instance personas
+  # llm_assisted: uses an LLM to classify the concern and pick the best instance
+  strategy: "tag_match"
+  fallback_to_least_loaded: true
+
+concerns:
+  idle_timeout_seconds: 300    # 5 minutes - timeout concerns with no activity
+  max_follow_ups: 10           # max follow-up exchanges per concern
+  max_concurrent_per_instance: 5
+
+auth:
+  enabled: false
+  keys:
+    # Each key entry allows a CC instance to connect.
+    # The "instance" field is an optional human-readable name.
+    #
+    # - key: "my-instance-key"
+    #   secret: "my-instance-secret"
+    #   instance: "claw-alpha"
+    # - key: "another-key"
+    #   secret: "another-secret"
+    #   instance: "claw-beta"
+
+logging:
+  level: "INFO"                # DEBUG, INFO, WARNING, ERROR
+  concern_history: true        # log concern exchanges to store
+  retention_days: 30           # auto-cleanup concerns older than this
+
+# LLM configuration (only needed when routing.strategy = "llm_assisted")
+llm:
+  provider: "ollama"           # "ollama" or "litellm"
+  model: "llama3.2"
+  base_url: "http://localhost:11434"
+  api_key: ""                  # required for litellm / hosted providers
+  temperature: 0.1

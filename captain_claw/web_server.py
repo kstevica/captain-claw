@@ -132,6 +132,8 @@ class WebServer:
         # Google OAuth state
         self._oauth_manager: GoogleOAuthManager | None = None
         self._pending_oauth: dict[str, dict[str, Any]] = {}  # state → {verifier, ts}
+        # BotPort client
+        self._botport_client: Any = None
 
     async def _init_agent(self) -> None:
         """Initialize the agent with web callbacks."""
@@ -1021,6 +1023,30 @@ async def _run_server(config: Config) -> None:
     from captain_claw.web.telegram import start_telegram, stop_telegram
     await start_telegram(server)
 
+    # Start BotPort client if configured.
+    if config.botport.enabled and config.botport.url.strip():
+        try:
+            from captain_claw.botport_client import BotPortClient
+            bp_client = BotPortClient(
+                config=config.botport,
+                provider=server.agent.provider if server.agent else None,
+                status_callback=server._status_callback,
+                tool_output_callback=server._tool_output_callback,
+                thinking_callback=server._thinking_callback,
+            )
+            await bp_client.start()
+            server._botport_client = bp_client
+            # Set client on agent's botport tool if registered.
+            if server.agent:
+                server.agent._botport_client = bp_client
+                bt = server.agent.tools.get("botport")
+                if bt is not None:
+                    bt.set_client(bp_client)
+            print(f"  BotPort client connected to {config.botport.url}")
+        except Exception as exc:
+            log.warning("BotPort client failed to start", error=str(exc))
+            print(f"  BotPort client failed: {exc}")
+
     app = server.create_app()
     runner = web.AppRunner(app)
     await runner.setup()
@@ -1087,6 +1113,11 @@ async def _run_server(config: Config) -> None:
         await stop_telegram(server)
     except Exception:
         pass
+    if server._botport_client:
+        try:
+            await server._botport_client.stop()
+        except Exception:
+            pass
     for ws in list(server.clients):
         try:
             await ws.close()

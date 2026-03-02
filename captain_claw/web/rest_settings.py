@@ -43,6 +43,8 @@ _SECRET_FIELDS: frozenset[str] = frozenset({
     "google_oauth.client_secret",
     "deep_memory.api_key",
     "memory.embeddings.litellm_api_key",
+    "botport.key",
+    "botport.secret",
 })
 
 # Fields shown as readonly (require manual edit + restart).
@@ -724,6 +726,55 @@ def _build_schema() -> list[dict[str, Any]]:
                 },
             ],
         },
+        # ── 13. BotPort ─────────────────────────────────────────
+        {
+            "id": "botport",
+            "title": "BotPort",
+            "icon": "\U0001F500",
+            "sections": [
+                {
+                    "id": "botport_connection",
+                    "title": "Connection",
+                    "description": "Connect to a BotPort hub for agent-to-agent task routing.",
+                    "fields": [
+                        _field("botport.enabled", "Enable BotPort", type="toggle"),
+                        _field("botport.url", "BotPort URL", type="text",
+                               placeholder="ws://localhost:9800/ws"),
+                        _field("botport.instance_name", "Instance name", type="text",
+                               hint="Human-readable name for this instance on the BotPort network."),
+                    ],
+                },
+                {
+                    "id": "botport_auth",
+                    "title": "Authentication",
+                    "description": "Credentials for BotPort hub (leave empty if auth is disabled on the hub).",
+                    "fields": [
+                        _field("botport.key", "Key"),
+                        _field("botport.secret", "Secret"),
+                    ],
+                },
+                {
+                    "id": "botport_advanced",
+                    "title": "Advanced",
+                    "description": "Capacity and timing settings.",
+                    "fields": [
+                        _field("botport.max_concurrent", "Max concurrent concerns", type="number",
+                               min=1, max=50,
+                               hint="How many dispatched concerns this instance handles simultaneously."),
+                        _field("botport.reconnect_delay_seconds", "Reconnect delay (s)", type="number",
+                               min=1, max=300),
+                        _field("botport.heartbeat_interval_seconds", "Heartbeat interval (s)", type="number",
+                               min=5, max=300),
+                        _field("botport.advertise_personas", "Advertise personas", type="toggle",
+                               hint="Share this instance's personas with BotPort for routing."),
+                        _field("botport.advertise_tools", "Advertise tools", type="toggle",
+                               hint="Share available tools list with BotPort."),
+                        _field("botport.advertise_models", "Advertise models", type="toggle",
+                               hint="Share available models list with BotPort."),
+                    ],
+                },
+            ],
+        },
     ]
 
 
@@ -827,10 +878,12 @@ async def put_settings(server: WebServer, request: web.Request) -> web.Response:
             continue
         _set_nested(data, dotted_key, value)
 
-    # Personality tool is always available — re-inject if the user removed it.
+    # Always-on tools — re-inject if the user removed them.
     tools_enabled = _get_nested(data, "tools.enabled")
-    if isinstance(tools_enabled, list) and "personality" not in tools_enabled:
-        tools_enabled.append("personality")
+    if isinstance(tools_enabled, list):
+        for always_on in ("personality", "botport"):
+            if always_on not in tools_enabled:
+                tools_enabled.append(always_on)
 
     # ── Validate against merged result (local base + home overlay) ──
     local_path = Path.cwd() / LOCAL_CONFIG_FILENAME

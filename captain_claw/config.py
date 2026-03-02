@@ -313,7 +313,7 @@ class ToolsConfig(BaseModel):
     plugin_dirs: list[str] = ["skills/tools"]
 
     # Personality tool is always available — re-inject if removed by user.
-    _ALWAYS_ENABLED: frozenset[str] = frozenset({"personality"})
+    _ALWAYS_ENABLED: frozenset[str] = frozenset({"personality", "botport"})
 
     @model_validator(mode="after")
     def _ensure_always_enabled(self) -> "ToolsConfig":
@@ -568,6 +568,22 @@ class DatastoreConfig(BaseModel):
     max_export_rows: int = 50_000
 
 
+class BotPortClientConfig(BaseModel):
+    """BotPort agent-to-agent routing hub connection settings."""
+
+    enabled: bool = False
+    url: str = ""  # ws://botport-host:23180/ws
+    instance_name: str = "default"
+    key: str = ""
+    secret: str = ""
+    advertise_personas: bool = True
+    advertise_tools: bool = True
+    advertise_models: bool = True
+    max_concurrent: int = 5
+    reconnect_delay_seconds: float = 5.0
+    heartbeat_interval_seconds: float = 30.0
+
+
 class OrchestratorConfig(BaseModel):
     """Parallel session orchestration settings."""
 
@@ -636,6 +652,7 @@ class Config(BaseSettings):
     scripts_memory: ScriptsMemoryConfig = Field(default_factory=ScriptsMemoryConfig)
     apis_memory: ApisMemoryConfig = Field(default_factory=ApisMemoryConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
+    botport: BotPortClientConfig = Field(default_factory=BotPortClientConfig)
     scale: ScaleConfig = Field(default_factory=ScaleConfig)
     deep_memory: DeepMemoryConfig = Field(default_factory=DeepMemoryConfig)
     datastore: DatastoreConfig = Field(default_factory=DatastoreConfig)

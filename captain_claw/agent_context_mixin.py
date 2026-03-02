@@ -1073,6 +1073,13 @@ class AgentContextMixin:
                 self.tools.register(pt)
             elif tool_name == "termux":
                 self.tools.register(TermuxTool())
+            elif tool_name == "botport":
+                from captain_claw.tools.botport import BotPortTool
+                bt = BotPortTool()
+                bp_client = getattr(self, "_botport_client", None)
+                if bp_client is not None:
+                    bt.set_client(bp_client)
+                self.tools.register(bt)
         self._register_plugin_tools()
 
     def reload_tools(self) -> None:
