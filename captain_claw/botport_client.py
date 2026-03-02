@@ -401,12 +401,35 @@ class BotPortClient:
             return False
 
     async def list_agents(self) -> list[dict[str, Any]]:
-        """Return the capabilities we know about from our last registration.
+        """Query BotPort's registry for all connected agents and their capabilities."""
+        # Derive HTTP URL from WebSocket URL.
+        api_url = self._registry_api_url()
+        if api_url and self._session and not self._session.closed:
+            try:
+                async with self._session.get(api_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if isinstance(data, list) and data:
+                            return data
+                        log.debug("Registry API returned empty, falling back to local")
+                    else:
+                        log.warning("Registry API returned %d", resp.status)
+            except Exception as exc:
+                log.debug("Registry API call failed: %s, using local capabilities", exc)
 
-        Note: In v1 this returns our own capabilities. Full fleet visibility
-        would require a BotPort API endpoint (future enhancement).
-        """
+        # Fallback: return our own capabilities.
         return [self._build_capabilities()]
+
+    def _registry_api_url(self) -> str:
+        """Derive the BotPort HTTP registry URL from the WebSocket URL."""
+        url = self._config.url.strip()
+        if not url:
+            return ""
+        # ws://host:port/ws  ->  http://host:port/api/registry
+        http_url = url.replace("ws://", "http://").replace("wss://", "https://")
+        if http_url.endswith("/ws"):
+            http_url = http_url[:-3]
+        return http_url.rstrip("/") + "/api/registry"
 
     # ── CC-A: Receiving results ──────────────────────────────────
 

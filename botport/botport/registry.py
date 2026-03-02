@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from botport.connection_manager import ConnectionManager
 from botport.models import InstanceInfo
@@ -121,13 +122,18 @@ class Registry:
         """Return a summary of all instances for the BotPort tool's list_agents action."""
         summaries: list[dict] = []
         for instance in self._connections.list_connected():
+            personas_info = []
+            for p in instance.personas:
+                info: dict[str, Any] = {"name": p.name, "expertise": p.expertise_tags}
+                if p.description:
+                    info["description"] = p.description
+                if p.background:
+                    info["background"] = p.background
+                personas_info.append(info)
             summaries.append({
                 "name": instance.name,
                 "status": instance.status,
-                "personas": [
-                    {"name": p.name, "expertise": p.expertise_tags}
-                    for p in instance.personas
-                ],
+                "personas": personas_info,
                 "tools_count": len(instance.tools),
                 "models": instance.models,
                 "active_concerns": instance.active_concerns,
