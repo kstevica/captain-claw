@@ -617,8 +617,11 @@
             userProfiles.forEach(p => {
                 const isActive = activePersonalityId === p.id;
                 const desc = p.description ? p.description.slice(0, 60) : '';
+                const sourceTag = p.is_telegram
+                    ? '<span class="persona-source-tag">Telegram</span>'
+                    : '';
                 html += `<div class="model-option${isActive ? ' active' : ''}" data-pid="${escapeHtml(p.id)}" title="${escapeHtml(p.description || p.name)}">
-                    <span class="model-option-name">${escapeHtml(p.name)}</span>
+                    <span class="model-option-name"><span class="persona-name-wrap"><span class="persona-name-text">${escapeHtml(p.name)}</span>${sourceTag}</span></span>
                     ${desc ? `<span class="model-option-desc">${escapeHtml(desc)}</span>` : ''}
                     ${isActive ? '<span class="model-option-check">&#x2713;</span>' : ''}
                 </div>`;

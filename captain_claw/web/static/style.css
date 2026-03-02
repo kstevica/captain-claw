@@ -246,6 +246,36 @@ html, body {
     font-family: var(--font);
 }
 
+.persona-name-wrap {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.persona-name-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.persona-source-tag {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    padding: 1px 6px;
+    border-radius: 999px;
+    border: 1px solid rgba(42, 171, 238, 0.55);
+    background: rgba(42, 171, 238, 0.14);
+    color: #62c6ff;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    line-height: 1.4;
+    text-transform: uppercase;
+}
+
 .persona-dropdown .pd-section-label {
     padding: 8px 14px 4px;
     font-size: 10px;

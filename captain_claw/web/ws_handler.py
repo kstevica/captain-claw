@@ -31,8 +31,11 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
     # These describe who the agent is talking to (not the agent's identity).
     from captain_claw.personality import list_user_personalities
     user_personalities = list_user_personalities()
+    approved = getattr(server, "_approved_telegram_users", {})
     for up in user_personalities:
-        up["id"] = up.get("user_id", "")
+        uid = str(up.get("user_id", "")).strip()
+        up["id"] = uid
+        up["is_telegram"] = uid in approved
     personalities = user_personalities
 
     await server._send(ws, {
