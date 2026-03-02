@@ -21,7 +21,10 @@ from captain_claw.telegram_bridge import TelegramBridge, TelegramMessage
 
 log = get_logger(__name__)
 
-STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
+STATIC_DIR = Path(
+    os.environ.get("CAPTAIN_CLAW_STATIC_DIR", "")
+    or str(Path(__file__).resolve().parent / "web" / "static")
+)
 
 # Available commands for the help/suggestion system
 COMMANDS: list[dict[str, str]] = [
@@ -1124,3 +1127,7 @@ def main() -> None:
     except Exception as e:
         print(f"Fatal error: {e}")
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

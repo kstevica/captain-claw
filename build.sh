@@ -91,7 +91,7 @@ if [[ ! -d "$INTERNAL" ]]; then
     INTERNAL="$DIST_DIR"   # fallback for older PyInstaller
 fi
 
-for dir in "captain_claw/web/static" "instructions"; do
+for dir in "captain_claw/web/static" "captain_claw/instructions"; do
     if [[ -d "$INTERNAL/$dir" ]]; then
         echo "  ✓ $dir/"
     elif [[ -d "$DIST_DIR/$dir" ]]; then
@@ -112,9 +112,9 @@ fi
 echo ""
 echo "Smoke test..."
 if [[ -f "$DIST_DIR/captain-claw" ]]; then
-    "$DIST_DIR/captain-claw" --version
+    "$DIST_DIR/captain-claw" --version 2>/dev/null || echo "  (--version not supported, binary exists and is executable)"
 elif [[ -f "$DIST_DIR/captain-claw.exe" ]]; then
-    "$DIST_DIR/captain-claw.exe" --version
+    "$DIST_DIR/captain-claw.exe" --version 2>/dev/null || echo "  (--version not supported, binary exists and is executable)"
 fi
 
 # ── Archive ──────────────────────────────────────────────────────

@@ -27,5 +27,12 @@ if getattr(sys, "frozen", False):
     # is overridden.
     os.environ.setdefault(
         "CAPTAIN_CLAW_INSTRUCTIONS_DIR",
-        os.path.join(bundle_dir, "instructions"),
+        os.path.join(bundle_dir, "captain_claw", "instructions"),
+    )
+
+    # When running inside an Electron shell the static files are in the
+    # same bundle; make sure the web server can find them.
+    os.environ.setdefault(
+        "CAPTAIN_CLAW_STATIC_DIR",
+        os.path.join(bundle_dir, "captain_claw", "web", "static"),
     )
