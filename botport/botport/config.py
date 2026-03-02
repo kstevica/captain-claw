@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+log = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = Path("~/.botport/config.yaml").expanduser()
 LOCAL_CONFIG_FILENAME = "config.yaml"
@@ -50,6 +53,14 @@ class AuthConfig(BaseModel):
 
     enabled: bool = False
     keys: list[AuthKeyEntry] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_null_keys(cls, data: Any) -> Any:
+        """YAML parses 'keys:' with only comments as None — coerce to []."""
+        if isinstance(data, dict) and data.get("keys") is None:
+            data["keys"] = []
+        return data
 
 
 class LoggingConfig(BaseModel):
@@ -123,17 +134,24 @@ class BotPortConfig(BaseSettings):
         local = Path(LOCAL_CONFIG_FILENAME)
         if local.is_file():
             try:
-                return cls.from_yaml(local)
-            except Exception:
-                pass
+                cfg = cls.from_yaml(local)
+                log.info("Config loaded from %s", local.resolve())
+                return cfg
+            except Exception as exc:
+                log.warning("Failed to parse local config %s: %s", local, exc)
 
         # Try home config.
         if DEFAULT_CONFIG_PATH.is_file():
             try:
-                return cls.from_yaml(DEFAULT_CONFIG_PATH)
-            except Exception:
-                pass
+                cfg = cls.from_yaml(DEFAULT_CONFIG_PATH)
+                log.info("Config loaded from %s", DEFAULT_CONFIG_PATH)
+                return cfg
+            except Exception as exc:
+                log.warning("Failed to parse home config %s: %s", DEFAULT_CONFIG_PATH, exc)
+        else:
+            log.debug("No config found at %s", DEFAULT_CONFIG_PATH)
 
+        log.info("Using default configuration")
         return cls()
 
     def save(self, path: Path | str | None = None) -> None:
