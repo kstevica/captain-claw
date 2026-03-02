@@ -18,12 +18,13 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Per-session model selection | Keep one session on Claude, another on GPT, another on Ollama |
 | Persistent multi-session workflows | Resume any session exactly where you left off |
 | Built-in safety guards | Input, output, and script/tool checks before anything runs |
-| 27 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, image gen/OCR/vision, Google Drive/Calendar/Gmail, todo, contacts, scripts, APIs, datastore, deep memory, personality, Termux (Android) |
+| 28 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, image gen/OCR/vision, Google Drive/Calendar/Gmail, todo, contacts, scripts, APIs, datastore, deep memory, personality, BotPort, Termux (Android) |
 | Personality system | Dual-profile system — global agent identity plus per-user profiles for tailored responses |
 | Skills system | OpenClaw-compatible skills with auto-discovery and GitHub install |
 | Orchestrator / DAG mode | Decompose complex tasks into parallel multi-session execution |
 | Memory / RAG | Hybrid vector + text retrieval across workspace and sessions |
 | Web UI | Chat, monitor pane, instruction editor, command palette, persona selector, datastore browser, deep memory dashboard |
+| BotPort (agent-to-agent) | Route tasks to specialist agents across a network of Captain Claw instances |
 | Remote integrations | Telegram (per-user sessions), Slack, Discord with secure pairing |
 | Cross-session to-do memory | Persistent task list shared across sessions with auto-capture |
 | Cross-session script memory | Persistent script/file tracking with auto-capture from write tool |
@@ -118,7 +119,7 @@ Sessions are first-class. Create named sessions for separate projects, switch in
 
 ### Tools
 
-Captain Claw ships with 27 built-in tools. The agent picks the right tool for each task automatically.
+Captain Claw ships with 28 built-in tools. The agent picks the right tool for each task automatically.
 
 | Tool | What it does |
 |---|---|
@@ -146,6 +147,7 @@ Captain Claw ships with 27 built-in tools. The agent picks the right tool for ea
 | `datastore` | Manage relational data tables with CRUD, import/export, raw SQL, and protection rules |
 | `personality` | Read or update the agent personality and per-user profiles |
 | `typesense` | Index, search, and manage documents in deep memory (Typesense) |
+| `botport` | Consult specialist agents through the BotPort agent-to-agent network |
 | `termux` | Interact with Android device via Termux API (camera, battery, GPS, torch) |
 
 See [USAGE.md](USAGE.md#tools-reference) for full parameters and configuration.
@@ -188,7 +190,7 @@ tools:
             "image_gen", "image_ocr", "image_vision",
             "pocket_tts", "send_mail", "google_drive", "google_calendar",
             "google_mail", "todo", "contacts", "scripts", "apis",
-            "datastore", "personality", "termux"]
+            "datastore", "personality", "botport", "termux"]
 
 web:
   enabled: true
@@ -220,6 +222,8 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 - **[Cron scheduling](USAGE.md#cron-commands)** — Pseudo-cron within the runtime. Schedule prompts, scripts, or tools at intervals, daily, or weekly. Guards remain active for every cron execution.
 
 - **[Execution queue](USAGE.md#execution-queue-1)** — Five queue modes (steer, followup, collect, interrupt, queue) control how follow-up messages are handled during agent execution.
+
+- **[BotPort (agent-to-agent)](USAGE.md#botport)** — Connect multiple Captain Claw instances through the BotPort routing hub. Agents can delegate tasks to specialist instances based on expertise tags, persona matching, or LLM-powered routing. Supports bidirectional follow-ups, context negotiation, and concern lifecycle management. Install separately with `pip install botport` and connect via WebSocket (e.g. `wss://botport.kstevica.com/ws`).
 
 - **[Remote integrations](USAGE.md#remote-integrations)** — Connect Telegram, Slack, or Discord bots. Telegram users get isolated per-user sessions with concurrent agent execution. Unknown users get a pairing token; the operator approves locally with `/approve user`.
 
@@ -263,7 +267,7 @@ ruff check captain_claw/
 |---|---|
 | `captain_claw/agent.py` | Main orchestration logic |
 | `captain_claw/llm/` | Provider abstraction (OpenAI, Anthropic, Gemini, Ollama) |
-| `captain_claw/tools/` | Tool registry and 27 tool implementations |
+| `captain_claw/tools/` | Tool registry and 28 tool implementations |
 | `captain_claw/personality.py` | Agent and per-user personality profiles |
 | `captain_claw/session/` | SQLite-backed session persistence |
 | `captain_claw/skills.py` | Skill discovery, loading, and invocation |
@@ -271,6 +275,7 @@ ruff check captain_claw/
 | `captain_claw/semantic_memory.py` | Hybrid vector + text retrieval (RAG) |
 | `captain_claw/datastore.py` | SQLite-backed relational datastore |
 | `captain_claw/deep_memory.py` | Typesense-backed long-term archive |
+| `captain_claw/botport_client.py` | BotPort WebSocket client |
 | `captain_claw/google_oauth_manager.py` | Google OAuth token management |
 | `captain_claw/cli.py` | Terminal UI |
 | `captain_claw/web/` | Web server (WebSocket + REST + static) |

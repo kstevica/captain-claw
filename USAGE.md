@@ -47,6 +47,7 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [web](#web)
   - [google_oauth](#google_oauth)
   - [orchestrator](#orchestrator)
+  - [botport_client](#botport_client)
   - [scale](#scale)
   - [datastore](#datastore-1)
   - [deep_memory](#deep_memory)
@@ -67,6 +68,7 @@ For a quick overview and installation guide, see [README.md](README.md).
 - [Context Compaction](#context-compaction)
 - [Execution Queue](#execution-queue-1)
 - [Orchestrator / DAG Mode](#orchestrator--dag-mode)
+- [BotPort (Agent-to-Agent)](#botport)
 - [Web UI](#web-ui)
 - [Remote Integrations](#remote-integrations)
   - [Telegram: Per-User Sessions](#telegram-per-user-sessions)
@@ -690,6 +692,28 @@ Index, search, and delete documents in deep memory (Typesense). All operations u
 
 Requires a running Typesense instance. Set the API key in `config.yaml` or via `TYPESENSE_API_KEY` env var. The tool is also used as the sink for the scale loop `no_file` output strategy when `final_action: api_call`. Indexing is routed through `DeepMemoryIndex` for proper chunking, timestamping, and embedding.
 
+### botport
+
+Consult specialist agents through the BotPort agent-to-agent network. Use this tool to delegate tasks to agents with specific expertise.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `consult`, `follow_up`, `close`, `status`, `list_agents` |
+| `task` | string | for consult | The task or question for the specialist agent |
+| `expertise` | list[string] | no | Expertise tags to match the right specialist (e.g. `["legal", "contracts"]`) |
+| `context` | string | no | Relevant context or background information for the task |
+| `concern_id` | string | for follow_up/close/status | Concern ID from a previous consult |
+| `message` | string | for follow_up | Follow-up message for an active concern |
+
+**Actions:**
+- **`consult`** — Send a new task to the BotPort network. BotPort routes it to the best-matched agent based on expertise tags, persona matching, or LLM-powered routing.
+- **`follow_up`** — Continue a conversation on an existing concern (requires `concern_id` from a previous consult).
+- **`close`** — Close an active concern and clean up the remote agent.
+- **`status`** — Check BotPort connection status or concern status.
+- **`list_agents`** — List all connected agents and their capabilities (personas, tools, models).
+
+Requires `botport_client.enabled: true` and a valid BotPort server URL in config. See [BotPort](#botport) for setup details.
+
 ### termux
 
 Interact with an Android device via Termux API. Requires the [Termux:API](https://wiki.termux.com/wiki/Termux:API) app and `termux-api` package (`pkg install termux-api`). Supports camera photo capture, battery status, GPS/network location, and flashlight (torch) control.
@@ -920,6 +944,7 @@ tools:
     - apis
     - datastore
     - personality
+    - botport
     - termux
   require_confirmation:           # tools that require user approval
     - shell
@@ -1188,6 +1213,23 @@ orchestrator:
   idle_evict_seconds: 300.0       # evict idle agents after 5 min
   worker_timeout_seconds: 300.0   # per-task timeout
   worker_max_retries: 2           # retries before failure
+```
+
+### botport_client
+
+```yaml
+botport_client:
+  enabled: false                    # enable BotPort connection
+  url: ""                           # WebSocket URL (e.g. wss://botport.kstevica.com/ws)
+  instance_name: "default"          # name to register with on the hub
+  key: ""                           # authentication key
+  secret: ""                        # authentication secret
+  advertise_personas: true          # advertise available personas to the hub
+  advertise_tools: true             # advertise available tools
+  advertise_models: true            # advertise available models
+  max_concurrent: 5                 # max concurrent concerns to handle
+  reconnect_delay_seconds: 5.0      # reconnection backoff
+  heartbeat_interval_seconds: 30.0  # heartbeat interval
 ```
 
 ### scale
@@ -2115,6 +2157,166 @@ orchestrator:
 
 ---
 
+## BotPort
+
+BotPort is an agent-to-agent task routing hub that connects multiple Captain Claw instances via persistent WebSocket connections. Agents can delegate tasks to specialist instances based on expertise, and receive structured results — enabling multi-agent collaboration across machines, networks, or cloud deployments.
+
+### Architecture
+
+```
+┌──────────┐     WebSocket     ┌──────────┐     WebSocket     ┌──────────┐
+│  CC-A    │◄─────────────────►│  BotPort │◄─────────────────►│  CC-B    │
+│ (sender) │   concern/result  │  (hub)   │  dispatch/result  │(handler) │
+└──────────┘                   └──────────┘                   └──────────┘
+```
+
+- **CC-A (originator):** Sends a concern (task + context + expertise tags) to BotPort.
+- **BotPort (hub):** Routes the concern to the best-matched instance using tag matching, LLM-powered routing, or least-loaded fallback.
+- **CC-B (handler):** Receives the dispatch, spawns an ephemeral agent, processes the task, and returns the result.
+
+### Setup
+
+**1. Install and run BotPort:**
+
+```bash
+pip install botport
+botport
+```
+
+BotPort starts on port `23180` by default. Configure via `~/.botport/config.yaml` or `./config.yaml`.
+
+**2. Connect a Captain Claw instance:**
+
+Add to your Captain Claw `config.yaml`:
+
+```yaml
+botport_client:
+  enabled: true
+  url: "wss://botport.kstevica.com/ws"
+  instance_name: "my-agent"
+  key: "my-key"                     # if auth is enabled on the hub
+  secret: "my-secret"
+```
+
+Or for a local BotPort server:
+
+```yaml
+botport_client:
+  enabled: true
+  url: "ws://localhost:23180/ws"
+  instance_name: "my-agent"
+```
+
+**3. Connect additional instances** with different `instance_name` values. Each instance advertises its personas, tools, and models to the hub.
+
+### Concern Lifecycle
+
+A "concern" is a task routed through BotPort:
+
+1. **CC-A** sends a concern with task description, context, and expertise tags
+2. **BotPort** acknowledges and routes to the best-matched CC-B instance
+3. **CC-B** spawns an ephemeral agent, processes the task, returns the result
+4. **BotPort** relays the result back to CC-A
+5. Either side can send **follow-ups** for multi-turn conversations
+6. The concern is **closed** when complete or after idle timeout
+
+**Concern states:** `pending` → `assigned` → `in_progress` → `responded` → `closed`
+
+### Routing Strategy
+
+BotPort uses a three-tier routing chain:
+
+| Tier | Strategy | How it works |
+|---|---|---|
+| 1 | **Tag matching** | Matches concern expertise tags against instance persona expertise (≥50% match threshold) |
+| 2 | **LLM routing** | If enabled, an LLM picks the best agent + persona combo from available instances |
+| 3 | **Least-loaded** | Falls back to the instance with the lowest active concern count |
+
+### Using the BotPort Tool
+
+Once connected, the agent can delegate tasks through the `botport` tool:
+
+```text
+> Ask a legal specialist to review this contract clause for compliance issues.
+```
+
+The agent uses the `botport` tool with `action: consult`, `expertise: ["legal", "contracts"]`, and routes the task to a connected instance with matching expertise.
+
+Follow-ups maintain conversation context:
+
+```text
+> Follow up on that legal review — what about the liability section?
+```
+
+### BotPort Server Configuration
+
+BotPort server configuration (`~/.botport/config.yaml`):
+
+```yaml
+server:
+  host: "0.0.0.0"
+  port: 23180
+  dashboard_enabled: true
+
+routing:
+  strategy: "auto"                    # tag_match -> llm -> least-loaded
+  fallback: "reject"                  # reject or queue_until_available
+
+concerns:
+  idle_timeout_seconds: 300           # timeout concerns after 5 min idle
+  max_follow_ups: 10                  # max follow-up exchanges per concern
+  max_concurrent_per_instance: 5
+
+auth:
+  enabled: false
+  keys:
+    - key: "instance-key"
+      secret: "instance-secret"
+      instance: "claw-alpha"
+
+logging:
+  level: "INFO"
+  concern_history: true               # persist concern exchanges to SQLite
+  retention_days: 30
+
+llm:
+  enabled: false                      # enable LLM-powered routing
+  model: "ollama/llama3.2"            # litellm provider/model format
+  temperature: 0.1
+  timeout: 30
+```
+
+### BotPort Dashboard
+
+BotPort includes a web dashboard (enabled by default) that shows:
+- Connected instances with their capabilities
+- Active and historical concerns
+- Routing decisions and concern lifecycle events
+
+Access at `https://botport.kstevica.com` (or `http://localhost:23180` for local).
+
+### Capability Advertisement
+
+Each connected Captain Claw instance advertises:
+- **Personas** — agent personality and user profiles with expertise tags
+- **Tools** — list of enabled tools
+- **Models** — available LLM models
+- **Capacity** — max concurrent concerns
+
+Control what is advertised via `botport_client.advertise_personas`, `advertise_tools`, and `advertise_models`.
+
+### Environment Variables
+
+| Variable | Description |
+|---|---|
+| `CLAW_BOTPORT_CLIENT__ENABLED` | Enable BotPort connection |
+| `CLAW_BOTPORT_CLIENT__URL` | BotPort WebSocket URL |
+| `CLAW_BOTPORT_CLIENT__INSTANCE_NAME` | Instance name |
+| `CLAW_BOTPORT_CLIENT__KEY` | Auth key |
+| `CLAW_BOTPORT_CLIENT__SECRET` | Auth secret |
+
+---
+
 ## Web UI
 
 Captain Claw includes a browser-based interface with the same capabilities as the terminal.
@@ -2463,6 +2665,9 @@ workspace/saved/
 | `MAILGUN_DOMAIN` | Mailgun domain |
 | `SENDGRID_API_KEY` | SendGrid API key |
 | `TYPESENSE_API_KEY` | Typesense API key (used by both tool and deep memory) |
+| `CLAW_BOTPORT_CLIENT__URL` | BotPort WebSocket URL (e.g. `wss://botport.kstevica.com/ws`) |
+| `CLAW_BOTPORT_CLIENT__KEY` | BotPort authentication key |
+| `CLAW_BOTPORT_CLIENT__SECRET` | BotPort authentication secret |
 | `MAIL_FROM_ADDRESS` | Email sender address |
 | `MAIL_FROM_NAME` | Email sender name |
 | `SMTP_HOST` | SMTP server host |
