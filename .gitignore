@@ -47,6 +47,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Docker
+docker-data/
+
 # Captain Claw specific
 .captain-claw/
 sessions.db
