@@ -2,11 +2,54 @@
 
 from __future__ import annotations
 
+import html
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import httpx
+
+
+def _md_to_telegram_html(text: str) -> str:
+    """Convert common Markdown formatting to Telegram-compatible HTML.
+
+    Supports: **bold**, *italic*, `code`, ```code blocks```, [text](url),
+    ~~strikethrough~~.  Unsupported or nested patterns are left as-is.
+    HTML entities in the source text are escaped first so the output is safe
+    to send with ``parse_mode="HTML"``.
+    """
+    # Escape HTML entities FIRST so user content doesn't break tags.
+    text = html.escape(text, quote=False)
+
+    # Fenced code blocks: ```lang\n...\n``` → <pre>...</pre>
+    text = re.sub(
+        r"```(?:\w*)\n(.*?)```",
+        lambda m: f"<pre>{m.group(1).rstrip()}</pre>",
+        text,
+        flags=re.DOTALL,
+    )
+    # Inline code: `...` → <code>...</code>
+    text = re.sub(r"`([^`]+?)`", r"<code>\1</code>", text)
+
+    # Bold: **text** → <b>text</b>
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text, flags=re.DOTALL)
+    # Italic: *text* → <i>text</i> (but not inside <b> tags from bold)
+    text = re.sub(r"(?<!\w)\*([^*]+?)\*(?!\w)", r"<i>\1</i>", text)
+    # Strikethrough: ~~text~~ → <s>text</s>
+    text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
+
+    # Links: [text](url) → <a href="url">text</a>
+    text = re.sub(
+        r"\[([^\]]+?)\]\(([^)]+?)\)",
+        r'<a href="\2">\1</a>',
+        text,
+    )
+
+    # Strip heading markers: ### Heading → <b>Heading</b>
+    text = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
+
+    return text
 
 
 @dataclass
@@ -110,7 +153,12 @@ class TelegramBridge:
         *,
         reply_to_message_id: int | None = None,
     ) -> None:
-        """Send text to Telegram, splitting at 4096 chars when needed."""
+        """Send text to Telegram, splitting at 4096 chars when needed.
+
+        Markdown in *text* is converted to Telegram HTML so formatting
+        renders natively in the Telegram app.  If the API rejects the
+        HTML (malformed tags etc.), the message is re-sent as plain text.
+        """
         raw = str(text or "").strip()
         if not raw:
             return
@@ -127,14 +175,21 @@ class TelegramBridge:
             raw = raw[split_at:].lstrip()
 
         for idx, chunk in enumerate(chunks):
+            html_chunk = _md_to_telegram_html(chunk)
             payload: dict[str, Any] = {
                 "chat_id": int(chat_id),
-                "text": chunk,
+                "text": html_chunk,
+                "parse_mode": "HTML",
                 "disable_web_page_preview": True,
             }
             if reply_to_message_id and idx == 0:
                 payload["reply_to_message_id"] = int(reply_to_message_id)
             response = await self._client.post(self._url("sendMessage"), json=payload)
+            # Fallback: if Telegram rejects the HTML, resend as plain text.
+            if response.status_code == 400:
+                payload["text"] = chunk
+                del payload["parse_mode"]
+                response = await self._client.post(self._url("sendMessage"), json=payload)
             response.raise_for_status()
 
     async def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
