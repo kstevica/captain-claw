@@ -9,6 +9,7 @@ For a quick overview and installation guide, see [README.md](README.md).
 ## Table of Contents
 
 - [Installation](#installation)
+- [Docker](#docker)
 - [Commands Reference](#commands-reference)
   - [Global Commands](#global-commands)
   - [Session Commands](#session-commands)
@@ -149,6 +150,136 @@ pip install -e ".[dev]"
 | `botport` | BotPort agent-to-agent routing hub |
 
 If the configured port is busy, Captain Claw automatically tries the next available port (up to 10 attempts).
+
+---
+
+## Docker
+
+Captain Claw ships with Docker support for running the web UI and BotPort as containers. You can either pull pre-built images from Docker Hub or build from source.
+
+### Prerequisites
+
+- Docker (and Docker Compose if building from source)
+- A `config.yaml` and `.env` file in your working directory (copy from `config.yaml.example` and `.env.example`, then add your API keys)
+
+### Pull from Docker Hub
+
+```bash
+docker pull kstevica/captain-claw:latest
+docker pull kstevica/captain-claw-botport:latest
+```
+
+Run Captain Claw:
+
+```bash
+docker run -d -p 23080:23080 \
+  -v $(pwd)/config.yaml:/app/config.yaml:ro \
+  -v $(pwd)/.env:/app/.env:ro \
+  -v $(pwd)/docker-data/home-config:/root/.captain-claw \
+  -v $(pwd)/docker-data/workspace:/data/workspace \
+  -v $(pwd)/docker-data/sessions:/data/sessions \
+  -v $(pwd)/docker-data/skills:/data/skills \
+  kstevica/captain-claw:latest
+```
+
+Run BotPort (optional, for multi-agent routing):
+
+```bash
+docker run -d -p 33080:33080 \
+  -v $(pwd)/botport/config.yaml:/app/config.yaml:ro \
+  -v $(pwd)/.env:/app/.env:ro \
+  kstevica/captain-claw-botport:latest
+```
+
+- **Web UI:** http://localhost:23080
+- **BotPort dashboard:** http://localhost:33080
+
+> **Note:** `config.yaml` and `.env` must exist in the current directory before running. If they don't exist, Docker creates empty directories instead of files, which causes a startup error.
+
+### Build from Source with Docker Compose
+
+If you cloned the repo, use the included `docker-compose.yml`:
+
+```bash
+docker compose up -d                # start both services
+docker compose up -d captain-claw   # web UI only
+docker compose up -d botport        # BotPort only
+```
+
+### Architecture
+
+The `docker-compose.yml` defines two independent services:
+
+| Service | Image | Port | Entry point |
+|---|---|---|---|
+| `captain-claw` | `kstevica/captain-claw` | 23080 | `captain-claw-web` |
+| `botport` | `kstevica/captain-claw-botport` | 33080 | `botport` |
+
+The services are independent — either can run alone without the other.
+
+### Volumes and Persistent Data
+
+All persistent data is bind-mounted to `./docker-data/` on the host, so files are directly accessible:
+
+| Host path | Container path | Contents |
+|---|---|---|
+| `./docker-data/home-config/` | `/root/.captain-claw/` | Settings saved from the web UI, personalities, datastore |
+| `./docker-data/workspace/` | `/data/workspace/` | Workspace files (tool outputs, exports, media) |
+| `./docker-data/sessions/` | `/data/sessions/` | Session database (`sessions.db`) |
+| `./docker-data/skills/` | `/data/skills/` | Installed skills |
+
+Configuration and secrets are mounted read-only from the project root:
+
+| Host path | Container path | Purpose |
+|---|---|---|
+| `./config.yaml` | `/app/config.yaml` | Main configuration (read-only) |
+| `./.env` | `/app/.env` | API keys and secrets (read-only) |
+| `./botport/config.yaml` | `/app/config.yaml` (botport) | BotPort configuration (read-only) |
+
+The `docker-data/` directory is created automatically on first run and is excluded from git via `.gitignore`.
+
+### Entrypoint
+
+The `docker-entrypoint.sh` script handles Docker-specific configuration:
+
+- **First run:** Seeds `~/.captain-claw/config.yaml` inside the container with overrides that bind the web server to `0.0.0.0` (required for Docker networking) and point storage paths to the persistent volumes.
+- **Subsequent runs:** Preserves settings saved from the web UI. Only ensures `web.host` stays at `0.0.0.0` so the container remains reachable.
+
+### Configuration Precedence in Docker
+
+Captain Claw merges configuration from two YAML files:
+
+1. `./config.yaml` (mounted read-only from the host) — base configuration
+2. `~/.captain-claw/config.yaml` (persisted in `./docker-data/home-config/`) — overlay that takes precedence
+
+Settings saved from the web UI Settings page are written to the overlay file, so they persist across container restarts and override the base configuration without modifying the host file.
+
+### Build and Manage
+
+```bash
+docker compose up -d --build        # rebuild after code changes
+docker compose logs -f captain-claw # follow captain-claw logs
+docker compose logs -f botport      # follow botport logs
+docker compose down                 # stop all services
+docker compose down -v              # stop and remove volumes
+```
+
+### Running with Ollama
+
+If you use local Ollama models, the container needs to reach the Ollama server on the host. Set the base URL in `.env`:
+
+```bash
+OLLAMA_BASE_URL="http://host.docker.internal:11434"
+```
+
+On Linux, add `extra_hosts` to the captain-claw service in `docker-compose.yml`:
+
+```yaml
+services:
+  captain-claw:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+```
 
 ---
 

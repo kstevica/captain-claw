@@ -103,6 +103,71 @@ Run `captain-claw-web` to start the web UI at **http://127.0.0.1:23080**. Use `C
 
 For the terminal, use `captain-claw` (interactive) or `captain-claw --tui` (TUI mode).
 
+## Docker
+
+### Pull and run (quickest)
+
+```bash
+docker pull kstevica/captain-claw:latest
+docker pull kstevica/captain-claw-botport:latest
+```
+
+You need a `config.yaml` and `.env` in the current directory (copy from `config.yaml.example` and `.env.example`, then add your API keys).
+
+```bash
+# Captain Claw web UI
+docker run -d -p 23080:23080 \
+  -v $(pwd)/config.yaml:/app/config.yaml:ro \
+  -v $(pwd)/.env:/app/.env:ro \
+  -v $(pwd)/docker-data/home-config:/root/.captain-claw \
+  -v $(pwd)/docker-data/workspace:/data/workspace \
+  -v $(pwd)/docker-data/sessions:/data/sessions \
+  -v $(pwd)/docker-data/skills:/data/skills \
+  kstevica/captain-claw:latest
+
+# BotPort (optional, for multi-agent routing)
+docker run -d -p 33080:33080 \
+  -v $(pwd)/botport/config.yaml:/app/config.yaml:ro \
+  -v $(pwd)/.env:/app/.env:ro \
+  kstevica/captain-claw-botport:latest
+```
+
+- **Web UI:** http://localhost:23080
+- **BotPort dashboard:** http://localhost:33080
+
+### Build from source with Docker Compose
+
+If you cloned the repo, use the included `docker-compose.yml`:
+
+```bash
+docker compose up -d                # both services
+docker compose up -d captain-claw   # web UI only
+docker compose up -d botport        # BotPort only
+```
+
+### Persistent data
+
+All persistent data is stored under `./docker-data/` on the host:
+
+| Host path | Container path | Contents |
+|---|---|---|
+| `./docker-data/home-config/` | `/root/.captain-claw/` | Settings saved from the web UI |
+| `./docker-data/workspace/` | `/data/workspace/` | Workspace files |
+| `./docker-data/sessions/` | `/data/sessions/` | Session database |
+| `./docker-data/skills/` | `/data/skills/` | Installed skills |
+
+Configuration (`config.yaml`) and secrets (`.env`) are mounted read-only from the current directory.
+
+### Build and manage
+
+```bash
+docker compose up -d --build    # rebuild after code changes
+docker compose logs -f          # follow logs
+docker compose down             # stop all services
+```
+
+See [USAGE.md](USAGE.md#docker) for the full Docker reference.
+
 ## How It Works
 
 ### Sessions
