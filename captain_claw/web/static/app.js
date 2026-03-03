@@ -16,6 +16,9 @@
     let personalities = [];
     let activePersonalityId = '';
     let activePersonalityName = 'No profile';
+    let playbooks = [];
+    let activePlaybookId = '';   // '' = auto, '__none__' = disabled, or a playbook ID
+    let activePlaybookName = 'Auto';
 
     // ── DOM references ──────────────────────────────────────
     const $ = (sel) => document.querySelector(sel);
@@ -137,6 +140,7 @@
         commands = data.commands || [];
         allowedModels = data.models || [];
         personalities = data.personalities || [];
+        playbooks = data.playbooks || [];
         // Set a fallback active model label from the models list.
         if (allowedModels.length && !activeModelLabel) {
             const active = allowedModels.find(m => m.id === 'default') || allowedModels[0];
@@ -149,6 +153,7 @@
         }
         buildModelDropdown();
         buildPersonaDropdown();
+        buildPlaybookDropdown();
         buildCommandReference();
     }
 
@@ -505,6 +510,13 @@
             personaName.textContent = activePersonalityName;
             highlightActivePersonaInDropdown();
         }
+        // Playbook override updates.
+        if ('playbook_id' in info) {
+            activePlaybookId = info.playbook_id || '';
+            activePlaybookName = info.playbook_name || 'Auto';
+            $('#playbookName').textContent = activePlaybookName;
+            highlightActivePlaybookInDropdown();
+        }
     }
 
     function updateToolsBar(tools) {
@@ -753,6 +765,97 @@
 
         // Focus on name input.
         setTimeout(() => form.querySelector('.pd-name-input').focus(), 50);
+    }
+
+    // ── Playbook Selector ──────────────────────────────────────
+
+    const playbookDropdown = $('#playbookDropdown');
+    const playbookBadge = $('#playbookBadge');
+    const playbookNameEl = $('#playbookName');
+
+    function buildPlaybookDropdown() {
+        let html = '';
+
+        // "Auto" option — system auto-retrieves relevant playbooks.
+        const isAutoActive = !activePlaybookId;
+        html += `<div class="model-option${isAutoActive ? ' active' : ''}" data-pbid="" title="Automatically select relevant playbooks based on task type">
+            <span class="model-option-name">Auto</span>
+            <span class="model-option-desc">System picks best match</span>
+            ${isAutoActive ? '<span class="model-option-check">&#x2713;</span>' : ''}
+        </div>`;
+
+        // "None" option — disable playbook injection entirely.
+        const isNoneActive = activePlaybookId === '__none__';
+        html += `<div class="model-option${isNoneActive ? ' active' : ''}" data-pbid="__none__" title="Disable playbook injection for this session">
+            <span class="model-option-name">None</span>
+            <span class="model-option-desc">No playbook guidance</span>
+            ${isNoneActive ? '<span class="model-option-check">&#x2713;</span>' : ''}
+        </div>`;
+
+        // Existing playbooks.
+        if (playbooks.length) {
+            html += '<div class="pd-section-label">Saved Playbooks</div>';
+            playbooks.forEach(pb => {
+                const isActive = activePlaybookId === pb.id;
+                const desc = pb.trigger_description ? pb.trigger_description.slice(0, 60) : (pb.task_type || '');
+                html += `<div class="model-option${isActive ? ' active' : ''}" data-pbid="${escapeHtml(pb.id)}" title="${escapeHtml(pb.name + (pb.trigger_description ? ' — ' + pb.trigger_description : ''))}">
+                    <span class="model-option-name">${escapeHtml(pb.name)}</span>
+                    ${desc ? `<span class="model-option-desc">${escapeHtml(desc)}</span>` : ''}
+                    ${isActive ? '<span class="model-option-check">&#x2713;</span>' : ''}
+                </div>`;
+            });
+        }
+
+        playbookDropdown.innerHTML = html;
+
+        // Bind click handlers for playbook options.
+        playbookDropdown.querySelectorAll('.model-option').forEach(el => {
+            el.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const pbid = el.dataset.pbid;
+                selectPlaybook(pbid);
+            });
+        });
+    }
+
+    function selectPlaybook(pbid) {
+        activePlaybookId = pbid;
+        if (!pbid) {
+            activePlaybookName = 'Auto';
+        } else if (pbid === '__none__') {
+            activePlaybookName = 'None';
+        } else {
+            const pb = playbooks.find(p => p.id === pbid);
+            activePlaybookName = pb ? pb.name : pbid;
+        }
+        playbookNameEl.textContent = activePlaybookName;
+        send({ type: 'set_playbook', playbook_id: pbid });
+        highlightActivePlaybookInDropdown();
+        hidePlaybookDropdown();
+    }
+
+    function highlightActivePlaybookInDropdown() {
+        playbookDropdown.querySelectorAll('.model-option').forEach(el => {
+            const isActive = (el.dataset.pbid || '') === (activePlaybookId || '');
+            el.classList.toggle('active', isActive);
+            const check = el.querySelector('.model-option-check');
+            if (isActive && !check) {
+                const span = document.createElement('span');
+                span.className = 'model-option-check';
+                span.innerHTML = '&#x2713;';
+                el.appendChild(span);
+            } else if (!isActive && check) {
+                check.remove();
+            }
+        });
+    }
+
+    function togglePlaybookDropdown() {
+        playbookDropdown.classList.toggle('hidden');
+    }
+
+    function hidePlaybookDropdown() {
+        playbookDropdown.classList.add('hidden');
     }
 
     // ── File Upload ──────────────────────────────────────────
@@ -1531,6 +1634,7 @@
         modelBadge.addEventListener('click', (e) => {
             e.stopPropagation();
             hidePersonaDropdown();
+            hidePlaybookDropdown();
             toggleModelDropdown();
         });
         // Close model dropdown on outside click
@@ -1544,12 +1648,27 @@
         personaBadge.addEventListener('click', (e) => {
             e.stopPropagation();
             hideModelDropdown();
+            hidePlaybookDropdown();
             togglePersonaDropdown();
         });
         // Close persona dropdown on outside click
         document.addEventListener('click', (e) => {
             if (!personaDropdown.contains(e.target) && e.target !== personaBadge) {
                 hidePersonaDropdown();
+            }
+        });
+
+        // Playbook badge toggles playbook selector dropdown
+        playbookBadge.addEventListener('click', (e) => {
+            e.stopPropagation();
+            hideModelDropdown();
+            hidePersonaDropdown();
+            togglePlaybookDropdown();
+        });
+        // Close playbook dropdown on outside click
+        document.addEventListener('click', (e) => {
+            if (!playbookDropdown.contains(e.target) && e.target !== playbookBadge) {
+                hidePlaybookDropdown();
             }
         });
 

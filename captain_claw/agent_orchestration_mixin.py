@@ -74,6 +74,14 @@ class AgentOrchestrationMixin:
         self._deferred_scale_attempts: int = 0
         planning_pipeline: dict[str, Any] | None = None
         recent_source_urls: list[str] = []
+        # Pre-populate playbook context cache for the sync _build_messages path.
+        if hasattr(self, "_build_playbook_context_note"):
+            try:
+                _pb_note = await self._build_playbook_context_note(user_input)
+                self._playbook_context_cache = {"query": user_input, "note": _pb_note}
+            except Exception:
+                self._playbook_context_cache = None
+
         effective_user_input = user_input
         effective_user_input, clarification_context_applied = self._resolve_effective_user_input(user_input)
         require_all_sources = self._request_references_all_sources(effective_user_input)
@@ -314,6 +322,16 @@ class AgentOrchestrationMixin:
         # only activates for genuine per-item processing tasks.
         scale_advisory = self._preflight_scale_check(effective_user_input, list_task_plan)
         if scale_advisory:
+            # Append playbook patterns for scale tasks (batch-processing).
+            if hasattr(self, "_build_playbook_block"):
+                try:
+                    _pb = await self._build_playbook_block(
+                        effective_user_input, task_type="batch-processing",
+                    )
+                    if _pb:
+                        scale_advisory = scale_advisory + _pb
+                except Exception:
+                    pass  # best-effort
             effective_user_input = effective_user_input + scale_advisory
             self._scale_progress = {"total": 0, "completed": 0}
             _out_strategy = str(list_task_plan.get("output_strategy", "single_file")).strip().lower()

@@ -968,6 +968,7 @@ class AgentContextMixin:
         "contacts": ["contacts"],
         "scripts": ["scripts"],
         "apis": ["apis"],
+        "playbooks": ["playbooks"],
         "typesense": ["typesense"],
         "datastore": ["datastore"],
         "personality": ["personality"],
@@ -996,6 +997,7 @@ class AgentContextMixin:
             ContactsTool,
             ScriptsTool,
             ApisTool,
+            PlaybooksTool,
             DatastoreTool,
             TermuxTool,
             WebFetchTool,
@@ -1054,6 +1056,8 @@ class AgentContextMixin:
                 self.tools.register(ScriptsTool())
             elif tool_name == "apis":
                 self.tools.register(ApisTool())
+            elif tool_name == "playbooks":
+                self.tools.register(PlaybooksTool())
             elif tool_name == "typesense":
                 from captain_claw.tools.typesense import TypesenseTool
                 dm = getattr(self, "_deep_memory", None)
@@ -1657,6 +1661,20 @@ class AgentContextMixin:
                     deep_debug,
                 )
                 self._last_deep_memory_debug_signature = deep_signature
+
+        # Playbook context note — inject proven patterns for similar tasks.
+        if hasattr(self, "_build_playbook_context_note_sync") and query:
+            try:
+                _pb_note = self._build_playbook_context_note_sync(query)
+                if _pb_note:
+                    candidate_messages.append({
+                        "role": "assistant",
+                        "content": _pb_note,
+                        "tool_name": "playbook_context",
+                        "token_count": self._count_tokens(_pb_note),
+                    })
+            except Exception:
+                pass  # best-effort — never block message assembly
 
         planning_note = self._build_pipeline_note(planning_pipeline or {})
         if planning_note:

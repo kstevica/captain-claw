@@ -63,6 +63,8 @@ For a quick overview and installation guide, see [README.md](README.md).
 - [Cross-Session Address Book](#cross-session-address-book)
 - [Cross-Session Script Memory](#cross-session-script-memory)
 - [Cross-Session API Memory](#cross-session-api-memory)
+- [Cross-Session Playbook Memory](#cross-session-playbook-memory)
+  - [Playbooks Editor](#playbooks-editor)
 - [Personality System](#personality-system)
 - [Session Management](#session-management)
 - [Chunked Processing Pipeline](#chunked-processing-pipeline)
@@ -824,6 +826,37 @@ Index, search, and delete documents in deep memory (Typesense). All operations u
 
 Requires a running Typesense instance. Set the API key in `config.yaml` or via `TYPESENSE_API_KEY` env var. The tool is also used as the sink for the scale loop `no_file` output strategy when `final_action: api_call`. Indexing is routed through `DeepMemoryIndex` for proper chunking, timestamping, and embedding.
 
+### playbooks
+
+Persistent cross-session orchestration pattern memory. Rate sessions to auto-distill reusable do/don't pseudo-code patterns that are injected into planning context when similar tasks are detected.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `add`, `list`, `search`, `info`, `update`, `remove`, `rate` |
+| `name` | string | for add | Playbook display name |
+| `playbook_id` | string | for info/update/remove | Playbook ID or `#index` |
+| `task_type` | string | for add | Classification: `batch-processing`, `web-research`, `code-generation`, `document-processing`, `data-transformation`, `orchestration`, `interactive`, `file-management`, `other` |
+| `rating` | string | for add/rate | `good` or `bad` |
+| `do_pattern` | string | no | Pseudo-code of the recommended approach (5-15 lines) |
+| `dont_pattern` | string | no | Pseudo-code of what to avoid (5-15 lines) |
+| `trigger_description` | string | no | When this playbook should activate |
+| `reasoning` | string | no | Why this pattern matters |
+| `tags` | string | no | Comma-separated tags |
+| `query` | string | for search | Search query |
+| `session_id` | string | no | Session ID for `rate` action (defaults to current) |
+| `note` | string | no | Optional note for `rate` action |
+
+**Actions:**
+- **`add`** — register a new playbook manually (requires `name`, `task_type`, and at least one of `do_pattern`/`dont_pattern`)
+- **`list`** — show all playbooks (up to 50), optionally filtered by `task_type`
+- **`search`** — find playbooks by keyword
+- **`info`** — show full details of one playbook
+- **`update`** — modify an existing playbook
+- **`remove`** — delete a playbook
+- **`rate`** — rate a session as good/bad and auto-distill a playbook via LLM analysis of the session's messages and tool trace
+
+See [Cross-Session Playbook Memory](#cross-session-playbook-memory) for details on how playbooks are distilled, stored, and injected.
+
 ### botport
 
 Consult specialist agents through the BotPort agent-to-agent network. Use this tool to delegate tasks to agents with specific expertise.
@@ -1075,6 +1108,7 @@ tools:
     - scripts
     - apis
     - datastore
+    - playbooks
     - personality
     - botport
     - termux
@@ -1946,6 +1980,90 @@ Captain Claw includes a persistent API memory that tracks external APIs the agen
 ### Availability
 
 The `/apis` command and `apis` tool are available across all interfaces: CLI, Web UI, Telegram, Slack, and Discord. The Web UI also exposes REST endpoints (`GET/POST /api/apis`, `GET /api/apis/search?q=`, `GET/PATCH/DELETE /api/apis/{id}`).
+
+---
+
+## Cross-Session Playbook Memory
+
+Captain Claw includes a persistent playbook system that captures proven orchestration patterns (do/don't pseudo-code) from rated sessions. Playbooks survive restarts and are auto-injected into the planning context when the agent encounters similar tasks.
+
+### How It Works
+
+- **Manual creation:** Use the `playbooks` tool `add` action or the REST API to register a playbook with a name, task type, and do/don't patterns.
+- **Auto-distillation from session rating:** Rate a session as "good" or "bad" via the `rate` action. The system extracts a compact session summary and tool trace, then runs a standalone LLM call to distill a reusable playbook with classified task type, trigger description, and pseudo-code patterns.
+- **Auto-injection:** When a new task arrives, the agent classifies it by task type using keyword heuristics and retrieves matching playbooks. Up to 2 playbooks are injected into the planning context as structured do/don't blocks.
+- **Usage tracking:** Each time a playbook is retrieved and injected, its usage count and last-used timestamp are updated.
+
+### Task Type Classifications
+
+| Task Type | Description |
+|---|---|
+| `batch-processing` | Processing multiple files/items in a loop |
+| `web-research` | Fetching and analyzing multiple web sources |
+| `code-generation` | Writing code, scripts, or implementations |
+| `document-processing` | Extracting/converting documents (PDF, DOCX, etc.) |
+| `data-transformation` | Converting data formats (CSV, JSON, etc.) |
+| `orchestration` | Multi-step workflow coordination |
+| `interactive` | Back-and-forth clarification-heavy tasks |
+| `file-management` | Renaming, moving, organizing files |
+| `other` | Anything that does not fit above |
+
+### Distillation Process
+
+When a session is rated:
+
+1. The session's messages are extracted into a compact summary (max 2000 chars)
+2. An ordered list of tool calls is extracted (max 30 entries)
+3. A standalone LLM call analyzes the summary and tool trace
+4. The LLM produces a structured playbook with task type, name, trigger description, do/don't patterns, and reasoning
+5. If rated "good", the `do_pattern` reflects what worked; if "bad", the `dont_pattern` captures the anti-pattern
+
+Patterns are abstract pseudo-code focused on orchestration decisions (tool ordering, looping strategy, context management) — not task-specific content.
+
+### Tracked Fields
+
+| Field | Description |
+|---|---|
+| `name` | Short descriptive name |
+| `task_type` | Classification from the 9 types |
+| `rating` | `good` or `bad` |
+| `do_pattern` | Pseudo-code of the recommended approach |
+| `dont_pattern` | Pseudo-code of what to avoid |
+| `trigger_description` | When this playbook should activate |
+| `reasoning` | Why the pattern matters |
+| `tags` | Comma-separated tags |
+| `use_count` | How many times the playbook has been retrieved |
+| `source_session` | Session ID it was distilled from |
+
+### Playbook Override
+
+The web UI playbooks editor allows overriding auto-selection:
+
+- **Auto** (default) — the agent selects playbooks based on task type matching
+- **None** — disable playbook injection entirely
+- **Specific playbook** — force a particular playbook regardless of task type
+
+### Playbooks Editor
+
+The web UI includes a Playbooks editor at `/playbooks`. It provides a visual interface for browsing, creating, editing, and selecting playbooks.
+
+**Features:**
+- **Playbook list** — browse all playbooks with task type badges, usage counts, and ratings
+- **Detail view** — view and edit all playbook fields including do/don't patterns
+- **Create** — add new playbooks manually
+- **Delete** — remove playbooks with confirmation
+- **Override selector** — choose auto, none, or a specific playbook for the current session
+
+### REST API
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/playbooks` | List all playbooks (up to 200, optional `?task_type=` filter) |
+| `GET` | `/api/playbooks/search` | Search playbooks (`?q=` required, optional `?task_type=` filter) |
+| `GET` | `/api/playbooks/{id}` | Get one playbook by ID |
+| `POST` | `/api/playbooks` | Create a new playbook |
+| `PATCH` | `/api/playbooks/{id}` | Update a playbook (partial update) |
+| `DELETE` | `/api/playbooks/{id}` | Delete a playbook |
 
 ---
 

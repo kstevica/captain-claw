@@ -17,5 +17,7 @@ and create requirements that enforce coverage of every listed URL.
 
 If `Extracted list members ...` is not `(none)`, include requirements that enforce coverage of each listed member.
 
+{playbook_block}
+
 Plan for complete execution and verification quality. Use nested `children` tasks when the request has phases/sub-steps.
 Return JSON only.

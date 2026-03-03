@@ -382,6 +382,57 @@ class ApiEntry:
         }
 
 
+@dataclass
+class PlaybookEntry:
+    """A persistent cross-session playbook entry for orchestration patterns."""
+
+    id: str
+    name: str
+    task_type: str  # batch-processing, web-research, code-generation, etc.
+    rating: str  # good, bad
+    do_pattern: str  # pseudo-code of what works
+    dont_pattern: str  # pseudo-code of what to avoid
+    trigger_description: str  # when to apply this playbook
+    reasoning: str | None = None
+    tags: str | None = None
+    use_count: int = 0
+    last_used_at: str | None = None
+    source_session: str | None = None
+    created_at: str = field(default_factory=_utcnow_iso)
+    updated_at: str = field(default_factory=_utcnow_iso)
+
+    @classmethod
+    def from_row(cls, row: tuple[Any, ...]) -> "PlaybookEntry":
+        return cls(
+            id=str(row[0]),
+            name=str(row[1]),
+            task_type=str(row[2]),
+            rating=str(row[3]),
+            do_pattern=str(row[4]),
+            dont_pattern=str(row[5]),
+            trigger_description=str(row[6]),
+            reasoning=str(row[7]) if row[7] else None,
+            tags=str(row[8]) if row[8] else None,
+            use_count=int(row[9]) if row[9] is not None else 0,
+            last_used_at=str(row[10]) if row[10] else None,
+            source_session=str(row[11]) if row[11] else None,
+            created_at=str(row[12]),
+            updated_at=str(row[13]),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id, "name": self.name, "task_type": self.task_type,
+            "rating": self.rating, "do_pattern": self.do_pattern,
+            "dont_pattern": self.dont_pattern,
+            "trigger_description": self.trigger_description,
+            "reasoning": self.reasoning, "tags": self.tags,
+            "use_count": self.use_count, "last_used_at": self.last_used_at,
+            "source_session": self.source_session,
+            "created_at": self.created_at, "updated_at": self.updated_at,
+        }
+
+
 class SessionManager:
     """Manages conversation sessions with SQLite storage."""
 
@@ -563,6 +614,34 @@ class SessionManager:
             )
             await self._db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_apis_use_count ON apis(use_count DESC)"
+            )
+            # -- Playbooks memory --
+            await self._db.execute("""
+                CREATE TABLE IF NOT EXISTS playbooks (
+                    id                  TEXT PRIMARY KEY,
+                    name                TEXT NOT NULL,
+                    task_type           TEXT NOT NULL,
+                    rating              TEXT NOT NULL DEFAULT 'good',
+                    do_pattern          TEXT NOT NULL DEFAULT '',
+                    dont_pattern        TEXT NOT NULL DEFAULT '',
+                    trigger_description TEXT NOT NULL DEFAULT '',
+                    reasoning           TEXT,
+                    tags                TEXT,
+                    use_count           INTEGER NOT NULL DEFAULT 0,
+                    last_used_at        TEXT,
+                    source_session      TEXT,
+                    created_at          TEXT NOT NULL,
+                    updated_at          TEXT NOT NULL
+                )
+            """)
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_playbooks_name ON playbooks(name COLLATE NOCASE)"
+            )
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_playbooks_task_type ON playbooks(task_type)"
+            )
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_playbooks_use_count ON playbooks(use_count DESC)"
             )
             # -- File registry (persistent file mapping) --
             await self._db.execute("""
@@ -1949,6 +2028,190 @@ class SessionManager:
         async with self._db.execute(
             "UPDATE apis SET use_count = use_count + 1, last_used_at = ?, updated_at = ? WHERE id = ?",
             (now, now, api_id),
+        ) as cursor:
+            affected = cursor.rowcount
+        await self._db.commit()
+        return affected > 0
+
+    # ------------------------------------------------------------------
+    # Playbooks memory CRUD
+    # ------------------------------------------------------------------
+
+    _PLAYBOOK_COLS = (
+        "id, name, task_type, rating, do_pattern, dont_pattern, "
+        "trigger_description, reasoning, tags, use_count, last_used_at, "
+        "source_session, created_at, updated_at"
+    )
+
+    async def create_playbook(
+        self,
+        name: str,
+        task_type: str,
+        *,
+        rating: str = "good",
+        do_pattern: str = "",
+        dont_pattern: str = "",
+        trigger_description: str = "",
+        reasoning: str | None = None,
+        tags: str | None = None,
+        source_session: str | None = None,
+    ) -> PlaybookEntry:
+        await self._ensure_db()
+        now = _utcnow_iso()
+        entry = PlaybookEntry(
+            id=str(uuid.uuid4()), name=name, task_type=task_type,
+            rating=rating, do_pattern=do_pattern, dont_pattern=dont_pattern,
+            trigger_description=trigger_description, reasoning=reasoning,
+            tags=tags, source_session=source_session,
+            created_at=now, updated_at=now,
+        )
+        await self._db.execute(
+            f"""
+            INSERT INTO playbooks ({self._PLAYBOOK_COLS})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (entry.id, entry.name, entry.task_type, entry.rating,
+             entry.do_pattern, entry.dont_pattern, entry.trigger_description,
+             entry.reasoning, entry.tags, entry.use_count,
+             entry.last_used_at, entry.source_session,
+             entry.created_at, entry.updated_at),
+        )
+        await self._db.commit()
+        return entry
+
+    async def load_playbook(self, playbook_id: str) -> PlaybookEntry | None:
+        await self._ensure_db()
+        async with self._db.execute(
+            f"SELECT {self._PLAYBOOK_COLS} FROM playbooks WHERE id = ?",
+            (playbook_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return PlaybookEntry.from_row(row) if row else None
+
+    async def select_playbook(self, selector: str) -> PlaybookEntry | None:
+        """Select by id, #index, or name (fuzzy search)."""
+        direct = await self.load_playbook(selector)
+        if direct:
+            return direct
+        if selector.startswith("#"):
+            try:
+                idx = int(selector[1:]) - 1
+            except ValueError:
+                return None
+            items = await self.list_playbooks(limit=200)
+            return items[idx] if 0 <= idx < len(items) else None
+        results = await self.search_playbooks(selector, limit=1)
+        return results[0] if results else None
+
+    async def list_playbooks(
+        self, *, limit: int = 200, task_type: str | None = None,
+    ) -> list[PlaybookEntry]:
+        await self._ensure_db()
+        if task_type:
+            async with self._db.execute(
+                f"""
+                SELECT {self._PLAYBOOK_COLS}
+                FROM playbooks
+                WHERE task_type = ?
+                ORDER BY use_count DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (task_type, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        else:
+            async with self._db.execute(
+                f"""
+                SELECT {self._PLAYBOOK_COLS}
+                FROM playbooks
+                ORDER BY use_count DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [PlaybookEntry.from_row(r) for r in rows]
+
+    async def search_playbooks(
+        self, query: str, *, limit: int = 20, task_type: str | None = None,
+    ) -> list[PlaybookEntry]:
+        await self._ensure_db()
+        pattern = f"%{query}%"
+        if task_type:
+            async with self._db.execute(
+                f"""
+                SELECT {self._PLAYBOOK_COLS}
+                FROM playbooks
+                WHERE task_type = ?
+                  AND (name LIKE ? COLLATE NOCASE
+                    OR trigger_description LIKE ? COLLATE NOCASE
+                    OR do_pattern LIKE ? COLLATE NOCASE
+                    OR tags LIKE ? COLLATE NOCASE)
+                ORDER BY use_count DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (task_type, pattern, pattern, pattern, pattern, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        else:
+            async with self._db.execute(
+                f"""
+                SELECT {self._PLAYBOOK_COLS}
+                FROM playbooks
+                WHERE name LIKE ? COLLATE NOCASE
+                   OR trigger_description LIKE ? COLLATE NOCASE
+                   OR do_pattern LIKE ? COLLATE NOCASE
+                   OR tags LIKE ? COLLATE NOCASE
+                ORDER BY use_count DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (pattern, pattern, pattern, pattern, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [PlaybookEntry.from_row(r) for r in rows]
+
+    async def update_playbook(
+        self, playbook_id: str, **kwargs: Any,
+    ) -> bool:
+        await self._ensure_db()
+        allowed = {
+            "name", "task_type", "rating", "do_pattern", "dont_pattern",
+            "trigger_description", "reasoning", "tags",
+        }
+        sets = []
+        vals: list[Any] = []
+        for key, val in kwargs.items():
+            if key in allowed:
+                sets.append(f"{key} = ?")
+                vals.append(val)
+        if not sets:
+            return False
+        sets.append("updated_at = ?")
+        vals.append(_utcnow_iso())
+        vals.append(playbook_id)
+        async with self._db.execute(
+            f"UPDATE playbooks SET {', '.join(sets)} WHERE id = ?",
+            vals,
+        ) as cursor:
+            affected = cursor.rowcount
+        await self._db.commit()
+        return affected > 0
+
+    async def delete_playbook(self, playbook_id: str) -> bool:
+        await self._ensure_db()
+        async with self._db.execute(
+            "DELETE FROM playbooks WHERE id = ?", (playbook_id,),
+        ) as cursor:
+            affected = cursor.rowcount
+        await self._db.commit()
+        return affected > 0
+
+    async def increment_playbook_usage(self, playbook_id: str) -> bool:
+        await self._ensure_db()
+        now = _utcnow_iso()
+        async with self._db.execute(
+            "UPDATE playbooks SET use_count = use_count + 1, last_used_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, playbook_id),
         ) as cursor:
             affected = cursor.rowcount
         await self._db.commit()

@@ -13,6 +13,7 @@ from captain_claw.agent_file_ops_mixin import AgentFileOpsMixin
 from captain_claw.agent_guard_mixin import AgentGuardMixin
 from captain_claw.agent_model_mixin import AgentModelMixin
 from captain_claw.agent_orchestration_mixin import AgentOrchestrationMixin
+from captain_claw.agent_playbook_mixin import AgentPlaybookMixin
 from captain_claw.agent_pipeline_mixin import AgentPipelineMixin
 from captain_claw.agent_reasoning_mixin import AgentReasoningMixin
 from captain_claw.agent_research_mixin import AgentResearchMixin
@@ -45,6 +46,7 @@ class Agent(
     AgentChunkedProcessingMixin,
     AgentSessionMixin,
     AgentSkillsMixin,
+    AgentPlaybookMixin,
     AgentToolLoopMixin,
 ):
     """Main agent orchestrator."""

@@ -38,12 +38,23 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
         up["is_telegram"] = uid in approved
     personalities = user_personalities
 
+    # Fetch available playbooks for the playbook override selector.
+    from captain_claw.session import get_session_manager as _get_sm
+    _sm = _get_sm()
+    _pb_entries = await _sm.list_playbooks(limit=100)
+    _playbook_list = [
+        {"id": p.id, "name": p.name, "task_type": p.task_type,
+         "trigger_description": p.trigger_description or ""}
+        for p in _pb_entries
+    ]
+
     await server._send(ws, {
         "type": "welcome",
         "session": server._session_info(),
         "models": models,
         "commands": COMMANDS,
         "personalities": personalities,
+        "playbooks": _playbook_list,
     })
 
     # Replay existing session messages for the connecting client
@@ -161,6 +172,33 @@ async def handle_ws_message(
             await server._send(ws, {
                 "type": "command_result",
                 "command": "/user-profile",
+                "content": msg_text,
+            })
+
+    elif msg_type == "set_playbook":
+        # Override which playbook the agent uses for retrieval.
+        # '' = auto (default), '__none__' = disabled, or a specific playbook ID.
+        playbook_id = str(data.get("playbook_id", "")).strip()
+        if server.agent:
+            server.agent._playbook_override = playbook_id or None
+            # Report the change.
+            if not playbook_id:
+                server.agent._playbook_override_name = "Auto"
+                msg_text = "Playbook mode set to **Auto**. The system will automatically select relevant playbooks."
+            elif playbook_id == "__none__":
+                server.agent._playbook_override_name = "None"
+                msg_text = "Playbook mode set to **None**. No playbook guidance will be injected."
+            else:
+                from captain_claw.session import get_session_manager as _get_sm
+                _sm = _get_sm()
+                pb = await _sm.load_playbook(playbook_id)
+                label = pb.name if pb else playbook_id
+                server.agent._playbook_override_name = label
+                msg_text = f"Playbook override set to **{label}**. This playbook will be used for all tasks."
+            server._broadcast({"type": "session_info", **server._session_info()})
+            await server._send(ws, {
+                "type": "command_result",
+                "command": "/playbook",
                 "content": msg_text,
             })
 

@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Playbooks - Captain Claw</title>
+    <link rel="stylesheet" href="/static/playbooks.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<header class="pb-header">
+    <div class="pb-header-left">
+        <a href="/" class="pb-logo-link"><img src="/static/logo.svg" width="28" height="28"></a>
+        <h1>Playbooks</h1>
+    </div>
+    <div class="pb-header-right">
+        <a href="/chat" class="pb-nav-link">&larr; Chat</a>
+    </div>
+</header>
+
+<div class="pb-layout">
+    <!-- Panel 1: List + filter -->
+    <aside class="pb-list-panel" id="pbListPanel">
+        <div class="pb-list-header">
+            <input type="text" class="pb-search" id="pbSearch"
+                   placeholder="Search playbooks..." autocomplete="off">
+            <button class="pb-add-btn" id="pbAddBtn" title="Add new playbook">+</button>
+        </div>
+        <div class="pb-filter-bar" id="pbFilterBar">
+            <select class="pb-filter-select" id="pbFilterType">
+                <option value="">All types</option>
+                <option value="batch-processing">Batch Processing</option>
+                <option value="web-research">Web Research</option>
+                <option value="code-generation">Code Generation</option>
+                <option value="document-processing">Document Processing</option>
+                <option value="data-transformation">Data Transformation</option>
+                <option value="orchestration">Orchestration</option>
+                <option value="interactive">Interactive</option>
+                <option value="file-management">File Management</option>
+                <option value="other">Other</option>
+            </select>
+            <span class="pb-count" id="pbCount">0</span>
+        </div>
+        <div class="pb-item-list" id="pbItemList">
+            <div class="pb-loading" id="pbLoading">Loading...</div>
+        </div>
+    </aside>
+
+    <!-- Panel 2: Detail / Edit -->
+    <main class="pb-detail" id="pbDetail">
+        <!-- Empty state -->
+        <div class="pb-empty" id="pbEmpty">
+            <div class="pb-empty-icon">&#x1F4D6;</div>
+            <div class="pb-empty-text">Select a playbook to view details</div>
+            <div class="pb-empty-sub">Playbooks are do/don't patterns learned from past sessions</div>
+        </div>
+
+        <!-- Detail view -->
+        <div class="pb-detail-view" id="pbDetailView" style="display:none;">
+            <div class="pb-detail-toolbar">
+                <div class="pb-detail-header-info">
+                    <h2 class="pb-detail-title" id="pbDetailTitle"></h2>
+                    <div class="pb-detail-meta" id="pbDetailMeta"></div>
+                </div>
+                <div class="pb-detail-actions">
+                    <button class="pb-btn primary" id="pbEditBtn">Edit</button>
+                    <button class="pb-btn danger" id="pbDeleteBtn">Delete</button>
+                </div>
+            </div>
+            <div class="pb-detail-content" id="pbDetailContent"></div>
+        </div>
+
+        <!-- Edit / Create form -->
+        <div class="pb-form" id="pbForm" style="display:none;">
+            <div class="pb-form-toolbar">
+                <h2 class="pb-form-title" id="pbFormTitle">New Playbook</h2>
+                <div class="pb-form-actions">
+                    <button class="pb-btn secondary" id="pbCancelBtn">Cancel</button>
+                    <button class="pb-btn primary" id="pbSaveBtn">Save</button>
+                </div>
+            </div>
+            <div class="pb-form-fields" id="pbFormFields">
+                <div class="pb-form-row">
+                    <div class="pb-form-group">
+                        <label class="pb-form-label">Name <span class="required">*</span></label>
+                        <input type="text" class="pb-input" id="fName" placeholder="Short descriptive name...">
+                    </div>
+                    <div class="pb-form-group">
+                        <label class="pb-form-label">Task Type <span class="required">*</span></label>
+                        <select class="pb-select" id="fTaskType">
+                            <option value="batch-processing">Batch Processing</option>
+                            <option value="web-research">Web Research</option>
+                            <option value="code-generation">Code Generation</option>
+                            <option value="document-processing">Document Processing</option>
+                            <option value="data-transformation">Data Transformation</option>
+                            <option value="orchestration">Orchestration</option>
+                            <option value="interactive">Interactive</option>
+                            <option value="file-management">File Management</option>
+                            <option value="other">Other</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="pb-form-row">
+                    <div class="pb-form-group">
+                        <label class="pb-form-label">Rating</label>
+                        <select class="pb-select" id="fRating">
+                            <option value="good">Good (recommended pattern)</option>
+                            <option value="bad">Bad (anti-pattern)</option>
+                        </select>
+                    </div>
+                    <div class="pb-form-group">
+                        <label class="pb-form-label">Tags</label>
+                        <input type="text" class="pb-input" id="fTags" placeholder="Comma-separated tags...">
+                    </div>
+                </div>
+                <div class="pb-form-group">
+                    <label class="pb-form-label">Trigger Description</label>
+                    <input type="text" class="pb-input" id="fTrigger" placeholder="When should this playbook activate?">
+                </div>
+                <div class="pb-form-group">
+                    <label class="pb-form-label">DO Pattern (recommended approach) <span class="required">*</span></label>
+                    <textarea class="pb-textarea pb-code" id="fDoPattern" rows="8"
+                              placeholder="Pseudo-code of what works well..."></textarea>
+                </div>
+                <div class="pb-form-group">
+                    <label class="pb-form-label">DON'T Pattern (anti-pattern)</label>
+                    <textarea class="pb-textarea pb-code" id="fDontPattern" rows="8"
+                              placeholder="Pseudo-code of what to avoid..."></textarea>
+                </div>
+                <div class="pb-form-group">
+                    <label class="pb-form-label">Reasoning</label>
+                    <textarea class="pb-textarea" id="fReasoning" rows="3"
+                              placeholder="Why this pattern matters..."></textarea>
+                </div>
+            </div>
+        </div>
+    </main>
+</div>
+
+<!-- Delete confirmation modal -->
+<div class="pb-modal-overlay" id="pbModalOverlay" style="display:none;">
+    <div class="pb-modal">
+        <div class="pb-modal-title">Confirm Delete</div>
+        <div class="pb-modal-body" id="pbModalBody">
+            Are you sure you want to delete this playbook?
+        </div>
+        <div class="pb-modal-actions">
+            <button class="pb-btn secondary" id="pbModalCancel">Cancel</button>
+            <button class="pb-btn danger" id="pbModalConfirm">Delete</button>
+        </div>
+    </div>
+</div>
+
+<!-- Toast -->
+<div class="pb-toast" id="pbToast"></div>
+
+<script src="/static/playbooks-editor.js"></script>
+</body>
+</html>

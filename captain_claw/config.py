@@ -294,6 +294,7 @@ class ToolsConfig(BaseModel):
         "contacts",
         "scripts",
         "apis",
+        "playbooks",
         "typesense",
         "datastore",
         "personality",
@@ -312,8 +313,8 @@ class ToolsConfig(BaseModel):
     require_confirmation: list[str] = ["shell", "write"]
     plugin_dirs: list[str] = ["skills/tools"]
 
-    # Personality tool is always available — re-inject if removed by user.
-    _ALWAYS_ENABLED: frozenset[str] = frozenset({"personality", "botport"})
+    # These tools are always available — re-inject if removed by user.
+    _ALWAYS_ENABLED: frozenset[str] = frozenset({"personality", "botport", "playbooks"})
 
     @model_validator(mode="after")
     def _ensure_always_enabled(self) -> "ToolsConfig":

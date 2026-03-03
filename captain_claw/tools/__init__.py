@@ -35,6 +35,7 @@ from captain_claw.tools.apis import ApisTool
 from captain_claw.tools.typesense import TypesenseTool
 from captain_claw.tools.datastore import DatastoreTool
 from captain_claw.tools.termux import TermuxTool
+from captain_claw.tools.playbooks import PlaybooksTool
 from captain_claw.tools.botport import BotPortTool
 
 __all__ = [
@@ -71,5 +72,6 @@ __all__ = [
     "TypesenseTool",
     "DatastoreTool",
     "TermuxTool",
+    "PlaybooksTool",
     "BotPortTool",
 ]

@@ -18,7 +18,7 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Per-session model selection | Keep one session on Claude, another on GPT, another on Ollama |
 | Persistent multi-session workflows | Resume any session exactly where you left off |
 | Built-in safety guards | Input, output, and script/tool checks before anything runs |
-| 28 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, image gen/OCR/vision, Google Drive/Calendar/Gmail, todo, contacts, scripts, APIs, datastore, deep memory, personality, BotPort, Termux (Android) |
+| 29 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, image gen/OCR/vision, Google Drive/Calendar/Gmail, todo, contacts, scripts, APIs, datastore, deep memory, playbooks, personality, BotPort, Termux (Android) |
 | Personality system | Dual-profile system — global agent identity plus per-user profiles for tailored responses |
 | Skills system | OpenClaw-compatible skills with auto-discovery and GitHub install |
 | Orchestrator / DAG mode | Decompose complex tasks into parallel multi-session execution |
@@ -29,6 +29,7 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Cross-session to-do memory | Persistent task list shared across sessions with auto-capture |
 | Cross-session script memory | Persistent script/file tracking with auto-capture from write tool |
 | Cross-session API memory | Persistent API endpoint tracking with auto-capture from web_fetch |
+| Cross-session playbook memory | Rate sessions to auto-distill reusable orchestration patterns (do/don't pseudo-code) with auto-injection |
 | Datastore | SQLite-backed relational tables managed by the agent, with protection rules, import/export, web dashboard, and table export via UI |
 | Chunked processing pipeline | Run small-context models (20k–32k tokens) on large content via automatic content chunking |
 | Cron scheduling | Interval, daily, and weekly tasks inside the runtime |
@@ -220,7 +221,7 @@ Sessions are first-class. Create named sessions for separate projects, switch in
 
 ### Tools
 
-Captain Claw ships with 28 built-in tools. The agent picks the right tool for each task automatically.
+Captain Claw ships with 29 built-in tools. The agent picks the right tool for each task automatically.
 
 | Tool | What it does |
 |---|---|
@@ -248,6 +249,7 @@ Captain Claw ships with 28 built-in tools. The agent picks the right tool for ea
 | `datastore` | Manage relational data tables with CRUD, import/export, raw SQL, and protection rules |
 | `personality` | Read or update the agent personality and per-user profiles |
 | `typesense` | Index, search, and manage documents in deep memory (Typesense) |
+| `playbooks` | Persistent cross-session orchestration pattern memory with auto-distillation |
 | `botport` | Consult specialist agents through the BotPort agent-to-agent network |
 | `termux` | Interact with Android device via Termux API (camera, battery, GPS, torch) |
 
@@ -291,7 +293,7 @@ tools:
             "image_gen", "image_ocr", "image_vision",
             "pocket_tts", "send_mail", "google_drive", "google_calendar",
             "google_mail", "todo", "contacts", "scripts", "apis",
-            "datastore", "personality", "botport", "termux"]
+            "datastore", "playbooks", "personality", "botport", "termux"]
 
 web:
   enabled: true
@@ -340,6 +342,8 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 
 - **[Deep Memory (Typesense)](USAGE.md#deep-memory-typesense)** — Long-term searchable archive backed by Typesense. Indexes processed items from the scale loop, web fetches, and manual input. Hybrid keyword + vector search. Separate from the SQLite-backed semantic memory. Includes a [web dashboard](USAGE.md#deep-memory-dashboard) for browsing, searching, and managing indexed documents.
 
+- **[Playbooks](USAGE.md#cross-session-playbook-memory)** — Persistent cross-session orchestration pattern memory. Rate sessions as good/bad to auto-distill reusable do/don't pseudo-code patterns. Playbooks are auto-injected into planning context when similar tasks are detected, improving decision quality over time. Includes a [web editor](USAGE.md#playbooks-editor) and REST API.
+
 - **[Send mail](USAGE.md#send-mail)** — SMTP, Mailgun, or SendGrid. Supports attachments up to 25 MB.
 
 - **[Termux (Android)](USAGE.md#termux)** — Run Captain Claw on Android via Termux. Take photos with front/back camera (auto-sent to Telegram), get GPS location, check battery status, and toggle the flashlight — all through the Termux API.
@@ -368,7 +372,7 @@ ruff check captain_claw/
 |---|---|
 | `captain_claw/agent.py` | Main orchestration logic |
 | `captain_claw/llm/` | Provider abstraction (OpenAI, Anthropic, Gemini, Ollama) |
-| `captain_claw/tools/` | Tool registry and 28 tool implementations |
+| `captain_claw/tools/` | Tool registry and 29 tool implementations |
 | `captain_claw/personality.py` | Agent and per-user personality profiles |
 | `captain_claw/session/` | SQLite-backed session persistence |
 | `captain_claw/skills.py` | Skill discovery, loading, and invocation |

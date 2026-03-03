@@ -195,6 +195,67 @@ html, body {
     flex-shrink: 0;
 }
 
+/* ─── Playbook Selector ─────────────────────────────── */
+
+.playbook-selector-wrap {
+    position: relative;
+}
+
+.playbook-badge {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    background: rgba(63, 185, 80, 0.08);
+    border: 1px solid rgba(63, 185, 80, 0.4);
+    border-radius: var(--radius);
+    font-size: 12px;
+    color: var(--green);
+    font-family: var(--font);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.playbook-badge:hover {
+    background: rgba(63, 185, 80, 0.16);
+    border-color: rgba(63, 185, 80, 0.6);
+}
+.playbook-icon {
+    font-size: 13px;
+}
+
+.playbook-dropdown {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    min-width: 280px;
+    max-width: 400px;
+    max-height: 400px;
+    overflow-y: auto;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    z-index: 40;
+    overflow-x: hidden;
+    animation: dropdownFadeIn 0.15s ease;
+}
+.playbook-dropdown.hidden { display: none; }
+
+.playbook-dropdown .pd-section-label {
+    padding: 8px 14px 4px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border-light);
+}
+
+.playbook-dropdown .model-option-name {
+    font-family: var(--font);
+}
+
 /* ─── Persona Selector ──────────────────────────────── */
 
 .persona-selector-wrap {

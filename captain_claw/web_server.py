@@ -268,6 +268,15 @@ class WebServer:
             up = load_user_personality(active_pid)
             personality_name = up.name if up else ""
 
+        # Active playbook override for the web UI.
+        active_pbid = getattr(self.agent, "_playbook_override", None) or ""
+        playbook_name = getattr(self.agent, "_playbook_override_name", "") or ""
+        if not playbook_name:
+            if active_pbid == "__none__":
+                playbook_name = "None"
+            elif not active_pbid:
+                playbook_name = "Auto"
+
         return {
             "id": s.id,
             "name": s.name,
@@ -282,6 +291,8 @@ class WebServer:
             ],
             "personality_id": active_pid or "",
             "personality_name": personality_name,
+            "playbook_id": active_pbid,
+            "playbook_name": playbook_name,
         }
 
     # ── Cron runtime context ─────────────────────────────────────────
@@ -734,6 +745,35 @@ class WebServer:
         from captain_claw.web.static_pages import serve_datastore
         return await serve_datastore(self, request)
 
+    async def _serve_playbooks(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_playbooks
+        return await serve_playbooks(self, request)
+
+    # Playbooks REST
+    async def _pb_list(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_playbooks import list_playbooks
+        return await list_playbooks(self, request)
+
+    async def _pb_search(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_playbooks import search_playbooks
+        return await search_playbooks(self, request)
+
+    async def _pb_get(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_playbooks import get_playbook
+        return await get_playbook(self, request)
+
+    async def _pb_create(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_playbooks import create_playbook
+        return await create_playbook(self, request)
+
+    async def _pb_update(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_playbooks import update_playbook
+        return await update_playbook(self, request)
+
+    async def _pb_delete(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_playbooks import delete_playbook
+        return await delete_playbook(self, request)
+
     # Datastore REST
     async def _ds_list_tables(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_datastore import list_tables
@@ -962,6 +1002,13 @@ class WebServer:
         app.router.add_post("/api/datastore/tables/{name}/protections", self._ds_add_protection)
         app.router.add_delete("/api/datastore/tables/{name}/protections", self._ds_remove_protection)
         app.router.add_post("/api/datastore/upload", self._ds_upload_and_import)
+        # Playbooks API
+        app.router.add_get("/api/playbooks", self._pb_list)
+        app.router.add_get("/api/playbooks/search", self._pb_search)
+        app.router.add_post("/api/playbooks", self._pb_create)
+        app.router.add_get("/api/playbooks/{id}", self._pb_get)
+        app.router.add_patch("/api/playbooks/{id}", self._pb_update)
+        app.router.add_delete("/api/playbooks/{id}", self._pb_delete)
         # Deep memory (Typesense) API
         app.router.add_get("/api/deep-memory/status", self._dm_status)
         app.router.add_get("/api/deep-memory/facets", self._dm_facets)
@@ -995,6 +1042,7 @@ class WebServer:
             app.router.add_get("/files", self._serve_files)
             app.router.add_get("/onboarding", self._serve_onboarding)
             app.router.add_get("/datastore", self._serve_datastore)
+            app.router.add_get("/playbooks", self._serve_playbooks)
             app.router.add_get("/favicon.ico", self._serve_favicon)
         return app
 

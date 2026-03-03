@@ -74,3 +74,7 @@ async def serve_onboarding(server: WebServer, request: web.Request) -> web.FileR
 
 async def serve_datastore(server: WebServer, request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "datastore.html")
+
+
+async def serve_playbooks(server: WebServer, request: web.Request) -> web.FileResponse:
+    return web.FileResponse(STATIC_DIR / "playbooks.html")

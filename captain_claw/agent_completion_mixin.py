@@ -438,4 +438,62 @@ class AgentCompletionMixin:
         await self._auto_capture_contacts(effective_user_input, final_response)
         await self._auto_capture_scripts(effective_user_input, final_response)
         await self._auto_capture_apis(effective_user_input, final_response)
+
+        # ── Playbook rating hint (once per session, complex tasks only) ──
+        final_response = self._maybe_append_playbook_hint(
+            final_response,
+            task_contract=task_contract,
+            scale_completed=_scale_completed,
+            planning_pipeline=planning_pipeline,
+            turn_start_idx=turn_start_idx,
+        )
+
         return True, final_response, finish_success, completion_feedback, python_worker_attempted
+
+    # ------------------------------------------------------------------
+    # Playbook rating hint
+    # ------------------------------------------------------------------
+
+    _PLAYBOOK_HINT = (
+        "\n\n---\n"
+        "💡 *If this worked well or could be improved, say "
+        "\"rate good\" or \"rate bad\" to save this pattern for future tasks.*"
+    )
+
+    def _maybe_append_playbook_hint(
+        self,
+        response: str,
+        *,
+        task_contract: dict | None,
+        scale_completed: bool,
+        planning_pipeline: dict | None,
+        turn_start_idx: int,
+    ) -> str:
+        """Append a one-time playbook rating hint after complex tasks.
+
+        Criteria (all must be true):
+        1. Complex task: used a task contract, scale loop, or pipeline.
+        2. Hint not yet shown this session (``_playbook_hint_shown``).
+        3. At least 3 tool calls happened this turn (real work, not a
+           quick answer).
+        """
+        # Already shown this session?
+        if getattr(self, "_playbook_hint_shown", False):
+            return response
+
+        # Was this a complex task?
+        is_complex = bool(task_contract) or scale_completed or bool(planning_pipeline)
+        if not is_complex:
+            return response
+
+        # Count tool calls this turn.
+        tool_call_count = 0
+        if self.session:
+            for msg in self.session.messages[turn_start_idx:]:
+                if msg.get("role") == "tool":
+                    tool_call_count += 1
+        if tool_call_count < 3:
+            return response
+
+        self._playbook_hint_shown = True
+        return response + self._PLAYBOOK_HINT

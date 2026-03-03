@@ -512,6 +512,13 @@ class AgentReasoningMixin:
             members = list_task_plan.get("members")
             if isinstance(members, list) and members:
                 list_member_lines = "\n".join(f"{idx}. {str(member)}" for idx, member in enumerate(members, start=1))
+        # Retrieve relevant playbook patterns for planner context.
+        playbook_block = ""
+        if hasattr(self, "_build_playbook_block"):
+            try:
+                playbook_block = await self._build_playbook_block(user_input)
+            except Exception as _pb_err:
+                log.debug("Playbook retrieval skipped", error=str(_pb_err))
         base_messages = [
             Message(
                 role="system",
@@ -525,6 +532,7 @@ class AgentReasoningMixin:
                     recent_source_urls=source_lines,
                     require_all_sources=str(bool(require_all_sources)).lower(),
                     extracted_list_members=list_member_lines,
+                    playbook_block=playbook_block,
                 ),
             ),
         ]
