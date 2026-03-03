@@ -1,80 +1,78 @@
-# Captain Claw v0.3.0 Release Notes
+# Captain Claw v0.3.2 Release Notes
 
-**Release title:** Chunked Processing, Personality System & Termux
+**Release title:** Playbooks — Learn from Past Sessions
 
-**Release date:** 2026-03-01
+**Release date:** 2026-03-03
 
 ## Highlights
 
-Major feature release — small-context models (20k-32k tokens) can now handle arbitrarily large content via automatic chunked processing, a dual-profile personality system tailors responses per user, and the new Termux tool brings Captain Claw to Android devices. Plus: web UI authentication, XLSX upload to datastore, and image auto-resize before vision calls.
+Feature release — the agent can now learn from past sessions via **playbooks**, a persistent cross-session orchestration pattern memory. Rate sessions as good or bad to auto-distill reusable do/don't pseudo-code patterns that are injected into planning context when similar tasks are detected. Includes a web UI editor, chat header override selector, and full REST API.
 
 ## New Features
 
-### Chunked Processing Pipeline
-- Enables small-context models (20k-32k tokens) to process content that far exceeds their context window
-- Context budget guard automatically detects when content exceeds available space and triggers chunking
-- Map phase splits content into sequential overlapping chunks and processes each with full instructions via isolated LLM calls
-- Reduce phase combines partial results via LLM synthesis (summarize) or simple join (concatenate)
-- Hooks into both the normal conversation flow (tool result interception) and the scale loop micro-loop
-- Content-extraction tools automatically chunked: `read`, `pdf_extract`, `docx_extract`, `xlsx_extract`, `pptx_extract`, `web_fetch`, `web_get`
-- Configurable: auto-threshold, output reserve, chunk overlap, max chunks, and combine strategy
-- New settings UI section under Model & LLM for all chunked processing parameters
-- Tested: 108k token file split into 9 chunks, processed in 48.5 seconds, reduced to 5.7k tokens
+### Playbooks — Cross-Session Orchestration Pattern Memory
+- Rate sessions with "rate good" or "rate bad" to auto-distill a reusable playbook from the session's tool trace and message history
+- Standalone LLM call extracts a compact session summary (max 2000 chars) and ordered tool trace (max 30 entries), then produces structured do/don't pseudo-code patterns
+- 9 task type classifications: batch-processing, web-research, code-generation, document-processing, data-transformation, orchestration, interactive, file-management, other
+- Auto-injection: when a new task arrives, the agent classifies it by task type using keyword heuristics and retrieves up to 2 matching playbooks into the planning context
+- Usage tracking: each playbook tracks retrieval count and last-used timestamp
+- Manual creation via the `playbooks` tool `add` action or REST API
+- 7 tool actions: `add`, `list`, `search`, `info`, `update`, `remove`, `rate`
 
-### Personality System
-- Dual-profile architecture: global agent identity (name, background, expertise) plus per-user profiles
-- Per-user profiles tailor responses to each user's perspective and preferences
-- New `personality` tool for reading and updating profiles from conversation
-- REST API endpoints for personality management
-- Settings page integration for editing agent and user profiles from the web UI
-- Telegram users get automatic per-user profiles
+### Playbooks Web UI Editor
+- New `/playbooks` page linked from the homepage
+- Browse all playbooks with task type badges, usage counts, and ratings
+- Create, edit, and delete playbooks from the UI
+- View full do/don't patterns, trigger descriptions, and reasoning
 
-### Termux Tool (Android)
-- Run Captain Claw on Android via Termux
-- Take photos with front/back camera (auto-sent to Telegram)
-- Get GPS location, check battery status, toggle flashlight
-- All operations via Termux API integration
+### Playbook Override Selector
+- New dropdown in the chat header (next to model selector)
+- Three modes: Auto (default — system selects based on task type), None (disable injection), or pick a specific playbook
+- Override persists for the session and is reflected in session info
 
-### Web UI Authentication
-- Optional authentication layer for the web UI
-- Protects web interface when exposed on a network
+### Playbook Rating Hint
+- After complex tasks (3+ tool calls with task contracts, scale loop, or pipeline), the agent appends a one-time hint suggesting the user rate the session
+- Shown once per session to avoid noise
 
-### XLSX Upload to Datastore
-- Upload Excel files directly to datastore tables from the web dashboard
-- Automatic column detection and data import
+### Playbooks REST API
+- `GET /api/playbooks` — list all playbooks (up to 200, optional `?task_type=` filter)
+- `GET /api/playbooks/search` — keyword search (`?q=` required, optional `?task_type=` filter)
+- `GET /api/playbooks/{id}` — get one playbook by ID
+- `POST /api/playbooks` — create a new playbook
+- `PATCH /api/playbooks/{id}` — partial update
+- `DELETE /api/playbooks/{id}` — delete a playbook
 
-### Image Auto-Resize
-- Images are automatically resized before being sent to vision-capable LLMs
-- Reduces token usage and speeds up processing for large images
+## Other Changes
 
-## Improvements
-
-### Gemini Timeout Handling
-- Added 180-second timeout wrapper for Gemini sync completion calls
-- Previously the agent could hang indefinitely if the Gemini API was slow or unresponsive
-- Both `asyncio.wait_for` and litellm `timeout` kwarg applied
-
-### Scale Loop Enhancements
-- Improved micro-loop integration with chunked processing support
-- Better handling of large content items in multi-step processing
-
-### Mobile Usage
-- Updated usage instructions with mobile-specific guidance
+- Tool count: 29 built-in tools (was 28)
+- Playbooks tool is always enabled (alongside personality and botport)
+- Playbook context injected into task contract planner and scale loop planning
+- Session metadata tracks playbook ratings
 
 ## Internal
 
-- New `agent_chunked_processing_mixin.py` (837 lines) — full chunked processing pipeline
-- New `personality.py` — personality profile management
-- New `tools/personality.py` — personality tool implementation
-- New `tools/termux.py` — Termux API tool
-- New `web/auth.py` — web authentication middleware
-- New `web/rest_personality.py` — personality REST endpoints
-- New `web/rest_file_upload.py` — file upload handling for datastore
-- Updated `agent.py` — added `AgentChunkedProcessingMixin` to Agent class MRO
-- Updated `agent_tool_loop_mixin.py` — chunked processing hook in `_handle_tool_calls()`
-- Updated `agent_scale_loop_mixin.py` — scale loop micro-loop chunked processing integration
-- Updated `config.py` — added `ChunkedProcessingConfig` with 6 settings
-- Updated `llm/__init__.py` — Gemini timeout fix
-- Updated `web/rest_settings.py` — chunked processing settings UI section
-- Updated `README.md` and `USAGE.md` — documentation for all new features
-- 43 files changed, 4,035 insertions, 88 deletions
+- New `agent_playbook_mixin.py` — playbook retrieval, distillation, context injection, and override handling
+- New `tools/playbooks.py` — playbooks tool with 7 actions
+- New `web/rest_playbooks.py` — playbooks REST API endpoints
+- New `web/static/playbooks.html` — playbooks editor page
+- New `web/static/playbooks-editor.js` — playbooks editor JavaScript
+- New `web/static/playbooks.css` — playbooks editor styles
+- New `instructions/playbook_distill_system_prompt.md` — LLM distillation system prompt
+- New `instructions/playbook_distill_user_prompt.md` — LLM distillation user prompt template
+- Updated `agent.py` — added `AgentPlaybookMixin` to Agent class MRO
+- Updated `agent_completion_mixin.py` — playbook rating hint after complex tasks
+- Updated `agent_context_mixin.py` — playbook context injection into message assembly, tool registration
+- Updated `agent_orchestration_mixin.py` — playbook injection into orchestrator planning
+- Updated `agent_reasoning_mixin.py` — playbook injection into scale loop planning
+- Updated `config.py` — added `playbooks` to default enabled tools and always-enabled set
+- Updated `session/__init__.py` — PlaybookEntry model, CRUD operations, search, usage tracking
+- Updated `web/ws_handler.py` — playbook list in welcome message, `set_playbook` message handler
+- Updated `web/static/app.js` — playbook override selector UI logic
+- Updated `web/static/index.html` — playbook badge and dropdown in chat header
+- Updated `web/static/style.css` — playbook selector styles
+- Updated `web/static/home.html` — playbooks card on homepage
+- Updated `web/static_pages.py` — serve playbooks page
+- Updated `web_server.py` — playbook REST routes, session info playbook fields
+- Updated `instructions/task_contract_planner_user_prompt.md` — playbook block injection
+- Updated `README.md` and `USAGE.md` — documentation for playbooks feature
+- 22 files changed, 787 insertions, 10 deletions
