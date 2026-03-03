@@ -539,10 +539,18 @@ class DatastoreTool(Tool):
         where_raw = kwargs.get("where")
         where = _parse_json_str(where_raw, "where") if where_raw else None
 
-        # Build output path in saved/ directory
-        base = kwargs.get("_saved_base_path") or kwargs.get("_runtime_base_path") or "."
+        # Build output path in saved/ directory.
+        # _saved_base_path already points to <runtime>/saved so we must NOT
+        # add another "saved" segment; _runtime_base_path needs it appended.
+        saved_base = kwargs.get("_saved_base_path")
+        runtime_base = kwargs.get("_runtime_base_path")
         session_id = kwargs.get("_session_id", "default")
-        output_dir = Path(base) / "saved" / "output" / str(session_id)
+        if saved_base:
+            output_dir = Path(saved_base) / "output" / str(session_id)
+        elif runtime_base:
+            output_dir = Path(runtime_base) / "saved" / "output" / str(session_id)
+        else:
+            output_dir = Path(".") / "saved" / "output" / str(session_id)
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"{table}.{fmt}"
 

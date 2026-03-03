@@ -234,6 +234,23 @@ class AgentToolLoopMixin:
                 return True
         return False
 
+    def _turn_has_successful_datastore_export(self, turn_start_idx: int) -> bool:
+        """Check whether a successful datastore export was performed this turn."""
+        if not self.session:
+            return False
+        for msg in self.session.messages[turn_start_idx:]:
+            if msg.get("role") != "tool":
+                continue
+            if str(msg.get("tool_name", "")).strip().lower() != "datastore":
+                continue
+            args = msg.get("tool_arguments") or {}
+            if str(args.get("action", "")).strip().lower() != "export":
+                continue
+            content = str(msg.get("content", "")).strip().lower()
+            if not content.startswith("error:"):
+                return True
+        return False
+
     @staticmethod
     def _clip_tool_output_for_rewrite(raw: str, max_chars: int) -> tuple[str, str]:
         """Clip tool output while preserving coverage across multiple blocks/sources."""

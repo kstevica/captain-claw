@@ -91,6 +91,43 @@ class AgentCompletionMixin:
                     turn_usage=turn_usage,
                 )
 
+        # ── final_action=write_file enforcement ────────────────────────
+        # When the list task plan requires file output, verify that a
+        # write or datastore-export tool was actually called this turn.
+        # Without this gate the LLM can claim it saved a file while
+        # never invoking the tool, causing hallucinated file paths.
+        _final_action = str(list_task_plan.get("final_action", "")).strip().lower()
+        _output_strategy = str(list_task_plan.get("output_strategy", "")).strip().lower()
+        if (
+            _final_action == "write_file"
+            and _output_strategy in ("single_file", "file_per_item")
+            and bool(list_task_plan.get("enabled", False))
+            and not _scale_completed
+        ):
+            has_write_or_export = (
+                self._turn_has_successful_tool(turn_start_idx, "write")
+                or self._turn_has_successful_datastore_export(turn_start_idx)
+            )
+            if not has_write_or_export and iteration < (hard_turn_iterations - 1):
+                completion_feedback = (
+                    "Completion gate: final_action is write_file but no file was actually "
+                    "written or exported this turn.\n"
+                    "You MUST call the write tool or datastore(action='export') to save "
+                    "the output to a file before responding.\n"
+                    "Do NOT just describe the file path — actually invoke the tool."
+                )
+                self._emit_tool_output(
+                    "completion_gate",
+                    {
+                        "step": "write_file_enforcement",
+                        "passed": False,
+                        "final_action": _final_action,
+                        "output_strategy": _output_strategy,
+                    },
+                    completion_feedback,
+                )
+                return False, "", finish_success, completion_feedback, python_worker_attempted
+
         # ── Python worker enforcement ────────────────────────────────
         if enforce_python_worker_mode:
             worker_ran_this_iteration = False
