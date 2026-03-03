@@ -338,6 +338,35 @@ class AgentToolLoopMixin:
                     return True
         return False
 
+    def _turn_collect_datastore_saves(self, turn_start_idx: int) -> list[dict[str, Any]]:
+        """Collect successful datastore save operations from this turn.
+
+        Returns list of dicts with keys: ``action``, ``table``, ``content``.
+        Only includes data-writing actions that should be verified:
+        ``create_table``, ``insert``, ``import_file``, ``update``,
+        ``update_column``.
+        """
+        _SAVE_ACTIONS = {"create_table", "insert", "import_file", "update", "update_column"}
+        saves: list[dict[str, Any]] = []
+        if not self.session:
+            return saves
+        for msg in self.session.messages[turn_start_idx:]:
+            if msg.get("role") != "tool":
+                continue
+            if str(msg.get("tool_name", "")).strip().lower() != "datastore":
+                continue
+            args = msg.get("tool_arguments") or {}
+            action = str(args.get("action", "")).strip().lower()
+            if action not in _SAVE_ACTIONS:
+                continue
+            content = str(msg.get("content", "")).strip()
+            if content.lower().startswith("error:"):
+                continue
+            table = str(args.get("table", "")).strip()
+            if table:
+                saves.append({"action": action, "table": table, "content": content})
+        return saves
+
     @staticmethod
     def _clip_tool_output_for_rewrite(raw: str, max_chars: int) -> tuple[str, str]:
         """Clip tool output while preserving coverage across multiple blocks/sources."""

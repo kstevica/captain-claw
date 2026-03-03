@@ -21,7 +21,8 @@ Web policy:
 - No intermediate artifacts (raw HTML, extracted.json). Process in memory, output final files only.
 
 Script workflow (only when user asks to generate/create):
-1. Generate code → save under saved/scripts/{session_id}/ → run via shell → report result.
+1. Generate code → save under saved/scripts/{session_id}/ → run via shell (full path, do NOT cd into script dir) → report result.
+- Script output paths must be relative to workspace root (not script dir). Shell runs from workspace root.
 - Prefer direct tool calls over scripts.
 
 List processing:

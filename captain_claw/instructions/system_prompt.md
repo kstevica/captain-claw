@@ -61,8 +61,9 @@ Script/tool generation workflow:
 - Script workflow steps:
   1) Generate runnable code.
   2) Save it under `saved/scripts/{session_id}/` (or `saved/tools/{session_id}/` for reusable helper tools) using the write tool.
-  3) Run it from that directory using the shell tool (`cd <dir> && <run command>`).
+  3) Run it using the shell tool with the full script path: `shell(command='python3 saved/scripts/{session_id}/script_name.py')`. Do NOT cd into the script directory — the shell executes from the workspace root.
   4) Report exact saved path and execution result.
+- IMPORTANT: In generated scripts, all output file paths MUST be relative to the workspace root, NOT the script's own directory. The shell tool runs commands with the workspace root as the working directory, so paths like `saved/showcase/{session_id}/report.pdf` resolve correctly.
 - For list-heavy tasks (for example "for each", "top N", "all sources/items"), first extract the list members from user request plus available context/content.
 - After extraction, choose strategy:
   - `direct` loop strategy: keep member list in task memory and process members one-by-one with tool calls/instructions.

@@ -4,6 +4,7 @@ This mixin handles the logic that decides whether a turn's output is
 "done" or needs more iterations:
 
 - Auto-write of requested output files
+- Datastore save verification
 - Python worker mode enforcement
 - List member coverage evaluation
 - Task contract completion validation
@@ -26,6 +27,52 @@ log = get_logger(__name__)
 
 class AgentCompletionMixin:
     """Completion gate and response finalization."""
+
+    async def _verify_datastore_saves(
+        self,
+        saves: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Verify that datastore save operations actually persisted.
+
+        Queries the datastore to confirm that tables exist and contain
+        the expected data.  Returns a list of failed verifications,
+        each with keys ``action``, ``table``, and ``reason``.
+        """
+        from captain_claw.datastore import get_datastore_manager
+
+        dm = get_datastore_manager()
+        failures: list[dict[str, Any]] = []
+
+        # Deduplicate: only verify the last save per table.
+        tables_to_verify: dict[str, dict[str, Any]] = {}
+        for save in saves:
+            tables_to_verify[save["table"]] = save
+
+        for table_name, save in tables_to_verify.items():
+            action = save["action"]
+            try:
+                info = await dm.describe_table(table_name)
+                # For insert/import_file, the table must have rows.
+                if action in ("insert", "import_file") and info.row_count == 0:
+                    failures.append({
+                        "action": action,
+                        "table": table_name,
+                        "reason": (
+                            f"Table '{table_name}' exists but has 0 rows "
+                            f"after {action}"
+                        ),
+                    })
+            except Exception as exc:
+                failures.append({
+                    "action": action,
+                    "table": table_name,
+                    "reason": (
+                        f"Table '{table_name}' could not be verified "
+                        f"after {action}: {exc}"
+                    ),
+                })
+
+        return failures
 
     async def _attempt_finalize_response(
         self,
@@ -115,12 +162,16 @@ class AgentCompletionMixin:
                 completion_feedback = (
                     "Completion gate: final_action is write_file but no output file was "
                     "actually produced this turn.\n"
-                    "You MUST call datastore(action='export') to save the output file "
-                    "before responding.\n"
-                    "For cross-table queries (JOINs), pass the sql_query parameter: "
-                    "datastore(action='export', format='xlsx', sql_query='SELECT ... "
-                    "FROM t1 JOIN t2 ON ...', table='output_name').\n"
-                    "Do NOT just describe the file path — actually invoke the export tool."
+                    "You MUST produce the file using one of these approaches:\n"
+                    "1. datastore(action='export') — for tabular data (XLSX/CSV). "
+                    "For JOINs: datastore(action='export', format='xlsx', "
+                    "sql_query='SELECT ... FROM t1 JOIN t2 ON ...', table='output_name').\n"
+                    "2. write a Python script to scripts/ then execute it via "
+                    "shell(command='python3 <script_path>') — for non-tabular output "
+                    "(PDF, charts, custom formats). IMPORTANT: all output paths in the "
+                    "script must be relative to the workspace root (not the script's "
+                    "directory). Do NOT cd into the script directory.\n"
+                    "Do NOT just describe the file path — actually invoke the tools."
                 )
                 self._emit_tool_output(
                     "completion_gate",
@@ -158,6 +209,52 @@ class AgentCompletionMixin:
                 completion_feedback,
             )
             return False, "", finish_success, completion_feedback, python_worker_attempted
+
+        # ── Datastore save verification ────────────────────────────
+        # When the LLM performed datastore write operations (insert,
+        # import_file, create_table, update, update_column) this turn,
+        # verify the data actually persisted by querying the datastore.
+        # If verification fails, block finalization and tell the LLM
+        # to retry the save operation.
+        ds_saves = self._turn_collect_datastore_saves(turn_start_idx)
+        if ds_saves and iteration < (hard_turn_iterations - 1):
+            ds_failures = await self._verify_datastore_saves(ds_saves)
+            if ds_failures:
+                failed_details = "; ".join(
+                    f"{f['table']} ({f['action']}): {f['reason']}"
+                    for f in ds_failures
+                )
+                completion_feedback = (
+                    "Completion gate: datastore save verification FAILED.\n"
+                    f"The following saves did not persist: {failed_details}\n"
+                    "You MUST retry the datastore save operation to ensure the "
+                    "data is actually stored.\n"
+                    "Call the datastore tool again with the same action and data."
+                )
+                self._emit_tool_output(
+                    "completion_gate",
+                    {
+                        "step": "datastore_save_verification",
+                        "passed": False,
+                        "failed_tables": [f["table"] for f in ds_failures],
+                    },
+                    completion_feedback,
+                )
+                return False, "", finish_success, completion_feedback, python_worker_attempted
+            else:
+                self._emit_tool_output(
+                    "completion_gate",
+                    {
+                        "step": "datastore_save_verification",
+                        "passed": True,
+                        "verified_tables": [s["table"] for s in ds_saves],
+                    },
+                    (
+                        "step=datastore_save_verification\n"
+                        f"passed=True\n"
+                        f"verified_tables={[s['table'] for s in ds_saves]}"
+                    ),
+                )
 
         # ── Python worker enforcement ────────────────────────────────
         if enforce_python_worker_mode:

@@ -289,7 +289,7 @@ class AgentFileOpsMixin:
             "- Complete the full task end-to-end.\n"
             "- If a list of entities/items is discovered, iterate ALL items; never stop after the first item.\n"
             "- Use text extraction by default when parsing fetched pages.\n"
-            f"- Save per-item outputs under saved/showcase/{session_id}/.\n"
+            f"- Save per-item outputs under saved/showcase/{session_id}/ (path relative to workspace root, not script dir).\n"
             "- Use deterministic filenames based on item names where requested.\n"
             "- Print concise progress logs so monitor output shows progress.\n"
             "- Define `main()` and return a JSON-serializable summary object for downstream steps.\n"

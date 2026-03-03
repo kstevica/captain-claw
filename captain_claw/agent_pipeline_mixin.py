@@ -1509,16 +1509,20 @@ class AgentPipelineMixin:
                 if self._is_monitor_only_tool_name(tool_name):
                     continue
                 content = str(msg.get("content", ""))
-                if not content.strip().lower().startswith("error:"):
+                is_error = content.strip().lower().startswith("error:")
+                if not is_error:
                     successful_tool_count += 1
                     if tool_name == "write":
                         write_success_count += 1
-                args = msg.get("tool_arguments")
-                try:
-                    args_text = json.dumps(args, sort_keys=True, ensure_ascii=True) if isinstance(args, dict) else "{}"
-                except Exception:
-                    args_text = "{}"
-                tool_signatures.add(f"{tool_name}|{args_text}")
+                    # Only count successful tool calls as progress;
+                    # failed calls with unique signatures should not
+                    # reset the stagnation counter.
+                    args = msg.get("tool_arguments")
+                    try:
+                        args_text = json.dumps(args, sort_keys=True, ensure_ascii=True) if isinstance(args, dict) else "{}"
+                    except Exception:
+                        args_text = "{}"
+                    tool_signatures.add(f"{tool_name}|{args_text}")
 
         pipeline_index = -1
         pipeline_task_id = ""
