@@ -93,7 +93,10 @@ class AgentCompletionMixin:
 
         # ── final_action=write_file enforcement ────────────────────────
         # When the list task plan requires file output, verify that a
-        # write or datastore-export tool was actually called this turn.
+        # file was actually produced this turn.  Accepted patterns:
+        #   a) datastore(action='export') succeeded (single-table export)
+        #   b) write + shell both succeeded, where shell actually ran
+        #      a written script (not just mkdir/pip install)
         # Without this gate the LLM can claim it saved a file while
         # never invoking the tool, causing hallucinated file paths.
         _final_action = str(list_task_plan.get("final_action", "")).strip().lower()
@@ -104,17 +107,20 @@ class AgentCompletionMixin:
             and bool(list_task_plan.get("enabled", False))
             and not _scale_completed
         ):
-            has_write_or_export = (
-                self._turn_has_successful_tool(turn_start_idx, "write")
-                or self._turn_has_successful_datastore_export(turn_start_idx)
-            )
-            if not has_write_or_export and iteration < (hard_turn_iterations - 1):
+            has_ds_export = self._turn_has_successful_datastore_export(turn_start_idx)
+            has_write = self._turn_has_successful_tool(turn_start_idx, "write")
+            has_script_exec = self._turn_has_successful_script_execution(turn_start_idx)
+            file_produced = has_ds_export or (has_write and has_script_exec)
+            if not file_produced and iteration < (hard_turn_iterations - 1):
                 completion_feedback = (
-                    "Completion gate: final_action is write_file but no file was actually "
-                    "written or exported this turn.\n"
-                    "You MUST call the write tool or datastore(action='export') to save "
-                    "the output to a file before responding.\n"
-                    "Do NOT just describe the file path — actually invoke the tool."
+                    "Completion gate: final_action is write_file but no output file was "
+                    "actually produced this turn.\n"
+                    "You MUST call datastore(action='export') to save the output file "
+                    "before responding.\n"
+                    "For cross-table queries (JOINs), pass the sql_query parameter: "
+                    "datastore(action='export', format='xlsx', sql_query='SELECT ... "
+                    "FROM t1 JOIN t2 ON ...', table='output_name').\n"
+                    "Do NOT just describe the file path — actually invoke the export tool."
                 )
                 self._emit_tool_output(
                     "completion_gate",
@@ -127,6 +133,31 @@ class AgentCompletionMixin:
                     completion_feedback,
                 )
                 return False, "", finish_success, completion_feedback, python_worker_attempted
+
+        # ── Script execution enforcement ─────────────────────────────
+        # If a Python script was written to scripts/ this turn but never
+        # successfully executed, force the LLM to run it before finalizing.
+        # This catches cases where the LLM writes a generation script
+        # (e.g. for PDF/XLSX) but returns text without actually running it.
+        has_unexecuted, unexecuted_path = self._turn_has_unexecuted_script(turn_start_idx)
+        if has_unexecuted and iteration < (hard_turn_iterations - 1):
+            script_name = unexecuted_path.rsplit("/", 1)[-1]
+            completion_feedback = (
+                f"Completion gate: script '{script_name}' was written but never executed.\n"
+                f"You MUST run the script via shell before responding:\n"
+                f"  shell(command='python3 {unexecuted_path}')\n"
+                "The output file will not exist until the script is executed."
+            )
+            self._emit_tool_output(
+                "completion_gate",
+                {
+                    "step": "script_execution_enforcement",
+                    "passed": False,
+                    "script_path": unexecuted_path,
+                },
+                completion_feedback,
+            )
+            return False, "", finish_success, completion_feedback, python_worker_attempted
 
         # ── Python worker enforcement ────────────────────────────────
         if enforce_python_worker_mode:

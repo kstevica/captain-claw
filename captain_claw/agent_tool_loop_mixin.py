@@ -251,6 +251,93 @@ class AgentToolLoopMixin:
                 return True
         return False
 
+    def _turn_has_unexecuted_script(self, turn_start_idx: int) -> tuple[bool, str]:
+        """Check if a script was written this turn but never successfully executed.
+
+        Returns (has_unexecuted, script_path) — the path of the last unexecuted
+        script written during this turn.  Only considers .py files written to
+        a ``scripts/`` directory.
+        """
+        if not self.session:
+            return False, ""
+
+        messages = self.session.messages[turn_start_idx:]
+        # Collect script writes and their positions.
+        script_writes: list[tuple[int, str]] = []
+        # Collect successful shell executions and their positions.
+        shell_successes: list[tuple[int, str]] = []
+
+        for idx, msg in enumerate(messages):
+            if msg.get("role") != "tool":
+                continue
+            tool = str(msg.get("tool_name", "")).strip().lower()
+            args = msg.get("tool_arguments") or {}
+            content = str(msg.get("content", ""))
+
+            if tool == "write":
+                path = str(args.get("path", ""))
+                if path.endswith(".py") and "/scripts/" in path:
+                    script_writes.append((idx, path))
+
+            elif tool == "shell":
+                is_error = content.strip().lower().startswith("error:")
+                if not is_error:
+                    cmd = str(args.get("command", ""))
+                    shell_successes.append((idx, cmd))
+
+        if not script_writes:
+            return False, ""
+
+        # For each written script, check if it was executed successfully AFTER
+        # the write.  Only the last write of a given script matters.
+        last_write_idx, last_write_path = script_writes[-1]
+        script_basename = last_write_path.rsplit("/", 1)[-1]
+
+        for shell_idx, cmd in shell_successes:
+            if shell_idx > last_write_idx and script_basename in cmd:
+                return False, ""  # Script was executed after write
+
+        return True, last_write_path
+
+    def _turn_has_successful_script_execution(self, turn_start_idx: int) -> bool:
+        """Check if a shell command successfully ran a written script this turn.
+
+        Stricter than ``_turn_has_successful_tool(idx, 'shell')`` which also
+        matches ``pip install``, ``mkdir``, etc.
+        """
+        if not self.session:
+            return False
+
+        messages = self.session.messages[turn_start_idx:]
+        # Collect script basenames written this turn.
+        script_basenames: set[str] = set()
+        for msg in messages:
+            if msg.get("role") != "tool":
+                continue
+            if str(msg.get("tool_name", "")).strip().lower() != "write":
+                continue
+            path = str((msg.get("tool_arguments") or {}).get("path", ""))
+            if path.endswith(".py"):
+                script_basenames.add(path.rsplit("/", 1)[-1])
+
+        if not script_basenames:
+            return False
+
+        # Check for a successful shell call that references one of those scripts.
+        for msg in messages:
+            if msg.get("role") != "tool":
+                continue
+            if str(msg.get("tool_name", "")).strip().lower() != "shell":
+                continue
+            content = str(msg.get("content", ""))
+            if content.strip().lower().startswith("error:"):
+                continue
+            cmd = str((msg.get("tool_arguments") or {}).get("command", ""))
+            for basename in script_basenames:
+                if basename in cmd:
+                    return True
+        return False
+
     @staticmethod
     def _clip_tool_output_for_rewrite(raw: str, max_chars: int) -> tuple[str, str]:
         """Clip tool output while preserving coverage across multiple blocks/sources."""

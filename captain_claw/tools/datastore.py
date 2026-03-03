@@ -175,11 +175,11 @@ class DatastoreTool(Tool):
             },
             "sql_query": {
                 "type": "string",
-                "description": "Raw SELECT SQL query (for 'sql' action only).",
+                "description": "Raw SELECT SQL query (for 'sql' and 'export' actions). For export with sql_query, the query result is exported directly — useful for JOINs across tables.",
             },
             "file_path": {
                 "type": "string",
-                "description": "Path to CSV/XLSX file (for import_file).",
+                "description": "Path to CSV/XLSX file. For import_file: source file. For export: desired output path (relative to saved/ directory). If omitted on export, an auto-generated path is used.",
             },
             "sheet": {
                 "type": "string",
@@ -527,32 +527,74 @@ class DatastoreTool(Tool):
     @staticmethod
     async def _export(dm: Any, kwargs: dict[str, Any]) -> ToolResult:
         table = kwargs.get("table")
-        if not table:
-            return ToolResult(success=False, error="'table' is required.")
+        sql_query = kwargs.get("sql_query")
+
+        if not table and not sql_query:
+            return ToolResult(success=False, error="Either 'table' or 'sql_query' is required.")
 
         fmt = kwargs.get("format", "csv").lower()
         if fmt not in ("csv", "json", "xlsx"):
             return ToolResult(success=False, error=f"Unsupported format: {fmt}")
 
-        columns = _parse_columns(kwargs.get("columns"))
-
-        where_raw = kwargs.get("where")
-        where = _parse_json_str(where_raw, "where") if where_raw else None
-
-        # Build output path in saved/ directory.
-        # _saved_base_path already points to <runtime>/saved so we must NOT
-        # add another "saved" segment; _runtime_base_path needs it appended.
+        # Resolve output path.
+        # If file_path is provided, use it (resolve relative to saved base).
+        # Otherwise, auto-generate a path in saved/output/<session_id>/.
+        file_path_str = kwargs.get("file_path")
         saved_base = kwargs.get("_saved_base_path")
         runtime_base = kwargs.get("_runtime_base_path")
         session_id = kwargs.get("_session_id", "default")
-        if saved_base:
-            output_dir = Path(saved_base) / "output" / str(session_id)
-        elif runtime_base:
-            output_dir = Path(runtime_base) / "saved" / "output" / str(session_id)
+
+        if file_path_str:
+            # Resolve the requested file_path relative to the saved base.
+            fp = Path(file_path_str)
+            if not fp.is_absolute():
+                if saved_base:
+                    # file_path is relative — if it starts with "saved/", strip
+                    # that prefix since saved_base already points there.
+                    parts = fp.parts
+                    if parts and parts[0] == "saved":
+                        fp = Path(*parts[1:]) if len(parts) > 1 else fp
+                    fp = Path(saved_base) / fp
+                elif runtime_base:
+                    fp = Path(runtime_base) / file_path_str
+                # else keep as-is (relative to cwd)
+            output_path = fp.resolve()
+            # Ensure the format extension matches
+            if output_path.suffix.lower().lstrip(".") != fmt:
+                output_path = output_path.with_suffix(f".{fmt}")
         else:
-            output_dir = Path(".") / "saved" / "output" / str(session_id)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"{table}.{fmt}"
+            # Auto-generate output path
+            if saved_base:
+                output_dir = Path(saved_base) / "output" / str(session_id)
+            elif runtime_base:
+                output_dir = Path(runtime_base) / "saved" / "output" / str(session_id)
+            else:
+                output_dir = Path(".") / "saved" / "output" / str(session_id)
+            if sql_query:
+                file_stem = table or "query_result"
+            else:
+                file_stem = table
+            output_path = output_dir / f"{file_stem}.{fmt}"
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # sql_query mode: export the result of a raw SELECT (supports JOINs).
+        if sql_query:
+            if fmt == "csv":
+                path = await dm.export_sql_csv(sql_query, output_path)
+            elif fmt == "json":
+                path = await dm.export_sql_json(sql_query, output_path)
+            else:
+                path = await dm.export_sql_xlsx(sql_query, output_path)
+            return ToolResult(
+                success=True,
+                content=f"Exported query result to {path}",
+            )
+
+        # Single-table export mode.
+        columns = _parse_columns(kwargs.get("columns"))
+        where_raw = kwargs.get("where")
+        where = _parse_json_str(where_raw, "where") if where_raw else None
 
         if fmt == "csv":
             path = await dm.export_csv(table, output_path, columns, where)

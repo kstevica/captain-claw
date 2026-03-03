@@ -1350,6 +1350,33 @@ class DatastoreManager:
             json.dump(rows, f, indent=2, ensure_ascii=False, default=str)
         return output_path
 
+    async def export_sql_csv(self, sql: str, output_path: Path) -> Path:
+        """Export a raw SELECT query result to CSV."""
+        result = await self.raw_select(sql)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(result["columns"])
+            writer.writerows(result["rows"])
+        return output_path
+
+    async def export_sql_xlsx(self, sql: str, output_path: Path) -> Path:
+        """Export a raw SELECT query result to XLSX."""
+        result = await self.raw_select(sql)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_xlsx(output_path, result["columns"], result["rows"])
+        return output_path
+
+    async def export_sql_json(self, sql: str, output_path: Path) -> Path:
+        """Export a raw SELECT query result to JSON."""
+        result = await self.raw_select(sql)
+        cols = result["columns"]
+        rows = [dict(zip(cols, row)) for row in result["rows"]]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(rows, f, indent=2, ensure_ascii=False, default=str)
+        return output_path
+
     # ── summary for context injection ────────────────────────────────
 
     async def get_tables_summary(self) -> list[TableInfo]:
