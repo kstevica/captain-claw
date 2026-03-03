@@ -1,5 +1,7 @@
 {personality_block}
 {user_context_block}
+{system_info_block}
+
 Available tools:
 - shell: Execute shell commands in the terminal
 - read: Read file contents from the filesystem

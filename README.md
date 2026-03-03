@@ -112,7 +112,42 @@ docker pull kstevica/captain-claw:latest
 docker pull kstevica/captain-claw-botport:latest
 ```
 
-You need a `config.yaml` and `.env` in the current directory (copy from `config.yaml.example` and `.env.example`, then add your API keys).
+You need a `config.yaml` and `.env` in the current directory. Both files **must exist before running** — if they don't, Docker creates empty directories instead and the container fails to start.
+
+**Minimal `.env`** — add only the keys you need:
+
+```bash
+# At least one model API key is required
+OPENAI_API_KEY="sk-..."
+ANTHROPIC_API_KEY="sk-ant-..."
+GOOGLE_API_KEY="AI..."
+GEMINI_API_KEY="AI..."
+
+# Ollama (if using local models from within Docker)
+OLLAMA_BASE_URL="http://host.docker.internal:11434"
+```
+
+**Minimal `config.yaml`** — a working starting point:
+
+```yaml
+model:
+  provider: gemini              # openai, anthropic, gemini, ollama
+  model: gemini-2.5-flash       # model name for the chosen provider
+  temperature: 0.7
+  allowed:
+    - id: claude-sonnet
+      provider: anthropic
+      model: claude-sonnet-4-20250514
+    - id: gpt-4o
+      provider: openai
+      model: gpt-4o
+
+web:
+  enabled: true
+  port: 23080
+```
+
+The first launch starts onboarding automatically and pre-configures models. For the full configuration reference, see [USAGE.md](USAGE.md#configuration-reference).
 
 ```bash
 # Captain Claw web UI

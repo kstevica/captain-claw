@@ -1268,6 +1268,12 @@ class AgentContextMixin:
             if user_p is not None:
                 user_context_block = user_context_to_prompt_block(user_p)
 
+        from captain_claw.system_info import build_system_info_block
+
+        system_info_block = build_system_info_block(
+            detail_level="micro" if self.instructions.use_micro else "normal"
+        )
+
         base_prompt = self.instructions.render(
             "system_prompt.md",
             runtime_base_path=self.runtime_base_path,
@@ -1277,6 +1283,7 @@ class AgentContextMixin:
             planning_block=planning_block,
             personality_block=personality_block,
             user_context_block=user_context_block,
+            system_info_block=system_info_block,
         )
         skills_section = ""
         build_skills = getattr(self, "_build_skills_system_prompt_section", None)
