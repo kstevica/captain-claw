@@ -942,6 +942,24 @@ class AgentScaleLoopMixin:
                 f"{output_instruction}"
             )
         elif extraction_mode == "inline":
+            _has_table_ref_inline = (
+                previous_summary_sample
+                and not is_first_item
+                and "|" in previous_summary_sample
+            )
+            if _has_table_ref_inline:
+                _inline_format_rule = (
+                    "- You MUST match the FORMAT REFERENCE exactly. If the "
+                    "reference is a Markdown table row, output a single table "
+                    "row (starting with |) with the same columns.\n"
+                    "- Keep each cell concise (1-3 sentences max).\n"
+                )
+            else:
+                _inline_format_rule = (
+                    "- Use Markdown with headings and **bold labels** for structure. "
+                    "NEVER output Markdown tables (no | pipes) or CSV/TSV rows — "
+                    "use labeled fields instead (e.g. **Field**: value).\n"
+                )
             system_text = (
                 "You are a document processing assistant. Your job is to process "
                 "ONE item and produce a focused summary or processed result.\n\n"
@@ -960,12 +978,31 @@ class AgentScaleLoopMixin:
                 "- Do NOT mention other items, the total count, or the overall task.\n"
                 "- Do NOT echo or reproduce the extracted content — summarize it.\n"
                 "- NEVER include 'EXTRACTED CONTENT' sections in your output.\n"
-                "- Use Markdown with headings and **bold labels** for structure. "
-                "NEVER output Markdown tables (no | pipes) or CSV/TSV rows — "
-                "use labeled fields instead (e.g. **Field**: value).\n"
+                f"{_inline_format_rule}"
                 f"{output_instruction}"
             )
         else:
+            # When a format reference is available and uses a markdown table
+            # (pipes), the LLM must match that style.  Otherwise, default to
+            # headings + bold-label format (which is safer for long content).
+            _has_table_ref = (
+                previous_summary_sample
+                and not is_first_item
+                and "|" in previous_summary_sample
+            )
+            if _has_table_ref:
+                _format_rule = (
+                    "- You MUST match the FORMAT REFERENCE exactly. If the "
+                    "reference is a Markdown table row, output a single table "
+                    "row (starting with |) with the same columns.\n"
+                    "- Keep each cell concise (1-3 sentences max).\n"
+                )
+            else:
+                _format_rule = (
+                    "- Use Markdown with headings and **bold labels** for structure. "
+                    "NEVER output Markdown tables (no | pipes) or CSV/TSV rows — "
+                    "use labeled fields instead (e.g. **Field**: value).\n"
+                )
             system_text = (
                 "You are a document processing assistant. Your job is to process "
                 "ONE item and produce a focused summary or processed result.\n\n"
@@ -976,9 +1013,7 @@ class AgentScaleLoopMixin:
                 "- Do NOT mention other items, the total count, or the overall task.\n"
                 "- Do NOT echo or reproduce the extracted content — summarize it.\n"
                 "- NEVER include 'EXTRACTED CONTENT' sections in your output.\n"
-                "- Use Markdown with headings and **bold labels** for structure. "
-                "NEVER output Markdown tables (no | pipes) or CSV/TSV rows — "
-                "use labeled fields instead (e.g. **Field**: value).\n"
+                f"{_format_rule}"
                 f"{output_instruction}"
             )
 
@@ -1910,34 +1945,43 @@ class AgentScaleLoopMixin:
                     # Skip the separator for the first item.
                     if processed == 0 and not last_summary:
                         write_content = _clean
+                    elif last_summary and "|" in last_summary:
+                        # Table format: rows are separated by newline,
+                        # not horizontal rules.
+                        write_content = _clean if _clean.startswith("|") else f"| {_clean}"
                     else:
                         write_content = f"\n\n---\n\n{_clean}"
-                    # Use the original write argument (before the write tool
-                    # resolves it under the saved root) so the tool doesn't
-                    # double-resolve an already-absolute path.
-                    write_path_arg = sp.get("_output_file_arg", output_file)
-                    # Fallback chain when no output file is known yet
-                    # (early takeover before the LLM wrote anything):
-                    # 1. Filename template from scale progress (file_per_item)
-                    # 2. output_file from plan (LLM-derived for single_file)
-                    # 3. Extract filename from task description regex
-                    # 4. Derive from worker task title (unique per worker)
-                    # 5. Last resort: "scale_output.md"
-                    if not write_path_arg:
-                        write_path_arg = (
-                            str(sp.get("_output_filename_template", "")).strip()
-                            or str(sp.get("_output_file_from_plan", "")).strip()
-                            or self._extract_output_filename(task_description)
-                            or self._derive_output_filename_from_context(task_description)
-                            or "scale_output.md"
-                        )
+                    # Prefer the already-resolved absolute path (_output_file)
+                    # over the original relative argument (_output_file_arg).
+                    # Using the relative arg and then calling
+                    # _resolve_scale_output_path would double-resolve it:
+                    #   "saved/showcase/{id}/file.md" → "output/{id}/saved/showcase/{id}/file.md"
+                    # The absolute path is correct as-is and the write tool
+                    # passes absolute paths through without remapping.
+                    _known_abs = sp.get("_output_file", "")
+                    if _known_abs and os.path.isabs(_known_abs):
+                        write_path_arg = _known_abs
+                    else:
+                        write_path_arg = sp.get("_output_file_arg", output_file)
+                        # Fallback chain when no output file is known yet
+                        # (early takeover before the LLM wrote anything):
+                        # 1. Filename template from scale progress (file_per_item)
+                        # 2. output_file from plan (LLM-derived for single_file)
+                        # 3. Extract filename from task description regex
+                        # 4. Derive from worker task title (unique per worker)
+                        # 5. Last resort: "scale_output.md"
+                        if not write_path_arg:
+                            write_path_arg = (
+                                str(sp.get("_output_filename_template", "")).strip()
+                                or str(sp.get("_output_file_from_plan", "")).strip()
+                                or self._extract_output_filename(task_description)
+                                or self._derive_output_filename_from_context(task_description)
+                                or "scale_output.md"
+                            )
+                        # Resolve to absolute path under <workspace>/output/<session>/
+                        # only when we don't have a known absolute path.
+                        write_path_arg = self._resolve_scale_output_path(write_path_arg)
                     write_append = True
-
-                # ── Resolve to absolute path under <workspace>/output/<session>/ ──
-                # Force all scale micro-loop output into the workspace output
-                # directory so files are easy to find regardless of whether the
-                # micro-loop or the LLM picks the filename.
-                write_path_arg = self._resolve_scale_output_path(write_path_arg)
 
                 try:
                     write_result = await self._execute_tool_with_guard(

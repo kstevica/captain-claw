@@ -157,6 +157,20 @@ class ShellTool(Tool):
         runtime_base = kwargs.get("_runtime_base_path")
         shell_cwd: str | None = str(runtime_base) if runtime_base is not None else None
 
+        # Pre-create session-scoped directories under saved/ so that shell
+        # commands writing to paths like "saved/tmp/{session_id}/file.png"
+        # don't accidentally create a FILE at the session_id path when the
+        # intermediate directory is missing.
+        session_id = kwargs.get("_session_id")
+        if runtime_base and session_id:
+            from pathlib import Path
+
+            _saved = Path(runtime_base) / "saved"
+            for _cat in ("tmp", "scripts", "showcase", "media", "output"):
+                _dir = _saved / _cat / str(session_id)
+                if not _dir.exists():
+                    _dir.mkdir(parents=True, exist_ok=True)
+
         try:
             log.info("Executing shell command", command=command, timeout=timeout)
 

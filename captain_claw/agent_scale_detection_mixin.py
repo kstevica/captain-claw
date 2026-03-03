@@ -917,3 +917,109 @@ class AgentScaleDetectionMixin:
             or len(items) < 2
             or self._items_are_source_urls_only(items)
         )
+
+    # ------------------------------------------------------------------
+    # Glob-based scale init (no LLM re-extraction needed)
+    # ------------------------------------------------------------------
+
+    def _try_scale_init_from_glob(
+        self,
+        tool_results: list[dict[str, Any]],
+        effective_user_input: str,
+        list_task_plan: dict[str, Any],
+    ) -> list[str]:
+        """Populate ``_scale_progress`` directly from glob results.
+
+        When glob returns multiple files and the task is a list-processing
+        request, we can skip the expensive LLM list re-extraction and
+        initialize scale progress directly from the discovered file paths.
+
+        This fills the gap where ``_CONTENT_FETCH_TOOLS`` (correctly) does
+        not include ``glob``, so the deferred scale init never fires after
+        glob discovers files.
+
+        Returns the list of items if scale progress was initialized,
+        or an empty list otherwise.
+        """
+        if getattr(self, "_skip_deferred_scale", False):
+            return []
+
+        # Only act when scale progress has no items yet.
+        sp = getattr(self, "_scale_progress", None)
+        existing_items = sp.get("items", []) if sp else []
+        if existing_items and len(existing_items) >= 2:
+            return []  # Already populated
+
+        # Collect file paths from all successful glob results in this
+        # tool-call batch.
+        glob_files: list[str] = []
+        for r in (tool_results or []):
+            if str(r.get("tool_name", "")).lower() != "glob":
+                continue
+            if not r.get("success"):
+                continue
+            content = str(r.get("content", ""))
+            if "No files found" in content:
+                continue
+            # Parse lines like "  pdf-test/file1.pdf"
+            for line in content.splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith("Found "):
+                    glob_files.append(stripped)
+
+        _scale_cfg = get_config().scale
+        _lw_min = _scale_cfg.lightweight_progress_min_members
+        if len(glob_files) < _lw_min:
+            return []
+
+        # Verify the task actually needs per-item processing.
+        # Strip dependency output to avoid false matches from upstream
+        # task titles.
+        _stripped_input = _strip_dep_output_section(effective_user_input)
+        if _SKIP_SCALE_DETECTION_RE.search(_stripped_input):
+            if not (
+                self._input_suggests_large_scale(_stripped_input)
+                or self._is_list_processing_request(_stripped_input)
+            ):
+                log.info(
+                    "Glob scale init: skipped (non-scale task)",
+                    glob_files=len(glob_files),
+                )
+                return []
+
+        # Build a synthetic list_task_plan with the glob-discovered files.
+        synthetic_plan = dict(list_task_plan)
+        synthetic_plan["members"] = glob_files
+        synthetic_plan["enabled"] = True
+        if not synthetic_plan.get("per_member_action"):
+            synthetic_plan["per_member_action"] = "extract and process"
+
+        # Initialize scale progress from the plan.
+        self._scale_progress = self._init_scale_progress_from_plan(
+            synthetic_plan, user_input=effective_user_input,
+        )
+
+        # Inject scale advisory into effective user input (handled by
+        # the caller by returning the items — caller injects advisory).
+        self._emit_tool_output(
+            "task_contract",
+            {
+                "step": "glob_scale_init",
+                "members": len(glob_files),
+                "output_strategy": str(
+                    self._scale_progress.get("_output_strategy", "single_file")
+                ),
+            },
+            (
+                "step=glob_scale_init\n"
+                f"members={len(glob_files)}\n"
+                f"output_strategy={self._scale_progress.get('_output_strategy', 'single_file')}\n"
+                "note=scale loop initialized from glob file results (no LLM re-extraction needed)"
+            ),
+        )
+        log.info(
+            "Glob scale init: populated from glob results",
+            members=len(glob_files),
+            output_strategy=self._scale_progress.get("_output_strategy"),
+        )
+        return glob_files

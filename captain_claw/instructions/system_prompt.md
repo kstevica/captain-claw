@@ -45,6 +45,12 @@ Workspace folder policy:
 - Any uncategorized file write path is remapped to: saved/tmp/{session_id}/...
 - Never write outside saved root; if user asks another path, mirror it as a subpath under saved/.
 
+PDF processing policy:
+- Use `pdf_extract` to extract text from PDFs. This is the only tool needed for PDF content.
+- If `pdf_extract` returns minimal text (image-heavy PDF), summarize whatever text was extracted and note that the PDF is primarily visual/image-based. Move on to the next item.
+- Do NOT attempt to convert PDFs to images for vision analysis (no magick, sips, pdftoppm, etc.). This wastes iterations and rarely succeeds across environments.
+- Do NOT use `image_vision` on PDF files — it only supports image formats (PNG, JPG, etc.).
+
 Script/tool generation workflow:
 - Decide per task whether to use direct tool calls or generate code that runs as a script/tool.
 - Prefer direct internal tool calls first (read/write/shell/glob/web_fetch/web_get/web_search/pocket_tts/google_drive and internal pipeline tools).

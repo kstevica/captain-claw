@@ -11,6 +11,7 @@ import asyncio
 import json
 from typing import Any, AsyncIterator
 
+from captain_claw.agent_scale_detection_mixin import _build_scale_advisory
 from captain_claw.config import get_config
 from captain_claw.exceptions import GuardBlockedError
 from captain_claw.llm import Message
@@ -475,14 +476,35 @@ class AgentOrchestrationMixin:
                 planning_pipeline=planning_pipeline,
                 step_label="early_scale_micro_loop_takeover",
             )
-            micro_summary = micro_result["summary"]
-            self._update_clarification_state(
-                user_input=user_input,
-                effective_user_input=effective_user_input,
-                assistant_response=micro_summary,
+            if micro_result.get("cancelled"):
+                # User cancelled — finalize immediately.
+                micro_summary = micro_result["summary"]
+                self._update_clarification_state(
+                    user_input=user_input,
+                    effective_user_input=effective_user_input,
+                    assistant_response=micro_summary,
+                )
+                await self._persist_assistant_response(micro_summary)
+                return finish(micro_summary, success=False)
+            # Scale processing done — fall through to main loop so the
+            # LLM can handle remaining steps (summarise, email, etc.).
+            _sp_cont = getattr(self, "_scale_progress", None)
+            _cont_out = _sp_cont.get("_output_file", "") if _sp_cont else ""
+            completion_feedback = (
+                f"[Scale loop completed] {micro_result.get('processed', 0)} of "
+                f"{micro_result.get('total', 0)} items processed."
+                + (f" Output file: {_cont_out}." if _cont_out else "")
+                + "\n\nNow review the ORIGINAL user request and continue "
+                "with any remaining steps not handled by the scale "
+                "processing (e.g. summarising the output, emailing, "
+                "analysing, charting). If all steps are already "
+                "complete, provide a concise final summary."
             )
-            await self._persist_assistant_response(micro_summary)
-            return finish(micro_summary, success=micro_result.get("success", False))
+            log.info(
+                "Scale early takeover done — continuing main loop for post-processing",
+                processed=micro_result.get("processed", 0),
+                total=micro_result.get("total", 0),
+            )
 
         # ── Main agent loop ───────────────────────────────────────
         base_turn_iterations = self.max_iterations + (2 if completion_requirements else 0)
@@ -772,6 +794,71 @@ class AgentOrchestrationMixin:
                             task_ids=[str(item) for item in activated],
                         )
 
+                # ── Glob-based scale init ─────────────────────────
+                # When glob discovers files and scale_progress has no
+                # items, populate scale progress directly from the glob
+                # results.  This is cheaper than LLM re-extraction and
+                # fills the gap where glob is (correctly) not in
+                # _CONTENT_FETCH_TOOLS.
+                if _tool_results and self._needs_deferred_scale_init():
+                    _glob_items = self._try_scale_init_from_glob(
+                        tool_results=_tool_results,
+                        effective_user_input=effective_user_input,
+                        list_task_plan=list_task_plan,
+                    )
+                    if _glob_items:
+                        # Update list_task_plan with discovered members.
+                        list_task_plan["members"] = _glob_items
+                        list_task_plan["enabled"] = True
+                        # Recalculate iteration budget to accommodate
+                        # the newly discovered scale items.
+                        _glob_scale_budget = min(400, 10 + len(_glob_items) * 3)
+                        if _glob_scale_budget > soft_turn_iterations:
+                            log.info(
+                                "Glob scale init: expanding iteration budget",
+                                old_soft=soft_turn_iterations,
+                                new_soft=_glob_scale_budget,
+                                old_hard=hard_turn_iterations,
+                                new_hard=max(hard_turn_iterations, min(500, _glob_scale_budget * 3)),
+                            )
+                            soft_turn_iterations = _glob_scale_budget
+                            hard_turn_iterations = max(
+                                hard_turn_iterations,
+                                min(500, _glob_scale_budget * 3),
+                            )
+                            extension_step = max(6, min(24, max(1, _glob_scale_budget // 3)))
+                        # Inject the scale advisory into effective_user_input
+                        # so the LLM adopts the incremental strategy.
+                        _sp_glob = getattr(self, "_scale_progress", None)
+                        _glob_advisory = _build_scale_advisory(
+                            item_count=len(_glob_items),
+                            output_strategy=str(
+                                (_sp_glob or {}).get("_output_strategy", "single_file")
+                            ),
+                            filename_template=str(
+                                (_sp_glob or {}).get("_output_filename_template", "")
+                            ),
+                            final_action=str(
+                                (_sp_glob or {}).get("_final_action", "write_file")
+                            ),
+                        )
+                        if _glob_advisory:
+                            # Only append if no scale advisory was already
+                            # injected at preflight.
+                            if "--- SCALE ADVISORY" not in effective_user_input:
+                                effective_user_input = effective_user_input + _glob_advisory
+                            # Inject a concise note into session context so
+                            # subsequent LLM calls see the item list.
+                            self._add_session_message(
+                                role="user",
+                                content=(
+                                    f"[system] Scale advisory: {len(_glob_items)} "
+                                    f"items discovered via glob. "
+                                    f"Process them one at a time using the "
+                                    f"incremental read→write strategy."
+                                ),
+                            )
+
                 # ── Deferred scale init after fetch ───────────────
                 # Only consider deferred scale init when a content-
                 # fetching tool ran (web_fetch, web_get, read,
@@ -823,13 +910,39 @@ class AgentOrchestrationMixin:
                             planning_pipeline=planning_pipeline,
                             step_label="deferred_scale_micro_loop_takeover",
                         )
-                        finalized, final_text, finish_success = await attempt_finalize(
-                            output_text=micro_result["summary"],
-                            iteration=iteration,
-                            finish_success=micro_result.get("success", False),
+                        if micro_result.get("cancelled"):
+                            finalized, final_text, finish_success = await attempt_finalize(
+                                output_text=micro_result["summary"],
+                                iteration=iteration,
+                                finish_success=False,
+                            )
+                            if finalized:
+                                return finish(final_text, success=finish_success)
+                            continue
+                        # Continue main loop for remaining steps.
+                        _sp_cont = getattr(self, "_scale_progress", None)
+                        _cont_out = _sp_cont.get("_output_file", "") if _sp_cont else ""
+                        completion_feedback = (
+                            f"[Scale loop completed] {micro_result.get('processed', 0)} of "
+                            f"{micro_result.get('total', 0)} items processed."
+                            + (f" Output file: {_cont_out}." if _cont_out else "")
+                            + "\n\nNow review the ORIGINAL user request and "
+                            "continue with any remaining steps not handled "
+                            "by the scale processing (e.g. summarising the "
+                            "output, emailing, analysing, charting). If all "
+                            "steps are already complete, provide a concise "
+                            "final summary."
                         )
-                        if finalized:
-                            return finish(final_text, success=finish_success)
+                        _post_budget = iteration + 10
+                        if soft_turn_iterations < _post_budget:
+                            soft_turn_iterations = _post_budget
+                        if hard_turn_iterations < _post_budget:
+                            hard_turn_iterations = _post_budget
+                        stagnant_iterations = 0
+                        log.info(
+                            "Scale micro-loop done (deferred path) — continuing for post-processing",
+                            processed=micro_result.get("processed", 0),
+                        )
                         continue
 
                 # ── Micro-loop takeover (tool call path) ──────────
@@ -846,13 +959,39 @@ class AgentOrchestrationMixin:
                         step_label="scale_micro_loop_takeover",
                         output_file=output_file,
                     )
-                    finalized, final_text, finish_success = await attempt_finalize(
-                        output_text=micro_result["summary"],
-                        iteration=iteration,
-                        finish_success=micro_result.get("success", False),
+                    if micro_result.get("cancelled"):
+                        finalized, final_text, finish_success = await attempt_finalize(
+                            output_text=micro_result["summary"],
+                            iteration=iteration,
+                            finish_success=False,
+                        )
+                        if finalized:
+                            return finish(final_text, success=finish_success)
+                        continue
+                    # Continue main loop for remaining steps.
+                    _sp_cont = getattr(self, "_scale_progress", None)
+                    _cont_out = _sp_cont.get("_output_file", "") if _sp_cont else ""
+                    completion_feedback = (
+                        f"[Scale loop completed] {micro_result.get('processed', 0)} of "
+                        f"{micro_result.get('total', 0)} items processed."
+                        + (f" Output file: {_cont_out}." if _cont_out else "")
+                        + "\n\nNow review the ORIGINAL user request and "
+                        "continue with any remaining steps not handled "
+                        "by the scale processing (e.g. summarising the "
+                        "output, emailing, analysing, charting). If all "
+                        "steps are already complete, provide a concise "
+                        "final summary."
                     )
-                    if finalized:
-                        return finish(final_text, success=finish_success)
+                    _post_budget = iteration + 10
+                    if soft_turn_iterations < _post_budget:
+                        soft_turn_iterations = _post_budget
+                    if hard_turn_iterations < _post_budget:
+                        hard_turn_iterations = _post_budget
+                    stagnant_iterations = 0
+                    log.info(
+                        "Scale micro-loop done (tool path) — continuing for post-processing",
+                        processed=micro_result.get("processed", 0),
+                    )
                     continue
 
                 if not self._supports_tool_result_followup():
@@ -934,13 +1073,39 @@ class AgentOrchestrationMixin:
                             planning_pipeline=planning_pipeline,
                             step_label="deferred_scale_micro_loop_takeover",
                         )
-                        finalized, final_text, finish_success = await attempt_finalize(
-                            output_text=micro_result["summary"],
-                            iteration=iteration,
-                            finish_success=micro_result.get("success", False),
+                        if micro_result.get("cancelled"):
+                            finalized, final_text, finish_success = await attempt_finalize(
+                                output_text=micro_result["summary"],
+                                iteration=iteration,
+                                finish_success=False,
+                            )
+                            if finalized:
+                                return finish(final_text, success=finish_success)
+                            continue
+                        # Continue main loop for remaining steps.
+                        _sp_cont = getattr(self, "_scale_progress", None)
+                        _cont_out = _sp_cont.get("_output_file", "") if _sp_cont else ""
+                        completion_feedback = (
+                            f"[Scale loop completed] {micro_result.get('processed', 0)} of "
+                            f"{micro_result.get('total', 0)} items processed."
+                            + (f" Output file: {_cont_out}." if _cont_out else "")
+                            + "\n\nNow review the ORIGINAL user request and "
+                            "continue with any remaining steps not handled "
+                            "by the scale processing (e.g. summarising the "
+                            "output, emailing, analysing, charting). If all "
+                            "steps are already complete, provide a concise "
+                            "final summary."
                         )
-                        if finalized:
-                            return finish(final_text, success=finish_success)
+                        _post_budget = iteration + 10
+                        if soft_turn_iterations < _post_budget:
+                            soft_turn_iterations = _post_budget
+                        if hard_turn_iterations < _post_budget:
+                            hard_turn_iterations = _post_budget
+                        stagnant_iterations = 0
+                        log.info(
+                            "Scale micro-loop done (embedded deferred) — continuing for post-processing",
+                            processed=micro_result.get("processed", 0),
+                        )
                         continue
 
                 # ── Micro-loop takeover (embedded path) ───────────
@@ -957,13 +1122,39 @@ class AgentOrchestrationMixin:
                         step_label="scale_micro_loop_takeover",
                         output_file=output_file,
                     )
-                    finalized, final_text, finish_success = await attempt_finalize(
-                        output_text=micro_result["summary"],
-                        iteration=iteration,
-                        finish_success=micro_result.get("success", False),
+                    if micro_result.get("cancelled"):
+                        finalized, final_text, finish_success = await attempt_finalize(
+                            output_text=micro_result["summary"],
+                            iteration=iteration,
+                            finish_success=False,
+                        )
+                        if finalized:
+                            return finish(final_text, success=finish_success)
+                        continue
+                    # Continue main loop for remaining steps.
+                    _sp_cont = getattr(self, "_scale_progress", None)
+                    _cont_out = _sp_cont.get("_output_file", "") if _sp_cont else ""
+                    completion_feedback = (
+                        f"[Scale loop completed] {micro_result.get('processed', 0)} of "
+                        f"{micro_result.get('total', 0)} items processed."
+                        + (f" Output file: {_cont_out}." if _cont_out else "")
+                        + "\n\nNow review the ORIGINAL user request and "
+                        "continue with any remaining steps not handled "
+                        "by the scale processing (e.g. summarising the "
+                        "output, emailing, analysing, charting). If all "
+                        "steps are already complete, provide a concise "
+                        "final summary."
                     )
-                    if finalized:
-                        return finish(final_text, success=finish_success)
+                    _post_budget = iteration + 10
+                    if soft_turn_iterations < _post_budget:
+                        soft_turn_iterations = _post_budget
+                    if hard_turn_iterations < _post_budget:
+                        hard_turn_iterations = _post_budget
+                    stagnant_iterations = 0
+                    log.info(
+                        "Scale micro-loop done (embedded path) — continuing for post-processing",
+                        processed=micro_result.get("processed", 0),
+                    )
                     continue
 
                 if not self._supports_tool_result_followup():

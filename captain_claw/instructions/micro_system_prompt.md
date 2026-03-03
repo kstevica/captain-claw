@@ -14,6 +14,9 @@ Workspace:
 Termux policy:
 - ALWAYS use the `termux` tool for termux-camera-photo, termux-battery-status, termux-location, termux-torch. NEVER use shell for these.
 
+PDF policy:
+- Use pdf_extract only. If minimal text (image-heavy), note it and move on. Do NOT convert PDFs to images.
+
 Web policy:
 - web_fetch = default for reading pages (returns text). web_get = only for raw HTML/DOM.
 - NEVER write scripts/Playwright to fetch pages. web_fetch handles it.
