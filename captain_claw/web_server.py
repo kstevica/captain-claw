@@ -799,6 +799,36 @@ class WebServer:
         from captain_claw.web.rest_browser_workflows import delete_workflow
         return await delete_workflow(self, request)
 
+    # Direct API Calls page
+    async def _serve_direct_api_calls(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_direct_api_calls
+        return await serve_direct_api_calls(self, request)
+
+    # Direct API Calls REST
+    async def _dac_list(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_direct_api import list_calls
+        return await list_calls(self, request)
+
+    async def _dac_get(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_direct_api import get_call
+        return await get_call(self, request)
+
+    async def _dac_create(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_direct_api import create_call
+        return await create_call(self, request)
+
+    async def _dac_update(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_direct_api import update_call
+        return await update_call(self, request)
+
+    async def _dac_delete(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_direct_api import delete_call
+        return await delete_call(self, request)
+
+    async def _dac_execute(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_direct_api import execute_call
+        return await execute_call(self, request)
+
     # Datastore REST
     async def _ds_list_tables(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_datastore import list_tables
@@ -1040,6 +1070,13 @@ class WebServer:
         app.router.add_get("/api/browser-workflows/{id}", self._bw_get)
         app.router.add_patch("/api/browser-workflows/{id}", self._bw_update)
         app.router.add_delete("/api/browser-workflows/{id}", self._bw_delete)
+        # Direct API Calls API
+        app.router.add_get("/api/direct-api-calls", self._dac_list)
+        app.router.add_post("/api/direct-api-calls", self._dac_create)
+        app.router.add_get("/api/direct-api-calls/{id}", self._dac_get)
+        app.router.add_patch("/api/direct-api-calls/{id}", self._dac_update)
+        app.router.add_delete("/api/direct-api-calls/{id}", self._dac_delete)
+        app.router.add_post("/api/direct-api-calls/{id}/execute", self._dac_execute)
         # Deep memory (Typesense) API
         app.router.add_get("/api/deep-memory/status", self._dm_status)
         app.router.add_get("/api/deep-memory/facets", self._dm_facets)
@@ -1075,6 +1112,7 @@ class WebServer:
             app.router.add_get("/datastore", self._serve_datastore)
             app.router.add_get("/playbooks", self._serve_playbooks)
             app.router.add_get("/browser-workflows", self._serve_browser_workflows)
+            app.router.add_get("/direct-api-calls", self._serve_direct_api_calls)
             app.router.add_get("/favicon.ico", self._serve_favicon)
         return app
 

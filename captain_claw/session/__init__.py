@@ -524,6 +524,70 @@ class WorkflowEntry:
         }
 
 
+@dataclass
+class DirectApiCallEntry:
+    """A single registered direct API call endpoint."""
+
+    id: str
+    name: str
+    url: str
+    method: str  # GET, POST, PUT, PATCH — no DELETE
+    description: str = ""
+    input_payload: str = ""  # free-form schema docs (JSON/YAML/XML/text)
+    result_payload: str = ""  # free-form response docs
+    headers: str | None = None  # JSON dict of extra headers
+    auth_type: str | None = None  # bearer, api_key, basic, cookie, none
+    auth_token: str | None = None  # actual credential
+    auth_source: str | None = None  # manual, browser
+    app_name: str | None = None  # grouping label
+    tags: str | None = None
+    use_count: int = 0
+    last_used_at: str | None = None
+    last_status_code: int | None = None
+    last_response_preview: str | None = None
+    created_at: str = field(default_factory=_utcnow_iso)
+    updated_at: str = field(default_factory=_utcnow_iso)
+
+    @classmethod
+    def from_row(cls, row: tuple[Any, ...]) -> "DirectApiCallEntry":
+        return cls(
+            id=str(row[0]),
+            name=str(row[1]),
+            url=str(row[2]),
+            method=str(row[3]),
+            description=str(row[4]) if row[4] else "",
+            input_payload=str(row[5]) if row[5] else "",
+            result_payload=str(row[6]) if row[6] else "",
+            headers=str(row[7]) if row[7] else None,
+            auth_type=str(row[8]) if row[8] else None,
+            auth_token=str(row[9]) if row[9] else None,
+            auth_source=str(row[10]) if row[10] else None,
+            app_name=str(row[11]) if row[11] else None,
+            tags=str(row[12]) if row[12] else None,
+            use_count=int(row[13]) if row[13] is not None else 0,
+            last_used_at=str(row[14]) if row[14] else None,
+            last_status_code=int(row[15]) if row[15] is not None else None,
+            last_response_preview=str(row[16]) if row[16] else None,
+            created_at=str(row[17]),
+            updated_at=str(row[18]),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id, "name": self.name, "url": self.url,
+            "method": self.method, "description": self.description,
+            "input_payload": self.input_payload,
+            "result_payload": self.result_payload,
+            "headers": self.headers, "auth_type": self.auth_type,
+            "auth_token": self.auth_token, "auth_source": self.auth_source,
+            "app_name": self.app_name, "tags": self.tags,
+            "use_count": self.use_count, "last_used_at": self.last_used_at,
+            "last_status_code": self.last_status_code,
+            "last_response_preview": self.last_response_preview,
+            "created_at": self.created_at, "updated_at": self.updated_at,
+        }
+
+
 class SessionManager:
     """Manages conversation sessions with SQLite storage."""
 
@@ -779,6 +843,39 @@ class SessionManager:
             )
             await self._db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_bw_use_count ON browser_workflows(use_count DESC)"
+            )
+            # -- Direct API calls (manual API endpoint registry) --
+            await self._db.execute("""
+                CREATE TABLE IF NOT EXISTS direct_api_calls (
+                    id                    TEXT PRIMARY KEY,
+                    name                  TEXT NOT NULL,
+                    url                   TEXT NOT NULL,
+                    method                TEXT NOT NULL DEFAULT 'GET',
+                    description           TEXT NOT NULL DEFAULT '',
+                    input_payload         TEXT NOT NULL DEFAULT '',
+                    result_payload        TEXT NOT NULL DEFAULT '',
+                    headers               TEXT,
+                    auth_type             TEXT,
+                    auth_token            TEXT,
+                    auth_source           TEXT,
+                    app_name              TEXT,
+                    tags                  TEXT,
+                    use_count             INTEGER NOT NULL DEFAULT 0,
+                    last_used_at          TEXT,
+                    last_status_code      INTEGER,
+                    last_response_preview TEXT,
+                    created_at            TEXT NOT NULL,
+                    updated_at            TEXT NOT NULL
+                )
+            """)
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dac_name ON direct_api_calls(name COLLATE NOCASE)"
+            )
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dac_app_name ON direct_api_calls(app_name COLLATE NOCASE)"
+            )
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dac_use_count ON direct_api_calls(use_count DESC)"
             )
             # -- File registry (persistent file mapping) --
             await self._db.execute("""
@@ -2510,6 +2607,167 @@ class SessionManager:
         async with self._db.execute(
             "UPDATE browser_workflows SET use_count = use_count + 1, last_used_at = ?, updated_at = ? WHERE id = ?",
             (now, now, workflow_id),
+        ) as cursor:
+            affected = cursor.rowcount
+        await self._db.commit()
+        return affected > 0
+
+    # ------------------------------------------------------------------
+    # Direct API calls persistence
+    # ------------------------------------------------------------------
+
+    _DAC_COLS = (
+        "id, name, url, method, description, input_payload, result_payload, "
+        "headers, auth_type, auth_token, auth_source, app_name, tags, "
+        "use_count, last_used_at, last_status_code, last_response_preview, "
+        "created_at, updated_at"
+    )
+
+    async def create_direct_api_call(
+        self,
+        name: str,
+        url: str,
+        method: str = "GET",
+        *,
+        description: str = "",
+        input_payload: str = "",
+        result_payload: str = "",
+        headers: str | None = None,
+        auth_type: str | None = None,
+        auth_token: str | None = None,
+        auth_source: str | None = None,
+        app_name: str | None = None,
+        tags: str | None = None,
+    ) -> DirectApiCallEntry:
+        await self._ensure_db()
+        now = _utcnow_iso()
+        entry = DirectApiCallEntry(
+            id=str(uuid.uuid4()), name=name, url=url,
+            method=method.upper(), description=description,
+            input_payload=input_payload, result_payload=result_payload,
+            headers=headers, auth_type=auth_type, auth_token=auth_token,
+            auth_source=auth_source, app_name=app_name, tags=tags,
+            created_at=now, updated_at=now,
+        )
+        await self._db.execute(
+            f"""
+            INSERT INTO direct_api_calls ({self._DAC_COLS})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (entry.id, entry.name, entry.url, entry.method,
+             entry.description, entry.input_payload, entry.result_payload,
+             entry.headers, entry.auth_type, entry.auth_token,
+             entry.auth_source, entry.app_name, entry.tags,
+             entry.use_count, entry.last_used_at,
+             entry.last_status_code, entry.last_response_preview,
+             entry.created_at, entry.updated_at),
+        )
+        await self._db.commit()
+        return entry
+
+    async def load_direct_api_call(self, call_id: str) -> DirectApiCallEntry | None:
+        await self._ensure_db()
+        async with self._db.execute(
+            f"SELECT {self._DAC_COLS} FROM direct_api_calls WHERE id = ?",
+            (call_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return DirectApiCallEntry.from_row(row) if row else None
+
+    async def select_direct_api_call(self, selector: str) -> DirectApiCallEntry | None:
+        """Select by id, #index, or name (fuzzy search)."""
+        direct = await self.load_direct_api_call(selector)
+        if direct:
+            return direct
+        if selector.startswith("#"):
+            try:
+                idx = int(selector[1:]) - 1
+            except ValueError:
+                return None
+            items = await self.list_direct_api_calls(limit=200)
+            return items[idx] if 0 <= idx < len(items) else None
+        results = await self.search_direct_api_calls(selector, limit=1)
+        return results[0] if results else None
+
+    async def list_direct_api_calls(
+        self, *, limit: int = 200, app_name: str | None = None,
+    ) -> list[DirectApiCallEntry]:
+        await self._ensure_db()
+        if app_name:
+            sql = (
+                f"SELECT {self._DAC_COLS} FROM direct_api_calls "
+                "WHERE app_name = ? COLLATE NOCASE "
+                "ORDER BY use_count DESC, updated_at DESC LIMIT ?"
+            )
+            args: tuple[Any, ...] = (app_name, limit)
+        else:
+            sql = (
+                f"SELECT {self._DAC_COLS} FROM direct_api_calls "
+                "ORDER BY use_count DESC, updated_at DESC LIMIT ?"
+            )
+            args = (limit,)
+        async with self._db.execute(sql, args) as cur:
+            rows = await cur.fetchall()
+        return [DirectApiCallEntry.from_row(r) for r in rows]
+
+    async def search_direct_api_calls(
+        self, query: str, *, limit: int = 20,
+    ) -> list[DirectApiCallEntry]:
+        await self._ensure_db()
+        pat = f"%{query}%"
+        async with self._db.execute(
+            f"SELECT {self._DAC_COLS} FROM direct_api_calls "
+            "WHERE name LIKE ? COLLATE NOCASE "
+            "OR url LIKE ? COLLATE NOCASE "
+            "OR description LIKE ? COLLATE NOCASE "
+            "OR tags LIKE ? COLLATE NOCASE "
+            "ORDER BY use_count DESC, updated_at DESC LIMIT ?",
+            (pat, pat, pat, pat, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [DirectApiCallEntry.from_row(r) for r in rows]
+
+    async def update_direct_api_call(self, call_id: str, **kwargs: Any) -> bool:
+        allowed = {
+            "name", "url", "method", "description",
+            "input_payload", "result_payload", "headers",
+            "auth_type", "auth_token", "auth_source",
+            "app_name", "tags",
+        }
+        updates = {k: v for k, v in kwargs.items() if k in allowed}
+        if not updates:
+            return False
+        await self._ensure_db()
+        updates["updated_at"] = _utcnow_iso()
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [call_id]
+        async with self._db.execute(
+            f"UPDATE direct_api_calls SET {set_clause} WHERE id = ?",
+            values,
+        ) as cursor:
+            affected = cursor.rowcount
+        await self._db.commit()
+        return affected > 0
+
+    async def delete_direct_api_call(self, call_id: str) -> bool:
+        await self._ensure_db()
+        async with self._db.execute(
+            "DELETE FROM direct_api_calls WHERE id = ?", (call_id,),
+        ) as cursor:
+            affected = cursor.rowcount
+        await self._db.commit()
+        return affected > 0
+
+    async def record_direct_api_call_usage(
+        self, call_id: str, status_code: int, response_preview: str,
+    ) -> bool:
+        await self._ensure_db()
+        now = _utcnow_iso()
+        async with self._db.execute(
+            "UPDATE direct_api_calls SET use_count = use_count + 1, "
+            "last_used_at = ?, last_status_code = ?, "
+            "last_response_preview = ?, updated_at = ? WHERE id = ?",
+            (now, status_code, response_preview[:500], now, call_id),
         ) as cursor:
             affected = cursor.rowcount
         await self._db.commit()

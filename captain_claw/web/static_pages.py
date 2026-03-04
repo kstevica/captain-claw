@@ -82,3 +82,7 @@ async def serve_playbooks(server: WebServer, request: web.Request) -> web.FileRe
 
 async def serve_browser_workflows(server: WebServer, request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "browser-workflows.html")
+
+
+async def serve_direct_api_calls(server: WebServer, request: web.Request) -> web.FileResponse:
+    return web.FileResponse(STATIC_DIR / "direct-api-calls.html")

@@ -239,6 +239,7 @@ tools:
   - contacts
   - scripts
   - apis
+  - direct_api
   - typesense
   - datastore
   - termux

@@ -30,6 +30,12 @@ from captain_claw.tools.registry import Tool, ToolResult
 
 log = get_logger(__name__)
 
+# Module-level session/recorder stores keyed by _session_id.
+# Survives BrowserTool re-instantiation (e.g. when Telegram agents
+# call _register_default_tools and replace the global registry entry).
+_BROWSER_SESSIONS: dict[str, BrowserSession] = {}
+_WORKFLOW_RECORDERS: dict[str, WorkflowRecorder] = {}
+
 
 class BrowserTool(Tool):
     """Control a headless browser for interacting with web applications.
@@ -305,17 +311,22 @@ class BrowserTool(Tool):
     }
 
     def __init__(self) -> None:
-        self._session: BrowserSession | None = None
-        self._workflow_recorder: WorkflowRecorder | None = None
+        pass  # sessions stored in module-level _BROWSER_SESSIONS
 
-    def _get_session(self) -> BrowserSession:
-        """Return or lazily create the browser session."""
-        if self._session is None:
-            log.info("Creating new BrowserSession instance")
+    def _get_session(self, session_id: str = "default") -> BrowserSession:
+        """Return or lazily create the browser session for *session_id*."""
+        session_id = session_id or "default"
+        if session_id not in _BROWSER_SESSIONS:
+            log.info("Creating new BrowserSession", session_id=session_id)
             cfg = get_config()
-            self._session = BrowserSession(config=cfg.tools.browser)
-            log.info("BrowserSession created", headless=cfg.tools.browser.headless)
-        return self._session
+            _BROWSER_SESSIONS[session_id] = BrowserSession(config=cfg.tools.browser)
+            log.info("BrowserSession created", session_id=session_id, headless=cfg.tools.browser.headless)
+        return _BROWSER_SESSIONS[session_id]
+
+    @staticmethod
+    def _session_key(kwargs: dict[str, Any]) -> str:
+        """Extract session key from tool kwargs."""
+        return str(kwargs.get("_session_id", "")).strip() or "default"
 
     # -- screenshot path helper -----------------------------------------------
 
@@ -400,7 +411,7 @@ class BrowserTool(Tool):
     async def _open(self, **kwargs: Any) -> ToolResult:
         """Launch the browser."""
         log.info("browser._open called", headless=kwargs.get("headless"), url=kwargs.get("url"))
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
 
         if session.is_alive:
             return ToolResult(
@@ -439,7 +450,7 @@ class BrowserTool(Tool):
         if not url:
             return ToolResult(success=False, error="'url' parameter is required for navigate.")
 
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
         nav_info = await session.navigate(url)
 
         return ToolResult(
@@ -454,7 +465,7 @@ class BrowserTool(Tool):
     async def _screenshot(self, **kwargs: Any) -> ToolResult:
         """Take a screenshot of the current page."""
         log.info("browser._screenshot called", full_page=kwargs.get("full_page"))
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
         full_page = bool(kwargs.get("full_page", False))
 
         path = self._screenshot_path(kwargs)
@@ -491,7 +502,7 @@ class BrowserTool(Tool):
         Use ``nth`` (zero-based) to disambiguate when multiple elements match.
         """
         log.info("browser._click called", selector=kwargs.get("selector"), text=kwargs.get("text"), role=kwargs.get("role"), nth=kwargs.get("nth"))
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
         selector = str(kwargs.get("selector", "")).strip()
         text = str(kwargs.get("text", "")).strip()
         role = str(kwargs.get("role", "")).strip()
@@ -561,7 +572,7 @@ class BrowserTool(Tool):
         Use ``nth`` (zero-based) to disambiguate when multiple fields match.
         """
         log.info("browser._type called", selector=kwargs.get("selector"), role=kwargs.get("role"), text_len=len(str(kwargs.get("text", ""))))
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
         selector = str(kwargs.get("selector", "")).strip()
         text = str(kwargs.get("text", "")).strip()
         role = str(kwargs.get("role", "")).strip()
@@ -615,7 +626,7 @@ class BrowserTool(Tool):
     async def _press_key(self, **kwargs: Any) -> ToolResult:
         """Press a keyboard key."""
         log.info("browser._press_key called", key=kwargs.get("key"))
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
         key = str(kwargs.get("key", "")).strip()
 
         if not key:
@@ -630,7 +641,7 @@ class BrowserTool(Tool):
     async def _scroll(self, **kwargs: Any) -> ToolResult:
         """Scroll the page."""
         log.info("browser._scroll called", direction=kwargs.get("scroll_direction"), amount=kwargs.get("scroll_amount"))
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
         direction = str(kwargs.get("scroll_direction", "down")).strip().lower()
         amount = int(kwargs.get("scroll_amount", 500))
 
@@ -643,7 +654,7 @@ class BrowserTool(Tool):
     async def _wait(self, **kwargs: Any) -> ToolResult:
         """Wait for a specified duration."""
         log.info("browser._wait called", seconds=kwargs.get("wait_seconds"))
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
         seconds = float(kwargs.get("wait_seconds", 2.0))
         seconds = min(seconds, 30.0)  # safety cap
 
@@ -656,7 +667,7 @@ class BrowserTool(Tool):
     async def _status(self, **kwargs: Any) -> ToolResult:
         """Show current browser state."""
         log.info("browser._status called")
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
         info = session.status_info()
 
         if not info["alive"]:
@@ -682,7 +693,8 @@ class BrowserTool(Tool):
     async def _close(self, **kwargs: Any) -> ToolResult:
         """Shut down the browser."""
         log.info("browser._close called")
-        session = self._get_session()
+        sk = self._session_key(kwargs)
+        session = self._get_session(sk)
 
         if not session.is_alive:
             return ToolResult(
@@ -693,6 +705,8 @@ class BrowserTool(Tool):
         uptime = session.uptime_seconds
         capture_count = session.network.capture_count
         await session.close()
+        _BROWSER_SESSIONS.pop(sk, None)
+        _WORKFLOW_RECORDERS.pop(sk, None)
 
         extra = ""
         if capture_count:
@@ -715,7 +729,7 @@ class BrowserTool(Tool):
         Combines multiple signals for comprehensive page understanding.
         """
         log.info("browser._observe called", goal=kwargs.get("goal"), prompt=bool(kwargs.get("prompt")))
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
         page = await session.ensure_page()
         title = await session.get_title()
         url = session.current_url
@@ -827,7 +841,7 @@ class BrowserTool(Tool):
             )
 
         log.info("browser._act called", goal=goal)
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
         page = await session.ensure_page()
         title = await session.get_title()
         url = session.current_url
@@ -975,7 +989,7 @@ class BrowserTool(Tool):
     async def _accessibility_tree(self, **kwargs: Any) -> ToolResult:
         """Extract the page's accessibility tree (semantic structure)."""
         log.info("browser._accessibility_tree called")
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
         page = await session.ensure_page()
         title = await session.get_title()
 
@@ -995,7 +1009,7 @@ class BrowserTool(Tool):
     async def _find_element(self, **kwargs: Any) -> ToolResult:
         """Find interactive elements with suggested Playwright selectors."""
         log.info("browser._find_element called")
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
         page = await session.ensure_page()
 
         interactive = await AccessibilityExtractor.find_interactive_elements(
@@ -1151,7 +1165,7 @@ class BrowserTool(Tool):
                 error=f"Cannot decrypt credentials for '{app_name}': {cred['error']}",
             )
 
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
         login_url = cred["url"]
         username = cred["username"]
         password = cred["password"]
@@ -1503,7 +1517,7 @@ class BrowserTool(Tool):
     async def _network_start(self, **kwargs: Any) -> ToolResult:
         """Start recording network traffic."""
         log.info("browser._network_start called")
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
         network = session.network
 
         if network.is_recording:
@@ -1524,7 +1538,7 @@ class BrowserTool(Tool):
     async def _network_stop(self, **kwargs: Any) -> ToolResult:
         """Stop recording network traffic."""
         log.info("browser._network_stop called")
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
         network = session.network
 
         if not network.is_recording:
@@ -1547,7 +1561,7 @@ class BrowserTool(Tool):
     async def _network_list(self, **kwargs: Any) -> ToolResult:
         """List captured API calls."""
         log.info("browser._network_list called")
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
         network = session.network
 
         listing = network.format_capture_list(max_items=50)
@@ -1561,7 +1575,7 @@ class BrowserTool(Tool):
     async def _network_capture(self, **kwargs: Any) -> ToolResult:
         """Analyze captured traffic and store API patterns in APIs memory."""
         log.info("browser._network_capture called")
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
         network = session.network
 
         summaries = network.summarize_apis()
@@ -1618,7 +1632,7 @@ class BrowserTool(Tool):
     async def _network_clear(self, **kwargs: Any) -> ToolResult:
         """Discard all captured network data."""
         log.info("browser._network_clear called")
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
         count = session.network.capture_count
         session.network.clear()
         return ToolResult(
@@ -1893,7 +1907,7 @@ class BrowserTool(Tool):
                 ),
             )
 
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
 
         # Create context if it doesn't exist
         if app_name not in session._app_contexts:
@@ -1937,7 +1951,7 @@ class BrowserTool(Tool):
     async def _list_sessions(self, **kwargs: Any) -> ToolResult:
         """List all active app sessions."""
         log.info("browser._list_sessions called")
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
         sessions = session.list_app_sessions()
 
         if not sessions:
@@ -1965,24 +1979,34 @@ class BrowserTool(Tool):
 
     # -- workflow recording actions ------------------------------------------
 
+    def _get_workflow_recorder(self, session_id: str = "default") -> WorkflowRecorder | None:
+        return _WORKFLOW_RECORDERS.get(session_id or "default")
+
+    def _ensure_workflow_recorder(self, session_id: str = "default") -> WorkflowRecorder:
+        session_id = session_id or "default"
+        if session_id not in _WORKFLOW_RECORDERS:
+            _WORKFLOW_RECORDERS[session_id] = WorkflowRecorder()
+        return _WORKFLOW_RECORDERS[session_id]
+
     async def _workflow_record_start(self, **kwargs: Any) -> ToolResult:
-        session = self._get_session()
+        sk = self._session_key(kwargs)
+        session = self._get_session(sk)
         page = await session.ensure_page()
 
-        if self._workflow_recorder is None:
-            self._workflow_recorder = WorkflowRecorder()
-            await self._workflow_recorder.attach(page)
+        recorder = self._ensure_workflow_recorder(sk)
+        if not recorder._page:
+            await recorder.attach(page)
 
-        if self._workflow_recorder.is_recording:
+        if recorder.is_recording:
             return ToolResult(
                 success=True,
                 content=(
-                    f"Already recording. {self._workflow_recorder.step_count} steps captured so far.\n"
+                    f"Already recording. {recorder.step_count} steps captured so far.\n"
                     "Use workflow_record_stop to stop."
                 ),
             )
 
-        self._workflow_recorder.start_recording()
+        recorder.start_recording()
         return ToolResult(
             success=True,
             content=(
@@ -1993,14 +2017,15 @@ class BrowserTool(Tool):
         )
 
     async def _workflow_record_stop(self, **kwargs: Any) -> ToolResult:
-        if self._workflow_recorder is None or not self._workflow_recorder.is_recording:
+        recorder = self._get_workflow_recorder(self._session_key(kwargs))
+        if recorder is None or not recorder.is_recording:
             return ToolResult(
                 success=False,
                 error="No recording in progress. Start with browser(action='workflow_record_start').",
             )
 
-        self._workflow_recorder.stop_recording()
-        summary = self._workflow_recorder.summary()
+        recorder.stop_recording()
+        summary = recorder.summary()
         return ToolResult(
             success=True,
             content=(
@@ -2013,7 +2038,9 @@ class BrowserTool(Tool):
     async def _workflow_save(self, **kwargs: Any) -> ToolResult:
         from captain_claw.session import get_session_manager
 
-        if self._workflow_recorder is None or self._workflow_recorder.step_count == 0:
+        sk = self._session_key(kwargs)
+        recorder = self._get_workflow_recorder(sk)
+        if recorder is None or recorder.step_count == 0:
             return ToolResult(
                 success=False,
                 error="No recorded steps to save. Record a workflow first.",
@@ -2030,7 +2057,7 @@ class BrowserTool(Tool):
         app_name = str(kwargs.get("app_name", "")).strip()
 
         # determine start_url from first step
-        steps = self._workflow_recorder.steps_as_dicts()
+        steps = recorder.steps_as_dicts()
         start_url = steps[0]["url"] if steps else ""
 
         # variable parameterisation
@@ -2066,7 +2093,7 @@ class BrowserTool(Tool):
         )
 
         # clear recorder after saving
-        self._workflow_recorder.clear()
+        recorder.clear()
 
         return ToolResult(
             success=True,
@@ -2186,7 +2213,7 @@ class BrowserTool(Tool):
                     error=f"Invalid JSON in workflow_variables: {vars_raw[:200]}",
                 )
 
-        session = self._get_session()
+        session = self._get_session(self._session_key(kwargs))
 
         # navigate to start_url first (with variable substitution)
         start_url = entry.start_url

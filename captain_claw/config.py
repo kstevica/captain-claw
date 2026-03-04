@@ -340,7 +340,7 @@ class ToolsConfig(BaseModel):
     plugin_dirs: list[str] = ["skills/tools"]
 
     # These tools are always available — re-inject if removed by user.
-    _ALWAYS_ENABLED: frozenset[str] = frozenset({"personality", "botport", "playbooks", "browser", "datastore"})
+    _ALWAYS_ENABLED: frozenset[str] = frozenset({"personality", "botport", "playbooks", "browser", "datastore", "direct_api"})
 
     @model_validator(mode="after")
     def _ensure_always_enabled(self) -> "ToolsConfig":

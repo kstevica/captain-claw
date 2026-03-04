@@ -1,0 +1,690 @@
+/* Direct API Calls — dark theme, two-panel layout */
+
+:root {
+    --dac-bg: #0d1117;
+    --dac-surface: #161b22;
+    --dac-border: #30363d;
+    --dac-text: #e6edf3;
+    --dac-text-dim: #8b949e;
+    --dac-accent: #58a6ff;
+    --dac-accent-hover: #79c0ff;
+    --dac-danger: #f85149;
+    --dac-danger-hover: #ff6e6e;
+    --dac-success: #3fb950;
+    --dac-warn: #d29922;
+    --dac-radius: 8px;
+    --dac-get: #3fb950;
+    --dac-post: #58a6ff;
+    --dac-put: #d29922;
+    --dac-patch: #bc8cff;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif;
+    background: var(--dac-bg);
+    color: var(--dac-text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+/* ── Header ───────────────────────────────────────────────── */
+
+.dac-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 20px;
+    background: var(--dac-surface);
+    border-bottom: 1px solid var(--dac-border);
+    flex-shrink: 0;
+}
+
+.dac-header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.dac-header-left h1 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.dac-header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.dac-logo-link { display: flex; }
+
+.dac-nav-link {
+    color: var(--dac-text-dim);
+    text-decoration: none;
+    font-size: 14px;
+}
+.dac-nav-link:hover { color: var(--dac-accent); }
+
+/* ── Layout ───────────────────────────────────────────────── */
+
+.dac-layout {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+}
+
+/* ── List panel ───────────────────────────────────────────── */
+
+.dac-list-panel {
+    width: 320px;
+    min-width: 260px;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--dac-border);
+    background: var(--dac-surface);
+}
+
+.dac-list-header {
+    padding: 12px;
+    border-bottom: 1px solid var(--dac-border);
+}
+
+.dac-search {
+    width: 100%;
+    padding: 8px 12px;
+    background: var(--dac-bg);
+    border: 1px solid var(--dac-border);
+    border-radius: var(--dac-radius);
+    color: var(--dac-text);
+    font-size: 14px;
+    outline: none;
+}
+.dac-search:focus { border-color: var(--dac-accent); }
+
+.dac-filter-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--dac-border);
+    font-size: 13px;
+    color: var(--dac-text-dim);
+}
+
+.dac-filter-select {
+    background: var(--dac-bg);
+    border: 1px solid var(--dac-border);
+    border-radius: 4px;
+    color: var(--dac-text-dim);
+    font-size: 12px;
+    padding: 3px 6px;
+    outline: none;
+}
+
+.dac-item-list {
+    flex: 1;
+    overflow-y: auto;
+}
+
+.dac-loading {
+    padding: 24px;
+    text-align: center;
+    color: var(--dac-text-dim);
+}
+
+/* List items */
+
+.dac-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--dac-border);
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.dac-item:hover { background: rgba(88,166,255,0.06); }
+.dac-item.active { background: rgba(88,166,255,0.12); }
+
+.dac-item-method {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 4px;
+    letter-spacing: 0.5px;
+    flex-shrink: 0;
+    text-align: center;
+    min-width: 48px;
+}
+.dac-item-method.get    { background: rgba(63,185,80,0.15); color: var(--dac-get); }
+.dac-item-method.post   { background: rgba(88,166,255,0.15); color: var(--dac-post); }
+.dac-item-method.put    { background: rgba(210,153,34,0.15); color: var(--dac-put); }
+.dac-item-method.patch  { background: rgba(188,140,255,0.15); color: var(--dac-patch); }
+
+.dac-item-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.dac-item-name {
+    font-size: 14px;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.dac-item-url {
+    font-size: 12px;
+    color: var(--dac-text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+}
+
+.dac-item-app {
+    font-size: 11px;
+    color: var(--dac-accent);
+    background: rgba(88,166,255,0.1);
+    padding: 1px 6px;
+    border-radius: 3px;
+    flex-shrink: 0;
+}
+
+/* ── Detail panel ─────────────────────────────────────────── */
+
+.dac-detail {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.dac-empty {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+}
+
+.dac-empty-icon { font-size: 48px; opacity: 0.4; }
+.dac-empty-text { font-size: 16px; color: var(--dac-text-dim); }
+.dac-empty-sub  { font-size: 13px; color: var(--dac-text-dim); opacity: 0.6; }
+
+.dac-detail-view {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+}
+
+.dac-detail-toolbar {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--dac-border);
+    background: var(--dac-surface);
+    flex-shrink: 0;
+}
+
+.dac-detail-header-info { flex: 1; min-width: 0; }
+
+.dac-detail-title {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+}
+
+.dac-detail-meta {
+    margin-top: 4px;
+    font-size: 13px;
+    color: var(--dac-text-dim);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.dac-detail-actions {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+    margin-left: 16px;
+}
+
+/* Detail content */
+
+.dac-detail-content {
+    padding: 20px 24px;
+    flex: 0 0 auto;
+}
+
+.dac-field {
+    margin-bottom: 16px;
+}
+
+.dac-field-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--dac-text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+}
+
+.dac-field-value {
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.dac-field-value.mono {
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    background: var(--dac-bg);
+    padding: 8px 12px;
+    border-radius: var(--dac-radius);
+    border: 1px solid var(--dac-border);
+    word-break: break-all;
+}
+
+.dac-field-value.code-block {
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    background: var(--dac-bg);
+    padding: 12px;
+    border-radius: var(--dac-radius);
+    border: 1px solid var(--dac-border);
+    white-space: pre-wrap;
+    max-height: 200px;
+    overflow-y: auto;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.dac-field-row {
+    display: flex;
+    gap: 24px;
+}
+.dac-field-row .dac-field { flex: 1; }
+
+.dac-auth-masked {
+    color: var(--dac-text-dim);
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+}
+
+.dac-method-badge {
+    display: inline-block;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 4px;
+    letter-spacing: 0.5px;
+}
+.dac-method-badge.get   { background: rgba(63,185,80,0.15); color: var(--dac-get); }
+.dac-method-badge.post  { background: rgba(88,166,255,0.15); color: var(--dac-post); }
+.dac-method-badge.put   { background: rgba(210,153,34,0.15); color: var(--dac-put); }
+.dac-method-badge.patch { background: rgba(188,140,255,0.15); color: var(--dac-patch); }
+
+.dac-tags {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.dac-tag {
+    font-size: 12px;
+    padding: 2px 8px;
+    background: rgba(88,166,255,0.1);
+    color: var(--dac-accent);
+    border-radius: 3px;
+}
+
+/* ── Edit mode (inline fields) ────────────────────────────── */
+
+.dac-edit-field {
+    margin-bottom: 14px;
+}
+
+.dac-edit-field label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--dac-text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+}
+
+.dac-edit-input,
+.dac-edit-select,
+.dac-edit-textarea {
+    width: 100%;
+    padding: 8px 12px;
+    background: var(--dac-bg);
+    border: 1px solid var(--dac-border);
+    border-radius: var(--dac-radius);
+    color: var(--dac-text);
+    font-size: 14px;
+    outline: none;
+    font-family: inherit;
+}
+.dac-edit-input:focus,
+.dac-edit-select:focus,
+.dac-edit-textarea:focus {
+    border-color: var(--dac-accent);
+}
+
+.dac-edit-textarea {
+    resize: vertical;
+    min-height: 80px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+}
+
+.dac-edit-row {
+    display: flex;
+    gap: 16px;
+}
+.dac-edit-row .dac-edit-field { flex: 1; }
+
+/* ── Execute panel ────────────────────────────────────────── */
+
+.dac-execute-panel {
+    border-top: 1px solid var(--dac-border);
+    padding: 16px 24px;
+    background: var(--dac-surface);
+}
+
+.dac-execute-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+.dac-execute-header h3 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.dac-execute-inputs {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 12px;
+}
+
+.dac-exec-field {
+    flex: 1;
+}
+
+.dac-exec-field label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--dac-text-dim);
+    margin-bottom: 4px;
+}
+
+.dac-exec-textarea {
+    width: 100%;
+    min-height: 60px;
+    padding: 8px 10px;
+    background: var(--dac-bg);
+    border: 1px solid var(--dac-border);
+    border-radius: var(--dac-radius);
+    color: var(--dac-text);
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    resize: vertical;
+    outline: none;
+}
+.dac-exec-textarea:focus { border-color: var(--dac-accent); }
+
+.dac-execute-result {
+    margin-top: 12px;
+}
+
+.dac-exec-result-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+}
+
+.dac-exec-status {
+    font-size: 14px;
+    font-weight: 700;
+    padding: 2px 10px;
+    border-radius: 4px;
+}
+.dac-exec-status.success { background: rgba(63,185,80,0.15); color: var(--dac-success); }
+.dac-exec-status.error   { background: rgba(248,81,73,0.15); color: var(--dac-danger); }
+.dac-exec-status.redirect { background: rgba(210,153,34,0.15); color: var(--dac-warn); }
+
+.dac-exec-elapsed {
+    font-size: 13px;
+    color: var(--dac-text-dim);
+}
+
+.dac-exec-response {
+    background: var(--dac-bg);
+    border: 1px solid var(--dac-border);
+    border-radius: var(--dac-radius);
+    padding: 12px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    max-height: 400px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin: 0;
+}
+
+/* ── Create form ──────────────────────────────────────────── */
+
+.dac-create-view {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+}
+
+.dac-form {
+    padding: 20px 24px;
+    overflow-y: auto;
+}
+
+.dac-form-row {
+    margin-bottom: 16px;
+}
+
+.dac-form-row label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--dac-text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+}
+
+.dac-form-row input,
+.dac-form-row select,
+.dac-form-row textarea {
+    width: 100%;
+    padding: 8px 12px;
+    background: var(--dac-bg);
+    border: 1px solid var(--dac-border);
+    border-radius: var(--dac-radius);
+    color: var(--dac-text);
+    font-size: 14px;
+    outline: none;
+    font-family: inherit;
+}
+.dac-form-row input:focus,
+.dac-form-row select:focus,
+.dac-form-row textarea:focus {
+    border-color: var(--dac-accent);
+}
+
+.dac-form-row textarea {
+    resize: vertical;
+    min-height: 60px;
+}
+
+.dac-form-code {
+    font-family: "SF Mono", Menlo, Consolas, monospace !important;
+    font-size: 13px !important;
+    min-height: 80px !important;
+}
+
+.dac-form-row-split {
+    display: flex;
+    gap: 16px;
+}
+.dac-form-col {
+    flex: 1;
+}
+.dac-form-col label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--dac-text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+}
+.dac-form-col input,
+.dac-form-col select {
+    width: 100%;
+    padding: 8px 12px;
+    background: var(--dac-bg);
+    border: 1px solid var(--dac-border);
+    border-radius: var(--dac-radius);
+    color: var(--dac-text);
+    font-size: 14px;
+    outline: none;
+    font-family: inherit;
+}
+.dac-form-col input:focus,
+.dac-form-col select:focus {
+    border-color: var(--dac-accent);
+}
+
+/* ── Buttons ──────────────────────────────────────────────── */
+
+.dac-btn {
+    padding: 6px 14px;
+    border: none;
+    border-radius: var(--dac-radius);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, opacity 0.15s;
+}
+.dac-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.dac-btn.primary {
+    background: var(--dac-accent);
+    color: #fff;
+}
+.dac-btn.primary:hover:not(:disabled) { background: var(--dac-accent-hover); }
+
+.dac-btn.secondary {
+    background: var(--dac-border);
+    color: var(--dac-text);
+}
+.dac-btn.secondary:hover:not(:disabled) { background: #3d444d; }
+
+.dac-btn.danger {
+    background: transparent;
+    color: var(--dac-danger);
+    border: 1px solid var(--dac-danger);
+}
+.dac-btn.danger:hover:not(:disabled) {
+    background: rgba(248,81,73,0.12);
+    color: var(--dac-danger-hover);
+}
+
+/* ── Modal ────────────────────────────────────────────────── */
+
+.dac-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 999;
+}
+
+.dac-modal {
+    background: var(--dac-surface);
+    border: 1px solid var(--dac-border);
+    border-radius: 12px;
+    width: 400px;
+    padding: 24px;
+}
+
+.dac-modal-title {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 12px;
+}
+
+.dac-modal-body {
+    font-size: 14px;
+    color: var(--dac-text-dim);
+    margin-bottom: 20px;
+}
+
+.dac-modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+/* ── Toast ────────────────────────────────────────────────── */
+
+.dac-toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    padding: 10px 20px;
+    background: var(--dac-surface);
+    border: 1px solid var(--dac-border);
+    border-radius: var(--dac-radius);
+    font-size: 14px;
+    color: var(--dac-text);
+    opacity: 0;
+    transform: translateY(10px);
+    transition: opacity 0.3s, transform 0.3s;
+    z-index: 1000;
+    pointer-events: none;
+}
+.dac-toast.show {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+/* ── Spinning loader ──────────────────────────────────────── */
+
+.dac-spinner {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--dac-border);
+    border-top-color: var(--dac-accent);
+    border-radius: 50%;
+    animation: dac-spin 0.6s linear infinite;
+    vertical-align: middle;
+    margin-right: 6px;
+}
+@keyframes dac-spin { to { transform: rotate(360deg); } }

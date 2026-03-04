@@ -274,6 +274,9 @@ class ApiReplayEngine:
         if auth_type_lower == "basic":
             return {"Authorization": f"Basic {credentials.strip()}"}
 
+        if auth_type_lower == "cookie":
+            return {"Cookie": credentials.strip()}
+
         if auth_type_lower == "custom":
             # Try to parse "Header-Name: value" format
             if ": " in credentials:

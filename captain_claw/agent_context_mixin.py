@@ -998,6 +998,7 @@ class AgentContextMixin:
             ContactsTool,
             ScriptsTool,
             ApisTool,
+            DirectApiTool,
             PlaybooksTool,
             DatastoreTool,
             TermuxTool,
@@ -1057,6 +1058,8 @@ class AgentContextMixin:
                 self.tools.register(ScriptsTool())
             elif tool_name == "apis":
                 self.tools.register(ApisTool())
+            elif tool_name == "direct_api":
+                self.tools.register(DirectApiTool())
             elif tool_name == "playbooks":
                 self.tools.register(PlaybooksTool())
             elif tool_name == "typesense":

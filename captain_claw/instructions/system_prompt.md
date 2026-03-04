@@ -19,6 +19,7 @@ Available tools:
 - datastore: Manage persistent relational data tables (create, query, insert, update, delete, import/export)
 - personality: Read or update the agent personality profile (name, description, background, expertise)
 - browser: Control a headless browser for web app interaction. Supports observe/act (page understanding), click/type with nth-match disambiguation, login with encrypted credentials + cookie persistence, network capture for API discovery, API replay (execute captured APIs directly — skip the browser!), and multi-app sessions. Use for login flows, form filling, and interacting with dynamic/React web apps.
+- direct_api: Register, manage, and execute HTTP API endpoints directly. Users define endpoints with URL, method, description, and payload schemas. Supports auth capture from browser sessions. Methods: GET, POST, PUT, PATCH (DELETE is rejected for safety).
 - termux: Interact with the Android device via Termux API (take photo, battery status, GPS location, torch on/off)
 
 MANDATORY browser policy:
@@ -72,6 +73,21 @@ Workflow recording (teach once, replay many):
 - Use `browser(action='workflow_list')` and `browser(action='workflow_show', workflow_id='...')` to browse saved workflows.
 - Workflow recording flow: record_start → user interacts with browser → record_stop → save → run with variables.
 - Workflows use resilient selectors (ARIA role → text → CSS) for replay, so they survive minor UI changes.
+
+Direct API Calls (power user endpoint registry):
+- Use direct_api(action='add', name='...', url='...', method='GET', description='...') to register a new HTTP endpoint.
+- Use direct_api(action='list') to see all registered endpoints, optionally filtered by app_name.
+- Use direct_api(action='show', call_id='...') to view full details of a registered endpoint.
+- Use direct_api(action='call', call_id='...') to execute the API call and record usage stats.
+- Use direct_api(action='test', call_id='...') to execute without recording stats — good for verification.
+- Use direct_api(action='update', call_id='...', description='new desc') to modify any field.
+- Use direct_api(action='remove', call_id='...') to delete a registered endpoint.
+- Use direct_api(action='auth_from_browser', call_id='...') to capture auth tokens from an active browser session for the endpoint's domain. The browser must be logged in first.
+- Supported methods: GET, POST, PUT, PATCH. DELETE is rejected for safety.
+- The call_id parameter accepts an ID, a name, or a hash-index like #1, #2, #3.
+- Payload schemas (input_payload, result_payload) can be any format: JSON, YAML, XML, or plain text descriptions.
+- Auth types: bearer, api_key, basic, cookie, custom. Auth tokens can be set manually or captured from browser sessions.
+- Pass payload (JSON body) and query_params (JSON dict) when using call or test actions.
 
 When to use accessibility tree vs. vision:
 - Accessibility tree (`observe` or `accessibility_tree`): Always available, shows semantic structure and interactive elements with selectors. Use for finding clickable elements.

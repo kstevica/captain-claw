@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Direct API Calls - Captain Claw</title>
+    <link rel="stylesheet" href="/static/direct-api-calls.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<header class="dac-header">
+    <div class="dac-header-left">
+        <a href="/" class="dac-logo-link"><img src="/static/logo.svg" width="28" height="28"></a>
+        <h1>Direct API Calls</h1>
+    </div>
+    <div class="dac-header-right">
+        <button class="dac-btn primary" id="dacAddBtn">+ New API Call</button>
+        <a href="/chat" class="dac-nav-link">&larr; Chat</a>
+    </div>
+</header>
+
+<div class="dac-layout">
+    <!-- Panel 1: List + filter -->
+    <aside class="dac-list-panel" id="dacListPanel">
+        <div class="dac-list-header">
+            <input type="text" class="dac-search" id="dacSearch"
+                   placeholder="Search API calls..." autocomplete="off">
+        </div>
+        <div class="dac-filter-bar">
+            <span class="dac-count" id="dacCount">0</span>
+            <select class="dac-filter-select" id="dacAppFilter">
+                <option value="">All apps</option>
+            </select>
+        </div>
+        <div class="dac-item-list" id="dacItemList">
+            <div class="dac-loading" id="dacLoading">Loading...</div>
+        </div>
+    </aside>
+
+    <!-- Panel 2: Detail -->
+    <main class="dac-detail" id="dacDetail">
+        <!-- Empty state -->
+        <div class="dac-empty" id="dacEmpty">
+            <div class="dac-empty-icon">&#x1F310;</div>
+            <div class="dac-empty-text">Select an API call to view details</div>
+            <div class="dac-empty-sub">Register HTTP endpoints in chat or click "+ New API Call" above</div>
+        </div>
+
+        <!-- Detail view -->
+        <div class="dac-detail-view" id="dacDetailView" style="display:none;">
+            <div class="dac-detail-toolbar">
+                <div class="dac-detail-header-info">
+                    <h2 class="dac-detail-title" id="dacDetailTitle"></h2>
+                    <div class="dac-detail-meta" id="dacDetailMeta"></div>
+                </div>
+                <div class="dac-detail-actions">
+                    <button class="dac-btn primary" id="dacEditBtn">Edit</button>
+                    <button class="dac-btn primary" id="dacSaveBtn" style="display:none;">Save</button>
+                    <button class="dac-btn secondary" id="dacCancelEditBtn" style="display:none;">Cancel</button>
+                    <button class="dac-btn danger" id="dacDeleteBtn">Delete</button>
+                </div>
+            </div>
+            <div class="dac-detail-content" id="dacDetailContent"></div>
+
+            <!-- Execute panel -->
+            <div class="dac-execute-panel" id="dacExecutePanel">
+                <div class="dac-execute-header">
+                    <h3>Execute</h3>
+                    <button class="dac-btn primary" id="dacExecuteBtn">&#x25B6; Execute</button>
+                </div>
+                <div class="dac-execute-inputs">
+                    <div class="dac-exec-field">
+                        <label>Request Payload (JSON)</label>
+                        <textarea class="dac-exec-textarea" id="dacExecPayload"
+                                  placeholder='{"key": "value"}'></textarea>
+                    </div>
+                    <div class="dac-exec-field">
+                        <label>Query Parameters (JSON)</label>
+                        <textarea class="dac-exec-textarea" id="dacExecQueryParams"
+                                  placeholder='{"page": "1", "limit": "10"}'></textarea>
+                    </div>
+                </div>
+                <div class="dac-execute-result" id="dacExecuteResult" style="display:none;">
+                    <div class="dac-exec-result-header">
+                        <span class="dac-exec-status" id="dacExecStatus"></span>
+                        <span class="dac-exec-elapsed" id="dacExecElapsed"></span>
+                    </div>
+                    <pre class="dac-exec-response" id="dacExecResponse"></pre>
+                </div>
+            </div>
+        </div>
+
+        <!-- Add/Create form -->
+        <div class="dac-create-view" id="dacCreateView" style="display:none;">
+            <div class="dac-detail-toolbar">
+                <div class="dac-detail-header-info">
+                    <h2 class="dac-detail-title">New API Call</h2>
+                </div>
+                <div class="dac-detail-actions">
+                    <button class="dac-btn primary" id="dacCreateSaveBtn">Create</button>
+                    <button class="dac-btn secondary" id="dacCreateCancelBtn">Cancel</button>
+                </div>
+            </div>
+            <div class="dac-form" id="dacCreateForm">
+                <div class="dac-form-row">
+                    <label>Name *</label>
+                    <input type="text" id="dacCreateName" placeholder="e.g. Get All Users">
+                </div>
+                <div class="dac-form-row">
+                    <label>URL *</label>
+                    <input type="text" id="dacCreateUrl" placeholder="https://api.example.com/users">
+                </div>
+                <div class="dac-form-row dac-form-row-split">
+                    <div class="dac-form-col">
+                        <label>Method</label>
+                        <select id="dacCreateMethod">
+                            <option value="GET" selected>GET</option>
+                            <option value="POST">POST</option>
+                            <option value="PUT">PUT</option>
+                            <option value="PATCH">PATCH</option>
+                        </select>
+                    </div>
+                    <div class="dac-form-col">
+                        <label>App Name</label>
+                        <input type="text" id="dacCreateAppName" placeholder="e.g. Jira, GitHub">
+                    </div>
+                </div>
+                <div class="dac-form-row">
+                    <label>Description</label>
+                    <textarea id="dacCreateDescription" placeholder="What does this API do?"></textarea>
+                </div>
+                <div class="dac-form-row">
+                    <label>Input Payload Schema</label>
+                    <textarea id="dacCreateInputPayload" class="dac-form-code"
+                              placeholder="JSON, YAML, XML, or plain text schema..."></textarea>
+                </div>
+                <div class="dac-form-row">
+                    <label>Result Payload Schema</label>
+                    <textarea id="dacCreateResultPayload" class="dac-form-code"
+                              placeholder="Expected response format..."></textarea>
+                </div>
+                <div class="dac-form-row dac-form-row-split">
+                    <div class="dac-form-col">
+                        <label>Auth Type</label>
+                        <select id="dacCreateAuthType">
+                            <option value="">None</option>
+                            <option value="bearer">Bearer Token</option>
+                            <option value="api_key">API Key</option>
+                            <option value="basic">Basic Auth</option>
+                            <option value="cookie">Cookie</option>
+                            <option value="custom">Custom</option>
+                        </select>
+                    </div>
+                    <div class="dac-form-col">
+                        <label>Auth Token</label>
+                        <input type="password" id="dacCreateAuthToken" placeholder="Token / key value">
+                    </div>
+                </div>
+                <div class="dac-form-row">
+                    <label>Extra Headers (JSON)</label>
+                    <textarea id="dacCreateHeaders" class="dac-form-code"
+                              placeholder='{"X-Custom": "value"}'></textarea>
+                </div>
+                <div class="dac-form-row">
+                    <label>Tags</label>
+                    <input type="text" id="dacCreateTags" placeholder="Comma-separated tags">
+                </div>
+            </div>
+        </div>
+    </main>
+</div>
+
+<!-- Delete confirmation modal -->
+<div class="dac-modal-overlay" id="dacModalOverlay" style="display:none;">
+    <div class="dac-modal">
+        <div class="dac-modal-title">Confirm Delete</div>
+        <div class="dac-modal-body" id="dacModalBody">
+            Are you sure you want to delete this API call?
+        </div>
+        <div class="dac-modal-actions">
+            <button class="dac-btn secondary" id="dacModalCancel">Cancel</button>
+            <button class="dac-btn danger" id="dacModalConfirm">Delete</button>
+        </div>
+    </div>
+</div>
+
+<!-- Toast -->
+<div class="dac-toast" id="dacToast"></div>
+
+<script src="/static/direct-api-calls.js"></script>
+</body>
+</html>
