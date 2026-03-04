@@ -7,6 +7,7 @@
         { id: 'openai',    name: 'OpenAI / ChatGPT',           model: 'gpt-4.1-mini',                  env: 'OPENAI_API_KEY' },
         { id: 'anthropic', name: 'Anthropic / Claude',          model: 'claude-sonnet-4-20250514',       env: 'ANTHROPIC_API_KEY' },
         { id: 'gemini',    name: 'Google / Gemini',             model: 'gemini-3-flash-preview',         env: 'GOOGLE_API_KEY' },
+        { id: 'xai',       name: 'xAI / Grok',                 model: 'grok-3-mini',                    env: 'XAI_API_KEY' },
         { id: 'ollama',    name: 'Ollama (local/self-hosted)',   model: 'llama3.2',                       env: '' }
     ];
 

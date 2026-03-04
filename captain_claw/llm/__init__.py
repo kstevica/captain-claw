@@ -202,6 +202,8 @@ def _normalize_provider_name(provider: str) -> str:
         "gemini": "gemini",
         "google": "gemini",
         "googleai": "gemini",
+        "grok": "xai",
+        "xai": "xai",
         "ollama": "ollama",
     }
     return aliases.get(key, key)
@@ -254,6 +256,8 @@ def _resolve_api_key(provider: str, explicit_api_key: str | None) -> str | None:
         return os.getenv("ANTHROPIC_API_KEY") or None
     if provider == "gemini":
         return os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or None
+    if provider == "xai":
+        return os.getenv("XAI_API_KEY") or None
     return None
 
 
@@ -944,6 +948,7 @@ def create_provider(
     - `openai` / `chatgpt`
     - `anthropic` / `claude`
     - `gemini` / `google`
+    - `grok` / `xai`
     """
     normalized = _normalize_provider_name(provider)
 
@@ -958,7 +963,7 @@ def create_provider(
             tokens_per_minute=tokens_per_minute,
         )
 
-    if normalized in {"openai", "anthropic", "gemini"}:
+    if normalized in {"openai", "anthropic", "gemini", "xai"}:
         return LiteLLMProvider(
             provider=normalized,
             model=model,
@@ -971,7 +976,7 @@ def create_provider(
 
     raise ValueError(
         f"Provider '{provider}' not supported. "
-        "Use one of: ollama, openai/chatgpt, anthropic/claude, gemini/google."
+        "Use one of: ollama, openai/chatgpt, anthropic/claude, gemini/google, grok/xai."
     )
 
 

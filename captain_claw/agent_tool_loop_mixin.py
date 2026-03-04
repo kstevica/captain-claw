@@ -775,7 +775,7 @@ class AgentToolLoopMixin:
             _tool_lower = str(tc.name or "").strip().lower()
             # Stateful tools that modify data between calls — exempt from
             # duplicate detection because index→search sequences are normal.
-            _STATEFUL_TOOLS = {"typesense", "todo", "contacts", "scripts", "apis", "send_mail"}
+            _STATEFUL_TOOLS = {"typesense", "todo", "contacts", "scripts", "apis", "send_mail", "browser"}
             # During scale-progress tasks, give extra headroom so the LLM
             # can recover from a failed first attempt or a write-before-read
             # situation without being permanently locked out of a file.

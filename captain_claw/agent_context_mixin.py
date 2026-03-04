@@ -978,6 +978,7 @@ class AgentContextMixin:
     def _register_default_tools(self) -> None:
         """Register the default tool set."""
         from captain_claw.tools import (
+            BrowserTool,
             DocxExtractTool,
             GlobTool,
             GoogleCalendarTool,
@@ -1084,6 +1085,8 @@ class AgentContextMixin:
                 if bp_client is not None:
                     bt.set_client(bp_client)
                 self.tools.register(bt)
+            elif tool_name == "browser":
+                self.tools.register(BrowserTool())
         self._register_plugin_tools()
 
     def reload_tools(self) -> None:

@@ -78,3 +78,7 @@ async def serve_datastore(server: WebServer, request: web.Request) -> web.FileRe
 
 async def serve_playbooks(server: WebServer, request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "playbooks.html")
+
+
+async def serve_browser_workflows(server: WebServer, request: web.Request) -> web.FileResponse:
+    return web.FileResponse(STATIC_DIR / "browser-workflows.html")

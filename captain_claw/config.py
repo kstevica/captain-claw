@@ -268,6 +268,30 @@ class TypesenseToolConfig(BaseModel):
     connection_timeout: int = 5
 
 
+class BrowserToolConfig(BaseModel):
+    """Browser automation tool configuration."""
+
+    timeout_seconds: int = 60
+    headless: bool = True
+    viewport_width: int = 1280
+    viewport_height: int = 720
+    screenshot_max_pixels: int = 1568  # longest edge cap before sending to vision LLM
+    screenshot_jpeg_quality: int = 85
+    user_agent: str = ""  # empty = Playwright default
+    default_wait_seconds: float = 2.0
+    max_session_duration_seconds: int = 1800  # 30 min auto-close safety
+    network_capture_enabled: bool = True
+    network_max_captures: int = 500
+    network_max_body_bytes: int = 10000
+    network_filter_static: bool = True
+    network_auto_record: bool = True  # start recording automatically on navigate
+    # Credential management
+    credential_encryption_key: str = ""  # Fernet key — or CLAW_BROWSER_CREDENTIAL_KEY env var
+    cookie_persistence: bool = True  # save/restore cookies across sessions
+    login_timeout_seconds: int = 30  # max wait for login form fill + submit
+    login_verify_wait_seconds: float = 3.0  # wait after submit before checking login success
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
 
@@ -299,6 +323,7 @@ class ToolsConfig(BaseModel):
         "datastore",
         "personality",
         "termux",
+        "browser",
     ]
     shell: ShellToolConfig = Field(default_factory=ShellToolConfig)
     read: ReadToolConfig = Field(default_factory=ReadToolConfig)
@@ -310,11 +335,12 @@ class ToolsConfig(BaseModel):
     image_vision: ImageVisionToolConfig = Field(default_factory=ImageVisionToolConfig)
     send_mail: SendMailToolConfig = Field(default_factory=SendMailToolConfig)
     typesense: TypesenseToolConfig = Field(default_factory=TypesenseToolConfig)
+    browser: BrowserToolConfig = Field(default_factory=BrowserToolConfig)
     require_confirmation: list[str] = ["shell", "write"]
     plugin_dirs: list[str] = ["skills/tools"]
 
     # These tools are always available — re-inject if removed by user.
-    _ALWAYS_ENABLED: frozenset[str] = frozenset({"personality", "botport", "playbooks"})
+    _ALWAYS_ENABLED: frozenset[str] = frozenset({"personality", "botport", "playbooks", "browser", "datastore"})
 
     @model_validator(mode="after")
     def _ensure_always_enabled(self) -> "ToolsConfig":

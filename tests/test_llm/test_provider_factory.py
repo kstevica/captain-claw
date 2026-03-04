@@ -44,6 +44,36 @@ def test_create_provider_supports_gemini_alias():
     assert provider.model == "gemini/gemini-2.0-flash"
 
 
+def test_create_provider_supports_grok():
+    provider = create_provider(
+        provider="grok",
+        model="grok-3",
+    )
+    assert isinstance(provider, LiteLLMProvider)
+    assert provider.provider == "xai"
+    assert provider.model == "xai/grok-3"
+
+
+def test_create_provider_supports_xai_alias():
+    provider = create_provider(
+        provider="xai",
+        model="grok-3-mini",
+    )
+    assert isinstance(provider, LiteLLMProvider)
+    assert provider.provider == "xai"
+    assert provider.model == "xai/grok-3-mini"
+
+
+def test_create_provider_uses_env_xai_api_key(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("XAI_API_KEY", "test-xai-key")
+    provider = create_provider(
+        provider="grok",
+        model="grok-3",
+    )
+    assert isinstance(provider, LiteLLMProvider)
+    assert provider.api_key == "test-xai-key"
+
+
 def test_create_provider_preserves_prefixed_model():
     provider = create_provider(
         provider="openai",

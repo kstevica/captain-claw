@@ -1032,7 +1032,12 @@ class AgentOrchestrationMixin:
             # ── Embedded tool calls (fallback) ────────────────────
             embedded_calls = self._extract_tool_calls_from_content(response.content)
             if embedded_calls:
-                log.info("Tool calls found in response text", count=len(embedded_calls))
+                log.info(
+                    "Tool calls found in response text",
+                    count=len(embedded_calls),
+                    calls=[(c.name, list(c.arguments.keys())) for c in embedded_calls],
+                    content_preview=str(response.content or "")[:300],
+                )
                 self._add_session_message(
                     role="assistant",
                     content=str(response.content or ""),
@@ -1296,10 +1301,22 @@ class AgentOrchestrationMixin:
                     continue
 
             # ── No tool calls — final response ────────────────────
+            log.info(
+                "Text-only response (no tool calls), attempting finalize",
+                iteration=iteration,
+                content_preview=str(response.content or "")[:200],
+            )
             finalized, final_text, finish_success = await attempt_finalize(
                 output_text=response.content,
                 iteration=iteration,
                 finish_success=True,
+            )
+            log.info(
+                "Finalize result for text-only response",
+                finalized=finalized,
+                finish_success=finish_success,
+                completion_feedback_set=bool(completion_feedback),
+                completion_feedback_preview=str(completion_feedback)[:200] if completion_feedback else "",
             )
             if finalized:
                 return finish(final_text, success=finish_success)

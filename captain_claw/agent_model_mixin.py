@@ -19,6 +19,7 @@ class AgentModelMixin:
             "claude": "anthropic",
             "google": "gemini",
             "googleai": "gemini",
+            "grok": "xai",
         }
         return aliases.get(raw, raw)
 
@@ -29,6 +30,7 @@ class AgentModelMixin:
             "openai": ["OPENAI_API_KEY"],
             "anthropic": ["ANTHROPIC_API_KEY"],
             "gemini": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            "xai": ["XAI_API_KEY"],
         }
         keys = env_keys.get(normalized_provider, [])
         if not keys:

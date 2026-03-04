@@ -37,6 +37,7 @@ from captain_claw.tools.datastore import DatastoreTool
 from captain_claw.tools.termux import TermuxTool
 from captain_claw.tools.playbooks import PlaybooksTool
 from captain_claw.tools.botport import BotPortTool
+from captain_claw.tools.browser import BrowserTool
 
 __all__ = [
     "Tool",
@@ -74,4 +75,5 @@ __all__ = [
     "TermuxTool",
     "PlaybooksTool",
     "BotPortTool",
+    "BrowserTool",
 ]

@@ -16,29 +16,33 @@ log = logging.getLogger(__name__)
 
 _ONBOARDING_STATE_FILENAME = "onboarding_state.json"
 
-_PROVIDER_ORDER = ("openai", "anthropic", "gemini", "ollama")
+_PROVIDER_ORDER = ("openai", "anthropic", "gemini", "xai", "ollama")
 _PROVIDER_LABELS = {
     "openai": "OpenAI / ChatGPT",
     "anthropic": "Anthropic / Claude",
     "gemini": "Google / Gemini",
+    "xai": "xAI / Grok",
     "ollama": "Ollama (local/self-hosted)",
 }
 _PROVIDER_DEFAULT_MODELS = {
     "openai": "gpt-4.1-mini",
     "anthropic": "claude-sonnet-4-20250514",
     "gemini": "gemini-3-flash-preview",
+    "xai": "grok-3-mini",
     "ollama": "llama3.2",
 }
 _PROVIDER_ENV_VARS = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "gemini": "GOOGLE_API_KEY or GEMINI_API_KEY",
+    "xai": "XAI_API_KEY",
     "ollama": "(none required)",
 }
 _PROVIDER_ALIASES = {
     "chatgpt": "openai",
     "claude": "anthropic",
     "google": "gemini",
+    "grok": "xai",
 }
 
 # Default allowed models seeded during onboarding so every fresh install
@@ -420,7 +424,7 @@ def _select_provider(console, current_provider: str) -> str:  # type: ignore[typ
 
     choice = Prompt.ask(
         "Choose your default model provider",
-        choices=["1", "2", "3", "4"],
+        choices=["1", "2", "3", "4", "5"],
         default=str(default_index),
     )
     return _PROVIDER_ORDER[int(choice) - 1]

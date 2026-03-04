@@ -107,7 +107,7 @@ def _build_schema() -> list[dict[str, Any]]:
                     "description": "Primary LLM provider and model for all sessions.",
                     "fields": [
                         _field("model.provider", "Provider", type="select",
-                               options=["openai", "anthropic", "ollama", "gemini"]),
+                               options=["openai", "anthropic", "ollama", "gemini", "xai"]),
                         _field("model.model", "Model name", type="text"),
                         _field("model.temperature", "Temperature", type="range",
                                min=0, max=2, step=0.1),
@@ -132,7 +132,7 @@ def _build_schema() -> list[dict[str, Any]]:
                         _field("id", "ID", type="text",
                                hint="Unique short name used to select this model"),
                         _field("provider", "Provider", type="select",
-                               options=["openai", "anthropic", "ollama", "gemini"]),
+                               options=["openai", "anthropic", "ollama", "gemini", "xai"]),
                         _field("model", "Model", type="text",
                                hint="e.g. claude-sonnet-4-20250514, gpt-4.1-mini"),
                         _field("description", "Description", type="text",

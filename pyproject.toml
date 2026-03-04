@@ -55,6 +55,9 @@ vector = [
 vision = [
     "Pillow>=10.0.0",
 ]
+browser = [
+    "playwright>=1.40.0",
+]
 build = [
     "pyinstaller>=6.0.0",
 ]

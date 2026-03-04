@@ -383,6 +383,53 @@ class ApiEntry:
 
 
 @dataclass
+class BrowserCredentialEntry:
+    """A persistent browser credential for automated login flows."""
+
+    id: str
+    app_name: str  # unique friendly name, e.g. "jira", "confluence"
+    url: str  # login page URL
+    username: str
+    password_encrypted: str  # Fernet-encrypted or plaintext (see CredentialStore)
+    auth_type: str = "form"  # form | basic | oauth
+    login_selector_map: str | None = None  # JSON: field name → selector hints
+    cookies: str | None = None  # JSON: saved cookies for session reuse
+    notes: str | None = None  # free-form notes about this app
+    source_session: str | None = None
+    created_at: str = field(default_factory=_utcnow_iso)
+    updated_at: str = field(default_factory=_utcnow_iso)
+
+    @classmethod
+    def from_row(cls, row: tuple[Any, ...]) -> "BrowserCredentialEntry":
+        return cls(
+            id=str(row[0]),
+            app_name=str(row[1]),
+            url=str(row[2]),
+            username=str(row[3]),
+            password_encrypted=str(row[4]),
+            auth_type=str(row[5]) if row[5] else "form",
+            login_selector_map=str(row[6]) if row[6] else None,
+            cookies=str(row[7]) if row[7] else None,
+            notes=str(row[8]) if row[8] else None,
+            source_session=str(row[9]) if row[9] else None,
+            created_at=str(row[10]),
+            updated_at=str(row[11]),
+        )
+
+    def to_dict(self, *, mask_password: bool = True) -> dict[str, Any]:
+        return {
+            "id": self.id, "app_name": self.app_name, "url": self.url,
+            "username": self.username,
+            "password": "****" if mask_password else self.password_encrypted,
+            "auth_type": self.auth_type,
+            "login_selector_map": self.login_selector_map,
+            "has_cookies": bool(self.cookies and self.cookies != "null"),
+            "notes": self.notes, "source_session": self.source_session,
+            "created_at": self.created_at, "updated_at": self.updated_at,
+        }
+
+
+@dataclass
 class PlaybookEntry:
     """A persistent cross-session playbook entry for orchestration patterns."""
 
@@ -429,6 +476,50 @@ class PlaybookEntry:
             "reasoning": self.reasoning, "tags": self.tags,
             "use_count": self.use_count, "last_used_at": self.last_used_at,
             "source_session": self.source_session,
+            "created_at": self.created_at, "updated_at": self.updated_at,
+        }
+
+
+@dataclass
+class WorkflowEntry:
+    """A persistent browser workflow (recorded user interactions)."""
+
+    id: str
+    name: str
+    description: str
+    app_name: str  # e.g. "jira", "confluence"
+    start_url: str
+    steps: str  # JSON array of RecordedStep dicts
+    variables: str  # JSON array of variable definitions
+    use_count: int = 0
+    last_used_at: str | None = None
+    created_at: str = field(default_factory=_utcnow_iso)
+    updated_at: str = field(default_factory=_utcnow_iso)
+
+    @classmethod
+    def from_row(cls, row: tuple[Any, ...]) -> "WorkflowEntry":
+        return cls(
+            id=str(row[0]),
+            name=str(row[1]),
+            description=str(row[2]) if row[2] else "",
+            app_name=str(row[3]) if row[3] else "",
+            start_url=str(row[4]) if row[4] else "",
+            steps=str(row[5]) if row[5] else "[]",
+            variables=str(row[6]) if row[6] else "[]",
+            use_count=int(row[7]) if row[7] is not None else 0,
+            last_used_at=str(row[8]) if row[8] else None,
+            created_at=str(row[9]),
+            updated_at=str(row[10]),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id, "name": self.name,
+            "description": self.description, "app_name": self.app_name,
+            "start_url": self.start_url,
+            "steps": json.loads(self.steps),
+            "variables": json.loads(self.variables),
+            "use_count": self.use_count, "last_used_at": self.last_used_at,
             "created_at": self.created_at, "updated_at": self.updated_at,
         }
 
@@ -615,6 +706,27 @@ class SessionManager:
             await self._db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_apis_use_count ON apis(use_count DESC)"
             )
+            # -- Browser credentials --
+            await self._db.execute("""
+                CREATE TABLE IF NOT EXISTS browser_credentials (
+                    id                  TEXT PRIMARY KEY,
+                    app_name            TEXT NOT NULL UNIQUE,
+                    url                 TEXT NOT NULL,
+                    username            TEXT NOT NULL,
+                    password_encrypted  TEXT NOT NULL,
+                    auth_type           TEXT NOT NULL DEFAULT 'form',
+                    login_selector_map  TEXT,
+                    cookies             TEXT,
+                    notes               TEXT,
+                    source_session      TEXT,
+                    created_at          TEXT NOT NULL,
+                    updated_at          TEXT NOT NULL
+                )
+            """)
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_browser_creds_app_name "
+                "ON browser_credentials(app_name COLLATE NOCASE)"
+            )
             # -- Playbooks memory --
             await self._db.execute("""
                 CREATE TABLE IF NOT EXISTS playbooks (
@@ -642,6 +754,31 @@ class SessionManager:
             )
             await self._db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_playbooks_use_count ON playbooks(use_count DESC)"
+            )
+            # -- Browser workflows (recorded user interactions) --
+            await self._db.execute("""
+                CREATE TABLE IF NOT EXISTS browser_workflows (
+                    id              TEXT PRIMARY KEY,
+                    name            TEXT NOT NULL,
+                    description     TEXT NOT NULL DEFAULT '',
+                    app_name        TEXT NOT NULL DEFAULT '',
+                    start_url       TEXT NOT NULL DEFAULT '',
+                    steps           TEXT NOT NULL DEFAULT '[]',
+                    variables       TEXT NOT NULL DEFAULT '[]',
+                    use_count       INTEGER NOT NULL DEFAULT 0,
+                    last_used_at    TEXT,
+                    created_at      TEXT NOT NULL,
+                    updated_at      TEXT NOT NULL
+                )
+            """)
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_bw_name ON browser_workflows(name COLLATE NOCASE)"
+            )
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_bw_app_name ON browser_workflows(app_name COLLATE NOCASE)"
+            )
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_bw_use_count ON browser_workflows(use_count DESC)"
             )
             # -- File registry (persistent file mapping) --
             await self._db.execute("""
@@ -2218,6 +2355,167 @@ class SessionManager:
         return affected > 0
 
     # ------------------------------------------------------------------
+    # Browser workflows CRUD
+    # ------------------------------------------------------------------
+
+    _WORKFLOW_COLS = (
+        "id, name, description, app_name, start_url, steps, variables, "
+        "use_count, last_used_at, created_at, updated_at"
+    )
+
+    async def create_workflow(
+        self,
+        name: str,
+        *,
+        description: str = "",
+        app_name: str = "",
+        start_url: str = "",
+        steps: str = "[]",
+        variables: str = "[]",
+    ) -> WorkflowEntry:
+        await self._ensure_db()
+        now = _utcnow_iso()
+        entry = WorkflowEntry(
+            id=str(uuid.uuid4()), name=name,
+            description=description, app_name=app_name,
+            start_url=start_url, steps=steps, variables=variables,
+            created_at=now, updated_at=now,
+        )
+        await self._db.execute(
+            f"""
+            INSERT INTO browser_workflows ({self._WORKFLOW_COLS})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (entry.id, entry.name, entry.description,
+             entry.app_name, entry.start_url,
+             entry.steps, entry.variables,
+             entry.use_count, entry.last_used_at,
+             entry.created_at, entry.updated_at),
+        )
+        await self._db.commit()
+        return entry
+
+    async def load_workflow(self, workflow_id: str) -> WorkflowEntry | None:
+        await self._ensure_db()
+        async with self._db.execute(
+            f"SELECT {self._WORKFLOW_COLS} FROM browser_workflows WHERE id = ?",
+            (workflow_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return WorkflowEntry.from_row(row) if row else None
+
+    async def select_workflow(self, selector: str) -> WorkflowEntry | None:
+        """Select by id, #index, or name (fuzzy search)."""
+        direct = await self.load_workflow(selector)
+        if direct:
+            return direct
+        if selector.startswith("#"):
+            try:
+                idx = int(selector[1:]) - 1
+            except ValueError:
+                return None
+            items = await self.list_workflows(limit=200)
+            return items[idx] if 0 <= idx < len(items) else None
+        results = await self.search_workflows(selector, limit=1)
+        return results[0] if results else None
+
+    async def list_workflows(
+        self, *, limit: int = 100, app_name: str | None = None,
+    ) -> list[WorkflowEntry]:
+        await self._ensure_db()
+        if app_name:
+            async with self._db.execute(
+                f"""
+                SELECT {self._WORKFLOW_COLS}
+                FROM browser_workflows
+                WHERE app_name = ? COLLATE NOCASE
+                ORDER BY use_count DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (app_name, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        else:
+            async with self._db.execute(
+                f"""
+                SELECT {self._WORKFLOW_COLS}
+                FROM browser_workflows
+                ORDER BY use_count DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return [WorkflowEntry.from_row(r) for r in rows]
+
+    async def search_workflows(
+        self, query: str, *, limit: int = 20,
+    ) -> list[WorkflowEntry]:
+        await self._ensure_db()
+        pattern = f"%{query}%"
+        async with self._db.execute(
+            f"""
+            SELECT {self._WORKFLOW_COLS}
+            FROM browser_workflows
+            WHERE name LIKE ? COLLATE NOCASE
+               OR description LIKE ? COLLATE NOCASE
+               OR app_name LIKE ? COLLATE NOCASE
+            ORDER BY use_count DESC, updated_at DESC
+            LIMIT ?
+            """,
+            (pattern, pattern, pattern, limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [WorkflowEntry.from_row(r) for r in rows]
+
+    async def update_workflow(
+        self, workflow_id: str, **kwargs: Any,
+    ) -> bool:
+        await self._ensure_db()
+        allowed = {
+            "name", "description", "app_name", "start_url",
+            "steps", "variables",
+        }
+        sets = []
+        vals: list[Any] = []
+        for key, val in kwargs.items():
+            if key in allowed:
+                sets.append(f"{key} = ?")
+                vals.append(val)
+        if not sets:
+            return False
+        sets.append("updated_at = ?")
+        vals.append(_utcnow_iso())
+        vals.append(workflow_id)
+        async with self._db.execute(
+            f"UPDATE browser_workflows SET {', '.join(sets)} WHERE id = ?",
+            vals,
+        ) as cursor:
+            affected = cursor.rowcount
+        await self._db.commit()
+        return affected > 0
+
+    async def delete_workflow(self, workflow_id: str) -> bool:
+        await self._ensure_db()
+        async with self._db.execute(
+            "DELETE FROM browser_workflows WHERE id = ?", (workflow_id,),
+        ) as cursor:
+            affected = cursor.rowcount
+        await self._db.commit()
+        return affected > 0
+
+    async def increment_workflow_usage(self, workflow_id: str) -> bool:
+        await self._ensure_db()
+        now = _utcnow_iso()
+        async with self._db.execute(
+            "UPDATE browser_workflows SET use_count = use_count + 1, last_used_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, workflow_id),
+        ) as cursor:
+            affected = cursor.rowcount
+        await self._db.commit()
+        return affected > 0
+
+    # ------------------------------------------------------------------
     # File registry persistence
     # ------------------------------------------------------------------
 
@@ -2277,6 +2575,123 @@ class SessionManager:
         async with self._db.execute(
             "DELETE FROM file_registry WHERE physical_path = ?",
             (physical_path,),
+        ) as cursor:
+            affected = cursor.rowcount
+        await self._db.commit()
+        return affected > 0
+
+    # ------------------------------------------------------------------
+    # Browser credentials CRUD
+    # ------------------------------------------------------------------
+
+    _BROWSER_CRED_COLS = (
+        "id, app_name, url, username, password_encrypted, auth_type, "
+        "login_selector_map, cookies, notes, source_session, "
+        "created_at, updated_at"
+    )
+
+    async def create_browser_credential(
+        self,
+        app_name: str,
+        url: str,
+        username: str,
+        password_encrypted: str,
+        *,
+        auth_type: str = "form",
+        login_selector_map: str | None = None,
+        notes: str | None = None,
+        source_session: str | None = None,
+    ) -> BrowserCredentialEntry:
+        """Store a new browser credential (upsert by app_name)."""
+        await self._ensure_db()
+        now = _utcnow_iso()
+
+        # Check if app_name already exists — update if so
+        existing = await self.get_browser_credential(app_name)
+        if existing:
+            await self._db.execute(
+                """
+                UPDATE browser_credentials
+                SET url = ?, username = ?, password_encrypted = ?,
+                    auth_type = ?, login_selector_map = ?, notes = ?,
+                    source_session = ?, updated_at = ?
+                WHERE app_name = ? COLLATE NOCASE
+                """,
+                (url, username, password_encrypted, auth_type,
+                 login_selector_map, notes, source_session, now, app_name),
+            )
+            await self._db.commit()
+            return BrowserCredentialEntry(
+                id=existing.id, app_name=app_name, url=url,
+                username=username, password_encrypted=password_encrypted,
+                auth_type=auth_type, login_selector_map=login_selector_map,
+                cookies=existing.cookies, notes=notes,
+                source_session=source_session,
+                created_at=existing.created_at, updated_at=now,
+            )
+
+        entry = BrowserCredentialEntry(
+            id=str(uuid.uuid4()), app_name=app_name, url=url,
+            username=username, password_encrypted=password_encrypted,
+            auth_type=auth_type, login_selector_map=login_selector_map,
+            notes=notes, source_session=source_session,
+            created_at=now, updated_at=now,
+        )
+        await self._db.execute(
+            f"""
+            INSERT INTO browser_credentials ({self._BROWSER_CRED_COLS})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (entry.id, entry.app_name, entry.url, entry.username,
+             entry.password_encrypted, entry.auth_type,
+             entry.login_selector_map, entry.cookies, entry.notes,
+             entry.source_session, entry.created_at, entry.updated_at),
+        )
+        await self._db.commit()
+        return entry
+
+    async def get_browser_credential(self, app_name: str) -> BrowserCredentialEntry | None:
+        """Retrieve a credential by app name (case-insensitive)."""
+        await self._ensure_db()
+        async with self._db.execute(
+            f"SELECT {self._BROWSER_CRED_COLS} FROM browser_credentials "
+            "WHERE app_name = ? COLLATE NOCASE",
+            (app_name,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return BrowserCredentialEntry.from_row(row) if row else None
+
+    async def list_browser_credentials(self) -> list[BrowserCredentialEntry]:
+        """List all stored browser credentials."""
+        await self._ensure_db()
+        async with self._db.execute(
+            f"SELECT {self._BROWSER_CRED_COLS} FROM browser_credentials "
+            "ORDER BY app_name COLLATE NOCASE",
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [BrowserCredentialEntry.from_row(r) for r in rows]
+
+    async def update_browser_credential_cookies(
+        self, app_name: str, cookies_json: str,
+    ) -> bool:
+        """Update the saved cookies for a credential."""
+        await self._ensure_db()
+        now = _utcnow_iso()
+        async with self._db.execute(
+            "UPDATE browser_credentials SET cookies = ?, updated_at = ? "
+            "WHERE app_name = ? COLLATE NOCASE",
+            (cookies_json, now, app_name),
+        ) as cursor:
+            affected = cursor.rowcount
+        await self._db.commit()
+        return affected > 0
+
+    async def delete_browser_credential(self, app_name: str) -> bool:
+        """Delete a credential by app name."""
+        await self._ensure_db()
+        async with self._db.execute(
+            "DELETE FROM browser_credentials WHERE app_name = ? COLLATE NOCASE",
+            (app_name,),
         ) as cursor:
             affected = cursor.rowcount
         await self._db.commit()

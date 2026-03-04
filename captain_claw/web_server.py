@@ -208,7 +208,7 @@ class WebServer:
                 "role": "rephrase",
                 "content": str(output or ""),
             })
-        if normalized in ("image_gen", "termux") and output and not str(output).strip().lower().startswith("error"):
+        if normalized in ("image_gen", "termux", "browser") and output and not str(output).strip().lower().startswith("error"):
             from captain_claw.platform_adapter import extract_image_paths_from_tool_output
             for img_path in extract_image_paths_from_tool_output(str(output)):
                 self._broadcast({
@@ -774,6 +774,31 @@ class WebServer:
         from captain_claw.web.rest_playbooks import delete_playbook
         return await delete_playbook(self, request)
 
+    async def _serve_browser_workflows(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_browser_workflows
+        return await serve_browser_workflows(self, request)
+
+    # Browser Workflows REST
+    async def _bw_list(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_browser_workflows import list_workflows
+        return await list_workflows(self, request)
+
+    async def _bw_get(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_browser_workflows import get_workflow
+        return await get_workflow(self, request)
+
+    async def _bw_create(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_browser_workflows import create_workflow
+        return await create_workflow(self, request)
+
+    async def _bw_update(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_browser_workflows import update_workflow
+        return await update_workflow(self, request)
+
+    async def _bw_delete(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_browser_workflows import delete_workflow
+        return await delete_workflow(self, request)
+
     # Datastore REST
     async def _ds_list_tables(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_datastore import list_tables
@@ -1009,6 +1034,12 @@ class WebServer:
         app.router.add_get("/api/playbooks/{id}", self._pb_get)
         app.router.add_patch("/api/playbooks/{id}", self._pb_update)
         app.router.add_delete("/api/playbooks/{id}", self._pb_delete)
+        # Browser Workflows API
+        app.router.add_get("/api/browser-workflows", self._bw_list)
+        app.router.add_post("/api/browser-workflows", self._bw_create)
+        app.router.add_get("/api/browser-workflows/{id}", self._bw_get)
+        app.router.add_patch("/api/browser-workflows/{id}", self._bw_update)
+        app.router.add_delete("/api/browser-workflows/{id}", self._bw_delete)
         # Deep memory (Typesense) API
         app.router.add_get("/api/deep-memory/status", self._dm_status)
         app.router.add_get("/api/deep-memory/facets", self._dm_facets)
@@ -1043,6 +1074,7 @@ class WebServer:
             app.router.add_get("/onboarding", self._serve_onboarding)
             app.router.add_get("/datastore", self._serve_datastore)
             app.router.add_get("/playbooks", self._serve_playbooks)
+            app.router.add_get("/browser-workflows", self._serve_browser_workflows)
             app.router.add_get("/favicon.ico", self._serve_favicon)
         return app
 

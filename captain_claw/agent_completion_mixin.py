@@ -104,6 +104,16 @@ class AgentCompletionMixin:
         ``final_text`` to the caller.  When False the loop should continue
         with ``updated_completion_feedback`` injected as a user message.
         """
+        log.info(
+            "attempt_finalize_response called",
+            iteration=iteration,
+            hard_turn_iterations=hard_turn_iterations,
+            has_task_contract=task_contract is not None,
+            completion_requirements_count=len(completion_requirements),
+            list_task_plan_enabled=bool(list_task_plan.get("enabled", False)),
+            enforce_python_worker_mode=enforce_python_worker_mode,
+            output_text_len=len(output_text or ""),
+        )
         # Skip auto-write when the scale micro-loop just completed.
         # The micro-loop already wrote the real content to output files
         # via _execute_tool_with_guard (which does NOT add tool messages
@@ -157,7 +167,13 @@ class AgentCompletionMixin:
             has_ds_export = self._turn_has_successful_datastore_export(turn_start_idx)
             has_write = self._turn_has_successful_tool(turn_start_idx, "write")
             has_script_exec = self._turn_has_successful_script_execution(turn_start_idx)
-            file_produced = has_ds_export or (has_write and has_script_exec)
+            # Tools that directly produce file output (screenshots, images)
+            # satisfy write_file without needing write+shell.
+            has_media_output = (
+                self._turn_has_successful_tool(turn_start_idx, "browser")
+                or self._turn_has_successful_tool(turn_start_idx, "image_gen")
+            )
+            file_produced = has_ds_export or (has_write and has_script_exec) or has_media_output
             if not file_produced and iteration < (hard_turn_iterations - 1):
                 completion_feedback = (
                     "Completion gate: final_action is write_file but no output file was "
@@ -183,6 +199,7 @@ class AgentCompletionMixin:
                     },
                     completion_feedback,
                 )
+                log.info("Finalize BLOCKED by write_file_enforcement gate", iteration=iteration)
                 return False, "", finish_success, completion_feedback, python_worker_attempted
 
         # ── Script execution enforcement ─────────────────────────────
@@ -208,6 +225,7 @@ class AgentCompletionMixin:
                 },
                 completion_feedback,
             )
+            log.info("Finalize BLOCKED by script_execution_enforcement gate", iteration=iteration, script=unexecuted_path)
             return False, "", finish_success, completion_feedback, python_worker_attempted
 
         # ── Datastore save verification ────────────────────────────
@@ -240,6 +258,7 @@ class AgentCompletionMixin:
                     },
                     completion_feedback,
                 )
+                log.info("Finalize BLOCKED by datastore_save_verification gate", iteration=iteration)
                 return False, "", finish_success, completion_feedback, python_worker_attempted
             else:
                 self._emit_tool_output(
@@ -288,6 +307,7 @@ class AgentCompletionMixin:
                     "Python worker executed successfully.\n"
                     "Now provide the final answer covering the complete processed list and saved outputs."
                 )
+                log.info("Finalize BLOCKED by python_worker_ran gate", iteration=iteration)
                 return False, "", finish_success, completion_feedback, python_worker_attempted
             if not (has_write and has_shell):
                 completion_feedback = (
@@ -297,12 +317,31 @@ class AgentCompletionMixin:
                     "- Then provide final concise summary."
                 )
                 if iteration < (hard_turn_iterations - 1):
+                    log.info("Finalize BLOCKED by python_worker_enforcement gate", iteration=iteration)
                     return False, "", finish_success, completion_feedback, python_worker_attempted
 
         # ── List member coverage ─────────────────────────────────────
         if bool(list_task_plan.get("enabled", False)):
             members = list_task_plan.get("members")
             if isinstance(members, list) and members:
+                # When the browser tool was successfully used this turn,
+                # URL-only members are satisfied — the browser already
+                # visited/processed them.  The list task plan often
+                # false-positives on browser automation prompts that
+                # contain URLs.
+                _browser_used = self._turn_has_successful_tool(turn_start_idx, "browser")
+                if _browser_used:
+                    _all_urls = all(
+                        str(m).strip().startswith(("http://", "https://"))
+                        for m in members
+                    )
+                    if _all_urls:
+                        log.info(
+                            "Skipping list_member_coverage — browser tool covered URL members",
+                            member_count=len(members),
+                        )
+                        members = []  # treat as empty → skip coverage check
+
                 _sp = getattr(self, "_scale_progress", None)
                 _sp_items = _sp.get("items", []) if _sp else []
                 _sp_done = _sp.get("done_items", set()) if _sp else set()
@@ -367,6 +406,7 @@ class AgentCompletionMixin:
                         completion_feedback,
                     )
                     if iteration < (hard_turn_iterations - 1):
+                        log.info("Finalize BLOCKED by list_member_coverage gate", iteration=iteration, missing=len(missing_members))
                         return False, "", finish_success, completion_feedback, python_worker_attempted
 
         # ── Contract completion validation ───────────────────────────
@@ -425,9 +465,11 @@ class AgentCompletionMixin:
                     completion_feedback,
                 )
                 if iteration < (hard_turn_iterations - 1):
+                    log.info("Finalize BLOCKED by contract_validation gate", iteration=iteration, failed=len(failed_items))
                     return False, "", finish_success, completion_feedback, python_worker_attempted
 
         # ── Finalize: persist and return ─────────────────────────────
+        log.info("All completion gates passed — finalizing response", iteration=iteration)
         self._update_clarification_state(
             user_input=user_input,
             effective_user_input=effective_user_input,

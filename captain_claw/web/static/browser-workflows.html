@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Browser Workflows - Captain Claw</title>
+    <link rel="stylesheet" href="/static/browser-workflows.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<header class="bw-header">
+    <div class="bw-header-left">
+        <a href="/" class="bw-logo-link"><img src="/static/logo.svg" width="28" height="28"></a>
+        <h1>Browser Workflows</h1>
+    </div>
+    <div class="bw-header-right">
+        <a href="/chat" class="bw-nav-link">&larr; Chat</a>
+    </div>
+</header>
+
+<div class="bw-layout">
+    <!-- Panel 1: List + filter -->
+    <aside class="bw-list-panel" id="bwListPanel">
+        <div class="bw-list-header">
+            <input type="text" class="bw-search" id="bwSearch"
+                   placeholder="Search workflows..." autocomplete="off">
+        </div>
+        <div class="bw-filter-bar">
+            <span class="bw-count" id="bwCount">0</span>
+        </div>
+        <div class="bw-item-list" id="bwItemList">
+            <div class="bw-loading" id="bwLoading">Loading...</div>
+        </div>
+    </aside>
+
+    <!-- Panel 2: Detail -->
+    <main class="bw-detail" id="bwDetail">
+        <!-- Empty state -->
+        <div class="bw-empty" id="bwEmpty">
+            <div class="bw-empty-icon">&#x1F3AC;</div>
+            <div class="bw-empty-text">Select a workflow to view details</div>
+            <div class="bw-empty-sub">Record browser interactions in chat, then manage them here</div>
+        </div>
+
+        <!-- Detail view -->
+        <div class="bw-detail-view" id="bwDetailView" style="display:none;">
+            <div class="bw-detail-toolbar">
+                <div class="bw-detail-header-info">
+                    <h2 class="bw-detail-title" id="bwDetailTitle"></h2>
+                    <div class="bw-detail-meta" id="bwDetailMeta"></div>
+                </div>
+                <div class="bw-detail-actions">
+                    <button class="bw-btn primary" id="bwEditBtn">Edit Steps</button>
+                    <button class="bw-btn primary" id="bwSaveBtn" style="display:none;">Save</button>
+                    <button class="bw-btn secondary" id="bwCancelEditBtn" style="display:none;">Cancel</button>
+                    <button class="bw-btn danger" id="bwDeleteBtn">Delete</button>
+                </div>
+            </div>
+            <div class="bw-detail-content" id="bwDetailContent"></div>
+        </div>
+    </main>
+</div>
+
+<!-- Delete confirmation modal -->
+<div class="bw-modal-overlay" id="bwModalOverlay" style="display:none;">
+    <div class="bw-modal">
+        <div class="bw-modal-title">Confirm Delete</div>
+        <div class="bw-modal-body" id="bwModalBody">
+            Are you sure you want to delete this workflow?
+        </div>
+        <div class="bw-modal-actions">
+            <button class="bw-btn secondary" id="bwModalCancel">Cancel</button>
+            <button class="bw-btn danger" id="bwModalConfirm">Delete</button>
+        </div>
+    </div>
+</div>
+
+<!-- Toast -->
+<div class="bw-toast" id="bwToast"></div>
+
+<script src="/static/browser-workflows.js"></script>
+</body>
+</html>
