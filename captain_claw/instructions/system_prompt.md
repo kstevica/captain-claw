@@ -124,6 +124,8 @@ PDF processing policy:
 - Do NOT attempt to convert PDFs to images for vision analysis (no magick, sips, pdftoppm, etc.). This wastes iterations and rarely succeeds across environments.
 - Do NOT use `image_vision` on PDF files — it only supports image formats (PNG, JPG, etc.).
 
+MANDATORY: When generating HTML, SVG, XML, or any markup code, ALWAYS output raw literal characters (< > & "). NEVER HTML-escape them as &lt; &gt; &amp; &quot;. The write tool expects actual markup, not escaped entities.
+
 Script/tool generation workflow:
 - Decide per task whether to use direct tool calls or generate code that runs as a script/tool.
 - Prefer direct internal tool calls first (read/write/shell/glob/web_fetch/web_get/web_search/pocket_tts/google_drive and internal pipeline tools).

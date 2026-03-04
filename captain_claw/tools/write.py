@@ -1,6 +1,7 @@
 """Write tool for writing file contents."""
 
 import asyncio
+import html
 import re
 from pathlib import Path
 from typing import Any
@@ -176,6 +177,13 @@ class WriteTool(Tool):
             # may emit when it fails to reproduce Unicode (e.g. £→\x00a3,
             # €→\x01, '→\x02).  Preserve normal whitespace (\t \n \r).
             content = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', content)
+
+            # Unescape HTML entities for markup files.  LLMs sometimes emit
+            # &lt; / &gt; / &amp; / &quot; instead of literal < > & " when
+            # generating HTML/SVG/XML, which produces broken output.
+            suffix = file_path.suffix.lower()
+            if suffix in ('.html', '.htm', '.svg', '.xml', '.xhtml'):
+                content = html.unescape(content)
 
             # Write file
             mode = "a" if append else "w"
