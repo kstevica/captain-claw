@@ -1,4 +1,4 @@
-# Captain Claw v0.3.2 Release Notes
+# Captain Claw v0.3.3 Release Notes
 
 **Release title:** Playbooks — Learn from Past Sessions
 
