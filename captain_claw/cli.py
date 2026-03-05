@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import shlex
 import shutil
 import sys
@@ -87,6 +88,26 @@ class TerminalUI:
         self._colors_enabled = False
         self.term = None
         self._setup_readline()
+        self._install_sigwinch_handler()
+
+    def _install_sigwinch_handler(self) -> None:
+        """Register a SIGWINCH handler to refresh layout on terminal resize."""
+        if not self._sticky_footer or os.name != "posix":
+            return
+        try:
+            def _on_resize(signum: int, frame: Any) -> None:
+                # Recalculate metrics and re-apply the scroll region + footer
+                # so the bottom lines are always protected after a resize.
+                try:
+                    m = self._layout_metrics()
+                    sys.stdout.write(f"\033[1;{m['output_bottom']}r")
+                    self._render_footer(force=True)
+                except Exception:
+                    pass
+
+            signal.signal(signal.SIGWINCH, _on_resize)
+        except (OSError, ValueError):
+            pass  # SIGWINCH not available or can't set handler
 
     def _setup_readline(self) -> None:
         """Set up line editing, history, and command completion."""
@@ -325,6 +346,12 @@ Commands:
                 self._append_chat_text(end)
             self._render_monitor_view()
             return
+        # Ensure scroll region is active so streaming text never
+        # overwrites the status bar or input line.
+        if self._sticky_footer:
+            m = self._layout_metrics()
+            sys.stdout.write(f"\033[1;{m['output_bottom']}r")
+            sys.stdout.flush()
         print(chunk, end=end, flush=True)
 
     def print_tool_call(self, tool_name: str, arguments: dict[str, Any]) -> None:

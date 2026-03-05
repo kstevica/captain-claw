@@ -466,6 +466,43 @@ class SemanticMemoryIndex:
         self._cache[key] = (time.time() + self.cache_ttl_seconds, merged)
         return list(merged)
 
+    def search_in_session(
+        self,
+        query: str,
+        session_reference: str,
+        max_results: int | None = None,
+    ) -> list[SemanticMemoryResult]:
+        """Search within a specific session regardless of cross_session_retrieval config.
+
+        This allows targeted retrieval from a named session without enabling
+        the global cross-session flag.
+        """
+        cleaned = str(query or "").strip()
+        ref = str(session_reference or "").strip()
+        if not cleaned or not ref or self._closed:
+            return []
+        effective_max = max(1, int(max_results or self.max_results))
+
+        if self.auto_sync_on_search:
+            now = time.time()
+            stale = (now - self._last_sync_completed) >= self.stale_after_seconds
+            if stale or self._dirty:
+                self.schedule_sync("cross_session_search")
+
+        keyword_hits = self._keyword_search(
+            cleaned,
+            limit=self.candidate_limit,
+            active_session_reference=ref,
+            include_all_sessions=False,
+        )
+        vector_hits = self._vector_search(
+            cleaned,
+            limit=self.candidate_limit,
+            active_session_reference=ref,
+            include_all_sessions=False,
+        )
+        return list(self._merge_hybrid(keyword_hits, vector_hits, max_results=effective_max))
+
     def build_context_note(
         self,
         query: str,

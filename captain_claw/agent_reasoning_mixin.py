@@ -700,6 +700,7 @@ class AgentReasoningMixin:
         candidate_response: str,
         contract: dict[str, Any],
         turn_usage: dict[str, int],
+        scale_completed: bool = False,
     ) -> dict[str, Any]:
         """Critic pass: evaluate whether candidate satisfies contract requirements."""
         requirements = contract.get("requirements")
@@ -707,6 +708,21 @@ class AgentReasoningMixin:
             return {"complete": True, "checks": []}
 
         requirements_json = json.dumps(requirements, ensure_ascii=True)
+        user_content = self.instructions.render(
+            "task_contract_critic_user_prompt.md",
+            user_input=user_input,
+            requirements_json=requirements_json,
+            candidate_response=candidate_response,
+        )
+        if scale_completed:
+            user_content += (
+                "\n\nIMPORTANT: A scale micro-loop has already researched/processed "
+                "all list items independently. The candidate response is a POST-PROCESSING "
+                "synthesis that COMBINES pre-researched results. "
+                "Do NOT require sequential or one-at-a-time delivery — a single "
+                "combined response covering all items is correct and expected. "
+                "Focus only on whether the content for each requirement is present."
+            )
         messages = [
             Message(
                 role="system",
@@ -714,12 +730,7 @@ class AgentReasoningMixin:
             ),
             Message(
                 role="user",
-                content=self.instructions.render(
-                    "task_contract_critic_user_prompt.md",
-                    user_input=user_input,
-                    requirements_json=requirements_json,
-                    candidate_response=candidate_response,
-                ),
+                content=user_content,
             ),
         ]
         try:

@@ -26,4 +26,10 @@ if grep -q 'host:.*127\.0\.0\.1' "$CONFIG" 2>/dev/null; then
   sed -i 's/host:.*127\.0\.0\.1/host: "0.0.0.0"/' "$CONFIG"
 fi
 
+# If the first argument looks like a flag (e.g. --tui, --port),
+# prepend the default command so `docker run image --tui` works.
+if [ "${1#-}" != "$1" ]; then
+  set -- captain-claw "$@"
+fi
+
 exec "$@"

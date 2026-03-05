@@ -84,6 +84,26 @@ class AgentOrchestrationMixin:
 
         effective_user_input = user_input
         effective_user_input, clarification_context_applied = self._resolve_effective_user_input(user_input)
+
+        # Pre-populate cross-session context cache for _build_messages.
+        self._cross_session_context_cache = None
+        if hasattr(self, "_resolve_cross_session_context"):
+            try:
+                _cs_note = await self._resolve_cross_session_context(effective_user_input)
+                if _cs_note:
+                    selectors = self._extract_session_references(effective_user_input)
+                    self._cross_session_context_cache = {
+                        "note": _cs_note,
+                        "selectors": selectors,
+                    }
+                    log.info(
+                        "Cross-session context cached for _build_messages",
+                        selectors=selectors,
+                        note_length=len(_cs_note),
+                    )
+            except Exception as exc:
+                log.debug("Cross-session context resolution failed", error=str(exc))
+
         require_all_sources = self._request_references_all_sources(effective_user_input)
         is_worker = getattr(self, "_is_worker", False)
         use_contract_pipeline = self._should_use_contract_pipeline(

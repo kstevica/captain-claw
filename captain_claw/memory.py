@@ -141,6 +141,21 @@ class LayeredMemory:
             return []
         return self.semantic.search(query=query, max_results=max_results)
 
+    def search_in_session(
+        self,
+        query: str,
+        session_reference: str,
+        max_results: int | None = None,
+    ):
+        """Search within a specific session (bypasses cross_session_retrieval config)."""
+        if self.semantic is None:
+            return []
+        return self.semantic.search_in_session(
+            query=query,
+            session_reference=session_reference,
+            max_results=max_results,
+        )
+
     def build_semantic_note(
         self,
         query: str,

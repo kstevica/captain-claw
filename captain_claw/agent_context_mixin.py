@@ -838,6 +838,163 @@ class AgentContextMixin:
             log.debug("Semantic memory note generation failed", error=str(e))
             return "", ""
 
+    # --------------- Cross-session memory fetch --------------- #
+
+    # Patterns to detect session references in user input.
+    _SESSION_REF_PATTERNS = (
+        # "based on session #1", "from session #3", "using session #2"
+        re.compile(
+            r"\b(?:based\s+on|from|using|reference|refer\s+to|with)\s+"
+            r"session\s*#\s*(\d+)\b",
+            re.IGNORECASE,
+        ),
+        # standalone "session #1"
+        re.compile(r"\bsession\s*#\s*(\d+)\b", re.IGNORECASE),
+        # "session 'My Research'" or 'session "Blog Draft"'
+        re.compile(r"\bsession\s+[\"']([^\"']+)[\"']", re.IGNORECASE),
+    )
+
+    def _extract_session_references(self, query: str) -> list[str]:
+        """Extract session selectors from user query.
+
+        Returns a list of selector strings suitable for
+        ``session_manager.select_session()``.  Numeric references are
+        returned as ``"#N"`` strings; name references as-is.
+        """
+        selectors: list[str] = []
+        seen: set[str] = set()
+        for pat in self._SESSION_REF_PATTERNS:
+            for m in pat.finditer(query):
+                raw = m.group(1).strip()
+                if raw.isdigit():
+                    sel = f"#{raw}"
+                else:
+                    sel = raw
+                if sel.lower() not in seen:
+                    seen.add(sel.lower())
+                    selectors.append(sel)
+        return selectors
+
+    async def _resolve_cross_session_context(
+        self,
+        query: str,
+        max_output_chars: int = 3000,
+        max_semantic_items: int = 5,
+        max_snippet_chars: int = 400,
+    ) -> str | None:
+        """Resolve inter-session references and build a context block.
+
+        Combines two strategies:
+        1) **Direct output extraction** — recent assistant messages from the
+           referenced session (gives the LLM the actual output).
+        2) **Targeted semantic search** — relevance-ranked snippets from the
+           referenced session's indexed content.
+        """
+        selectors = self._extract_session_references(query)
+        if not selectors:
+            return None
+
+        session_manager = getattr(self, "session_manager", None)
+        if session_manager is None:
+            return None
+
+        current_id = ""
+        if self.session:
+            current_id = getattr(self.session, "id", "")
+
+        context_blocks: list[str] = []
+        for sel in selectors[:3]:  # Cap at 3 referenced sessions
+            try:
+                ref_session = await session_manager.select_session(sel)
+            except Exception:
+                ref_session = None
+            if ref_session is None:
+                context_blocks.append(
+                    f"⚠️ Could not resolve session reference '{sel}'. "
+                    "Available sessions can be listed with /sessions."
+                )
+                continue
+            if ref_session.id == current_id:
+                continue  # Skip self-reference
+
+            block_lines = [
+                f"── Cross-session context: \"{ref_session.name}\" "
+                f"(ref={sel}, id={ref_session.id[:8]}…) ──"
+            ]
+
+            # Strategy 1: Direct output extraction (last N assistant messages).
+            assistant_outputs: list[str] = []
+            total_chars = 0
+            for msg in reversed(ref_session.messages or []):
+                if total_chars >= max_output_chars:
+                    break
+                if msg.get("role") != "assistant":
+                    continue
+                content = str(msg.get("content", "")).strip()
+                if not content:
+                    continue
+                # Skip tool call stubs and compaction summaries.
+                tn = str(msg.get("tool_name", "")).strip().lower()
+                if tn in ("compaction_summary", "working_memory_summary"):
+                    continue
+                remaining = max_output_chars - total_chars
+                if len(content) > remaining:
+                    content = content[:remaining].rstrip() + "… [truncated]"
+                assistant_outputs.append(content)
+                total_chars += len(content)
+
+            if assistant_outputs:
+                # Reverse back to chronological order.
+                assistant_outputs.reverse()
+                block_lines.append("Session output (most recent):")
+                for chunk in assistant_outputs:
+                    block_lines.append(chunk)
+
+            # Strategy 2: Targeted semantic memory search.
+            memory = getattr(self, "memory", None)
+            if memory is not None:
+                try:
+                    hits = memory.search_in_session(
+                        query=query,
+                        session_reference=ref_session.id,
+                        max_results=max_semantic_items,
+                    )
+                    if hits:
+                        block_lines.append(
+                            f"Semantic matches from '{ref_session.name}':"
+                        )
+                        for item in hits:
+                            snippet = re.sub(r"\s+", " ", item.snippet).strip()
+                            if len(snippet) > max_snippet_chars:
+                                snippet = (
+                                    snippet[:max_snippet_chars].rstrip()
+                                    + "… [truncated]"
+                                )
+                            block_lines.append(
+                                f"  - (score={item.score:.3f}) {snippet}"
+                            )
+                except Exception as exc:
+                    log.debug(
+                        "Cross-session semantic search failed",
+                        session=ref_session.id,
+                        error=str(exc),
+                    )
+
+            context_blocks.append("\n".join(block_lines))
+
+        if not context_blocks:
+            return None
+
+        note = "\n\n".join(context_blocks)
+        log.info(
+            "Cross-session context resolved",
+            selectors=selectors,
+            note_length=len(note),
+        )
+        return note
+
+    # --------------- Deep memory triggers --------------- #
+
     # Trigger phrases that activate deep memory search.
     _DEEP_MEMORY_TRIGGERS = (
         "deep memory",
@@ -1667,6 +1824,25 @@ class AgentContextMixin:
                     deep_debug,
                 )
                 self._last_deep_memory_debug_signature = deep_signature
+
+        # Cross-session context note — fetched async, cached for sync access.
+        _cs_cache = getattr(self, "_cross_session_context_cache", None)
+        if isinstance(_cs_cache, dict) and _cs_cache.get("note"):
+            _cs_note = str(_cs_cache["note"])
+            candidate_messages.append({
+                "role": "assistant",
+                "content": _cs_note,
+                "tool_name": "cross_session_context",
+                "token_count": self._count_tokens(_cs_note),
+            })
+            _cs_sig = f"cross_session|{hash(_cs_note)}"
+            if _cs_sig != getattr(self, "_last_cross_session_debug_signature", None):
+                self._emit_tool_output(
+                    "memory_cross_session",
+                    {"selectors": _cs_cache.get("selectors", [])},
+                    f"Cross-session context injected ({len(_cs_note)} chars)",
+                )
+                self._last_cross_session_debug_signature = _cs_sig
 
         # Playbook context note — inject proven patterns for similar tasks.
         if hasattr(self, "_build_playbook_context_note_sync") and query:

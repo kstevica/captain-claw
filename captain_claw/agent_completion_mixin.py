@@ -476,6 +476,7 @@ class AgentCompletionMixin:
                 candidate_response=final_response,
                 contract=task_contract,
                 turn_usage=turn_usage,
+                scale_completed=_scale_completed,
             )
             checks_ok = bool(critique.get("complete", False))
             raw_check_results = critique.get("checks", [])
@@ -512,21 +513,36 @@ class AgentCompletionMixin:
                     planning_pipeline,
                 )
             if not checks_ok:
-                completion_feedback = self._build_completion_feedback(
-                    contract=task_contract,
-                    critique=critique,
-                )
-                self._emit_tool_output(
-                    "task_contract",
-                    {
-                        "step": "validation_retry",
-                        "missing": len(failed_items),
-                    },
-                    completion_feedback,
-                )
-                if iteration < (hard_turn_iterations - 1):
-                    log.info("Finalize BLOCKED by contract_validation gate", iteration=iteration, failed=len(failed_items))
-                    return False, "", finish_success, completion_feedback, python_worker_attempted
+                # Post-scale synthesis: cap validation retries.  The scale
+                # micro-loop already did the heavy lifting; the LLM is just
+                # combining pre-researched results.  Allowing 10+ retries
+                # wastes LLM calls when the critic oscillates between
+                # contradictory feedback (e.g. "deliver sequentially" vs
+                # "missing topic X").
+                _post_scale_retry_cap = 3
+                if _scale_completed and iteration >= _post_scale_retry_cap:
+                    log.info(
+                        "Post-scale validation retry cap reached — accepting response",
+                        iteration=iteration,
+                        failed=len(failed_items),
+                        cap=_post_scale_retry_cap,
+                    )
+                else:
+                    completion_feedback = self._build_completion_feedback(
+                        contract=task_contract,
+                        critique=critique,
+                    )
+                    self._emit_tool_output(
+                        "task_contract",
+                        {
+                            "step": "validation_retry",
+                            "missing": len(failed_items),
+                        },
+                        completion_feedback,
+                    )
+                    if iteration < (hard_turn_iterations - 1):
+                        log.info("Finalize BLOCKED by contract_validation gate", iteration=iteration, failed=len(failed_items))
+                        return False, "", finish_success, completion_feedback, python_worker_attempted
 
         # ── Finalize: persist and return ─────────────────────────────
         log.info("All completion gates passed — finalizing response", iteration=iteration)

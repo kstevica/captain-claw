@@ -33,6 +33,38 @@ class _SinkWriter:
             self._buffer = ""
 
 
+class _DynamicLogFile:
+    """File-like object that routes to the TUI system panel when available.
+
+    The ``_system_log_sink`` global can be set *after* structlog has been
+    configured.  This wrapper checks the current value on every write so
+    that log output is routed correctly even with
+    ``cache_logger_on_first_use=True``.
+    """
+
+    def __init__(self) -> None:
+        self._sink_writer: _SinkWriter | None = None
+        self._active_sink: Callable[[str], None] | None = None
+
+    def write(self, text: str) -> int:
+        sink = _system_log_sink
+        if sink is not None:
+            # Re-create _SinkWriter only when the sink function changes.
+            if self._active_sink is not sink:
+                self._active_sink = sink
+                self._sink_writer = _SinkWriter(sink)
+            return self._sink_writer.write(text)  # type: ignore[union-attr]
+        # No TUI sink — fall back to stderr.
+        return sys.stderr.write(text)
+
+    def flush(self) -> None:
+        sink = _system_log_sink
+        if sink is not None and self._sink_writer is not None:
+            self._sink_writer.flush()
+        else:
+            sys.stderr.flush()
+
+
 def set_system_log_sink(sink: Callable[[str], None] | None) -> None:
     """Set optional sink for system logs (used by fixed UI system panel)."""
     global _system_log_sink
@@ -66,7 +98,7 @@ def configure_logging() -> None:
         wrapper_class=structlog.make_filtering_bound_logger(log_level),
         context_class=dict,
         logger_factory=structlog.PrintLoggerFactory(
-            file=_SinkWriter(_system_log_sink) if _system_log_sink else sys.stderr
+            file=_DynamicLogFile()
         ),
         cache_logger_on_first_use=True,
     )

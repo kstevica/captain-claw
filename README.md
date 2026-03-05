@@ -8,6 +8,10 @@
 
 ![Captain Claw](docs/screenshot.png)
 
+[![asciicast](https://asciinema.org/a/R1UPSHi4Y6UrOnpY.svg)](https://asciinema.org/a/R1UPSHi4Y6UrOnpY)
+
+[![Watch the video](https://img.youtube.com/vi/4g_aA_WnEaw/maxresdefault.jpg)](https://www.youtube.com/watch?v=4g_aA_WnEaw)
+
 An open-source AI agent that runs locally, supports multiple LLM providers, and gets work done — coding, research, automation, document processing, orchestration — through persistent sessions with built-in safety guards.
 
 ## Feature Snapshot
