@@ -1012,6 +1012,26 @@ class AgentOrchestrationMixin:
                     )
                     continue
 
+                # ── Post-write finalization hint ───────────────────
+                # When a write_file task already has a successful write
+                # in this turn, nudge the LLM to finalize instead of
+                # making more tool calls.  Without this, the LLM may
+                # loop on duplicate write attempts indefinitely.
+                _fa = str(list_task_plan.get("final_action", "")).strip().lower()
+                if (
+                    _fa == "write_file"
+                    and self._turn_has_successful_tool(turn_start_idx, "write")
+                    and not completion_feedback
+                ):
+                    completion_feedback = (
+                        "The output file has been written successfully. "
+                        "Do NOT write the file again. "
+                        "Respond with a brief text summary of what you "
+                        "created (file name, key contents). Do NOT call "
+                        "any more tools."
+                    )
+                    log.info("Post-write finalization hint injected")
+
                 if not self._supports_tool_result_followup():
                     output = self._collect_turn_tool_output(turn_start_idx)
                     final = await self._friendly_tool_output_response(
@@ -1179,6 +1199,22 @@ class AgentOrchestrationMixin:
                         processed=micro_result.get("processed", 0),
                     )
                     continue
+
+                # ── Post-write finalization hint (embedded path) ──
+                _fa_emb = str(list_task_plan.get("final_action", "")).strip().lower()
+                if (
+                    _fa_emb == "write_file"
+                    and self._turn_has_successful_tool(turn_start_idx, "write")
+                    and not completion_feedback
+                ):
+                    completion_feedback = (
+                        "The output file has been written successfully. "
+                        "Do NOT write the file again. "
+                        "Respond with a brief text summary of what you "
+                        "created (file name, key contents). Do NOT call "
+                        "any more tools."
+                    )
+                    log.info("Post-write finalization hint injected (embedded path)")
 
                 if not self._supports_tool_result_followup():
                     output = self._collect_turn_tool_output(turn_start_idx)

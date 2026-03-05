@@ -819,6 +819,15 @@ class AgentToolLoopMixin:
                         "this item and move on to the NEXT unprocessed item in the list. "
                         "Do NOT attempt to re-fetch this item again."
                     )
+                elif _tool_lower == "write":
+                    dup_msg = (
+                        f"DUPLICATE CALL BLOCKED: You have already called `{tc.name}` "
+                        f"on this target {_dup_count} times this turn. The file was "
+                        "ALREADY SAVED SUCCESSFULLY on the first call. Do NOT attempt "
+                        "to write it again. You are DONE writing. Now respond with a "
+                        "brief TEXT summary of what you created (file name, description). "
+                        "Do NOT call any more tools."
+                    )
                 else:
                     dup_msg = (
                         f"DUPLICATE CALL BLOCKED: You have already called `{tc.name}` on "
@@ -931,6 +940,39 @@ class AgentToolLoopMixin:
                         "the PREVIOUS item to the output first (write, append=true), "
                         "then append the summary for THIS item. Do not skip any items."
                     )
+
+                # ── Post-pip-install retry hint ──────────────────
+                # When a `pip install` succeeds after a prior shell
+                # command failed (likely due to missing dependency),
+                # remind the LLM to re-run the original command.
+                if (
+                    result.success
+                    and _tool_lower == "shell"
+                    and isinstance(arguments, dict)
+                    and "pip install" in str(arguments.get("command", "")).lower()
+                ):
+                    # Check for a prior failed shell call in this turn.
+                    _had_prior_shell_failure = False
+                    if self.session:
+                        for _prev in self.session.messages[turn_start_idx:]:
+                            if _prev.get("role") != "tool":
+                                continue
+                            if str(_prev.get("tool_name", "")).strip().lower() != "shell":
+                                continue
+                            _prev_content = str(_prev.get("content", ""))
+                            if _prev_content.strip().lower().startswith("error:"):
+                                _had_prior_shell_failure = True
+                                break
+                    if _had_prior_shell_failure:
+                        _result_content += (
+                            "\n\n⚠️ IMPORTANT: The package was installed successfully, "
+                            "but the original script/command that failed earlier has "
+                            "NOT been re-run. You MUST re-execute the original "
+                            "script/command now to actually produce the output file. "
+                            "Do NOT skip this step."
+                        )
+                        log.info("Post-pip-install retry hint appended")
+
                 self._add_session_message(
                     role="tool",
                     content=_result_content,

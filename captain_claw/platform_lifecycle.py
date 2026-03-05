@@ -22,7 +22,7 @@ async def init_platforms(ctx: RuntimeContext) -> None:
     # Telegram
     telegram_cfg = cfg.telegram
     ctx.telegram.config = telegram_cfg
-    ctx.telegram.enabled = bool(telegram_cfg.enabled or telegram_cfg.bot_token.strip())
+    ctx.telegram.enabled = bool(telegram_cfg.enabled and telegram_cfg.bot_token.strip())
     if ctx.telegram.enabled:
         token = telegram_cfg.bot_token.strip()
         if token:
@@ -42,7 +42,7 @@ async def init_platforms(ctx: RuntimeContext) -> None:
     # Slack
     slack_cfg = cfg.slack
     ctx.slack.config = slack_cfg
-    ctx.slack.enabled = bool(slack_cfg.enabled or slack_cfg.bot_token.strip())
+    ctx.slack.enabled = bool(slack_cfg.enabled and slack_cfg.bot_token.strip())
     if ctx.slack.enabled:
         token = slack_cfg.bot_token.strip()
         if token:
@@ -62,7 +62,7 @@ async def init_platforms(ctx: RuntimeContext) -> None:
     # Discord
     discord_cfg = cfg.discord
     ctx.discord.config = discord_cfg
-    ctx.discord.enabled = bool(discord_cfg.enabled or discord_cfg.bot_token.strip())
+    ctx.discord.enabled = bool(discord_cfg.enabled and discord_cfg.bot_token.strip())
     if ctx.discord.enabled:
         token = discord_cfg.bot_token.strip()
         if token:

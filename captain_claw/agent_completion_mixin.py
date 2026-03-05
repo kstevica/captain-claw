@@ -152,8 +152,11 @@ class AgentCompletionMixin:
         # When the list task plan requires file output, verify that a
         # file was actually produced this turn.  Accepted patterns:
         #   a) datastore(action='export') succeeded (single-table export)
-        #   b) write + shell both succeeded, where shell actually ran
-        #      a written script (not just mkdir/pip install)
+        #   b) write tool succeeded (direct file creation — markdown,
+        #      text, or any non-tabular content)
+        #   c) A Python script was written to a .py file and executed
+        #      via shell (script-generated output like PDF, charts)
+        #   d) Media tools (browser screenshot, image_gen) produced output
         # Without this gate the LLM can claim it saved a file while
         # never invoking the tool, causing hallucinated file paths.
         _final_action = str(list_task_plan.get("final_action", "")).strip().lower()
@@ -173,16 +176,21 @@ class AgentCompletionMixin:
                 self._turn_has_successful_tool(turn_start_idx, "browser")
                 or self._turn_has_successful_tool(turn_start_idx, "image_gen")
             )
-            file_produced = has_ds_export or (has_write and has_script_exec) or has_media_output
+            # Any single file-producing action is sufficient.  The write
+            # tool alone proves a file was created (e.g. markdown, text).
+            # Script execution alone proves a script generated output.
+            file_produced = has_ds_export or has_write or has_script_exec or has_media_output
             if not file_produced and iteration < (hard_turn_iterations - 1):
                 completion_feedback = (
                     "Completion gate: final_action is write_file but no output file was "
                     "actually produced this turn.\n"
                     "You MUST produce the file using one of these approaches:\n"
-                    "1. datastore(action='export') — for tabular data (XLSX/CSV). "
+                    "1. write(path='<output_path>', content='<content>') — for text, "
+                    "markdown, or any non-tabular content.\n"
+                    "2. datastore(action='export') — for tabular data (XLSX/CSV). "
                     "For JOINs: datastore(action='export', format='xlsx', "
                     "sql_query='SELECT ... FROM t1 JOIN t2 ON ...', table='output_name').\n"
-                    "2. write a Python script to scripts/ then execute it via "
+                    "3. write a Python script to scripts/ then execute it via "
                     "shell(command='python3 <script_path>') — for non-tabular output "
                     "(PDF, charts, custom formats). IMPORTANT: all output paths in the "
                     "script must be relative to the workspace root (not the script's "
@@ -227,6 +235,58 @@ class AgentCompletionMixin:
             )
             log.info("Finalize BLOCKED by script_execution_enforcement gate", iteration=iteration, script=unexecuted_path)
             return False, "", finish_success, completion_feedback, python_worker_attempted
+
+        # ── Failed shell + pip install without retry ─────────────────
+        # When a shell command failed (e.g. missing module), the LLM
+        # installed the dependency via pip, but never re-ran the
+        # original command.  Block finalization so the actual output
+        # gets produced.
+        if iteration < (hard_turn_iterations - 1) and self.session:
+            _shell_msgs = [
+                m for m in self.session.messages[turn_start_idx:]
+                if m.get("role") == "tool"
+                and str(m.get("tool_name", "")).strip().lower() == "shell"
+            ]
+            _has_shell_failure = any(
+                str(m.get("content", "")).strip().lower().startswith("error:")
+                for m in _shell_msgs
+            )
+            _has_pip_install = any(
+                "pip install" in str((m.get("tool_arguments") or {}).get("command", "")).lower()
+                and not str(m.get("content", "")).strip().lower().startswith("error:")
+                for m in _shell_msgs
+            )
+            # Check if there was a successful non-pip shell call AFTER
+            # the pip install (meaning the LLM did re-run something).
+            _has_post_pip_success = False
+            _pip_seen = False
+            for _sm in _shell_msgs:
+                _cmd = str((_sm.get("tool_arguments") or {}).get("command", "")).lower()
+                _is_err = str(_sm.get("content", "")).strip().lower().startswith("error:")
+                if "pip install" in _cmd and not _is_err:
+                    _pip_seen = True
+                elif _pip_seen and not _is_err and "pip" not in _cmd:
+                    _has_post_pip_success = True
+                    break
+            if _has_shell_failure and _has_pip_install and not _has_post_pip_success:
+                completion_feedback = (
+                    "Completion gate: a shell command failed earlier this turn and "
+                    "a dependency was installed via pip, but the original command "
+                    "was never re-executed.\n"
+                    "You MUST re-run the original script/command that failed to "
+                    "actually produce the output file. The pip install alone does "
+                    "NOT create the output."
+                )
+                self._emit_tool_output(
+                    "completion_gate",
+                    {
+                        "step": "pip_install_retry_enforcement",
+                        "passed": False,
+                    },
+                    completion_feedback,
+                )
+                log.info("Finalize BLOCKED by pip_install_retry_enforcement gate", iteration=iteration)
+                return False, "", finish_success, completion_feedback, python_worker_attempted
 
         # ── Datastore save verification ────────────────────────────
         # When the LLM performed datastore write operations (insert,
