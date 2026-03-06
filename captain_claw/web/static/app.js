@@ -1537,6 +1537,27 @@
         // Ordered lists
         html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
 
+        // Tables
+        html = html.replace(/((?:^\|.+\|$\n?){2,})/gm, function(block) {
+            var rows = block.trim().split('\n');
+            if (rows.length < 2) return block;
+            var parseRow = function(row) {
+                return row.replace(/^\|/, '').replace(/\|$/, '').split('|').map(function(c) { return c.trim(); });
+            };
+            // Check if second row is a separator (e.g. | :--- | :--- |)
+            var sepCells = parseRow(rows[1]);
+            var isSep = sepCells.every(function(c) { return /^:?-{1,}:?$/.test(c); });
+            if (!isSep) return block;
+            var headCells = parseRow(rows[0]);
+            var thead = '<thead><tr>' + headCells.map(function(c) { return '<th>' + c + '</th>'; }).join('') + '</tr></thead>';
+            var bodyRows = rows.slice(2);
+            var tbody = '<tbody>' + bodyRows.map(function(row) {
+                var cells = parseRow(row);
+                return '<tr>' + cells.map(function(c) { return '<td>' + c + '</td>'; }).join('') + '</tr>';
+            }).join('') + '</tbody>';
+            return '<table>' + thead + tbody + '</table>';
+        });
+
         // Paragraphs (double newlines)
         html = html.replace(/\n\n/g, '</p><p>');
         html = html.replace(/\n/g, '<br>');
