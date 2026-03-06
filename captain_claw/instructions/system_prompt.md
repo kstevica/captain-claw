@@ -6,7 +6,7 @@ Available tools:
 - shell: Execute shell commands in the terminal
 - read: Read file contents from the filesystem
 - write: Write content to files
-- glob: Find files by pattern
+- glob: Find files by pattern (ALWAYS use this instead of shell find/ls for file searching — it automatically searches extra read folders too)
 - web_fetch: Fetch a URL and return clean readable TEXT (always text mode, never raw HTML)
 - web_get: Fetch a URL and return raw HTML source (only for scraping/DOM inspection)
 - web_search: Search the web for up-to-date sources
@@ -102,6 +102,7 @@ Workspace folder policy:
 - Runtime base path: "{runtime_base_path}".
 - Workspace root path: "{workspace_root}".
 - All tool-generated files must be written inside: "{saved_root}".
+{extra_read_dirs_block}
 - If a save target folder does not exist, create it first.
 - Organize generated artifacts using these folders under saved root: downloads, media, scripts, showcase, skills, tmp, tools.
 - Why: keep outputs predictable, easy to review, and easy to clean up by type and session.
@@ -251,6 +252,12 @@ Large-scale and incremental output policy:
   - Do NOT skip writing a summary because an extract returned little text. Write what you can and move on.
 - For glob/file listing tasks: always pass an explicit `limit` parameter large enough to capture all files. The default limit is 100 — if the user says "all files" or the folder might have more than 100, use limit=1000 or higher.
 - If you discover the item count is very large (100+), tell the user the count and confirm before processing. Example: "Found 600 files in abc/. Processing all of them will take a while. Should I proceed?"
+
+MANDATORY file search policy:
+- ALWAYS use the `glob` tool to find files. NEVER use `shell` with `find`, `ls`, or other commands to search for files.
+- The `glob` tool automatically searches both the workspace AND all extra read folders configured by the user. Shell find/ls only searches the current directory.
+- The `glob` tool performs case-insensitive matching in extra read folders — shell find does not.
+- When the user asks about a file by partial name, use glob with a broad pattern like `**/*partial_name*` to find it.
 
 Efficient tool use:
 - Prefer the smallest number of tool calls that can accomplish the task.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import platform
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -15,6 +16,38 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
+# ── Blocked system paths ─────────────────────────────────────
+
+_BLOCKED_UNIX = {
+    "/bin", "/sbin", "/usr", "/etc", "/var", "/tmp", "/dev", "/proc",
+    "/sys", "/boot", "/lib", "/lib64", "/run", "/snap", "/lost+found",
+    "/System", "/Library", "/private",
+}
+_BLOCKED_WIN = {
+    "C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)",
+    "C:\\ProgramData", "C:\\$Recycle.Bin", "C:\\Recovery",
+}
+
+
+def _is_drive_root(p: Path) -> bool:
+    """Return True if path is a filesystem root (/ or C:\\)."""
+    return p == p.anchor or str(p) in ("/", "\\")
+
+
+def _is_blocked_path(p: Path) -> bool:
+    """Return True if path is a drive root or a known system directory."""
+    resolved = p.resolve()
+    if _is_drive_root(resolved):
+        return True
+    s = str(resolved)
+    blocked = _BLOCKED_WIN if platform.system() == "Windows" else _BLOCKED_UNIX
+    for bp in blocked:
+        if s == bp or s.startswith(bp + ("/" if "/" in bp else "\\")):
+            return True
+    return False
+
+
+# ── Helpers ───────────────────────────────────────────────────
 
 def _resolve_skill_key(entry: Any) -> str:
     """Return the config key for a skill entry."""
@@ -31,6 +64,23 @@ def _get_enabled_state(cfg: Any, skill_key: str) -> bool | None:
             return val.enabled
     return None
 
+
+def _save_config(config_path: Path, data: dict) -> None:
+    """Validate, write, and reload config."""
+    from captain_claw.config import Config, LOCAL_CONFIG_FILENAME, set_config
+
+    local_path = Path.cwd() / LOCAL_CONFIG_FILENAME
+    local_data = Config._read_yaml_data(local_path)
+    merged_data = Config._deep_merge(local_data, data) if local_data else data
+    Config(**merged_data)  # validate — raises on error
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+    set_config(Config.load())
+
+
+# ── Skills CRUD ───────────────────────────────────────────────
 
 async def list_skills(server: WebServer, request: web.Request) -> web.Response:
     """GET /api/skills — list all workspace skill entries with rich metadata."""
@@ -116,12 +166,7 @@ async def install_skill(server: WebServer, request: web.Request) -> web.Response
 
 async def toggle_skill(server: WebServer, request: web.Request) -> web.Response:
     """POST /api/skills/toggle — enable or disable a skill via config."""
-    from captain_claw.config import (
-        DEFAULT_CONFIG_PATH,
-        LOCAL_CONFIG_FILENAME,
-        Config,
-        set_config,
-    )
+    from captain_claw.config import DEFAULT_CONFIG_PATH
 
     try:
         body = await request.json()
@@ -137,45 +182,191 @@ async def toggle_skill(server: WebServer, request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": "Missing enabled"}, status=400)
     enabled = bool(enabled)
 
-    # ── Read existing YAML ────────────────────────────────
     config_path = DEFAULT_CONFIG_PATH
     if config_path.exists():
-        raw = config_path.read_text(encoding="utf-8")
-        data: dict = yaml.safe_load(raw) or {}
+        data: dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
         data = {}
 
-    # ── Update skills.entries.<key>.enabled ────────────────
     skills_section = data.setdefault("skills", {})
     entries_section = skills_section.setdefault("entries", {})
     entry = entries_section.setdefault(skill_key, {})
 
     if enabled:
-        # Re-enable: remove the enabled key entirely (None = default enabled)
         entry.pop("enabled", None)
-        # Clean up empty entry
         if not entry:
             entries_section.pop(skill_key, None)
-        # Clean up empty entries dict
         if not entries_section:
             skills_section.pop("entries", None)
     else:
         entry["enabled"] = False
 
-    # ── Validate ──────────────────────────────────────────
-    local_path = Path.cwd() / LOCAL_CONFIG_FILENAME
-    local_data = Config._read_yaml_data(local_path)
-    merged_data = Config._deep_merge(local_data, data) if local_data else data
     try:
-        Config(**merged_data)
+        _save_config(config_path, data)
     except Exception as e:
         return web.json_response({"ok": False, "error": str(e)}, status=422)
 
-    # ── Save and reload ───────────────────────────────────
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(config_path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-    set_config(Config.load())
-
     log.info("Skill toggled", skill_key=skill_key, enabled=enabled)
     return web.json_response({"ok": True, "skill_key": skill_key, "enabled": enabled})
+
+
+# ── Directory browsing ────────────────────────────────────────
+
+async def browse_directory(server: WebServer, request: web.Request) -> web.Response:
+    """GET /api/browse?path=... — list subdirectories for folder selection."""
+    raw_path = request.query.get("path", "").strip()
+    if not raw_path:
+        raw_path = str(Path.home())
+
+    try:
+        target = Path(raw_path).expanduser().resolve()
+    except Exception:
+        return web.json_response({"error": "Invalid path"}, status=400)
+
+    if not target.exists():
+        return web.json_response({"error": "Path does not exist"}, status=404)
+    if not target.is_dir():
+        return web.json_response({"error": "Not a directory"}, status=400)
+
+    dirs = []
+    try:
+        for child in sorted(target.iterdir()):
+            if not child.is_dir():
+                continue
+            name = child.name
+            # Skip hidden directories.
+            if name.startswith("."):
+                continue
+            dirs.append(name)
+    except PermissionError:
+        return web.json_response({"error": "Permission denied"}, status=403)
+
+    blocked = _is_blocked_path(target)
+
+    return web.json_response({
+        "path": str(target),
+        "parent": str(target.parent) if not _is_drive_root(target) else None,
+        "dirs": dirs,
+        "blocked": blocked,
+    })
+
+
+# ── Read-folder management ────────────────────────────────────
+
+async def list_read_folders(server: WebServer, request: web.Request) -> web.Response:
+    """GET /api/read-folders — list configured extra readable directories."""
+    from captain_claw.config import get_config
+
+    cfg = get_config()
+    dirs = list(cfg.tools.read.extra_dirs)
+    resolved = []
+    for d in dirs:
+        p = Path(d).expanduser().resolve()
+        resolved.append({
+            "path": d,
+            "resolved": str(p),
+            "exists": p.exists(),
+        })
+    return web.json_response({"dirs": resolved})
+
+
+async def add_read_folder(server: WebServer, request: web.Request) -> web.Response:
+    """POST /api/read-folders — add a readable directory."""
+    from captain_claw.config import DEFAULT_CONFIG_PATH
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+
+    raw = str(body.get("path", "")).strip()
+    if not raw:
+        return web.json_response({"ok": False, "error": "Missing path"}, status=400)
+
+    target = Path(raw).expanduser().resolve()
+
+    if _is_blocked_path(target):
+        return web.json_response(
+            {"ok": False, "error": "Cannot add root or system directories"},
+            status=400,
+        )
+    if not target.exists():
+        return web.json_response({"ok": False, "error": "Directory does not exist"}, status=400)
+    if not target.is_dir():
+        return web.json_response({"ok": False, "error": "Path is not a directory"}, status=400)
+
+    config_path = DEFAULT_CONFIG_PATH
+    if config_path.exists():
+        data: dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    else:
+        data = {}
+
+    read_section = data.setdefault("tools", {}).setdefault("read", {})
+    extra = read_section.setdefault("extra_dirs", [])
+
+    # Avoid duplicates (compare resolved paths).
+    existing_resolved = {str(Path(e).expanduser().resolve()) for e in extra}
+    if str(target) in existing_resolved:
+        return web.json_response({"ok": False, "error": "Directory already added"}, status=409)
+
+    extra.append(str(target))
+
+    try:
+        _save_config(config_path, data)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=422)
+
+    log.info("Read folder added", path=str(target))
+    return web.json_response({"ok": True, "path": str(target)})
+
+
+async def remove_read_folder(server: WebServer, request: web.Request) -> web.Response:
+    """DELETE /api/read-folders — remove a readable directory."""
+    from captain_claw.config import DEFAULT_CONFIG_PATH
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+
+    raw = str(body.get("path", "")).strip()
+    if not raw:
+        return web.json_response({"ok": False, "error": "Missing path"}, status=400)
+
+    target = Path(raw).expanduser().resolve()
+
+    config_path = DEFAULT_CONFIG_PATH
+    if config_path.exists():
+        data: dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    else:
+        data = {}
+
+    read_section = data.get("tools", {}).get("read", {})
+    extra = read_section.get("extra_dirs", [])
+    if not extra:
+        return web.json_response({"ok": False, "error": "No read folders configured"}, status=404)
+
+    new_extra = []
+    removed = False
+    for e in extra:
+        if str(Path(e).expanduser().resolve()) == str(target):
+            removed = True
+        else:
+            new_extra.append(e)
+
+    if not removed:
+        return web.json_response({"ok": False, "error": "Directory not found in list"}, status=404)
+
+    read_section["extra_dirs"] = new_extra
+    if not new_extra:
+        read_section.pop("extra_dirs", None)
+    if not read_section:
+        data.get("tools", {}).pop("read", None)
+
+    try:
+        _save_config(config_path, data)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=422)
+
+    log.info("Read folder removed", path=str(target))
+    return web.json_response({"ok": True, "path": str(target)})

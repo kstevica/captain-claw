@@ -515,6 +515,24 @@ html, body {
     font-style: italic;
 }
 
+.skills-folder-btn {
+    margin-left: auto;
+    flex-shrink: 0;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 13px;
+    cursor: pointer;
+    color: var(--text-muted);
+    line-height: 1;
+    transition: all 0.15s;
+}
+.skills-folder-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--accent);
+}
+
 #panes {
     flex: 1;
     display: flex;
@@ -1818,6 +1836,187 @@ html, body {
     display: flex;
     gap: 12px;
     justify-content: center;
+}
+
+/* ─── Folder Browser Dialog ──────────────────────────── */
+
+.folder-dialog {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    width: 90vw;
+    max-width: 560px;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+
+.folder-dialog-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+}
+.folder-dialog-header h3 {
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.folder-current {
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--border);
+}
+
+.folder-section-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+}
+
+.folder-list {
+    max-height: 120px;
+    overflow-y: auto;
+}
+
+.folder-entry {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    margin-bottom: 3px;
+    font-size: 12px;
+}
+.folder-entry.missing {
+    border-color: var(--orange);
+    opacity: 0.7;
+}
+.folder-entry-path {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--font-mono);
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.folder-entry-warn {
+    flex-shrink: 0;
+    font-size: 14px;
+    color: var(--orange);
+}
+.folder-entry-remove {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 16px;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+}
+.folder-entry-remove:hover { color: var(--red); }
+
+.folder-browser {
+    padding: 12px 18px;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.folder-breadcrumb {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 1px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+}
+.folder-bc-item {
+    cursor: pointer;
+    color: var(--accent);
+    padding: 1px 2px;
+    border-radius: 3px;
+}
+.folder-bc-item:hover {
+    background: var(--bg-tertiary);
+    text-decoration: underline;
+}
+.folder-bc-sep {
+    color: var(--text-muted);
+    padding: 0 1px;
+}
+
+.folder-dirs {
+    flex: 1;
+    overflow-y: auto;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    max-height: 260px;
+    min-height: 120px;
+}
+
+.folder-dir-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    font-size: 13px;
+    cursor: pointer;
+    color: var(--text-primary);
+    border-bottom: 1px solid var(--border);
+    transition: background 0.1s;
+}
+.folder-dir-item:last-child { border-bottom: none; }
+.folder-dir-item:hover {
+    background: var(--bg-tertiary);
+}
+.folder-dir-item.parent {
+    color: var(--text-muted);
+    font-style: italic;
+}
+.folder-dir-icon {
+    flex-shrink: 0;
+    font-size: 14px;
+}
+
+.folder-empty {
+    padding: 16px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.folder-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+}
+
+.folder-selected-path {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 /* ─── Help Table ─────────────────────────────────────── */

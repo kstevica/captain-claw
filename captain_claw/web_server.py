@@ -970,6 +970,22 @@ class WebServer:
         from captain_claw.web.rest_skills import toggle_skill
         return await toggle_skill(self, request)
 
+    async def _browse_directory(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_skills import browse_directory
+        return await browse_directory(self, request)
+
+    async def _list_read_folders(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_skills import list_read_folders
+        return await list_read_folders(self, request)
+
+    async def _add_read_folder(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_skills import add_read_folder
+        return await add_read_folder(self, request)
+
+    async def _remove_read_folder(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_skills import remove_read_folder
+        return await remove_read_folder(self, request)
+
     # ── App setup ────────────────────────────────────────────────────
 
     def create_app(self) -> web.Application:
@@ -989,6 +1005,10 @@ class WebServer:
         app.router.add_get("/api/skills", self._list_skills)
         app.router.add_post("/api/skills/install", self._install_skill)
         app.router.add_post("/api/skills/toggle", self._toggle_skill)
+        app.router.add_get("/api/read-folders", self._list_read_folders)
+        app.router.add_post("/api/read-folders", self._add_read_folder)
+        app.router.add_delete("/api/read-folders", self._remove_read_folder)
+        app.router.add_get("/api/browse", self._browse_directory)
         app.router.add_get("/api/sessions", self.list_sessions_api)
         app.router.add_post("/api/sessions/bulk-delete", self._bulk_delete_sessions)
         app.router.add_get("/api/sessions/{id}", self._get_session_detail)

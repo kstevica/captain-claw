@@ -1,6 +1,7 @@
 """Glob tool for finding files by pattern."""
 
 import asyncio
+import fnmatch
 import os
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,27 @@ from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 
 log = get_logger(__name__)
+
+
+def _case_insensitive_walk(directory: str, pattern: str) -> list[str]:
+    """Walk *directory* recursively and return files matching *pattern* case-insensitively.
+
+    The *pattern* should be a filename-level glob (e.g. ``*kartica*``, ``*.pdf``).
+    Directory components like ``subdir/*.pdf`` are NOT supported — only the
+    basename of each file is tested.
+    """
+    # Extract just the filename portion of the pattern (after last /).
+    # E.g. "**/*kartica*stranke*" → "*kartica*stranke*"
+    parts = pattern.replace("\\", "/").split("/")
+    fname_pattern = parts[-1] if parts else pattern
+    lower_pattern = fname_pattern.lower()
+
+    results: list[str] = []
+    for root, _dirs, files in os.walk(directory):
+        for name in files:
+            if fnmatch.fnmatch(name.lower(), lower_pattern):
+                results.append(os.path.join(root, name))
+    return results
 
 
 class GlobTool(Tool):
@@ -76,6 +98,7 @@ class GlobTool(Tool):
             # Preserve the raw pattern before root is joined — used for
             # the cross-scope hint when the primary search finds nothing.
             raw_pattern = pattern
+            user_provided_root = bool(root)
 
             # Resolve root based on scope.
             if scope == "workflow":
@@ -98,6 +121,13 @@ class GlobTool(Tool):
 
             if root:
                 pattern = str(Path(root) / pattern)
+
+            # Also search configured extra read folders when using the
+            # default workspace scope (no custom root, not workflow).
+            search_extra_dirs = (
+                scope != "workflow"
+                and not user_provided_root
+            )
 
             # Find files (sync, but run in executor to not block)
             loop = asyncio.get_event_loop()
@@ -146,10 +176,42 @@ class GlobTool(Tool):
                         filtered=filtered_count,
                     )
 
+            # Also search configured extra read folders (case-insensitive).
+            # Python's glob.glob is case-sensitive even on macOS, so we use
+            # os.walk + fnmatch with lowered names to ensure user files like
+            # "Kartica_stranke.pdf" are found when searching "*kartica*".
+            extra_matches: dict[str, list[str]] = {}  # dir → absolute matches
+            if search_extra_dirs:
+                try:
+                    from captain_claw.config import get_config
+                    extra_dirs = get_config().tools.read.extra_dirs
+                except Exception:
+                    extra_dirs = []
+
+                if extra_dirs:
+                    log.info("Glob searching extra read folders", count=len(extra_dirs), pattern=raw_pattern)
+
+                for extra_dir in extra_dirs:
+                    edir = Path(extra_dir).expanduser().resolve()
+                    if not edir.is_dir():
+                        log.warning("Extra read folder not a directory", path=str(edir))
+                        continue
+                    try:
+                        edir_matches = await loop.run_in_executor(
+                            None,
+                            lambda d=str(edir), p=raw_pattern: _case_insensitive_walk(d, p),
+                        )
+                    except Exception as exc:
+                        log.warning("Glob extra dir failed", path=str(edir), error=str(exc))
+                        continue
+                    log.info("Glob extra dir result", path=str(edir), found=len(edir_matches))
+                    if edir_matches:
+                        extra_matches[str(edir)] = edir_matches
+
             # Apply limit
             matches = matches[:limit]
 
-            if not matches:
+            if not matches and not extra_matches:
                 # Cross-scope hint: if we searched workspace and found
                 # nothing, check whether the workflow output directory has
                 # matches for the same pattern.  This helps the LLM
@@ -189,8 +251,15 @@ class GlobTool(Tool):
             if scope == "workflow":
                 output = f"Found {len(matches)} file(s) in workflow output:\n"
             else:
-                output = f"Found {len(matches)} file(s):\n"
+                total = len(matches) + sum(len(v) for v in extra_matches.values())
+                output = f"Found {total} file(s):\n"
             output += "\n".join(f"  {m}" for m in matches)
+
+            # Append extra read folder results with clear labeling.
+            for edir, edir_files in extra_matches.items():
+                edir_files = edir_files[:limit]
+                output += f"\n\n  [read folder: {edir}]\n"
+                output += "\n".join(f"  {f}" for f in edir_files)
 
             return ToolResult(
                 success=True,

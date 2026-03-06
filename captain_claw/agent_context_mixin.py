@@ -1445,6 +1445,26 @@ class AgentContextMixin:
             detail_level="micro" if self.instructions.use_micro else "normal"
         )
 
+        # Build extra read dirs block for system prompt.
+        extra_read_dirs_block = ""
+        try:
+            extra_dirs = get_config().tools.read.extra_dirs
+            if extra_dirs:
+                resolved = []
+                for d in extra_dirs:
+                    p = Path(d).expanduser().resolve()
+                    if p.is_dir():
+                        resolved.append(str(p))
+                if resolved:
+                    dirs_list = "\n".join(f"  - {d}" for d in resolved)
+                    extra_read_dirs_block = (
+                        "- Extra read folders (user-configured directories with additional files — "
+                        "always search these with glob and read when the user asks about files "
+                        "that are not in the workspace):\n" + dirs_list
+                    )
+        except Exception:
+            pass
+
         base_prompt = self.instructions.render(
             "system_prompt.md",
             runtime_base_path=self.runtime_base_path,
@@ -1455,6 +1475,7 @@ class AgentContextMixin:
             personality_block=personality_block,
             user_context_block=user_context_block,
             system_info_block=system_info_block,
+            extra_read_dirs_block=extra_read_dirs_block,
         )
         skills_section = ""
         build_skills = getattr(self, "_build_skills_system_prompt_section", None)

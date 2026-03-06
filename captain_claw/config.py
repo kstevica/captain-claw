@@ -174,7 +174,10 @@ class ShellToolConfig(BaseModel):
 class ReadToolConfig(BaseModel):
     """Read tool configuration."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     max_file_bytes: int = 200_000  # 200 KB
+    extra_dirs: list[str] = Field(default_factory=list, alias="extraDirs")
 
 
 class WebFetchToolConfig(BaseModel):

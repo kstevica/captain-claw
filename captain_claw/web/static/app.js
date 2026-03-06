@@ -1458,6 +1458,164 @@
         filePreviewBody.innerHTML = '';
     }
 
+    // ── Folder Browser ─────────────────────────────────────
+
+    var folderCurrentPath = null;
+
+    function openFolderModal() {
+        $('#folderModal').classList.remove('hidden');
+        loadExtraDirs();
+        browseDir('');
+    }
+
+    function closeFolderModal() {
+        $('#folderModal').classList.add('hidden');
+    }
+
+    async function loadExtraDirs() {
+        var list = $('#folderList');
+        try {
+            var res = await fetch('/api/read-folders');
+            var data = await res.json();
+            var dirs = data.dirs || [];
+            if (!dirs.length) {
+                list.innerHTML = '<div class="folder-empty">No extra folders configured</div>';
+                return;
+            }
+            list.innerHTML = dirs.map(function(d) {
+                var cls = d.exists ? '' : ' missing';
+                return '<div class="folder-entry' + cls + '">' +
+                    '<span class="folder-entry-path" title="' + escapeHtml(d.resolved) + '">' + escapeHtml(d.resolved) + '</span>' +
+                    (!d.exists ? '<span class="folder-entry-warn" title="Directory does not exist">&#x26A0;</span>' : '') +
+                    '<button class="folder-entry-remove" data-path="' + escapeHtml(d.resolved) + '" title="Remove">&times;</button>' +
+                    '</div>';
+            }).join('');
+            list.querySelectorAll('.folder-entry-remove').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    removeExtraDir(btn.dataset.path);
+                });
+            });
+        } catch (e) {
+            list.innerHTML = '<div class="folder-empty">Failed to load</div>';
+        }
+    }
+
+    async function browseDir(path) {
+        var dirsEl = $('#folderDirs');
+        dirsEl.innerHTML = '<div class="folder-empty">Loading...</div>';
+
+        try {
+            var url = '/api/browse' + (path ? '?path=' + encodeURIComponent(path) : '');
+            var res = await fetch(url);
+            var data = await res.json();
+            if (data.error) {
+                dirsEl.innerHTML = '<div class="folder-empty">' + escapeHtml(data.error) + '</div>';
+                return;
+            }
+            folderCurrentPath = data.path;
+            $('#folderSelectedPath').textContent = data.path;
+            var addBtn = $('#folderAddBtn');
+            addBtn.disabled = !!data.blocked;
+            addBtn.title = data.blocked ? 'Cannot add root or system directories' : 'Add this folder as a read directory';
+
+            // Breadcrumb.
+            renderBreadcrumb(data.path);
+
+            // Directory listing.
+            var html = '';
+            if (data.parent) {
+                html += '<div class="folder-dir-item parent" data-path="' + escapeHtml(data.parent) + '">' +
+                    '<span class="folder-dir-icon">\u2B06</span> ..</div>';
+            }
+            if (!data.dirs.length && !data.parent) {
+                html += '<div class="folder-empty">No subdirectories</div>';
+            }
+            data.dirs.forEach(function(name) {
+                var full = data.path + (data.path.endsWith('/') ? '' : '/') + name;
+                html += '<div class="folder-dir-item" data-path="' + escapeHtml(full) + '">' +
+                    '<span class="folder-dir-icon">\uD83D\uDCC1</span> ' + escapeHtml(name) + '</div>';
+            });
+            dirsEl.innerHTML = html;
+
+            dirsEl.querySelectorAll('.folder-dir-item').forEach(function(el) {
+                el.addEventListener('click', function() {
+                    browseDir(el.dataset.path);
+                });
+            });
+        } catch (e) {
+            dirsEl.innerHTML = '<div class="folder-empty">Error: ' + escapeHtml(e.message) + '</div>';
+        }
+    }
+
+    function renderBreadcrumb(fullPath) {
+        var bc = $('#folderBreadcrumb');
+        // Split path into segments.
+        var sep = fullPath.includes('\\') ? '\\' : '/';
+        var parts = fullPath.split(sep).filter(Boolean);
+        var html = '';
+        var built = fullPath.startsWith('/') ? '/' : '';
+        // Root.
+        if (fullPath.startsWith('/')) {
+            html += '<span class="folder-bc-item" data-path="/">/</span>';
+        }
+        parts.forEach(function(p, i) {
+            built += (i > 0 || !fullPath.startsWith('/') ? sep : '') + p;
+            html += '<span class="folder-bc-sep">' + sep + '</span>';
+            html += '<span class="folder-bc-item" data-path="' + escapeHtml(built) + '">' + escapeHtml(p) + '</span>';
+        });
+        bc.innerHTML = html;
+        bc.querySelectorAll('.folder-bc-item').forEach(function(el) {
+            el.addEventListener('click', function() {
+                browseDir(el.dataset.path);
+            });
+        });
+    }
+
+    async function addCurrentFolder() {
+        if (!folderCurrentPath) return;
+        var btn = $('#folderAddBtn');
+        btn.disabled = true;
+        btn.textContent = 'Adding...';
+        try {
+            var res = await fetch('/api/read-folders', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: folderCurrentPath }),
+            });
+            var data = await res.json();
+            if (!res.ok || !data.ok) {
+                addChatMessage('error', 'Add folder failed: ' + (data.error || 'Unknown error'));
+            } else {
+                addChatMessage('assistant', 'Read folder added: `' + data.path + '`');
+                loadExtraDirs();
+            }
+        } catch (e) {
+            addChatMessage('error', 'Add folder failed: ' + e.message);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Add this folder';
+        }
+    }
+
+    async function removeExtraDir(path) {
+        try {
+            var res = await fetch('/api/read-folders', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: path }),
+            });
+            var data = await res.json();
+            if (!res.ok || !data.ok) {
+                addChatMessage('error', 'Remove folder failed: ' + (data.error || 'Unknown error'));
+            } else {
+                addChatMessage('assistant', 'Read folder removed: `' + data.path + '`');
+                loadExtraDirs();
+            }
+        } catch (e) {
+            addChatMessage('error', 'Remove folder failed: ' + e.message);
+        }
+    }
+
     // ── Command Reference ───────────────────────────────────
 
     function buildCommandReference() {
@@ -1878,6 +2036,14 @@
         // File explorer
         filesSearch.addEventListener('input', () => renderFilesList(sessionFiles));
         $('#filePreviewClose').addEventListener('click', closeFilePreview);
+
+        // Folder browser
+        $('#skillsFolderBtn').addEventListener('click', openFolderModal);
+        $('#folderModalClose').addEventListener('click', closeFolderModal);
+        $('#folderAddBtn').addEventListener('click', addCurrentFolder);
+        $('#folderModal').addEventListener('click', function(e) {
+            if (e.target === e.currentTarget) closeFolderModal();
+        });
 
         // Resize handle
         initResize();

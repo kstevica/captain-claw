@@ -66,6 +66,7 @@
         <div id="skillsBar" class="tools-bar">
             <span class="tools-bar-label">Skills</span>
             <div id="skillsList" class="tools-list"></div>
+            <button class="skills-folder-btn" id="skillsFolderBtn" title="Manage read folders">&#x1F4C2;</button>
         </div>
         <!-- Chat + Monitor split pane -->
         <div id="panes">
@@ -228,6 +229,35 @@
             <div class="modal-buttons">
                 <button class="action-btn" id="approveBtn">Approve</button>
                 <button class="action-btn danger" id="denyBtn">Deny</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Folder browser modal -->
+    <div id="folderModal" class="modal-overlay hidden">
+        <div class="folder-dialog">
+            <div class="folder-dialog-header">
+                <h3>Read Folders</h3>
+                <button class="icon-btn" id="folderModalClose" title="Close">&times;</button>
+            </div>
+            <!-- Current extra dirs -->
+            <div class="folder-current" id="folderCurrent">
+                <div class="folder-section-label">Active folders</div>
+                <div id="folderList" class="folder-list">
+                    <div class="folder-empty">No extra folders configured</div>
+                </div>
+            </div>
+            <!-- Browser -->
+            <div class="folder-browser">
+                <div class="folder-section-label">Browse &amp; add folder</div>
+                <div class="folder-breadcrumb" id="folderBreadcrumb"></div>
+                <div class="folder-dirs" id="folderDirs">
+                    <div class="folder-empty">Loading...</div>
+                </div>
+                <div class="folder-actions">
+                    <span class="folder-selected-path" id="folderSelectedPath">-</span>
+                    <button class="action-btn small" id="folderAddBtn" disabled>Add this folder</button>
+                </div>
             </div>
         </div>
     </div>
