@@ -4,6 +4,7 @@
   "description": "Captain Claw – AI Agentic System",
   "main": "main.js",
   "author": "Stevica Kuharski <kstevica@gmail.com>",
+  "homepage": "https://github.com/kstevica/captain-claw",
   "license": "MIT",
   "scripts": {
     "start": "electron .",

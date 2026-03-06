@@ -16,6 +16,7 @@ sharing one set of bundled dependencies.
 import os
 import sys
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_data_files
 
 block_cipher = None
 
@@ -30,7 +31,7 @@ INSTRUCTIONS_DIR = os.path.join(PKG_DIR, "instructions")
 datas = [
     (STATIC_DIR, os.path.join("captain_claw", "web", "static")),
     (INSTRUCTIONS_DIR, os.path.join("captain_claw", "instructions")),
-]
+] + collect_data_files("litellm")
 
 # ── Hidden imports ──────────────────────────────────────────────
 # These are all the lazy / dynamic imports that PyInstaller's
