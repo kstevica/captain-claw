@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Skills - Captain Claw</title>
+    <link rel="stylesheet" href="/static/skills.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<header class="sk-header">
+    <div class="sk-header-left">
+        <a href="/" class="sk-logo-link"><img src="/static/logo.svg" width="28" height="28"></a>
+        <h1>Skills</h1>
+    </div>
+    <div class="sk-header-center">
+        <input type="text" id="searchInput" class="sk-search" placeholder="Filter skills..." autocomplete="off">
+    </div>
+    <div class="sk-header-right">
+        <a href="/chat" class="sk-nav-link">&larr; Chat</a>
+    </div>
+</header>
+
+<div class="sk-layout">
+    <!-- Left panel: skills list -->
+    <aside class="sk-list-panel" id="skListPanel">
+        <div class="sk-list-header">
+            <span class="sk-list-count" id="skillsCount">0 skills</span>
+            <div class="sk-list-actions">
+                <button class="sk-action-btn" id="installToggle" title="Install skill from GitHub">+ Install</button>
+            </div>
+        </div>
+
+        <!-- Install form (collapsible) -->
+        <div class="sk-install-form hidden" id="installForm">
+            <input type="text" id="installUrl" placeholder="https://github.com/owner/repo/..." autocomplete="off">
+            <button class="sk-action-btn primary" id="installBtn">Install</button>
+        </div>
+
+        <div class="sk-list" id="skillsList">
+            <div class="sk-loading">Loading skills...</div>
+        </div>
+    </aside>
+
+    <!-- Right area: detail -->
+    <div class="sk-detail" id="skillDetail">
+        <div class="sk-detail-empty" id="detailEmpty">
+            <div class="sk-detail-empty-icon">&#x26A1;</div>
+            <div class="sk-detail-empty-text">Select a skill to view details</div>
+        </div>
+
+        <!-- Detail content (hidden until a skill is selected) -->
+        <div class="sk-detail-content hidden" id="detailContent">
+            <div class="sk-detail-header">
+                <div class="sk-detail-title" id="detailTitle">-</div>
+                <button class="sk-toggle-btn" id="toggleBtn" title="Enable or disable this skill"></button>
+            </div>
+            <div class="sk-detail-body" id="detailBody"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    var $ = function(sel) { return document.querySelector(sel); };
+    var $$ = function(sel) { return document.querySelectorAll(sel); };
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    var allSkills = [];
+    var activeSkillName = null;
+
+    var sourceLabels = {
+        'captain-bundled': 'Bundled',
+        'captain-managed': 'Installed',
+        'captain-workspace': 'Workspace',
+        'captain-extra': 'Extra',
+        'captain-plugin': 'Plugin',
+        'agents-skills-personal': 'Personal',
+        'agents-skills-project': 'Project',
+    };
+
+    var sourceOrder = [
+        'captain-workspace', 'captain-managed', 'agents-skills-project',
+        'agents-skills-personal', 'captain-bundled', 'captain-extra', 'captain-plugin',
+    ];
+
+    // ── Load skills ──────────────────────────────────────
+
+    async function loadSkills() {
+        try {
+            var res = await fetch('/api/skills');
+            var data = await res.json();
+            allSkills = data.skills || [];
+            renderList(allSkills);
+        } catch (e) {
+            $('#skillsList').innerHTML = '<div class="sk-loading">Failed to load skills</div>';
+        }
+    }
+
+    // ── Render list ──────────────────────────────────────
+
+    function renderList(skills) {
+        var query = ($('#searchInput').value || '').toLowerCase().trim();
+        var filtered = skills;
+        if (query) {
+            filtered = skills.filter(function(s) {
+                return s.name.toLowerCase().includes(query) ||
+                       (s.description || '').toLowerCase().includes(query) ||
+                       (s.source || '').toLowerCase().includes(query);
+            });
+        }
+
+        $('#skillsCount').textContent = filtered.length + ' skill' + (filtered.length !== 1 ? 's' : '');
+
+        if (!filtered.length) {
+            $('#skillsList').innerHTML = query
+                ? '<div class="sk-loading">No matching skills</div>'
+                : '<div class="sk-loading">No skills loaded</div>';
+            return;
+        }
+
+        // Group by source.
+        var groups = {};
+        filtered.forEach(function(s) {
+            var src = s.source || 'other';
+            if (!groups[src]) groups[src] = [];
+            groups[src].push(s);
+        });
+
+        var html = '';
+
+        function renderGroup(src, items) {
+            var label = sourceLabels[src] || src;
+            html += '<div class="sk-group-label">' + escapeHtml(label) +
+                    ' <span class="sk-group-count">(' + items.length + ')</span></div>';
+            items.forEach(function(s) {
+                var icon = s.emoji || '\u26A1';
+                var isDisabled = s.enabled === false;
+                var statusCls = isDisabled ? 'disabled' : (s.active ? 'active' : 'inactive');
+                var statusTip = isDisabled ? 'Disabled' : (s.active ? 'Active' : 'Inactive (missing requirements)');
+                var selectedCls = (s.name === activeSkillName) ? ' selected' : '';
+                var disabledCls = isDisabled ? ' disabled' : '';
+                html += '<div class="sk-item' + selectedCls + disabledCls + '" data-skill="' + escapeHtml(s.name) + '">' +
+                    '<span class="sk-item-icon">' + escapeHtml(icon) + '</span>' +
+                    '<div class="sk-item-info">' +
+                    '<div class="sk-item-name">' +
+                    '<span class="sk-dot ' + statusCls + '" title="' + statusTip + '"></span>' +
+                    escapeHtml(s.name) +
+                    '</div>' +
+                    (s.description ? '<div class="sk-item-desc">' + escapeHtml(s.description) + '</div>' : '') +
+                    '</div></div>';
+            });
+        }
+
+        sourceOrder.forEach(function(src) {
+            if (groups[src] && groups[src].length) renderGroup(src, groups[src]);
+        });
+        // Catch any sources not in the ordered list.
+        Object.keys(groups).forEach(function(src) {
+            if (sourceOrder.indexOf(src) >= 0) return;
+            if (groups[src] && groups[src].length) renderGroup(src, groups[src]);
+        });
+
+        $('#skillsList').innerHTML = html;
+
+        // Bind click handlers.
+        $$('.sk-item').forEach(function(el) {
+            el.addEventListener('click', function() {
+                var name = el.dataset.skill;
+                var s = allSkills.find(function(x) { return x.name === name; });
+                if (s) openDetail(s);
+            });
+        });
+    }
+
+    // ── Detail panel ─────────────────────────────────────
+
+    function openDetail(s) {
+        activeSkillName = s.name;
+        $('#detailEmpty').classList.add('hidden');
+        $('#detailContent').classList.remove('hidden');
+        $('#detailTitle').textContent = (s.emoji || '\u26A1') + '  ' + s.name;
+
+        // Toggle button state.
+        var toggleBtn = $('#toggleBtn');
+        var isDisabled = s.enabled === false;
+        toggleBtn.textContent = isDisabled ? 'Enable' : 'Disable';
+        toggleBtn.className = 'sk-toggle-btn ' + (isDisabled ? 'enable' : 'disable');
+        toggleBtn.onclick = function() { toggleSkill(s); };
+
+        var html = '';
+
+        // Description.
+        if (s.description) {
+            html += '<div class="sk-section">' +
+                '<div class="sk-label">Description</div>' +
+                '<div class="sk-value">' + escapeHtml(s.description) + '</div></div>';
+        }
+
+        // Status + source.
+        html += '<div class="sk-section"><div class="sk-label">Status</div><div class="sk-badges">';
+        if (isDisabled) {
+            html += '<span class="sk-badge red">Disabled</span>';
+        } else {
+            html += s.active
+                ? '<span class="sk-badge green">Active</span>'
+                : '<span class="sk-badge gray">Inactive</span>';
+        }
+        html += ' <span class="sk-badge purple">' + escapeHtml(sourceLabels[s.source] || s.source) + '</span>';
+        html += '</div></div>';
+
+        // Invocation flags.
+        html += '<div class="sk-section"><div class="sk-label">Invocation</div><div class="sk-badges">';
+        if (s.user_invocable) html += '<span class="sk-badge green">User invocable</span>';
+        if (s.model_invocation) html += '<span class="sk-badge green">Model invocable</span>';
+        if (!s.user_invocable) html += '<span class="sk-badge gray">Not user-invocable</span>';
+        if (!s.model_invocation) html += '<span class="sk-badge gray">Model invocation disabled</span>';
+        html += '</div></div>';
+
+        // Requirements.
+        var reqs = s.requires || {};
+        var hasBins = reqs.bins && reqs.bins.length;
+        var hasEnv = reqs.env && reqs.env.length;
+        var hasAnyBins = reqs.any_bins && reqs.any_bins.length;
+        var hasConfig = reqs.config && reqs.config.length;
+        if (hasBins || hasEnv || hasAnyBins || hasConfig) {
+            html += '<div class="sk-section"><div class="sk-label">Requirements</div>';
+            if (hasBins) {
+                html += '<div class="sk-req-row">Binaries: ' +
+                    reqs.bins.map(function(b) { return '<code>' + escapeHtml(b) + '</code>'; }).join(', ') +
+                    '</div>';
+            }
+            if (hasAnyBins) {
+                html += '<div class="sk-req-row">Any of: ' +
+                    reqs.any_bins.map(function(b) { return '<code>' + escapeHtml(b) + '</code>'; }).join(', ') +
+                    '</div>';
+            }
+            if (hasEnv) {
+                html += '<div class="sk-req-row">Env vars: ' +
+                    reqs.env.map(function(e) { return '<code>' + escapeHtml(e) + '</code>'; }).join(', ') +
+                    '</div>';
+            }
+            if (hasConfig) {
+                html += '<div class="sk-req-row">Config: ' +
+                    reqs.config.map(function(c) { return '<code>' + escapeHtml(c) + '</code>'; }).join(', ') +
+                    '</div>';
+            }
+            html += '</div>';
+        }
+
+        // Location.
+        if (s.base_dir) {
+            html += '<div class="sk-section"><div class="sk-label">Location</div>' +
+                '<code class="sk-path">' + escapeHtml(s.base_dir) + '</code></div>';
+        }
+
+        // Skill file.
+        if (s.file_path) {
+            html += '<div class="sk-section"><div class="sk-label">Skill File</div>' +
+                '<code class="sk-path">' + escapeHtml(s.file_path) + '</code></div>';
+        }
+
+        // Homepage.
+        if (s.homepage) {
+            html += '<div class="sk-section"><div class="sk-label">Homepage</div>' +
+                '<a href="' + escapeHtml(s.homepage) + '" target="_blank" rel="noopener">' + escapeHtml(s.homepage) + '</a></div>';
+        }
+
+        $('#detailBody').innerHTML = html;
+
+        // Highlight in list.
+        $$('.sk-item').forEach(function(el) {
+            el.classList.toggle('selected', el.dataset.skill === s.name);
+        });
+    }
+
+    // ── Toggle enable/disable ──────────────────────────────
+
+    async function toggleSkill(s) {
+        var isDisabled = s.enabled === false;
+        var newEnabled = isDisabled; // flip: disabled → enable (true), enabled → disable (false)
+        var btn = $('#toggleBtn');
+        btn.disabled = true;
+        btn.textContent = isDisabled ? 'Enabling...' : 'Disabling...';
+
+        try {
+            var res = await fetch('/api/skills/toggle', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    skill_key: s.skill_key || s.name,
+                    enabled: newEnabled,
+                }),
+            });
+            var data = await res.json();
+            if (!res.ok || !data.ok) {
+                alert('Toggle failed: ' + (data.error || 'Unknown error'));
+                btn.disabled = false;
+                btn.textContent = isDisabled ? 'Enable' : 'Disable';
+                return;
+            }
+            // Reload skills to get updated state.
+            await loadSkills();
+            // Re-open detail for the same skill with fresh data.
+            var updated = allSkills.find(function(x) { return x.name === s.name; });
+            if (updated) openDetail(updated);
+        } catch (err) {
+            alert('Toggle failed: ' + err.message);
+            btn.disabled = false;
+            btn.textContent = isDisabled ? 'Enable' : 'Disable';
+        }
+    }
+
+    // ── Install ──────────────────────────────────────────
+
+    function toggleInstall() {
+        var form = $('#installForm');
+        form.classList.toggle('hidden');
+        if (!form.classList.contains('hidden')) {
+            $('#installUrl').focus();
+        }
+    }
+
+    async function installSkill() {
+        var urlInput = $('#installUrl');
+        var url = urlInput.value.trim();
+        if (!url) { urlInput.focus(); return; }
+
+        var btn = $('#installBtn');
+        btn.disabled = true;
+        btn.textContent = 'Installing...';
+
+        try {
+            var res = await fetch('/api/skills/install', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: url }),
+            });
+            var data = await res.json();
+            if (!res.ok || !data.ok) {
+                alert('Install failed: ' + (data.error || 'Unknown error'));
+            } else {
+                urlInput.value = '';
+                $('#installForm').classList.add('hidden');
+                loadSkills();
+            }
+        } catch (err) {
+            alert('Install failed: ' + err.message);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Install';
+        }
+    }
+
+    // ── Init ─────────────────────────────────────────────
+
+    $('#searchInput').addEventListener('input', function() { renderList(allSkills); });
+    $('#installToggle').addEventListener('click', toggleInstall);
+    $('#installBtn').addEventListener('click', installSkill);
+    $('#installUrl').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { e.preventDefault(); installSkill(); }
+    });
+
+    loadSkills();
+})();
+</script>
+</body>
+</html>

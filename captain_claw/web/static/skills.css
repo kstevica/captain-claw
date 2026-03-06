@@ -1,0 +1,475 @@
+/* Captain Claw — Skills Browser */
+
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --bg-hover: #30363d;
+    --border: #30363d;
+    --border-light: #21262d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --accent: #58a6ff;
+    --accent-hover: #79c0ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --orange: #f78166;
+    --purple: #bc8cff;
+    --radius: 8px;
+    --radius-sm: 6px;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+    height: 100%;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 1.5;
+    overflow: hidden;
+}
+
+/* ─── Header ─────────────────────────────────────────── */
+
+.sk-header {
+    display: flex;
+    align-items: center;
+    height: 48px;
+    padding: 0 16px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    gap: 16px;
+}
+
+.sk-header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+}
+
+.sk-logo-link {
+    display: flex;
+    align-items: center;
+    border-radius: 6px;
+}
+
+.sk-logo-link img { border-radius: 5px; }
+
+.sk-header-left h1 {
+    font-size: 16px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.sk-header-center { flex: 1; display: flex; justify-content: center; }
+
+.sk-search {
+    width: 100%;
+    max-width: 360px;
+    padding: 6px 12px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 13px;
+}
+.sk-search:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+.sk-search::placeholder { color: var(--text-muted); }
+
+.sk-header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+}
+
+.sk-nav-link {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 13px;
+    padding: 4px 10px;
+    border-radius: var(--radius-sm);
+    transition: all 0.15s;
+}
+.sk-nav-link:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+/* ─── Layout ─────────────────────────────────────────── */
+
+.sk-layout {
+    display: flex;
+    height: calc(100vh - 48px);
+}
+
+/* ─── Left panel: list ───────────────────────────────── */
+
+.sk-list-panel {
+    width: 360px;
+    min-width: 260px;
+    max-width: 500px;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--border);
+    background: var(--bg-secondary);
+}
+
+.sk-list-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.sk-list-count {
+    font-size: 12px;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.sk-list-actions {
+    display: flex;
+    gap: 6px;
+}
+
+.sk-action-btn {
+    padding: 4px 10px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.15s;
+    font-family: var(--font);
+    white-space: nowrap;
+}
+.sk-action-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--accent);
+}
+.sk-action-btn.primary {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+}
+.sk-action-btn.primary:hover {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+}
+.sk-action-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Install form */
+.sk-install-form {
+    display: flex;
+    gap: 6px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-primary);
+    flex-shrink: 0;
+}
+.sk-install-form input {
+    flex: 1;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 6px 8px;
+    font-size: 12px;
+    color: var(--text-primary);
+    font-family: var(--mono);
+}
+.sk-install-form input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+.sk-install-form input::placeholder { color: var(--text-muted); }
+
+/* Skills list */
+.sk-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 10px;
+}
+
+.sk-loading {
+    text-align: center;
+    padding: 32px 16px;
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+/* Group label */
+.sk-group-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    padding: 10px 4px 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.sk-group-count {
+    font-weight: 400;
+    color: var(--text-muted);
+    text-transform: none;
+    letter-spacing: 0;
+}
+
+/* Skill item */
+.sk-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all 0.15s;
+    font-size: 13px;
+    margin-bottom: 4px;
+}
+.sk-item:hover {
+    border-color: var(--accent);
+    background: var(--bg-tertiary);
+}
+.sk-item.selected {
+    border-color: var(--accent);
+    background: var(--bg-tertiary);
+    box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.sk-item-icon {
+    font-size: 16px;
+    flex-shrink: 0;
+    width: 24px;
+    text-align: center;
+}
+
+.sk-item-info {
+    min-width: 0;
+    flex: 1;
+}
+
+.sk-item-name {
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.sk-item-desc {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-top: 1px;
+}
+
+.sk-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.sk-dot.active { background: var(--green); }
+.sk-dot.inactive { background: var(--text-muted); opacity: 0.5; }
+.sk-dot.disabled { background: var(--red); opacity: 0.7; }
+
+/* Disabled skill item */
+.sk-item.disabled {
+    opacity: 0.5;
+}
+.sk-item.disabled:hover {
+    opacity: 0.75;
+}
+
+/* ─── Right panel: detail ────────────────────────────── */
+
+.sk-detail {
+    flex: 1;
+    overflow-y: auto;
+    background: var(--bg-primary);
+}
+
+.sk-detail-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    gap: 12px;
+    color: var(--text-muted);
+}
+.sk-detail-empty-icon {
+    font-size: 48px;
+    opacity: 0.3;
+}
+.sk-detail-empty-text {
+    font-size: 14px;
+}
+
+.sk-detail-content {
+    padding: 24px 32px;
+    max-width: 720px;
+}
+
+.sk-detail-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 24px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+}
+
+.sk-detail-title {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+/* Toggle button */
+.sk-toggle-btn {
+    padding: 5px 14px;
+    font-size: 12px;
+    font-weight: 500;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all 0.15s;
+    font-family: var(--font);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.sk-toggle-btn.disable {
+    background: transparent;
+    color: var(--red);
+    border-color: var(--red);
+}
+.sk-toggle-btn.disable:hover {
+    background: rgba(248,81,73,0.1);
+}
+.sk-toggle-btn.enable {
+    background: transparent;
+    color: var(--green);
+    border-color: var(--green);
+}
+.sk-toggle-btn.enable:hover {
+    background: rgba(63,185,80,0.1);
+}
+.sk-toggle-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.sk-detail-body {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+}
+
+/* Sections */
+.sk-section {
+    margin-bottom: 16px;
+}
+
+.sk-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+
+.sk-value {
+    color: var(--text-primary);
+    font-size: 13px;
+}
+
+.sk-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.sk-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+}
+.sk-badge.green { background: rgba(63,185,80,0.15); color: var(--green); }
+.sk-badge.gray { background: var(--bg-tertiary); color: var(--text-muted); }
+.sk-badge.red { background: rgba(248,81,73,0.15); color: var(--red); }
+.sk-badge.purple { background: rgba(188,140,255,0.12); color: var(--purple); }
+
+.sk-req-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 3px 0;
+    font-size: 13px;
+}
+.sk-req-row code {
+    background: var(--bg-tertiary);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-primary);
+}
+
+.sk-path {
+    display: block;
+    font-size: 12px;
+    padding: 6px 10px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius-sm);
+    font-family: var(--mono);
+    word-break: break-all;
+    color: var(--text-secondary);
+    user-select: all;
+    margin-top: 2px;
+}
+
+.sk-detail-body a {
+    color: var(--accent);
+    text-decoration: none;
+}
+.sk-detail-body a:hover { text-decoration: underline; }
+
+.hidden { display: none !important; }
+
+/* ─── Scrollbar ──────────────────────────────────────── */
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bg-hover); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }

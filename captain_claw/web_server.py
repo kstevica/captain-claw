@@ -753,6 +753,10 @@ class WebServer:
         from captain_claw.web.static_pages import serve_playbooks
         return await serve_playbooks(self, request)
 
+    async def _serve_skills(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_skills
+        return await serve_skills(self, request)
+
     # Playbooks REST
     async def _pb_list(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_playbooks import list_playbooks
@@ -952,6 +956,20 @@ class WebServer:
         from captain_claw.web.rest_settings import put_settings
         return await put_settings(self, request)
 
+    # ── Skills REST ─────────────────────────────────────────────────
+
+    async def _list_skills(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_skills import list_skills
+        return await list_skills(self, request)
+
+    async def _install_skill(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_skills import install_skill
+        return await install_skill(self, request)
+
+    async def _toggle_skill(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_skills import toggle_skill
+        return await toggle_skill(self, request)
+
     # ── App setup ────────────────────────────────────────────────────
 
     def create_app(self) -> web.Application:
@@ -968,6 +986,9 @@ class WebServer:
         app.router.add_get("/api/settings/schema", self._get_settings_schema)
         app.router.add_get("/api/settings", self._get_settings_values)
         app.router.add_put("/api/settings", self._put_settings)
+        app.router.add_get("/api/skills", self._list_skills)
+        app.router.add_post("/api/skills/install", self._install_skill)
+        app.router.add_post("/api/skills/toggle", self._toggle_skill)
         app.router.add_get("/api/sessions", self.list_sessions_api)
         app.router.add_post("/api/sessions/bulk-delete", self._bulk_delete_sessions)
         app.router.add_get("/api/sessions/{id}", self._get_session_detail)
@@ -1118,6 +1139,7 @@ class WebServer:
             app.router.add_get("/playbooks", self._serve_playbooks)
             app.router.add_get("/browser-workflows", self._serve_browser_workflows)
             app.router.add_get("/direct-api-calls", self._serve_direct_api_calls)
+            app.router.add_get("/skills", self._serve_skills)
             app.router.add_get("/favicon.ico", self._serve_favicon)
         return app
 

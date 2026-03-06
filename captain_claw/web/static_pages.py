@@ -86,3 +86,7 @@ async def serve_browser_workflows(server: WebServer, request: web.Request) -> we
 
 async def serve_direct_api_calls(server: WebServer, request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "direct-api-calls.html")
+
+
+async def serve_skills(server: WebServer, request: web.Request) -> web.FileResponse:
+    return web.FileResponse(STATIC_DIR / "skills.html")
