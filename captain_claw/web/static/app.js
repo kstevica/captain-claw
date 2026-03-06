@@ -1307,6 +1307,13 @@
     const filePreviewMeta = $('#filePreviewMeta');
     const filePreviewBody = $('#filePreviewBody');
     const fileDownloadBtn = $('#fileDownloadBtn');
+    const fileMdViewBtn = $('#fileMdViewBtn');
+    var currentMdContent = null;
+    var currentMdFilename = null;
+
+    function _isMarkdownFile(filename) {
+        return /\.(md|markdown|mdown|mkd|mkdn|mdx)$/i.test(filename || '');
+    }
 
     function formatFileSize(bytes) {
         if (bytes === 0) return '0 B';
@@ -1427,6 +1434,9 @@
         filePreviewMeta.textContent = f.logical + ' \u2022 ' + formatFileSize(f.size) + ' \u2022 ' + f.mime_type;
         fileDownloadBtn.href = '/api/files/download?path=' + encodeURIComponent(f.physical);
         filePreview.classList.remove('hidden');
+        currentMdContent = null;
+        currentMdFilename = null;
+        fileMdViewBtn.style.display = 'none';
 
         if (!f.exists) {
             filePreviewBody.innerHTML = '<div class="file-preview-empty">File no longer exists on disk</div>';
@@ -1441,6 +1451,11 @@
                     filePreviewBody.innerHTML = '<div class="file-preview-empty">' + escapeHtml(data.error) + '</div>';
                 } else {
                     filePreviewBody.innerHTML = '<pre class="file-preview-code"><code>' + escapeHtml(data.content) + '</code></pre>';
+                    if (_isMarkdownFile(f.filename)) {
+                        currentMdContent = data.content;
+                        currentMdFilename = f.filename;
+                        fileMdViewBtn.style.display = '';
+                    }
                 }
             } catch (e) {
                 filePreviewBody.innerHTML = '<div class="file-preview-empty">Failed to load content</div>';
@@ -1456,6 +1471,21 @@
     function closeFilePreview() {
         filePreview.classList.add('hidden');
         filePreviewBody.innerHTML = '';
+        currentMdContent = null;
+        currentMdFilename = null;
+        fileMdViewBtn.style.display = 'none';
+    }
+
+    function openMdViewer() {
+        if (!currentMdContent) return;
+        $('#mdViewerTitle').textContent = currentMdFilename || 'Markdown';
+        $('#mdViewerBody').innerHTML = renderMarkdown(currentMdContent);
+        $('#mdViewerModal').classList.remove('hidden');
+    }
+
+    function closeMdViewer() {
+        $('#mdViewerModal').classList.add('hidden');
+        $('#mdViewerBody').innerHTML = '';
     }
 
     // ── Folder Browser ─────────────────────────────────────
@@ -2036,6 +2066,11 @@
         // File explorer
         filesSearch.addEventListener('input', () => renderFilesList(sessionFiles));
         $('#filePreviewClose').addEventListener('click', closeFilePreview);
+        fileMdViewBtn.addEventListener('click', openMdViewer);
+        $('#mdViewerClose').addEventListener('click', closeMdViewer);
+        $('#mdViewerModal').addEventListener('click', function(e) {
+            if (e.target === e.currentTarget) closeMdViewer();
+        });
 
         // Folder browser
         $('#skillsFolderBtn').addEventListener('click', openFolderModal);

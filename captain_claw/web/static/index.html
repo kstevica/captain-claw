@@ -177,6 +177,7 @@
                 <div class="file-preview-header">
                     <span class="file-preview-name" id="filePreviewName">-</span>
                     <div class="file-preview-actions">
+                        <button class="action-btn small" id="fileMdViewBtn" title="View rendered markdown" style="display:none">View</button>
                         <a class="action-btn small" id="fileDownloadBtn" href="#" download title="Download file">Download</a>
                         <button class="action-btn small secondary" id="filePreviewClose" title="Close preview">&#x2715;</button>
                     </div>
@@ -259,6 +260,17 @@
                     <button class="action-btn small" id="folderAddBtn" disabled>Add this folder</button>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <!-- Markdown viewer modal -->
+    <div id="mdViewerModal" class="modal-overlay hidden">
+        <div class="md-viewer-dialog">
+            <div class="md-viewer-header">
+                <span class="md-viewer-title" id="mdViewerTitle">-</span>
+                <button class="icon-btn" id="mdViewerClose" title="Close">&times;</button>
+            </div>
+            <div class="md-viewer-body" id="mdViewerBody"></div>
         </div>
     </div>
 
