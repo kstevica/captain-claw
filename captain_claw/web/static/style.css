@@ -515,23 +515,7 @@ html, body {
     font-style: italic;
 }
 
-.skills-folder-btn {
-    margin-left: auto;
-    flex-shrink: 0;
-    background: none;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 1px 5px;
-    font-size: 13px;
-    cursor: pointer;
-    color: var(--text-muted);
-    line-height: 1;
-    transition: all 0.15s;
-}
-.skills-folder-btn:hover {
-    color: var(--text-primary);
-    border-color: var(--accent);
-}
+
 
 #panes {
     flex: 1;
