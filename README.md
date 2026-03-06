@@ -22,7 +22,7 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Per-session model selection | Keep one session on Claude, another on GPT, another on Ollama |
 | Persistent multi-session workflows | Resume any session exactly where you left off |
 | Built-in safety guards | Input, output, and script/tool checks before anything runs |
-| 29 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, image gen/OCR/vision, Google Drive/Calendar/Gmail, todo, contacts, scripts, APIs, datastore, deep memory, playbooks, personality, BotPort, Termux (Android) |
+| 27 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, image gen/OCR/vision, Google Workspace CLI (gws — Drive, Docs, Calendar, Gmail), todo, contacts, scripts, APIs, datastore, deep memory, playbooks, personality, BotPort, Termux (Android) |
 | Personality system | Dual-profile system — global agent identity plus per-user profiles for tailored responses |
 | Skills system | OpenClaw-compatible skills with auto-discovery and GitHub install |
 | Orchestrator / DAG mode | Decompose complex tasks into parallel multi-session execution |
@@ -225,7 +225,7 @@ Sessions are first-class. Create named sessions for separate projects, switch in
 
 ### Tools
 
-Captain Claw ships with 29 built-in tools. The agent picks the right tool for each task automatically.
+Captain Claw ships with 27 built-in tools. The agent picks the right tool for each task automatically.
 
 | Tool | What it does |
 |---|---|
@@ -243,9 +243,7 @@ Captain Claw ships with 29 built-in tools. The agent picks the right tool for ea
 | `image_vision` | Analyze and describe images via vision-capable LLMs |
 | `pocket_tts` | Generate speech audio (MP3) locally |
 | `send_mail` | Send email via SMTP, Mailgun, or SendGrid |
-| `google_drive` | List, search, read, upload, and manage Google Drive files |
-| `google_calendar` | Create, list, update, and delete Google Calendar events |
-| `google_mail` | Read-only Gmail access — search, read messages and threads |
+| `gws` | Google Workspace CLI — Drive, Docs, Gmail (read), and Calendar via the `gws` binary |
 | `todo` | Persistent cross-session to-do list with auto-capture |
 | `contacts` | Persistent cross-session address book with auto-capture |
 | `scripts` | Persistent cross-session script/file memory with auto-capture |
@@ -295,9 +293,8 @@ tools:
   enabled: ["shell", "read", "write", "glob", "web_fetch", "web_search",
             "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract",
             "image_gen", "image_ocr", "image_vision",
-            "pocket_tts", "send_mail", "google_drive", "google_calendar",
-            "google_mail", "todo", "contacts", "scripts", "apis",
-            "datastore", "playbooks", "personality", "botport", "termux"]
+            "pocket_tts", "send_mail", "gws", "todo", "contacts", "scripts",
+            "apis", "datastore", "playbooks", "personality", "botport", "termux"]
 
 web:
   enabled: true
@@ -336,11 +333,7 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 
 - **[OpenAI-compatible API](USAGE.md#openai-compatible-api-proxy)** — `POST /v1/chat/completions` endpoint proxied through the Captain Claw agent pool. Streaming supported.
 
-- **[Google Drive + OAuth](USAGE.md#google-oauth-drive-calendar-and-gmail)** — Connect your Google account for Drive file operations (list, search, read, upload, create, update) and Vertex AI model access.
-
-- **[Google Calendar](USAGE.md#tools-reference)** — Create, list, update, and delete calendar events. Uses the same Google OAuth connection as Drive.
-
-- **[Google Mail (Gmail)](USAGE.md#tools-reference)** — Read-only Gmail access — search, read messages, browse threads and labels. No send/modify/delete scope required.
+- **[Google Workspace CLI (gws)](USAGE.md#gws)** — Access Google Drive, Docs, Gmail (read), and Calendar through the `gws` CLI binary. Search and download Drive files, read and create Google Docs, list and search emails, view calendar agenda and create events. Supports a `raw` passthrough mode for any `gws` command. Requires separate `gws` CLI installation and authentication.
 
 - **[Datastore](USAGE.md#datastore)** — SQLite-backed relational data tables managed entirely by the agent. 19 tool actions cover schema management, CRUD operations, raw SELECT queries, CSV/XLSX import and export, and a four-level protection system (table, column, row, cell). Includes a [web dashboard](USAGE.md#datastore-dashboard) for browsing tables, editing rows, running SQL, uploading files, and exporting tables as CSV/XLSX/JSON.
 
@@ -376,7 +369,7 @@ ruff check captain_claw/
 |---|---|
 | `captain_claw/agent.py` | Main orchestration logic |
 | `captain_claw/llm/` | Provider abstraction (OpenAI, Anthropic, Gemini, Ollama) |
-| `captain_claw/tools/` | Tool registry and 29 tool implementations |
+| `captain_claw/tools/` | Tool registry and 26 tool implementations |
 | `captain_claw/personality.py` | Agent and per-user personality profiles |
 | `captain_claw/session/` | SQLite-backed session persistence |
 | `captain_claw/skills.py` | Skill discovery, loading, and invocation |

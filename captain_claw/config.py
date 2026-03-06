@@ -268,6 +268,12 @@ class TypesenseToolConfig(BaseModel):
     connection_timeout: int = 5
 
 
+class GwsToolConfig(BaseModel):
+    """Google Workspace CLI (gws) tool configuration."""
+
+    binary_path: str = ""  # custom path to the gws binary; empty = find in PATH
+
+
 class BrowserToolConfig(BaseModel):
     """Browser automation tool configuration."""
 
@@ -314,6 +320,7 @@ class ToolsConfig(BaseModel):
         "google_drive",
         "google_calendar",
         "google_mail",
+        "gws",
         "todo",
         "contacts",
         "scripts",
@@ -335,6 +342,7 @@ class ToolsConfig(BaseModel):
     image_vision: ImageVisionToolConfig = Field(default_factory=ImageVisionToolConfig)
     send_mail: SendMailToolConfig = Field(default_factory=SendMailToolConfig)
     typesense: TypesenseToolConfig = Field(default_factory=TypesenseToolConfig)
+    gws: GwsToolConfig = Field(default_factory=GwsToolConfig)
     browser: BrowserToolConfig = Field(default_factory=BrowserToolConfig)
     require_confirmation: list[str] = ["shell", "write"]
     plugin_dirs: list[str] = ["skills/tools"]

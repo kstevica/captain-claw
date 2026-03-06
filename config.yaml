@@ -235,6 +235,7 @@ tools:
   - google_drive
   - google_calendar
   - google_mail
+  - gws
   - todo
   - contacts
   - scripts

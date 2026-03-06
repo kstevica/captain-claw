@@ -104,6 +104,7 @@ class AgentModelMixin:
                 "max_output_tokens": int(_pick(item, "max_output_tokens", 0) or 0),
                 "reasoning_level": str(_pick(item, "reasoning_level", "") or "").strip(),
                 "description": str(_pick(item, "description", "") or "").strip(),
+                "model_type": str(_pick(item, "model_type", "llm") or "llm").strip(),
             })
 
         if options:
@@ -121,6 +122,7 @@ class AgentModelMixin:
             "max_output_tokens": 0,
             "reasoning_level": "",
             "description": "",
+            "model_type": "llm",
         }]
 
     def _resolve_allowed_model(self, selector: str) -> dict[str, Any] | None:

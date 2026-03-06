@@ -44,10 +44,6 @@
     const approvalModal = $('#approvalModal');
     const approvalMessage = $('#approvalMessage');
     const sessionsList = $('#sessionsList');
-    const instructionsList = $('#instructionsList');
-    const instructionEditor = $('#instructionEditor');
-    const instructionContent = $('#instructionContent');
-    const editorFileName = $('#editorFileName');
 
     // ── WebSocket ───────────────────────────────────────────
 
@@ -560,9 +556,11 @@
         modelDropdown.innerHTML = allowedModels.map((m, i) => {
             const label = `${m.provider}:${m.model}`;
             const desc = m.description || '';
+            const mtype = m.model_type || 'llm';
             const isActive = label === activeModelLabel;
             return `<div class="model-option${isActive ? ' active' : ''}" data-selector="${escapeHtml(m.id || String(i + 1))}" data-label="${escapeHtml(label)}" title="${escapeHtml(desc || label)}">
                 <span class="model-option-name">${escapeHtml(label)}</span>
+                <span class="model-option-type">${escapeHtml(mtype)}</span>
                 ${desc ? `<span class="model-option-desc">${escapeHtml(desc)}</span>` : ''}
                 ${isActive ? '<span class="model-option-check">&#x2713;</span>' : ''}
             </div>`;
@@ -1215,19 +1213,15 @@
         sidebar.classList.toggle('hidden');
         if (!sidebar.classList.contains('hidden')) {
             loadSessions();
-            loadInstructions(); // always refresh file list (sizes may have changed)
+            loadSessionFiles();
         }
     }
 
     function switchTab(tabName) {
-        // Warn if leaving instructions tab with unsaved changes
-        if (tabName !== 'instructions' && instructionDirty) {
-            if (!confirm('You have unsaved changes in the instruction editor. Discard and switch tabs?')) return;
-            markDirty(false);
-        }
         $$('.sidebar-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tabName));
         $$('.sidebar-content').forEach(c => c.classList.remove('active'));
         $(`#tab${tabName.charAt(0).toUpperCase() + tabName.slice(1)}`).classList.add('active');
+        if (tabName === 'files') loadSessionFiles();
     }
 
     // Sessions
@@ -1257,127 +1251,166 @@
         }
     }
 
-    // Instructions
-    let currentInstructionName = null;
-    let instructionDirty = false;
-    const editorDirtyMark = $('#editorDirtyMark');
-    const editorSaveStatus = $('#editorSaveStatus');
+    // ── File Explorer ────────────────────────────────────────
 
-    function markDirty(dirty) {
-        instructionDirty = dirty;
-        if (dirty) {
-            editorDirtyMark.classList.remove('hidden');
-            editorSaveStatus.textContent = '';
-        } else {
-            editorDirtyMark.classList.add('hidden');
-        }
+    let sessionFiles = [];
+    const filesList = $('#filesList');
+    const filesCount = $('#filesCount');
+    const filesSearch = $('#filesSearch');
+    const filePreview = $('#filePreview');
+    const filePreviewName = $('#filePreviewName');
+    const filePreviewMeta = $('#filePreviewMeta');
+    const filePreviewBody = $('#filePreviewBody');
+    const fileDownloadBtn = $('#fileDownloadBtn');
+
+    function formatFileSize(bytes) {
+        if (bytes === 0) return '0 B';
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
     }
 
-    function highlightActiveFile(name) {
-        instructionsList.querySelectorAll('.instruction-item').forEach(el => {
-            el.classList.toggle('active-file', el.dataset.name === name);
-        });
+    function fileIcon(ext) {
+        var icons = {
+            '.py': '\u{1F40D}', '.js': '\u{1F4DC}', '.ts': '\u{1F4DC}',
+            '.html': '\u{1F310}', '.css': '\u{1F3A8}', '.json': '\u{1F4CB}',
+            '.md': '\u{1F4DD}', '.txt': '\u{1F4C4}', '.csv': '\u{1F4CA}',
+            '.png': '\u{1F5BC}', '.jpg': '\u{1F5BC}', '.jpeg': '\u{1F5BC}',
+            '.gif': '\u{1F5BC}', '.webp': '\u{1F5BC}', '.svg': '\u{1F5BC}',
+            '.mp3': '\u{1F3B5}', '.wav': '\u{1F3B5}', '.mp4': '\u{1F3AC}',
+            '.sh': '\u{1F4DF}', '.sql': '\u{1F5C3}', '.log': '\u{1F4C3}',
+        };
+        return icons[ext] || '\u{1F4C1}';
     }
 
-    async function loadInstructions() {
-        try {
-            const res = await fetch('/api/instructions');
-            const files = await res.json();
-            if (!files.length) {
-                instructionsList.innerHTML = '<div class="loading">No instruction files found.</div>';
-                return;
-            }
-            instructionsList.innerHTML = files.map(f => {
-                const sizeKb = (f.size / 1024).toFixed(1);
-                const customized = f.overridden ? ' <span class="instruction-item-customized">customized</span>' : '';
-                return `<div class="instruction-item${f.overridden ? ' overridden' : ''}" data-name="${escapeHtml(f.name)}" title="${escapeHtml(f.name)} — ${sizeKb} KB${f.overridden ? ' — customized' : ''} — click to edit">
-                    <span class="instruction-item-name">${escapeHtml(f.name)}${customized}</span>
-                    <span class="instruction-item-size">${sizeKb} KB</span>
-                </div>`;
-            }).join('');
-
-            instructionsList.querySelectorAll('.instruction-item').forEach(el => {
-                el.addEventListener('click', () => {
-                    if (instructionDirty && currentInstructionName && currentInstructionName !== el.dataset.name) {
-                        if (!confirm(`You have unsaved changes in "${currentInstructionName}". Discard and open "${el.dataset.name}"?`)) return;
-                    }
-                    openInstruction(el.dataset.name);
-                });
-            });
-
-            // Re-highlight active file if one is open
-            if (currentInstructionName) highlightActiveFile(currentInstructionName);
-        } catch (e) {
-            instructionsList.innerHTML = '<div class="loading">Failed to load instructions</div>';
-        }
-    }
-
-    async function openInstruction(name) {
-        try {
-            const res = await fetch(`/api/instructions/${encodeURIComponent(name)}`);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const data = await res.json();
-            currentInstructionName = name;
-            editorFileName.textContent = name;
-            instructionContent.value = data.content;
-            instructionEditor.dataset.name = name;
-            instructionEditor.classList.remove('hidden');
-            markDirty(false);
-            highlightActiveFile(name);
-            instructionContent.focus();
-        } catch (e) {
-            alert(`Failed to load "${name}": ${e.message}`);
-        }
-    }
-
-    async function saveInstruction() {
-        const name = instructionEditor.dataset.name;
-        if (!name) return;
-        const content = instructionContent.value;
-        const btn = $('#saveInstructionBtn');
-        btn.disabled = true;
-        btn.textContent = 'Saving…';
-        try {
-            const res = await fetch(`/api/instructions/${encodeURIComponent(name)}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content }),
-            });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            markDirty(false);
-            editorSaveStatus.textContent = 'Saved ✓';
-            setTimeout(() => { editorSaveStatus.textContent = ''; }, 2000);
-            // Refresh file list to show updated size
-            loadInstructions();
-        } catch (e) {
-            alert(`Failed to save "${name}": ${e.message}`);
-        } finally {
-            btn.disabled = false;
-            btn.textContent = 'Save';
-        }
-    }
-
-    async function createNewInstruction() {
-        const name = prompt('New instruction file name (will add .md if needed):');
-        if (!name) return;
-        const filename = name.endsWith('.md') ? name : name + '.md';
-        // Validate: no slashes, no dots except the .md suffix
-        if (/[/\\]/.test(filename) || filename.split('.').length > 2) {
-            alert('Invalid file name. Use simple names like "my-instructions.md".');
+    async function loadSessionFiles() {
+        if (!sessionInfo.id) {
+            filesList.innerHTML = '<div class="loading">No active session</div>';
+            filesCount.textContent = '0 files';
             return;
         }
         try {
-            const res = await fetch(`/api/instructions/${encodeURIComponent(filename)}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: `# ${filename}\n\n` }),
-            });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            await loadInstructions();
-            openInstruction(filename);
+            var res = await fetch('/api/files/session/' + encodeURIComponent(sessionInfo.id));
+            sessionFiles = await res.json();
+            renderFilesList(sessionFiles);
         } catch (e) {
-            alert(`Failed to create "${filename}": ${e.message}`);
+            filesList.innerHTML = '<div class="loading">Failed to load files</div>';
         }
+    }
+
+    function getFileCategory(logical) {
+        var first = (logical || '').split('/')[0];
+        var cats = ['downloads','media','output','scripts','showcase','skills','tmp','tools'];
+        return cats.indexOf(first) >= 0 ? first : 'other';
+    }
+
+    var categoryLabels = {
+        scripts: '\u{1F4DC} Scripts',
+        output: '\u{1F4E4} Output',
+        media: '\u{1F5BC}\uFE0F Media',
+        downloads: '\u{2B07}\uFE0F Downloads',
+        tools: '\u{1F527} Tools',
+        showcase: '\u{2B50} Showcase',
+        skills: '\u{26A1} Skills',
+        tmp: '\u{1F4C2} Temp',
+        other: '\u{1F4C1} Other',
+    };
+
+    function renderFilesList(files) {
+        var query = (filesSearch.value || '').toLowerCase().trim();
+        var filtered = files;
+        if (query) {
+            filtered = files.filter(function(f) {
+                return f.filename.toLowerCase().includes(query) ||
+                       f.logical.toLowerCase().includes(query) ||
+                       f.extension.toLowerCase().includes(query);
+            });
+        }
+        filesCount.textContent = filtered.length + ' file' + (filtered.length !== 1 ? 's' : '');
+
+        if (!filtered.length) {
+            filesList.innerHTML = query
+                ? '<div class="loading">No matching files</div>'
+                : '<div class="loading">No files generated in this session</div>';
+            return;
+        }
+
+        // Group by category folder.
+        var groups = {};
+        filtered.forEach(function(f) {
+            var cat = getFileCategory(f.logical);
+            if (!groups[cat]) groups[cat] = [];
+            groups[cat].push(f);
+        });
+
+        var order = ['scripts','output','media','downloads','tools','showcase','skills','tmp','other'];
+        var html = '';
+        order.forEach(function(cat) {
+            var items = groups[cat];
+            if (!items || !items.length) return;
+            html += '<div class="files-group-label">' + (categoryLabels[cat] || cat) + ' <span class="files-group-count">(' + items.length + ')</span></div>';
+            items.forEach(function(f) {
+                var icon = fileIcon(f.extension);
+                var size = formatFileSize(f.size);
+                var missing = !f.exists ? ' <span class="file-missing">missing</span>' : '';
+                // Show filename relative to the category (strip category prefix).
+                var relPath = f.logical;
+                var slashIdx = relPath.indexOf('/');
+                if (slashIdx >= 0) relPath = relPath.substring(slashIdx + 1);
+                html += '<div class="file-item" data-physical="' + escapeHtml(f.physical) + '" data-logical="' + escapeHtml(f.logical) + '" title="' + escapeHtml(f.logical) + '">' +
+                    '<span class="file-item-icon">' + icon + '</span>' +
+                    '<div class="file-item-info">' +
+                    '<div class="file-item-name">' + escapeHtml(f.filename) + missing + '</div>' +
+                    '<div class="file-item-path">' + escapeHtml(relPath) + ' &middot; ' + size + '</div>' +
+                    '</div></div>';
+            });
+        });
+
+        filesList.innerHTML = html;
+
+        filesList.querySelectorAll('.file-item').forEach(function(el) {
+            el.addEventListener('click', function() {
+                var physical = el.dataset.physical;
+                var f = sessionFiles.find(function(x) { return x.physical === physical; });
+                if (f) openFilePreview(f);
+            });
+        });
+    }
+
+    async function openFilePreview(f) {
+        filePreviewName.textContent = f.filename;
+        filePreviewMeta.textContent = f.logical + ' \u2022 ' + formatFileSize(f.size) + ' \u2022 ' + f.mime_type;
+        fileDownloadBtn.href = '/api/files/download?path=' + encodeURIComponent(f.physical);
+        filePreview.classList.remove('hidden');
+
+        if (!f.exists) {
+            filePreviewBody.innerHTML = '<div class="file-preview-empty">File no longer exists on disk</div>';
+            return;
+        }
+
+        if (f.is_text) {
+            try {
+                var res = await fetch('/api/files/content?path=' + encodeURIComponent(f.physical));
+                var data = await res.json();
+                if (data.error) {
+                    filePreviewBody.innerHTML = '<div class="file-preview-empty">' + escapeHtml(data.error) + '</div>';
+                } else {
+                    filePreviewBody.innerHTML = '<pre class="file-preview-code"><code>' + escapeHtml(data.content) + '</code></pre>';
+                }
+            } catch (e) {
+                filePreviewBody.innerHTML = '<div class="file-preview-empty">Failed to load content</div>';
+            }
+        } else if (/^image\//.test(f.mime_type)) {
+            filePreviewBody.innerHTML = '<img src="/api/files/download?path=' + encodeURIComponent(f.physical) +
+                '" class="file-preview-image" alt="' + escapeHtml(f.filename) + '">';
+        } else {
+            filePreviewBody.innerHTML = '<div class="file-preview-empty">Binary file \u2014 use Download to view</div>';
+        }
+    }
+
+    function closeFilePreview() {
+        filePreview.classList.add('hidden');
+        filePreviewBody.innerHTML = '';
     }
 
     // ── Command Reference ───────────────────────────────────
@@ -1776,44 +1809,9 @@
         $('#approveBtn').addEventListener('click', () => respondApproval(true));
         $('#denyBtn').addEventListener('click', () => respondApproval(false));
 
-        // Instruction editor
-        $('#saveInstructionBtn').addEventListener('click', saveInstruction);
-        $('#closeEditorBtn').addEventListener('click', () => {
-            if (instructionDirty) {
-                if (!confirm('You have unsaved changes. Discard and close?')) return;
-            }
-            instructionEditor.classList.add('hidden');
-            currentInstructionName = null;
-            markDirty(false);
-            highlightActiveFile(null);
-        });
-        $('#newInstructionBtn').addEventListener('click', createNewInstruction);
-
-        // Mark dirty on content change
-        instructionContent.addEventListener('input', () => {
-            if (!instructionDirty) markDirty(true);
-        });
-
-        // Tab support + Ctrl+S in instruction editor textarea
-        instructionContent.addEventListener('keydown', (e) => {
-            // Ctrl+S / Cmd+S to save
-            if ((e.ctrlKey || e.metaKey) && e.key === 's') {
-                e.preventDefault();
-                saveInstruction();
-                return;
-            }
-            // Tab inserts 4 spaces
-            if (e.key === 'Tab') {
-                e.preventDefault();
-                const start = instructionContent.selectionStart;
-                const end = instructionContent.selectionEnd;
-                instructionContent.value =
-                    instructionContent.value.substring(0, start) +
-                    '    ' +
-                    instructionContent.value.substring(end);
-                instructionContent.selectionStart = instructionContent.selectionEnd = start + 4;
-            }
-        });
+        // File explorer
+        filesSearch.addEventListener('input', () => renderFilesList(sessionFiles));
+        $('#filePreviewClose').addEventListener('click', closeFilePreview);
 
         // Resize handle
         initResize();

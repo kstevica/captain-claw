@@ -75,6 +75,30 @@ def _enrich(logical: str, physical: str, source: str) -> dict[str, Any]:
     }
 
 
+def _is_allowed_path(physical: str) -> bool:
+    """Return True if the physical path is under workspace saved/ or output/."""
+    try:
+        from captain_claw.config import get_config
+        cfg = get_config()
+        workspace = cfg.resolved_workspace_path()
+        resolved = Path(physical).resolve()
+        saved_root = (workspace / "saved").resolve()
+        output_root = (workspace / "output").resolve()
+        try:
+            resolved.relative_to(saved_root)
+            return True
+        except ValueError:
+            pass
+        try:
+            resolved.relative_to(output_root)
+            return True
+        except ValueError:
+            pass
+    except Exception:
+        pass
+    return False
+
+
 async def _collect_files(server: WebServer) -> list[dict[str, Any]]:
     """Merge files from in-memory registries and persisted SQLite table."""
     seen: dict[str, dict[str, Any]] = {}  # physical_path → entry
@@ -127,16 +151,109 @@ async def list_files(server: WebServer, request: web.Request) -> web.Response:
     return web.json_response(files)
 
 
+async def list_session_files(server: WebServer, request: web.Request) -> web.Response:
+    """GET /api/files/session/{session_id} — list files for a specific session.
+
+    Merges two sources:
+    1. Persisted file_registry rows for this session.
+    2. Filesystem scan of workspace/saved/<category>/<session_id>/ folders
+       and workspace/output/<session_id>/.
+    """
+    session_id = request.match_info.get("session_id", "").strip()
+    if not session_id:
+        return web.json_response({"error": "Missing session_id"}, status=400)
+
+    seen: dict[str, dict[str, Any]] = {}  # physical → entry
+
+    # 1. Registry entries for this session.
+    try:
+        from captain_claw.session import get_session_manager
+        sm = get_session_manager()
+        await sm._ensure_db()
+        async with sm._db.execute(
+            f"""
+            SELECT {sm._FILE_REG_COLS}
+            FROM file_registry
+            WHERE session_id = ?
+            ORDER BY registered_at DESC
+            """,
+            (session_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        cols = [c.strip() for c in sm._FILE_REG_COLS.split(",")]
+        for row in rows:
+            d = dict(zip(cols, row))
+            physical = d.get("physical_path", "")
+            logical = d.get("logical_path", "")
+            source = d.get("source", "persisted")
+            if physical and physical not in seen:
+                seen[physical] = _enrich(logical, physical, source)
+    except Exception:
+        pass
+
+    # 2. Filesystem scan — pick up files that may not be in the registry.
+    try:
+        from captain_claw.config import get_config
+        cfg = get_config()
+        workspace = cfg.resolved_workspace_path()
+        saved_root = (workspace / "saved").resolve()
+        output_root = (workspace / "output").resolve()
+
+        # Normalise session_id the same way write.py does.
+        safe_id = "".join(
+            c if c.isalnum() or c in "._-" else "-" for c in session_id
+        ).strip("-") or "default"
+
+        # Scan workspace/saved/<category>/<session_id>/
+        _CATEGORIES = (
+            "downloads", "media", "output", "scripts",
+            "showcase", "skills", "tmp", "tools",
+        )
+        for cat in _CATEGORIES:
+            cat_dir = saved_root / cat / safe_id
+            if not cat_dir.is_dir():
+                continue
+            for child in cat_dir.rglob("*"):
+                if not child.is_file():
+                    continue
+                phys = str(child.resolve())
+                if phys in seen:
+                    continue
+                # Build a logical path like "scripts/my_file.py"
+                rel = child.relative_to(cat_dir)
+                logical = f"{cat}/{rel}"
+                seen[phys] = _enrich(logical, phys, "filesystem")
+
+        # Scan workspace/output/<session_id>/
+        out_dir = output_root / safe_id
+        if out_dir.is_dir():
+            for child in out_dir.rglob("*"):
+                if not child.is_file():
+                    continue
+                phys = str(child.resolve())
+                if phys in seen:
+                    continue
+                rel = child.relative_to(out_dir)
+                logical = f"output/{rel}"
+                seen[phys] = _enrich(logical, phys, "filesystem")
+    except Exception:
+        pass
+
+    files = sorted(seen.values(), key=lambda f: f["logical"].lower())
+    return web.json_response(files)
+
+
 async def get_file_content(server: WebServer, request: web.Request) -> web.Response:
     """GET /api/files/content?path=<physical_path> — read text file content."""
     physical = request.query.get("path", "").strip()
     if not physical:
         return web.json_response({"error": "Missing 'path' parameter"}, status=400)
 
-    # Security: verify path is in a current registry.
-    known_physicals = {f["physical"] for f in await _collect_files(server)}
-    if physical not in known_physicals:
-        return web.json_response({"error": "File not in registry"}, status=403)
+    # Security: verify path is in registry OR under workspace saved/output dirs.
+    if not _is_allowed_path(physical):
+        known_physicals = {f["physical"] for f in await _collect_files(server)}
+        if physical not in known_physicals:
+            return web.json_response({"error": "File not in registry"}, status=403)
 
     p = Path(physical)
     if not p.is_file():
@@ -173,10 +290,11 @@ async def download_file(server: WebServer, request: web.Request) -> web.Response
     if not physical:
         return web.json_response({"error": "Missing 'path' parameter"}, status=400)
 
-    # Security: verify path is in a current registry.
-    known_physicals = {f["physical"] for f in await _collect_files(server)}
-    if physical not in known_physicals:
-        return web.json_response({"error": "File not in registry"}, status=403)
+    # Security: verify path is in registry OR under workspace saved/output dirs.
+    if not _is_allowed_path(physical):
+        known_physicals = {f["physical"] for f in await _collect_files(server)}
+        if physical not in known_physicals:
+            return web.json_response({"error": "File not in registry"}, status=403)
 
     p = Path(physical)
     if not p.is_file():

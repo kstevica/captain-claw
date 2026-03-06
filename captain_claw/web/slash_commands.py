@@ -125,7 +125,9 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
             lines = []
             for m in models:
                 active = " (active)" if m.get("model") == current.get("model") else ""
-                lines.append(f"- **{m.get('id', '?')}**: {m.get('provider', '')}:{m.get('model', '')}{active}")
+                mtype = m.get("model_type", "llm")
+                type_tag = f" [{mtype}]" if mtype and mtype != "llm" else ""
+                lines.append(f"- **{m.get('id', '?')}**: {m.get('provider', '')}:{m.get('model', '')}{type_tag}{active}")
             result = "\n".join(lines) if lines else "No models configured."
 
         elif cmd in ("/pipeline",):

@@ -1121,6 +1121,7 @@ class AgentContextMixin:
         "google_drive": ["google_drive"],
         "google_calendar": ["google_calendar"],
         "google_mail": ["google_mail"],
+        "gws": ["gws"],
         "todo": ["todo"],
         "contacts": ["contacts"],
         "scripts": ["scripts"],
@@ -1141,6 +1142,7 @@ class AgentContextMixin:
             GoogleCalendarTool,
             GoogleDriveTool,
             GoogleMailTool,
+            GwsTool,
             ImageGenTool,
             ImageOcrTool,
             ImageVisionTool,
@@ -1207,6 +1209,8 @@ class AgentContextMixin:
                 self.tools.register(GoogleCalendarTool())
             elif tool_name == "google_mail":
                 self.tools.register(GoogleMailTool())
+            elif tool_name == "gws":
+                self.tools.register(GwsTool())
             elif tool_name == "todo":
                 self.tools.register(TodoTool())
             elif tool_name == "contacts":

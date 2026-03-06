@@ -149,7 +149,7 @@
         <div class="sidebar-header">
             <div class="sidebar-tabs">
                 <button class="sidebar-tab active" data-tab="sessions">Sessions</button>
-                <button class="sidebar-tab" data-tab="instructions">Instructions</button>
+                <button class="sidebar-tab" data-tab="files">Files</button>
                 <button class="sidebar-tab" data-tab="help">Help</button>
             </div>
             <button class="icon-btn sidebar-close" id="sidebarClose" title="Close sidebar">&times;</button>
@@ -165,34 +165,23 @@
             </div>
         </div>
 
-        <!-- Instructions tab -->
-        <div class="sidebar-content instructions-tab" id="tabInstructions">
-            <!-- File list panel -->
-            <div class="instr-files-panel" id="instrFilesPanel">
-                <div class="instr-files-header">
-                    <span class="instr-files-title">Instruction Files</span>
-                    <button class="action-btn small" id="newInstructionBtn" title="Create a new instruction file">+ New</button>
-                </div>
-                <p class="sidebar-hint">Click a file to view and edit it.</p>
-                <div id="instructionsList" class="sidebar-list instr-file-list"></div>
+        <!-- Files tab -->
+        <div class="sidebar-content files-tab" id="tabFiles">
+            <div class="files-header-row">
+                <span class="files-count" id="filesCount">0 files</span>
+                <input type="text" class="files-search" id="filesSearch" placeholder="Filter files..." autocomplete="off">
             </div>
-            <!-- Editor panel (always visible once a file is opened) -->
-            <div id="instructionEditor" class="instruction-editor hidden">
-                <div class="editor-header">
-                    <div class="editor-file-info">
-                        <span class="editor-file-icon">&#x1F4DD;</span>
-                        <span id="editorFileName">-</span>
-                        <span id="editorDirtyMark" class="editor-dirty hidden" title="Unsaved changes">●</span>
-                    </div>
-                    <div class="editor-actions">
-                        <span id="editorSaveStatus" class="editor-save-status"></span>
-                        <button class="action-btn small" id="saveInstructionBtn" title="Save (Ctrl+S)">Save</button>
-                        <button class="action-btn small secondary" id="closeEditorBtn" title="Close editor">✕</button>
+            <div id="filesList" class="sidebar-list files-list"></div>
+            <div id="filePreview" class="file-preview hidden">
+                <div class="file-preview-header">
+                    <span class="file-preview-name" id="filePreviewName">-</span>
+                    <div class="file-preview-actions">
+                        <a class="action-btn small" id="fileDownloadBtn" href="#" download title="Download file">Download</a>
+                        <button class="action-btn small secondary" id="filePreviewClose" title="Close preview">&#x2715;</button>
                     </div>
                 </div>
-                <div class="editor-body">
-                    <textarea id="instructionContent" class="editor-textarea" spellcheck="false" placeholder="File content will appear here..."></textarea>
-                </div>
+                <div class="file-preview-meta" id="filePreviewMeta"></div>
+                <div class="file-preview-body" id="filePreviewBody"></div>
             </div>
         </div>
 

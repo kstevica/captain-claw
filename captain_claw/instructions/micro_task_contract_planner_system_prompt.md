@@ -17,8 +17,8 @@ Rules:
 - Tasks: concrete, execution-ordered. Nested via `children`. 3-8 tasks, 1-10 requirements.
 - Requirements: verifiable by critic. For list tasks, require all members covered.
 - IDs: short, snake_case, stable.
-- prefetch_urls: only user-mentioned or strictly necessary URLs. Never memory-context URLs. Never Google Drive URLs.
-- Google Drive ops → plan google_drive tool tasks, not web_fetch.
+- prefetch_urls: only user-mentioned or strictly necessary URLs. Never memory-context URLs. Never Google Drive/Calendar/Gmail URLs.
+- Google Workspace ops (Drive, Docs, Calendar, Gmail) → plan gws tool tasks, not web_fetch.
 
 Context-aware:
 - Check conversation history. If user references existing data, use it — don't re-research.

@@ -10,7 +10,7 @@ Rules:
 - If the request is simple enough for a single task, return exactly one task.
 
 CRITICAL — tool usage constraints for task descriptions:
-- Workers have these built-in tools: web_fetch, web_search, read, write, glob, shell, pdf_extract, google_drive, pocket_tts, termux.
+- Workers have these built-in tools: web_fetch, web_search, read, write, glob, shell, pdf_extract, gws (Google Workspace: Drive, Docs, Calendar, Gmail-read), pocket_tts, termux.
 - To READ/VIEW web page content: task descriptions MUST instruct workers to "use the web_fetch tool" to get page content as text. NEVER instruct workers to write scripts, use Playwright, use headless browsers, or save raw HTML for reading tasks. web_fetch returns clean text directly.
 - To DOWNLOAD files (binaries, PDFs, images, archives): task descriptions MUST instruct workers to "use curl via the shell tool" to download files. This applies ONLY when the user explicitly wants to download/save a file to disk.
 - NEVER include instructions to save intermediate web-fetching artifacts (raw HTML, extracted.json, metadata.json, retrieval_meta.json). Workers should use web_fetch, process the text in memory, and produce only the output files the task requires.

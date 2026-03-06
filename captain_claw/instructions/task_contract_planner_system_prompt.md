@@ -27,9 +27,9 @@ Rules:
 - When list-member execution is implied, include explicit requirements that every extracted member is covered.
 - Keep ids short, snake_case, and stable.
 - Include only URLs in `prefetch_urls` that the user explicitly mentioned or that are strictly necessary to satisfy the request. Never add URLs that only appear in memory context or semantic memory — those are background knowledge, not action items.
-- Never include Google Drive URLs or Google API documentation URLs — use the `google_drive` tool instead.
+- Never include Google Drive, Calendar, or Gmail URLs or Google API documentation URLs — use the `gws` tool instead.
 - Use 3-8 tasks and 1-10 requirements.
-- For Google Drive file operations (read, download, list, search), plan tasks that use the `google_drive` tool directly. Do NOT plan web_fetch or web_search steps for Drive files.
+- For Google Workspace operations (Drive, Docs, Calendar, Gmail), plan tasks that use the `gws` tool directly. Do NOT plan web_fetch or web_search steps for Google Workspace content.
 
 Context-aware planning:
 - IMPORTANT: Review the conversation history before planning. If the user's message references, quotes, or closely matches content from a previous response (e.g. an article title, a data point, a URL), the plan should use the existing data — NOT start a new research pipeline.

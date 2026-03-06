@@ -667,66 +667,44 @@ Send email via SMTP, Mailgun, or SendGrid.
 
 At least one of `body` or `html` is required. Max attachment size: 25 MB per file.
 
-### google_drive
+### gws
 
-Interact with Google Drive. Requires Google OAuth connection.
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `action` | string | yes | `list`, `search`, `read`, `info`, `upload`, `create`, `update` |
-| `file_id` | string | for read/info/update | Google Drive file ID |
-| `folder_id` | string | no | Folder ID for list/upload (default: root) |
-| `query` | string | for search | Search query text |
-| `max_results` | number | no | Max results (default: 20, max: 100) |
-| `local_path` | string | for upload | Local file path to upload |
-| `name` | string | for upload/create | File name |
-| `content` | string | for create/update | Text content |
-| `mime_type` | string | for create | Target MIME type |
-| `order_by` | string | no | Sort order (default: `modifiedTime desc`) |
-
-**Read behavior:** Google Docs export as markdown, Sheets as CSV, Slides as plain text. Office files (DOCX, XLSX, PPTX) are downloaded and parsed by the corresponding extract tools. Plain text files are downloaded directly.
-
-### google_calendar
-
-Interact with Google Calendar. Requires Google OAuth connection with Calendar scope.
+Google Workspace CLI tool. Wraps the `gws` binary ([github.com/googleworkspace/cli](https://github.com/googleworkspace/cli)) to access Drive, Docs, Gmail, and Calendar. Requires the `gws` CLI to be installed and authenticated separately (`gws auth setup && gws auth login`).
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `action` | string | yes | `list_events`, `search_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `list_calendars` |
-| `calendar_id` | string | no | Calendar ID (default: `primary`). Use `list_calendars` to find others. |
-| `event_id` | string | for get/update/delete | Event ID |
-| `query` | string | for search_events | Free-text search query |
-| `summary` | string | for create_event | Event title |
-| `description` | string | no | Event description/notes |
-| `location` | string | no | Event location |
-| `start` | string | for create_event | ISO 8601 datetime (e.g. `2026-02-24T10:00:00+01:00`) or date-only for all-day events (e.g. `2026-02-24`) |
-| `end` | string | no | ISO 8601 datetime or date-only. Defaults to start + 1 hour (timed) or start + 1 day (all-day). |
-| `timezone` | string | no | IANA timezone (e.g. `Europe/Berlin`). Used when start/end don't include an offset. |
-| `attendees` | list[string] | no | Attendee email addresses |
-| `reminders` | list[object] | no | Custom reminders: `[{"method": "popup", "minutes": 10}]` |
-| `recurrence` | list[string] | no | RRULE strings (e.g. `["RRULE:FREQ=WEEKLY;COUNT=10"]`) |
-| `max_results` | number | no | Max results (default: 10, max: 100) |
-| `time_min` | string | no | Lower bound for event start time (ISO 8601). Defaults to now for `list_events`. |
-| `time_max` | string | no | Upper bound for event end time (ISO 8601) |
-| `color_id` | string | no | Event color ID (1-11) |
+| `action` | string | yes | `drive_list`, `drive_search`, `drive_download`, `drive_info`, `drive_create`, `docs_read`, `docs_append`, `mail_list`, `mail_search`, `mail_read`, `calendar_list`, `calendar_search`, `calendar_create`, `calendar_agenda`, `raw` |
+| `query` | string | for search actions | Search text (Drive file name/content, Gmail search syntax, calendar event text) |
+| `file_id` | string | for file actions | Google Drive file ID |
+| `folder_id` | string | no | Drive folder ID for `drive_list` or `drive_create` (default: root) |
+| `name` | string | for drive_create | File/document name |
+| `content` | string | no | Text content (for `drive_create` initial content or `docs_append` text) |
+| `mime_type` | string | no | MIME type for `drive_create` (e.g. `application/vnd.google-apps.document` for Google Doc) |
+| `output_path` | string | no | Local path to save downloaded file (for `drive_download`) |
+| `message_id` | string | for mail_read | Gmail message ID |
+| `max_results` | number | no | Maximum results to return (default varies by action) |
+| `label` | string | no | Gmail label for `mail_list` (e.g. `INBOX`, `SENT`). Default: `INBOX` |
+| `summary` | string | for calendar_create | Event title |
+| `start` | string | for calendar_create | Event start time in ISO 8601 format |
+| `end` | string | no | Event end time in ISO 8601 format |
+| `attendees` | string | no | Comma-separated attendee email addresses (for `calendar_create`) |
+| `calendar_id` | string | no | Calendar ID (default: `primary`) |
+| `days` | number | no | Days to look ahead for `calendar_list`/`calendar_agenda` (default: 7) |
+| `raw_args` | string | for raw | Raw arguments passed directly to gws CLI |
 
-All-day event end dates are exclusive — an end of `2026-02-25` means the event covers `2026-02-24` only. Uses Google Calendar REST API v3 via httpx (no Google SDK dependency).
+**Installation:** `npm install -g @googleworkspace/cli`, then `gws auth setup && gws auth login`.
 
-### google_mail
+**Drive actions:** `drive_list` lists files in a folder, `drive_search` finds files by name or content, `drive_download` exports/downloads a file locally (Google Docs export as markdown, Sheets as CSV), `drive_info` gets file metadata, `drive_create` creates a new file on Drive.
 
-Read-only Gmail access. Requires Google OAuth connection with `gmail.readonly` scope. No send, modify, or delete operations.
+**Docs actions:** `docs_read` reads a Google Doc's content (exported as markdown), `docs_append` appends text to a Doc.
 
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `action` | string | yes | `list_messages`, `search`, `read_message`, `get_thread`, `list_labels` |
-| `query` | string | for search | Gmail search query (e.g. `from:alice subject:report`, `is:unread has:attachment`) |
-| `message_id` | string | for read_message | Message ID |
-| `thread_id` | string | for get_thread | Thread ID |
-| `label` | string | no | Label/folder for `list_messages` (default: `INBOX`). Common: `SENT`, `DRAFT`, `STARRED`, `UNREAD`, `SPAM`, `TRASH`. |
-| `max_results` | number | no | Max results (default: 10, max: 50) |
-| `include_body` | boolean | no | Include message body in list/search results (default: false). Always true for `read_message`. |
+**Mail actions:** `mail_list` lists recent emails from a label, `mail_search` searches using Gmail syntax (e.g. `from:alice subject:report`), `mail_read` reads a specific email by ID.
 
-Handles MIME multipart emails, extracts text/plain and text/html parts, and converts HTML to plain text automatically. Message bodies are truncated at 30,000 characters.
+**Calendar actions:** `calendar_list` lists upcoming events, `calendar_search` searches events by text, `calendar_create` creates a new event, `calendar_agenda` shows a formatted agenda view.
+
+**Raw passthrough:** The `raw` action passes arguments directly to the `gws` CLI for any command not covered by the built-in actions. Example: `raw_args: "sheets +read --id SPREADSHEET_ID --range A1:D10"`.
+
+**Configuration:** The `gws` binary path can be customized via `tools.gws.binary_path` in config. If empty, the binary is found via PATH.
 
 ### todo
 
@@ -1100,9 +1078,7 @@ tools:
     - image_vision
     - pocket_tts
     - send_mail
-    - google_drive
-    - google_calendar
-    - google_mail
+    - gws
     - todo
     - contacts
     - scripts
@@ -1176,6 +1152,8 @@ tools:
     sendgrid_base_url: "https://api.sendgrid.com/v3/mail/send"
     timeout: 60
     max_attachment_bytes: 26214400  # 25 MB
+  gws:
+    binary_path: ""                 # custom path to gws binary (empty = find in PATH)
 ```
 
 ### skills
@@ -2772,50 +2750,6 @@ OAuth auto-enables when both `client_id` and `client_secret` are set.
 - **CLI:** Navigate to `/auth/google/login` in your browser
 
 The OAuth flow uses PKCE for security. Tokens are stored locally and refresh automatically.
-
-### Google Drive Tool
-
-Once connected, the `google_drive` tool is available with these actions:
-
-| Action | Description |
-|---|---|
-| `list` | Browse files in a folder (default: root) |
-| `search` | Find files by name or content |
-| `read` | Get file contents (exports Google Docs/Sheets/Slides) |
-| `info` | Get file metadata |
-| `upload` | Upload a local file to Drive |
-| `create` | Create a new file on Drive |
-| `update` | Update an existing file's content |
-
-### Google Calendar Tool
-
-Once connected, the `google_calendar` tool is available with these actions:
-
-| Action | Description |
-|---|---|
-| `list_events` | List upcoming events (defaults to now onwards) |
-| `search_events` | Find events by free-text query |
-| `get_event` | Get full event details by ID |
-| `create_event` | Create a new event with attendees, reminders, recurrence |
-| `update_event` | Partial patch of an existing event |
-| `delete_event` | Remove an event |
-| `list_calendars` | List all accessible calendars |
-
-Supports timed events (ISO 8601 datetime) and all-day events (date-only). See [google_calendar tool reference](#google_calendar) for full parameters.
-
-### Google Mail (Gmail) Tool
-
-Once connected, the `google_mail` tool provides read-only Gmail access:
-
-| Action | Description |
-|---|---|
-| `list_messages` | List recent emails from a label (default: INBOX) |
-| `search` | Search using Gmail query syntax (`from:`, `subject:`, `is:unread`, etc.) |
-| `read_message` | Get full message content, headers, and attachment list |
-| `get_thread` | Get all messages in a conversation thread |
-| `list_labels` | List available Gmail labels/folders |
-
-Only the `gmail.readonly` scope is required — no send, modify, or delete operations. See [google_mail tool reference](#google_mail) for full parameters.
 
 ### Vertex AI
 

@@ -601,6 +601,10 @@ class WebServer:
         from captain_claw.web.rest_files import list_files
         return await list_files(self, request)
 
+    async def _list_session_files(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_files import list_session_files
+        return await list_session_files(self, request)
+
     async def _get_file_content(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_files import get_file_content
         return await get_file_content(self, request)
@@ -1031,6 +1035,7 @@ class WebServer:
         app.router.add_get("/api/workflow-browser", self._list_workflow_outputs)
         app.router.add_get("/api/workflow-browser/output/{filename}", self._get_workflow_output)
         app.router.add_get("/api/files", self._list_files)
+        app.router.add_get("/api/files/session/{session_id}", self._list_session_files)
         app.router.add_get("/api/files/content", self._get_file_content)
         app.router.add_get("/api/files/download", self._download_file)
         app.router.add_get("/api/media", self._serve_media)

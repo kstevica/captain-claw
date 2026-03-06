@@ -8,7 +8,7 @@ Rules:
 - Simple request = one task.
 
 Tool constraints for task descriptions:
-- Workers have: web_fetch, web_search, read, write, glob, shell, pdf_extract, google_drive, pocket_tts, termux.
+- Workers have: web_fetch, web_search, read, write, glob, shell, pdf_extract, gws (Google Workspace: Drive, Docs, Calendar, Gmail-read), pocket_tts, termux.
 - Read web content → "use web_fetch". NEVER scripts/Playwright/headless browsers.
 - Download files → "use curl via shell". Only for binary saves.
 - No intermediate artifacts (HTML dumps, extracted.json). web_fetch → process in memory → final output only.

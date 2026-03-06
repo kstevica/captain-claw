@@ -238,6 +238,7 @@ tools:
   - google_drive
   - google_calendar
   - google_mail
+  - gws
   - datastore
   - typesense
   - image_gen
