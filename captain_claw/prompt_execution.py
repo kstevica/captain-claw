@@ -303,6 +303,20 @@ async def run_prompt_in_active_session(
                 await on_assistant_text(outbound_text)
             if after_turn:
                 await after_turn(turn_start_idx, prompt_text, assistant_text)
+
+            # Extract suggested next steps (skip for cron jobs).
+            ctx.last_next_steps = []
+            if not cron_job_id and assistant_text.strip():
+                try:
+                    from captain_claw.next_steps import extract_next_steps, next_steps_to_dicts
+                    steps = await extract_next_steps(agent.provider, assistant_text)
+                    if steps:
+                        step_dicts = next_steps_to_dicts(steps)
+                        ctx.last_next_steps = step_dicts
+                        ui.print_next_steps(step_dicts)
+                except Exception as ns_err:
+                    log.debug("Next steps extraction failed", error=str(ns_err))
+
             ctx.last_exec_seconds = time.perf_counter() - started
             ctx.last_completed_at = datetime.now()
             ui.set_runtime_status("waiting")

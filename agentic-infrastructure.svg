@@ -1,0 +1,585 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 2200" width="1600" height="2200">
+  <defs>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&amp;display=swap');
+      text { font-family: 'Inter', 'Segoe UI', Arial, sans-serif; }
+    </style>
+    <!-- Gradients -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f0f1a;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1a1a2e;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="humanGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1" />
+      <stop offset="100%" style="stop-color:#8b5cf6" />
+    </linearGradient>
+    <linearGradient id="orchestratorGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#3b82f6" />
+      <stop offset="100%" style="stop-color:#2563eb" />
+    </linearGradient>
+    <linearGradient id="governanceGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ef4444" />
+      <stop offset="100%" style="stop-color:#dc2626" />
+    </linearGradient>
+    <linearGradient id="toolGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#10b981" />
+      <stop offset="100%" style="stop-color:#059669" />
+    </linearGradient>
+    <linearGradient id="memoryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f59e0b" />
+      <stop offset="100%" style="stop-color:#d97706" />
+    </linearGradient>
+    <linearGradient id="evalGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ec4899" />
+      <stop offset="100%" style="stop-color:#db2777" />
+    </linearGradient>
+    <linearGradient id="subagentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#06b6d4" />
+      <stop offset="100%" style="stop-color:#0891b2" />
+    </linearGradient>
+    <linearGradient id="envGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#84cc16" />
+      <stop offset="100%" style="stop-color:#65a30d" />
+    </linearGradient>
+
+    <!-- Drop shadow filter -->
+    <filter id="shadow" x="-5%" y="-5%" width="115%" height="115%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Arrow markers -->
+    <marker id="arrowBlue" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+      <path d="M0,0 L12,4 L0,8 Z" fill="#60a5fa"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+      <path d="M0,0 L12,4 L0,8 Z" fill="#f87171"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+      <path d="M0,0 L12,4 L0,8 Z" fill="#34d399"/>
+    </marker>
+    <marker id="arrowYellow" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+      <path d="M0,0 L12,4 L0,8 Z" fill="#fbbf24"/>
+    </marker>
+    <marker id="arrowPink" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+      <path d="M0,0 L12,4 L0,8 Z" fill="#f472b6"/>
+    </marker>
+    <marker id="arrowCyan" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+      <path d="M0,0 L12,4 L0,8 Z" fill="#22d3ee"/>
+    </marker>
+    <marker id="arrowWhite" markerWidth="12" markerHeight="8" refX="10" refY="4" orient="auto">
+      <path d="M0,0 L12,4 L0,8 Z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1600" height="2200" fill="url(#bgGrad)"/>
+
+  <!-- Grid pattern -->
+  <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+    <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#ffffff06" stroke-width="0.5"/>
+  </pattern>
+  <rect width="1600" height="2200" fill="url(#grid)"/>
+
+  <!-- ==================== TITLE ==================== -->
+  <text x="800" y="65" text-anchor="middle" fill="#e2e8f0" font-size="36" font-weight="700" letter-spacing="2">AGENTIC INFRASTRUCTURE</text>
+  <text x="800" y="100" text-anchor="middle" fill="#94a3b8" font-size="18" font-weight="400">Governance, Steering &amp; Control Architecture</text>
+  <line x1="300" y1="120" x2="1300" y2="120" stroke="#334155" stroke-width="1"/>
+
+  <!-- ==================== LAYER LABELS (left side) ==================== -->
+  <text x="30" y="260" fill="#475569" font-size="13" font-weight="600" transform="rotate(-90, 30, 260)" letter-spacing="3">HUMAN LAYER</text>
+  <text x="30" y="560" fill="#475569" font-size="13" font-weight="600" transform="rotate(-90, 30, 560)" letter-spacing="3">GOVERNANCE</text>
+  <text x="30" y="880" fill="#475569" font-size="13" font-weight="600" transform="rotate(-90, 30, 880)" letter-spacing="3">ORCHESTRATION</text>
+  <text x="30" y="1250" fill="#475569" font-size="13" font-weight="600" transform="rotate(-90, 30, 1250)" letter-spacing="3">DELEGATION</text>
+  <text x="30" y="1600" fill="#475569" font-size="13" font-weight="600" transform="rotate(-90, 30, 1600)" letter-spacing="3">EXECUTION</text>
+  <text x="30" y="1950" fill="#475569" font-size="13" font-weight="600" transform="rotate(-90, 30, 1950)" letter-spacing="3">ENVIRONMENT</text>
+
+  <!-- ==================== 1. HUMAN / USER LAYER ==================== -->
+  <rect x="70" y="150" width="1460" height="200" rx="16" fill="#1e1b4b15" stroke="#6366f130" stroke-width="1.5"/>
+  <text x="800" y="180" text-anchor="middle" fill="#a5b4fc" font-size="14" font-weight="600" letter-spacing="2">1. HUMAN OVERSIGHT &amp; INTENT</text>
+
+  <!-- User -->
+  <rect x="120" y="200" width="220" height="120" rx="12" fill="#1e1b4b" stroke="#6366f1" stroke-width="2" filter="url(#shadow)"/>
+  <circle cx="180" cy="245" r="18" fill="none" stroke="#a5b4fc" stroke-width="2"/>
+  <circle cx="180" cy="238" r="7" fill="#a5b4fc"/>
+  <path d="M162,258 Q180,272 198,258" fill="none" stroke="#a5b4fc" stroke-width="2"/>
+  <text x="210" y="250" fill="#e2e8f0" font-size="16" font-weight="700">Human User</text>
+  <text x="180" y="280" fill="#94a3b8" font-size="11" text-anchor="middle">Intent, Goals,</text>
+  <text x="180" y="295" fill="#94a3b8" font-size="11" text-anchor="middle">Approval Authority</text>
+
+  <!-- Approval Gate -->
+  <rect x="420" y="200" width="220" height="120" rx="12" fill="#1e1b4b" stroke="#6366f1" stroke-width="2" filter="url(#shadow)"/>
+  <text x="530" y="240" text-anchor="middle" fill="#e2e8f0" font-size="15" font-weight="700">Approval Gate</text>
+  <text x="530" y="265" text-anchor="middle" fill="#94a3b8" font-size="11">Confirm / Deny / Modify</text>
+  <text x="530" y="282" text-anchor="middle" fill="#94a3b8" font-size="11">actions before execution</text>
+  <rect x="460" y="295" width="60" height="18" rx="4" fill="#22c55e20" stroke="#22c55e" stroke-width="1"/>
+  <text x="490" y="308" text-anchor="middle" fill="#22c55e" font-size="10" font-weight="600">ALLOW</text>
+  <rect x="530" y="295" width="60" height="18" rx="4" fill="#ef444420" stroke="#ef4444" stroke-width="1"/>
+  <text x="560" y="308" text-anchor="middle" fill="#ef4444" font-size="10" font-weight="600">DENY</text>
+
+  <!-- Permission Modes -->
+  <rect x="720" y="200" width="250" height="120" rx="12" fill="#1e1b4b" stroke="#6366f1" stroke-width="2" filter="url(#shadow)"/>
+  <text x="845" y="235" text-anchor="middle" fill="#e2e8f0" font-size="15" font-weight="700">Permission Modes</text>
+  <circle cx="755" cy="260" r="6" fill="#22c55e"/>
+  <text x="770" y="265" fill="#94a3b8" font-size="11">Auto-allow (trusted tools)</text>
+  <circle cx="755" cy="282" r="6" fill="#f59e0b"/>
+  <text x="770" y="287" fill="#94a3b8" font-size="11">Prompt per action</text>
+  <circle cx="755" cy="304" r="6" fill="#ef4444"/>
+  <text x="770" y="309" fill="#94a3b8" font-size="11">Deny by default</text>
+
+  <!-- Feedback Channel -->
+  <rect x="1050" y="200" width="220" height="120" rx="12" fill="#1e1b4b" stroke="#6366f1" stroke-width="2" filter="url(#shadow)"/>
+  <text x="1160" y="240" text-anchor="middle" fill="#e2e8f0" font-size="15" font-weight="700">Feedback Loop</text>
+  <text x="1160" y="265" text-anchor="middle" fill="#94a3b8" font-size="11">Corrections, Preferences,</text>
+  <text x="1160" y="282" text-anchor="middle" fill="#94a3b8" font-size="11">Clarifications, Stop signals</text>
+  <text x="1160" y="302" text-anchor="middle" fill="#a5b4fc" font-size="11" font-weight="600">Real-time steering</text>
+
+  <!-- Arrows from User -->
+  <line x1="340" y1="260" x2="415" y2="260" stroke="#a5b4fc" stroke-width="2" marker-end="url(#arrowBlue)" stroke-dasharray="6,3"/>
+
+  <!-- ==================== 2. GOVERNANCE LAYER ==================== -->
+  <rect x="70" y="380" width="1460" height="330" rx="16" fill="#7f1d1d10" stroke="#ef444425" stroke-width="1.5"/>
+  <text x="800" y="410" text-anchor="middle" fill="#fca5a5" font-size="14" font-weight="600" letter-spacing="2">2. GOVERNANCE &amp; SAFETY FRAMEWORK</text>
+
+  <!-- System Prompt / Constitution -->
+  <rect x="100" y="430" width="300" height="250" rx="12" fill="#1c1917" stroke="#ef4444" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="100" y="430" width="300" height="40" rx="12" fill="#ef444420"/>
+  <rect x="100" y="458" width="300" height="2" fill="#ef444440"/>
+  <text x="250" y="457" text-anchor="middle" fill="#fca5a5" font-size="14" font-weight="700">System Prompt / Constitution</text>
+  <text x="120" y="495" fill="#d1d5db" font-size="12" font-weight="600">Immutable Rules</text>
+  <rect x="120" y="505" width="8" height="8" rx="2" fill="#ef4444"/>
+  <text x="135" y="513" fill="#94a3b8" font-size="11">Safety boundaries</text>
+  <rect x="120" y="523" width="8" height="8" rx="2" fill="#ef4444"/>
+  <text x="135" y="531" fill="#94a3b8" font-size="11">Prohibited actions list</text>
+  <rect x="120" y="541" width="8" height="8" rx="2" fill="#ef4444"/>
+  <text x="135" y="549" fill="#94a3b8" font-size="11">Data privacy constraints</text>
+  <rect x="120" y="559" width="8" height="8" rx="2" fill="#ef4444"/>
+  <text x="135" y="567" fill="#94a3b8" font-size="11">Injection defense rules</text>
+  <rect x="120" y="577" width="8" height="8" rx="2" fill="#ef4444"/>
+  <text x="135" y="585" fill="#94a3b8" font-size="11">Copyright protections</text>
+  <text x="120" y="615" fill="#d1d5db" font-size="12" font-weight="600">Priority Hierarchy</text>
+  <text x="120" y="635" fill="#fbbf24" font-size="11">1. System safety (highest)</text>
+  <text x="120" y="652" fill="#94a3b8" font-size="11">2. User instructions</text>
+  <text x="120" y="669" fill="#64748b" font-size="11">3. Web/tool content (lowest)</text>
+
+  <!-- Guardrails -->
+  <rect x="440" y="430" width="300" height="250" rx="12" fill="#1c1917" stroke="#ef4444" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="440" y="430" width="300" height="40" rx="12" fill="#ef444420"/>
+  <rect x="440" y="458" width="300" height="2" fill="#ef444440"/>
+  <text x="590" y="457" text-anchor="middle" fill="#fca5a5" font-size="14" font-weight="700">Guardrails &amp; Policies</text>
+
+  <text x="460" y="495" fill="#d1d5db" font-size="12" font-weight="600">Action Classification</text>
+  <rect x="460" y="507" width="100" height="22" rx="4" fill="#ef444420" stroke="#ef4444" stroke-width="1"/>
+  <text x="510" y="522" text-anchor="middle" fill="#ef4444" font-size="10" font-weight="600">PROHIBITED</text>
+  <rect x="570" y="507" width="100" height="22" rx="4" fill="#f59e0b20" stroke="#f59e0b" stroke-width="1"/>
+  <text x="620" y="522" text-anchor="middle" fill="#f59e0b" font-size="10" font-weight="600">NEEDS APPROVAL</text>
+
+  <rect x="460" y="537" width="100" height="22" rx="4" fill="#22c55e20" stroke="#22c55e" stroke-width="1"/>
+  <text x="510" y="552" text-anchor="middle" fill="#22c55e" font-size="10" font-weight="600">ALLOWED</text>
+
+  <text x="460" y="585" fill="#d1d5db" font-size="12" font-weight="600">Content Filters</text>
+  <rect x="460" y="595" width="8" height="8" rx="2" fill="#f97316"/>
+  <text x="475" y="603" fill="#94a3b8" font-size="11">Prompt injection detection</text>
+  <rect x="460" y="613" width="8" height="8" rx="2" fill="#f97316"/>
+  <text x="475" y="621" fill="#94a3b8" font-size="11">PII exfiltration blocking</text>
+  <rect x="460" y="631" width="8" height="8" rx="2" fill="#f97316"/>
+  <text x="475" y="639" fill="#94a3b8" font-size="11">Harmful content filtering</text>
+  <rect x="460" y="649" width="8" height="8" rx="2" fill="#f97316"/>
+  <text x="475" y="657" fill="#94a3b8" font-size="11">Authority impersonation check</text>
+
+  <!-- Trust Boundaries -->
+  <rect x="780" y="430" width="300" height="250" rx="12" fill="#1c1917" stroke="#ef4444" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="780" y="430" width="300" height="40" rx="12" fill="#ef444420"/>
+  <rect x="780" y="458" width="300" height="2" fill="#ef444440"/>
+  <text x="930" y="457" text-anchor="middle" fill="#fca5a5" font-size="14" font-weight="700">Trust Boundaries</text>
+
+  <!-- Trust zones -->
+  <rect x="800" y="485" width="260" height="55" rx="8" fill="#22c55e10" stroke="#22c55e40" stroke-width="1"/>
+  <text x="810" y="505" fill="#22c55e" font-size="11" font-weight="600">TRUSTED ZONE</text>
+  <text x="810" y="525" fill="#94a3b8" font-size="10">System prompt, User messages (chat)</text>
+
+  <rect x="800" y="550" width="260" height="55" rx="8" fill="#f59e0b10" stroke="#f59e0b40" stroke-width="1"/>
+  <text x="810" y="570" fill="#f59e0b" font-size="11" font-weight="600">SEMI-TRUSTED ZONE</text>
+  <text x="810" y="590" fill="#94a3b8" font-size="10">Local files, configured tools, hooks</text>
+
+  <rect x="800" y="615" width="260" height="55" rx="8" fill="#ef444410" stroke="#ef444440" stroke-width="1"/>
+  <text x="810" y="635" fill="#ef4444" font-size="11" font-weight="600">UNTRUSTED ZONE</text>
+  <text x="810" y="655" fill="#94a3b8" font-size="10">Web content, emails, tool results, DOM</text>
+
+  <!-- Audit / Logging -->
+  <rect x="1120" y="430" width="300" height="250" rx="12" fill="#1c1917" stroke="#ef4444" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="1120" y="430" width="300" height="40" rx="12" fill="#ef444420"/>
+  <rect x="1120" y="458" width="300" height="2" fill="#ef444440"/>
+  <text x="1270" y="457" text-anchor="middle" fill="#fca5a5" font-size="14" font-weight="700">Audit &amp; Accountability</text>
+  <rect x="1140" y="485" width="8" height="8" rx="2" fill="#f87171"/>
+  <text x="1155" y="493" fill="#94a3b8" font-size="11">Full conversation logging</text>
+  <rect x="1140" y="508" width="8" height="8" rx="2" fill="#f87171"/>
+  <text x="1155" y="516" fill="#94a3b8" font-size="11">Tool call traces &amp; results</text>
+  <rect x="1140" y="531" width="8" height="8" rx="2" fill="#f87171"/>
+  <text x="1155" y="539" fill="#94a3b8" font-size="11">Permission decisions recorded</text>
+  <rect x="1140" y="554" width="8" height="8" rx="2" fill="#f87171"/>
+  <text x="1155" y="562" fill="#94a3b8" font-size="11">Denial reason capture</text>
+  <rect x="1140" y="577" width="8" height="8" rx="2" fill="#f87171"/>
+  <text x="1155" y="585" fill="#94a3b8" font-size="11">Session integrity tracking</text>
+  <text x="1140" y="620" fill="#d1d5db" font-size="12" font-weight="600">Observability</text>
+  <rect x="1140" y="632" width="8" height="8" rx="2" fill="#f87171"/>
+  <text x="1155" y="640" fill="#94a3b8" font-size="11">Token usage monitoring</text>
+  <rect x="1140" y="652" width="8" height="8" rx="2" fill="#f87171"/>
+  <text x="1155" y="660" fill="#94a3b8" font-size="11">Cost tracking per session</text>
+
+  <!-- ==================== 3. ORCHESTRATOR / AGENT CORE ==================== -->
+  <rect x="70" y="740" width="1460" height="320" rx="16" fill="#1e3a5f10" stroke="#3b82f625" stroke-width="1.5"/>
+  <text x="800" y="770" text-anchor="middle" fill="#93c5fd" font-size="14" font-weight="600" letter-spacing="2">3. ORCHESTRATOR / PRIMARY AGENT</text>
+
+  <!-- Main Agent Core -->
+  <rect x="450" y="790" width="700" height="240" rx="16" fill="#172554" stroke="#3b82f6" stroke-width="2.5" filter="url(#shadow)"/>
+  <rect x="450" y="790" width="700" height="45" rx="16" fill="#3b82f620"/>
+  <rect x="450" y="823" width="700" height="2" fill="#3b82f640"/>
+  <text x="800" y="820" text-anchor="middle" fill="#93c5fd" font-size="18" font-weight="700">Agent Core (LLM Reasoning Engine)</text>
+
+  <!-- Inner components -->
+  <rect x="475" y="850" width="200" height="80" rx="8" fill="#1e293b" stroke="#60a5fa50" stroke-width="1"/>
+  <text x="575" y="878" text-anchor="middle" fill="#93c5fd" font-size="13" font-weight="600">Planning &amp; Reasoning</text>
+  <text x="575" y="898" text-anchor="middle" fill="#94a3b8" font-size="10">Chain of thought</text>
+  <text x="575" y="913" text-anchor="middle" fill="#94a3b8" font-size="10">Task decomposition</text>
+
+  <rect x="700" y="850" width="200" height="80" rx="8" fill="#1e293b" stroke="#60a5fa50" stroke-width="1"/>
+  <text x="800" y="878" text-anchor="middle" fill="#93c5fd" font-size="13" font-weight="600">Tool Selection</text>
+  <text x="800" y="898" text-anchor="middle" fill="#94a3b8" font-size="10">Match task to capabilities</text>
+  <text x="800" y="913" text-anchor="middle" fill="#94a3b8" font-size="10">Parameter inference</text>
+
+  <rect x="925" y="850" width="200" height="80" rx="8" fill="#1e293b" stroke="#60a5fa50" stroke-width="1"/>
+  <text x="1025" y="878" text-anchor="middle" fill="#93c5fd" font-size="13" font-weight="600">Output Generation</text>
+  <text x="1025" y="898" text-anchor="middle" fill="#94a3b8" font-size="10">Response synthesis</text>
+  <text x="1025" y="913" text-anchor="middle" fill="#94a3b8" font-size="10">Code generation</text>
+
+  <!-- Agentic loop indicator -->
+  <rect x="475" y="945" width="650" height="65" rx="8" fill="#0f172a" stroke="#3b82f630" stroke-width="1"/>
+  <text x="800" y="970" text-anchor="middle" fill="#60a5fa" font-size="13" font-weight="600">Agentic Loop: Observe -> Think -> Act -> Observe</text>
+  <text x="800" y="990" text-anchor="middle" fill="#64748b" font-size="11">Iterative refinement with self-correction and context accumulation</text>
+
+  <!-- Context Window -->
+  <rect x="100" y="800" width="310" height="220" rx="12" fill="#172554" stroke="#3b82f6" stroke-width="2" filter="url(#shadow)"/>
+  <text x="255" y="830" text-anchor="middle" fill="#93c5fd" font-size="14" font-weight="700">Context Window</text>
+  <rect x="120" y="845" width="270" height="35" rx="6" fill="#7c3aed15" stroke="#7c3aed40" stroke-width="1"/>
+  <text x="130" y="868" fill="#c4b5fd" font-size="11">System instructions (pinned)</text>
+  <rect x="120" y="888" width="270" height="35" rx="6" fill="#3b82f615" stroke="#3b82f640" stroke-width="1"/>
+  <text x="130" y="911" fill="#93c5fd" font-size="11">Conversation history (compressed)</text>
+  <rect x="120" y="931" width="270" height="35" rx="6" fill="#10b98115" stroke="#10b98140" stroke-width="1"/>
+  <text x="130" y="954" fill="#6ee7b7" font-size="11">Tool results &amp; observations</text>
+  <rect x="120" y="974" width="270" height="35" rx="6" fill="#f59e0b15" stroke="#f59e0b40" stroke-width="1"/>
+  <text x="130" y="997" fill="#fcd34d" font-size="11">Memory files (MEMORY.md, etc.)</text>
+
+  <!-- Steering Mechanisms (right side) -->
+  <rect x="1190" y="800" width="310" height="220" rx="12" fill="#172554" stroke="#3b82f6" stroke-width="2" filter="url(#shadow)"/>
+  <text x="1345" y="830" text-anchor="middle" fill="#93c5fd" font-size="14" font-weight="700">Steering Mechanisms</text>
+  <rect x="1210" y="845" width="8" height="8" rx="2" fill="#60a5fa"/>
+  <text x="1225" y="853" fill="#94a3b8" font-size="11">CLAUDE.md project config</text>
+  <rect x="1210" y="868" width="8" height="8" rx="2" fill="#60a5fa"/>
+  <text x="1225" y="876" fill="#94a3b8" font-size="11">User preferences &amp; style</text>
+  <rect x="1210" y="891" width="8" height="8" rx="2" fill="#60a5fa"/>
+  <text x="1225" y="899" fill="#94a3b8" font-size="11">Hooks (pre/post actions)</text>
+  <rect x="1210" y="914" width="8" height="8" rx="2" fill="#60a5fa"/>
+  <text x="1225" y="922" fill="#94a3b8" font-size="11">Todo list / task tracking</text>
+  <rect x="1210" y="937" width="8" height="8" rx="2" fill="#60a5fa"/>
+  <text x="1225" y="945" fill="#94a3b8" font-size="11">Temperature &amp; model selection</text>
+  <rect x="1210" y="960" width="8" height="8" rx="2" fill="#60a5fa"/>
+  <text x="1225" y="968" fill="#94a3b8" font-size="11">Max turns &amp; token limits</text>
+  <rect x="1210" y="983" width="8" height="8" rx="2" fill="#60a5fa"/>
+  <text x="1225" y="991" fill="#94a3b8" font-size="11">Permission settings</text>
+
+  <!-- ==================== 4. DELEGATION LAYER ==================== -->
+  <rect x="70" y="1090" width="1460" height="340" rx="16" fill="#06424010" stroke="#06b6d425" stroke-width="1.5"/>
+  <text x="800" y="1120" text-anchor="middle" fill="#67e8f9" font-size="14" font-weight="600" letter-spacing="2">4. SUB-AGENT DELEGATION &amp; SPECIALIZATION</text>
+
+  <!-- Sub-agent types -->
+  <rect x="100" y="1145" width="240" height="255" rx="12" fill="#164e63" stroke="#06b6d4" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="100" y="1145" width="240" height="35" rx="12" fill="#06b6d420"/>
+  <text x="220" y="1170" text-anchor="middle" fill="#67e8f9" font-size="13" font-weight="700">Explore Agent</text>
+  <text x="220" y="1200" text-anchor="middle" fill="#94a3b8" font-size="11">Codebase exploration</text>
+  <text x="220" y="1215" text-anchor="middle" fill="#94a3b8" font-size="11">File pattern search</text>
+  <text x="220" y="1230" text-anchor="middle" fill="#94a3b8" font-size="11">Code understanding</text>
+  <rect x="115" y="1250" width="210" height="30" rx="6" fill="#0e7490" stroke="#22d3ee40" stroke-width="1"/>
+  <text x="220" y="1270" text-anchor="middle" fill="#67e8f9" font-size="10">Tools: Glob, Grep, Read</text>
+  <rect x="115" y="1290" width="210" height="30" rx="6" fill="#0e749040" stroke="#22d3ee30" stroke-width="1"/>
+  <text x="220" y="1310" text-anchor="middle" fill="#94a3b8" font-size="10">Read-only access</text>
+  <rect x="115" y="1330" width="210" height="55" rx="6" fill="#0f172a" stroke="#22d3ee20" stroke-width="1"/>
+  <text x="220" y="1350" text-anchor="middle" fill="#64748b" font-size="10">Thoroughness levels:</text>
+  <text x="220" y="1368" text-anchor="middle" fill="#94a3b8" font-size="10">quick | medium | very thorough</text>
+
+  <rect x="370" y="1145" width="240" height="255" rx="12" fill="#164e63" stroke="#06b6d4" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="370" y="1145" width="240" height="35" rx="12" fill="#06b6d420"/>
+  <text x="490" y="1170" text-anchor="middle" fill="#67e8f9" font-size="13" font-weight="700">Bash Agent</text>
+  <text x="490" y="1200" text-anchor="middle" fill="#94a3b8" font-size="11">Command execution</text>
+  <text x="490" y="1215" text-anchor="middle" fill="#94a3b8" font-size="11">Git operations</text>
+  <text x="490" y="1230" text-anchor="middle" fill="#94a3b8" font-size="11">Build &amp; test runners</text>
+  <rect x="385" y="1250" width="210" height="30" rx="6" fill="#0e7490" stroke="#22d3ee40" stroke-width="1"/>
+  <text x="490" y="1270" text-anchor="middle" fill="#67e8f9" font-size="10">Tools: Bash (sandboxed)</text>
+  <rect x="385" y="1290" width="210" height="30" rx="6" fill="#f59e0b15" stroke="#f59e0b40" stroke-width="1"/>
+  <text x="490" y="1310" text-anchor="middle" fill="#fbbf24" font-size="10">Requires permission</text>
+  <rect x="385" y="1330" width="210" height="55" rx="6" fill="#0f172a" stroke="#22d3ee20" stroke-width="1"/>
+  <text x="490" y="1350" text-anchor="middle" fill="#64748b" font-size="10">Isolated environment</text>
+  <text x="490" y="1368" text-anchor="middle" fill="#94a3b8" font-size="10">No destructive defaults</text>
+
+  <rect x="640" y="1145" width="240" height="255" rx="12" fill="#164e63" stroke="#06b6d4" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="640" y="1145" width="240" height="35" rx="12" fill="#06b6d420"/>
+  <text x="760" y="1170" text-anchor="middle" fill="#67e8f9" font-size="13" font-weight="700">Plan Agent</text>
+  <text x="760" y="1200" text-anchor="middle" fill="#94a3b8" font-size="11">Architecture design</text>
+  <text x="760" y="1215" text-anchor="middle" fill="#94a3b8" font-size="11">Implementation strategy</text>
+  <text x="760" y="1230" text-anchor="middle" fill="#94a3b8" font-size="11">Trade-off analysis</text>
+  <rect x="655" y="1250" width="210" height="30" rx="6" fill="#0e7490" stroke="#22d3ee40" stroke-width="1"/>
+  <text x="760" y="1270" text-anchor="middle" fill="#67e8f9" font-size="10">Tools: Read, Glob, Grep</text>
+  <rect x="655" y="1290" width="210" height="30" rx="6" fill="#0e749040" stroke="#22d3ee30" stroke-width="1"/>
+  <text x="760" y="1310" text-anchor="middle" fill="#94a3b8" font-size="10">No edit/write access</text>
+  <rect x="655" y="1330" width="210" height="55" rx="6" fill="#0f172a" stroke="#22d3ee20" stroke-width="1"/>
+  <text x="760" y="1350" text-anchor="middle" fill="#64748b" font-size="10">Output: step-by-step plan</text>
+  <text x="760" y="1368" text-anchor="middle" fill="#94a3b8" font-size="10">Requires user approval</text>
+
+  <rect x="910" y="1145" width="240" height="255" rx="12" fill="#164e63" stroke="#06b6d4" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="910" y="1145" width="240" height="35" rx="12" fill="#06b6d420"/>
+  <text x="1030" y="1170" text-anchor="middle" fill="#67e8f9" font-size="13" font-weight="700">General Purpose</text>
+  <text x="1030" y="1200" text-anchor="middle" fill="#94a3b8" font-size="11">Complex multi-step tasks</text>
+  <text x="1030" y="1215" text-anchor="middle" fill="#94a3b8" font-size="11">Research &amp; analysis</text>
+  <text x="1030" y="1230" text-anchor="middle" fill="#94a3b8" font-size="11">Code search &amp; execute</text>
+  <rect x="925" y="1250" width="210" height="30" rx="6" fill="#0e7490" stroke="#22d3ee40" stroke-width="1"/>
+  <text x="1030" y="1270" text-anchor="middle" fill="#67e8f9" font-size="10">Tools: All tools</text>
+  <rect x="925" y="1290" width="210" height="30" rx="6" fill="#22c55e15" stroke="#22c55e40" stroke-width="1"/>
+  <text x="1030" y="1310" text-anchor="middle" fill="#34d399" font-size="10">Full capability access</text>
+  <rect x="925" y="1330" width="210" height="55" rx="6" fill="#0f172a" stroke="#22d3ee20" stroke-width="1"/>
+  <text x="1030" y="1350" text-anchor="middle" fill="#64748b" font-size="10">Autonomous execution</text>
+  <text x="1030" y="1368" text-anchor="middle" fill="#94a3b8" font-size="10">Returns results to parent</text>
+
+  <!-- Isolation -->
+  <rect x="1190" y="1145" width="310" height="255" rx="12" fill="#164e63" stroke="#06b6d4" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="1190" y="1145" width="310" height="35" rx="12" fill="#06b6d420"/>
+  <text x="1345" y="1170" text-anchor="middle" fill="#67e8f9" font-size="13" font-weight="700">Isolation Modes</text>
+  <rect x="1210" y="1195" width="270" height="65" rx="8" fill="#0f172a" stroke="#22d3ee25" stroke-width="1"/>
+  <text x="1220" y="1215" fill="#67e8f9" font-size="12" font-weight="600">Git Worktree Isolation</text>
+  <text x="1220" y="1235" fill="#94a3b8" font-size="10">Separate branch + directory</text>
+  <text x="1220" y="1250" fill="#94a3b8" font-size="10">No main branch contamination</text>
+
+  <rect x="1210" y="1270" width="270" height="65" rx="8" fill="#0f172a" stroke="#22d3ee25" stroke-width="1"/>
+  <text x="1220" y="1290" fill="#67e8f9" font-size="12" font-weight="600">Foreground / Background</text>
+  <text x="1220" y="1310" fill="#94a3b8" font-size="10">FG: blocking, sequential</text>
+  <text x="1220" y="1325" fill="#94a3b8" font-size="10">BG: parallel, async results</text>
+
+  <rect x="1210" y="1345" width="270" height="45" rx="8" fill="#0f172a" stroke="#22d3ee25" stroke-width="1"/>
+  <text x="1220" y="1365" fill="#67e8f9" font-size="12" font-weight="600">Context Isolation</text>
+  <text x="1220" y="1382" fill="#94a3b8" font-size="10">Each sub-agent: fresh context</text>
+
+  <!-- ==================== 5. TOOL / EXECUTION LAYER ==================== -->
+  <rect x="70" y="1460" width="1460" height="310" rx="16" fill="#05261710" stroke="#10b98125" stroke-width="1.5"/>
+  <text x="800" y="1490" text-anchor="middle" fill="#6ee7b7" font-size="14" font-weight="600" letter-spacing="2">5. TOOL EXECUTION &amp; CAPABILITIES</text>
+
+  <!-- File Operations -->
+  <rect x="100" y="1510" width="215" height="230" rx="12" fill="#064e3b" stroke="#10b981" stroke-width="2" filter="url(#shadow)"/>
+  <text x="207" y="1540" text-anchor="middle" fill="#6ee7b7" font-size="13" font-weight="700">File Operations</text>
+  <rect x="115" y="1555" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="207" y="1572" text-anchor="middle" fill="#94a3b8" font-size="11">Read (view files)</text>
+  <rect x="115" y="1583" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="207" y="1600" text-anchor="middle" fill="#94a3b8" font-size="11">Edit (string replace)</text>
+  <rect x="115" y="1611" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="207" y="1628" text-anchor="middle" fill="#94a3b8" font-size="11">Write (create files)</text>
+  <rect x="115" y="1639" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="207" y="1656" text-anchor="middle" fill="#94a3b8" font-size="11">Glob (find files)</text>
+  <rect x="115" y="1667" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="207" y="1684" text-anchor="middle" fill="#94a3b8" font-size="11">Grep (search content)</text>
+  <rect x="115" y="1700" width="185" height="28" rx="4" fill="#0f172a" stroke="#10b98130" stroke-width="1"/>
+  <text x="207" y="1718" text-anchor="middle" fill="#64748b" font-size="10">Sandboxed filesystem</text>
+
+  <!-- Shell -->
+  <rect x="345" y="1510" width="215" height="230" rx="12" fill="#064e3b" stroke="#10b981" stroke-width="2" filter="url(#shadow)"/>
+  <text x="452" y="1540" text-anchor="middle" fill="#6ee7b7" font-size="13" font-weight="700">Shell &amp; CLI</text>
+  <rect x="360" y="1555" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="452" y="1572" text-anchor="middle" fill="#94a3b8" font-size="11">Bash (sandboxed)</text>
+  <rect x="360" y="1583" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="452" y="1600" text-anchor="middle" fill="#94a3b8" font-size="11">Git operations</text>
+  <rect x="360" y="1611" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="452" y="1628" text-anchor="middle" fill="#94a3b8" font-size="11">npm / build tools</text>
+  <rect x="360" y="1639" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="452" y="1656" text-anchor="middle" fill="#94a3b8" font-size="11">Docker &amp; processes</text>
+  <rect x="360" y="1700" width="185" height="28" rx="4" fill="#f59e0b10" stroke="#f59e0b40" stroke-width="1"/>
+  <text x="452" y="1718" text-anchor="middle" fill="#fbbf24" font-size="10">Permission gated</text>
+
+  <!-- Browser -->
+  <rect x="590" y="1510" width="215" height="230" rx="12" fill="#064e3b" stroke="#10b981" stroke-width="2" filter="url(#shadow)"/>
+  <text x="697" y="1540" text-anchor="middle" fill="#6ee7b7" font-size="13" font-weight="700">Browser Control</text>
+  <rect x="605" y="1555" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="697" y="1572" text-anchor="middle" fill="#94a3b8" font-size="11">Navigate &amp; click</text>
+  <rect x="605" y="1583" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="697" y="1600" text-anchor="middle" fill="#94a3b8" font-size="11">Screenshot &amp; read DOM</text>
+  <rect x="605" y="1611" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="697" y="1628" text-anchor="middle" fill="#94a3b8" font-size="11">Form input &amp; JS exec</text>
+  <rect x="605" y="1639" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="697" y="1656" text-anchor="middle" fill="#94a3b8" font-size="11">Network &amp; console logs</text>
+  <rect x="605" y="1700" width="185" height="28" rx="4" fill="#ef444410" stroke="#ef444440" stroke-width="1"/>
+  <text x="697" y="1718" text-anchor="middle" fill="#f87171" font-size="10">Injection defense active</text>
+
+  <!-- External APIs / MCP -->
+  <rect x="835" y="1510" width="215" height="230" rx="12" fill="#064e3b" stroke="#10b981" stroke-width="2" filter="url(#shadow)"/>
+  <text x="942" y="1540" text-anchor="middle" fill="#6ee7b7" font-size="13" font-weight="700">MCP Connectors</text>
+  <rect x="850" y="1555" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="942" y="1572" text-anchor="middle" fill="#94a3b8" font-size="11">Gmail (read/draft)</text>
+  <rect x="850" y="1583" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="942" y="1600" text-anchor="middle" fill="#94a3b8" font-size="11">Google Calendar</text>
+  <rect x="850" y="1611" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="942" y="1628" text-anchor="middle" fill="#94a3b8" font-size="11">Preview server</text>
+  <rect x="850" y="1639" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="942" y="1656" text-anchor="middle" fill="#94a3b8" font-size="11">Custom integrations</text>
+  <rect x="850" y="1700" width="185" height="28" rx="4" fill="#3b82f610" stroke="#3b82f640" stroke-width="1"/>
+  <text x="942" y="1718" text-anchor="middle" fill="#60a5fa" font-size="10">OAuth / API key auth</text>
+
+  <!-- Web / Search -->
+  <rect x="1080" y="1510" width="215" height="230" rx="12" fill="#064e3b" stroke="#10b981" stroke-width="2" filter="url(#shadow)"/>
+  <text x="1187" y="1540" text-anchor="middle" fill="#6ee7b7" font-size="13" font-weight="700">Web &amp; Search</text>
+  <rect x="1095" y="1555" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="1187" y="1572" text-anchor="middle" fill="#94a3b8" font-size="11">WebSearch</text>
+  <rect x="1095" y="1583" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="1187" y="1600" text-anchor="middle" fill="#94a3b8" font-size="11">WebFetch (URL content)</text>
+  <rect x="1095" y="1611" width="185" height="24" rx="4" fill="#10b98115"/>
+  <text x="1187" y="1628" text-anchor="middle" fill="#94a3b8" font-size="11">GitHub CLI (gh)</text>
+  <rect x="1095" y="1700" width="185" height="28" rx="4" fill="#ef444410" stroke="#ef444440" stroke-width="1"/>
+  <text x="1187" y="1718" text-anchor="middle" fill="#f87171" font-size="10">Content treated untrusted</text>
+
+  <!-- Memory / State -->
+  <rect x="1325" y="1510" width="175" height="230" rx="12" fill="#064e3b" stroke="#10b981" stroke-width="2" filter="url(#shadow)"/>
+  <text x="1412" y="1540" text-anchor="middle" fill="#6ee7b7" font-size="13" font-weight="700">Persistence</text>
+  <rect x="1340" y="1555" width="145" height="24" rx="4" fill="#10b98115"/>
+  <text x="1412" y="1572" text-anchor="middle" fill="#94a3b8" font-size="11">Auto-memory</text>
+  <rect x="1340" y="1583" width="145" height="24" rx="4" fill="#10b98115"/>
+  <text x="1412" y="1600" text-anchor="middle" fill="#94a3b8" font-size="11">MEMORY.md</text>
+  <rect x="1340" y="1611" width="145" height="24" rx="4" fill="#10b98115"/>
+  <text x="1412" y="1628" text-anchor="middle" fill="#94a3b8" font-size="11">TodoWrite state</text>
+  <rect x="1340" y="1639" width="145" height="24" rx="4" fill="#10b98115"/>
+  <text x="1412" y="1656" text-anchor="middle" fill="#94a3b8" font-size="11">CLAUDE.md config</text>
+  <rect x="1340" y="1700" width="145" height="28" rx="4" fill="#f59e0b10" stroke="#f59e0b40" stroke-width="1"/>
+  <text x="1412" y="1718" text-anchor="middle" fill="#fbbf24" font-size="10">Cross-session</text>
+
+  <!-- ==================== 6. ENVIRONMENT LAYER ==================== -->
+  <rect x="70" y="1800" width="1460" height="230" rx="16" fill="#1a2e0510" stroke="#84cc1625" stroke-width="1.5"/>
+  <text x="800" y="1830" text-anchor="middle" fill="#bef264" font-size="14" font-weight="600" letter-spacing="2">6. ENVIRONMENT &amp; EXTERNAL SYSTEMS</text>
+
+  <rect x="100" y="1855" width="280" height="150" rx="12" fill="#1a2e05" stroke="#84cc16" stroke-width="2" filter="url(#shadow)"/>
+  <text x="240" y="1885" text-anchor="middle" fill="#bef264" font-size="13" font-weight="700">Local Filesystem</text>
+  <text x="240" y="1910" text-anchor="middle" fill="#94a3b8" font-size="11">Project files &amp; source code</text>
+  <text x="240" y="1930" text-anchor="middle" fill="#94a3b8" font-size="11">Git repositories</text>
+  <text x="240" y="1950" text-anchor="middle" fill="#94a3b8" font-size="11">Configuration files</text>
+  <text x="240" y="1970" text-anchor="middle" fill="#94a3b8" font-size="11">Build artifacts</text>
+  <rect x="115" y="1980" width="250" height="18" rx="4" fill="#84cc1610"/>
+  <text x="240" y="1993" text-anchor="middle" fill="#84cc16" font-size="9">Sandboxed access boundaries</text>
+
+  <rect x="420" y="1855" width="280" height="150" rx="12" fill="#1a2e05" stroke="#84cc16" stroke-width="2" filter="url(#shadow)"/>
+  <text x="560" y="1885" text-anchor="middle" fill="#bef264" font-size="13" font-weight="700">External Services</text>
+  <text x="560" y="1910" text-anchor="middle" fill="#94a3b8" font-size="11">GitHub / GitLab</text>
+  <text x="560" y="1930" text-anchor="middle" fill="#94a3b8" font-size="11">CI/CD pipelines</text>
+  <text x="560" y="1950" text-anchor="middle" fill="#94a3b8" font-size="11">Package registries</text>
+  <text x="560" y="1970" text-anchor="middle" fill="#94a3b8" font-size="11">Cloud infrastructure</text>
+  <rect x="435" y="1980" width="250" height="18" rx="4" fill="#84cc1610"/>
+  <text x="560" y="1993" text-anchor="middle" fill="#84cc16" font-size="9">Authenticated via CLI / API keys</text>
+
+  <rect x="740" y="1855" width="280" height="150" rx="12" fill="#1a2e05" stroke="#84cc16" stroke-width="2" filter="url(#shadow)"/>
+  <text x="880" y="1885" text-anchor="middle" fill="#bef264" font-size="13" font-weight="700">Web / Internet</text>
+  <text x="880" y="1910" text-anchor="middle" fill="#94a3b8" font-size="11">Web pages &amp; APIs</text>
+  <text x="880" y="1930" text-anchor="middle" fill="#94a3b8" font-size="11">Search engines</text>
+  <text x="880" y="1950" text-anchor="middle" fill="#94a3b8" font-size="11">Documentation sites</text>
+  <text x="880" y="1970" text-anchor="middle" fill="#94a3b8" font-size="11">Third-party services</text>
+  <rect x="755" y="1980" width="250" height="18" rx="4" fill="#ef444410"/>
+  <text x="880" y="1993" text-anchor="middle" fill="#ef4444" font-size="9">UNTRUSTED - All content verified</text>
+
+  <rect x="1060" y="1855" width="280" height="150" rx="12" fill="#1a2e05" stroke="#84cc16" stroke-width="2" filter="url(#shadow)"/>
+  <text x="1200" y="1885" text-anchor="middle" fill="#bef264" font-size="13" font-weight="700">User Applications</text>
+  <text x="1200" y="1910" text-anchor="middle" fill="#94a3b8" font-size="11">Email (Gmail)</text>
+  <text x="1200" y="1930" text-anchor="middle" fill="#94a3b8" font-size="11">Calendar (GCal)</text>
+  <text x="1200" y="1950" text-anchor="middle" fill="#94a3b8" font-size="11">Browsers (Chrome)</text>
+  <text x="1200" y="1970" text-anchor="middle" fill="#94a3b8" font-size="11">IDE integrations</text>
+  <rect x="1075" y="1980" width="250" height="18" rx="4" fill="#f59e0b10"/>
+  <text x="1200" y="1993" text-anchor="middle" fill="#f59e0b" font-size="9">OAuth scoped permissions</text>
+
+  <!-- ==================== FLOW ARROWS ==================== -->
+  <!-- Human to Governance -->
+  <path d="M 530 320 L 530 380" stroke="#a5b4fc" stroke-width="2" marker-end="url(#arrowBlue)" stroke-dasharray="6,3"/>
+  <path d="M 845 320 L 845 380" stroke="#a5b4fc" stroke-width="2" marker-end="url(#arrowBlue)" stroke-dasharray="6,3"/>
+
+  <!-- Governance to Orchestrator -->
+  <path d="M 250 680 L 250 740" stroke="#f87171" stroke-width="2" marker-end="url(#arrowRed)"/>
+  <path d="M 590 680 L 590 740" stroke="#f87171" stroke-width="2" marker-end="url(#arrowRed)"/>
+  <path d="M 930 680 L 930 740" stroke="#f87171" stroke-width="2" marker-end="url(#arrowRed)"/>
+  <path d="M 1270 680 L 1270 740" stroke="#f87171" stroke-width="2" marker-end="url(#arrowRed)"/>
+
+  <!-- Orchestrator to Delegation -->
+  <path d="M 800 1030 L 800 1090" stroke="#22d3ee" stroke-width="2.5" marker-end="url(#arrowCyan)"/>
+  <path d="M 550 1030 L 220 1090" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowCyan)" stroke-dasharray="6,3"/>
+  <path d="M 650 1030 L 490 1090" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowCyan)" stroke-dasharray="6,3"/>
+  <path d="M 950 1030 L 1030 1090" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowCyan)" stroke-dasharray="6,3"/>
+  <path d="M 1050 1030 L 1345 1090" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowCyan)" stroke-dasharray="6,3"/>
+
+  <!-- Delegation to Tools -->
+  <path d="M 220 1400 L 207 1510" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowGreen)" stroke-dasharray="5,3"/>
+  <path d="M 490 1400 L 452 1510" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowGreen)" stroke-dasharray="5,3"/>
+  <path d="M 760 1400 L 697 1510" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowGreen)" stroke-dasharray="5,3"/>
+  <path d="M 1030 1400 L 942 1510" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowGreen)" stroke-dasharray="5,3"/>
+  <path d="M 1030 1400 L 1187 1510" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowGreen)" stroke-dasharray="5,3"/>
+
+  <!-- Tools to Environment -->
+  <path d="M 207 1740 L 240 1855" stroke="#84cc16" stroke-width="1.5" marker-end="url(#arrowGreen)" stroke-dasharray="5,3"/>
+  <path d="M 452 1740 L 560 1855" stroke="#84cc16" stroke-width="1.5" marker-end="url(#arrowGreen)" stroke-dasharray="5,3"/>
+  <path d="M 697 1740 L 880 1855" stroke="#84cc16" stroke-width="1.5" marker-end="url(#arrowGreen)" stroke-dasharray="5,3"/>
+  <path d="M 942 1740 L 1200 1855" stroke="#84cc16" stroke-width="1.5" marker-end="url(#arrowGreen)" stroke-dasharray="5,3"/>
+
+  <!-- ==================== SIDE PANEL: FEEDBACK LOOPS ==================== -->
+  <!-- Right side feedback arc -->
+  <path d="M 1530 1800 C 1570 1800, 1570 400, 1530 400" stroke="#f472b680" stroke-width="2" fill="none" stroke-dasharray="8,4"/>
+  <text x="1555" y="1100" fill="#f472b6" font-size="11" font-weight="600" transform="rotate(90, 1555, 1100)">FEEDBACK &amp; OBSERVATION LOOP</text>
+  <path d="M 1530 400 L 1525 395 M 1530 400 L 1535 395" stroke="#f472b6" stroke-width="2"/>
+
+  <!-- Left side governance enforcement arc -->
+  <path d="M 55 400 C 15 400, 15 1800, 55 1800" stroke="#ef444460" stroke-width="2" fill="none" stroke-dasharray="8,4"/>
+  <text x="22" y="1100" fill="#ef4444" font-size="11" font-weight="600" transform="rotate(-90, 22, 1100)">GOVERNANCE ENFORCEMENT BOUNDARY</text>
+  <path d="M 55 1800 L 50 1795 M 55 1800 L 60 1795" stroke="#ef4444" stroke-width="2"/>
+
+  <!-- ==================== LEGEND ==================== -->
+  <rect x="70" y="2060" width="1460" height="120" rx="16" fill="#0f172a" stroke="#334155" stroke-width="1"/>
+  <text x="800" y="2090" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="700">LEGEND</text>
+
+  <!-- Color keys -->
+  <circle cx="130" cy="2120" r="8" fill="#6366f1"/>
+  <text x="145" y="2125" fill="#94a3b8" font-size="11">Human Oversight</text>
+
+  <circle cx="310" cy="2120" r="8" fill="#ef4444"/>
+  <text x="325" y="2125" fill="#94a3b8" font-size="11">Governance / Safety</text>
+
+  <circle cx="510" cy="2120" r="8" fill="#3b82f6"/>
+  <text x="525" y="2125" fill="#94a3b8" font-size="11">Orchestration / Core</text>
+
+  <circle cx="710" cy="2120" r="8" fill="#06b6d4"/>
+  <text x="725" y="2125" fill="#94a3b8" font-size="11">Sub-Agents</text>
+
+  <circle cx="870" cy="2120" r="8" fill="#10b981"/>
+  <text x="885" y="2125" fill="#94a3b8" font-size="11">Tools / Execution</text>
+
+  <circle cx="1040" cy="2120" r="8" fill="#84cc16"/>
+  <text x="1055" y="2125" fill="#94a3b8" font-size="11">Environment</text>
+
+  <circle cx="1200" cy="2120" r="8" fill="#f59e0b"/>
+  <text x="1215" y="2125" fill="#94a3b8" font-size="11">Memory / State</text>
+
+  <circle cx="1370" cy="2120" r="8" fill="#ec4899"/>
+  <text x="1385" y="2125" fill="#94a3b8" font-size="11">Feedback Loop</text>
+
+  <!-- Line legend -->
+  <line x1="130" y1="2155" x2="175" y2="2155" stroke="#94a3b8" stroke-width="2"/>
+  <text x="185" y="2160" fill="#64748b" font-size="10">Data flow</text>
+
+  <line x1="310" y1="2155" x2="355" y2="2155" stroke="#94a3b8" stroke-width="2" stroke-dasharray="6,3"/>
+  <text x="365" y="2160" fill="#64748b" font-size="10">Control flow</text>
+
+  <line x1="510" y1="2155" x2="555" y2="2155" stroke="#94a3b8" stroke-width="2" stroke-dasharray="2,4"/>
+  <text x="565" y="2160" fill="#64748b" font-size="10">Optional / conditional</text>
+
+</svg>

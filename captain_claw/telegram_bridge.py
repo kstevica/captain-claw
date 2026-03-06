@@ -67,6 +67,20 @@ class TelegramMessage:
     business_connection_id: str = ""
 
 
+@dataclass
+class TelegramCallbackQuery:
+    """Normalized incoming Telegram callback query (inline keyboard button press)."""
+
+    update_id: int
+    callback_query_id: str
+    chat_id: int
+    user_id: int
+    username: str
+    first_name: str
+    data: str  # callback_data from the button
+    message_id: int = 0  # message the button was attached to
+
+
 class TelegramBridge:
     """Telegram Bot API helper."""
 
@@ -85,8 +99,10 @@ class TelegramBridge:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def get_updates(self, offset: int | None = None, timeout: int = 25) -> list[TelegramMessage]:
-        """Poll Telegram updates and normalize text messages."""
+    async def get_updates(
+        self, offset: int | None = None, timeout: int = 25,
+    ) -> list[TelegramMessage | TelegramCallbackQuery]:
+        """Poll Telegram updates and normalize messages and callback queries."""
         params: dict[str, Any] = {"timeout": max(1, int(timeout))}
         if offset is not None:
             params["offset"] = int(offset)
@@ -99,11 +115,40 @@ class TelegramBridge:
         if not isinstance(results, list):
             return []
 
-        messages: list[TelegramMessage] = []
+        updates: list[TelegramMessage | TelegramCallbackQuery] = []
         for item in results:
             if not isinstance(item, dict):
                 continue
             update_id = int(item.get("update_id", 0))
+
+            # Handle callback queries (inline keyboard button presses).
+            cbq = item.get("callback_query")
+            if isinstance(cbq, dict):
+                cb_from = cbq.get("from")
+                cb_msg = cbq.get("message")
+                if isinstance(cb_from, dict):
+                    cb_chat_id = 0
+                    cb_message_id = 0
+                    if isinstance(cb_msg, dict):
+                        cb_chat = cb_msg.get("chat")
+                        if isinstance(cb_chat, dict):
+                            cb_chat_id = int(cb_chat.get("id", 0))
+                        cb_message_id = int(cb_msg.get("message_id", 0))
+                    updates.append(
+                        TelegramCallbackQuery(
+                            update_id=update_id,
+                            callback_query_id=str(cbq.get("id", "")),
+                            chat_id=cb_chat_id or int(cb_from.get("id", 0)),
+                            user_id=int(cb_from.get("id", 0)),
+                            username=str(cb_from.get("username", "")).strip(),
+                            first_name=str(cb_from.get("first_name", "")).strip(),
+                            data=str(cbq.get("data", "")).strip(),
+                            message_id=cb_message_id,
+                        )
+                    )
+                continue
+
+            # Handle regular messages.
             msg = item.get("message")
             if not isinstance(msg, dict):
                 msg = item.get("business_message")
@@ -131,7 +176,7 @@ class TelegramBridge:
             chat_id = int(chat.get("id", 0))
             if user_id == 0 or chat_id == 0:
                 continue
-            messages.append(
+            updates.append(
                 TelegramMessage(
                     update_id=update_id,
                     message_id=int(msg.get("message_id", 0)),
@@ -144,7 +189,7 @@ class TelegramBridge:
                     business_connection_id=str(msg.get("business_connection_id", "")).strip(),
                 )
             )
-        return messages
+        return updates
 
     async def send_message(
         self,
@@ -191,6 +236,51 @@ class TelegramBridge:
                 del payload["parse_mode"]
                 response = await self._client.post(self._url("sendMessage"), json=payload)
             response.raise_for_status()
+
+    async def send_message_with_inline_keyboard(
+        self,
+        chat_id: int,
+        text: str,
+        buttons: list[list[dict[str, str]]],
+        *,
+        reply_to_message_id: int | None = None,
+    ) -> None:
+        """Send a message with inline keyboard buttons.
+
+        *buttons* is a list of rows, each row is a list of button dicts
+        with keys ``text`` and ``callback_data``.
+        """
+        raw = str(text or "").strip() or "\u200b"  # zero-width space fallback
+        html_text = _md_to_telegram_html(raw)
+        payload: dict[str, Any] = {
+            "chat_id": int(chat_id),
+            "text": html_text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+            "reply_markup": {"inline_keyboard": buttons},
+        }
+        if reply_to_message_id:
+            payload["reply_to_message_id"] = int(reply_to_message_id)
+        response = await self._client.post(self._url("sendMessage"), json=payload)
+        if response.status_code == 400:
+            payload["text"] = raw
+            del payload["parse_mode"]
+            response = await self._client.post(self._url("sendMessage"), json=payload)
+        response.raise_for_status()
+
+    async def answer_callback_query(
+        self,
+        callback_query_id: str,
+        text: str = "",
+    ) -> None:
+        """Acknowledge a callback query (inline keyboard button press)."""
+        payload: dict[str, Any] = {
+            "callback_query_id": str(callback_query_id),
+        }
+        if text:
+            payload["text"] = str(text)[:200]
+        response = await self._client.post(self._url("answerCallbackQuery"), json=payload)
+        response.raise_for_status()
 
     async def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
         """Send transient chat action status (e.g., `typing`)."""

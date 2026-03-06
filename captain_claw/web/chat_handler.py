@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from aiohttp import web
 
 from captain_claw.logging import get_logger
+from captain_claw.next_steps import extract_next_steps, next_steps_to_dicts
 
 if TYPE_CHECKING:
     from captain_claw.web_server import WebServer
@@ -114,6 +115,17 @@ async def _run_agent(server: WebServer, content: str) -> None:
                 "timestamp": datetime.now(UTC).isoformat(),
                 "model": model_label,
             })
+
+            # Extract and broadcast suggested next steps.
+            try:
+                steps = await extract_next_steps(server.agent.provider, response)
+                if steps:
+                    server._broadcast({
+                        "type": "next_steps",
+                        "options": next_steps_to_dicts(steps),
+                    })
+            except Exception as ns_err:
+                log.debug("Next steps extraction error", error=str(ns_err))
 
         # Send updated usage/session info
         server._broadcast({

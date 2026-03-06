@@ -18,7 +18,8 @@ from typing import TYPE_CHECKING, Any
 from captain_claw.instructions import InstructionLoader
 from captain_claw.logging import get_logger
 from captain_claw.session import Session, get_session_manager
-from captain_claw.telegram_bridge import TelegramBridge, TelegramMessage
+from captain_claw.next_steps import extract_next_steps, next_steps_to_dicts
+from captain_claw.telegram_bridge import TelegramBridge, TelegramCallbackQuery, TelegramMessage
 
 if TYPE_CHECKING:
     from captain_claw.agent import Agent
@@ -102,11 +103,14 @@ async def _telegram_poll_loop(server: WebServer) -> None:
 
 
 async def _telegram_worker(server: WebServer) -> None:
-    """Dispatch queued Telegram messages as concurrent tasks."""
+    """Dispatch queued Telegram messages and callback queries as concurrent tasks."""
     while True:
         try:
-            message = await server._telegram_queue.get()
-            asyncio.create_task(_handle_telegram_message(server, message))
+            update = await server._telegram_queue.get()
+            if isinstance(update, TelegramCallbackQuery):
+                asyncio.create_task(_handle_telegram_callback_query(server, update))
+            else:
+                asyncio.create_task(_handle_telegram_message(server, update))
         except asyncio.CancelledError:
             break
         except Exception as exc:
@@ -304,6 +308,73 @@ async def _handle_telegram_message(server: WebServer, message: TelegramMessage) 
             )
         except Exception:
             pass
+
+
+async def _handle_telegram_callback_query(server: WebServer, cbq: TelegramCallbackQuery) -> None:
+    """Handle an inline keyboard button press from Telegram."""
+    bridge = server._telegram_bridge
+    if not bridge or not server.agent:
+        return
+
+    try:
+        # Acknowledge the button press immediately.
+        await bridge.answer_callback_query(cbq.callback_query_id)
+    except Exception:
+        pass
+
+    try:
+        user_id_key = str(cbq.user_id)
+        if user_id_key not in server._approved_telegram_users:
+            return
+
+        # Decode the action from callback_data.
+        # We store a key like "ns:0", "ns:1", etc. and look up the full
+        # action from a per-user cache.
+        action_text = ""
+        if cbq.data.startswith("ns:"):
+            idx_str = cbq.data[3:]
+            cache_key = f"_tg_next_steps_{user_id_key}"
+            cached_steps = getattr(server, cache_key, None)
+            if isinstance(cached_steps, list):
+                try:
+                    idx = int(idx_str)
+                    if 0 <= idx < len(cached_steps):
+                        action_text = cached_steps[idx].get("action", "")
+                except (ValueError, IndexError):
+                    pass
+            # Clean up the cache.
+            if hasattr(server, cache_key):
+                delattr(server, cache_key)
+
+        if not action_text:
+            return
+
+        # Get or create the user agent and process the action.
+        user_agent = await _tg_get_or_create_agent(server, TelegramMessage(
+            update_id=cbq.update_id,
+            message_id=cbq.message_id,
+            chat_id=cbq.chat_id,
+            user_id=cbq.user_id,
+            username=cbq.username,
+            first_name=cbq.first_name,
+            text=action_text,
+        ))
+
+        user_label = cbq.username or cbq.first_name or str(cbq.user_id)
+        server._broadcast({
+            "type": "chat_message",
+            "role": "user",
+            "content": f"[TG {user_label}] {action_text}",
+        })
+
+        await _tg_process_with_typing(
+            server, cbq.chat_id, action_text, None,
+            user_agent=user_agent,
+            user_id=user_id_key,
+        )
+
+    except Exception as exc:
+        log.error("Telegram callback query handler failed", error=str(exc))
 
 
 # ── Commands ─────────────────────────────────────────────────────
@@ -637,6 +708,33 @@ async def _tg_process_with_typing(
                     "role": "assistant",
                     "content": response,
                 })
+
+                # Extract and send suggested next steps as inline keyboard.
+                try:
+                    steps = await extract_next_steps(user_agent.provider, response)
+                    if steps and server._telegram_bridge:
+                        step_dicts = next_steps_to_dicts(steps)
+                        # Cache for callback handler lookup.
+                        cache_key = f"_tg_next_steps_{user_id}"
+                        setattr(server, cache_key, step_dicts)
+                        # Build inline keyboard rows (max 2 buttons per row).
+                        keyboard_rows: list[list[dict[str, str]]] = []
+                        row: list[dict[str, str]] = []
+                        for i, s in enumerate(step_dicts):
+                            row.append({"text": s["label"], "callback_data": f"ns:{i}"})
+                            if len(row) >= 2:
+                                keyboard_rows.append(row)
+                                row = []
+                        if row:
+                            keyboard_rows.append(row)
+                        await server._telegram_bridge.send_message_with_inline_keyboard(
+                            chat_id,
+                            "What would you like to do next?",
+                            keyboard_rows,
+                            reply_to_message_id=reply_to_message_id,
+                        )
+                except Exception as ns_err:
+                    log.debug("Telegram next steps extraction error", error=str(ns_err))
 
             server._broadcast({
                 "type": "usage",

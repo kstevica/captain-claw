@@ -126,6 +126,9 @@
             case 'thinking':
                 updateThinkingIndicator(data.text, data.tool, data.phase);
                 break;
+            case 'next_steps':
+                renderNextSteps(data.options || []);
+                break;
             case 'error':
                 addChatMessage('error', data.message);
                 break;
@@ -179,6 +182,10 @@
     }
 
     function addChatMessage(role, content, isReplay, timestamp, model) {
+        // Remove stale next-steps buttons when new messages arrive.
+        if (role === 'user' || role === 'assistant' || role === 'error') {
+            removeNextSteps();
+        }
         // Remove thinking indicator(s) when assistant or error message arrives.
         if (role === 'assistant' || role === 'error') {
             removeThinkingIndicator();
@@ -341,6 +348,44 @@
         chatEmpty.style.display = '';
         msgCount = 0;
         chatCount.textContent = '0 messages';
+    }
+
+    // ── Next Steps ──────────────────────────────────────────
+
+    function removeNextSteps() {
+        chatMessages.querySelectorAll('.next-steps-container').forEach(el => el.remove());
+    }
+
+    function renderNextSteps(options) {
+        if (!options || !options.length) return;
+        removeNextSteps();
+
+        const container = document.createElement('div');
+        container.className = 'next-steps-container';
+
+        const label = document.createElement('div');
+        label.className = 'next-steps-label';
+        label.textContent = 'Suggested next steps';
+        container.appendChild(label);
+
+        const row = document.createElement('div');
+        row.className = 'next-steps-row';
+
+        options.forEach(function(opt) {
+            const btn = document.createElement('button');
+            btn.className = 'next-step-btn';
+            btn.title = opt.description || opt.action;
+            btn.textContent = opt.label;
+            btn.addEventListener('click', function() {
+                removeNextSteps();
+                send({ type: 'chat', content: opt.action });
+            });
+            row.appendChild(btn);
+        });
+
+        container.appendChild(row);
+        chatMessages.appendChild(container);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
     }
 
     // ── Thinking Indicator ─────────────────────────────────

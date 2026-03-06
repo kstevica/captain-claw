@@ -9,6 +9,20 @@ mkdir -p /root/.captain-claw
 # and may contain settings saved from the web UI — don't overwrite it.
 if [ ! -f "$CONFIG" ]; then
   cat > "$CONFIG" <<EOF
+model:
+  provider: openai
+  model: gpt-5-mini
+  allowed:
+    - id: gpt-5-mini
+      provider: openai
+      model: gpt-5-mini
+      reasoning_level: high
+      description: "Good for everyday tasks, light coding, reasoning"
+    - id: gemini-flash-lite
+      provider: gemini
+      model: gemini-3.1-flash-lite-preview
+      temperature: 0
+      description: "simple and fast model"
 web:
   host: "0.0.0.0"
 session:

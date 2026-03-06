@@ -361,7 +361,20 @@ async def run_interactive() -> None:
                 if not user_input.strip():
                     continue
 
-                await run_prompt_in_active_session(ctx, user_input)
+                # Resolve next-step shortcut: user types a number to select.
+                effective_input = user_input
+                stripped_input = user_input.strip()
+                if ctx.last_next_steps and stripped_input.isdigit():
+                    idx = int(stripped_input)
+                    if idx == 0:
+                        # Skip / cancel
+                        ctx.last_next_steps = []
+                        continue
+                    if 1 <= idx <= len(ctx.last_next_steps):
+                        effective_input = ctx.last_next_steps[idx - 1].get("action", user_input)
+                        ctx.last_next_steps = []
+
+                await run_prompt_in_active_session(ctx, effective_input)
 
             except KeyboardInterrupt:
                 log.info("Interrupted by user")

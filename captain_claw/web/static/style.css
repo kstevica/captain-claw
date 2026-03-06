@@ -793,6 +793,49 @@ html, body {
     to { opacity: 1; transform: translateY(0); }
 }
 
+/* ─── Next Steps ─────────────────────────────────────── */
+
+.next-steps-container {
+    max-width: 90%;
+    margin-right: auto;
+    margin-bottom: 16px;
+    animation: thinkFadeIn 0.25s ease;
+}
+.next-steps-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.next-steps-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.next-step-btn {
+    font-size: 12px;
+    padding: 6px 14px;
+    border-radius: 16px;
+    background: var(--bg-tertiary);
+    color: var(--accent);
+    border: 1px solid rgba(88, 166, 255, 0.25);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.next-step-btn:hover {
+    background: var(--accent-subtle);
+    border-color: var(--accent);
+    color: var(--accent-hover);
+}
+.next-step-btn:active {
+    transform: scale(0.97);
+}
+
 /* ─── Rephrase Panel ─────────────────────────────────── */
 
 .rephrase-panel {

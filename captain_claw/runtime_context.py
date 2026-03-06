@@ -45,6 +45,7 @@ class RuntimeContext:
     cron_poll_seconds: float = 2.0
     last_exec_seconds: float | None = None
     last_completed_at: datetime | None = None
+    last_next_steps: list[dict[str, str]] = field(default_factory=list)
 
     telegram: PlatformState = field(default_factory=lambda: PlatformState(
         name="telegram",

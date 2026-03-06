@@ -322,6 +322,27 @@ Commands:
         self._prepare_output()
         print(f"OK: {message}")
 
+    def print_next_steps(self, steps: list[dict[str, str]]) -> None:
+        """Print suggested next steps as numbered options."""
+        if not steps:
+            return
+        text = "\n  Suggested next steps:\n"
+        for i, step in enumerate(steps, 1):
+            label = step.get("label", "")
+            desc = step.get("description", "")
+            if desc:
+                text += f"    [{i}] {label} — {desc}\n"
+            else:
+                text += f"    [{i}] {label}\n"
+        text += "    [0] Skip\n"
+        text += "  Type a number to select, or type anything else to chat.\n"
+        if self._monitor_mode and self._sticky_footer:
+            self._append_chat_text(text)
+            self._render_monitor_view()
+            return
+        self._prepare_output()
+        print(text)
+
     def print_tokens(self, prompt_tokens: int, completion_tokens: int) -> None:
         """Print token usage."""
         if self._monitor_mode and self._sticky_footer:
