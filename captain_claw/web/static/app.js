@@ -1405,15 +1405,18 @@
                 var icon = fileIcon(f.extension);
                 var size = formatFileSize(f.size);
                 var missing = !f.exists ? ' <span class="file-missing">missing</span>' : '';
-                // Show filename relative to the category (strip category prefix).
-                var relPath = f.logical;
-                var slashIdx = relPath.indexOf('/');
-                if (slashIdx >= 0) relPath = relPath.substring(slashIdx + 1);
+                // Format modification date/time instead of repeating the filename.
+                var dateStr = '';
+                if (f.modified) {
+                    var d = new Date(f.modified * 1000);
+                    dateStr = d.toLocaleDateString(undefined, {year:'numeric',month:'short',day:'numeric'}) +
+                              ' ' + d.toLocaleTimeString(undefined, {hour:'2-digit',minute:'2-digit'});
+                }
                 html += '<div class="file-item" data-physical="' + escapeHtml(f.physical) + '" data-logical="' + escapeHtml(f.logical) + '" title="' + escapeHtml(f.logical) + '">' +
                     '<span class="file-item-icon">' + icon + '</span>' +
                     '<div class="file-item-info">' +
                     '<div class="file-item-name">' + escapeHtml(f.filename) + missing + '</div>' +
-                    '<div class="file-item-path">' + escapeHtml(relPath) + ' &middot; ' + size + '</div>' +
+                    '<div class="file-item-path">' + dateStr + ' &middot; ' + size + '</div>' +
                     '</div></div>';
             });
         });

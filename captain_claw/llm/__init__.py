@@ -389,6 +389,419 @@ def _extract_usage(usage_obj: Any) -> dict[str, int]:
     }
 
 
+# ── ChatGPT Responses API helpers ─────────────────────────────────────────
+
+
+def _normalize_chatgpt_model(name: str) -> str:
+    """Normalize ChatGPT / Codex model name aliases."""
+    base = (name or "").strip()
+    if not base:
+        return "gpt-5"
+    # Strip effort suffixes (e.g. gpt-5-high → gpt-5).
+    for sep in ("-", "_"):
+        lowered = base.lower()
+        for effort in ("minimal", "low", "medium", "high", "xhigh"):
+            suffix = f"{sep}{effort}"
+            if lowered.endswith(suffix):
+                base = base[: -len(suffix)]
+                break
+    mapping: dict[str, str] = {
+        "gpt5": "gpt-5",
+        "gpt-5-latest": "gpt-5",
+        "gpt-5": "gpt-5",
+        "gpt-5.1": "gpt-5.1",
+        "gpt5.2": "gpt-5.2",
+        "gpt-5.2": "gpt-5.2",
+        "gpt-5.2-latest": "gpt-5.2",
+        "gpt5.3-codex": "gpt-5.3-codex",
+        "gpt-5.3-codex": "gpt-5.3-codex",
+        "gpt-5.3-codex-latest": "gpt-5.3-codex",
+        "gpt5.2-codex": "gpt-5.2-codex",
+        "gpt-5.2-codex": "gpt-5.2-codex",
+        "gpt-5.2-codex-latest": "gpt-5.2-codex",
+        "gpt5-codex": "gpt-5-codex",
+        "gpt-5-codex": "gpt-5-codex",
+        "gpt-5-codex-latest": "gpt-5-codex",
+        "gpt-5.1-codex": "gpt-5.1-codex",
+        "gpt-5.1-codex-max": "gpt-5.1-codex-max",
+        "codex": "codex-mini-latest",
+        "codex-mini": "codex-mini-latest",
+        "codex-mini-latest": "codex-mini-latest",
+        "gpt-5.1-codex-mini": "gpt-5.1-codex-mini",
+    }
+    return mapping.get(base, base)
+
+
+def _convert_messages_for_responses_api(
+    messages: list[Message],
+) -> tuple[str, list[dict[str, Any]]]:
+    """Convert internal messages to ChatGPT Responses API format.
+
+    Returns ``(instructions, input_items)`` where *instructions* is the
+    concatenated system prompt and *input_items* is a list of Responses
+    API input objects.
+    """
+    system_parts: list[str] = []
+    items: list[dict[str, Any]] = []
+
+    for msg in messages:
+        if isinstance(msg, dict):
+            role = str(msg.get("role", ""))
+            content = str(msg.get("content", ""))
+            tool_call_id = msg.get("tool_call_id")
+            tool_calls = msg.get("tool_calls")
+        else:
+            role = str(getattr(msg, "role", ""))
+            content = str(getattr(msg, "content", ""))
+            tool_call_id = getattr(msg, "tool_call_id", None)
+            tool_calls = getattr(msg, "tool_calls", None)
+
+        if role == "system":
+            if content:
+                system_parts.append(content)
+            continue
+
+        if role == "user":
+            items.append({
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": content}],
+            })
+            continue
+
+        if role == "assistant":
+            # Emit text content as a message item (if any).
+            if content:
+                items.append({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": content}],
+                })
+            # Emit each tool call as a separate function_call item.
+            if isinstance(tool_calls, list):
+                for idx, raw in enumerate(tool_calls, start=1):
+                    if not isinstance(raw, dict):
+                        continue
+                    fn = raw.get("function") if isinstance(raw.get("function"), dict) else raw
+                    fn_name = str(fn.get("name", "") or "")
+                    fn_args = fn.get("arguments", {})
+                    if isinstance(fn_args, dict):
+                        fn_args = json.dumps(fn_args, ensure_ascii=False)
+                    elif not isinstance(fn_args, str):
+                        fn_args = "{}"
+                    call_id = str(raw.get("id", "") or f"call_{idx}")
+                    items.append({
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": fn_name,
+                        "arguments": fn_args,
+                    })
+            continue
+
+        if role == "tool":
+            items.append({
+                "type": "function_call_output",
+                "call_id": str(tool_call_id or ""),
+                "output": content,
+            })
+            continue
+
+    instructions = "\n\n".join(system_parts)
+    return instructions, items
+
+
+def _convert_tools_for_responses_api(
+    tools: list[ToolDefinition],
+) -> list[dict[str, Any]]:
+    """Convert tool definitions to Responses API format.
+
+    Responses API uses a flat structure (``name`` at top level) unlike
+    Chat Completions which nests under a ``function`` key.
+    """
+    result: list[dict[str, Any]] = []
+    for tool in tools:
+        if isinstance(tool, dict):
+            name = tool.get("name")
+            description = tool.get("description", "")
+            parameters = tool.get("parameters", {})
+        else:
+            name = getattr(tool, "name", None)
+            description = getattr(tool, "description", "") or ""
+            parameters = getattr(tool, "parameters", None) or {}
+        if not name:
+            continue
+        result.append({
+            "type": "function",
+            "name": str(name),
+            "description": str(description),
+            "parameters": parameters if isinstance(parameters, dict) else {},
+        })
+    return result
+
+
+class ChatGPTResponsesProvider(LLMProvider):
+    """Direct connection to the ChatGPT Responses API.
+
+    Used when the OpenAI provider has ``extra_headers`` configured
+    (e.g. ``Authorization``, ``chatgpt-account-id``, ``OpenAI-Beta``).
+    Bypasses LiteLLM entirely and speaks the Responses API protocol
+    (SSE streaming, ``input`` items instead of ``messages``).
+    """
+
+    def __init__(
+        self,
+        model: str = "gpt-5",
+        base_url: str = "https://chatgpt.com/backend-api/codex/responses",
+        extra_headers: dict[str, str] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 32000,
+        tokens_per_minute: int = 0,
+    ):
+        import uuid
+
+        self.provider = "openai"
+        self.model = _normalize_chatgpt_model(model)
+        self.base_url = base_url.rstrip("/")
+        self.extra_headers = extra_headers or {}
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.session_id = uuid.uuid4().hex
+        self.client = httpx.AsyncClient(timeout=600.0, follow_redirects=True)
+        self.rate_limiter = (
+            TokenRateLimiter(tokens_per_minute) if tokens_per_minute > 0 else None
+        )
+
+    # ── helpers ────────────────────────────────────────────────────────
+
+    def _build_headers(self) -> dict[str, str]:
+        """Merge provider extra_headers with required defaults."""
+        headers: dict[str, str] = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "session_id": self.session_id,
+        }
+        headers.update(self.extra_headers)
+        return headers
+
+    def _build_payload(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        instructions, input_items = _convert_messages_for_responses_api(messages)
+        api_tools = _convert_tools_for_responses_api(tools) if tools else []
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "input": input_items,
+            "tools": api_tools,
+            "tool_choice": "auto" if api_tools else "none",
+            "parallel_tool_calls": False,
+            "store": False,
+            "stream": True,
+            "prompt_cache_key": self.session_id,
+        }
+        if instructions:
+            payload["instructions"] = instructions
+        return payload
+
+    @staticmethod
+    def _parse_sse_events(lines: list[str]) -> list[dict[str, Any]]:
+        """Parse raw SSE lines into a list of JSON event dicts."""
+        events: list[dict[str, Any]] = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("event:"):
+                continue
+            if stripped.startswith("data: "):
+                data_str = stripped[6:]
+            elif stripped.startswith("data:"):
+                data_str = stripped[5:]
+            else:
+                continue
+            try:
+                events.append(json.loads(data_str))
+            except json.JSONDecodeError:
+                continue
+        return events
+
+    def _parse_response_output(
+        self,
+        completed_event: dict[str, Any],
+    ) -> LLMResponse:
+        """Extract content and tool calls from a ``response.completed`` event."""
+        response_data = completed_event.get("response") or completed_event
+        output_items = response_data.get("output", []) or []
+
+        content_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+
+        for item in output_items:
+            item_type = item.get("type", "")
+
+            if item_type == "message":
+                for part in item.get("content", []) or []:
+                    text = part.get("text", "")
+                    if text:
+                        content_parts.append(str(text))
+
+            elif item_type == "function_call":
+                call_id = str(item.get("call_id", "") or item.get("id", ""))
+                name = str(item.get("name", ""))
+                raw_args = item.get("arguments", "{}")
+                args = _safe_json_loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+                tool_calls.append(ToolCall(id=call_id, name=name, arguments=args))
+
+        usage_raw = response_data.get("usage", {}) or {}
+        usage = {
+            "prompt_tokens": int(usage_raw.get("input_tokens", 0) or 0),
+            "completion_tokens": int(usage_raw.get("output_tokens", 0) or 0),
+            "total_tokens": int(usage_raw.get("total_tokens", 0) or 0),
+        }
+        if usage["total_tokens"] <= 0:
+            usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+
+        return LLMResponse(
+            content="".join(content_parts),
+            tool_calls=tool_calls,
+            model=str(response_data.get("model", self.model) or self.model),
+            usage=usage,
+            finish_reason="tool_calls" if tool_calls else "stop",
+        )
+
+    # ── LLMProvider interface ──────────────────────────────────────────
+
+    async def complete(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        estimated = 0
+        if self.rate_limiter:
+            estimated = self._estimate_request_tokens(messages, max_tokens or self.max_tokens)
+            await self.rate_limiter.acquire(estimated)
+
+        payload = self._build_payload(messages, tools, temperature, max_tokens)
+        headers = self._build_headers()
+
+        try:
+            collected_lines: list[str] = []
+            async with self.client.stream("POST", self.base_url, json=payload, headers=headers) as response:
+                if not response.is_success:
+                    error_text = await response.aread()
+                    raise LLMAPIError(
+                        f"ChatGPT Responses API error {response.status_code}: {error_text.decode(errors='replace')}",
+                        status_code=response.status_code,
+                    )
+                async for line in response.aiter_lines():
+                    collected_lines.append(line)
+
+            events = self._parse_sse_events(collected_lines)
+
+            # Find the completed event.
+            completed: dict[str, Any] | None = None
+            for evt in events:
+                if evt.get("type") == "response.completed":
+                    completed = evt
+                    break
+
+            if completed is None:
+                # Fallback: try last event or collect text deltas.
+                content_parts: list[str] = []
+                tc_items: list[dict[str, Any]] = []
+                for evt in events:
+                    etype = evt.get("type", "")
+                    if etype == "response.output_text.delta":
+                        content_parts.append(str(evt.get("delta", "")))
+                    elif etype == "response.output_item.done":
+                        item = evt.get("item", {})
+                        if item.get("type") == "function_call":
+                            tc_items.append(item)
+                tool_calls = []
+                for tc in tc_items:
+                    call_id = str(tc.get("call_id", "") or tc.get("id", ""))
+                    name = str(tc.get("name", ""))
+                    raw_args = tc.get("arguments", "{}")
+                    args = _safe_json_loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+                    tool_calls.append(ToolCall(id=call_id, name=name, arguments=args))
+                result = LLMResponse(
+                    content="".join(content_parts),
+                    tool_calls=tool_calls,
+                    model=self.model,
+                    usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                    finish_reason="tool_calls" if tool_calls else "stop",
+                )
+            else:
+                result = self._parse_response_output(completed)
+
+            if self.rate_limiter:
+                self.rate_limiter.record_actual(result.usage.get("total_tokens", 0), estimated)
+            return result
+
+        except LLMAPIError:
+            raise
+        except httpx.HTTPError as exc:
+            raise LLMAPIError(f"ChatGPT Responses API HTTP error: {exc}")
+        except Exception as exc:
+            raise LLMError(f"ChatGPT Responses API call failed: {exc}")
+
+    async def complete_streaming(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[str]:
+        if self.rate_limiter:
+            estimated = self._estimate_request_tokens(messages, max_tokens or self.max_tokens)
+            await self.rate_limiter.acquire(estimated)
+
+        payload = self._build_payload(messages, tools, temperature, max_tokens)
+        headers = self._build_headers()
+
+        try:
+            async with self.client.stream("POST", self.base_url, json=payload, headers=headers) as response:
+                if not response.is_success:
+                    error_text = await response.aread()
+                    raise LLMAPIError(
+                        f"ChatGPT Responses API error {response.status_code}: {error_text.decode(errors='replace')}",
+                        status_code=response.status_code,
+                    )
+                async for line in response.aiter_lines():
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("event:"):
+                        continue
+                    if stripped.startswith("data: "):
+                        data_str = stripped[6:]
+                    elif stripped.startswith("data:"):
+                        data_str = stripped[5:]
+                    else:
+                        continue
+                    try:
+                        evt = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    if evt.get("type") == "response.output_text.delta":
+                        delta = evt.get("delta", "")
+                        if delta:
+                            yield str(delta)
+        except LLMAPIError:
+            raise
+        except httpx.HTTPError as exc:
+            raise LLMAPIError(f"ChatGPT Responses API streaming error: {exc}")
+        except Exception as exc:
+            raise LLMError(f"ChatGPT Responses API streaming failed: {exc}")
+
+    def count_tokens(self, text: str) -> int:
+        return len(text) // 4
+
+    async def close(self) -> None:
+        await self.client.aclose()
+
+
 class OllamaProvider(LLMProvider):
     """Direct Ollama API provider."""
 
@@ -580,6 +993,7 @@ class LiteLLMProvider(LLMProvider):
         temperature: float = 0.7,
         max_tokens: int = 32000,
         tokens_per_minute: int = 0,
+        extra_headers: dict[str, str] | None = None,
     ):
         self.provider = _normalize_provider_name(provider)
         self.model = _provider_model_name(self.provider, model)
@@ -592,6 +1006,7 @@ class LiteLLMProvider(LLMProvider):
         )
         self.max_tokens = max_tokens
         self.rate_limiter = TokenRateLimiter(tokens_per_minute) if tokens_per_minute > 0 else None
+        self.extra_headers = extra_headers or None
 
         # Google OAuth / Vertex AI credentials (set via set_vertex_credentials).
         self._vertex_credentials: dict[str, Any] | None = None
@@ -657,6 +1072,8 @@ class LiteLLMProvider(LLMProvider):
 
         if self.base_url:
             kwargs["api_base"] = self.base_url
+        if self.extra_headers:
+            kwargs["extra_headers"] = self.extra_headers
         return kwargs
 
     async def _collect_streaming_response(self, stream: Any) -> dict[str, Any]:
@@ -940,6 +1357,7 @@ def create_provider(
     max_tokens: int = 32000,
     num_ctx: int = 160000,
     tokens_per_minute: int = 0,
+    extra_headers: dict[str, str] | None = None,
 ) -> LLMProvider:
     """Create an LLM provider.
 
@@ -963,6 +1381,17 @@ def create_provider(
             tokens_per_minute=tokens_per_minute,
         )
 
+    # ChatGPT Responses API path — activated when openai + extra_headers.
+    if normalized == "openai" and extra_headers:
+        return ChatGPTResponsesProvider(
+            model=model,
+            base_url=base_url or "https://chatgpt.com/backend-api/codex/responses",
+            extra_headers=extra_headers,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tokens_per_minute=tokens_per_minute,
+        )
+
     if normalized in {"openai", "anthropic", "gemini", "xai"}:
         return LiteLLMProvider(
             provider=normalized,
@@ -972,6 +1401,7 @@ def create_provider(
             temperature=temperature,
             max_tokens=max_tokens,
             tokens_per_minute=tokens_per_minute,
+            extra_headers=extra_headers,
         )
 
     raise ValueError(
@@ -991,15 +1421,19 @@ def get_provider() -> LLMProvider:
         from captain_claw.config import get_config
 
         cfg = get_config()
+        normalized = _normalize_provider_name(cfg.model.provider)
+        headers = cfg.provider_keys.headers_for(normalized) or None
+        api_key = None if headers else (cfg.model.api_key or None)
         _provider = create_provider(
             provider=cfg.model.provider,
             model=cfg.model.model,
             temperature=cfg.model.temperature,
             max_tokens=cfg.model.max_tokens,
             num_ctx=cfg.context.max_tokens,
-            api_key=cfg.model.api_key or None,
+            api_key=api_key,
             base_url=cfg.model.base_url or None,
             tokens_per_minute=cfg.model.tokens_per_minute,
+            extra_headers=headers,
         )
     return _provider
 

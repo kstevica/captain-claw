@@ -29,7 +29,7 @@
     --font-mono: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
     --header-height: 48px;
     --input-height: 120px;
-    --sidebar-width: 380px;
+    --sidebar-width: max(420px, 40vw);
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }

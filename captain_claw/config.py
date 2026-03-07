@@ -666,9 +666,39 @@ class WebConfig(BaseModel):
     auth_cookie_max_age: int = 90  # days
 
 
+class ProviderKeysConfig(BaseModel):
+    """Per-provider API keys managed from the settings UI."""
+
+    openai: str = ""
+    openai_headers: list[str] = Field(default_factory=list)
+    anthropic: str = ""
+    anthropic_headers: list[str] = Field(default_factory=list)
+    gemini: str = ""
+    gemini_headers: list[str] = Field(default_factory=list)
+    xai: str = ""
+    xai_headers: list[str] = Field(default_factory=list)
+    brave: str = ""
+
+    def headers_for(self, provider: str) -> dict[str, str]:
+        """Parse extra header tags for *provider* into a dict.
+
+        Each tag is ``"Header-Name: value"``; entries without a colon are
+        silently skipped.  Returns an empty dict when the provider has no
+        headers configured.
+        """
+        raw: list[str] = getattr(self, f"{provider}_headers", []) or []
+        result: dict[str, str] = {}
+        for tag in raw:
+            if ":" in tag:
+                k, v = tag.split(":", 1)
+                result[k.strip()] = v.strip()
+        return result
+
+
 class Config(BaseSettings):
     """Main configuration for Captain Claw."""
 
+    provider_keys: ProviderKeysConfig = Field(default_factory=ProviderKeysConfig)
     model: ModelConfig = Field(default_factory=ModelConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
@@ -1031,6 +1061,22 @@ class Config(BaseSettings):
                     or str(os.getenv("GOOGLE_API_KEY", "")).strip()
                     or str(dotenv_values.get("GOOGLE_API_KEY", "")).strip()
                 )
+        # Provider-keys fallback (settings UI keys).
+        if not str(config.model.api_key or "").strip():
+            pk = config.provider_keys
+            if provider in {"openai", "chatgpt"} and pk.openai:
+                config.model.api_key = pk.openai
+            elif provider in {"anthropic", "claude"} and pk.anthropic:
+                config.model.api_key = pk.anthropic
+            elif provider in {"gemini", "google"} and pk.gemini:
+                config.model.api_key = pk.gemini
+            elif provider in {"xai", "grok"} and pk.xai:
+                config.model.api_key = pk.xai
+
+        # Brave Search key from provider_keys.
+        if not str(config.tools.web_search.api_key or "").strip() and config.provider_keys.brave:
+            config.tools.web_search.api_key = config.provider_keys.brave
+
         if provider == "ollama" and not str(config.model.base_url or "").strip():
             base_url = (
                 str(os.getenv("OLLAMA_BASE_URL", "")).strip()

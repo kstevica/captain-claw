@@ -30,6 +30,11 @@ SECRET_MASK = "\u2022" * 8  # ••••••••
 # Fields whose values must be masked in GET and skipped if unchanged in PUT.
 _SECRET_FIELDS: frozenset[str] = frozenset({
     "model.api_key",
+    "provider_keys.openai",
+    "provider_keys.anthropic",
+    "provider_keys.gemini",
+    "provider_keys.xai",
+    "provider_keys.brave",
     "tools.web_search.api_key",
     "tools.send_mail.mailgun_api_key",
     "tools.send_mail.sendgrid_api_key",
@@ -95,7 +100,35 @@ def _build_schema() -> list[dict[str, Any]]:
                 },
             ],
         },
-        # ── 1. Model & LLM ──────────────────────────────────────
+        # ── 1. Provider API Keys ───────────────────────────────────
+        {
+            "id": "provider_keys",
+            "title": "Provider API Keys",
+            "icon": "\U0001F511",
+            "sections": [
+                {
+                    "id": "provider_keys_section",
+                    "title": "API Keys",
+                    "description": "Enter API keys for each provider. These are saved locally and used when environment variables are not set.",
+                    "fields": [
+                        _field("provider_keys.openai", "OpenAI"),
+                        _field("provider_keys.openai_headers", "OpenAI Extra Headers",
+                               type="tags", hint="Custom HTTP headers (Header-Name: value). When set, API key is ignored."),
+                        _field("provider_keys.anthropic", "Anthropic"),
+                        _field("provider_keys.anthropic_headers", "Anthropic Extra Headers",
+                               type="tags", hint="Custom HTTP headers (Header-Name: value). When set, API key is ignored."),
+                        _field("provider_keys.gemini", "Google Gemini"),
+                        _field("provider_keys.gemini_headers", "Gemini Extra Headers",
+                               type="tags", hint="Custom HTTP headers (Header-Name: value). When set, API key is ignored."),
+                        _field("provider_keys.xai", "xAI (Grok)"),
+                        _field("provider_keys.xai_headers", "xAI Extra Headers",
+                               type="tags", hint="Custom HTTP headers (Header-Name: value). When set, API key is ignored."),
+                        _field("provider_keys.brave", "Brave Search"),
+                    ],
+                },
+            ],
+        },
+        # ── 2. Model & LLM ──────────────────────────────────────
         {
             "id": "model_llm",
             "title": "Model & LLM",

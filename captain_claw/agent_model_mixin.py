@@ -25,7 +25,7 @@ class AgentModelMixin:
 
     @staticmethod
     def _resolve_provider_api_key(normalized_provider: str) -> str | None:
-        """Resolve API key for a specific provider from env vars and .env file."""
+        """Resolve API key for a specific provider from env vars, .env, or provider_keys."""
         env_keys: dict[str, list[str]] = {
             "openai": ["OPENAI_API_KEY"],
             "anthropic": ["ANTHROPIC_API_KEY"],
@@ -33,13 +33,19 @@ class AgentModelMixin:
             "xai": ["XAI_API_KEY"],
         }
         keys = env_keys.get(normalized_provider, [])
-        if not keys:
-            return None
-        dotenv_values = Config._read_dotenv_file(".env")
-        for k in keys:
-            val = str(os.getenv(k, "")).strip() or str(dotenv_values.get(k, "")).strip()
-            if val:
-                return val
+        if keys:
+            dotenv_values = Config._read_dotenv_file(".env")
+            for k in keys:
+                val = str(os.getenv(k, "")).strip() or str(dotenv_values.get(k, "")).strip()
+                if val:
+                    return val
+        # Fallback to provider_keys from settings.
+        cfg = get_config()
+        pk = cfg.provider_keys
+        pk_map = {"openai": pk.openai, "anthropic": pk.anthropic, "gemini": pk.gemini, "xai": pk.xai}
+        val = str(pk_map.get(normalized_provider, "") or "").strip()
+        if val:
+            return val
         return None
 
     def _refresh_runtime_model_details(
@@ -177,10 +183,16 @@ class AgentModelMixin:
         resolved_temperature = float(cfg.model.temperature if temperature is None else temperature)
         resolved_max_tokens = int(cfg.model.max_tokens if max_tokens is None else max_tokens)
 
+        # Resolve extra headers for the target provider.
+        extra_headers = cfg.provider_keys.headers_for(normalized_provider) or None
+
         # If switching to a different provider, resolve the correct API key
         # for that provider from env vars / .env instead of using the default
         # model key (which may belong to a different provider).
-        if normalized_provider == normalized_cfg_provider:
+        # When extra_headers carry auth, skip the api_key entirely.
+        if extra_headers:
+            resolved_api_key = None
+        elif normalized_provider == normalized_cfg_provider:
             resolved_api_key = cfg.model.api_key or None
         else:
             resolved_api_key = self._resolve_provider_api_key(normalized_provider) or cfg.model.api_key or None
@@ -203,6 +215,7 @@ class AgentModelMixin:
             max_tokens=resolved_max_tokens,
             num_ctx=resolved_num_ctx,
             tokens_per_minute=resolved_tpm,
+            extra_headers=extra_headers,
         )
         set_provider(self.provider)
         self._refresh_runtime_model_details(source=source, model_id=model_id)
