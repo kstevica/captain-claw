@@ -1077,6 +1077,21 @@ class Config(BaseSettings):
         if not str(config.tools.web_search.api_key or "").strip() and config.provider_keys.brave:
             config.tools.web_search.api_key = config.provider_keys.brave
 
+        # Export provider_keys to environment so that libraries which
+        # check env vars directly (e.g. LiteLLM image_generation
+        # validate_environment) find them.
+        pk = config.provider_keys
+        _env_exports: list[tuple[str, str]] = [
+            ("OPENAI_API_KEY", pk.openai),
+            ("ANTHROPIC_API_KEY", pk.anthropic),
+            ("GEMINI_API_KEY", pk.gemini),
+            ("GOOGLE_API_KEY", pk.gemini),
+            ("XAI_API_KEY", pk.xai),
+        ]
+        for env_name, pk_value in _env_exports:
+            if pk_value and not os.getenv(env_name):
+                os.environ[env_name] = pk_value
+
         if provider == "ollama" and not str(config.model.base_url or "").strip():
             base_url = (
                 str(os.getenv("OLLAMA_BASE_URL", "")).strip()

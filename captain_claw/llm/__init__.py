@@ -247,17 +247,35 @@ def _normalize_temperature_for_model(provider: str, model: str, temperature: flo
 
 
 def _resolve_api_key(provider: str, explicit_api_key: str | None) -> str | None:
-    """Resolve provider API key from explicit value or environment."""
+    """Resolve provider API key from explicit value, environment, or provider_keys."""
     if explicit_api_key:
         return explicit_api_key
     if provider == "openai":
-        return os.getenv("OPENAI_API_KEY") or None
-    if provider == "anthropic":
-        return os.getenv("ANTHROPIC_API_KEY") or None
-    if provider == "gemini":
-        return os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or None
-    if provider == "xai":
-        return os.getenv("XAI_API_KEY") or None
+        val = os.getenv("OPENAI_API_KEY") or None
+        if val:
+            return val
+    elif provider == "anthropic":
+        val = os.getenv("ANTHROPIC_API_KEY") or None
+        if val:
+            return val
+    elif provider == "gemini":
+        val = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or None
+        if val:
+            return val
+    elif provider == "xai":
+        val = os.getenv("XAI_API_KEY") or None
+        if val:
+            return val
+    # Fallback: provider_keys from config (settings UI).
+    try:
+        from captain_claw.config import get_config
+        pk = get_config().provider_keys
+        pk_map = {"openai": pk.openai, "anthropic": pk.anthropic, "gemini": pk.gemini, "xai": pk.xai}
+        pk_val = str(pk_map.get(provider, "") or "").strip()
+        if pk_val:
+            return pk_val
+    except Exception:
+        pass
     return None
 
 

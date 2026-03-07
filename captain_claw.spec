@@ -31,7 +31,11 @@ INSTRUCTIONS_DIR = os.path.join(PKG_DIR, "instructions")
 datas = [
     (STATIC_DIR, os.path.join("captain_claw", "web", "static")),
     (INSTRUCTIONS_DIR, os.path.join("captain_claw", "instructions")),
-] + collect_data_files("litellm")
+] + collect_data_files("litellm") + collect_data_files("playwright")
+
+# NOTE: Playwright Chromium browser binaries are NOT bundled here.
+# PyInstaller fails to codesign the Chromium .app bundle on macOS.
+# Instead, build.sh copies pw-browsers/ into dist/ after PyInstaller.
 
 # ── Hidden imports ──────────────────────────────────────────────
 # These are all the lazy / dynamic imports that PyInstaller's
@@ -111,6 +115,12 @@ hidden_imports = [
     "sqlite3",
     "email.mime.text",
     "email.mime.multipart",
+
+    # ── playwright (browser tool) ──
+    "playwright",
+    "playwright.async_api",
+    "playwright._impl",
+    "playwright._impl._driver",
 
     # ── other deps ──
     "httpx",

@@ -36,3 +36,8 @@ if getattr(sys, "frozen", False):
         "CAPTAIN_CLAW_STATIC_DIR",
         os.path.join(bundle_dir, "captain_claw", "web", "static"),
     )
+
+    # Playwright bundled Chromium browser.
+    pw_browsers = os.path.join(bundle_dir, "pw-browsers")
+    if os.path.isdir(pw_browsers):
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = pw_browsers

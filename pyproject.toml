@@ -1,6 +1,6 @@
 [project]
 name = "captain-claw"
-version = "0.3.3.4"
+version = "0.3.3.5"
 description = "A powerful AI agentic system"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -35,6 +35,7 @@ dependencies = [
     "glob2>=0.7",
     "tenacity>=8.0.0",
     "aiohttp>=3.9.0",
+    "playwright>=1.40.0",
 ]
 
 [project.optional-dependencies]
@@ -56,6 +57,7 @@ vision = [
     "Pillow>=10.0.0",
 ]
 browser = [
+    # Included in core deps; kept for backward compat with pip install captain-claw[browser].
     "playwright>=1.40.0",
 ]
 build = [

@@ -57,17 +57,39 @@ if ! "$PYTHON" -c "import captain_claw" &>/dev/null 2>&1; then
     "$PYTHON" -m pip install .
 fi
 
+# ── Download Playwright Chromium browser ─────────────────────────
+echo ""
+echo "Downloading Playwright Chromium browser..."
+echo ""
+export PLAYWRIGHT_BROWSERS_PATH="$SCRIPT_DIR/build/pw-browsers"
+"$PYTHON" -m playwright install chromium
+echo "Chromium installed to $PLAYWRIGHT_BROWSERS_PATH"
+
 # ── Build ────────────────────────────────────────────────────────
 echo ""
 echo "Building Captain Claw binaries..."
 echo ""
 "$PYTHON" -m PyInstaller captain_claw.spec
 
+# ── Copy Playwright browsers into dist (post-PyInstaller) ────────
+# Chromium's .app bundle cannot be codesigned by PyInstaller, so we
+# copy it directly into the dist folder after the build completes.
+DIST_DIR="dist/captain-claw"
+INTERNAL_DIR="$DIST_DIR/_internal"
+if [[ ! -d "$INTERNAL_DIR" ]]; then
+    INTERNAL_DIR="$DIST_DIR"
+fi
+
+if [[ -d "$PLAYWRIGHT_BROWSERS_PATH" ]]; then
+    echo ""
+    echo "Copying Playwright browsers into dist..."
+    cp -R "$PLAYWRIGHT_BROWSERS_PATH" "$INTERNAL_DIR/pw-browsers"
+    echo "  ✓ pw-browsers/"
+fi
+
 # ── Verify ───────────────────────────────────────────────────────
 echo ""
 echo "Verifying build..."
-
-DIST_DIR="dist/captain-claw"
 
 if [[ ! -d "$DIST_DIR" ]]; then
     echo "Error: dist/captain-claw/ not found. Build may have failed."
