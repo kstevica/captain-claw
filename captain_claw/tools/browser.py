@@ -408,9 +408,38 @@ class BrowserTool(Tool):
 
     # -- action handlers ------------------------------------------------------
 
+    @staticmethod
+    def _is_google_drive_url(url: str) -> bool:
+        """Return True if URL is a Google Drive/Docs/Sheets/Slides URL."""
+        _gdrive_hosts = (
+            "docs.google.com", "drive.google.com",
+            "sheets.google.com", "slides.google.com",
+        )
+        try:
+            from urllib.parse import urlparse
+            host = urlparse(url).hostname or ""
+            return any(host == h or host.endswith("." + h) for h in _gdrive_hosts)
+        except Exception:
+            return False
+
+    _GDRIVE_BLOCK_MSG = (
+        "Cannot open Google Drive/Docs URLs in the browser (requires authentication). "
+        "Use the gws tool instead:\n"
+        "  - gws(action='docs_read', file_id='...') to read document content\n"
+        "  - gws(action='drive_download', file_id='...') to download files\n"
+        "  - gws(action='drive_info', file_id='...') for file metadata\n"
+        "The docs_read action returns the full document text inline."
+    )
+
     async def _open(self, **kwargs: Any) -> ToolResult:
         """Launch the browser."""
         log.info("browser._open called", headless=kwargs.get("headless"), url=kwargs.get("url"))
+
+        # Block Google Drive URLs — gws tool should be used instead.
+        url = str(kwargs.get("url", "")).strip()
+        if url and self._is_google_drive_url(url):
+            return ToolResult(success=False, error=self._GDRIVE_BLOCK_MSG)
+
         session = self._get_session(self._session_key(kwargs))
 
         if session.is_alive:
@@ -449,6 +478,10 @@ class BrowserTool(Tool):
         url = str(kwargs.get("url", "")).strip()
         if not url:
             return ToolResult(success=False, error="'url' parameter is required for navigate.")
+
+        # Block Google Drive URLs — gws tool should be used instead.
+        if self._is_google_drive_url(url):
+            return ToolResult(success=False, error=self._GDRIVE_BLOCK_MSG)
 
         session = self._get_session(self._session_key(kwargs))
         nav_info = await session.navigate(url)

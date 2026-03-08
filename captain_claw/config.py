@@ -171,6 +171,13 @@ class ShellToolConfig(BaseModel):
     deny_patterns: list[str] = ["rm -rf *", "sudo *"]
 
 
+class GDriveFolderEntry(BaseModel):
+    """A Google Drive folder configured for context injection."""
+
+    id: str  # Google Drive folder ID
+    name: str  # Display name (for UI and prompt)
+
+
 class ReadToolConfig(BaseModel):
     """Read tool configuration."""
 
@@ -178,6 +185,13 @@ class ReadToolConfig(BaseModel):
 
     max_file_bytes: int = 200_000  # 200 KB
     extra_dirs: list[str] = Field(default_factory=list, alias="extraDirs")
+    gdrive_folders: list[GDriveFolderEntry] = Field(
+        default_factory=list, alias="gdriveFolders"
+    )
+    file_tree_max_entries: int = Field(default=50, alias="fileTreeMaxEntries")
+    file_tree_max_depth: int = Field(default=2, alias="fileTreeMaxDepth")
+    file_tree_max_tokens: int = Field(default=2000, alias="fileTreeMaxTokens")
+    file_tree_cache_ttl_seconds: int = Field(default=300, alias="fileTreeCacheTtlSeconds")
 
 
 class WebFetchToolConfig(BaseModel):

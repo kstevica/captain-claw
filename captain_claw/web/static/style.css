@@ -1848,6 +1848,59 @@ html, body {
     font-weight: 600;
 }
 
+/* ─── Folder tabs ─────────────────────────────────────── */
+.folder-tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--border);
+    padding: 0 18px;
+}
+.folder-tab {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-muted);
+    font-family: var(--font);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 8px 14px;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+}
+.folder-tab:hover { color: var(--text); }
+.folder-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+}
+.folder-tab-content.hidden { display: none; }
+
+/* ─── Drive bar (Windows) ─────────────────────────────── */
+.folder-drive-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+}
+.folder-drive-bar.hidden { display: none; }
+.folder-drive-btn {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--accent);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 3px 8px;
+    cursor: pointer;
+    transition: background 0.1s, border-color 0.1s;
+}
+.folder-drive-btn:hover {
+    background: var(--bg-tertiary);
+    border-color: var(--accent);
+}
+
 .folder-current {
     padding: 12px 18px;
     border-bottom: 1px solid var(--border);

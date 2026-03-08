@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 from typing import Any
 
 from captain_claw.config import get_config
@@ -82,6 +83,15 @@ class AgentScaleLoopMixin:
         ".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".md", ".csv",
         ".json", ".xml", ".html", ".htm", ".yaml", ".yml", ".toml",
         ".py", ".js", ".ts", ".go", ".rs", ".java", ".c", ".cpp",
+    })
+
+    # Google Workspace MIME types that can be read via ``gws docs_read``
+    # (Drive export API).  All other files require ``drive_download``
+    # followed by a local extraction tool (read, pdf_extract, etc.).
+    _GOOGLE_NATIVE_MIMETYPES = frozenset({
+        "application/vnd.google-apps.document",
+        "application/vnd.google-apps.spreadsheet",
+        "application/vnd.google-apps.presentation",
     })
 
     # ------------------------------------------------------------------
@@ -845,6 +855,88 @@ class AgentScaleLoopMixin:
         return "read", {"path": item}
 
     # ------------------------------------------------------------------
+    # Google Drive file map for scale extraction
+    # ------------------------------------------------------------------
+
+    def _build_gdrive_file_map(self) -> dict[str, dict[str, str]]:
+        """Scan session messages for ``gws drive_list`` / ``drive_search``
+        results and build a file-name → ``{id, mimeType}`` map for
+        Google-Drive-aware extraction in the scale micro-loop.
+
+        Returns an empty dict when ``gws`` is not available or no
+        Drive file listing results exist in the session.
+        """
+        if not shutil.which("gws"):
+            return {}
+
+        session = getattr(self, "session", None)
+        if session is None:
+            return {}
+
+        file_map: dict[str, dict[str, str]] = {}
+        for msg in session.messages:
+            if msg.get("role") != "tool":
+                continue
+            if msg.get("tool_name") != "gws":
+                continue
+            args = msg.get("tool_arguments")
+            if not isinstance(args, dict):
+                continue
+            action = args.get("action", "")
+            if action not in ("drive_list", "drive_search"):
+                continue
+            content = msg.get("content", "")
+            if not content:
+                continue
+            try:
+                data = json.loads(content)
+                files = data.get("files", [])
+                if not isinstance(files, list):
+                    continue
+                for f in files:
+                    name = f.get("name", "")
+                    file_id = f.get("id", "")
+                    mime_type = f.get("mimeType", "")
+                    if name and file_id:
+                        file_map[name] = {"id": file_id, "mimeType": mime_type}
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                continue
+
+        return file_map
+
+    @staticmethod
+    def _lookup_gdrive_file(
+        item: str,
+        gdrive_map: dict[str, dict[str, str]],
+    ) -> dict[str, str] | None:
+        """Look up a scale item in the Google Drive file map.
+
+        Tries exact match first, then case-insensitive, then substring
+        matching (Drive file name contained in item text or vice versa).
+        Returns ``{id, mimeType}`` or ``None``.
+        """
+        if not gdrive_map:
+            return None
+
+        # Exact match
+        if item in gdrive_map:
+            return gdrive_map[item]
+
+        # Case-insensitive match
+        item_lower = item.strip().lower()
+        for name, info in gdrive_map.items():
+            if name.strip().lower() == item_lower:
+                return info
+
+        # Substring match — one name contained in the other
+        for name, info in gdrive_map.items():
+            name_lower = name.strip().lower()
+            if name_lower in item_lower or item_lower in name_lower:
+                return info
+
+        return None
+
+    # ------------------------------------------------------------------
     # Prompt building for micro-loop
     # ------------------------------------------------------------------
 
@@ -1168,17 +1260,12 @@ class AgentScaleLoopMixin:
         return f"{safe}.md"
 
     def _resolve_scale_output_path(self, filename_or_path: str) -> str:
-        """Resolve a scale output filename to ``<workspace>/output/<session>/``.
+        """Normalise a scale output filename for the write tool.
 
-        If the agent has a known workspace base path and the filename is not
-        already absolute, this constructs the full absolute path under the
-        workspace ``output/<session>/`` directory.  The write tool recognises
-        absolute paths under ``<workspace>/output/`` and passes them through
-        without remapping into the ``saved/`` hierarchy.
-
-        If ``workspace_base_path`` is unavailable (unlikely for worker agents)
-        the filename is returned unchanged and the write tool will apply its
-        default scoping rules.
+        If the path is already absolute, return it as-is.  Otherwise
+        return the bare filename so the write tool's normal session
+        scoping places it into ``<workspace>/saved/tmp/<session>/``,
+        consistent with all other tool-generated files.
         """
         from pathlib import Path as _Path
 
@@ -1189,18 +1276,9 @@ class AgentScaleLoopMixin:
         if _Path(filename_or_path).is_absolute():
             return filename_or_path
 
-        workspace = getattr(self, "workspace_base_path", None)
-        if workspace is None:
-            return filename_or_path
-
-        session_slug = (
-            self._current_session_slug()
-            if hasattr(self, "_current_session_slug")
-            else "default"
-        )
-        output_dir = _Path(workspace) / "output" / session_slug
-        resolved = str(output_dir / filename_or_path)
-        return resolved
+        # Return bare filename — the write tool will scope it into
+        # saved/tmp/<session>/ via _normalize_under_saved().
+        return filename_or_path
 
     # ------------------------------------------------------------------
     # Micro-turn scale loop — isolated per-item processing
@@ -1328,6 +1406,15 @@ class AgentScaleLoopMixin:
                 remaining=len(remaining),
                 extraction=_extraction_mode,
                 sink=_final_action,
+            )
+
+        # ── Build Google Drive file map for GDrive-aware extraction ──
+        _gdrive_file_map = self._build_gdrive_file_map()
+        if _gdrive_file_map:
+            log.info(
+                "GDrive file map built for scale loop",
+                files=len(_gdrive_file_map),
+                names=list(_gdrive_file_map.keys())[:5],
             )
 
         # ── Research mode: extract search keywords once via LLM ──
@@ -1476,6 +1563,99 @@ class AgentScaleLoopMixin:
             else:
                 # Standard mode: single-tool extraction (read, web_fetch, pdf_extract, etc.)
                 tool_name, tool_args = self._detect_item_extractor(item)
+
+                # ── Google Drive file override ──
+                # When the detected tool would try a local-file operation
+                # (read, pdf_extract) or _passthrough, check if this item
+                # exists in the Google Drive file map.  If yes, use gws
+                # docs_read (for Google-native Docs/Sheets/Slides) or
+                # drive_download + local extract (for uploaded files).
+                if _gdrive_file_map and tool_name in (
+                    "read", "pdf_extract", "docx_extract",
+                    "xlsx_extract", "pptx_extract", "_passthrough",
+                ):
+                    _gd_info = self._lookup_gdrive_file(item, _gdrive_file_map)
+                    if _gd_info:
+                        _gd_id = _gd_info["id"]
+                        _gd_mime = _gd_info.get("mimeType", "")
+                        if _gd_mime in self._GOOGLE_NATIVE_MIMETYPES:
+                            # Google Docs/Sheets/Slides → docs_read
+                            tool_name = "gws"
+                            tool_args = {"action": "docs_read", "file_id": _gd_id}
+                            log.info(
+                                "GDrive override → docs_read",
+                                item=item_label[:60], file_id=_gd_id,
+                            )
+                        else:
+                            # Uploaded files → download first, then extract
+                            log.info(
+                                "GDrive override → drive_download",
+                                item=item_label[:60], file_id=_gd_id, mime=_gd_mime,
+                            )
+                            try:
+                                _dl_result = await self._execute_tool_with_guard(
+                                    name="gws",
+                                    arguments={"action": "drive_download", "file_id": _gd_id},
+                                    interaction_label=f"scale_gdrive_dl_{item_num}",
+                                    turn_usage=turn_usage,
+                                    session_policy=session_policy,
+                                    task_policy=task_policy,
+                                )
+                            except Exception as _dl_err:
+                                log.warning("GDrive download failed", item=item_label, error=str(_dl_err))
+                                self._emit_tool_output(
+                                    "scale_micro_loop",
+                                    {"item": item_label, "step": "extract", "mode": "gdrive"},
+                                    f"[{item_num}/{total}] GDRIVE DOWNLOAD FAILED: {item_label}\nError: {_dl_err}",
+                                )
+                                errors.append({"item": item_label, "phase": "extract", "error": str(_dl_err)})
+                                failed += 1
+                                done_items.add(item)
+                                sp["done_items"] = done_items
+                                continue
+
+                            if not _dl_result.success:
+                                log.warning("GDrive download error", item=item_label, error=_dl_result.error)
+                                self._emit_tool_output(
+                                    "scale_micro_loop",
+                                    {"item": item_label, "step": "extract", "mode": "gdrive"},
+                                    f"[{item_num}/{total}] GDRIVE DOWNLOAD ERROR: {item_label}\nError: {_dl_result.error}",
+                                )
+                                errors.append({"item": item_label, "phase": "extract", "error": _dl_result.error})
+                                failed += 1
+                                done_items.add(item)
+                                sp["done_items"] = done_items
+                                continue
+
+                            # Parse local path from download result.
+                            _dl_content = _dl_result.content or ""
+                            _path_match = re.search(r'read\(path="([^"]+)"\)', _dl_content)
+                            if not _path_match:
+                                # Fallback: try "to /absolute/path" pattern
+                                _path_match = re.search(r"to\s+(/\S+)", _dl_content)
+                            if _path_match:
+                                _local_path = _path_match.group(1)
+                                _local_ext = os.path.splitext(_local_path)[-1].lower()
+                                if _local_ext == ".pdf":
+                                    tool_name = "pdf_extract"
+                                    tool_args = {"path": _local_path}
+                                elif _local_ext == ".docx":
+                                    tool_name = "docx_extract"
+                                    tool_args = {"path": _local_path}
+                                elif _local_ext == ".xlsx":
+                                    tool_name = "xlsx_extract"
+                                    tool_args = {"path": _local_path}
+                                elif _local_ext == ".pptx":
+                                    tool_name = "pptx_extract"
+                                    tool_args = {"path": _local_path}
+                                else:
+                                    tool_name = "read"
+                                    tool_args = {"path": _local_path}
+                            else:
+                                # Could not parse downloaded path — use raw
+                                # download output as extracted content.
+                                extracted_content = _dl_content
+                                tool_name = None
 
                 # _passthrough: the item is a plain-text entity (not a file
                 # or URL).  Use the item text itself + any member_context as

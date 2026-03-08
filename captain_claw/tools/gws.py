@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,21 @@ _MAX_OUTPUT_CHARS = 60_000
 # Default timeout for gws commands (seconds).
 _DEFAULT_TIMEOUT = 120
 
+# Pattern matching inline base64-encoded images (can be hundreds of KB in exported markdown).
+_BASE64_IMG_RE = re.compile(r'data:image/[^;]+;base64,[A-Za-z0-9+/=\s]+')
+
+
+def _strip_base64_images(text: str) -> str:
+    """Remove inline base64 image data from text to prevent context bloat."""
+    cleaned = _BASE64_IMG_RE.sub('[image]', text)
+    if len(cleaned) < len(text):
+        log.debug(
+            "stripped base64 images",
+            original_len=len(text),
+            cleaned_len=len(cleaned),
+        )
+    return cleaned
+
 
 class GwsTool(Tool):
     """Google Workspace CLI — access Drive, Docs, Gmail, and Calendar via the ``gws`` binary."""
@@ -36,7 +52,9 @@ class GwsTool(Tool):
         "Actions: drive_list (list files in Drive), drive_search (find files by name/content), "
         "drive_download (download/export a file locally), drive_info (file metadata), "
         "drive_create (create a new Google Doc/Sheet/file on Drive), "
-        "docs_read (read a Google Doc), docs_append (append text to a Doc), "
+        "docs_read (read a Google Doc — returns the full document text INLINE in the "
+        "tool result; do NOT attempt to read a file after docs_read, the content is "
+        "already in the response), docs_append (append text to a Doc), "
         "mail_list (list recent emails), mail_search (search emails), "
         "mail_read (read a specific email), "
         "calendar_list (list upcoming events), calendar_search (search events), "
@@ -164,7 +182,7 @@ class GwsTool(Tool):
     async def execute(self, action: str, **kwargs: Any) -> ToolResult:
         """Dispatch to the appropriate action handler."""
         # Pop injected kwargs from the registry.
-        kwargs.pop("_runtime_base_path", None)
+        runtime_base = kwargs.pop("_runtime_base_path", None)
         saved_base = kwargs.pop("_saved_base_path", None)
         kwargs.pop("_session_id", None)
         kwargs.pop("_abort_event", None)
@@ -209,7 +227,7 @@ class GwsTool(Tool):
             )
 
         try:
-            return await handler(binary, saved_base=saved_base, **kwargs)
+            return await handler(binary, saved_base=saved_base, runtime_base=runtime_base, **kwargs)
         except asyncio.TimeoutError:
             return ToolResult(success=False, error="gws command timed out.")
         except Exception as exc:
@@ -313,6 +331,10 @@ class GwsTool(Tool):
 
         params["orderBy"] = "modifiedTime desc"
         params["fields"] = "files(id,name,mimeType,size,modifiedTime)"
+        # Support shared drives.
+        params["corpora"] = "allDrives"
+        params["supportsAllDrives"] = "true"
+        params["includeItemsFromAllDrives"] = "true"
 
         args = ["drive", "files", "list", "--params", json.dumps(params)]
         return await self._run_gws(binary, args)
@@ -332,6 +354,10 @@ class GwsTool(Tool):
             "pageSize": page_size,
             "q": q,
             "fields": "files(id,name,mimeType,size,modifiedTime,webViewLink)",
+            # Support shared drives.
+            "corpora": "allDrives",
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
         }
 
         args = ["drive", "files", "list", "--params", json.dumps(params)]
@@ -343,6 +369,7 @@ class GwsTool(Tool):
         file_id: str = "",
         output_path: str = "",
         saved_base: Any = None,
+        runtime_base: Any = None,
         **kw: Any,
     ) -> ToolResult:
         """Download/export a file from Google Drive."""
@@ -352,7 +379,7 @@ class GwsTool(Tool):
         # First get file metadata to determine type and name.
         meta_args = [
             "drive", "files", "get",
-            "--params", json.dumps({"fileId": file_id, "fields": "id,name,mimeType"}),
+            "--params", json.dumps({"fileId": file_id, "fields": "id,name,mimeType", "supportsAllDrives": "true"}),
         ]
         meta_result = await self._run_gws(binary, meta_args)
         if not meta_result.success:
@@ -368,19 +395,39 @@ class GwsTool(Tool):
             pass
 
         # For Google Workspace native types, use export.
+        # Sheets → XLSX and Presentations → PPTX to preserve all
+        # sheets/slides (CSV/TXT only capture the first one).
         google_export_map = {
             "application/vnd.google-apps.document": ("text/markdown", ".md"),
-            "application/vnd.google-apps.spreadsheet": ("text/csv", ".csv"),
-            "application/vnd.google-apps.presentation": ("text/plain", ".txt"),
+            "application/vnd.google-apps.spreadsheet": (
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ".xlsx",
+            ),
+            "application/vnd.google-apps.presentation": (
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                ".pptx",
+            ),
             "application/vnd.google-apps.drawing": ("image/svg+xml", ".svg"),
         }
 
         if output_path:
-            dest = Path(output_path).expanduser().resolve()
+            _out = Path(output_path).expanduser()
+            if _out.is_absolute():
+                dest = _out.resolve()
+            elif runtime_base:
+                # Resolve relative output paths against workspace root
+                # so they are consistent with the read tool's path resolution.
+                # (e.g. "saved/tmp/{session}/file.md" → workspace/saved/tmp/…)
+                dest = (Path(str(runtime_base)) / _out).resolve()
+            else:
+                dest = _out.resolve()
         elif saved_base:
             dest = Path(str(saved_base)) / file_name
         else:
             dest = Path.cwd() / file_name
+
+        # Ensure parent directory exists.
+        dest.parent.mkdir(parents=True, exist_ok=True)
 
         if mime_type in google_export_map:
             export_mime, ext = google_export_map[mime_type]
@@ -392,21 +439,42 @@ class GwsTool(Tool):
                 "--params", json.dumps({
                     "fileId": file_id,
                     "mimeType": export_mime,
+                    "supportsAllDrives": "true",
                 }),
                 "--output", str(dest),
             ]
         else:
             args = [
                 "drive", "files", "get",
-                "--params", json.dumps({"fileId": file_id, "alt": "media"}),
+                "--params", json.dumps({"fileId": file_id, "alt": "media", "supportsAllDrives": "true"}),
                 "--output", str(dest),
             ]
 
         result = await self._run_gws(binary, args, json_output=False)
         if result.success:
+            # Strip base64 images from exported markdown/text files to prevent bloat.
+            if dest.exists() and dest.suffix in (".md", ".txt") and mime_type in google_export_map:
+                try:
+                    raw = dest.read_text(encoding="utf-8", errors="replace")
+                    cleaned = _strip_base64_images(raw)
+                    if len(cleaned) < len(raw):
+                        dest.write_text(cleaned, encoding="utf-8")
+                except OSError:
+                    pass
+            # Clean up gws side-effect download.bin file.
+            _stale = Path.cwd() / "download.bin"
+            if _stale.exists():
+                try:
+                    _stale.unlink()
+                except OSError:
+                    pass
+            abs_dest = str(dest.resolve())
             return ToolResult(
                 success=True,
-                content=f"Downloaded '{file_name}' to {dest}",
+                content=(
+                    f"Downloaded '{file_name}' to {abs_dest}\n"
+                    f"Use read(path=\"{abs_dest}\") to view the file contents."
+                ),
             )
         return result
 
@@ -420,6 +488,7 @@ class GwsTool(Tool):
         params = {
             "fileId": file_id,
             "fields": "id,name,mimeType,size,modifiedTime,createdTime,parents,webViewLink,owners,shared,description",
+            "supportsAllDrives": "true",
         }
         args = ["drive", "files", "get", "--params", json.dumps(params)]
         return await self._run_gws(binary, args)
@@ -479,28 +548,161 @@ class GwsTool(Tool):
     # Docs actions
     # ------------------------------------------------------------------
 
+    # Google Workspace types that need binary export (XLSX / PPTX) followed
+    # by local extraction rather than plain-text export.
+    _BINARY_EXPORT_MAP: dict[str, tuple[str, str]] = {
+        "application/vnd.google-apps.spreadsheet": (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ".xlsx",
+        ),
+        "application/vnd.google-apps.presentation": (
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            ".pptx",
+        ),
+    }
+
     async def _docs_read(
-        self, binary: str, file_id: str = "", **kw: Any,
+        self, binary: str, file_id: str = "", saved_base: Any = None, **kw: Any,
     ) -> ToolResult:
-        """Read a Google Doc's content."""
+        """Read a Google Doc/Sheet/Slides content."""
         if not file_id:
             return ToolResult(success=False, error="file_id is required for docs_read.")
 
-        # Export the doc as markdown/plain text via Drive export.
+        # gws export writes a `download.bin` side-effect file in cwd; remove stale copies first.
+        _stale = Path.cwd() / "download.bin"
+        if _stale.exists():
+            try:
+                _stale.unlink()
+            except OSError:
+                pass
+
+        # First get file metadata for name and MIME type.
+        meta_params = {
+            "fileId": file_id,
+            "fields": "name,mimeType",
+            "supportsAllDrives": "true",
+        }
+        meta_result = await self._run_gws(
+            binary,
+            ["drive", "files", "get", "--params", json.dumps(meta_params)],
+        )
+        doc_name = file_id
+        file_mime = ""
+        if meta_result.success:
+            try:
+                _meta = json.loads(meta_result.content)
+                doc_name = _meta.get("name", file_id)
+                file_mime = _meta.get("mimeType", "")
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # ── Spreadsheets / Presentations: export as XLSX/PPTX, extract locally ──
+        if file_mime in self._BINARY_EXPORT_MAP:
+            return await self._docs_read_binary_export(
+                binary, file_id, doc_name, file_mime,
+            )
+
+        # ── Docs / default: export as markdown, fallback to plain text ──
         params = {
             "fileId": file_id,
             "mimeType": "text/markdown",
+            "supportsAllDrives": "true",
         }
         args = ["drive", "files", "export", "--params", json.dumps(params)]
         result = await self._run_gws(binary, args, json_output=False)
 
-        if not result.success and "markdown" in (result.error or "").lower():
-            # Fall back to plain text.
+        if not result.success:
+            # Fall back to plain text (catches any export error, not just "markdown").
             params["mimeType"] = "text/plain"
             args = ["drive", "files", "export", "--params", json.dumps(params)]
             result = await self._run_gws(binary, args, json_output=False)
 
+        # Clean up the `download.bin` side-effect file that gws export creates.
+        if _stale.exists():
+            try:
+                _stale.unlink()
+            except OSError:
+                pass
+
+        # Strip inline base64 image data that can bloat the content (hundreds of KB).
+        if result.success and result.content:
+            cleaned = _strip_base64_images(result.content)
+            result = ToolResult(success=True, content=cleaned)
+
         return result
+
+    async def _docs_read_binary_export(
+        self,
+        binary: str,
+        file_id: str,
+        doc_name: str,
+        file_mime: str,
+    ) -> ToolResult:
+        """Export a Google Sheet/Presentation to XLSX/PPTX, extract content,
+        and return the text inline (same contract as ``docs_read``)."""
+        import tempfile
+
+        export_mime, suffix = self._BINARY_EXPORT_MAP[file_mime]
+
+        # Export to a temp file.
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        tmp_path = Path(tmp.name)
+        tmp.close()
+
+        try:
+            params = {
+                "fileId": file_id,
+                "mimeType": export_mime,
+                "supportsAllDrives": "true",
+            }
+            args = [
+                "drive", "files", "export",
+                "--params", json.dumps(params),
+                "--output", str(tmp_path),
+            ]
+            result = await self._run_gws(binary, args, json_output=False)
+            if not result.success:
+                return result
+
+            # Verify the exported file has content.
+            if not tmp_path.exists() or tmp_path.stat().st_size == 0:
+                return ToolResult(
+                    success=False,
+                    error=f"gws export produced empty file for {doc_name!r}",
+                )
+
+            # Extract content using the appropriate extractor.
+            from captain_claw.tools.document_extract import (
+                _extract_xlsx_markdown,
+                _extract_pptx_markdown,
+            )
+
+            if suffix == ".xlsx":
+                content = await asyncio.to_thread(
+                    _extract_xlsx_markdown, tmp_path, 200,
+                )
+            else:
+                content = await asyncio.to_thread(
+                    _extract_pptx_markdown, tmp_path, 200,
+                )
+
+            return ToolResult(success=True, content=content)
+
+        except Exception as e:
+            log.error("docs_read binary export failed", file_id=file_id, error=str(e))
+            return ToolResult(success=False, error=str(e))
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            # Clean up gws side-effect download.bin file.
+            _stale = Path.cwd() / "download.bin"
+            if _stale.exists():
+                try:
+                    _stale.unlink()
+                except OSError:
+                    pass
 
     async def _docs_append(
         self, binary: str, file_id: str = "", content: str = "", **kw: Any,

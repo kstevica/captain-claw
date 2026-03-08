@@ -1494,15 +1494,67 @@
     // ── Folder Browser ─────────────────────────────────────
 
     var folderCurrentPath = null;
+    var _gwsAvailable = false;
 
     function openFolderModal() {
         $('#folderModal').classList.remove('hidden');
         loadExtraDirs();
         browseDir('');
+        _initFolderTabs();
     }
 
     function closeFolderModal() {
         $('#folderModal').classList.add('hidden');
+    }
+
+    async function _initFolderTabs() {
+        // Check for Windows drives.
+        try {
+            var dRes = await fetch('/api/drives');
+            var dData = await dRes.json();
+            var driveBar = $('#folderDriveBar');
+            if (dData.drives && dData.drives.length > 0) {
+                driveBar.classList.remove('hidden');
+                driveBar.innerHTML = dData.drives.map(function(d) {
+                    return '<button class="folder-drive-btn" data-drive="' +
+                        escapeHtml(d) + '">' + escapeHtml(d) + '</button>';
+                }).join('');
+                driveBar.querySelectorAll('.folder-drive-btn').forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        browseDir(btn.dataset.drive + '\\');
+                    });
+                });
+            } else {
+                driveBar.classList.add('hidden');
+            }
+        } catch (e) {
+            $('#folderDriveBar').classList.add('hidden');
+        }
+
+        // Check for gws availability → show/hide GDrive tab.
+        try {
+            var gRes = await fetch('/api/gws-status');
+            var gData = await gRes.json();
+            _gwsAvailable = !!gData.available;
+            $('#folderTabGdriveBtn').style.display = _gwsAvailable ? '' : 'none';
+        } catch (e) {
+            _gwsAvailable = false;
+            $('#folderTabGdriveBtn').style.display = 'none';
+        }
+
+        // Tab switching.
+        document.querySelectorAll('.folder-tab').forEach(function(tab) {
+            tab.onclick = function() {
+                document.querySelectorAll('.folder-tab').forEach(function(t) { t.classList.remove('active'); });
+                tab.classList.add('active');
+                var target = tab.dataset.tab;
+                $('#folderTabLocal').classList.toggle('hidden', target !== 'local');
+                $('#folderTabGdrive').classList.toggle('hidden', target !== 'gdrive');
+                if (target === 'gdrive') {
+                    _loadGdriveTab();
+                }
+            };
+        });
     }
 
     async function loadExtraDirs() {
@@ -1551,10 +1603,8 @@
             addBtn.disabled = !!data.blocked;
             addBtn.title = data.blocked ? 'Cannot add root or system directories' : 'Add this folder as a read directory';
 
-            // Breadcrumb.
             renderBreadcrumb(data.path);
 
-            // Directory listing.
             var html = '';
             if (data.parent) {
                 html += '<div class="folder-dir-item parent" data-path="' + escapeHtml(data.parent) + '">' +
@@ -1564,7 +1614,8 @@
                 html += '<div class="folder-empty">No subdirectories</div>';
             }
             data.dirs.forEach(function(name) {
-                var full = data.path + (data.path.endsWith('/') ? '' : '/') + name;
+                var sep = data.path.includes('\\') ? '\\' : '/';
+                var full = data.path + (data.path.endsWith(sep) ? '' : sep) + name;
                 html += '<div class="folder-dir-item" data-path="' + escapeHtml(full) + '">' +
                     '<span class="folder-dir-icon">\uD83D\uDCC1</span> ' + escapeHtml(name) + '</div>';
             });
@@ -1582,20 +1633,29 @@
 
     function renderBreadcrumb(fullPath) {
         var bc = $('#folderBreadcrumb');
-        // Split path into segments.
         var sep = fullPath.includes('\\') ? '\\' : '/';
         var parts = fullPath.split(sep).filter(Boolean);
         var html = '';
-        var built = fullPath.startsWith('/') ? '/' : '';
-        // Root.
+        var built = '';
+
         if (fullPath.startsWith('/')) {
             html += '<span class="folder-bc-item" data-path="/">/</span>';
+            built = '/';
         }
+
         parts.forEach(function(p, i) {
-            built += (i > 0 || !fullPath.startsWith('/') ? sep : '') + p;
-            html += '<span class="folder-bc-sep">' + sep + '</span>';
+            if (i === 0 && !fullPath.startsWith('/')) {
+                // Windows drive letter (e.g. "C:").
+                built = p + sep;
+            } else {
+                built += (built.endsWith(sep) ? '' : sep) + p;
+            }
+            if (i > 0 || fullPath.startsWith('/')) {
+                html += '<span class="folder-bc-sep">' + sep + '</span>';
+            }
             html += '<span class="folder-bc-item" data-path="' + escapeHtml(built) + '">' + escapeHtml(p) + '</span>';
         });
+
         bc.innerHTML = html;
         bc.querySelectorAll('.folder-bc-item').forEach(function(el) {
             el.addEventListener('click', function() {
@@ -1646,6 +1706,172 @@
             }
         } catch (e) {
             addChatMessage('error', 'Remove folder failed: ' + e.message);
+        }
+    }
+
+    // ── Google Drive Folder Browser ─────────────────────────
+
+    var _gdriveCurrent = { id: 'root', name: 'My Drive' };
+    var _gdriveBcStack = [{ id: 'root', name: 'My Drive' }];
+
+    async function _loadGdriveTab() {
+        _loadGdriveFolderList();
+        _browseGdrive('root', 'My Drive');
+    }
+
+    async function _loadGdriveFolderList() {
+        var list = $('#gdriveList');
+        try {
+            var res = await fetch('/api/read-folders/gdrive');
+            var data = await res.json();
+            var folders = data.folders || [];
+            if (!folders.length) {
+                list.innerHTML = '<div class="folder-empty">No Google Drive folders configured</div>';
+                return;
+            }
+            list.innerHTML = folders.map(function(f) {
+                return '<div class="folder-entry">' +
+                    '<span class="folder-entry-path" title="ID: ' + escapeHtml(f.id) + '">' +
+                    escapeHtml(f.name) + '</span>' +
+                    '<button class="folder-entry-remove" data-id="' + escapeHtml(f.id) + '" title="Remove">&times;</button>' +
+                    '</div>';
+            }).join('');
+            list.querySelectorAll('.folder-entry-remove').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    _removeGdriveFolder(btn.dataset.id);
+                });
+            });
+        } catch (e) {
+            list.innerHTML = '<div class="folder-empty">Failed to load</div>';
+        }
+    }
+
+    async function _browseGdrive(folderId, folderName) {
+        var dirsEl = $('#gdriveDirs');
+        dirsEl.innerHTML = '<div class="folder-empty">Loading...</div>';
+
+        _gdriveCurrent = { id: folderId, name: folderName };
+        $('#gdriveSelectedName').textContent = folderName;
+        $('#gdriveAddBtn').disabled = (folderId === 'root');
+
+        // Update breadcrumb stack.
+        if (folderId === 'root') {
+            _gdriveBcStack = [{ id: 'root', name: 'My Drive' }];
+        } else {
+            var idx = _gdriveBcStack.findIndex(function(b) { return b.id === folderId; });
+            if (idx >= 0) {
+                _gdriveBcStack = _gdriveBcStack.slice(0, idx + 1);
+            } else {
+                _gdriveBcStack.push({ id: folderId, name: folderName });
+            }
+        }
+        _renderGdriveBreadcrumb();
+
+        try {
+            var res = await fetch('/api/read-folders/gdrive/browse?folder_id=' + encodeURIComponent(folderId));
+            var data = await res.json();
+            if (data.error) {
+                dirsEl.innerHTML = '<div class="folder-empty">' + escapeHtml(data.error) + '</div>';
+                return;
+            }
+            var folders = data.folders || [];
+            var sharedDrives = data.shared_drives || [];
+            var html = '';
+            if (_gdriveBcStack.length > 1) {
+                var parent = _gdriveBcStack[_gdriveBcStack.length - 2];
+                html += '<div class="folder-dir-item parent" data-gid="' + escapeHtml(parent.id) +
+                    '" data-gname="' + escapeHtml(parent.name) + '">' +
+                    '<span class="folder-dir-icon">\u2B06</span> ..</div>';
+            }
+            // Shared drives section (only at root).
+            if (sharedDrives.length) {
+                html += '<div class="folder-section-label" style="margin-top:4px">Shared Drives</div>';
+                sharedDrives.forEach(function(d) {
+                    html += '<div class="folder-dir-item" data-gid="' + escapeHtml(d.id) +
+                        '" data-gname="' + escapeHtml(d.name) + '">' +
+                        '<span class="folder-dir-icon">\uD83D\uDCE4</span> ' + escapeHtml(d.name) + '</div>';
+                });
+                if (folders.length) {
+                    html += '<div class="folder-section-label" style="margin-top:4px">My Drive</div>';
+                }
+            }
+            if (!folders.length && !sharedDrives.length && _gdriveBcStack.length <= 1) {
+                html += '<div class="folder-empty">No subfolders</div>';
+            }
+            folders.forEach(function(f) {
+                html += '<div class="folder-dir-item" data-gid="' + escapeHtml(f.id) +
+                    '" data-gname="' + escapeHtml(f.name) + '">' +
+                    '<span class="folder-dir-icon">\uD83D\uDCC1</span> ' + escapeHtml(f.name) + '</div>';
+            });
+            dirsEl.innerHTML = html;
+            dirsEl.querySelectorAll('.folder-dir-item').forEach(function(el) {
+                el.addEventListener('click', function() {
+                    _browseGdrive(el.dataset.gid, el.dataset.gname);
+                });
+            });
+        } catch (e) {
+            dirsEl.innerHTML = '<div class="folder-empty">Error: ' + escapeHtml(e.message) + '</div>';
+        }
+    }
+
+    function _renderGdriveBreadcrumb() {
+        var bc = $('#gdriveBreadcrumb');
+        var html = '';
+        _gdriveBcStack.forEach(function(item, i) {
+            if (i > 0) html += '<span class="folder-bc-sep">/</span>';
+            html += '<span class="folder-bc-item" data-gid="' + escapeHtml(item.id) +
+                '" data-gname="' + escapeHtml(item.name) + '">' + escapeHtml(item.name) + '</span>';
+        });
+        bc.innerHTML = html;
+        bc.querySelectorAll('.folder-bc-item').forEach(function(el) {
+            el.addEventListener('click', function() {
+                _browseGdrive(el.dataset.gid, el.dataset.gname);
+            });
+        });
+    }
+
+    async function _addGdriveFolder() {
+        if (_gdriveCurrent.id === 'root') return;
+        var btn = $('#gdriveAddBtn');
+        btn.disabled = true;
+        btn.textContent = 'Adding...';
+        try {
+            var res = await fetch('/api/read-folders/gdrive', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: _gdriveCurrent.id, name: _gdriveCurrent.name }),
+            });
+            var data = await res.json();
+            if (!res.ok || !data.ok) {
+                addChatMessage('error', 'Add GDrive folder failed: ' + (data.error || 'Unknown error'));
+            } else {
+                addChatMessage('assistant', 'Google Drive folder added: `' + data.name + '`');
+                _loadGdriveFolderList();
+            }
+        } catch (e) {
+            addChatMessage('error', 'Add GDrive folder failed: ' + e.message);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Add this folder';
+        }
+    }
+
+    async function _removeGdriveFolder(id) {
+        try {
+            var res = await fetch('/api/read-folders/gdrive', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: id }),
+            });
+            var data = await res.json();
+            if (!res.ok || !data.ok) {
+                addChatMessage('error', 'Remove GDrive folder failed: ' + (data.error || 'Unknown error'));
+            } else {
+                addChatMessage('assistant', 'Google Drive folder removed');
+                _loadGdriveFolderList();
+            }
+        } catch (e) {
+            addChatMessage('error', 'Remove GDrive folder failed: ' + e.message);
         }
     }
 
@@ -2079,6 +2305,7 @@
         $('#skillsFolderBtn').addEventListener('click', openFolderModal);
         $('#folderModalClose').addEventListener('click', closeFolderModal);
         $('#folderAddBtn').addEventListener('click', addCurrentFolder);
+        $('#gdriveAddBtn').addEventListener('click', _addGdriveFolder);
         $('#folderModal').addEventListener('click', function(e) {
             if (e.target === e.currentTarget) closeFolderModal();
         });

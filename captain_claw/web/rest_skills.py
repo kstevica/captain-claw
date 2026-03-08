@@ -370,3 +370,185 @@ async def remove_read_folder(server: WebServer, request: web.Request) -> web.Res
 
     log.info("Read folder removed", path=str(target))
     return web.json_response({"ok": True, "path": str(target)})
+
+
+# ── Drive enumeration (Windows) ─────────────────────────────
+
+async def list_drives(server: WebServer, request: web.Request) -> web.Response:
+    """GET /api/drives — list available drive letters (Windows only)."""
+    import string
+
+    os_name = platform.system()
+    if os_name != "Windows":
+        return web.json_response({"drives": [], "os": os_name})
+
+    drives = []
+    for letter in string.ascii_uppercase:
+        drive_path = Path(f"{letter}:\\")
+        if drive_path.exists():
+            drives.append(f"{letter}:")
+    return web.json_response({"drives": drives, "os": "Windows"})
+
+
+# ── GWS status ───────────────────────────────────────────────
+
+async def gws_status(server: WebServer, request: web.Request) -> web.Response:
+    """GET /api/gws-status — check whether the gws CLI is available."""
+    from captain_claw.file_tree_builder import resolve_gws_binary
+
+    binary = resolve_gws_binary()
+    return web.json_response({"available": binary is not None})
+
+
+# ── Google Drive folder management (via gws) ─────────────────
+
+async def list_gdrive_folders(server: WebServer, request: web.Request) -> web.Response:
+    """GET /api/read-folders/gdrive — list configured GDrive folders."""
+    from captain_claw.config import get_config
+
+    cfg = get_config()
+    folders = [{"id": f.id, "name": f.name} for f in cfg.tools.read.gdrive_folders]
+    return web.json_response({"folders": folders})
+
+
+async def add_gdrive_folder(server: WebServer, request: web.Request) -> web.Response:
+    """POST /api/read-folders/gdrive — add a GDrive folder."""
+    from captain_claw.config import DEFAULT_CONFIG_PATH
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+
+    folder_id = str(body.get("id", "")).strip()
+    folder_name = str(body.get("name", "")).strip()
+    if not folder_id or not folder_name:
+        return web.json_response({"ok": False, "error": "Missing id or name"}, status=400)
+
+    config_path = DEFAULT_CONFIG_PATH
+    if config_path.exists():
+        data: dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    else:
+        data = {}
+
+    read_section = data.setdefault("tools", {}).setdefault("read", {})
+    gdrive = read_section.setdefault("gdrive_folders", [])
+
+    # Avoid duplicates.
+    for existing in gdrive:
+        if existing.get("id") == folder_id:
+            return web.json_response({"ok": False, "error": "Folder already added"}, status=409)
+
+    gdrive.append({"id": folder_id, "name": folder_name})
+
+    try:
+        _save_config(config_path, data)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=422)
+
+    log.info("GDrive folder added", folder_id=folder_id, name=folder_name)
+    return web.json_response({"ok": True, "id": folder_id, "name": folder_name})
+
+
+async def remove_gdrive_folder(server: WebServer, request: web.Request) -> web.Response:
+    """DELETE /api/read-folders/gdrive — remove a GDrive folder."""
+    from captain_claw.config import DEFAULT_CONFIG_PATH
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+
+    folder_id = str(body.get("id", "")).strip()
+    if not folder_id:
+        return web.json_response({"ok": False, "error": "Missing id"}, status=400)
+
+    config_path = DEFAULT_CONFIG_PATH
+    if config_path.exists():
+        data: dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    else:
+        data = {}
+
+    read_section = data.get("tools", {}).get("read", {})
+    gdrive = read_section.get("gdrive_folders", [])
+    if not gdrive:
+        return web.json_response({"ok": False, "error": "No GDrive folders configured"}, status=404)
+
+    new_gdrive = [f for f in gdrive if f.get("id") != folder_id]
+    if len(new_gdrive) == len(gdrive):
+        return web.json_response({"ok": False, "error": "Folder not found in list"}, status=404)
+
+    read_section["gdrive_folders"] = new_gdrive
+    if not new_gdrive:
+        read_section.pop("gdrive_folders", None)
+
+    try:
+        _save_config(config_path, data)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=422)
+
+    log.info("GDrive folder removed", folder_id=folder_id)
+    return web.json_response({"ok": True, "id": folder_id})
+
+
+async def browse_gdrive(server: WebServer, request: web.Request) -> web.Response:
+    """GET /api/read-folders/gdrive/browse?folder_id=... — browse GDrive subfolders."""
+    from captain_claw.file_tree_builder import browse_gdrive_folders
+
+    folder_id = request.query.get("folder_id", "root").strip() or "root"
+    result = await browse_gdrive_folders(folder_id)
+    if result.get("error"):
+        return web.json_response(result, status=502)
+    return web.json_response(result)
+
+
+# ── Folder trees ─────────────────────────────────────────────
+
+async def get_folder_trees(server: WebServer, request: web.Request) -> web.Response:
+    """GET /api/folder-trees — return file-tree listings for all configured folders."""
+    from captain_claw.config import get_config
+    from captain_claw.file_tree_builder import (
+        build_gdrive_tree,
+        build_local_tree,
+        get_cached_tree,
+        set_cached_tree,
+    )
+
+    cfg = get_config()
+    ttl = cfg.tools.read.file_tree_cache_ttl_seconds
+    max_entries = cfg.tools.read.file_tree_max_entries
+    max_depth = cfg.tools.read.file_tree_max_depth
+
+    trees: list[dict[str, Any]] = []
+
+    # Local folders.
+    for d in cfg.tools.read.extra_dirs:
+        cache_key = f"local:{d}"
+        cached = get_cached_tree(cache_key, ttl)
+        if cached:
+            trees.append({"type": "local", "path": d, "tree": cached})
+            continue
+        try:
+            tree_str, count = build_local_tree(d, max_entries=max_entries, max_depth=max_depth)
+            set_cached_tree(cache_key, tree_str, count)
+            trees.append({"type": "local", "path": d, "tree": tree_str})
+        except Exception as e:
+            trees.append({"type": "local", "path": d, "tree": f"[Error: {e}]"})
+
+    # GDrive folders.
+    for gf in cfg.tools.read.gdrive_folders:
+        cache_key = f"gdrive:{gf.id}"
+        cached = get_cached_tree(cache_key, ttl)
+        if cached:
+            trees.append({"type": "gdrive", "id": gf.id, "name": gf.name, "tree": cached})
+            continue
+        try:
+            tree_str, count = await build_gdrive_tree(
+                gf.id, gf.name, max_entries=max_entries, max_depth=max_depth,
+            )
+            set_cached_tree(cache_key, tree_str, count)
+            trees.append({"type": "gdrive", "id": gf.id, "name": gf.name, "tree": tree_str})
+        except Exception as e:
+            trees.append({"type": "gdrive", "id": gf.id, "name": gf.name, "tree": f"[Error: {e}]"})
+
+    return web.json_response({"trees": trees})

@@ -1,8 +1,9 @@
 """Web fetch tools for retrieving web page content."""
 
 import re
+import shutil
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 import httpx
@@ -12,6 +13,32 @@ from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 
 log = get_logger(__name__)
+
+# ── Google Drive URL blocking ─────────────────────────────────────────
+
+_GDRIVE_HOSTS = (
+    "docs.google.com", "drive.google.com",
+    "sheets.google.com", "slides.google.com",
+)
+
+
+def _is_google_drive_url(url: str) -> bool:
+    """Return True if *url* points to Google Drive/Docs/Sheets/Slides."""
+    try:
+        host = urlparse(url).hostname or ""
+        return any(host == h or host.endswith("." + h) for h in _GDRIVE_HOSTS)
+    except Exception:
+        return False
+
+
+_GDRIVE_FETCH_BLOCK_MSG = (
+    "Cannot fetch Google Drive/Docs URLs via web_fetch (requires authentication). "
+    "Use the gws tool instead:\n"
+    "  - gws(action='docs_read', file_id='...') to read Google Docs content\n"
+    "  - gws(action='drive_download', file_id='...') to download files\n"
+    "  - gws(action='drive_info', file_id='...') for file metadata\n"
+    "The docs_read action returns the full document text inline."
+)
 
 
 def _make_http_client() -> httpx.AsyncClient:
@@ -95,6 +122,10 @@ class WebFetchTool(Tool):
     ) -> ToolResult:
         """Fetch a web page and extract readable text via BeautifulSoup.
 
+        Google Drive/Docs URLs are blocked when the ``gws`` CLI is
+        available because they require authentication that web_fetch
+        cannot provide.
+
         Args:
             url: URL to fetch
             max_chars: Max characters to return
@@ -104,6 +135,10 @@ class WebFetchTool(Tool):
         """
         # Hard guard: strip any extract_mode — web_fetch ALWAYS returns text.
         kwargs.pop("extract_mode", None)
+
+        # Block Google Drive URLs when gws is available.
+        if _is_google_drive_url(url) and shutil.which("gws"):
+            return ToolResult(success=False, error=_GDRIVE_FETCH_BLOCK_MSG)
 
         try:
             log.info("Fetching URL (text mode)", url=url)
@@ -191,6 +226,10 @@ class WebGetTool(Tool):
         Returns:
             ToolResult with raw HTML content
         """
+        # Block Google Drive URLs when gws is available.
+        if _is_google_drive_url(url) and shutil.which("gws"):
+            return ToolResult(success=False, error=_GDRIVE_FETCH_BLOCK_MSG)
+
         try:
             log.info("Fetching URL (raw HTML mode)", url=url)
             cfg = get_config()

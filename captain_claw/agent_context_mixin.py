@@ -1449,10 +1449,16 @@ class AgentContextMixin:
             detail_level="micro" if self.instructions.use_micro else "normal"
         )
 
-        # Build extra read dirs block for system prompt.
+        # Build extra read dirs block + file tree listings for system prompt.
         extra_read_dirs_block = ""
         try:
-            extra_dirs = get_config().tools.read.extra_dirs
+            cfg = get_config()
+            extra_dirs = cfg.tools.read.extra_dirs
+            gdrive_folders = cfg.tools.read.gdrive_folders
+
+            parts: list[str] = []
+
+            # 1. Local folder paths (for glob instructions).
             if extra_dirs:
                 resolved = []
                 for d in extra_dirs:
@@ -1461,11 +1467,86 @@ class AgentContextMixin:
                         resolved.append(str(p))
                 if resolved:
                     dirs_list = "\n".join(f"  - {d}" for d in resolved)
-                    extra_read_dirs_block = (
+                    parts.append(
                         "- Extra read folders (user-configured directories with additional files — "
                         "always search these with glob and read when the user asks about files "
                         "that are not in the workspace):\n" + dirs_list
                     )
+
+            # 2. Google Drive folder references (for gws tool usage).
+            if gdrive_folders:
+                gd_list = "\n".join(
+                    f"  - {gf.name} (folder_id: {gf.id})" for gf in gdrive_folders
+                )
+                parts.append(
+                    "- Google Drive folders — ALWAYS use the gws tool for ALL Google Drive "
+                    "operations. NEVER use browser, web_fetch, curl, or wget for Google "
+                    "Drive/Docs/Sheets/Slides files — the gws tool handles authentication "
+                    "and export automatically. "
+                    "Actions: drive_list (list files), drive_info (metadata), docs_read "
+                    "(read Google Docs — returns content inline), drive_download "
+                    "(download/export files). "
+                    "Folder IDs:\n" + gd_list
+                )
+
+            # 3. File tree listings — compact tree output injected into context.
+            from captain_claw.file_tree_builder import (
+                build_local_tree,
+                get_cached_tree,
+                set_cached_tree,
+            )
+
+            token_budget = cfg.tools.read.file_tree_max_tokens
+            max_entries = cfg.tools.read.file_tree_max_entries
+            max_depth = cfg.tools.read.file_tree_max_depth
+            ttl = cfg.tools.read.file_tree_cache_ttl_seconds
+            tokens_used = 0
+            tree_parts: list[str] = []
+
+            # Local trees (synchronous — fast for shallow walks).
+            for d in (extra_dirs or []):
+                if tokens_used >= token_budget:
+                    break
+                p = Path(d).expanduser().resolve()
+                if not p.is_dir():
+                    continue
+                cache_key = f"local:{d}"
+                cached = get_cached_tree(cache_key, ttl)
+                if cached:
+                    tree_str = cached
+                else:
+                    tree_str, count = build_local_tree(
+                        str(p), max_entries=max_entries, max_depth=max_depth,
+                    )
+                    set_cached_tree(cache_key, tree_str, count)
+                tree_tokens = len(tree_str) // 4
+                if tokens_used + tree_tokens > token_budget and tree_parts:
+                    break
+                tree_parts.append(tree_str)
+                tokens_used += tree_tokens
+
+            # GDrive trees — use cached only (_build_system_prompt is sync).
+            for gf in (gdrive_folders or []):
+                if tokens_used >= token_budget:
+                    break
+                cache_key = f"gdrive:{gf.id}"
+                cached = get_cached_tree(cache_key, ttl)
+                if cached:
+                    tree_tokens = len(cached) // 4
+                    if tokens_used + tree_tokens > token_budget and tree_parts:
+                        break
+                    tree_parts.append(cached)
+                    tokens_used += tree_tokens
+
+            if tree_parts:
+                parts.append(
+                    "- File listings in configured folders (use these to locate files "
+                    "without glob; for GDrive files use gws tool with the [id:...] shown):\n"
+                    + "\n\n".join(tree_parts)
+                )
+
+            if parts:
+                extra_read_dirs_block = "\n".join(parts)
         except Exception:
             pass
 
@@ -1491,6 +1572,37 @@ class AgentContextMixin:
         if skills_section:
             return f"{base_prompt.strip()}\n\n{skills_section}\n"
         return base_prompt
+
+    async def _refresh_gdrive_trees(self) -> None:
+        """Pre-populate GDrive tree cache for system prompt injection."""
+        try:
+            cfg = get_config()
+            gdrive_folders = cfg.tools.read.gdrive_folders
+            if not gdrive_folders:
+                return
+
+            from captain_claw.file_tree_builder import (
+                build_gdrive_tree,
+                set_cached_tree,
+            )
+
+            max_entries = cfg.tools.read.file_tree_max_entries
+            max_depth = cfg.tools.read.file_tree_max_depth
+
+            for gf in gdrive_folders:
+                try:
+                    tree_str, count = await build_gdrive_tree(
+                        gf.id, gf.name,
+                        max_entries=max_entries, max_depth=max_depth,
+                    )
+                    set_cached_tree(f"gdrive:{gf.id}", tree_str, count)
+                except Exception as e:
+                    log.warning(
+                        "GDrive tree refresh failed",
+                        folder=gf.name, error=str(e),
+                    )
+        except Exception:
+            pass
 
     def _build_tool_memory_note(
         self,

@@ -173,6 +173,10 @@ class WebServer:
             from captain_claw.web.google_oauth import inject_oauth_into_provider
             await inject_oauth_into_provider(self)
 
+        # Prime GDrive tree cache for context injection (non-blocking).
+        if hasattr(self.agent, "_refresh_gdrive_trees"):
+            asyncio.ensure_future(self.agent._refresh_gdrive_trees())
+
     # ── Callbacks ─────────────────────────────────────────────────────
 
     def _status_callback(self, status: str) -> None:
@@ -994,6 +998,34 @@ class WebServer:
         from captain_claw.web.rest_skills import remove_read_folder
         return await remove_read_folder(self, request)
 
+    async def _list_drives(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_skills import list_drives
+        return await list_drives(self, request)
+
+    async def _gws_status(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_skills import gws_status
+        return await gws_status(self, request)
+
+    async def _list_gdrive_folders(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_skills import list_gdrive_folders
+        return await list_gdrive_folders(self, request)
+
+    async def _add_gdrive_folder(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_skills import add_gdrive_folder
+        return await add_gdrive_folder(self, request)
+
+    async def _remove_gdrive_folder(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_skills import remove_gdrive_folder
+        return await remove_gdrive_folder(self, request)
+
+    async def _browse_gdrive(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_skills import browse_gdrive
+        return await browse_gdrive(self, request)
+
+    async def _get_folder_trees(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_skills import get_folder_trees
+        return await get_folder_trees(self, request)
+
     # ── App setup ────────────────────────────────────────────────────
 
     def create_app(self) -> web.Application:
@@ -1017,6 +1049,13 @@ class WebServer:
         app.router.add_post("/api/read-folders", self._add_read_folder)
         app.router.add_delete("/api/read-folders", self._remove_read_folder)
         app.router.add_get("/api/browse", self._browse_directory)
+        app.router.add_get("/api/drives", self._list_drives)
+        app.router.add_get("/api/gws-status", self._gws_status)
+        app.router.add_get("/api/read-folders/gdrive", self._list_gdrive_folders)
+        app.router.add_post("/api/read-folders/gdrive", self._add_gdrive_folder)
+        app.router.add_delete("/api/read-folders/gdrive", self._remove_gdrive_folder)
+        app.router.add_get("/api/read-folders/gdrive/browse", self._browse_gdrive)
+        app.router.add_get("/api/folder-trees", self._get_folder_trees)
         app.router.add_get("/api/sessions", self.list_sessions_api)
         app.router.add_post("/api/sessions/bulk-delete", self._bulk_delete_sessions)
         app.router.add_get("/api/sessions/{id}", self._get_session_detail)

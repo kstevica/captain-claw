@@ -241,23 +241,50 @@
                 <h3>Read Folders</h3>
                 <button class="icon-btn" id="folderModalClose" title="Close">&times;</button>
             </div>
-            <!-- Current extra dirs -->
-            <div class="folder-current" id="folderCurrent">
-                <div class="folder-section-label">Active folders</div>
-                <div id="folderList" class="folder-list">
-                    <div class="folder-empty">No extra folders configured</div>
+            <!-- Tab bar -->
+            <div class="folder-tabs">
+                <button class="folder-tab active" data-tab="local">Local Folders</button>
+                <button class="folder-tab" data-tab="gdrive" id="folderTabGdriveBtn" style="display:none">Google Drive</button>
+            </div>
+            <!-- Local tab -->
+            <div class="folder-tab-content" id="folderTabLocal">
+                <div class="folder-current" id="folderCurrent">
+                    <div class="folder-section-label">Active folders</div>
+                    <div id="folderList" class="folder-list">
+                        <div class="folder-empty">No extra folders configured</div>
+                    </div>
+                </div>
+                <div class="folder-browser">
+                    <div class="folder-section-label">Browse &amp; add folder</div>
+                    <div id="folderDriveBar" class="folder-drive-bar hidden"></div>
+                    <div class="folder-breadcrumb" id="folderBreadcrumb"></div>
+                    <div class="folder-dirs" id="folderDirs">
+                        <div class="folder-empty">Loading...</div>
+                    </div>
+                    <div class="folder-actions">
+                        <span class="folder-selected-path" id="folderSelectedPath">-</span>
+                        <button class="action-btn small" id="folderAddBtn" disabled>Add this folder</button>
+                    </div>
                 </div>
             </div>
-            <!-- Browser -->
-            <div class="folder-browser">
-                <div class="folder-section-label">Browse &amp; add folder</div>
-                <div class="folder-breadcrumb" id="folderBreadcrumb"></div>
-                <div class="folder-dirs" id="folderDirs">
-                    <div class="folder-empty">Loading...</div>
+            <!-- Google Drive tab -->
+            <div class="folder-tab-content hidden" id="folderTabGdrive">
+                <div class="folder-current">
+                    <div class="folder-section-label">Active Google Drive folders</div>
+                    <div id="gdriveList" class="folder-list">
+                        <div class="folder-empty">No Google Drive folders configured</div>
+                    </div>
                 </div>
-                <div class="folder-actions">
-                    <span class="folder-selected-path" id="folderSelectedPath">-</span>
-                    <button class="action-btn small" id="folderAddBtn" disabled>Add this folder</button>
+                <div class="folder-browser">
+                    <div class="folder-section-label">Browse &amp; add folder</div>
+                    <div class="folder-breadcrumb" id="gdriveBreadcrumb"></div>
+                    <div class="folder-dirs" id="gdriveDirs">
+                        <div class="folder-empty">Loading...</div>
+                    </div>
+                    <div class="folder-actions">
+                        <span class="folder-selected-path" id="gdriveSelectedName">My Drive</span>
+                        <button class="action-btn small" id="gdriveAddBtn" disabled>Add this folder</button>
+                    </div>
                 </div>
             </div>
         </div>

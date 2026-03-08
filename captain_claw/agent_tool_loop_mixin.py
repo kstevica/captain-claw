@@ -921,7 +921,7 @@ class AgentToolLoopMixin:
                                 user_query=_user_query,
                                 turn_usage=turn_usage,
                             )
-                            if _reduced is not None:
+                            if _reduced is not None and _reduced.strip():
                                 _result_content = _reduced
                         except Exception as _chunk_err:
                             log.warning(

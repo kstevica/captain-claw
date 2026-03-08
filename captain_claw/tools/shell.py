@@ -3,6 +3,7 @@
 import asyncio
 import os
 import re
+import shutil
 from typing import Any
 
 from captain_claw.config import get_config
@@ -15,6 +16,32 @@ from captain_claw.tools.registry import (
 )
 
 log = get_logger(__name__)
+
+# ── Google Drive download blocking ────────────────────────────────────
+# When the gws CLI is available, curl/wget to Google Drive/Docs URLs
+# should be blocked — the gws tool handles auth and exports properly.
+
+_GDRIVE_HOST_PATTERNS = (
+    "docs.google.com", "drive.google.com",
+    "sheets.google.com", "slides.google.com",
+    "storage.googleapis.com",
+)
+
+_GDRIVE_DOWNLOAD_RE = re.compile(
+    r"""(?:curl|wget)\s.*(?:"""
+    + "|".join(re.escape(h) for h in _GDRIVE_HOST_PATTERNS)
+    + r""")""",
+    re.IGNORECASE,
+)
+
+_GDRIVE_SHELL_BLOCK_MSG = (
+    "Do not use curl/wget to download Google Drive/Docs files — "
+    "the gws tool handles authentication and export automatically.\n"
+    "Use instead:\n"
+    "  - gws(action='docs_read', file_id='...') to read Google Docs content\n"
+    "  - gws(action='drive_download', file_id='...') to download files\n"
+    "  - gws(action='drive_info', file_id='...') for file metadata"
+)
 
 # Commands that complete nearly instantly and should never hang for the
 # full config timeout.  We use a short timeout (5 s) for these — they
@@ -82,13 +109,17 @@ class ShellTool(Tool):
 
     def _is_command_safe(self, command: str) -> tuple[bool, str]:
         """Check if command is safe to execute.
-        
+
         Args:
             command: Command to check
-        
+
         Returns:
             Tuple of (is_safe, reason)
         """
+        # Block curl/wget targeting Google Drive when gws is available.
+        if _GDRIVE_DOWNLOAD_RE.search(command) and shutil.which("gws"):
+            return False, _GDRIVE_SHELL_BLOCK_MSG
+
         # Check blocked patterns
         blocked, matched = is_blocked_shell_command(command, self.config.tools.shell.blocked)
         if blocked:

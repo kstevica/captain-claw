@@ -298,6 +298,11 @@ def _convert_messages_for_openai_style(messages: list[Message]) -> list[dict[str
 
         if role not in {"system", "user", "assistant", "tool"}:
             continue
+        # Anthropic rejects empty text content blocks.
+        if not content and role == "tool":
+            content = "[empty tool response]"
+        elif not content and role not in {"assistant"}:
+            content = " "
         entry: dict[str, Any] = {"role": role, "content": content}
         if role == "assistant" and isinstance(tool_calls, list) and tool_calls:
             normalized_calls: list[dict[str, Any]] = []

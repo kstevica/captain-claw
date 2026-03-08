@@ -47,6 +47,17 @@ class ReadTool(Tool):
             ToolResult with file contents
         """
         try:
+            # Block reads of gws side-effect artifact files.
+            if Path(path).name == "download.bin":
+                return ToolResult(
+                    success=False,
+                    error=(
+                        "download.bin is a temporary gws export artifact — do not read it. "
+                        "The document content was already returned inline by the docs_read "
+                        "tool call. Check the previous gws docs_read result."
+                    ),
+                )
+
             raw_path = Path(path).expanduser()
 
             # Resolve relative paths against the workspace root (not the
@@ -60,6 +71,29 @@ class ReadTool(Tool):
                     file_path = (Path(runtime_base) / raw_path).resolve()
                 else:
                     file_path = raw_path.resolve()
+
+            if not file_path.exists():
+                # Some tools (gws drive_download, shell) write files
+                # relative to the process CWD which may differ from the
+                # workspace root.  Try CWD-based resolution.
+                runtime_base = kwargs.get("_runtime_base_path")
+                if not raw_path.is_absolute():
+                    # Relative path: try resolving against cwd instead of
+                    # workspace root.
+                    cwd_candidate = raw_path.resolve()
+                    if cwd_candidate.exists():
+                        file_path = cwd_candidate
+                elif runtime_base is not None:
+                    # Absolute path under workspace root that doesn't exist:
+                    # strip workspace prefix and try the remainder under cwd
+                    # (e.g. workspace/saved/x.md → cwd/saved/x.md).
+                    try:
+                        rel = file_path.relative_to(Path(runtime_base).resolve())
+                        cwd_candidate = (Path.cwd() / rel).resolve()
+                        if cwd_candidate.exists():
+                            file_path = cwd_candidate
+                    except ValueError:
+                        pass
 
             if not file_path.exists():
                 # Try workflow-run directory (orchestrated workflows write
