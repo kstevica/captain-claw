@@ -226,7 +226,14 @@ class _BaseImageLLMTool(Tool):
 
             provider = _normalize_provider_name(model_cfg.provider)
             model_name = _provider_model_name(provider, model_cfg.model)
-            api_key = _resolve_api_key(provider, None)
+
+            # Resolve auth: prefer extra headers (bearer/OAuth) over API key.
+            extra_headers: dict[str, str] | None = None
+            try:
+                extra_headers = cfg.provider_keys.headers_for(provider) or None
+            except Exception:
+                pass
+            api_key = None if extra_headers else _resolve_api_key(provider, None)
 
             # Read, optionally resize, and encode image.
             image_bytes = await asyncio.to_thread(file_path.read_bytes)
@@ -262,6 +269,8 @@ class _BaseImageLLMTool(Tool):
             }
             if api_key:
                 call_kwargs["api_key"] = api_key
+            if extra_headers:
+                call_kwargs["extra_headers"] = extra_headers
             base_url = str(getattr(model_cfg, "base_url", "") or "").strip()
             if base_url:
                 call_kwargs["api_base"] = base_url
