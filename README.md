@@ -243,7 +243,7 @@ Captain Claw ships with 27 built-in tools. The agent picks the right tool for ea
 | `image_vision` | Analyze and describe images via vision-capable LLMs |
 | `pocket_tts` | Generate speech audio (MP3) locally |
 | `send_mail` | Send email via SMTP, Mailgun, or SendGrid |
-| `gws` | Google Workspace CLI — Drive, Docs, Gmail (read), and Calendar via the `gws` binary |
+| `gws` | Google Workspace CLI — Drive, Docs, Sheets, Slides, Gmail (read), and Calendar via the `gws` binary |
 | `todo` | Persistent cross-session to-do list with auto-capture |
 | `contacts` | Persistent cross-session address book with auto-capture |
 | `scripts` | Persistent cross-session script/file memory with auto-capture |
@@ -333,7 +333,7 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 
 - **[OpenAI-compatible API](USAGE.md#openai-compatible-api-proxy)** — `POST /v1/chat/completions` endpoint proxied through the Captain Claw agent pool. Streaming supported.
 
-- **[Google Workspace CLI (gws)](USAGE.md#gws)** — Access Google Drive, Docs, Gmail (read), and Calendar through the `gws` CLI binary. Search and download Drive files, read and create Google Docs, list and search emails, view calendar agenda and create events. Supports a `raw` passthrough mode for any `gws` command. Requires separate `gws` CLI installation and authentication.
+- **[Google Workspace CLI (gws)](USAGE.md#gws)** — Access Google Drive, Docs, Sheets, Slides, Gmail (read), and Calendar through the `gws` CLI binary. Search and download Drive files, read Google Docs/Sheets/Slides inline (Sheets exported as XLSX with all sheets, Presentations as PPTX with all slides), create Google Docs, list and search emails, view calendar agenda and create events. The scale loop automatically processes Google Drive file lists without manual file-ID handling. Supports a `raw` passthrough mode for any `gws` command. Requires separate `gws` CLI installation and authentication.
 
 - **[Datastore](USAGE.md#datastore)** — SQLite-backed relational data tables managed entirely by the agent. 19 tool actions cover schema management, CRUD operations, raw SELECT queries, CSV/XLSX import and export, and a four-level protection system (table, column, row, cell). Includes a [web dashboard](USAGE.md#datastore-dashboard) for browsing tables, editing rows, running SQL, uploading files, and exporting tables as CSV/XLSX/JSON.
 

@@ -694,9 +694,9 @@ Google Workspace CLI tool. Wraps the `gws` binary ([github.com/googleworkspace/c
 
 **Installation:** `npm install -g @googleworkspace/cli`, then `gws auth setup && gws auth login`.
 
-**Drive actions:** `drive_list` lists files in a folder, `drive_search` finds files by name or content, `drive_download` exports/downloads a file locally (Google Docs export as markdown, Sheets as CSV), `drive_info` gets file metadata, `drive_create` creates a new file on Drive.
+**Drive actions:** `drive_list` lists files in a folder, `drive_search` finds files by name or content, `drive_download` exports/downloads a file locally (Google Docs as markdown, Sheets as XLSX preserving all sheets, Presentations as PPTX preserving all slides), `drive_info` gets file metadata, `drive_create` creates a new file on Drive.
 
-**Docs actions:** `docs_read` reads a Google Doc's content (exported as markdown), `docs_append` appends text to a Doc.
+**Docs actions:** `docs_read` reads a Google Doc, Sheet, or Presentation inline (Docs exported as markdown; Sheets exported as XLSX and extracted with all sheets preserved; Presentations exported as PPTX and extracted with all slides preserved), `docs_append` appends text to a Doc.
 
 **Mail actions:** `mail_list` lists recent emails from a label, `mail_search` searches using Gmail syntax (e.g. `from:alice subject:report`), `mail_read` reads a specific email by ID.
 
@@ -1402,6 +1402,8 @@ scale:
   scale_advisory_min_members: 7   # activate full scale loop (guards + micro-loop)
   lightweight_progress_min_members: 3  # activate progress indicators only
 ```
+
+**Google Drive integration:** The scale loop automatically detects Google Drive files from previous `drive_list` or `drive_search` results in the session. Google-native files (Docs, Sheets, Presentations) are read inline via `docs_read`. Uploaded files (PDF, DOCX, etc.) are downloaded via `drive_download` and extracted locally. No manual file-ID handling is needed — the scale loop matches item names to Drive file IDs automatically.
 
 **Chunked processing integration:** When `context.chunked_processing` is active, the micro-loop automatically detects items whose content exceeds the model's available context window and routes them through the [chunked processing pipeline](#chunked-processing-pipeline). This is transparent — items that fit in one call are processed normally; only oversized items trigger chunking.
 

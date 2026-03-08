@@ -1,78 +1,52 @@
-# Captain Claw v0.3.3 Release Notes
+# Captain Claw v0.3.3.7 Release Notes
 
-**Release title:** Playbooks — Learn from Past Sessions
+**Release title:** Google Drive Scale Loop + Sheets & Slides Support
 
-**Release date:** 2026-03-03
+**Release date:** 2026-03-08
 
 ## Highlights
 
-Feature release — the agent can now learn from past sessions via **playbooks**, a persistent cross-session orchestration pattern memory. Rate sessions as good or bad to auto-distill reusable do/don't pseudo-code patterns that are injected into planning context when similar tasks are detected. Includes a web UI editor, chat header override selector, and full REST API.
+The scale loop (batch-processing pipeline) now fully supports Google Drive files. When processing a list of Drive files, the scale loop automatically maps item names to file IDs from session context, routes Google-native files (Docs, Sheets, Slides) through `docs_read`, and downloads uploaded files (PDF, DOCX, etc.) for local extraction — all without manual file-ID handling.
+
+Google Sheets and Presentations are now exported as XLSX and PPTX respectively (instead of CSV/plain text), preserving all sheets and slides. The existing `xlsx_extract` and `pptx_extract` extractors handle the content extraction.
 
 ## New Features
 
-### Playbooks — Cross-Session Orchestration Pattern Memory
-- Rate sessions with "rate good" or "rate bad" to auto-distill a reusable playbook from the session's tool trace and message history
-- Standalone LLM call extracts a compact session summary (max 2000 chars) and ordered tool trace (max 30 entries), then produces structured do/don't pseudo-code patterns
-- 9 task type classifications: batch-processing, web-research, code-generation, document-processing, data-transformation, orchestration, interactive, file-management, other
-- Auto-injection: when a new task arrives, the agent classifies it by task type using keyword heuristics and retrieves up to 2 matching playbooks into the planning context
-- Usage tracking: each playbook tracks retrieval count and last-used timestamp
-- Manual creation via the `playbooks` tool `add` action or REST API
-- 7 tool actions: `add`, `list`, `search`, `info`, `update`, `remove`, `rate`
+### Scale Loop Google Drive Integration
+- The scale loop micro-loop now builds a Google Drive file map from `drive_list` / `drive_search` results in the current session
+- Google-native files (Docs, Sheets, Slides) are routed to `docs_read` for inline content extraction
+- Uploaded files (PDF, DOCX, XLSX, PPTX, TXT) are downloaded via `drive_download` and extracted with the appropriate local tool
+- Three-level name matching: exact → case-insensitive → substring, so items like "My Report" match "My Report.pdf" in Drive
+- No manual file-ID handling required — the scale loop resolves everything automatically
 
-### Playbooks Web UI Editor
-- New `/playbooks` page linked from the homepage
-- Browse all playbooks with task type badges, usage counts, and ratings
-- Create, edit, and delete playbooks from the UI
-- View full do/don't patterns, trigger descriptions, and reasoning
+### Google Sheets — Full Multi-Sheet Support via XLSX Export
+- `docs_read` now exports Google Sheets as XLSX (was text/markdown, which failed)
+- Content extracted with `_extract_xlsx_markdown` — all sheets preserved as markdown tables
+- `drive_download` also updated: Sheets export as XLSX instead of CSV
 
-### Playbook Override Selector
-- New dropdown in the chat header (next to model selector)
-- Three modes: Auto (default — system selects based on task type), None (disable injection), or pick a specific playbook
-- Override persists for the session and is reflected in session info
+### Google Presentations — Full Multi-Slide Support via PPTX Export
+- `docs_read` now exports Google Presentations as PPTX (was text/plain)
+- Content extracted with `_extract_pptx_markdown` — all slides preserved as markdown
+- `drive_download` also updated: Presentations export as PPTX instead of plain text
 
-### Playbook Rating Hint
-- After complex tasks (3+ tool calls with task contracts, scale loop, or pipeline), the agent appends a one-time hint suggesting the user rate the session
-- Shown once per session to avoid noise
+## Bug Fixes
 
-### Playbooks REST API
-- `GET /api/playbooks` — list all playbooks (up to 200, optional `?task_type=` filter)
-- `GET /api/playbooks/search` — keyword search (`?q=` required, optional `?task_type=` filter)
-- `GET /api/playbooks/{id}` — get one playbook by ID
-- `POST /api/playbooks` — create a new playbook
-- `PATCH /api/playbooks/{id}` — partial update
-- `DELETE /api/playbooks/{id}` — delete a playbook
+### Scale Loop Output Path
+- Scale loop output files now go to `saved/tmp/<session>/` (via the write tool's normal session scoping) instead of the previous `output/<session>/` path that bypassed the saved directory structure
 
-## Other Changes
-
-- Tool count: 29 built-in tools (was 28)
-- Playbooks tool is always enabled (alongside personality and botport)
-- Playbook context injected into task contract planner and scale loop planning
-- Session metadata tracks playbook ratings
+### docs_read Export Fallback
+- The markdown export fallback in `docs_read` now catches any export error, not just errors containing the word "markdown" — fixes edge cases where Google's export API returns unexpected error messages
 
 ## Internal
 
-- New `agent_playbook_mixin.py` — playbook retrieval, distillation, context injection, and override handling
-- New `tools/playbooks.py` — playbooks tool with 7 actions
-- New `web/rest_playbooks.py` — playbooks REST API endpoints
-- New `web/static/playbooks.html` — playbooks editor page
-- New `web/static/playbooks-editor.js` — playbooks editor JavaScript
-- New `web/static/playbooks.css` — playbooks editor styles
-- New `instructions/playbook_distill_system_prompt.md` — LLM distillation system prompt
-- New `instructions/playbook_distill_user_prompt.md` — LLM distillation user prompt template
-- Updated `agent.py` — added `AgentPlaybookMixin` to Agent class MRO
-- Updated `agent_completion_mixin.py` — playbook rating hint after complex tasks
-- Updated `agent_context_mixin.py` — playbook context injection into message assembly, tool registration
-- Updated `agent_orchestration_mixin.py` — playbook injection into orchestrator planning
-- Updated `agent_reasoning_mixin.py` — playbook injection into scale loop planning
-- Updated `config.py` — added `playbooks` to default enabled tools and always-enabled set
-- Updated `session/__init__.py` — PlaybookEntry model, CRUD operations, search, usage tracking
-- Updated `web/ws_handler.py` — playbook list in welcome message, `set_playbook` message handler
-- Updated `web/static/app.js` — playbook override selector UI logic
-- Updated `web/static/index.html` — playbook badge and dropdown in chat header
-- Updated `web/static/style.css` — playbook selector styles
-- Updated `web/static/home.html` — playbooks card on homepage
-- Updated `web/static_pages.py` — serve playbooks page
-- Updated `web_server.py` — playbook REST routes, session info playbook fields
-- Updated `instructions/task_contract_planner_user_prompt.md` — playbook block injection
-- Updated `README.md` and `USAGE.md` — documentation for playbooks feature
-- 22 files changed, 787 insertions, 10 deletions
+- New `_GOOGLE_NATIVE_MIMETYPES` constant in `agent_scale_loop_mixin.py` — defines Google Workspace MIME types handled via `docs_read`
+- New `_build_gdrive_file_map()` method — scans session messages for `drive_list` / `drive_search` tool results, builds `{name → {id, mimeType}}` map
+- New `_lookup_gdrive_file()` static method — three-level name matching (exact, case-insensitive, substring)
+- New `_BINARY_EXPORT_MAP` class constant in `gws.py` — maps Sheets/Presentations MIME types to XLSX/PPTX export formats
+- New `_docs_read_binary_export()` method — exports to temp file, extracts with existing extractors, returns content inline, cleans up temp file
+- Updated `_docs_read()` — fetches `mimeType` in metadata, routes Sheets/Presentations to binary export, improved fallback logic
+- Updated `_run_scale_micro_loop()` — builds GDrive file map at initialization, adds GDrive override block in extraction step
+- Updated `_resolve_scale_output_path()` — simplified to return bare filenames for write tool session scoping
+- Updated `drive_download` export map — Sheets→XLSX, Presentations→PPTX (consistent with `docs_read`)
+- Updated `README.md` and `USAGE.md` — documentation for Google Drive scale loop support and Sheets/Slides export formats
+- 2 files changed: `agent_scale_loop_mixin.py`, `tools/gws.py`
