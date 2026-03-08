@@ -77,6 +77,12 @@
         h.innerHTML = '<span class="icon">' + group.icon + '</span> ' + esc(group.title);
         main.appendChild(h);
 
+        // Personality group gets a special split-pane layout.
+        if (group.id === 'personality') {
+            renderPersonalitySplitPane(main);
+            return;
+        }
+
         for (const section of group.sections || []) {
             const card = document.createElement('div');
             card.className = 'st-section';
@@ -113,9 +119,9 @@
 
             // Fields, array, or custom component
             if (section.type === 'custom' && section.custom_id === 'personality') {
-                renderPersonalityEditor(card);
+                // Personality uses a unified split-pane rendered at group level; skip here.
             } else if (section.type === 'custom' && section.custom_id === 'user_personalities') {
-                renderUserPersonalitiesEditor(card);
+                // Handled by the unified personality pane; skip here.
             } else if (section.type === 'array') {
                 renderArraySection(card, section);
             } else {
@@ -877,213 +883,117 @@
         // Values are collected via input handlers above; nothing extra needed.
     }
 
-    // ── Personality editor (custom component) ─────────────
-    function renderPersonalityEditor(container) {
-        var wrap = document.createElement('div');
-        wrap.className = 'st-personality-editor';
-        wrap.innerHTML =
-            '<div class="st-personality-loading">Loading personality...</div>';
-        container.appendChild(wrap);
+    // ── Personality split-pane layout ───────────────────────
+    // State for the personality pane.
+    var _ppState = {
+        agentData: null,       // global personality
+        userPersonalities: [], // array of user personality objects
+        telegramUsers: [],     // approved telegram users
+        selectedId: '__agent__', // '__agent__' or a user_id
+    };
 
-        fetch('/api/personality')
-            .then(function (r) { return r.json(); })
-            .then(function (data) {
-                wrap.innerHTML = '';
+    function renderPersonalitySplitPane(container) {
+        var pane = document.createElement('div');
+        pane.className = 'st-pp-split';
+        pane.innerHTML = '<div class="st-pp-left"><div class="st-personality-loading">Loading...</div></div>'
+            + '<div class="st-pp-right"><div class="st-personality-loading">Select a persona</div></div>';
+        container.appendChild(pane);
 
-                // Name
-                var nameRow = _pField('Name', 'text');
-                var nameInp = nameRow.querySelector('input');
-                nameInp.value = data.name || '';
-                nameInp.placeholder = 'e.g. Toby McDev';
-                wrap.appendChild(nameRow);
-
-                // Description
-                var descRow = _pField('Description', 'textarea');
-                var descInp = descRow.querySelector('textarea');
-                descInp.value = data.description || '';
-                descInp.rows = 3;
-                wrap.appendChild(descRow);
-
-                // Background
-                var bgRow = _pField('Background', 'textarea');
-                var bgInp = bgRow.querySelector('textarea');
-                bgInp.value = data.background || '';
-                bgInp.rows = 4;
-                wrap.appendChild(bgRow);
-
-                // Expertise (one per line)
-                var expRow = _pField('Expertise', 'textarea');
-                var expInp = expRow.querySelector('textarea');
-                expInp.value = (data.expertise || []).join('\n');
-                expInp.rows = 5;
-                expInp.placeholder = 'One expertise per line';
-                wrap.appendChild(expRow);
-
-                // Save button
-                var actions = document.createElement('div');
-                actions.className = 'st-personality-actions';
-                var savePersonalityBtn = document.createElement('button');
-                savePersonalityBtn.className = 'st-btn primary';
-                savePersonalityBtn.textContent = 'Save Personality';
-                savePersonalityBtn.addEventListener('click', function () {
-                    var name = nameInp.value.trim();
-                    if (!name) {
-                        toast('Name is required', 'error');
-                        return;
-                    }
-                    var expertise = expInp.value
-                        .split('\n')
-                        .map(function (e) { return e.trim(); })
-                        .filter(function (e) { return e.length > 0; });
-
-                    var body = {
-                        name: name,
-                        description: descInp.value.trim(),
-                        background: bgInp.value.trim(),
-                        expertise: expertise
-                    };
-
-                    savePersonalityBtn.disabled = true;
-                    savePersonalityBtn.textContent = 'Saving...';
-
-                    fetch('/api/personality', {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(body)
-                    })
-                        .then(function (r) { return r.json(); })
-                        .then(function (result) {
-                            if (result.error) {
-                                toast(result.error, 'error');
-                            } else {
-                                toast('Personality saved', 'success');
-                            }
-                        })
-                        .catch(function (err) {
-                            toast('Failed: ' + err.message, 'error');
-                        })
-                        .finally(function () {
-                            savePersonalityBtn.disabled = false;
-                            savePersonalityBtn.textContent = 'Save Personality';
-                        });
-                });
-                actions.appendChild(savePersonalityBtn);
-                wrap.appendChild(actions);
-            })
-            .catch(function (err) {
-                wrap.innerHTML =
-                    '<div class="st-personality-loading" style="color:var(--red)">' +
-                    'Failed to load personality: ' + esc(err.message) + '</div>';
-            });
-    }
-
-    function _pField(label, type) {
-        var row = document.createElement('div');
-        row.className = 'st-field';
-        var lbl = document.createElement('div');
-        lbl.className = 'st-field-label';
-        lbl.textContent = label;
-        row.appendChild(lbl);
-        var ctrl = document.createElement('div');
-        ctrl.className = 'st-field-control';
-        var el;
-        if (type === 'textarea') {
-            el = document.createElement('textarea');
-            el.className = 'st-input st-textarea';
-        } else {
-            el = document.createElement('input');
-            el.className = 'st-input';
-            el.type = type || 'text';
-        }
-        ctrl.appendChild(el);
-        row.appendChild(ctrl);
-        return row;
-    }
-
-    // ── User personalities editor (custom component) ────
-    function renderUserPersonalitiesEditor(container) {
-        var wrap = document.createElement('div');
-        wrap.className = 'st-personality-editor st-user-personalities';
-        wrap.innerHTML = '<div class="st-personality-loading">Loading user personalities...</div>';
-        container.appendChild(wrap);
-
-        // Fetch both user personalities and telegram users in parallel.
         Promise.all([
+            fetch('/api/personality').then(function (r) { return r.json(); }),
             fetch('/api/user-personalities').then(function (r) { return r.json(); }),
             fetch('/api/telegram-users').then(function (r) { return r.json(); })
         ])
         .then(function (results) {
-            var personalities = results[0];
-            var telegramUsers = results[1];
-            _renderUserPersonalitiesList(wrap, personalities, telegramUsers);
+            _ppState.agentData = results[0];
+            _ppState.userPersonalities = results[1];
+            _ppState.telegramUsers = results[2];
+            _ppState.selectedId = '__agent__';
+            _ppRenderLeft(pane);
+            _ppRenderRight(pane);
         })
         .catch(function (err) {
-            wrap.innerHTML =
-                '<div class="st-personality-loading" style="color:var(--red)">' +
-                'Failed to load: ' + esc(err.message) + '</div>';
+            pane.innerHTML = '<div class="st-personality-loading" style="color:var(--red)">'
+                + 'Failed to load: ' + esc(err.message) + '</div>';
         });
     }
 
-    function _renderUserPersonalitiesList(wrap, personalities, telegramUsers) {
-        wrap.innerHTML = '';
+    function _ppRenderLeft(pane) {
+        var left = pane.querySelector('.st-pp-left');
+        left.innerHTML = '';
 
-        // Build lookup: user_id → personality data.
+        // Section label
+        var lbl = document.createElement('div');
+        lbl.className = 'st-pp-section-label';
+        lbl.textContent = 'Agent';
+        left.appendChild(lbl);
+
+        // Agent personality item
+        var agentItem = document.createElement('div');
+        agentItem.className = 'st-pp-item' + (_ppState.selectedId === '__agent__' ? ' active' : '');
+        agentItem.dataset.id = '__agent__';
+        agentItem.innerHTML = '<span class="st-pp-item-icon">\uD83E\uDD16</span>'
+            + '<span class="st-pp-item-name">' + esc(_ppState.agentData.name || 'Agent') + '</span>';
+        agentItem.addEventListener('click', function () {
+            _ppState.selectedId = '__agent__';
+            _ppRenderLeft(pane);
+            _ppRenderRight(pane);
+        });
+        left.appendChild(agentItem);
+
+        // User personas section
+        var ulbl = document.createElement('div');
+        ulbl.className = 'st-pp-section-label';
+        ulbl.textContent = 'User Personas';
+        left.appendChild(ulbl);
+
+        // Build lookup
         var personalityMap = {};
-        personalities.forEach(function (p) { personalityMap[p.user_id] = p; });
-
-        // Build set of user_ids from Telegram users.
+        _ppState.userPersonalities.forEach(function (p) { personalityMap[p.user_id] = p; });
         var telegramIds = {};
-        telegramUsers.forEach(function (u) { telegramIds[u.user_id] = u; });
+        _ppState.telegramUsers.forEach(function (u) { telegramIds[u.user_id] = u; });
 
-        // 1) Show all approved Telegram users (configured first, then unconfigured).
-        var configuredUsers = [];
-        var unconfiguredUsers = [];
-        telegramUsers.forEach(function (u) {
+        // Configured telegram users
+        _ppState.telegramUsers.forEach(function (u) {
             if (personalityMap[u.user_id]) {
-                configuredUsers.push(u);
-            } else {
-                unconfiguredUsers.push(u);
+                var p = personalityMap[u.user_id];
+                p.username = p.username || u.username;
+                p.first_name = p.first_name || u.first_name;
+                left.appendChild(_ppPersonaItem(pane, p));
             }
         });
 
-        configuredUsers.forEach(function (u) {
-            var p = personalityMap[u.user_id];
-            // Enrich personality with telegram info for label.
-            p.username = p.username || u.username;
-            p.first_name = p.first_name || u.first_name;
-            wrap.appendChild(_renderUserPersonalityCard(p, wrap, personalities, telegramUsers));
-        });
-
-        unconfiguredUsers.forEach(function (u) {
-            wrap.appendChild(_renderUnconfiguredUserCard(u, wrap, personalities, telegramUsers));
-        });
-
-        // 2) Show personalities for non-Telegram users (e.g. web-created profiles).
-        personalities.forEach(function (p) {
+        // Non-telegram user personalities
+        _ppState.userPersonalities.forEach(function (p) {
             if (!telegramIds[p.user_id]) {
-                wrap.appendChild(_renderUserPersonalityCard(p, wrap, personalities, telegramUsers));
+                left.appendChild(_ppPersonaItem(pane, p));
             }
         });
 
-        // Empty state.
-        if (telegramUsers.length === 0 && personalities.length === 0) {
-            var empty = document.createElement('div');
-            empty.className = 'st-personality-loading';
-            empty.textContent = 'No approved Telegram users yet. Pair a Telegram account first.';
-            wrap.appendChild(empty);
-        }
+        // Unconfigured telegram users
+        _ppState.telegramUsers.forEach(function (u) {
+            if (!personalityMap[u.user_id]) {
+                var item = document.createElement('div');
+                item.className = 'st-pp-item unconfigured';
+                item.innerHTML = '<span class="st-pp-item-icon">\uD83D\uDC64</span>'
+                    + '<span class="st-pp-item-name">' + esc(_userLabel(u)) + '</span>'
+                    + '<span class="st-up-badge-none">No profile</span>';
+                item.addEventListener('click', function () {
+                    _ppSetupUser(pane, u);
+                });
+                left.appendChild(item);
+            }
+        });
 
-        // Manual add button for arbitrary user IDs.
-        var addRow = document.createElement('div');
-        addRow.className = 'st-personality-actions';
+        // Add button
         var addBtn = document.createElement('button');
-        addBtn.className = 'st-btn secondary';
+        addBtn.className = 'st-btn secondary sm st-pp-add-btn';
         addBtn.textContent = '+ Add by User ID';
         addBtn.addEventListener('click', function () {
             var userId = prompt('Enter user ID:');
             if (!userId || !userId.trim()) return;
             userId = userId.trim();
-            if (personalityMap[userId]) { toast('Personality already exists for this user', 'error'); return; }
+            if (personalityMap[userId]) { toast('Personality already exists', 'error'); return; }
             var payload = { name: 'New User', description: '', background: '', expertise: [] };
             fetch('/api/user-personalities/' + userId, {
                 method: 'PUT',
@@ -1094,91 +1004,149 @@
             .then(function (result) {
                 if (result.error) { toast(result.error, 'error'); return; }
                 toast('User personality created', 'success');
-                fetch('/api/user-personalities').then(function (r) { return r.json(); })
-                    .then(function (fresh) { _renderUserPersonalitiesList(wrap, fresh, telegramUsers); });
+                _ppRefresh(pane, userId);
             })
             .catch(function (err) { toast('Failed: ' + err.message, 'error'); });
         });
-        addRow.appendChild(addBtn);
-        wrap.appendChild(addRow);
+        left.appendChild(addBtn);
     }
 
-    function _renderUnconfiguredUserCard(u, wrap, personalities, telegramUsers) {
-        var card = document.createElement('div');
-        card.className = 'st-up-card st-up-card-unconfigured';
+    function _ppPersonaItem(pane, p) {
+        var item = document.createElement('div');
+        item.className = 'st-pp-item' + (_ppState.selectedId === p.user_id ? ' active' : '');
+        item.dataset.id = p.user_id;
+        item.innerHTML = '<span class="st-pp-item-icon">\uD83D\uDC64</span>'
+            + '<span class="st-pp-item-name">' + esc(p.name || _userLabel(p)) + '</span>';
+        item.addEventListener('click', function () {
+            _ppState.selectedId = p.user_id;
+            _ppRenderLeft(pane);
+            _ppRenderRight(pane);
+        });
+        return item;
+    }
 
-        var hdr = document.createElement('div');
-        hdr.className = 'st-up-card-header';
-        var title = document.createElement('span');
-        title.className = 'st-up-card-title';
-        title.textContent = _userLabel(u);
-        hdr.appendChild(title);
+    function _ppSetupUser(pane, u) {
+        var payload = {
+            name: u.first_name || u.username || 'User ' + u.user_id,
+            description: '', background: '', expertise: []
+        };
+        fetch('/api/user-personalities/' + u.user_id, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (result) {
+            if (result.error) { toast(result.error, 'error'); return; }
+            toast('Profile created for ' + _userLabel(u), 'success');
+            _ppRefresh(pane, u.user_id);
+        })
+        .catch(function (err) { toast('Failed: ' + err.message, 'error'); });
+    }
 
-        var badge = document.createElement('span');
-        badge.className = 'st-up-badge-none';
-        badge.textContent = 'No profile';
-        hdr.appendChild(badge);
+    function _ppRefresh(pane, selectId) {
+        Promise.all([
+            fetch('/api/personality').then(function (r) { return r.json(); }),
+            fetch('/api/user-personalities').then(function (r) { return r.json(); }),
+            fetch('/api/telegram-users').then(function (r) { return r.json(); })
+        ])
+        .then(function (results) {
+            _ppState.agentData = results[0];
+            _ppState.userPersonalities = results[1];
+            _ppState.telegramUsers = results[2];
+            if (selectId !== undefined) _ppState.selectedId = selectId;
+            _ppRenderLeft(pane);
+            _ppRenderRight(pane);
+        });
+    }
 
-        var setupBtn = document.createElement('button');
-        setupBtn.className = 'st-btn sm primary';
-        setupBtn.textContent = 'Set Up';
-        setupBtn.addEventListener('click', function () {
-            var payload = {
-                name: u.first_name || u.username || 'User ' + u.user_id,
-                description: '',
-                background: '',
-                expertise: []
+    function _ppRenderRight(pane) {
+        var right = pane.querySelector('.st-pp-right');
+        right.innerHTML = '';
+
+        if (_ppState.selectedId === '__agent__') {
+            _ppRenderAgentEditor(right, pane);
+        } else {
+            var p = null;
+            _ppState.userPersonalities.forEach(function (up) {
+                if (up.user_id === _ppState.selectedId) p = up;
+            });
+            if (p) {
+                _ppRenderUserEditor(right, pane, p);
+            } else {
+                right.innerHTML = '<div class="st-personality-loading">Persona not found</div>';
+            }
+        }
+    }
+
+    function _ppRenderAgentEditor(container, pane) {
+        var data = _ppState.agentData;
+
+        var header = document.createElement('div');
+        header.className = 'st-pp-editor-header';
+        header.innerHTML = '<span class="st-pp-editor-title">Agent Personality</span>'
+            + '<span class="st-pp-editor-subtitle">Define the agent\'s default identity, background, and expertise areas.</span>';
+        container.appendChild(header);
+
+        var form = document.createElement('div');
+        form.className = 'st-pp-editor-form';
+
+        // Name
+        var nameInp = _ppFormField(form, 'Name', 'text', data.name || '', 'e.g. Captain Claw');
+
+        // Description
+        var descInp = _ppFormField(form, 'Description', 'textarea', data.description || '', '', 3);
+
+        // Background
+        var bgInp = _ppFormField(form, 'Background', 'textarea', data.background || '', '', 5);
+
+        // Expertise
+        var expInp = _ppFormField(form, 'Expertise', 'textarea', (data.expertise || []).join('\n'), 'One expertise per line', 8);
+
+        container.appendChild(form);
+
+        // Actions
+        var actions = document.createElement('div');
+        actions.className = 'st-personality-actions';
+        var saveBtn = document.createElement('button');
+        saveBtn.className = 'st-btn primary';
+        saveBtn.textContent = 'Save Personality';
+        saveBtn.addEventListener('click', function () {
+            var name = nameInp.value.trim();
+            if (!name) { toast('Name is required', 'error'); return; }
+            var body = {
+                name: name,
+                description: descInp.value.trim(),
+                background: bgInp.value.trim(),
+                expertise: expInp.value.split('\n').map(function (e) { return e.trim(); }).filter(function (e) { return e.length > 0; })
             };
-            fetch('/api/user-personalities/' + u.user_id, {
+            saveBtn.disabled = true; saveBtn.textContent = 'Saving...';
+            fetch('/api/personality', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
+                body: JSON.stringify(body)
             })
             .then(function (r) { return r.json(); })
             .then(function (result) {
-                if (result.error) { toast(result.error, 'error'); return; }
-                toast('Profile created for ' + _userLabel(u), 'success');
-                fetch('/api/user-personalities').then(function (r) { return r.json(); })
-                    .then(function (fresh) { _renderUserPersonalitiesList(wrap, fresh, telegramUsers); });
+                if (result.error) { toast(result.error, 'error'); }
+                else {
+                    toast('Personality saved', 'success');
+                    _ppState.agentData = result;
+                    _ppRenderLeft(pane);
+                }
             })
-            .catch(function (err) { toast('Failed: ' + err.message, 'error'); });
+            .catch(function (err) { toast('Failed: ' + err.message, 'error'); })
+            .finally(function () { saveBtn.disabled = false; saveBtn.textContent = 'Save Personality'; });
         });
-        hdr.appendChild(setupBtn);
-
-        card.appendChild(hdr);
-        return card;
+        actions.appendChild(saveBtn);
+        container.appendChild(actions);
     }
 
-    function _userLabel(p) {
-        var parts = [];
-        if (p.username) parts.push('@' + p.username);
-        if (p.first_name) parts.push(p.first_name);
-        if (parts.length === 0) parts.push(p.user_id);
-        return parts.join(' — ');
-    }
-
-    function _renderUserPersonalityCard(p, wrap, personalities, telegramUsers) {
-        var card = document.createElement('div');
-        card.className = 'st-up-card';
-
-        // Header
-        var hdr = document.createElement('div');
-        hdr.className = 'st-up-card-header';
-        var title = document.createElement('span');
-        title.className = 'st-up-card-title';
-        title.textContent = p.name + ' (' + _userLabel(p) + ')';
-        hdr.appendChild(title);
-
-        var toggleBtn = document.createElement('button');
-        toggleBtn.className = 'st-btn sm';
-        toggleBtn.textContent = 'Edit';
-        toggleBtn.addEventListener('click', function () {
-            var body = card.querySelector('.st-up-card-body');
-            var isOpen = body.style.display !== 'none';
-            body.style.display = isOpen ? 'none' : '';
-            toggleBtn.textContent = isOpen ? 'Edit' : 'Collapse';
-        });
-        hdr.appendChild(toggleBtn);
+    function _ppRenderUserEditor(container, pane, p) {
+        var header = document.createElement('div');
+        header.className = 'st-pp-editor-header';
+        header.innerHTML = '<span class="st-pp-editor-title">' + esc(_userLabel(p)) + '</span>'
+            + '<span class="st-pp-editor-subtitle">User profile — tells the agent who it is talking to.</span>';
 
         var delBtn = document.createElement('button');
         delBtn.className = 'st-btn sm danger';
@@ -1189,44 +1157,22 @@
                 .then(function (r) { return r.json(); })
                 .then(function () {
                     toast('User personality removed', 'success');
-                    // Refresh list.
-                    fetch('/api/user-personalities').then(function (r) { return r.json(); })
-                        .then(function (fresh) { _renderUserPersonalitiesList(wrap, fresh, telegramUsers); });
+                    _ppRefresh(pane, '__agent__');
                 })
                 .catch(function (err) { toast('Failed: ' + err.message, 'error'); });
         });
-        hdr.appendChild(delBtn);
-        card.appendChild(hdr);
+        header.appendChild(delBtn);
+        container.appendChild(header);
 
-        // Body (collapsed by default)
-        var body = document.createElement('div');
-        body.className = 'st-up-card-body';
-        body.style.display = 'none';
+        var form = document.createElement('div');
+        form.className = 'st-pp-editor-form';
 
-        var nameRow = _pField('Name', 'text');
-        var nameInp = nameRow.querySelector('input');
-        nameInp.value = p.name || '';
-        nameInp.placeholder = 'e.g. Toby McDev';
-        body.appendChild(nameRow);
+        var nameInp = _ppFormField(form, 'Name', 'text', p.name || '', 'e.g. Toby McDev');
+        var descInp = _ppFormField(form, 'Description', 'textarea', p.description || '', '', 3);
+        var bgInp = _ppFormField(form, 'Background', 'textarea', p.background || '', '', 5);
+        var expInp = _ppFormField(form, 'Expertise', 'textarea', (p.expertise || []).join('\n'), 'One expertise per line', 8);
 
-        var descRow = _pField('Description', 'textarea');
-        var descInp = descRow.querySelector('textarea');
-        descInp.value = p.description || '';
-        descInp.rows = 3;
-        body.appendChild(descRow);
-
-        var bgRow = _pField('Background', 'textarea');
-        var bgInp = bgRow.querySelector('textarea');
-        bgInp.value = p.background || '';
-        bgInp.rows = 3;
-        body.appendChild(bgRow);
-
-        var expRow = _pField('Expertise', 'textarea');
-        var expInp = expRow.querySelector('textarea');
-        expInp.value = (p.expertise || []).join('\n');
-        expInp.rows = 4;
-        expInp.placeholder = 'One expertise per line';
-        body.appendChild(expRow);
+        container.appendChild(form);
 
         var actions = document.createElement('div');
         actions.className = 'st-personality-actions';
@@ -1241,8 +1187,7 @@
                 expertise: expInp.value.split('\n').map(function (e) { return e.trim(); }).filter(function (e) { return e.length > 0; })
             };
             if (!payload.name) { toast('Name is required', 'error'); return; }
-            saveBtn.disabled = true;
-            saveBtn.textContent = 'Saving...';
+            saveBtn.disabled = true; saveBtn.textContent = 'Saving...';
             fetch('/api/user-personalities/' + p.user_id, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
@@ -1253,17 +1198,94 @@
                 if (result.error) { toast(result.error, 'error'); }
                 else {
                     toast('Saved personality for ' + _userLabel(p), 'success');
-                    title.textContent = (result.name || p.name) + ' (' + _userLabel(p) + ')';
+                    _ppRefresh(pane);
                 }
             })
             .catch(function (err) { toast('Failed: ' + err.message, 'error'); })
             .finally(function () { saveBtn.disabled = false; saveBtn.textContent = 'Save'; });
         });
         actions.appendChild(saveBtn);
-        body.appendChild(actions);
+        container.appendChild(actions);
+    }
 
-        card.appendChild(body);
-        return card;
+    // Build a form field row with optional rephrase button for textareas.
+    // Returns the input/textarea element.
+    function _ppFormField(container, label, type, value, placeholder, rows) {
+        var row = document.createElement('div');
+        row.className = 'st-pp-field';
+
+        var lbl = document.createElement('label');
+        lbl.className = 'st-pp-field-label';
+        lbl.textContent = label;
+        row.appendChild(lbl);
+
+        var ctrlWrap = document.createElement('div');
+        ctrlWrap.className = 'st-pp-field-ctrl';
+
+        var el;
+        if (type === 'textarea') {
+            el = document.createElement('textarea');
+            el.className = 'st-input st-textarea';
+            el.rows = rows || 3;
+        } else {
+            el = document.createElement('input');
+            el.className = 'st-input';
+            el.type = type || 'text';
+        }
+        el.value = value;
+        if (placeholder) el.placeholder = placeholder;
+        ctrlWrap.appendChild(el);
+
+        // Rephrase button for textareas
+        if (type === 'textarea') {
+            var fieldName = label.toLowerCase(); // description, background, expertise
+            var rephraseBtn = document.createElement('button');
+            rephraseBtn.className = 'st-btn sm st-pp-rephrase-btn';
+            rephraseBtn.innerHTML = '\u2728 Rephrase & Enrich';
+            rephraseBtn.title = 'Use AI to rephrase and enrich this content';
+            rephraseBtn.addEventListener('click', function () {
+                var text = el.value.trim();
+                if (!text) { toast('Nothing to rephrase', 'error'); return; }
+                // Find the name field in the same form
+                var formEl = row.closest('.st-pp-editor-form');
+                var nameInput = formEl ? formEl.querySelector('input.st-input') : null;
+                var personaName = nameInput ? nameInput.value.trim() : '';
+
+                rephraseBtn.disabled = true;
+                rephraseBtn.innerHTML = '\u23F3 Rephrasing...';
+                el.classList.add('st-pp-rephrasing');
+
+                fetch('/api/personality/rephrase', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ field: fieldName, text: text, name: personaName })
+                })
+                .then(function (r) { return r.json(); })
+                .then(function (result) {
+                    if (result.error) { toast(result.error, 'error'); }
+                    else if (result.text) { el.value = result.text; }
+                })
+                .catch(function (err) { toast('Rephrase failed: ' + err.message, 'error'); })
+                .finally(function () {
+                    rephraseBtn.disabled = false;
+                    rephraseBtn.innerHTML = '\u2728 Rephrase & Enrich';
+                    el.classList.remove('st-pp-rephrasing');
+                });
+            });
+            ctrlWrap.appendChild(rephraseBtn);
+        }
+
+        row.appendChild(ctrlWrap);
+        container.appendChild(row);
+        return el;
+    }
+
+    function _userLabel(p) {
+        var parts = [];
+        if (p.username) parts.push('@' + p.username);
+        if (p.first_name) parts.push(p.first_name);
+        if (parts.length === 0) parts.push(p.user_id);
+        return parts.join(' \u2014 ');
     }
 
 

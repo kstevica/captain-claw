@@ -537,6 +537,10 @@ class WebServer:
         from captain_claw.web.rest_personality import list_telegram_users
         return await list_telegram_users(self, request)
 
+    async def _rephrase_personality_field(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_personality import rephrase_personality_field
+        return await rephrase_personality_field(self, request)
+
     # Scripts
     async def _list_scripts(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_entities import list_scripts
@@ -1077,6 +1081,7 @@ class WebServer:
         app.router.add_put("/api/user-personalities/{user_id}", self._put_user_personality)
         app.router.add_delete("/api/user-personalities/{user_id}", self._delete_user_personality)
         app.router.add_get("/api/telegram-users", self._list_telegram_users)
+        app.router.add_post("/api/personality/rephrase", self._rephrase_personality_field)
         app.router.add_get("/api/workflow-browser", self._list_workflow_outputs)
         app.router.add_get("/api/workflow-browser/output/{filename}", self._get_workflow_output)
         app.router.add_get("/api/files", self._list_files)

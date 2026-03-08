@@ -170,6 +170,83 @@ async def delete_user_personality(
     return web.json_response({"ok": True})
 
 
+async def rephrase_personality_field(
+    server: WebServer, request: web.Request
+) -> web.Response:
+    """POST /api/personality/rephrase — rephrase and enrich a personality field.
+
+    Body: ``{"field": "description|background|expertise", "text": "...", "name": "..."}``
+    Returns ``{"text": "..."}`` with the rephrased content.
+    """
+    from captain_claw.llm import Message
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    field_name = str(body.get("field", "")).strip()
+    text = str(body.get("text", "")).strip()
+    persona_name = str(body.get("name", "")).strip() or "the persona"
+
+    if not text:
+        return web.json_response({"error": "Empty text"}, status=400)
+
+    if field_name not in ("description", "background", "expertise"):
+        return web.json_response({"error": "Invalid field"}, status=400)
+
+    # Build a focused prompt for rephrasing/enriching.
+    if field_name == "expertise":
+        system_msg = (
+            "You are a writing assistant. The user has a list of expertise areas "
+            f"for a persona named '{persona_name}'. Rewrite and enrich the list: "
+            "make each item more specific and descriptive, add 1-2 related areas "
+            "they might also have, and keep it as a newline-separated list "
+            "(one expertise per line, no bullets or numbers). "
+            "Keep it concise — each item should be one short phrase."
+        )
+    elif field_name == "description":
+        system_msg = (
+            "You are a writing assistant. The user has a short description "
+            f"for a persona named '{persona_name}'. Rewrite it to be more vivid, "
+            "specific, and engaging. Keep it to 1-3 sentences. "
+            "Do not add markdown formatting."
+        )
+    else:  # background
+        system_msg = (
+            "You are a writing assistant. The user has a background section "
+            f"for a persona named '{persona_name}'. Rewrite it to be richer and "
+            "more detailed while staying concise (2-4 sentences). "
+            "Add relevant context that would help an AI assistant understand "
+            "this persona better. Do not add markdown formatting."
+        )
+
+    provider = server.agent.provider if server.agent else None
+    if provider is None:
+        from captain_claw.llm import get_provider
+        provider = get_provider()
+
+    messages = [
+        Message(role="system", content=system_msg),
+        Message(role="user", content=text),
+    ]
+
+    try:
+        import asyncio as _asyncio
+
+        response = await _asyncio.wait_for(
+            provider.complete(messages=messages, tools=None, max_tokens=1000),
+            timeout=30.0,
+        )
+        result = str(getattr(response, "content", "") or "").strip()
+        if not result:
+            result = text
+    except Exception:
+        result = text
+
+    return web.json_response({"text": result})
+
+
 async def list_telegram_users(
     server: WebServer, request: web.Request
 ) -> web.Response:
