@@ -1106,6 +1106,7 @@ class AgentContextMixin:
         "shell": ["shell"],
         "read": ["read"],
         "write": ["write"],
+        "edit": ["edit"],
         "glob": ["glob"],
         "web_fetch": ["web_fetch", "web_get"],
         "web_search": ["web_search"],
@@ -1138,6 +1139,7 @@ class AgentContextMixin:
         from captain_claw.tools import (
             BrowserTool,
             DocxExtractTool,
+            EditTool,
             GlobTool,
             GoogleCalendarTool,
             GoogleDriveTool,
@@ -1178,6 +1180,8 @@ class AgentContextMixin:
                 self.tools.register(ReadTool())
             elif tool_name == "write":
                 self.tools.register(WriteTool())
+            elif tool_name == "edit":
+                self.tools.register(EditTool())
             elif tool_name == "glob":
                 self.tools.register(GlobTool())
             elif tool_name == "web_fetch":

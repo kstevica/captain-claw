@@ -277,6 +277,15 @@ class GwsToolConfig(BaseModel):
     binary_path: str = ""  # custom path to the gws binary; empty = find in PATH
 
 
+class EditToolConfig(BaseModel):
+    """Edit tool configuration."""
+
+    max_file_bytes: int = 500_000  # 500 KB max file size for editing
+    backup_enabled: bool = True
+    backup_dir: str = ".captain-claw/backups"  # relative to runtime_base_path
+    max_backups: int = 5
+
+
 class BrowserToolConfig(BaseModel):
     """Browser automation tool configuration."""
 
@@ -333,6 +342,7 @@ class ToolsConfig(BaseModel):
         "datastore",
         "personality",
         "termux",
+        "edit",
         "browser",
     ]
     shell: ShellToolConfig = Field(default_factory=ShellToolConfig)
@@ -346,12 +356,13 @@ class ToolsConfig(BaseModel):
     send_mail: SendMailToolConfig = Field(default_factory=SendMailToolConfig)
     typesense: TypesenseToolConfig = Field(default_factory=TypesenseToolConfig)
     gws: GwsToolConfig = Field(default_factory=GwsToolConfig)
+    edit: EditToolConfig = Field(default_factory=EditToolConfig)
     browser: BrowserToolConfig = Field(default_factory=BrowserToolConfig)
-    require_confirmation: list[str] = ["shell", "write"]
+    require_confirmation: list[str] = ["shell", "write", "edit"]
     plugin_dirs: list[str] = ["skills/tools"]
 
     # These tools are always available — re-inject if removed by user.
-    _ALWAYS_ENABLED: frozenset[str] = frozenset({"personality", "botport", "playbooks", "browser", "datastore", "direct_api"})
+    _ALWAYS_ENABLED: frozenset[str] = frozenset({"read", "write", "edit", "personality", "botport", "playbooks", "browser", "datastore", "direct_api"})
 
     @model_validator(mode="after")
     def _ensure_always_enabled(self) -> "ToolsConfig":

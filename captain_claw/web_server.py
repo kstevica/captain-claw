@@ -919,6 +919,10 @@ class WebServer:
         from captain_claw.web.rest_onboarding import post_onboarding_save
         return await post_onboarding_save(self, request)
 
+    async def _get_codex_auth(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_onboarding import get_codex_auth
+        return await get_codex_auth(self, request)
+
     # Sessions REST
     async def _get_session_detail(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_sessions import get_session_detail
@@ -1136,6 +1140,7 @@ class WebServer:
         app.router.add_get("/api/onboarding/status", self._get_onboarding_status)
         app.router.add_post("/api/onboarding/validate", self._post_onboarding_validate)
         app.router.add_post("/api/onboarding/save", self._post_onboarding_save)
+        app.router.add_get("/api/onboarding/codex-auth", self._get_codex_auth)
         app.router.add_get("/auth/google/login", self._auth_google_login)
         app.router.add_get("/auth/google/callback", self._auth_google_callback)
         app.router.add_get("/auth/google/status", self._auth_google_status)

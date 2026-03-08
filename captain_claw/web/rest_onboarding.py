@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
@@ -15,6 +17,8 @@ from captain_claw.onboarding import (
 
 if TYPE_CHECKING:
     from captain_claw.web_server import WebServer
+
+_CODEX_AUTH_PATH = Path("~/.codex/auth.json").expanduser()
 
 
 async def get_onboarding_status(server: WebServer, request: web.Request) -> web.Response:
@@ -45,6 +49,30 @@ async def post_onboarding_validate(server: WebServer, request: web.Request) -> w
         base_url=base_url,
     )
     return web.json_response({"ok": ok, "error": error})
+
+
+async def get_codex_auth(server: WebServer, request: web.Request) -> web.Response:
+    """GET /api/onboarding/codex-auth — read OpenAI OAuth tokens from ~/.codex/auth.json."""
+    if not _CODEX_AUTH_PATH.exists():
+        return web.json_response({"ok": False, "error": "~/.codex/auth.json not found. Install and authenticate with Codex CLI first."})
+
+    try:
+        data = json.loads(_CODEX_AUTH_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return web.json_response({"ok": False, "error": f"Failed to read auth.json: {exc}"})
+
+    tokens = data.get("tokens") or {}
+    access_token = tokens.get("access_token", "")
+    account_id = tokens.get("account_id", "")
+
+    if not access_token:
+        return web.json_response({"ok": False, "error": "No access_token found in ~/.codex/auth.json"})
+
+    return web.json_response({
+        "ok": True,
+        "access_token": access_token,
+        "account_id": account_id,
+    })
 
 
 async def post_onboarding_save(server: WebServer, request: web.Request) -> web.Response:

@@ -22,8 +22,22 @@
             </div>
         </div>
 
-        <!-- Step 1: Provider -->
+        <!-- Step 1: API Keys -->
         <div class="ob-step" data-step="1">
+            <h2>API Keys</h2>
+            <p class="ob-desc">Enter your provider keys below. You can skip any &mdash; environment variables work too.</p>
+            <div class="ob-api-keys" id="api-keys-list"></div>
+            <div class="ob-actions">
+                <button class="ob-btn ob-btn-secondary" onclick="OB.prev()">Back</button>
+                <div>
+                    <button class="ob-skip" onclick="OB.next()">Skip</button>
+                    <button class="ob-btn ob-btn-primary" onclick="OB.next()" style="margin-left:8px;">Next</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 2: Provider -->
+        <div class="ob-step" data-step="2">
             <h2>Choose a Model Provider</h2>
             <p class="ob-desc">Pick the provider for your primary model. You can add more later.</p>
             <div class="ob-providers" id="provider-grid"></div>
@@ -33,8 +47,8 @@
             </div>
         </div>
 
-        <!-- Step 2: Model + Key -->
-        <div class="ob-step" data-step="2">
+        <!-- Step 3: Model + Key -->
+        <div class="ob-step" data-step="3">
             <h2>Model &amp; API Key</h2>
             <p class="ob-desc">Configure your default model and authentication.</p>
             <div class="ob-field">
@@ -65,8 +79,8 @@
             </div>
         </div>
 
-        <!-- Step 3: Validate -->
-        <div class="ob-step" data-step="3">
+        <!-- Step 4: Validate -->
+        <div class="ob-step" data-step="4">
             <h2>Testing Connection</h2>
             <div class="ob-validation" id="validation-area">
                 <div class="ob-spinner" id="val-spinner"></div>
@@ -78,8 +92,8 @@
             </div>
         </div>
 
-        <!-- Step 4: Extra Models -->
-        <div class="ob-step" data-step="4">
+        <!-- Step 5: Extra Models -->
+        <div class="ob-step" data-step="5">
             <h2>Additional Models</h2>
             <p class="ob-desc">Captain Claw comes pre-configured with 12 models across OpenAI, Anthropic, and Gemini (including image generation, OCR, and vision). You can manage them in Settings.</p>
             <p class="ob-desc">Need more? Add custom models below, or skip to continue.</p>
@@ -94,8 +108,8 @@
             </div>
         </div>
 
-        <!-- Step 5: Guards -->
-        <div class="ob-step" data-step="5">
+        <!-- Step 6: Guards -->
+        <div class="ob-step" data-step="6">
             <h2>Safety Guards</h2>
             <p class="ob-desc">Guards check input, output, and tool calls before execution. Recommended for shared or production environments.</p>
             <div class="ob-toggle-row">
@@ -111,8 +125,8 @@
             </div>
         </div>
 
-        <!-- Step 6: Telegram -->
-        <div class="ob-step" data-step="6">
+        <!-- Step 7: Telegram -->
+        <div class="ob-step" data-step="7">
             <h2>Telegram Bot</h2>
             <p class="ob-desc">Connect a Telegram bot to chat with Captain Claw from your phone. You can set this up later in Settings.</p>
             <div class="ob-toggle-row">
@@ -139,8 +153,8 @@
             </div>
         </div>
 
-        <!-- Step 7: Summary + Save -->
-        <div class="ob-step" data-step="7">
+        <!-- Step 8: Summary + Save -->
+        <div class="ob-step" data-step="8">
             <h2>Ready to Go</h2>
             <p class="ob-desc">Review your setup and launch Captain Claw.</p>
             <table class="ob-summary-table" id="summary-table"></table>
@@ -153,8 +167,8 @@
             </p>
         </div>
 
-        <!-- Step 8: Done -->
-        <div class="ob-step" data-step="8">
+        <!-- Step 9: Done -->
+        <div class="ob-step" data-step="9">
             <div class="ob-done">
                 <div class="ob-check">&#10003;</div>
                 <h2>Setup Complete</h2>

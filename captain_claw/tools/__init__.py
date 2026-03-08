@@ -11,6 +11,7 @@ from captain_claw.tools.registry import (
 from captain_claw.tools.shell import ShellTool
 from captain_claw.tools.read import ReadTool
 from captain_claw.tools.write import WriteTool
+from captain_claw.tools.edit import EditTool
 from captain_claw.tools.glob import GlobTool
 from captain_claw.tools.web_fetch import WebFetchTool, WebGetTool
 from captain_claw.tools.web_search import WebSearchTool
@@ -51,6 +52,7 @@ __all__ = [
     "ShellTool",
     "ReadTool",
     "WriteTool",
+    "EditTool",
     "GlobTool",
     "WebFetchTool",
     "WebGetTool",

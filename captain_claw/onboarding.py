@@ -307,7 +307,8 @@ def save_onboarding_config(
         provider, model, api_key, base_url, workspace_path,
         enable_guards, allowed_models (list of dicts with
         provider/model/api_key fields), telegram_enabled,
-        telegram_token.
+        telegram_token, provider_keys (dict of provider→key),
+        openai_headers (list of header strings).
 
     Returns the config file path.
     """
@@ -357,6 +358,24 @@ def save_onboarding_config(
         cfg.model.allowed = [
             AllowedModel(**entry) for entry in _DEFAULT_ALLOWED_MODELS
         ]
+
+    # Provider keys (from the new API Keys onboarding step)
+    pk = values.get("provider_keys") or {}
+    if pk.get("openai"):
+        cfg.provider_keys.openai = pk["openai"]
+    if pk.get("anthropic"):
+        cfg.provider_keys.anthropic = pk["anthropic"]
+    if pk.get("gemini"):
+        cfg.provider_keys.gemini = pk["gemini"]
+    if pk.get("xai"):
+        cfg.provider_keys.xai = pk["xai"]
+    if pk.get("brave"):
+        cfg.provider_keys.brave = pk["brave"]
+
+    # OpenAI OAuth headers (from Codex CLI import)
+    openai_headers = values.get("openai_headers") or []
+    if openai_headers:
+        cfg.provider_keys.openai_headers = list(openai_headers)
 
     # Telegram
     if "telegram_enabled" in values:
