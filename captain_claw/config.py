@@ -284,8 +284,8 @@ class BrowserToolConfig(BaseModel):
     headless: bool = True
     viewport_width: int = 1280
     viewport_height: int = 720
-    screenshot_max_pixels: int = 1568  # longest edge cap before sending to vision LLM
-    screenshot_jpeg_quality: int = 85
+    screenshot_max_pixels: int = 800  # longest edge cap before sending to vision LLM
+    screenshot_jpeg_quality: int = 40
     user_agent: str = ""  # empty = Playwright default
     default_wait_seconds: float = 2.0
     max_session_duration_seconds: int = 1800  # 30 min auto-close safety
