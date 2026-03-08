@@ -155,6 +155,7 @@ async def _chatgpt_responses_vision(
 
     payload = {
         "model": _normalize_chatgpt_model(model),
+        "instructions": prompt,
         "input": [
             {
                 "type": "message",
