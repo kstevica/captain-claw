@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import io
+import json
 import mimetypes
 import shutil
 import subprocess
@@ -133,6 +134,93 @@ def _maybe_resize_image(
     return image_bytes, ""
 
 
+async def _chatgpt_responses_vision(
+    headers: dict[str, str],
+    model: str,
+    prompt: str,
+    b64_image: str,
+    mime: str,
+    base_url: str = "https://chatgpt.com/backend-api/codex/responses",
+    timeout: float = 120.0,
+) -> str:
+    """Call the ChatGPT Responses API directly with an image input.
+
+    Used when OpenAI provider is configured with bearer/OAuth headers
+    (Codex auth) which cannot be used with the standard OpenAI API.
+    Returns the extracted text content.
+    """
+    import httpx
+
+    from captain_claw.llm import _normalize_chatgpt_model
+
+    payload = {
+        "model": _normalize_chatgpt_model(model),
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                    {"type": "input_image", "image_url": f"data:{mime};base64,{b64_image}"},
+                ],
+            }
+        ],
+        "store": False,
+        "stream": True,
+    }
+
+    request_headers = {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+    }
+    request_headers.update(headers)
+
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        collected: list[str] = []
+        async with client.stream("POST", base_url, json=payload, headers=request_headers) as response:
+            if not response.is_success:
+                error_body = await response.aread()
+                raise RuntimeError(
+                    f"ChatGPT Responses API error {response.status_code}: "
+                    f"{error_body.decode(errors='replace')}"
+                )
+            async for line in response.aiter_lines():
+                collected.append(line)
+
+    # Parse SSE events and extract text
+    content_parts: list[str] = []
+    for raw_line in collected:
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("data: "):
+            data_str = stripped[6:]
+        elif stripped.startswith("data:"):
+            data_str = stripped[5:]
+        else:
+            continue
+        try:
+            evt = json.loads(data_str)
+        except json.JSONDecodeError:
+            continue
+
+        etype = evt.get("type", "")
+        if etype == "response.output_text.delta":
+            content_parts.append(str(evt.get("delta", "")))
+        elif etype == "response.completed":
+            # Extract from completed event
+            resp_data = evt.get("response") or evt
+            for item in resp_data.get("output", []) or []:
+                if item.get("type") == "message":
+                    for part in item.get("content", []) or []:
+                        text = part.get("text", "")
+                        if text:
+                            content_parts.append(str(text))
+            break  # completed is final
+
+    return "".join(content_parts)
+
+
 class _BaseImageLLMTool(Tool):
     """Shared base for tools that send an image to a vision-capable LLM.
 
@@ -248,50 +336,65 @@ class _BaseImageLLMTool(Tool):
             b64_data = base64.b64encode(image_bytes).decode("ascii")
             mime = resized_mime or mimetypes.guess_type(str(file_path))[0] or "image/png"
 
-            call_kwargs: dict[str, Any] = {
-                "model": model_name,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": effective_prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{mime};base64,{b64_data}",
-                                },
-                            },
-                        ],
-                    }
-                ],
-                "timeout": int(self.timeout_seconds),
-                "drop_params": True,
-            }
-            if api_key:
-                call_kwargs["api_key"] = api_key
-            if extra_headers:
-                call_kwargs["extra_headers"] = extra_headers
-            base_url = str(getattr(model_cfg, "base_url", "") or "").strip()
-            if base_url:
-                call_kwargs["api_base"] = base_url
-
-            response = await asyncio.to_thread(litellm_completion, **call_kwargs)
-
-            # Extract text from response.
-            choices = getattr(response, "choices", None)
-            if not choices:
-                return ToolResult(success=False, error="Vision model returned no choices.")
-            message = getattr(choices[0], "message", None)
-            raw_content = getattr(message, "content", "") if message else ""
-            if isinstance(raw_content, list):
-                text_parts = []
-                for part in raw_content:
-                    t = getattr(part, "text", "") if not isinstance(part, dict) else part.get("text", "")
-                    if t:
-                        text_parts.append(t)
-                extracted = "\n".join(text_parts)
+            # Route: OpenAI + bearer headers → ChatGPT Responses API directly,
+            # everything else → litellm Chat Completions.
+            if provider == "openai" and extra_headers:
+                base_url = (
+                    str(getattr(model_cfg, "base_url", "") or "").strip()
+                    or "https://chatgpt.com/backend-api/codex/responses"
+                )
+                extracted = await _chatgpt_responses_vision(
+                    headers=extra_headers,
+                    model=model_cfg.model,
+                    prompt=effective_prompt,
+                    b64_image=b64_data,
+                    mime=mime,
+                    base_url=base_url,
+                    timeout=float(self.timeout_seconds),
+                )
             else:
-                extracted = str(raw_content or "")
+                call_kwargs: dict[str, Any] = {
+                    "model": model_name,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": effective_prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:{mime};base64,{b64_data}",
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                    "timeout": int(self.timeout_seconds),
+                    "drop_params": True,
+                }
+                if api_key:
+                    call_kwargs["api_key"] = api_key
+                base_url = str(getattr(model_cfg, "base_url", "") or "").strip()
+                if base_url:
+                    call_kwargs["api_base"] = base_url
+
+                response = await asyncio.to_thread(litellm_completion, **call_kwargs)
+
+                # Extract text from response.
+                choices = getattr(response, "choices", None)
+                if not choices:
+                    return ToolResult(success=False, error="Vision model returned no choices.")
+                message = getattr(choices[0], "message", None)
+                raw_content = getattr(message, "content", "") if message else ""
+                if isinstance(raw_content, list):
+                    text_parts = []
+                    for part in raw_content:
+                        t = getattr(part, "text", "") if not isinstance(part, dict) else part.get("text", "")
+                        if t:
+                            text_parts.append(t)
+                    extracted = "\n".join(text_parts)
+                else:
+                    extracted = str(raw_content or "")
 
             if not extracted.strip():
                 return ToolResult(

@@ -169,34 +169,6 @@ class BrowserVision:
             b64_data = base64.b64encode(image_bytes).decode("ascii")
             mime = resized_mime or "image/jpeg"
 
-            call_kwargs: dict[str, Any] = {
-                "model": model_name,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": effective_prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{mime};base64,{b64_data}",
-                                },
-                            },
-                        ],
-                    }
-                ],
-                "timeout": 120,
-                "drop_params": True,
-            }
-
-            if api_key:
-                call_kwargs["api_key"] = api_key
-            if extra_headers:
-                call_kwargs["extra_headers"] = extra_headers
-            base_url = str(getattr(model_cfg, "base_url", "") or "").strip()
-            if base_url:
-                call_kwargs["api_base"] = base_url
-
             log.info(
                 "Vision analysis requested",
                 model=model_cfg.model,
@@ -204,30 +176,75 @@ class BrowserVision:
                 prompt=effective_prompt[:80],
             )
 
-            response = await asyncio.to_thread(litellm_completion, **call_kwargs)
+            # Route: OpenAI + bearer headers → ChatGPT Responses API directly,
+            # everything else → litellm Chat Completions.
+            if provider == "openai" and extra_headers:
+                from captain_claw.tools.image_ocr import _chatgpt_responses_vision
 
-            # Extract text from response (same as image_ocr.py)
-            choices = getattr(response, "choices", None)
-            if not choices:
-                log.warning("Vision model returned no choices")
-                return ""
-
-            message = getattr(choices[0], "message", None)
-            raw_content = getattr(message, "content", "") if message else ""
-
-            if isinstance(raw_content, list):
-                text_parts = []
-                for part in raw_content:
-                    t = (
-                        getattr(part, "text", "")
-                        if not isinstance(part, dict)
-                        else part.get("text", "")
-                    )
-                    if t:
-                        text_parts.append(t)
-                extracted = "\n".join(text_parts)
+                resp_base_url = (
+                    str(getattr(model_cfg, "base_url", "") or "").strip()
+                    or "https://chatgpt.com/backend-api/codex/responses"
+                )
+                extracted = await _chatgpt_responses_vision(
+                    headers=extra_headers,
+                    model=model_cfg.model,
+                    prompt=effective_prompt,
+                    b64_image=b64_data,
+                    mime=mime,
+                    base_url=resp_base_url,
+                    timeout=120.0,
+                )
             else:
-                extracted = str(raw_content or "")
+                call_kwargs: dict[str, Any] = {
+                    "model": model_name,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": effective_prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:{mime};base64,{b64_data}",
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                    "timeout": 120,
+                    "drop_params": True,
+                }
+
+                if api_key:
+                    call_kwargs["api_key"] = api_key
+                base_url = str(getattr(model_cfg, "base_url", "") or "").strip()
+                if base_url:
+                    call_kwargs["api_base"] = base_url
+
+                response = await asyncio.to_thread(litellm_completion, **call_kwargs)
+
+                # Extract text from response
+                choices = getattr(response, "choices", None)
+                if not choices:
+                    log.warning("Vision model returned no choices")
+                    return ""
+
+                message = getattr(choices[0], "message", None)
+                raw_content = getattr(message, "content", "") if message else ""
+
+                if isinstance(raw_content, list):
+                    text_parts = []
+                    for part in raw_content:
+                        t = (
+                            getattr(part, "text", "")
+                            if not isinstance(part, dict)
+                            else part.get("text", "")
+                        )
+                        if t:
+                            text_parts.append(t)
+                    extracted = "\n".join(text_parts)
+                else:
+                    extracted = str(raw_content or "")
 
             log.info("Vision analysis completed", chars=len(extracted))
             return extracted.strip()
