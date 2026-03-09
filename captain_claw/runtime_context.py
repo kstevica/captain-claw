@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -47,6 +48,10 @@ class RuntimeContext:
     last_completed_at: datetime | None = None
     last_next_steps: list[dict[str, str]] = field(default_factory=list)
 
+    # Callback invoked when a cron job produces assistant output.
+    # Signature: (session_id: str, text: str) -> Awaitable[None]
+    on_cron_output: Callable[[str, str], Awaitable[None]] | None = None
+
     telegram: PlatformState = field(default_factory=lambda: PlatformState(
         name="telegram",
         state_key_approved="telegram_approved_users",
@@ -82,7 +87,7 @@ class RuntimeContext:
             "skill",
             "Run/search/install skill: /skill <name> [args] | /skill search <criteria> | /skill install <github-url> | /skill install <skill-name> [install-id]",
         ),
-        ("cron", "Run one-off cron prompt"),
+        ("cron", "Manage cron jobs: list, add, pause, resume, run"),
         ("todo", "Manage to-do items"),
         ("contacts", "Manage address book contacts"),
         ("scripts", "Manage script memory"),

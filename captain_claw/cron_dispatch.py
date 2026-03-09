@@ -231,6 +231,13 @@ async def run_script_or_tool_in_session(
                 f"[CRON] {trigger} {kind} run complete: {file_path}",
                 trigger=trigger, kind=kind, session_id=target_session.id,
             )
+            # Deliver output to platform (e.g. Telegram).
+            if ctx.on_cron_output:
+                try:
+                    summary = shell_output.strip()[:2000] or "Cron job completed."
+                    await ctx.on_cron_output(target_session.id, summary)
+                except Exception:
+                    pass
             if agent.session:
                 done_note = f"[CRON] {trigger} {kind} complete: {file_path}"
                 agent.session.add_message(

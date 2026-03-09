@@ -264,7 +264,7 @@ async def _handle_telegram_message(server: WebServer, message: TelegramMessage) 
             await _tg_send(
                 server, message.chat_id,
                 "Send any text to chat with your session.\n"
-                "Commands: /clear, /history, /compact, /config, /session\n"
+                "Commands: /clear, /history, /compact, /config, /session, /cron\n"
                 "Each Telegram user has a dedicated session.",
                 reply_to_message_id=message.message_id,
             )
@@ -348,6 +348,13 @@ async def _handle_telegram_callback_query(server: WebServer, cbq: TelegramCallba
 
         if not action_text:
             return
+
+        # Echo the selected action back so the user sees what prompt
+        # is being executed (Telegram hides the button text after click).
+        try:
+            await bridge.send_message(cbq.chat_id, f"*Action:* {action_text}")
+        except Exception:
+            pass
 
         # Get or create the user agent and process the action.
         user_agent = await _tg_get_or_create_agent(server, TelegramMessage(
@@ -534,6 +541,9 @@ async def execute_telegram_command(
             from captain_claw.web.slash_commands import handle_apis_command
             return await handle_apis_command(server, args.strip())
 
+        if cmd in ("/cron",):
+            return await _tg_handle_cron_command(server, args.strip(), user_agent)
+
         if cmd in ("/orchestrate",):
             return None
 
@@ -620,6 +630,160 @@ async def _tg_handle_session_subcommand(
         return "\n".join(lines)
 
     return f"Unknown session subcommand: {subcmd}"
+
+
+async def _tg_handle_cron_command(
+    server: WebServer, args: str, user_agent: Agent,
+) -> str:
+    """Handle /cron subcommands for Telegram."""
+    from captain_claw.cron import compute_next_run, schedule_to_text, to_utc_iso
+    from captain_claw.cron_dispatch import (
+        cron_monitor_event,
+        execute_cron_job,
+        parse_cron_add_args,
+    )
+
+    sm = user_agent.session_manager
+    session = user_agent.session
+
+    if not args:
+        return (
+            "Usage:\n"
+            "/cron list\n"
+            "/cron add every <Nm|Nh> <task>\n"
+            "/cron pause <#index>\n"
+            "/cron resume <#index>\n"
+            "/cron remove <#index>\n"
+            "/cron run <#index>"
+        )
+
+    parts = args.split(None, 1)
+    subcmd = parts[0].lower()
+    subargs = parts[1].strip() if len(parts) > 1 else ""
+
+    # ── list ──
+    if subcmd in ("list", "ls"):
+        jobs = await sm.list_cron_jobs(limit=200, active_only=False)
+        # Filter to jobs belonging to this user's session.
+        if session:
+            jobs = [j for j in jobs if j.session_id == session.id]
+        if not jobs:
+            return "No cron jobs."
+        lines: list[str] = []
+        for idx, job in enumerate(jobs, 1):
+            sched_text = schedule_to_text(job.schedule) if isinstance(job.schedule, dict) else "?"
+            status = job.last_status or "pending"
+            enabled_tag = "" if job.enabled else " [paused]"
+            kind = job.kind
+            payload_summary = ""
+            if kind == "prompt":
+                payload_summary = str(job.payload.get("text", ""))[:60]
+            elif kind in ("script", "tool"):
+                payload_summary = str(job.payload.get("path", ""))[:60]
+            elif kind == "orchestrate":
+                payload_summary = str(job.payload.get("workflow", ""))[:60]
+            lines.append(
+                f"#{idx} [{kind}] {sched_text}{enabled_tag} ({status})\n  {payload_summary}"
+            )
+        return "\n".join(lines)
+
+    # ── add ──
+    if subcmd == "add":
+        if not session:
+            return "No active session."
+        if not subargs:
+            return "Usage: /cron add every <Nm|Nh> <task>"
+        try:
+            schedule, kind, payload = parse_cron_add_args(subargs)
+        except ValueError as e:
+            return str(e)
+        next_run_at_iso = to_utc_iso(compute_next_run(schedule))
+        job = await sm.create_cron_job(
+            kind=kind, payload=payload, schedule=schedule,
+            session_id=session.id, next_run_at=next_run_at_iso, enabled=True,
+        )
+        if server._runtime_ctx:
+            await cron_monitor_event(
+                server._runtime_ctx, "job_added", history_job_id=job.id,
+                job_id=job.id, session_id=job.session_id, kind=job.kind,
+                schedule=schedule_to_text(schedule), next_run_at=next_run_at_iso,
+            )
+        return (
+            f"Cron job added: {job.id}\n"
+            f"Kind: {kind}, Schedule: {schedule_to_text(schedule)}\n"
+            f"Next run: {next_run_at_iso}"
+        )
+
+    # ── remove ──
+    if subcmd in ("remove", "rm", "delete", "del"):
+        if not subargs:
+            return "Usage: /cron remove <#index>"
+        job = await _tg_select_user_cron_job(sm, session, subargs)
+        if not job:
+            return f"Cron job not found: {subargs}"
+        await sm.delete_cron_job(job.id)
+        return f"Removed cron job: {job.id}"
+
+    # ── pause ──
+    if subcmd in ("pause", "disable"):
+        if not subargs:
+            return "Usage: /cron pause <#index>"
+        job = await _tg_select_user_cron_job(sm, session, subargs)
+        if not job:
+            return f"Cron job not found: {subargs}"
+        await sm.update_cron_job(job.id, enabled=False, last_status="paused")
+        return f"Paused cron job: {job.id}"
+
+    # ── resume ──
+    if subcmd in ("resume", "enable"):
+        if not subargs:
+            return "Usage: /cron resume <#index>"
+        job = await _tg_select_user_cron_job(sm, session, subargs)
+        if not job:
+            return f"Cron job not found: {subargs}"
+        next_run_at_iso = to_utc_iso(compute_next_run(job.schedule))
+        await sm.update_cron_job(
+            job.id, enabled=True, last_status="scheduled",
+            next_run_at=next_run_at_iso,
+        )
+        return f"Resumed cron job: {job.id}\nNext run: {next_run_at_iso}"
+
+    # ── run ──
+    if subcmd == "run":
+        if not subargs:
+            return "Usage: /cron run <#index>"
+        job = await _tg_select_user_cron_job(sm, session, subargs)
+        if not job:
+            return f"Cron job not found: {subargs}"
+        if not server._runtime_ctx:
+            return "Server runtime not available."
+        try:
+            await execute_cron_job(server._runtime_ctx, job, trigger="manual")
+        except Exception as e:
+            return f"Cron run failed: {e}"
+        return f"Manual cron run finished: {job.id}"
+
+    # ── one-off prompt — just send the text as a regular message ──
+    return "Unknown cron subcommand. Use /cron list|add|remove|pause|resume|run"
+
+
+async def _tg_select_user_cron_job(sm: Any, session: Session | None, selector: str) -> Any:
+    """Select a cron job by #index, scoped to the user's session."""
+    if not session:
+        return None
+    # Support #N index selection.
+    if selector.startswith("#"):
+        try:
+            idx = int(selector[1:]) - 1
+        except ValueError:
+            return None
+        jobs = await sm.list_cron_jobs(limit=200, active_only=False)
+        user_jobs = [j for j in jobs if j.session_id == session.id]
+        if 0 <= idx < len(user_jobs):
+            return user_jobs[idx]
+        return None
+    # Fall back to global selector.
+    return await sm.select_cron_job(selector, active_only=False)
 
 
 # ── Agent processing ─────────────────────────────────────────────

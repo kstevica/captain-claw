@@ -288,6 +288,16 @@ async def run_prompt_in_active_session(
                     trigger=cron_trigger or "", source=cron_source or "",
                     output=truncate_history_text(assistant_text),
                 )
+                # Deliver cron output to platform (e.g. Telegram) if
+                # the session belongs to a platform user.
+                if ctx.on_cron_output and agent.session:
+                    try:
+                        outbound = assistant_text.strip()
+                        if not outbound:
+                            outbound = "Cron job completed."
+                        await ctx.on_cron_output(agent.session.id, outbound)
+                    except Exception:
+                        log.debug("on_cron_output callback failed", exc_info=True)
             if on_assistant_text:
                 outbound_text = assistant_text.strip()
                 if not outbound_text and agent.session:
@@ -481,10 +491,15 @@ async def run_prompt_in_session(
     async def _execute() -> None:
         previous_session = agent.session
         previous_session_id = previous_session.id if previous_session else None
+        previous_pipeline_mode = agent.pipeline_mode
         switched = previous_session_id != selected.id
         if switched:
             agent.session = selected
             agent.refresh_session_runtime_flags()
+        # Force loop mode for cron — no human in the loop to iterate
+        # on contract feedback, so contracts would just timeout.
+        agent.pipeline_mode = "loop"
+        agent.planning_enabled = False
         try:
             await cron_monitor_event(
                 ctx, "prompt_start",
@@ -546,6 +561,8 @@ async def run_prompt_in_session(
                 await agent.session_manager.save_session(agent.session)
             raise
         finally:
+            agent.pipeline_mode = previous_pipeline_mode
+            agent.planning_enabled = previous_pipeline_mode == "contracts"
             if switched and previous_session is not None:
                 restored = await agent.session_manager.load_session(previous_session_id)
                 agent.session = restored or previous_session

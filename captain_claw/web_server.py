@@ -123,6 +123,8 @@ class WebServer:
         self._telegram_worker_task: asyncio.Task[None] | None = None
         # Orchestrator (lazy init in _init_agent)
         self._orchestrator: SessionOrchestrator | None = None
+        # Runtime context for cron execution (set when cron scheduler starts).
+        self._runtime_ctx: Any = None
         # Loop runner state
         self._loop_runner_task: asyncio.Task[None] | None = None
         self._loop_runner_state: dict[str, Any] = {}
@@ -311,10 +313,16 @@ class WebServer:
             def print_message(self, role: str, content: str) -> None:
                 pass
 
+            def print_blank_line(self) -> None:
+                pass
+
             def print_error(self, error: str) -> None:
                 log.error("WebCronUI error", error=error)
 
             def set_runtime_status(self, status: str) -> None:
+                pass
+
+            def set_thinking(self, text: str, phase: str = "") -> None:
                 pass
 
             def append_tool_output(
@@ -322,12 +330,54 @@ class WebServer:
             ) -> None:
                 pass
 
+            def append_system_line(self, text: str) -> None:
+                pass
+
+            def begin_assistant_stream(self) -> None:
+                pass
+
+            def end_assistant_stream(self) -> None:
+                pass
+
+            def print_streaming(self, chunk: str) -> None:
+                pass
+
+            def complete_stream_line(self) -> None:
+                pass
+
+            def print_next_steps(self, steps: list[dict[str, str]]) -> None:
+                pass
+
+            def can_capture_escape(self) -> bool:
+                return False
+
             def confirm(self, message: str) -> bool:
                 return True
 
         if not self.agent:
             raise RuntimeError("Agent not initialized")
-        return RuntimeContext(agent=self.agent, ui=_WebCronUI())  # type: ignore[arg-type]
+
+        server = self
+
+        async def _cron_output_to_telegram(session_id: str, text: str) -> None:
+            """Deliver cron output to Telegram if the session belongs to a TG user."""
+            bridge = server._telegram_bridge
+            if not bridge:
+                return
+            # Reverse lookup: find user_id whose session matches.
+            for user_id, sid in server._telegram_user_sessions.items():
+                if sid == session_id:
+                    user_info = server._approved_telegram_users.get(user_id, {})
+                    chat_id = int(user_info.get("chat_id", 0) or 0)
+                    if chat_id:
+                        await bridge.send_message(chat_id, f"*Cron result:*\n{text}")
+                    break
+
+        return RuntimeContext(
+            agent=self.agent,
+            ui=_WebCronUI(),  # type: ignore[arg-type]
+            on_cron_output=_cron_output_to_telegram,
+        )
 
     # ── Delegated handlers ───────────────────────────────────────────
     # Each handler delegates to a function in the captain_claw.web package.
@@ -1296,6 +1346,7 @@ async def _run_server(config: Config) -> None:
         from captain_claw.cron_dispatch import cron_scheduler_loop
 
         ctx = server._get_web_runtime_context()
+        server._runtime_ctx = ctx
         cron_worker = asyncio.create_task(cron_scheduler_loop(ctx))
         log.info("cron_scheduler_started")
         print("  Cron scheduler started.")
