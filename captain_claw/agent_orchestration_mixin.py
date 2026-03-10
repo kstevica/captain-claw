@@ -13,7 +13,7 @@ from typing import Any, AsyncIterator
 
 from captain_claw.agent_scale_detection_mixin import _build_scale_advisory
 from captain_claw.config import get_config
-from captain_claw.exceptions import GuardBlockedError
+from captain_claw.exceptions import GuardBlockedError, LLMAPIError, LLMError
 from captain_claw.llm import Message
 from captain_claw.logging import get_logger
 
@@ -880,43 +880,73 @@ class AgentOrchestrationMixin:
                 context_pct=f"{_ctx_pct}%",
                 dropped=int(_ctx.get("dropped_messages", 0)),
             )
-            try:
-                response = await self._complete_with_guards(
-                    messages=messages,
-                    tools=tool_defs if tool_defs else None,
-                    interaction_label=f"turn_{iteration + 1}",
-                    turn_usage=turn_usage,
-                )
-            except GuardBlockedError as e:
-                final = str(e)
-                self._update_clarification_state(
-                    user_input=user_input,
-                    effective_user_input=effective_user_input,
-                    assistant_response=final,
-                )
-                await self._persist_assistant_response(final)
-                return finish(final, success=False)
-            except Exception as e:
-                error_str = str(e)
-                tool_output = self._collect_turn_tool_output(turn_start_idx)
-                if tool_output and "500" in error_str:
-                    log.warning("Tool result call failed (500), returning tool output")
-                    final = await self._friendly_tool_output_response(
-                        user_input=effective_user_input,
-                        tool_output=tool_output,
+            # ── LLM call with retry for transient errors ───────────
+            _max_llm_retries = 2
+            for _llm_attempt in range(_max_llm_retries + 1):
+                try:
+                    response = await self._complete_with_guards(
+                        messages=messages,
+                        tools=tool_defs if tool_defs else None,
+                        interaction_label=f"turn_{iteration + 1}",
                         turn_usage=turn_usage,
                     )
-                    finalized, final_text, finish_success = await attempt_finalize(
-                        output_text=final,
-                        iteration=iteration,
-                        finish_success=False,
+                    break  # success
+                except GuardBlockedError as e:
+                    final = str(e)
+                    self._update_clarification_state(
+                        user_input=user_input,
+                        effective_user_input=effective_user_input,
+                        assistant_response=final,
                     )
-                    if finalized:
-                        return finish(final_text, success=finish_success)
-                    continue
-                log.error("LLM call failed", error=str(e), exc_info=True)
-                _restore_skill_env_once()
-                raise
+                    await self._persist_assistant_response(final)
+                    return finish(final, success=False)
+                except Exception as e:
+                    error_str = str(e)
+
+                    # Check if transient and retriable
+                    _is_transient = False
+                    if isinstance(e, LLMAPIError) and e.status_code in (408, 429, 502, 503, 529):
+                        _is_transient = True
+                    elif isinstance(e, (LLMAPIError, LLMError)):
+                        _lower = error_str.lower()
+                        if "timeout" in _lower or "timed out" in _lower or "overloaded" in _lower:
+                            _is_transient = True
+
+                    if _is_transient and _llm_attempt < _max_llm_retries:
+                        _delay = 5 * (_llm_attempt + 1)
+                        log.warning(
+                            "Transient LLM error, retrying",
+                            error=error_str,
+                            attempt=_llm_attempt + 1,
+                            max_retries=_max_llm_retries,
+                            delay=_delay,
+                        )
+                        await asyncio.sleep(_delay)
+                        continue
+
+                    # Not transient or exhausted retries — handle as before
+                    tool_output = self._collect_turn_tool_output(turn_start_idx)
+                    if tool_output and "500" in error_str:
+                        log.warning("Tool result call failed (500), returning tool output")
+                        final = await self._friendly_tool_output_response(
+                            user_input=effective_user_input,
+                            tool_output=tool_output,
+                            turn_usage=turn_usage,
+                        )
+                        finalized, final_text, finish_success = await attempt_finalize(
+                            output_text=final,
+                            iteration=iteration,
+                            finish_success=False,
+                        )
+                        if finalized:
+                            return finish(final_text, success=finish_success)
+                        break  # exit retry loop, continue outer turn loop
+                    log.error("LLM call failed", error=error_str, exc_info=True)
+                    _restore_skill_env_once()
+                    raise
+            else:
+                # for-loop exhausted without break — 500 fallback used `break`
+                continue  # continue outer turn loop
 
             self._record_pipeline_task_usage(
                 planning_pipeline,

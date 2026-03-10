@@ -610,21 +610,21 @@ class AgentScaleLoopMixin:
     # entities because the items are already the data to be saved.
     _SAVE_INTENT_RE = re.compile(
         r"(?:"
-        # "save this/these/it/them", "store this", "create a table"
-        r"(?:save|store|persist|keep|insert|put|index)\s+(?:this|these|it|them|the\s+(?:data|results?|items?|list|info))"
+        # "save this/these/it/them/files", "store this", "create a table"
+        r"(?:save|store|persist|keep|insert|put|index)\s+(?:this|these|it|them|files?|the\s+(?:data|results?|items?|list|info|files?))"
         # "create a [optional words] table" — allows "create a shopping list table"
         r"|create\s+(?:a\s+)?(?:\w+\s+){0,3}(?:table|datastore|dataset|database|spreadsheet|csv)"
-        r"|(?:save|store|write|add|import|insert|index)\s+(?:to|into|in)\s+(?:a\s+)?(?:table|datastore|dataset|database|spreadsheet|file|csv|memory|deep\s+memory|typesense)"
+        r"|(?:save|store|write|add|import|insert|index)\s+(?:to|into|in|on)\s+(?:a\s+)?(?:table|datastore|dataset|database|spreadsheet|file|csv|memory|deep\s+memory|typesense)"
         # "make/build a [optional words] table from/with/of"
         r"|(?:make|build)\s+(?:a\s+)?(?:\w+\s+){0,3}(?:table|spreadsheet|csv)\s+(?:from|with|of)"
         # "put/add this/these [optional words] to/into/in" — allows "add these items to it"
         r"|(?:put|add)\s+(?:this|these|it|them|the\s+(?:data|results?|items?|list))(?:\s+\w+){0,3}\s+(?:to|into|in)\b"
         # "save to datastore", "write to table", "index to memory"
-        r"|(?:save|write|export|index)\s+(?:it\s+)?(?:to|into)\s+(?:a\s+)?(?:table|datastore|file|memory|deep\s+memory|typesense)"
+        r"|(?:save|write|export|index)\s+(?:it\s+)?(?:to|into|on)\s+(?:a\s+)?(?:table|datastore|file|memory|deep\s+memory|typesense)"
         # "just save/store", "only save/store"
         r"|(?:just|only)\s+(?:save|store|create|write|keep|index)"
-        # "to memory", "to deep memory" — covers "index X to memory"
-        r"|(?:to|into)\s+(?:deep\s+)?memory"
+        # "to/on memory", "to/on deep memory" — covers "index X to/on memory"
+        r"|(?:to|into|on)\s+(?:deep\s+)?memory"
         r")",
         re.IGNORECASE,
     )
@@ -723,8 +723,14 @@ class AgentScaleLoopMixin:
             AgentScaleLoopMixin._RESEARCH_SIGNAL_RE.search(user_input)
         ) if user_input else False
 
-        if _user_wants_save and not _action_says_research and not _user_wants_research:
+        # When the user explicitly wants to save/store/index data, suppress
+        # research mode.  The user's save intent takes precedence over the
+        # LLM-generated per_member_action — which may hallucinate research
+        # keywords even when the user only wanted to persist existing data.
+        # Only override if the USER themselves didn't also ask for research.
+        if _user_wants_save and not _user_wants_research:
             _action_says_fetch_only = True
+            _action_says_research = False
 
         sample = items[:10]
         pure_url_count = 0
@@ -793,7 +799,9 @@ class AgentScaleLoopMixin:
             # When save intent is detected, return "passthrough" so the
             # micro-loop is skipped entirely and the main LLM handles the
             # items directly (e.g. via datastore tool calls).
-            if _user_wants_save and not _action_says_research and not _user_wants_research:
+            # Note: _action_says_research is already cleared by the save
+            # intent guard above, so only _user_wants_research matters.
+            if _user_wants_save and not _user_wants_research:
                 return "passthrough"
             if _action_says_fetch_only and not _action_says_research:
                 return "file"

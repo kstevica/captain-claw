@@ -34,6 +34,7 @@ COMMANDS: list[dict[str, str]] = [
     {"command": "/config", "description": "Show active configuration", "category": "General"},
     {"command": "/history", "description": "Show recent conversation history", "category": "General"},
     {"command": "/compact", "description": "Manually compact session memory", "category": "General"},
+    {"command": "/nuke", "description": "Delete all workspace files, memory, and datastore", "category": "General"},
     {"command": "/exit", "description": "Exit Captain Claw", "category": "General"},
     {"command": "/new [name]", "description": "Create a new session", "category": "Sessions"},
     {"command": "/session", "description": "Show active session info", "category": "Sessions"},
@@ -687,6 +688,10 @@ class WebServer:
         from captain_claw.web.rest_files import download_file
         return await download_file(self, request)
 
+    async def _export_md(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_files import export_md
+        return await export_md(self, request)
+
     async def _serve_media(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_files import serve_media
         return await serve_media(self, request)
@@ -1193,6 +1198,7 @@ class WebServer:
         app.router.add_get("/api/files/session/{session_id}", self._list_session_files)
         app.router.add_get("/api/files/content", self._get_file_content)
         app.router.add_get("/api/files/download", self._download_file)
+        app.router.add_post("/api/files/export", self._export_md)
         app.router.add_get("/api/media", self._serve_media)
         app.router.add_post("/api/image/upload", self._image_upload)
         app.router.add_post("/api/file/upload", self._file_upload)

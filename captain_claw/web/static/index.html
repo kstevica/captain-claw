@@ -157,15 +157,15 @@
     <div id="sidebar" class="sidebar hidden">
         <div class="sidebar-header">
             <div class="sidebar-tabs">
-                <button class="sidebar-tab active" data-tab="sessions">Sessions</button>
-                <button class="sidebar-tab" data-tab="files">Files</button>
+                <button class="sidebar-tab active" data-tab="files">Files</button>
+                <button class="sidebar-tab" data-tab="sessions">Sessions</button>
                 <button class="sidebar-tab" data-tab="help">Help</button>
             </div>
             <button class="icon-btn sidebar-close" id="sidebarClose" title="Close sidebar">&times;</button>
         </div>
 
         <!-- Sessions tab -->
-        <div class="sidebar-content active" id="tabSessions">
+        <div class="sidebar-content" id="tabSessions">
             <div class="sidebar-actions">
                 <button class="action-btn" id="newSessionBtn">+ New Session</button>
             </div>
@@ -175,7 +175,7 @@
         </div>
 
         <!-- Files tab -->
-        <div class="sidebar-content files-tab" id="tabFiles">
+        <div class="sidebar-content active files-tab" id="tabFiles">
             <div class="files-header-row">
                 <span class="files-count" id="filesCount">0 files</span>
                 <input type="text" class="files-search" id="filesSearch" placeholder="Filter files..." autocomplete="off">
@@ -303,7 +303,11 @@
         <div class="md-viewer-dialog">
             <div class="md-viewer-header">
                 <span class="md-viewer-title" id="mdViewerTitle">-</span>
-                <button class="icon-btn" id="mdViewerClose" title="Close">&times;</button>
+                <div class="md-viewer-actions">
+                    <button class="action-btn small" id="mdExportPdf" title="Export as PDF">PDF</button>
+                    <button class="action-btn small" id="mdExportDocx" title="Export as DOCX">DOCX</button>
+                    <button class="icon-btn" id="mdViewerClose" title="Close">&times;</button>
+                </div>
             </div>
             <div class="md-viewer-body" id="mdViewerBody"></div>
         </div>

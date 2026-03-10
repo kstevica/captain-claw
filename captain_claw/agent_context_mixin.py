@@ -1022,10 +1022,11 @@ class AgentContextMixin:
     ) -> tuple[str, str]:
         """Build deep memory context note from the Typesense archive.
 
-        Only produces a note when the user explicitly requests deep memory.
+        Always searches when deep memory is available — relevance scoring
+        in Typesense already filters out low-quality matches.
         """
         cleaned = str(query or "").strip()
-        if not cleaned or not self._should_search_deep_memory(cleaned):
+        if not cleaned:
             return "", ""
         deep_memory = getattr(self, "_deep_memory", None)
         if deep_memory is None:

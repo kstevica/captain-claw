@@ -1170,6 +1170,19 @@ class SemanticMemoryIndex:
     def _clear_cache(self) -> None:
         self._cache.clear()
 
+    def clear_all(self) -> int:
+        """Delete all documents, chunks, embeddings, and FTS data. Returns count of deleted docs."""
+        conn = self._conn_or_raise()
+        with self._db_lock:
+            count = conn.execute("SELECT COUNT(*) FROM memory_documents").fetchone()[0]
+            conn.execute("DELETE FROM memory_embeddings")
+            conn.execute("DELETE FROM memory_chunks_fts")
+            conn.execute("DELETE FROM memory_chunks")
+            conn.execute("DELETE FROM memory_documents")
+            conn.commit()
+            self._clear_cache()
+        return int(count)
+
 
 def _build_embedding_chain(memory_cfg: Any) -> _EmbeddingProviderChain:
     providers: list[_EmbeddingProvider] = []

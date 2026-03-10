@@ -171,6 +171,13 @@ class LayeredMemory:
             max_snippet_chars=max_snippet_chars,
         )
 
+    def clear_all(self) -> int:
+        """Clear all semantic memory data. Returns count of deleted docs."""
+        self.working.clear()
+        if self.semantic is not None:
+            return self.semantic.clear_all()
+        return 0
+
     def close(self) -> None:
         if self.semantic is not None:
             self.semantic.close()

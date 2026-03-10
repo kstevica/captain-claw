@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import random
 import shlex as _shlex
+import shutil
+import time
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
@@ -12,6 +15,10 @@ from captain_claw.config import get_config
 
 if TYPE_CHECKING:
     from captain_claw.web_server import WebServer
+
+# Pending nuke confirmation codes.
+# Maps ws id() → (code, timestamp) so each connection has its own code.
+_pending_nuke: dict[int, tuple[int, float]] = {}
 
 
 async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str) -> None:
@@ -41,6 +48,35 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
                 server.agent.last_context_window = {}
                 server._broadcast({"type": "session_info", **server._session_info()})
             result = "Session cleared (messages, planning state, and metadata reset)."
+
+        elif cmd in ("/nuke",):
+            ws_id = id(ws)
+            if args.strip():
+                # User provided a code — verify it.
+                pending = _pending_nuke.pop(ws_id, None)
+                if not pending:
+                    result = "No pending nuke. Run `/nuke` first."
+                else:
+                    code, ts = pending
+                    if time.time() - ts > 120:
+                        result = "Nuke code expired. Run `/nuke` again."
+                    elif args.strip() != str(code):
+                        result = f"Wrong code. Run `/nuke` again."
+                    else:
+                        result = await _execute_nuke(server)
+            else:
+                # Generate confirmation code.
+                code = random.randint(1000, 9999)
+                _pending_nuke[ws_id] = (code, time.time())
+                result = (
+                    "⚠️ **This will permanently delete:**\n"
+                    "- All files in the workspace (`saved/`)\n"
+                    "- All deep memory documents (Typesense)\n"
+                    "- All datastore tables\n"
+                    "- All sessions\n"
+                    "- All todos, contacts, scripts, apis\n\n"
+                    f"To confirm, run: `/nuke {code}`"
+                )
 
         elif cmd in ("/config",):
             cfg = get_config()
@@ -242,6 +278,117 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
         "command": raw,
         "content": result,
     })
+
+
+async def _execute_nuke(server: WebServer) -> str:
+    """Execute the full workspace nuke — delete everything, start fresh."""
+    lines: list[str] = []
+    sm = server.agent.session_manager
+
+    # 1. Delete workspace files (saved/ folder).
+    saved_path = server.agent.tools.get_saved_base_path(create=False)
+    file_count = 0
+    if saved_path.exists():
+        for item in saved_path.rglob("*"):
+            if item.is_file():
+                file_count += 1
+        shutil.rmtree(saved_path)
+        saved_path.mkdir(parents=True, exist_ok=True)
+    lines.append(f"📁 Deleted **{file_count}** workspace files")
+
+    # 1b. Delete workspace runtime folders (workflows, logs, workflow-run).
+    workspace_root = saved_path.parent
+    for folder_name in ("workflows", "logs", "workflow-run", "output"):
+        folder = workspace_root / folder_name
+        if folder.exists() and folder.is_dir():
+            shutil.rmtree(folder)
+            lines.append(f"📁 Deleted **{folder_name}/** folder")
+
+    # 2. Clear deep memory (Typesense) — delete all documents.
+    dm = getattr(server.agent, "_deep_memory", None)
+    dm_count = 0
+    if dm is not None:
+        try:
+            dm_count = dm.delete_by_filter("doc_id:!=__impossible__")
+        except Exception as e:
+            lines.append(f"⚠️ Deep memory clear failed: {e}")
+    lines.append(f"🧠 Deleted **{dm_count}** deep memory documents")
+
+    # 2b. Clear semantic memory (SQLite FTS + embeddings).
+    sm_count = 0
+    memory = getattr(server.agent, "memory", None)
+    if memory is not None:
+        try:
+            sm_count = memory.clear_all()
+        except Exception as e:
+            lines.append(f"⚠️ Semantic memory clear failed: {e}")
+    if sm_count:
+        lines.append(f"🧠 Cleared **{sm_count}** semantic memory documents")
+
+    # 3. Drop all datastore tables.
+    from captain_claw.datastore import get_datastore_manager
+
+    ds = get_datastore_manager()
+    table_count = 0
+    try:
+        tables = await ds.list_tables()
+        for t in tables:
+            try:
+                await ds.drop_table(t.name)
+                table_count += 1
+            except Exception:
+                pass  # protected tables skip silently
+    except Exception as e:
+        lines.append(f"⚠️ Datastore clear failed: {e}")
+    lines.append(f"🗄️ Dropped **{table_count}** datastore tables")
+
+    # 4. Delete all sessions.
+    session_count = 0
+    try:
+        all_sessions = await sm.list_sessions(limit=1000)
+        for s in all_sessions:
+            try:
+                await sm.delete_session(s.id)
+                session_count += 1
+            except Exception:
+                pass
+    except Exception as e:
+        lines.append(f"⚠️ Session cleanup failed: {e}")
+    lines.append(f"💬 Deleted **{session_count}** sessions")
+
+    # 5. Delete all todos, contacts, scripts, apis.
+    entity_count = 0
+    for list_fn, del_fn in [
+        (sm.list_todos, sm.delete_todo),
+        (sm.list_contacts, sm.delete_contact),
+        (sm.list_scripts, sm.delete_script),
+        (sm.list_apis, sm.delete_api),
+    ]:
+        try:
+            items = await list_fn(limit=10000)
+            for item in items:
+                try:
+                    await del_fn(item.id)
+                    entity_count += 1
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    if entity_count:
+        lines.append(f"🗑️ Deleted **{entity_count}** entities (todos, contacts, scripts, apis)")
+
+    # 6. Create fresh session and switch to it.
+    new_session = await sm.create_session(name="web-session")
+    server.agent.session = new_session
+    server.agent.refresh_session_runtime_flags()
+    await sm.set_last_active_session(new_session.id)
+    server.agent.last_usage = server.agent._empty_usage()
+    server.agent.last_context_window = {}
+    server._broadcast({"type": "session_info", **server._session_info()})
+    server._broadcast({"type": "session_switched"})
+    lines.append(f"✨ Fresh session created: **{new_session.name}**")
+
+    return "💥 **Nuked.**\n" + "\n".join(lines)
 
 
 async def handle_session_subcommand(server: WebServer, args: str) -> str:

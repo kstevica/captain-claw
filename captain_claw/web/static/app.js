@@ -1636,6 +1636,45 @@
         $('#mdViewerBody').innerHTML = '';
     }
 
+    function _exportMd(format) {
+        if (!currentMdContent) return;
+        var btn = format === 'pdf' ? $('#mdExportPdf') : $('#mdExportDocx');
+        var origText = btn.textContent;
+        btn.textContent = '...';
+        btn.disabled = true;
+        fetch('/api/files/export', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                markdown: currentMdContent,
+                format: format,
+                filename: currentMdFilename || 'document'
+            })
+        }).then(function(resp) {
+            if (!resp.ok) throw new Error('Export failed: ' + resp.status);
+            return resp.blob();
+        }).then(function(blob) {
+            var base = (currentMdFilename || 'document').replace(/\.md$/i, '');
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = base + '.' + format;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }).catch(function(err) {
+            console.error('MD export error:', err);
+            alert('Export failed: ' + err.message);
+        }).finally(function() {
+            btn.textContent = origText;
+            btn.disabled = false;
+        });
+    }
+
+    function exportMdAsPdf() { _exportMd('pdf'); }
+    function exportMdAsDocx() { _exportMd('docx'); }
+
     // ── Folder Browser ─────────────────────────────────────
 
     var folderCurrentPath = null;
@@ -2458,6 +2497,8 @@
         $('#filePreviewClose').addEventListener('click', closeFilePreview);
         fileMdViewBtn.addEventListener('click', openMdViewer);
         $('#mdViewerClose').addEventListener('click', closeMdViewer);
+        $('#mdExportPdf').addEventListener('click', exportMdAsPdf);
+        $('#mdExportDocx').addEventListener('click', exportMdAsDocx);
         $('#mdViewerModal').addEventListener('click', function(e) {
             if (e.target === e.currentTarget) closeMdViewer();
         });
