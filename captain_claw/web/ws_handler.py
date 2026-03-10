@@ -202,6 +202,13 @@ async def handle_ws_message(
                 "content": msg_text,
             })
 
+    elif msg_type == "set_force_script":
+        enabled = bool(data.get("enabled", False))
+        if server.agent:
+            server.agent._force_script_mode = enabled
+            server._broadcast({"type": "session_info", **server._session_info()})
+            log.info("Force script mode toggled", enabled=enabled)
+
     elif msg_type == "cancel":
         if server.agent and hasattr(server.agent, "cancel_event"):
             server.agent.cancel_event.set()

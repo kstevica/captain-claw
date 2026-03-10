@@ -500,6 +500,7 @@ class ToolRegistry:
         runtime_base_path: Path | None = None,
         approval_callback: Callable[[str], bool] | None = None,
         file_registry: Any | None = None,
+        stream_callback: Callable[[str], None] | None = None,
     ) -> ToolResult:
         """Execute a tool by name.
 
@@ -623,6 +624,7 @@ class ToolRegistry:
                     _file_registry=file_registry,
                     _workflow_started_at=_workflow_started_at,
                     _workflow_run_dir=_workflow_run_dir,
+                    _stream_callback=stream_callback,
                 )
             )
             abort_wait_task = asyncio.create_task(tool_abort_event.wait())

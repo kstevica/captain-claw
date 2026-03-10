@@ -252,11 +252,18 @@ class AgentToolLoopMixin:
         return False
 
     def _turn_has_unexecuted_script(self, turn_start_idx: int) -> tuple[bool, str]:
-        """Check if a script was written this turn but never successfully executed.
+        """Check if a script was written this turn but never attempted.
 
         Returns (has_unexecuted, script_path) — the path of the last unexecuted
         script written during this turn.  Only considers .py files written to
         a ``scripts/`` directory.
+
+        NOTE: This checks whether the script was *attempted* (regardless of
+        success or failure).  A script that was run but timed out or exited
+        with an error still counts as "executed" — the gate's purpose is to
+        catch cases where the LLM writes a script and forgets to run it, not
+        to enforce success.  A separate gate (failed shell + pip install)
+        handles retry-after-fix scenarios.
         """
         if not self.session:
             return False, ""
@@ -264,15 +271,14 @@ class AgentToolLoopMixin:
         messages = self.session.messages[turn_start_idx:]
         # Collect script writes and their positions.
         script_writes: list[tuple[int, str]] = []
-        # Collect successful shell executions and their positions.
-        shell_successes: list[tuple[int, str]] = []
+        # Collect ALL shell executions and their positions (including failures).
+        shell_executions: list[tuple[int, str]] = []
 
         for idx, msg in enumerate(messages):
             if msg.get("role") != "tool":
                 continue
             tool = str(msg.get("tool_name", "")).strip().lower()
             args = msg.get("tool_arguments") or {}
-            content = str(msg.get("content", ""))
 
             if tool == "write":
                 path = str(args.get("path", ""))
@@ -280,22 +286,20 @@ class AgentToolLoopMixin:
                     script_writes.append((idx, path))
 
             elif tool == "shell":
-                is_error = content.strip().lower().startswith("error:")
-                if not is_error:
-                    cmd = str(args.get("command", ""))
-                    shell_successes.append((idx, cmd))
+                cmd = str(args.get("command", ""))
+                shell_executions.append((idx, cmd))
 
         if not script_writes:
             return False, ""
 
-        # For each written script, check if it was executed successfully AFTER
-        # the write.  Only the last write of a given script matters.
+        # For each written script, check if it was attempted AFTER the write.
+        # Only the last write of a given script matters.
         last_write_idx, last_write_path = script_writes[-1]
         script_basename = last_write_path.rsplit("/", 1)[-1]
 
-        for shell_idx, cmd in shell_successes:
+        for shell_idx, cmd in shell_executions:
             if shell_idx > last_write_idx and script_basename in cmd:
-                return False, ""  # Script was executed after write
+                return False, ""  # Script was attempted after write
 
         return True, last_write_path
 
@@ -951,10 +955,10 @@ class AgentToolLoopMixin:
                     and isinstance(arguments, dict)
                     and "pip install" in str(arguments.get("command", "")).lower()
                 ):
-                    # Check for a prior failed shell call in this turn.
+                    # Check for a prior failed shell call in recent messages.
                     _had_prior_shell_failure = False
                     if self.session:
-                        for _prev in self.session.messages[turn_start_idx:]:
+                        for _prev in self.session.messages[-20:]:
                             if _prev.get("role") != "tool":
                                 continue
                             if str(_prev.get("tool_name", "")).strip().lower() != "shell":
@@ -972,6 +976,52 @@ class AgentToolLoopMixin:
                             "Do NOT skip this step."
                         )
                         log.info("Post-pip-install retry hint appended")
+
+                # ── Post-write empty-content check ────────────────
+                # When the LLM writes a DATA file that is suspiciously
+                # small relative to tool data already in context, warn
+                # it so it rewrites with the actual content.
+                # Skip for code/script files — those are intentionally
+                # different from the tool data in context.
+                if (
+                    result.success
+                    and _tool_lower == "write"
+                    and isinstance(arguments, dict)
+                ):
+                    _write_path = str(arguments.get("path", "")).lower()
+                    _CODE_EXTS = (".py", ".sh", ".js", ".ts", ".rb", ".go", ".rs", ".java")
+                    _is_code_file = (
+                        any(_write_path.endswith(ext) for ext in _CODE_EXTS)
+                        or "/scripts/" in _write_path
+                    )
+                    if not _is_code_file:
+                        written_len = len(str(arguments.get("content", "")))
+                        _data_in_context = 0
+                        if self.session:
+                            _recent = self.session.messages[-30:]
+                            for _prev in _recent:
+                                if _prev.get("role") != "tool":
+                                    continue
+                                _pname = str(_prev.get("tool_name", "")).strip().lower()
+                                if _pname in ("write", "shell"):
+                                    continue
+                                _pc = str(_prev.get("content", ""))
+                                if len(_pc) > 500:
+                                    _data_in_context = max(_data_in_context, len(_pc))
+                        if _data_in_context > 500 and written_len < _data_in_context * 0.10:
+                            _result_content += (
+                                "\n\n⚠️ WARNING: The file you just wrote is nearly empty "
+                                f"({written_len} chars) but you have substantial data "
+                                f"({_data_in_context} chars) from tool results in this "
+                                "conversation. You likely forgot to include the actual "
+                                "data in the file content. Please rewrite the file NOW "
+                                "with the complete data formatted as requested by the user."
+                            )
+                            log.warning(
+                                "Post-write empty-content warning injected",
+                                written_len=written_len,
+                                data_in_context=_data_in_context,
+                            )
 
                 self._add_session_message(
                     role="tool",

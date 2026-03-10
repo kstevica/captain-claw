@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import shutil
+import time
 from typing import Any
 
 from captain_claw.config import get_config
@@ -59,6 +60,20 @@ _QUICK_COMMANDS: frozenset[str] = frozenset({
 })
 _QUICK_TIMEOUT = 5
 
+# Script interpreters that typically run longer than simple commands.
+# When the shell config timeout is low (e.g. 30 s), these get a minimum
+# floor so that scripts have a reasonable initial window before the
+# activity-based timeout kicks in.
+_SCRIPT_COMMANDS: frozenset[str] = frozenset({
+    "python3", "python", "python3.11", "python3.12", "python3.13",
+    "node", "ruby", "perl", "bash", "sh", "zsh",
+})
+_SCRIPT_MIN_TIMEOUT = 120
+
+# Hard wall-time cap for activity-based timeout extension (30 minutes).
+# Even if a process is producing output, it cannot run longer than this.
+_HARD_WALL_TIME = 1800
+
 
 class ShellTool(Tool):
     """Execute shell commands."""
@@ -83,7 +98,34 @@ class ShellTool(Tool):
 
     def __init__(self):
         self.config = get_config()
-        self.timeout_seconds = float(getattr(self.config.tools.shell, "timeout", 120) or 120)
+        # The shell tool manages its own timeouts internally with an
+        # activity-based system + hard wall-time cap (_HARD_WALL_TIME).
+        # Set the registry-level timeout to the hard cap so the outer
+        # wrapper in tools/registry.py never kills a command before the
+        # shell's own timeout handling can act.  Quick commands, normal
+        # commands, and scripts all have appropriate internal timeouts
+        # that will terminate them long before the hard cap.
+        self.timeout_seconds = float(_HARD_WALL_TIME)
+
+    @staticmethod
+    def _is_script_command(command: str) -> bool:
+        """Return True if *command* runs a script interpreter (python3, node, etc.).
+
+        Checks ALL parts of chained commands (``cd foo && python3 bar.py``)
+        so that ``python3`` is detected even if preceded by ``cd``.
+        Used to enforce a minimum timeout floor so that scripts have a
+        reasonable initial window before the activity-based timeout kicks in.
+        """
+        stripped = re.sub(r"^\s*(\w+=\S+\s+)*", "", command).strip()
+        parts = re.split(r"\s*(?:&&|\|\|?|;)\s*", stripped)
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            base = part.split()[0].split("/")[-1] if part.split() else ""
+            if base in _SCRIPT_COMMANDS:
+                return True
+        return False
 
     @staticmethod
     def _is_quick_command(command: str) -> bool:
@@ -174,6 +216,13 @@ class ShellTool(Tool):
                 timeout = self.config.tools.shell.timeout
         timeout = max(1, int(timeout))
 
+        # Script interpreters (python3, node, etc.) need a reasonable
+        # initial window — the first API call from within a script may
+        # block for many seconds before any output appears.  Enforce a
+        # minimum inactivity timeout so the script isn't killed prematurely.
+        if self._is_script_command(command):
+            timeout = max(timeout, _SCRIPT_MIN_TIMEOUT)
+
         abort_event = kwargs.get("_abort_event")
         if isinstance(abort_event, asyncio.Event) and abort_event.is_set():
             return ToolResult(success=False, error="Command aborted")
@@ -197,13 +246,14 @@ class ShellTool(Tool):
             from pathlib import Path
 
             _saved = Path(runtime_base) / "saved"
-            for _cat in ("tmp", "scripts", "showcase", "media", "output"):
+            for _cat in ("tmp", "scripts", "showcase", "media", "output", "downloads"):
                 _dir = _saved / _cat / str(session_id)
                 if not _dir.exists():
                     _dir.mkdir(parents=True, exist_ok=True)
 
         try:
             log.info("Executing shell command", command=command, timeout=timeout)
+            stream_cb = kwargs.get("_stream_callback")
 
             process = await asyncio.create_subprocess_shell(
                 command,
@@ -212,48 +262,114 @@ class ShellTool(Tool):
                 env=env,
                 cwd=shell_cwd,
             )
-            
-            communicate_task = asyncio.create_task(process.communicate())
+
+            # Read stdout/stderr line-by-line, streaming each line to the UI.
+            # Track last activity time for activity-based timeout extension:
+            # as long as the process is producing output, the timeout resets.
+            stdout_chunks: list[str] = []
+            stderr_chunks: list[str] = []
+            last_activity = [time.monotonic()]
+
+            async def _read_stream(
+                stream: asyncio.StreamReader, collected: list[str], prefix: str = "",
+            ) -> None:
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    last_activity[0] = time.monotonic()
+                    text = line.decode("utf-8", errors="replace")
+                    collected.append(text)
+                    if stream_cb:
+                        try:
+                            stream_cb(prefix + text)
+                        except Exception:
+                            pass
+
+            async def _collect() -> None:
+                await asyncio.gather(
+                    _read_stream(process.stdout, stdout_chunks),
+                    _read_stream(process.stderr, stderr_chunks),
+                )
+                await process.wait()
+
+            collect_task = asyncio.create_task(_collect())
             abort_wait_task: asyncio.Task[bool] | None = None
             if isinstance(abort_event, asyncio.Event):
                 abort_wait_task = asyncio.create_task(abort_event.wait())
             try:
-                wait_tasks: set[asyncio.Task[Any]] = {communicate_task}
-                if abort_wait_task is not None:
-                    wait_tasks.add(abort_wait_task)
-                done, _ = await asyncio.wait(
-                    wait_tasks,
-                    timeout=timeout,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
+                # Activity-based timeout: instead of a single fixed wait, poll
+                # periodically.  Whenever new stdout/stderr output arrives, the
+                # inactivity deadline resets.  A hard wall-time cap prevents
+                # infinite-running processes even if they keep producing output.
+                wall_deadline = time.monotonic() + _HARD_WALL_TIME
+                inactivity_deadline = time.monotonic() + timeout
+                timed_out = False
+                aborted = False
 
-                if communicate_task in done:
-                    stdout, stderr = await communicate_task
-                elif abort_wait_task is not None and abort_wait_task in done:
+                while True:
+                    wait_tasks: set[asyncio.Task[Any]] = {collect_task}
+                    if abort_wait_task is not None:
+                        wait_tasks.add(abort_wait_task)
+
+                    remaining = max(0.1, min(
+                        inactivity_deadline - time.monotonic(),
+                        wall_deadline - time.monotonic(),
+                    ))
+                    check_interval = min(5.0, remaining)
+
+                    done, _ = await asyncio.wait(
+                        wait_tasks,
+                        timeout=check_interval,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+
+                    if collect_task in done:
+                        await collect_task
+                        break
+
+                    if abort_wait_task is not None and abort_wait_task in done:
+                        aborted = True
+                        break
+
+                    # Extend inactivity deadline if output was received recently
+                    now = time.monotonic()
+                    time_since_activity = now - last_activity[0]
+                    if time_since_activity < timeout:
+                        inactivity_deadline = max(
+                            inactivity_deadline, last_activity[0] + timeout,
+                        )
+
+                    if now >= wall_deadline or now >= inactivity_deadline:
+                        timed_out = True
+                        break
+
+                if aborted:
                     process.kill()
                     await process.wait()
-                    communicate_task.cancel()
+                    collect_task.cancel()
                     try:
-                        await communicate_task
+                        await collect_task
                     except asyncio.CancelledError:
                         pass
                     return ToolResult(success=False, error="Command aborted")
-                else:
+
+                if timed_out:
                     process.kill()
                     await process.wait()
-                    communicate_task.cancel()
+                    collect_task.cancel()
                     try:
-                        await communicate_task
+                        await collect_task
                     except asyncio.CancelledError:
                         pass
                     return ToolResult(
                         success=False,
-                        error=f"Command timed out after {timeout}s",
+                        error=f"Command timed out after {timeout}s of inactivity",
                     )
             except asyncio.CancelledError:
                 process.kill()
                 await process.wait()
-                communicate_task.cancel()
+                collect_task.cancel()
                 raise
             finally:
                 if abort_wait_task is not None and not abort_wait_task.done():
@@ -262,21 +378,20 @@ class ShellTool(Tool):
                         await abort_wait_task
                     except asyncio.CancelledError:
                         pass
-            
-            # Decode output
-            stdout_text = stdout.decode("utf-8", errors="replace").strip()
-            stderr_text = stderr.decode("utf-8", errors="replace").strip()
-            
-            # Combine stdout and stderr
+
+            # Combine collected output
+            stdout_text = "".join(stdout_chunks).strip()
+            stderr_text = "".join(stderr_chunks).strip()
+
             output = stdout_text
             if stderr_text:
                 output += f"\n[stderr] {stderr_text}"
-            
+
             # Truncate if too long
             max_length = 10000
             if len(output) > max_length:
                 output = output[:max_length] + f"\n... [truncated, {len(output)} total chars]"
-            
+
             return ToolResult(
                 success=process.returncode == 0,
                 content=output or "[no output]",

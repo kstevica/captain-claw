@@ -238,7 +238,7 @@ class TypesenseTool(Tool):
         ):
             kwargs.pop(k, None)
 
-        if not self._api_key:
+        if not self._api_key and self._deep_memory is None:
             return ToolResult(
                 success=False,
                 error=(

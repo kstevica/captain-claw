@@ -204,7 +204,7 @@ class SessionOrchestrator:
         orch_cfg = cfg.orchestrator
 
         self._main_agent = main_agent
-        self._provider = provider or get_provider()
+        self._fallback_provider = provider or get_provider()
         self._status_callback = status_callback
         self._tool_output_callback = tool_output_callback
         self._broadcast_callback = broadcast_callback
@@ -219,7 +219,7 @@ class SessionOrchestrator:
         self._pool = AgentPool(
             max_agents=max_agents or orch_cfg.max_agents,
             idle_evict_seconds=orch_cfg.idle_evict_seconds,
-            provider=self._provider,
+            provider_factory=lambda: self._provider,
             status_callback=status_callback,
             tool_output_callback=tool_output_callback,
             thinking_callback=thinking_callback,
@@ -244,6 +244,13 @@ class SessionOrchestrator:
         self._synthesis_instruction: str = ""
         self._workflow_variables: list[dict[str, Any]] = []
         self._workspace_tree: str = ""   # cached workspace listing for prompts
+
+    @property
+    def _provider(self) -> LLMProvider:
+        """Return the agent's *current* provider (tracks runtime model switches)."""
+        if self._main_agent and getattr(self._main_agent, "provider", None):
+            return self._main_agent.provider
+        return self._fallback_provider
 
     # ------------------------------------------------------------------
     # File registry persistence
@@ -398,10 +405,14 @@ class SessionOrchestrator:
             cfg = get_config()
             provider_name = str(resolved.get("provider", cfg.model.provider)).strip()
             norm_key = self._main_agent._normalize_provider_key(provider_name)
-            api_key = (
-                self._main_agent._resolve_provider_api_key(norm_key)
-                or cfg.model.api_key or None
-            )
+            extra_headers = cfg.provider_keys.headers_for(norm_key) or None
+            if extra_headers:
+                api_key = None  # auth is carried in headers
+            else:
+                api_key = (
+                    self._main_agent._resolve_provider_api_key(norm_key)
+                    or cfg.model.api_key or None
+                )
             base_url = str(resolved.get("base_url", "") or "").strip() or cfg.model.base_url or None
             temperature = resolved.get("temperature")
             max_tokens = resolved.get("max_tokens")
@@ -412,6 +423,7 @@ class SessionOrchestrator:
                 base_url=base_url,
                 temperature=float(cfg.model.temperature if temperature is None else temperature),
                 max_tokens=int(cfg.model.max_tokens if max_tokens is None else max_tokens),
+                extra_headers=extra_headers,
             )
             log.info("Resolved model override provider",
                      selector=selector,
@@ -963,28 +975,58 @@ class SessionOrchestrator:
     # ------------------------------------------------------------------
 
     async def _assign_sessions(self, graph: TaskGraph) -> None:
-        """Assign a unique session_id to each task.
+        """Assign session IDs to tasks.
 
-        If a task already has a session_id (set via preview overrides),
-        it is left as-is and ``use_existing_session`` is set.  Otherwise
-        a fresh session is created per task.
+        Supports three modes per task (determined by ``session_id``):
+        * ``__shared__`` or empty (default) — all such tasks share one new session.
+        * ``__per_worker__`` — each task gets its own fresh session.
+        * Any other value — treated as a user-selected existing session.
         """
-        for tid, task in graph.tasks.items():
-            if task.session_id:
-                # User pre-selected an existing session; mark it.
-                task.use_existing_session = True
-                continue
+        _SHARED = "__shared__"
+        _PER_WORKER = "__per_worker__"
 
-            # Create a fresh session per task.
-            label = task.session_name or task.title or tid
+        # ── 1. Create one shared session for all __shared__ tasks ────
+        # Empty / unset session_id also defaults to shared.
+        shared_tids = [
+            tid for tid, t in graph.tasks.items()
+            if t.session_id in (_SHARED, "")
+        ]
+        shared_session_id: str | None = None
+        if shared_tids:
+            label = self._user_input[:60].strip() if self._user_input else "shared"
             try:
                 session = await self._session_manager.create_session(
                     name=f"orchestrator::{label}",
                 )
-                task.session_id = session.id
+                shared_session_id = session.id
             except Exception as e:
-                log.error("Failed to create session for task", task_id=tid, error=str(e))
-                task.session_id = f"fallback-{tid}"
+                log.error("Failed to create shared session", error=str(e))
+                shared_session_id = f"fallback-shared"
+
+        # ── 2. Walk every task and assign ────────────────────────────
+        for tid, task in graph.tasks.items():
+            sid = task.session_id
+
+            # Shared session (default)
+            if sid in (_SHARED, ""):
+                task.session_id = shared_session_id  # type: ignore[assignment]
+                continue
+
+            # Per-worker: create a fresh session
+            if sid == _PER_WORKER:
+                label = task.session_name or task.title or tid
+                try:
+                    session = await self._session_manager.create_session(
+                        name=f"orchestrator::{label}",
+                    )
+                    task.session_id = session.id
+                except Exception as e:
+                    log.error("Failed to create session for task", task_id=tid, error=str(e))
+                    task.session_id = f"fallback-{tid}"
+                continue
+
+            # User pre-selected an existing session; mark it.
+            task.use_existing_session = True
 
     # ------------------------------------------------------------------
     # 4. EXECUTE GRAPH

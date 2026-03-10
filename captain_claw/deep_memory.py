@@ -345,10 +345,19 @@ class DeepMemoryIndex:
             if line.strip() and json.loads(line).get("success", False)
         )
         if ok < len(docs):
+            # Log first failing line for debugging.
+            first_error = ""
+            for line in result_lines:
+                if line.strip():
+                    parsed = json.loads(line)
+                    if not parsed.get("success", False):
+                        first_error = parsed.get("error", "") or parsed.get("document", "")
+                        break
             log.warning(
                 "Deep memory batch upsert partial failure",
                 ok=ok,
                 total=len(docs),
+                first_error=str(first_error)[:300],
             )
         return ok
 
@@ -361,6 +370,20 @@ class DeepMemoryIndex:
             return []
         try:
             _key, vectors = chain.embed_batch(texts)
+            # Validate dimensions match the collection schema.
+            # Fallback providers (ollama, local_hash) may produce
+            # different dimensions than what the collection expects.
+            expected = self._embedding_dims
+            if expected and vectors:
+                actual = len(vectors[0]) if vectors[0] else 0
+                if actual != expected:
+                    log.warning(
+                        "Embedding dimension mismatch — discarding vectors",
+                        expected=expected,
+                        actual=actual,
+                        provider=_key,
+                    )
+                    return []
             return vectors
         except Exception as exc:
             log.debug("Deep memory embedding failed", error=str(exc))

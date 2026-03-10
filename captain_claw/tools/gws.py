@@ -130,6 +130,25 @@ class GwsTool(Tool):
                 "type": "number",
                 "description": "Maximum number of results to return (default varies by action).",
             },
+            "output_file": {
+                "type": "string",
+                "description": (
+                    "When set, write results directly to this file path instead of "
+                    "returning raw data. Use for drive_list and drive_search when the "
+                    "user wants a file listing saved to disk. The tool handles "
+                    "pagination, formatting, and writing automatically. Returns a "
+                    "summary (file count, path) instead of raw JSON."
+                ),
+            },
+            "recursive": {
+                "type": "boolean",
+                "description": (
+                    "For drive_list: when true, recursively traverse ALL folders "
+                    "and subfolders, listing every file with its full folder path. "
+                    "Must be used with output_file — results are written directly "
+                    "to disk. Format: <folder/path/filename>, <link>, <size>, <type>."
+                ),
+            },
             "label": {
                 "type": "string",
                 "description": "Gmail label for mail_list (e.g. INBOX, SENT, DRAFT). Default: INBOX.",
@@ -188,6 +207,8 @@ class GwsTool(Tool):
         kwargs.pop("_abort_event", None)
         kwargs.pop("_file_registry", None)
         kwargs.pop("_task_id", None)
+        stream_cb = kwargs.pop("_stream_callback", None)
+        self._stream_callback = stream_cb
 
         # Resolve the gws binary path.
         binary = self._resolve_binary()
@@ -280,6 +301,7 @@ class GwsTool(Tool):
             cmd.extend(["--format", "json"])
 
         log.debug("Running gws command", cmd=" ".join(cmd))
+        stream_cb = getattr(self, "_stream_callback", None)
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -287,17 +309,40 @@ class GwsTool(Tool):
             stderr=asyncio.subprocess.PIPE,
         )
 
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout,
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+
+        async def _read_stream(
+            stream: asyncio.StreamReader, collected: list[str], prefix: str = "",
+        ) -> None:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace")
+                collected.append(text)
+                if stream_cb:
+                    try:
+                        stream_cb(prefix + text)
+                    except Exception:
+                        pass
+
+        async def _collect() -> None:
+            await asyncio.gather(
+                _read_stream(proc.stdout, stdout_chunks),
+                _read_stream(proc.stderr, stderr_chunks),
             )
+            await proc.wait()
+
+        try:
+            await asyncio.wait_for(_collect(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
-            await proc.communicate()
+            await proc.wait()
             return ToolResult(success=False, error="gws command timed out.")
 
-        stdout_str = stdout.decode("utf-8", errors="replace").strip()
-        stderr_str = stderr.decode("utf-8", errors="replace").strip()
+        stdout_str = "".join(stdout_chunks).strip()
+        stderr_str = "".join(stderr_chunks).strip()
 
         if proc.returncode != 0:
             error_msg = stderr_str or stdout_str or f"gws exited with code {proc.returncode}"
@@ -317,10 +362,21 @@ class GwsTool(Tool):
     # ------------------------------------------------------------------
 
     async def _drive_list(
-        self, binary: str, folder_id: str = "", max_results: int | float | None = None, **kw: Any,
+        self, binary: str, folder_id: str = "", max_results: int | float | None = None,
+        output_file: str = "", recursive: bool = False, **kw: Any,
     ) -> ToolResult:
-        """List files in a Google Drive folder."""
-        page_size = min(int(max_results or 20), 100)
+        """List files in a Google Drive folder with auto-pagination."""
+        # ── Recursive mode: flat-fetch everything, build tree ─────
+        if recursive:
+            if not output_file:
+                return ToolResult(
+                    success=False,
+                    error="recursive=true requires output_file to be set.",
+                )
+            return await self._drive_recursive_list(binary, output_file, int(max_results or 10000))
+
+        limit = int(max_results or 100)
+        page_size = min(limit, 1000)
         params: dict[str, Any] = {"pageSize": page_size}
 
         if folder_id:
@@ -330,38 +386,351 @@ class GwsTool(Tool):
             params["q"] = "'root' in parents and trashed = false"
 
         params["orderBy"] = "modifiedTime desc"
-        params["fields"] = "files(id,name,mimeType,size,modifiedTime)"
-        # Support shared drives.
+        params["fields"] = "nextPageToken,files(id,name,mimeType,size,modifiedTime,webViewLink,parents)"
         params["corpora"] = "allDrives"
         params["supportsAllDrives"] = "true"
         params["includeItemsFromAllDrives"] = "true"
 
-        args = ["drive", "files", "list", "--params", json.dumps(params)]
-        return await self._run_gws(binary, args)
+        return await self._drive_paginated_list(binary, params, limit, output_file)
 
     async def _drive_search(
-        self, binary: str, query: str = "", max_results: int | float | None = None, **kw: Any,
+        self, binary: str, query: str = "", max_results: int | float | None = None,
+        output_file: str = "", **kw: Any,
     ) -> ToolResult:
-        """Search for files across Google Drive."""
+        """Search for files across Google Drive with auto-pagination."""
         if not query:
             return ToolResult(success=False, error="query is required for drive_search.")
 
-        page_size = min(int(max_results or 20), 100)
+        limit = int(max_results or 100)
+        page_size = min(limit, 1000)
         escaped = query.replace("\\", "\\\\").replace("'", "\\'")
         q = f"(name contains '{escaped}' or fullText contains '{escaped}') and trashed = false"
 
         params: dict[str, Any] = {
             "pageSize": page_size,
             "q": q,
-            "fields": "files(id,name,mimeType,size,modifiedTime,webViewLink)",
-            # Support shared drives.
+            "fields": "nextPageToken,files(id,name,mimeType,size,modifiedTime,webViewLink)",
             "corpora": "allDrives",
             "supportsAllDrives": "true",
             "includeItemsFromAllDrives": "true",
         }
 
-        args = ["drive", "files", "list", "--params", json.dumps(params)]
-        return await self._run_gws(binary, args)
+        return await self._drive_paginated_list(binary, params, limit, output_file)
+
+    # ------------------------------------------------------------------
+    # Drive pagination + direct file writing
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _format_file_size(size_str: str) -> str:
+        """Convert byte string to human-readable size."""
+        try:
+            size = int(size_str)
+            for unit in ("B", "KB", "MB", "GB", "TB"):
+                if size < 1024:
+                    return f"{size:.1f} {unit}" if unit != "B" else f"{size} B"
+                size /= 1024
+            return f"{size:.1f} PB"
+        except (ValueError, TypeError):
+            return str(size_str) if size_str else "—"
+
+    @staticmethod
+    def _readable_mime(mime: str) -> str:
+        """Convert MIME type to a short human-readable label."""
+        _MAP = {
+            "application/vnd.google-apps.folder": "Folder",
+            "application/vnd.google-apps.document": "Google Doc",
+            "application/vnd.google-apps.spreadsheet": "Google Sheet",
+            "application/vnd.google-apps.presentation": "Google Slides",
+            "application/vnd.google-apps.form": "Google Form",
+            "application/vnd.google-apps.drawing": "Google Drawing",
+            "application/vnd.google-apps.site": "Google Site",
+            "application/pdf": "PDF",
+            "text/csv": "CSV",
+            "text/plain": "Text",
+            "application/json": "JSON",
+        }
+        if mime in _MAP:
+            return _MAP[mime]
+        if "image/" in mime:
+            return "Image"
+        if "video/" in mime:
+            return "Video"
+        if "audio/" in mime:
+            return "Audio"
+        if "officedocument" in mime or "msword" in mime:
+            return "Office Doc"
+        return mime.split("/")[-1].upper() if "/" in mime else mime or "Unknown"
+
+    @staticmethod
+    def _format_drive_file_line(f: dict[str, Any]) -> str:
+        """Format a single Drive file dict into a text line."""
+        name = f.get("name", "Unnamed")
+        link = f.get("webViewLink", "—")
+        size = GwsTool._format_file_size(f.get("size", ""))
+        ftype = GwsTool._readable_mime(f.get("mimeType", ""))
+        return f"{name}, {link}, {size}, {ftype}"
+
+    async def _drive_paginated_list(
+        self,
+        binary: str,
+        params: dict[str, Any],
+        limit: int,
+        output_file: str = "",
+    ) -> ToolResult:
+        """Paginate through Drive file list results.
+
+        When *output_file* is set the tool writes each file line directly
+        to disk as it is fetched, streams progress via ``_stream_callback``,
+        and returns a short summary.  When *output_file* is empty the raw
+        JSON is returned (capped by ``_MAX_OUTPUT_CHARS``).
+        """
+        stream_cb = getattr(self, "_stream_callback", None)
+        all_files: list[dict[str, Any]] = []
+        page_token: str | None = None
+        _max_pages = 50
+        page_num = 0
+
+        # ── Prepare output file if requested ──────────────────────
+        out_fh = None
+        out_path: Path | None = None
+        if output_file:
+            out_path = Path(output_file).expanduser()
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_fh = open(out_path, "w", encoding="utf-8")  # noqa: SIM115
+            if stream_cb:
+                stream_cb(f"Writing results to {out_path}\n")
+
+        try:
+            for _ in range(_max_pages):
+                page_num += 1
+                page_params = dict(params)
+                if page_token:
+                    page_params["pageToken"] = page_token
+
+                if stream_cb:
+                    stream_cb(f"Fetching page {page_num}...\n")
+
+                args = ["drive", "files", "list", "--params", json.dumps(page_params)]
+                result = await self._run_gws(binary, args)
+
+                if not result.success:
+                    if all_files:
+                        break
+                    return result
+
+                try:
+                    data = json.loads(result.content)
+                except (json.JSONDecodeError, TypeError):
+                    if all_files:
+                        break
+                    return result
+
+                files = data.get("files", [])
+                if not files:
+                    break
+
+                # ── Write / accumulate ────────────────────────────
+                for f in files:
+                    if len(all_files) >= limit:
+                        break
+                    all_files.append(f)
+                    if out_fh:
+                        out_fh.write(self._format_drive_file_line(f) + "\n")
+
+                if stream_cb:
+                    stream_cb(f"  ↳ {len(all_files)} files collected so far\n")
+
+                page_token = data.get("nextPageToken")
+                if not page_token or len(all_files) >= limit:
+                    break
+        finally:
+            if out_fh:
+                out_fh.close()
+
+        # ── Build result ──────────────────────────────────────────
+        if out_path:
+            summary = (
+                f"✓ {len(all_files)} files written to {out_path}\n"
+                f"  Format: <filename>, <google docs link>, <size>, <type>\n"
+                f"  Pages fetched: {page_num}"
+            )
+            if stream_cb:
+                stream_cb(f"\n{summary}\n")
+            return ToolResult(success=True, content=summary)
+
+        # No output_file — return JSON payload.
+        all_files = all_files[:limit]
+        output = json.dumps({"files": all_files, "totalFiles": len(all_files)}, indent=2)
+        if len(output) > _MAX_OUTPUT_CHARS:
+            output = output[:_MAX_OUTPUT_CHARS] + "\n\n... [output truncated]"
+        return ToolResult(success=True, content=output)
+
+    # ------------------------------------------------------------------
+    # Recursive drive listing (flat-fetch + tree reconstruction)
+    # ------------------------------------------------------------------
+
+    async def _drive_recursive_list(
+        self,
+        binary: str,
+        output_file: str,
+        limit: int = 10000,
+    ) -> ToolResult:
+        """Fetch ALL Drive files in one sweep, reconstruct folder paths, write to file.
+
+        Strategy:
+        1. Paginate through the entire Drive (no parent filter) collecting
+           every file and folder.
+        2. Build a folder-id → name lookup.
+        3. Reconstruct full paths by walking parent chains.
+        4. Write each file as ``<path/name>, <link>, <size>, <type>`` to *output_file*.
+
+        This is far more efficient than recursive per-folder API calls.
+        """
+        stream_cb = getattr(self, "_stream_callback", None)
+
+        # ── Phase 1: Fetch everything ─────────────────────────────
+        if stream_cb:
+            stream_cb("Phase 1: Fetching all files from Google Drive...\n")
+
+        params: dict[str, Any] = {
+            "pageSize": 1000,
+            "q": "trashed = false",
+            "fields": "nextPageToken,files(id,name,mimeType,size,webViewLink,parents)",
+            "corpora": "allDrives",
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+        }
+
+        all_items: list[dict[str, Any]] = []
+        page_token: str | None = None
+        page_num = 0
+
+        for _ in range(100):  # safety cap
+            page_num += 1
+            page_params = dict(params)
+            if page_token:
+                page_params["pageToken"] = page_token
+
+            if stream_cb:
+                stream_cb(f"  Fetching page {page_num}...\n")
+
+            args = ["drive", "files", "list", "--params", json.dumps(page_params)]
+            result = await self._run_gws(binary, args)
+
+            if not result.success:
+                if all_items:
+                    if stream_cb:
+                        stream_cb(f"  ⚠ Page {page_num} failed, continuing with {len(all_items)} items\n")
+                    break
+                return result
+
+            try:
+                data = json.loads(result.content)
+            except (json.JSONDecodeError, TypeError):
+                if all_items:
+                    break
+                return result
+
+            files = data.get("files", [])
+            if not files:
+                break
+
+            all_items.extend(files)
+            if stream_cb:
+                stream_cb(f"  ↳ {len(all_items)} items collected\n")
+
+            if len(all_items) >= limit:
+                all_items = all_items[:limit]
+                break
+
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                break
+
+        if not all_items:
+            return ToolResult(success=True, content="No files found in Google Drive.")
+
+        # ── Phase 2: Build folder tree ────────────────────────────
+        if stream_cb:
+            stream_cb(f"\nPhase 2: Building folder tree from {len(all_items)} items...\n")
+
+        FOLDER_MIME = "application/vnd.google-apps.folder"
+        folder_map: dict[str, str] = {}  # id → name
+        for item in all_items:
+            if item.get("mimeType") == FOLDER_MIME:
+                folder_map[item["id"]] = item.get("name", "Unnamed")
+
+        # Resolve full path for a given parent list (with memoization).
+        _path_cache: dict[str, str] = {}
+
+        def _resolve_path(parent_id: str) -> str:
+            if parent_id in _path_cache:
+                return _path_cache[parent_id]
+            if parent_id not in folder_map:
+                # Root or shared drive root.
+                _path_cache[parent_id] = "My Drive"
+                return "My Drive"
+            # Walk up — find this folder's own parents.
+            folder_name = folder_map[parent_id]
+            # Find the folder item to get its parents.
+            for item in all_items:
+                if item.get("id") == parent_id:
+                    parents = item.get("parents", [])
+                    if parents:
+                        parent_path = _resolve_path(parents[0])
+                        full = f"{parent_path}/{folder_name}"
+                    else:
+                        full = folder_name
+                    _path_cache[parent_id] = full
+                    return full
+            _path_cache[parent_id] = folder_name
+            return folder_name
+
+        # ── Phase 3: Write output file ────────────────────────────
+        if stream_cb:
+            stream_cb("Phase 3: Writing output file...\n")
+
+        out_path = Path(output_file).expanduser()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        file_count = 0
+        folder_count = 0
+        folders_seen: set[str] = set()
+
+        with open(out_path, "w", encoding="utf-8") as fh:
+            for item in all_items:
+                name = item.get("name", "Unnamed")
+                mime = item.get("mimeType", "")
+                parents = item.get("parents", [])
+                parent_path = _resolve_path(parents[0]) if parents else "My Drive"
+
+                # Track unique folders.
+                if parents:
+                    folders_seen.add(parents[0])
+
+                full_path = f"{parent_path}/{name}"
+                link = item.get("webViewLink", "—")
+                size = self._format_file_size(item.get("size", ""))
+                ftype = self._readable_mime(mime)
+
+                if mime == FOLDER_MIME:
+                    folder_count += 1
+                else:
+                    file_count += 1
+
+                fh.write(f"{full_path}, {link}, {size}, {ftype}\n")
+
+        summary = (
+            f"✓ Recursive listing complete → {out_path}\n"
+            f"  Total items: {len(all_items)} ({file_count} files, {folder_count} folders)\n"
+            f"  Unique folders traversed: {len(folders_seen)}\n"
+            f"  Pages fetched: {page_num}\n"
+            f"  Format: <full/path/name>, <link>, <size>, <type>"
+        )
+        if stream_cb:
+            stream_cb(f"\n{summary}\n")
+        return ToolResult(success=True, content=summary)
 
     async def _drive_download(
         self,

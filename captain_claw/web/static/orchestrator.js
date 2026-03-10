@@ -757,7 +757,7 @@
                     const ov = taskOverrides[tid];
                     const parts = [];
                     if (ov.model_id) parts.push(ov.model_id);
-                    if (ov.session_id) parts.push('session');
+                    if (ov.session_id && ov.session_id !== '__shared__') parts.push('session');
                     if (parts.length) {
                         html += `<div class="task-card-override">${parts.join(' \u00B7 ')}</div>`;
                     }
@@ -1001,7 +1001,10 @@
         html += '<div class="preview-field">';
         html += '<label class="preview-field-label">Session</label>';
         html += '<select class="preview-field-select" id="previewSession">';
-        html += '<option value="">New session (auto)</option>';
+        const sharedSel = (!sessionId || sessionId === '__shared__') ? ' selected' : '';
+        const perWorkerSel = sessionId === '__per_worker__' ? ' selected' : '';
+        html += `<option value="__shared__"${sharedSel}>New session shared between workers</option>`;
+        html += `<option value="__per_worker__"${perWorkerSel}>New session per worker</option>`;
         availableSessions.forEach(s => {
             const sel = sessionId === s.id ? ' selected' : '';
             html += `<option value="${esc(s.id)}"${sel}>${esc(s.name)} (${esc(s.id.slice(0, 8))})</option>`;
@@ -1056,7 +1059,7 @@
                 if (descEl && descEl.value !== tasks[tid].description) {
                     ov.description = descEl.value;
                 }
-                if (sessionEl && sessionEl.value) {
+                if (sessionEl) {
                     ov.session_id = sessionEl.value;
                 }
                 if (modelEl && modelEl.value) {

@@ -611,18 +611,20 @@ class AgentScaleLoopMixin:
     _SAVE_INTENT_RE = re.compile(
         r"(?:"
         # "save this/these/it/them", "store this", "create a table"
-        r"(?:save|store|persist|keep|insert|put)\s+(?:this|these|it|them|the\s+(?:data|results?|items?|list|info))"
+        r"(?:save|store|persist|keep|insert|put|index)\s+(?:this|these|it|them|the\s+(?:data|results?|items?|list|info))"
         # "create a [optional words] table" — allows "create a shopping list table"
         r"|create\s+(?:a\s+)?(?:\w+\s+){0,3}(?:table|datastore|dataset|database|spreadsheet|csv)"
-        r"|(?:save|store|write|add|import|insert)\s+(?:to|into|in)\s+(?:a\s+)?(?:table|datastore|dataset|database|spreadsheet|file|csv)"
+        r"|(?:save|store|write|add|import|insert|index)\s+(?:to|into|in)\s+(?:a\s+)?(?:table|datastore|dataset|database|spreadsheet|file|csv|memory|deep\s+memory|typesense)"
         # "make/build a [optional words] table from/with/of"
         r"|(?:make|build)\s+(?:a\s+)?(?:\w+\s+){0,3}(?:table|spreadsheet|csv)\s+(?:from|with|of)"
         # "put/add this/these [optional words] to/into/in" — allows "add these items to it"
         r"|(?:put|add)\s+(?:this|these|it|them|the\s+(?:data|results?|items?|list))(?:\s+\w+){0,3}\s+(?:to|into|in)\b"
-        # "save to datastore", "write to table"
-        r"|(?:save|write|export)\s+(?:it\s+)?(?:to|into)\s+(?:a\s+)?(?:table|datastore|file)"
+        # "save to datastore", "write to table", "index to memory"
+        r"|(?:save|write|export|index)\s+(?:it\s+)?(?:to|into)\s+(?:a\s+)?(?:table|datastore|file|memory|deep\s+memory|typesense)"
         # "just save/store", "only save/store"
-        r"|(?:just|only)\s+(?:save|store|create|write|keep)"
+        r"|(?:just|only)\s+(?:save|store|create|write|keep|index)"
+        # "to memory", "to deep memory" — covers "index X to memory"
+        r"|(?:to|into)\s+(?:deep\s+)?memory"
         r")",
         re.IGNORECASE,
     )
@@ -643,11 +645,14 @@ class AgentScaleLoopMixin:
           ``_member_context`` snippet from the already-fetched page
         - ``"file"``        — majority contain path separators or known extensions
         - ``"research"``    — majority are plain-text entities (names, titles),
-          OR entities with accompanying URLs (``"Name — https://…"``)
-        - ``"passthrough"`` — plain-text entities where the user wants to
-          save/store them (e.g. "create a table and add these items").
-          The micro-loop is skipped and the main LLM handles the items
-          directly with tool calls (datastore, todo, etc.).
+          OR entities with accompanying URLs (``"Name — https://…"``),
+          AND the user or per_member_action explicitly requested web
+          research.  Research mode is NEVER auto-enabled — it requires
+          an explicit opt-in signal.
+        - ``"passthrough"`` — plain-text entities where no explicit research
+          signal is present.  The micro-loop is skipped and the main LLM
+          handles the items directly with tool calls (datastore, todo,
+          etc.).  This is the DEFAULT for entity lists.
 
         Items that have BOTH a text prefix and an embedded URL are examined
         further: if the prefix is a date, numeric label, or metadata tag
@@ -667,9 +672,15 @@ class AgentScaleLoopMixin:
         so that named URLs are treated as plain URLs (no research).
 
         When ``user_input`` contains save/store/create intent signals
-        (e.g. "create a table and save this", "store to datastore"),
-        research mode is suppressed because the user wants to persist
-        already-known data, not search the web for more information.
+        (e.g. "create a table and save this", "store to datastore",
+        "index to memory"), research mode is suppressed because the user
+        wants to persist already-known data, not search the web.
+
+        **IMPORTANT**: Research mode is NEVER auto-enabled.  It requires
+        an explicit research signal — either from ``user_input`` (e.g.
+        "research these companies") or from ``per_member_action`` (e.g.
+        "research each company and summarize findings").  Without such a
+        signal, plain-text entity lists default to ``"passthrough"``.
 
         The result is stored once in ``_scale_progress["_extraction_mode"]``
         so the micro-loop knows which extraction strategy to use.
@@ -703,7 +714,16 @@ class AgentScaleLoopMixin:
         _user_wants_save = bool(
             AgentScaleLoopMixin._SAVE_INTENT_RE.search(user_input)
         ) if user_input else False
-        if _user_wants_save and not _action_says_research:
+
+        # ── Check user_input for explicit research intent ──
+        # Research mode must be explicitly requested.  We check the user's
+        # raw instructions (not just per_member_action) so that phrases like
+        # "research these companies" or "search the web for each" opt in.
+        _user_wants_research = bool(
+            AgentScaleLoopMixin._RESEARCH_SIGNAL_RE.search(user_input)
+        ) if user_input else False
+
+        if _user_wants_save and not _action_says_research and not _user_wants_research:
             _action_says_fetch_only = True
 
         sample = items[:10]
@@ -764,19 +784,25 @@ class AgentScaleLoopMixin:
                 return "inline"
             return "url"
         if research_count >= n * 0.5:
-            # Suppress research mode when:
-            # - User wants to save/store existing data (not research it)
-            # - per_member_action says fetch-only (without explicit research signal)
-            # In these cases the items are treated as data to be processed
-            # without web searches.
+            # Research mode requires an EXPLICIT opt-in signal — either
+            # the user asked for web research in their input, or the
+            # LLM-generated per_member_action explicitly says "research".
+            # Without this signal, the agent must NOT autonomously search
+            # the web for each entity.
+            #
             # When save intent is detected, return "passthrough" so the
             # micro-loop is skipped entirely and the main LLM handles the
             # items directly (e.g. via datastore tool calls).
-            if _user_wants_save and not _action_says_research:
+            if _user_wants_save and not _action_says_research and not _user_wants_research:
                 return "passthrough"
             if _action_says_fetch_only and not _action_says_research:
                 return "file"
-            return "research"
+            # Only enable research mode if explicitly requested.
+            if _action_says_research or _user_wants_research:
+                return "research"
+            # Default: treat plain entities as passthrough — let the main
+            # LLM decide how to handle them without autonomous web searching.
+            return "passthrough"
         return "file"
 
     @staticmethod

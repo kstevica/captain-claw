@@ -186,6 +186,13 @@ _SKIP_SCALE_DETECTION_RE = re.compile(
     r"|(?:find\s+(?:all|every)\s+.*files?\b.*return\s+(?:the\s+)?(?:list|paths?))"
     r"|(?:locate\s+(?:all|every)\s+.*files?\b)"
     r"|(?:return\s+(?:the\s+)?(?:complete\s+)?list\s+of\b.*(?:file|relative)\s*(?:paths?|names?))"
+    # Bulk indexing / import into external services: these are mechanical
+    # operations that a Python script handles — per-item LLM processing
+    # would be wasteful (hundreds or thousands of items).
+    r"|(?:index\s+(?:in|into|to)\s+(?:typesense|elasticsearch|elastic|opensearch|solr|meilisearch|algolia|pinecone|weaviate|qdrant|chroma|milvus))"
+    r"|(?:(?:bulk|batch)\s+(?:index|import|insert|ingest|upload|load))"
+    r"|(?:(?:import|ingest|load|insert|push|upload)\s+(?:into|in|to)\s+(?:typesense|elasticsearch|elastic|opensearch|solr|meilisearch|algolia|pinecone|weaviate|qdrant|chroma|milvus))"
+    r"|(?:(?:import|ingest|load|insert|push|upload)\s+(?:all|every|each|the)?\s*(?:files?|records?|items?|documents?|entries|rows?|lines?)\s+(?:into|in|to)\b)"
     r")",
     re.IGNORECASE,
 )

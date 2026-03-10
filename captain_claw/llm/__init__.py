@@ -625,8 +625,7 @@ class ChatGPTResponsesProvider(LLMProvider):
             "stream": True,
             "prompt_cache_key": self.session_id,
         }
-        if instructions:
-            payload["instructions"] = instructions
+        payload["instructions"] = instructions or "Follow the user's instructions."
         return payload
 
     @staticmethod

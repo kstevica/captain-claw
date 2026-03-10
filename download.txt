@@ -1,0 +1,125 @@
+﻿FRC × SCV AI Hackathon — Concept 
+
+
+
+
+Organizers: Fil Rouge Capital (FRC) × South Central Ventures (SCV)
+Location: Zagreb (Wespa or similar space)
+Date: 17. 04. 2026. (Friday)
+Duration: 09:00–19:00 (1 day)
+________________
+
+
+________________
+
+
+1. Why We’re Doing This
+AI is everywhere, but most teams still struggle to move from “we should use AI” to a small, useful, production-grade tool.
+With this hackathon, we want to:
+* Help teams ship real tools in 8 hours – not slide decks, but working demos.
+* Create enablers, not toys – tools that plug into existing workflows (email, docs, CRM, support, code, etc.) and make other businesses faster, smarter, or safer.
+* Activate our joint ecosystem – connect portfolio companies, external builders, and our teams around concrete problems and solutions.
+* Spot new ideas and teams – identify projects and people we might support further (pilots, mentorship, or potential investment).
+* Start our “AI builder” brand in Zagreb and the wider region.
+
+
+________________
+
+
+________________
+
+
+2. Expected Outcomes
+For teams & individuals
+* A working demo of a focused AI tool (web app, bot, service, plugin, etc.).
+* Clear user story (who, what problem, how they use it).
+* A simple “next 4 weeks” roadmap for further development.
+For portfolio companies
+* Prototype or concept for internal tools they would actually use.
+* New connections to developers and data/ML talent.
+For FRC & SCV
+* 2–3 projects to explore for:
+   * internal pilots (dealflow, IC, portfolio support, analytics, security…), or
+   * continued work as standalone products.
+* High-quality content: photos, short interviews, 2–3 case-study style write-ups.
+Overall theme:
+Build AI tools that plug into real workflows and enable other people or businesses to do more.
+
+
+________________
+
+
+________________
+
+
+3. Theme & Topic Areas (Inspiration for Teams)
+Teams can choose from suggested areas or propose their own topic (if it fits the theme and scope):
+1. Ops & Knowledge Copilots
+   * Internal assistants for ops, HR, finance, legal, or support (policy Q&A, contract summary, onboarding guides, SOP search).
+2. Meetings & Communication Intelligence
+   * Tools around meetings, email, Slack/Teams (multi-meeting digest, decision tracker, follow-up generator).
+3. Dev & Data Engineering Helpers
+   * AI for understanding codebases, logs, infra, or schemas (repo explainer, log triage, CI/CD config helper).
+4. Sales, CRM & Pipeline Enrichment
+   * Tools that help find, qualify, or understand leads faster (company research agents, CRM auto-enrichment, account briefings).
+5. Security, Monitoring & Compliance for AI Apps
+   * Lightweight tools for safe AI use (prompt-injection checker, PII detector, AI usage analytics dashboards).
+6. VC & Portfolio Ops Tools
+   * Tools that help FRC/SCV run better (IC memo generators, portfolio dashboards, LP update assistants, deal-tracking helpers).
+Additionally, 3–5 portfolio companies will provide short, real-world challenge briefs teams can pick up.
+________________
+
+
+________________
+
+
+4. Format & High-Level Schedule
+Goal: Build a small but “production-grade enough” AI tool in ~8 hours, plus learning via workshops.
+Proposed structure:
+* 08:30–09:00 — Arrival & Coffee
+Registration, setup, Slack/Discord, Wi-Fi.
+* 09:00–09:20 — Welcome & Context (FRC × SCV)
+Why we’re doing this, theme (enabler tools), expectations.
+* 09:20–09:40 — Theme, Topics & Format Overview
+Present topic areas, what “production-grade in 8 hours” means.
+* 09:40–10:00 — Portfolio Challenge Pitches & Team Formation
+3–5 portfolio founders pitch concrete challenges; teams form and briefly introduce their idea.
+* 10:00–11:00 — Hacking Block #1 (Setup & Skeleton)
+Repos, basic stack, minimal working skeleton.
+* 11:00–11:30 — Workshop #1 (Live “Idea → AI Microservice” Build)
+Practical, copy-pastable patterns to use immediately.
+* 11:30–13:00 — Hacking Block #2 (Core Functionality)
+Get end-to-end flow working (input → AI → output).
+* 13:00–14:00 — Lunch & Informal Networking
+Optional short fireside chat with a portfolio founder.
+* 14:00–14:30 — Workshop #2 (Productizing AI: Evals, UX & Cost)
+How to avoid brittle demos and useless UX.
+* 14:30–16:00 — Hacking Block #3 (UX & Integrations)
+Focus on workflow integration (email, calendar, Slack, CRM, code, etc.) and user experience.
+* 16:00–16:30 — Workshop #3 (Security & Safety for AI Tools)
+Simple security measures teams can add, even in a hackathon.
+* 16:30–18:00 — Hacking Block #4 (Stabilization & Demo Prep)
+Bugfixing, seed examples, short pitch/demo narrative.
+* 18:00–18:50 — Demos & Judging
+~3 min demo + 3 min Q&A per team (or finalist track).
+Criteria: problem clarity, enabler value, technical execution, AI integration, future potential.
+* 18:50–19:10 — Awards & Closing
+Overall winner, best enabler awards, portfolio choice award. Next steps, group photo, drinks.
+________________
+
+
+________________
+
+
+5. Participants & Roles
+   * Teams:
+   * FRC & SCV portfolio teams, invited external teams, individual builders.
+   * Recommended team size: 3–5 people.
+   * Mentors:
+   * FRC & SCV partners and team members.
+   * Portfolio founders/CTOs and technical leads (product, AI/ML, security).
+   * Judges:
+   * Mix of FRC/SCV partners + 1–2 portfolio CTOs / external AI experts.
+   * Follow-up:
+   * 1:1 sessions with winning teams, potential pilots with interested portfolio companies, content for blogs/LinkedIn and potential next edition of the hackathon.
+________________

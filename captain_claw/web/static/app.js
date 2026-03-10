@@ -19,6 +19,7 @@
     let playbooks = [];
     let activePlaybookId = '';   // '' = auto, '__none__' = disabled, or a playbook ID
     let activePlaybookName = 'Auto';
+    let forceScriptMode = false;
 
     // ── DOM references ──────────────────────────────────────
     const $ = (sel) => document.querySelector(sel);
@@ -126,6 +127,12 @@
             case 'thinking':
                 updateThinkingIndicator(data.text, data.tool, data.phase);
                 break;
+            case 'tool_output_inline':
+                updateThinkingWithOutput(data.tool, data.summary, data.output);
+                break;
+            case 'tool_stream':
+                appendToolStreamChunk(data.chunk);
+                break;
             case 'next_steps':
                 renderNextSteps(data.options || []);
                 break;
@@ -154,6 +161,10 @@
         buildPersonaDropdown();
         buildPlaybookDropdown();
         buildCommandReference();
+        // Sync force-script mode from sessionStorage to backend on connect.
+        if (forceScriptMode) {
+            send({ type: 'set_force_script', enabled: true });
+        }
     }
 
     // ── Chat ────────────────────────────────────────────────
@@ -409,6 +420,9 @@
         // Stop the pulsing animation on the icon.
         const icon = el.querySelector('.thinking-icon');
         if (icon) icon.style.animation = 'none';
+        // Auto-collapse console output in frozen state.
+        const consoleEl = el.querySelector('.thinking-console');
+        if (consoleEl) consoleEl.classList.add('collapsed');
     }
 
     function _buildThinkingHtml(text, tool) {
@@ -444,6 +458,14 @@
 
         // Hide empty state so indicator is visible.
         chatEmpty.style.display = 'none';
+
+        // Freeze any previous indicator that has a console (completed tool output).
+        if (phase === 'tool') {
+            const existing = document.getElementById('thinkingIndicator');
+            if (existing && existing.querySelector('.thinking-console')) {
+                _freezeThinkingIndicator();
+            }
+        }
 
         // For scale_micro_loop: freeze the previous step so it stays
         // visible, then create a fresh indicator for the new step.
@@ -487,6 +509,122 @@
 
         // Keep it at the bottom and scroll.
         chatMessages.appendChild(el);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    function updateThinkingWithOutput(tool, summary, output) {
+        // Tool has completed — update the thinking indicator to show its
+        // output in an inline console block beneath the summary line.
+        chatEmpty.style.display = 'none';
+
+        // Freeze any previous indicator that already has console output
+        // (a previous tool in the same turn).
+        const existing = document.getElementById('thinkingIndicator');
+        if (existing && existing.querySelector('.thinking-console')) {
+            _freezeThinkingIndicator();
+        }
+
+        // Create or reuse the live indicator.
+        let el = document.getElementById('thinkingIndicator');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'thinkingIndicator';
+            el.className = 'thinking-indicator';
+            const inner = document.createElement('div');
+            inner.className = 'thinking-inner';
+            const icon = document.createElement('span');
+            icon.className = 'thinking-icon';
+            icon.textContent = '\u2705';  // checkmark — tool is done
+            const textSpan = document.createElement('span');
+            textSpan.className = 'thinking-text';
+            inner.appendChild(icon);
+            inner.appendChild(textSpan);
+            el.appendChild(inner);
+            chatMessages.appendChild(el);
+        }
+
+        // Update the summary line.
+        const textSpan = el.querySelector('.thinking-text');
+        textSpan.innerHTML = _buildThinkingHtml(summary, tool);
+
+        // Mark icon as done (stop pulsing, show checkmark).
+        const icon = el.querySelector('.thinking-icon');
+        if (icon) {
+            icon.textContent = '\u2705';
+            icon.style.animation = 'none';
+        }
+
+        // Add or update the console output block.
+        // If a console already exists (from live tool_stream chunks), keep
+        // its streamed content — don't overwrite with the final output.
+        let consoleEl = el.querySelector('.thinking-console');
+        if (!consoleEl) {
+            // No live stream was received — create the console with final output.
+            consoleEl = document.createElement('div');
+            consoleEl.className = 'thinking-console';
+
+            // Clickable header to toggle expand/collapse.
+            const header = document.createElement('div');
+            header.className = 'thinking-console-header';
+            header.innerHTML = '<span class="thinking-console-chevron">\u25BE</span> Output';
+            header.addEventListener('click', function() {
+                consoleEl.classList.toggle('collapsed');
+            });
+            consoleEl.appendChild(header);
+
+            // Output pre block.
+            const pre = document.createElement('pre');
+            pre.className = 'thinking-console-output';
+            pre.textContent = output || '(no output)';
+            consoleEl.appendChild(pre);
+
+            el.appendChild(consoleEl);
+        }
+        // If console already exists from streaming, leave it as-is.
+
+        // Keep it at the bottom and scroll.
+        chatMessages.appendChild(el);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+
+        _thinkingTool = tool || '';
+    }
+
+    function appendToolStreamChunk(chunk) {
+        // Append a live output chunk to the thinking console.
+        // If no console block exists yet, create one on the current
+        // thinking indicator (the tool is still running).
+        if (!chunk) return;
+
+        let el = document.getElementById('thinkingIndicator');
+        if (!el) return;  // No active indicator — ignore.
+
+        let consoleEl = el.querySelector('.thinking-console');
+        if (!consoleEl) {
+            // First chunk — create the console block.
+            consoleEl = document.createElement('div');
+            consoleEl.className = 'thinking-console';
+
+            const header = document.createElement('div');
+            header.className = 'thinking-console-header';
+            header.innerHTML = '<span class="thinking-console-chevron">\u25BE</span> Output';
+            header.addEventListener('click', function() {
+                consoleEl.classList.toggle('collapsed');
+            });
+            consoleEl.appendChild(header);
+
+            const pre = document.createElement('pre');
+            pre.className = 'thinking-console-output';
+            consoleEl.appendChild(pre);
+
+            el.appendChild(consoleEl);
+        }
+
+        const pre = consoleEl.querySelector('.thinking-console-output');
+        pre.textContent += chunk;
+
+        // Auto-scroll the console to the bottom.
+        pre.scrollTop = pre.scrollHeight;
+        // Keep the chat scrolled to the bottom too.
         chatMessages.scrollTop = chatMessages.scrollHeight;
     }
 
@@ -557,6 +695,13 @@
             activePlaybookName = info.playbook_name || 'Auto';
             $('#playbookName').textContent = activePlaybookName;
             highlightActivePlaybookInDropdown();
+        }
+        // Force script mode sync.
+        if ('force_script' in info) {
+            forceScriptMode = !!info.force_script;
+            var toggle = $('#forceScriptToggle');
+            if (toggle) toggle.checked = forceScriptMode;
+            sessionStorage.setItem('forceScriptMode', forceScriptMode ? 'true' : 'false');
         }
     }
 
@@ -2044,6 +2189,22 @@
         sendBtn.addEventListener('click', handleSend);
         // Stop button — cancels current processing
         stopBtn.addEventListener('click', handleStop);
+
+        // Force script mode toggle
+        var forceScriptToggle = $('#forceScriptToggle');
+        if (forceScriptToggle) {
+            // Restore from sessionStorage
+            var stored = sessionStorage.getItem('forceScriptMode');
+            if (stored === 'true') {
+                forceScriptMode = true;
+                forceScriptToggle.checked = true;
+            }
+            forceScriptToggle.addEventListener('change', function () {
+                forceScriptMode = forceScriptToggle.checked;
+                sessionStorage.setItem('forceScriptMode', forceScriptMode ? 'true' : 'false');
+                send({ type: 'set_force_script', enabled: forceScriptMode });
+            });
+        }
 
         // Input events
         messageInput.addEventListener('keydown', (e) => {

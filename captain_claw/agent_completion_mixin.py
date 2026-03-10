@@ -176,10 +176,13 @@ class AgentCompletionMixin:
                 self._turn_has_successful_tool(turn_start_idx, "browser")
                 or self._turn_has_successful_tool(turn_start_idx, "image_gen")
             )
+            # Typesense index is a valid output sink — no file needed.
+            has_index_output = self._turn_has_successful_tool(turn_start_idx, "typesense")
             # Any single file-producing action is sufficient.  The write
             # tool alone proves a file was created (e.g. markdown, text).
             # Script execution alone proves a script generated output.
-            file_produced = has_ds_export or has_write or has_script_exec or has_media_output
+            # Typesense indexing proves data was persisted to memory.
+            file_produced = has_ds_export or has_write or has_script_exec or has_media_output or has_index_output
             if not file_produced and iteration < (hard_turn_iterations - 1):
                 completion_feedback = (
                     "Completion gate: final_action is write_file but no output file was "
@@ -384,23 +387,42 @@ class AgentCompletionMixin:
         if bool(list_task_plan.get("enabled", False)):
             members = list_task_plan.get("members")
             if isinstance(members, list) and members:
+                # When a Python script was successfully executed this
+                # turn, it handled the entire task outside the scale
+                # system.  The script's output lives in a file (not in
+                # the LLM response), so _evaluate_list_member_coverage
+                # would never find textual evidence of each member and
+                # would block finalization forever.  Skip the gate.
+                # ── Bypass: script execution covers the entire task ──
+                _skip_coverage = False
+                if self._turn_has_successful_script_execution(turn_start_idx):
+                    log.info(
+                        "Skipping list_member_coverage — script execution covered task",
+                        member_count=len(members),
+                    )
+                    _skip_coverage = True
+
                 # When the browser tool was successfully used this turn,
                 # URL-only members are satisfied — the browser already
                 # visited/processed them.  The list task plan often
                 # false-positives on browser automation prompts that
                 # contain URLs.
-                _browser_used = self._turn_has_successful_tool(turn_start_idx, "browser")
-                if _browser_used:
-                    _all_urls = all(
-                        str(m).strip().startswith(("http://", "https://"))
-                        for m in members
-                    )
-                    if _all_urls:
-                        log.info(
-                            "Skipping list_member_coverage — browser tool covered URL members",
-                            member_count=len(members),
+                if not _skip_coverage:
+                    _browser_used = self._turn_has_successful_tool(turn_start_idx, "browser")
+                    if _browser_used:
+                        _all_urls = all(
+                            str(m).strip().startswith(("http://", "https://"))
+                            for m in members
                         )
-                        members = []  # treat as empty → skip coverage check
+                        if _all_urls:
+                            log.info(
+                                "Skipping list_member_coverage — browser tool covered URL members",
+                                member_count=len(members),
+                            )
+                            _skip_coverage = True
+
+                if _skip_coverage:
+                    members = []  # prevent downstream evaluation
 
                 _sp = getattr(self, "_scale_progress", None)
                 _sp_items = _sp.get("items", []) if _sp else []
@@ -409,9 +431,13 @@ class AgentCompletionMixin:
                 _sp_completed = len(_sp_done)
                 _sp_all_done = _sp_total > 0 and _sp_completed >= _sp_total
 
-                if _sp_all_done:
-                    covered_members = [str(m) for m in members]
+                if _skip_coverage:
+                    # Bypass already logged; treat all members as covered.
+                    covered_members = list(members)
                     missing_members: list[str] = []
+                elif _sp_all_done:
+                    covered_members = [str(m) for m in members]
+                    missing_members = []
                 else:
                     eval_members = (
                         [str(m) for m in _sp_items]
@@ -515,17 +541,29 @@ class AgentCompletionMixin:
             if not checks_ok:
                 # Post-scale synthesis: cap validation retries.  The scale
                 # micro-loop already did the heavy lifting; the LLM is just
-                # combining pre-researched results.  Allowing 10+ retries
+                # combining pre-researched results.  Allowing many retries
                 # wastes LLM calls when the critic oscillates between
                 # contradictory feedback (e.g. "deliver sequentially" vs
                 # "missing topic X").
-                _post_scale_retry_cap = 3
+                _post_scale_retry_cap = 1
+                # Also accept after just 1 retry for any task (non-scale)
+                # that already produced a substantive response.  The contract
+                # validation is advisory — blocking indefinitely causes
+                # pipeline timeouts for straightforward requests.
+                _general_retry_cap = 2
                 if _scale_completed and iteration >= _post_scale_retry_cap:
                     log.info(
                         "Post-scale validation retry cap reached — accepting response",
                         iteration=iteration,
                         failed=len(failed_items),
                         cap=_post_scale_retry_cap,
+                    )
+                elif iteration >= _general_retry_cap:
+                    log.info(
+                        "General validation retry cap reached — accepting response (advisory)",
+                        iteration=iteration,
+                        failed=len(failed_items),
+                        cap=_general_retry_cap,
                     )
                 else:
                     completion_feedback = self._build_completion_feedback(

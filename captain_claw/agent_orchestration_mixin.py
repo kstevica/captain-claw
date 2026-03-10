@@ -85,6 +85,8 @@ class AgentOrchestrationMixin:
         effective_user_input = user_input
         effective_user_input, clarification_context_applied = self._resolve_effective_user_input(user_input)
 
+        _force_script = getattr(self, "_force_script_mode", False)
+
         # Pre-populate cross-session context cache for _build_messages.
         self._cross_session_context_cache = None
         if hasattr(self, "_resolve_cross_session_context"):
@@ -239,17 +241,68 @@ class AgentOrchestrationMixin:
         # ── Automatic task rephrasing ──────────────────────────────
         task_was_rephrased = False
         if not is_worker and not clarification_context_applied:
-            effective_user_input, task_was_rephrased = await self._rephrase_task(
-                user_input=effective_user_input,
-                turn_usage=turn_usage,
-            )
+            if _force_script:
+                # Force-script mode: always rephrase into a script spec.
+                effective_user_input, task_was_rephrased = await self._rephrase_for_script_mode(
+                    user_input=effective_user_input,
+                    turn_usage=turn_usage,
+                )
+            else:
+                effective_user_input, task_was_rephrased = await self._rephrase_task(
+                    user_input=effective_user_input,
+                    turn_usage=turn_usage,
+                )
             if task_was_rephrased:
                 require_all_sources = self._request_references_all_sources(effective_user_input)
+
+        # ── Force script mode instruction ─────────────────────────
+        # Append AFTER rephrasing so the rephrase works on the clean
+        # user prompt, and the mandatory instruction is always present.
+        if _force_script:
+            _credentials_block = await self._collect_script_credentials()
+            _force_script_instruction = (
+                "\n\n"
+                "===== SYSTEM CONSTRAINT: SCRIPT-ONLY MODE =====\n"
+                "Your ONLY allowed action sequence is:\n"
+                "  Step 1: write(path='scripts/<name>.py', content=<script>)\n"
+                "  Step 2: shell(command='python3 scripts/<name>.py')\n"
+                "  Step 3: Report results from stdout.\n\n"
+                "FORBIDDEN (will cause errors):\n"
+                "- shell() for anything other than python3 <script>\n"
+                "- Any interactive commands (mkdir, cat, gws, curl, ls, "
+                "grep, python3 -c)\n"
+                "- Reading or downloading content into the conversation\n"
+                "- Multiple shell calls before writing a script\n\n"
+                "The script must contain ALL logic: data fetching, "
+                "processing, file I/O, API calls. Nothing happens outside "
+                "the script.\n\n"
+                "GOOGLE SERVICES (inside the script only):\n"
+                "Use `gws` CLI via subprocess.run(). It is pre-installed "
+                "and authenticated. Example: "
+                "subprocess.run(['gws', 'drive_list', '--folder-id', "
+                "'...'], capture_output=True, text=True). "
+                "Actions: drive_list, drive_search, drive_download, "
+                "drive_info, drive_create, docs_read, docs_append, "
+                "mail_list, mail_search, mail_read, calendar_list, "
+                "calendar_search, calendar_create, calendar_agenda, raw.\n"
+                "==============================================\n"
+            )
+            if _credentials_block:
+                _force_script_instruction += _credentials_block
+            effective_user_input = effective_user_input + _force_script_instruction
+            log.info("Force script mode: instruction injected into user input")
+
         list_context_excerpt = self._collect_list_extraction_context()
         # Workers execute a single focused task — skip the heavyweight list
         # task extraction / coverage pipeline which can cause endless loops
         # on simple fetch-and-summarize instructions.
         if getattr(self, "_is_worker", False):
+            list_task_plan = list_task_plan  # keep default (disabled)
+        elif _force_script:
+            # Force-script mode: skip list extraction entirely.
+            # The credential URLs injected into the prompt would get
+            # picked up by the list extractor as "members", blocking
+            # finalization.  Script mode doesn't need scale loop.
             list_task_plan = list_task_plan  # keep default (disabled)
         else:
             list_task_plan = await self._generate_list_task_plan(
@@ -269,7 +322,7 @@ class AgentOrchestrationMixin:
         # extraction from the worker prompt would re-enable the list task
         # plan that was intentionally disabled above, causing endless
         # coverage-check loops on simple fetch-and-summarize tasks.
-        if not is_worker:
+        if not is_worker and not _force_script:
             url_extraction_source = user_input if clarification_context_applied else effective_user_input
             input_urls = self._extract_urls(url_extraction_source)
             if len(input_urls) > len(list_task_plan.get("members", [])):
@@ -554,10 +607,14 @@ class AgentOrchestrationMixin:
         if scale_advisory:
             member_count = len(list_task_plan.get("members", []))
             estimated_items = member_count if member_count > 15 else 50
-            scale_budget = min(400, 10 + estimated_items * 3)
+            # Tighter budget: cap at 120 iterations (was 400) and use 2x
+            # per-item (was 3x).  Most list tasks complete well within this.
+            scale_budget = min(120, 10 + estimated_items * 2)
             if scale_budget > planned_turn_iterations:
                 planned_turn_iterations = scale_budget
-        hard_turn_iterations = max(planned_turn_iterations, min(500, planned_turn_iterations * 3))
+        # Hard ceiling: 2x planned (was 3x) capped at 200 (was 500).
+        # Prevents runaway loops when the critic keeps rejecting.
+        hard_turn_iterations = max(planned_turn_iterations, min(200, planned_turn_iterations * 2))
         soft_turn_iterations = planned_turn_iterations
         extension_step = max(6, min(24, max(1, planned_turn_iterations // 3)))
         max_stagnant_iterations = 6
@@ -607,8 +664,26 @@ class AgentOrchestrationMixin:
                     self._emit_pipeline_update("runtime_update", planning_pipeline)
                 if str(planning_pipeline.get("state", "")).strip().lower() == "failed":
                     self._set_runtime_status("waiting")
+                    # Recover the last assistant text as partial results
+                    # so the user sees what was accomplished before failure.
+                    _partial = ""
+                    if self.session:
+                        for _msg in reversed(self.session.messages[turn_start_idx:]):
+                            if _msg.get("role") == "assistant":
+                                _content = str(_msg.get("content", "")).strip()
+                                if _content and len(_content) > 20:
+                                    _partial = _content
+                                    break
+                    if _partial:
+                        return finish(
+                            "⚠️ I wasn't able to fully complete this request "
+                            "(retries exhausted), but here's what I have so "
+                            f"far:\n\n{_partial}",
+                            success=False,
+                        )
                     return finish(
-                        "Task pipeline failed after timeout/retry exhaustion. Could not complete the request.",
+                        "I wasn't able to complete the request — retries "
+                        "exhausted. Please try again or simplify the task.",
                         success=False,
                     )
 
@@ -657,7 +732,27 @@ class AgentOrchestrationMixin:
                         ),
                     )
                     self._set_runtime_status("waiting")
-                    return finish("Max iterations reached. Could not complete the request.", success=False)
+                    # Recover the last assistant text as partial results.
+                    _partial_budget = ""
+                    if self.session:
+                        for _msg in reversed(self.session.messages[turn_start_idx:]):
+                            if _msg.get("role") == "assistant":
+                                _content = str(_msg.get("content", "")).strip()
+                                if _content and len(_content) > 20:
+                                    _partial_budget = _content
+                                    break
+                    if _partial_budget:
+                        return finish(
+                            "⚠️ I wasn't able to fully complete this request "
+                            "(iteration budget exhausted), but here's what I "
+                            f"have so far:\n\n{_partial_budget}",
+                            success=False,
+                        )
+                    return finish(
+                        "I wasn't able to complete the request — iteration "
+                        "budget exhausted. Please try again or simplify the task.",
+                        success=False,
+                    )
 
             # ── Progress / stagnation tracking ────────────────────
             current_snapshot = self._capture_turn_progress_snapshot(turn_start_idx, planning_pipeline)
@@ -694,8 +789,25 @@ class AgentOrchestrationMixin:
                             ),
                         )
                         self._set_runtime_status("waiting")
+                        # Recover the last assistant text as partial results.
+                        _partial_stuck = ""
+                        if self.session:
+                            for _msg in reversed(self.session.messages[turn_start_idx:]):
+                                if _msg.get("role") == "assistant":
+                                    _content = str(_msg.get("content", "")).strip()
+                                    if _content and len(_content) > 20:
+                                        _partial_stuck = _content
+                                        break
+                        if _partial_stuck:
+                            return finish(
+                                "⚠️ I got stuck and couldn't make further "
+                                "progress, but here's what I have so "
+                                f"far:\n\n{_partial_stuck}",
+                                success=False,
+                            )
                         return finish(
-                            "Stopped after repeated non-progress iterations. Could not complete the request.",
+                            "I got stuck and couldn't make further progress. "
+                            "Please try again or simplify the task.",
                             success=False,
                         )
             else:
@@ -724,6 +836,21 @@ class AgentOrchestrationMixin:
                 session_policy=session_tool_policy,
                 task_policy=active_task_tool_policy,
             )
+            # ── Force script mode: strip tools the LLM must NOT use ──
+            # Instruction alone is insufficient (Haiku ignores it).
+            # Keep only tools needed for writing & running a script.
+            if _force_script and tool_defs:
+                _SCRIPT_MODE_TOOLS = {"shell", "write", "read", "edit", "glob"}
+                _before = len(tool_defs)
+                tool_defs = [
+                    td for td in tool_defs
+                    if td.get("name", "").strip().lower() in _SCRIPT_MODE_TOOLS
+                ]
+                log.info(
+                    "Force script mode: restricted tool set",
+                    kept=[td["name"] for td in tool_defs],
+                    removed=_before - len(tool_defs),
+                )
             log.debug(
                 "Tool definitions available",
                 count=len(
@@ -838,7 +965,7 @@ class AgentOrchestrationMixin:
                 # results.  This is cheaper than LLM re-extraction and
                 # fills the gap where glob is (correctly) not in
                 # _CONTENT_FETCH_TOOLS.
-                if _tool_results and self._needs_deferred_scale_init():
+                if _tool_results and not getattr(self, "_force_script_mode", False) and self._needs_deferred_scale_init():
                     _glob_items = self._try_scale_init_from_glob(
                         tool_results=_tool_results,
                         effective_user_input=effective_user_input,
@@ -899,16 +1026,23 @@ class AgentOrchestrationMixin:
 
                 # ── Deferred scale init after fetch ───────────────
                 # Only consider deferred scale init when a content-
-                # fetching tool ran (web_fetch, web_get, read,
-                # pdf_extract, etc.).  Datastore / glob / shell / todo
-                # results don't bring in new article content that
-                # warrants list re-extraction.
+                # fetching tool ran *successfully* (web_fetch, web_get,
+                # read, pdf_extract, etc.).  Failed fetches, datastore,
+                # glob, shell, and todo results don't bring in new
+                # article content that warrants list re-extraction.
+                # Also skip when a script was just executed — the read
+                # is checking the script's output, not fetching new
+                # external content for scale processing.
                 _had_content_fetch = _tool_results and any(
                     str(r.get("tool_name", "")).lower() in _CONTENT_FETCH_TOOLS
+                    and r.get("success", False)
                     for r in _tool_results
                 )
                 _needs_def = (
-                    _had_content_fetch and self._needs_deferred_scale_init()
+                    _had_content_fetch
+                    and not getattr(self, "_force_script_mode", False)
+                    and self._needs_deferred_scale_init()
+                    and not self._turn_has_successful_script_execution(turn_start_idx)
                 )
                 log.info(
                     "Post-tool deferred check",
@@ -928,17 +1062,26 @@ class AgentOrchestrationMixin:
                     # URLs), enter micro-loop.  The source-URL guard prevents
                     # entering the micro-loop with the article URL repeated.
                     # Skip when extraction mode is "passthrough" (save/store intent).
+                    # Also skip when item count is very high (>100) — the task
+                    # clearly needs a script-based approach, not per-item LLM calls.
                     _sp_deferred = getattr(self, "_scale_progress", None)
                     _deferred_items = _sp_deferred.get("items", []) if _sp_deferred else []
                     _deferred_passthrough = (
                         _sp_deferred is not None
                         and str(_sp_deferred.get("_extraction_mode", "")).strip() == "passthrough"
                     )
+                    _deferred_too_many = len(_deferred_items) > 100
+                    if _deferred_too_many:
+                        log.info(
+                            "Deferred scale init: too many items for micro-loop, skipping",
+                            item_count=len(_deferred_items),
+                        )
                     if (
                         _sp_deferred is not None
                         and len(_deferred_items) >= 2
                         and not self._items_are_source_urls_only(_deferred_items)
                         and not _deferred_passthrough
+                        and not _deferred_too_many
                     ):
                         micro_result = await self._run_micro_loop_and_summarize(
                             effective_user_input=effective_user_input,
@@ -1110,7 +1253,13 @@ class AgentOrchestrationMixin:
                         )
 
                 # ── Deferred scale init (embedded path) ───────────
-                if self._needs_deferred_scale_init():
+                # Skip when a script was executed — the LLM is reading
+                # its own output, not fetching external list content.
+                if (
+                    not getattr(self, "_force_script_mode", False)
+                    and self._needs_deferred_scale_init()
+                    and not self._turn_has_successful_script_execution(turn_start_idx)
+                ):
                     list_task_plan = await self._deferred_scale_init(
                         effective_user_input=effective_user_input,
                         list_task_plan=list_task_plan,
@@ -1459,3 +1608,139 @@ class AgentOrchestrationMixin:
             "total_tokens": prompt_tokens + completion_tokens,
         })
         self._set_runtime_status("waiting")
+
+    # ── Script-mode credential injection ─────────────────────────
+
+    async def _collect_script_credentials(self) -> str:
+        """Collect API keys, passwords, and credentials from config + DB.
+
+        Returns a formatted block to inject into the force-script prompt,
+        or an empty string if no credentials are configured.
+        """
+        cfg = get_config()
+        lines: list[str] = []
+
+        # -- Typesense --
+        ts = cfg.tools.typesense
+        if ts.api_key:
+            lines.append("## Typesense")
+            lines.append(f"  Host: {ts.host}")
+            lines.append(f"  Port: {ts.port}")
+            lines.append(f"  Protocol: {ts.protocol}")
+            lines.append(f"  API Key: {ts.api_key}")
+            if ts.default_collection:
+                lines.append(f"  Default Collection: {ts.default_collection}")
+
+        # -- Deep Memory (Typesense-backed) --
+        dm = cfg.deep_memory
+        if dm.enabled and dm.api_key:
+            # Only add if different from the Typesense tool config
+            _dm_same = (
+                dm.host == ts.host
+                and dm.port == ts.port
+                and dm.api_key == ts.api_key
+            )
+            if not _dm_same:
+                lines.append("## Deep Memory (Typesense)")
+                lines.append(f"  Host: {dm.host}")
+                lines.append(f"  Port: {dm.port}")
+                lines.append(f"  Protocol: {dm.protocol}")
+                lines.append(f"  API Key: {dm.api_key}")
+                lines.append(f"  Collection: {dm.collection_name}")
+
+        # -- Web Search (Brave) --
+        ws = cfg.tools.web_search
+        if ws.api_key:
+            lines.append("## Web Search (Brave)")
+            lines.append(f"  API Key: {ws.api_key}")
+            lines.append(f"  Base URL: {ws.base_url}")
+
+        # -- SendMail --
+        sm_cfg = cfg.tools.send_mail
+        if sm_cfg.mailgun_api_key:
+            lines.append("## Mailgun")
+            lines.append(f"  API Key: {sm_cfg.mailgun_api_key}")
+            lines.append(f"  Domain: {sm_cfg.mailgun_domain}")
+            lines.append(f"  Base URL: {sm_cfg.mailgun_base_url}")
+        if sm_cfg.sendgrid_api_key:
+            lines.append("## SendGrid")
+            lines.append(f"  API Key: {sm_cfg.sendgrid_api_key}")
+            lines.append(f"  Base URL: {sm_cfg.sendgrid_base_url}")
+        if sm_cfg.smtp_password:
+            lines.append("## SMTP")
+            lines.append(f"  Host: {sm_cfg.smtp_host}")
+            lines.append(f"  Port: {sm_cfg.smtp_port}")
+            lines.append(f"  Username: {sm_cfg.smtp_username}")
+            lines.append(f"  Password: {sm_cfg.smtp_password}")
+            lines.append(f"  TLS: {sm_cfg.smtp_use_tls}")
+        if sm_cfg.from_address:
+            lines.append("## SendMail (General)")
+            lines.append(f"  From Address: {sm_cfg.from_address}")
+            if sm_cfg.from_name:
+                lines.append(f"  From Name: {sm_cfg.from_name}")
+
+        # -- LLM Provider API Key (for scripts that call LLM APIs) --
+        if cfg.model.api_key:
+            lines.append("## LLM Provider")
+            lines.append(f"  Provider: {cfg.model.provider}")
+            lines.append(f"  API Key: {cfg.model.api_key}")
+            if cfg.model.base_url:
+                lines.append(f"  Base URL: {cfg.model.base_url}")
+
+        # -- Provider keys from settings UI --
+        pk = cfg.provider_keys
+        if pk.openai:
+            lines.append("## OpenAI API")
+            lines.append(f"  API Key: {pk.openai}")
+        if pk.anthropic:
+            lines.append("## Anthropic API")
+            lines.append(f"  API Key: {pk.anthropic}")
+        if pk.gemini:
+            lines.append("## Google Gemini API")
+            lines.append(f"  API Key: {pk.gemini}")
+        if pk.xai:
+            lines.append("## xAI API")
+            lines.append(f"  API Key: {pk.xai}")
+        if pk.brave:
+            lines.append("## Brave Search (Provider Keys)")
+            lines.append(f"  API Key: {pk.brave}")
+
+        # -- Telegram bot token --
+        if cfg.telegram.enabled and cfg.telegram.bot_token:
+            lines.append("## Telegram Bot")
+            lines.append(f"  Bot Token: {cfg.telegram.bot_token}")
+
+        # -- Direct API entries from session DB --
+        try:
+            sm = getattr(self, "session_manager", None)
+            if sm:
+                api_entries = await sm.list_direct_api_calls(limit=50)
+                for entry in api_entries:
+                    if entry.auth_token:
+                        label = entry.app_name or entry.name or entry.url
+                        lines.append(f"## Direct API: {label}")
+                        lines.append(f"  URL: {entry.url}")
+                        lines.append(f"  Method: {entry.method}")
+                        lines.append(f"  Auth Type: {entry.auth_type or 'bearer'}")
+                        lines.append(f"  Auth Token: {entry.auth_token}")
+                        if entry.headers:
+                            lines.append(f"  Headers: {entry.headers}")
+        except Exception as e:
+            log.debug("Failed to load direct API credentials", error=str(e))
+
+        if not lines:
+            return ""
+
+        block = (
+            "\n===== AVAILABLE CREDENTIALS =====\n"
+            "Use these credentials in your script as needed.\n"
+            "Hardcode them directly in the script (this is a local, "
+            "single-user environment).\n\n"
+            + "\n".join(lines)
+            + "\n=================================\n"
+        )
+        log.info(
+            "Force script mode: credentials injected",
+            credential_sections=sum(1 for l in lines if l.startswith("## ")),
+        )
+        return block

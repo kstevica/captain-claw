@@ -144,6 +144,7 @@ class WebServer:
             tool_output_callback=self._tool_output_callback,
             approval_callback=self._approval_callback,
             thinking_callback=self._thinking_callback,
+            tool_stream_callback=self._tool_stream_callback,
         )
         await self.agent.initialize()
 
@@ -189,6 +190,10 @@ class WebServer:
         """Broadcast inline thinking/reasoning updates to all connected clients."""
         self._broadcast({"type": "thinking", "text": text, "tool": tool, "phase": phase})
 
+    def _tool_stream_callback(self, chunk: str) -> None:
+        """Broadcast a live tool output chunk to the thinking console."""
+        self._broadcast({"type": "tool_stream", "chunk": chunk})
+
     _THINKING_SILENT_TOOLS: set[str] = {
         "llm_trace", "pipeline_trace", "memory_select", "memory_semantic_select",
         "compaction", "guard_input", "guard_output", "guard_web", "guard_exec",
@@ -225,7 +230,17 @@ class WebServer:
         if normalized not in self._THINKING_SILENT_TOOLS:
             from captain_claw.agent_tool_loop_mixin import AgentToolLoopMixin
             summary = AgentToolLoopMixin._tool_thinking_summary(tool_name, arguments or {})
-            self._thinking_callback(summary, tool=tool_name, phase="tool")
+            # Send tool output inline to the thinking indicator in the chat pane.
+            raw = str(output or "")
+            truncated = raw[:3000]
+            if len(raw) > 3000:
+                truncated += f"\n... [{len(raw)} total chars]"
+            self._broadcast({
+                "type": "tool_output_inline",
+                "tool": tool_name,
+                "summary": summary,
+                "output": truncated,
+            })
 
     def _approval_callback(self, message: str) -> bool:
         """Handle tool approval requests from the agent."""
@@ -299,6 +314,7 @@ class WebServer:
             "personality_name": personality_name,
             "playbook_id": active_pbid,
             "playbook_name": playbook_name,
+            "force_script": bool(getattr(self.agent, "_force_script_mode", False)),
         }
 
     # ── Cron runtime context ─────────────────────────────────────────

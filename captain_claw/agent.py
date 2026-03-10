@@ -58,6 +58,7 @@ class Agent(
         tool_output_callback: Callable[[str, dict[str, Any], str], None] | None = None,
         approval_callback: Callable[[str], bool] | None = None,
         thinking_callback: Callable[[str, str, str], None] | None = None,
+        tool_stream_callback: Callable[[str], None] | None = None,
     ):
         """Initialize the agent.
 
@@ -66,12 +67,14 @@ class Agent(
             status_callback: Optional runtime status callback
             approval_callback: Optional callback for guard approval prompts
             thinking_callback: Optional callback for inline thinking/reasoning updates
+            tool_stream_callback: Optional callback for streaming tool output chunks
         """
         self.provider = provider
         self.status_callback = status_callback
         self.tool_output_callback = tool_output_callback
         self.approval_callback = approval_callback
         self.thinking_callback = thinking_callback
+        self._tool_stream_callback = tool_stream_callback
         self.tools = get_tool_registry()
         self.tools.set_approval_callback(self.approval_callback)
         self.runtime_base_path = Path.cwd().resolve()

@@ -35,6 +35,7 @@ class AgentPool:
         max_agents: int = 50,
         idle_evict_seconds: float = 300.0,
         provider: LLMProvider | None = None,
+        provider_factory: Callable[[], LLMProvider] | None = None,
         status_callback: Callable[[str], None] | None = None,
         tool_output_callback: Callable[[str, dict[str, Any], str], None] | None = None,
         thinking_callback: Callable[[str, str, str], None] | None = None,
@@ -44,6 +45,7 @@ class AgentPool:
         self.max_agents = max(1, int(max_agents))
         self.idle_evict_seconds = max(30.0, float(idle_evict_seconds))
         self._provider = provider
+        self._provider_factory = provider_factory
         self._status_callback = status_callback
         self._tool_output_callback = tool_output_callback
         self._thinking_callback = thinking_callback
@@ -58,6 +60,12 @@ class AgentPool:
         self._creating: dict[str, asyncio.Lock] = {}
         # Shared instruction loader so all workers reuse the same template cache.
         self._shared_instructions = InstructionLoader()
+
+    def _get_current_provider(self) -> LLMProvider:
+        """Return the current LLM provider (tracks runtime model switches)."""
+        if self._provider_factory:
+            return self._provider_factory()
+        return self._provider or get_provider()
 
     @property
     def size(self) -> int:
@@ -153,7 +161,7 @@ class AgentPool:
             return True
 
         agent = Agent(
-            provider=self._provider or get_provider(),
+            provider=self._get_current_provider(),
             status_callback=self._status_callback,
             tool_output_callback=self._tool_output_callback,
             thinking_callback=self._thinking_callback,

@@ -318,22 +318,42 @@ class AgentReasoningMixin:
                 continue
         return None
 
+    # Regex for requests that are simple single-action tasks (list, search,
+    # read, check, show).  These don't benefit from the contract pipeline's
+    # multi-step planning and validation overhead.
+    _SIMPLE_TASK_RE = re.compile(
+        r"^(?:list|show|search|find|check|get|read|display|what(?:'s| is| are))"
+        r"\b",
+        re.IGNORECASE,
+    )
+
     @staticmethod
     def _should_use_contract_pipeline(
         user_input: str,
         planning_enabled: bool,
         pipeline_mode: str | None = None,
     ) -> bool:
-        """Use explicit user-selected mode only (no automatic switching)."""
-        del user_input  # mode-driven decision for now
+        """Use explicit user-selected mode only (no automatic switching).
+
+        Simple single-action requests (list, search, read, etc.) bypass the
+        contract pipeline entirely — the overhead of generating a contract,
+        running a critic, and retrying validation is not justified for tasks
+        that translate to one or two tool calls.
+        """
         mode = str(pipeline_mode or "").strip().lower()
         if mode == "contracts":
+            # Explicit contracts mode — but still skip for trivially simple tasks.
+            text = (user_input or "").strip()
+            if len(text) < 120 and AgentReasoningMixin._SIMPLE_TASK_RE.search(text):
+                return False
             return True
         if mode == "loop":
-            # Backward compatibility: some call sites/tests toggle planning_enabled
-            # directly without updating pipeline_mode.
             return bool(planning_enabled)
-        # Backward-compat fallback for call sites/session metadata not yet migrated.
+
+        # Default / fallback — skip for simple tasks.
+        text = (user_input or "").strip()
+        if len(text) < 120 and AgentReasoningMixin._SIMPLE_TASK_RE.search(text):
+            return False
         return bool(planning_enabled)
 
     @staticmethod
@@ -1056,6 +1076,93 @@ class AgentReasoningMixin:
         )
         return rephrased, True
 
+    async def _rephrase_for_script_mode(
+        self,
+        user_input: str,
+        turn_usage: dict[str, int],
+    ) -> tuple[str, bool]:
+        """Rephrase user prompt into a script-oriented specification.
+
+        Always runs (no complexity check) — called when force-script mode
+        is ON.  Uses a dedicated system prompt that restructures the user's
+        request as a script spec.
+
+        Returns (rephrased_text, was_rephrased).
+        """
+        self._emit_tool_output(
+            "task_contract",
+            {"step": "script_rephrase_start"},
+            "step=script_rephrase_start\nnote=rephrasing for script-mode execution",
+        )
+
+        messages = [
+            Message(
+                role="system",
+                content=self.instructions.load("script_rephrase_system_prompt.md"),
+            ),
+            Message(
+                role="user",
+                content=self.instructions.render(
+                    "task_rephrase_user_prompt.md",
+                    user_input=user_input,
+                ),
+            ),
+        ]
+        try:
+            response = await self._complete_with_guards(
+                messages=messages,
+                tools=None,
+                interaction_label="script_rephrase",
+                turn_usage=turn_usage,
+                max_tokens=min(4000, int(get_config().model.max_tokens)),
+            )
+            rephrased = (response.content or "").strip()
+        except Exception as e:
+            self._emit_tool_output(
+                "task_contract",
+                {"step": "script_rephrase_error"},
+                f"step=script_rephrase_error\nerror={str(e)}",
+            )
+            return user_input, False
+
+        if not rephrased or len(rephrased) < len(user_input) * 0.3:
+            self._emit_tool_output(
+                "task_contract",
+                {"step": "script_rephrase_rejected", "reason": "too_short"},
+                (
+                    "step=script_rephrase_rejected\n"
+                    f"reason=too_short\n"
+                    f"original_len={len(user_input)}\n"
+                    f"rephrased_len={len(rephrased)}"
+                ),
+            )
+            return user_input, False
+
+        # Strip accidental code fences.
+        if rephrased.startswith("```") and rephrased.endswith("```"):
+            rephrased = re.sub(r"^```\w*\n?", "", rephrased)
+            rephrased = re.sub(r"\n?```$", "", rephrased).strip()
+
+        self._emit_tool_output(
+            "task_contract",
+            {
+                "step": "script_rephrase_done",
+                "original_len": len(user_input),
+                "rephrased_len": len(rephrased),
+            },
+            (
+                "step=script_rephrase_done\n"
+                f"original_len={len(user_input)}\n"
+                f"rephrased_len={len(rephrased)}"
+            ),
+        )
+        self._emit_tool_output(
+            "task_rephrase",
+            {"original_len": len(user_input), "rephrased_len": len(rephrased)},
+            rephrased,
+        )
+        return rephrased, True
+
     @staticmethod
     def _should_enforce_python_worker_mode(user_input: str) -> bool:
         """Whether this turn should enforce Python worker mode."""
@@ -1153,17 +1260,52 @@ class AgentReasoningMixin:
 
     @staticmethod
     def _list_member_aliases(member: str) -> set[str]:
-        """Build simple aliases for matching member coverage in outputs."""
+        """Build simple aliases for matching member coverage in outputs.
+
+        Handles several member formats:
+        - Plain text: ``"Bird Buddy"``
+        - Entity + URL: ``"Bird Buddy — https://mybirdbuddy.com/"``
+        - Pure URL: ``"https://example.com"``
+
+        For "Name — URL" members the entity name is extracted and used
+        as the primary matching alias so that a response mentioning just
+        "Bird Buddy" satisfies coverage for the full member string.
+        """
         base = str(member or "").strip().lower()
         if not base:
             return set()
-        aliases = {base}
+
+        aliases: set[str] = set()
+
+        # ── Extract entity name from "Name — URL" format ──
+        # If the member contains an embedded URL, the text before the URL
+        # separator is the meaningful entity name to match against.
+        url_match = re.search(r"https?://", base)
+        if url_match:
+            name_part = base[:url_match.start()].strip().rstrip("—–\u2014-:.,;| ").strip()
+            if name_part:
+                # Entity name is the primary match target.
+                aliases.add(name_part)
+                name_normalized = re.sub(r"[^a-z0-9]+", " ", name_part).strip()
+                if name_normalized:
+                    aliases.add(name_normalized)
+                    aliases.add(name_normalized.replace(" ", "-"))
+                    aliases.add(name_normalized.replace(" ", "_"))
+                    aliases.add(name_normalized.replace(" ", ""))
+            # Also add the domain name as a fallback alias (e.g. "mybirdbuddy").
+            domain_match = re.search(r"https?://(?:www\.)?([^/.:]+)", base)
+            if domain_match:
+                aliases.add(domain_match.group(1))
+
+        # ── Full-string aliases (backward compatibility) ──
+        aliases.add(base)
         normalized_words = re.sub(r"[^a-z0-9]+", " ", base).strip()
         if normalized_words:
             aliases.add(normalized_words)
             aliases.add(normalized_words.replace(" ", "-"))
             aliases.add(normalized_words.replace(" ", "_"))
             aliases.add(normalized_words.replace(" ", ""))
+
         return {alias for alias in aliases if len(alias) >= 2}
 
     def _evaluate_list_member_coverage(

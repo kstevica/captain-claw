@@ -84,16 +84,25 @@ async def rephrase_orchestrator_input(server: WebServer, request: web.Request) -
             from captain_claw.llm import create_provider
             from captain_claw.config import get_config as _cfg
             _c = _cfg()
+            provider_name = str(resolved.get("provider", _c.model.provider)).strip()
+            norm_key = server.agent._normalize_provider_key(provider_name)
+            extra_headers = _c.provider_keys.headers_for(norm_key) or None
+            if extra_headers:
+                api_key = None  # auth is carried in headers
+            else:
+                api_key = (
+                    server.agent._resolve_provider_api_key(norm_key)
+                    or _c.model.api_key or None
+                )
             provider = create_provider(
-                provider=str(resolved.get("provider", _c.model.provider)),
+                provider=provider_name,
                 model=str(resolved.get("model", _c.model.model)),
-                api_key=server.agent._resolve_provider_api_key(
-                    server.agent._normalize_provider_key(str(resolved.get("provider", "")))
-                ) or _c.model.api_key or None,
+                api_key=api_key,
                 base_url=str(resolved.get("base_url", "") or "") or _c.model.base_url or None,
                 temperature=float(resolved.get("temperature") if resolved.get("temperature") is not None else _c.model.temperature),
                 max_tokens=int(resolved.get("max_tokens") if resolved.get("max_tokens") is not None else _c.model.max_tokens),
                 tokens_per_minute=_c.model.tokens_per_minute,
+                extra_headers=extra_headers,
             )
             log.info("Rephrase using model override", model=str(resolved.get("model", "")))
 
@@ -107,13 +116,15 @@ async def rephrase_orchestrator_input(server: WebServer, request: web.Request) -
     try:
         import asyncio as _asyncio
 
+        # Ollama (local models) can be slower — give more time.
+        _timeout = 180.0 if getattr(provider, "provider", "") == "ollama" else 60.0
         response = await _asyncio.wait_for(
             provider.complete(
                 messages=rephrase_messages,
                 tools=None,
                 max_tokens=2000,
             ),
-            timeout=60.0,
+            timeout=_timeout,
         )
         rephrased = str(getattr(response, "content", "") or "").strip()
         if not rephrased:
@@ -136,7 +147,12 @@ async def rephrase_orchestrator_input(server: WebServer, request: web.Request) -
             except Exception:
                 pass
     except Exception as e:
-        log.error("Rephrase failed", error=str(e))
+        log.error("Rephrase failed",
+                  error=str(e) or repr(e),
+                  error_type=type(e).__name__,
+                  provider_type=type(provider).__name__,
+                  model=getattr(provider, "model", "?"),
+                  base_url=getattr(provider, "base_url", "?"))
         rephrased = user_input
 
     return web.json_response({"rephrased": rephrased, "original": user_input})

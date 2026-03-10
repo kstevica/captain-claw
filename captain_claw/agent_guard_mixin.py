@@ -424,4 +424,5 @@ class AgentGuardMixin:
             runtime_base_path=getattr(self, "workspace_base_path", None),
             approval_callback=getattr(self, "approval_callback", None),
             file_registry=getattr(self, "_file_registry", None),
+            stream_callback=getattr(self, "_tool_stream_callback", None),
         )

@@ -117,6 +117,14 @@
 
         <!-- Input area -->
         <div id="inputArea">
+            <!-- Input toggles bar -->
+            <div class="input-toggles">
+                <label class="toggle-switch" title="Force script mode: LLM writes and executes a Python script instead of using internal tools">
+                    <input type="checkbox" id="forceScriptToggle" />
+                    <span class="toggle-slider"></span>
+                    <span class="toggle-label">Script mode</span>
+                </label>
+            </div>
             <!-- Command suggestions dropdown -->
             <div id="commandSuggestions" class="suggestions-dropdown hidden"></div>
             <div id="attachmentPreview" class="attachment-preview hidden"></div>
