@@ -121,6 +121,8 @@ class Agent(
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
         }
 
     @staticmethod
@@ -148,6 +150,11 @@ class Agent(
         target["prompt_tokens"] += prompt
         target["completion_tokens"] += completion
         target["total_tokens"] += total
+        # Cache tokens (Anthropic via LiteLLM)
+        target.setdefault("cache_creation_input_tokens", 0)
+        target.setdefault("cache_read_input_tokens", 0)
+        target["cache_creation_input_tokens"] += int(usage.get("cache_creation_input_tokens", 0))
+        target["cache_read_input_tokens"] += int(usage.get("cache_read_input_tokens", 0))
 
     def _finalize_turn_usage(self, turn_usage: dict[str, int]) -> None:
         """Persist usage for the last turn and aggregate global totals."""

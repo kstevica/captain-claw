@@ -901,6 +901,36 @@ class SessionManager:
             await self._db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_filereg_logical ON file_registry(logical_path)"
             )
+            # -- LLM usage tracking (per-call token & byte metrics) --
+            await self._db.execute("""
+                CREATE TABLE IF NOT EXISTS llm_usage (
+                    id                          TEXT PRIMARY KEY,
+                    session_id                  TEXT,
+                    interaction                 TEXT NOT NULL DEFAULT 'conversation',
+                    provider                    TEXT NOT NULL DEFAULT '',
+                    model                       TEXT NOT NULL DEFAULT '',
+                    prompt_tokens               INTEGER NOT NULL DEFAULT 0,
+                    completion_tokens           INTEGER NOT NULL DEFAULT 0,
+                    total_tokens                INTEGER NOT NULL DEFAULT 0,
+                    cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+                    cache_read_input_tokens     INTEGER NOT NULL DEFAULT 0,
+                    input_bytes                 INTEGER NOT NULL DEFAULT 0,
+                    output_bytes                INTEGER NOT NULL DEFAULT 0,
+                    streaming                   INTEGER NOT NULL DEFAULT 0,
+                    tools_enabled               INTEGER NOT NULL DEFAULT 0,
+                    max_tokens                  INTEGER,
+                    finish_reason               TEXT NOT NULL DEFAULT '',
+                    error                       INTEGER NOT NULL DEFAULT 0,
+                    latency_ms                  INTEGER NOT NULL DEFAULT 0,
+                    created_at                  TEXT NOT NULL
+                )
+            """)
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_llm_usage_created_at ON llm_usage(created_at)"
+            )
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_llm_usage_session_id ON llm_usage(session_id)"
+            )
             await self._ensure_cron_jobs_migrations()
             await self._db.commit()
 
@@ -2954,6 +2984,109 @@ class SessionManager:
             affected = cursor.rowcount
         await self._db.commit()
         return affected > 0
+
+    # ------------------------------------------------------------------
+    # LLM usage tracking
+    # ------------------------------------------------------------------
+
+    async def record_llm_usage(
+        self,
+        *,
+        session_id: str | None = None,
+        interaction: str = "conversation",
+        provider: str = "",
+        model: str = "",
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        total_tokens: int = 0,
+        cache_creation_input_tokens: int = 0,
+        cache_read_input_tokens: int = 0,
+        input_bytes: int = 0,
+        output_bytes: int = 0,
+        streaming: bool = False,
+        tools_enabled: bool = False,
+        max_tokens: int | None = None,
+        finish_reason: str = "",
+        error: bool = False,
+        latency_ms: int = 0,
+    ) -> None:
+        """Persist a single LLM call usage record."""
+        await self._ensure_db()
+        assert self._db is not None
+        now_iso = _utcnow_iso()
+        row_id = str(uuid.uuid4())
+        await self._db.execute(
+            """INSERT INTO llm_usage (
+                id, session_id, interaction, provider, model,
+                prompt_tokens, completion_tokens, total_tokens,
+                cache_creation_input_tokens, cache_read_input_tokens,
+                input_bytes, output_bytes, streaming, tools_enabled,
+                max_tokens, finish_reason, error, latency_ms, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                row_id, session_id, interaction, provider, model,
+                prompt_tokens, completion_tokens, total_tokens,
+                cache_creation_input_tokens, cache_read_input_tokens,
+                input_bytes, output_bytes, int(streaming), int(tools_enabled),
+                max_tokens, finish_reason, int(error), latency_ms, now_iso,
+            ),
+        )
+        await self._db.commit()
+
+    async def query_llm_usage(
+        self,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+        session_id: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        limit: int = 5000,
+    ) -> list[dict]:
+        """Query llm_usage rows with optional date/session/provider/model filters.
+
+        Returns list of dicts, ordered newest-first.
+        """
+        await self._ensure_db()
+        assert self._db is not None
+        clauses: list[str] = []
+        params: list = []
+        if since:
+            clauses.append("created_at >= ?")
+            params.append(since)
+        if until:
+            clauses.append("created_at < ?")
+            params.append(until)
+        if session_id:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if provider:
+            clauses.append("provider = ?")
+            params.append(provider)
+        if model:
+            clauses.append("model = ?")
+            params.append(model)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = (
+            "SELECT id, session_id, interaction, provider, model,"
+            " prompt_tokens, completion_tokens, total_tokens,"
+            " cache_creation_input_tokens, cache_read_input_tokens,"
+            " input_bytes, output_bytes, streaming, tools_enabled,"
+            " max_tokens, finish_reason, error, latency_ms, created_at"
+            f" FROM llm_usage{where}"
+            " ORDER BY created_at DESC LIMIT ?"
+        )
+        params.append(limit)
+        async with self._db.execute(sql, tuple(params)) as cursor:
+            rows = await cursor.fetchall()
+        cols = [
+            "id", "session_id", "interaction", "provider", "model",
+            "prompt_tokens", "completion_tokens", "total_tokens",
+            "cache_creation_input_tokens", "cache_read_input_tokens",
+            "input_bytes", "output_bytes", "streaming", "tools_enabled",
+            "max_tokens", "finish_reason", "error", "latency_ms", "created_at",
+        ]
+        return [dict(zip(cols, row)) for row in rows]
 
     async def close(self) -> None:
         """Close the database connection."""

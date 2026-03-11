@@ -102,3 +102,7 @@ async def serve_direct_api_calls(server: WebServer, request: web.Request) -> web
 
 async def serve_skills(server: WebServer, request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "skills.html")
+
+
+async def serve_usage(server: WebServer, request: web.Request) -> web.FileResponse:
+    return web.FileResponse(STATIC_DIR / "usage.html")

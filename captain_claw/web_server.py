@@ -911,6 +911,78 @@ class WebServer:
         from captain_claw.web.static_pages import serve_skills
         return await serve_skills(self, request)
 
+    async def _serve_usage(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_usage
+        return await serve_usage(self, request)
+
+    async def _get_usage(self, request: web.Request) -> web.Response:
+        """GET /api/usage — query LLM usage records with date filtering."""
+        import json as _json
+        from datetime import datetime, timedelta, timezone
+
+        from captain_claw.session import get_session_manager
+        sm = get_session_manager()
+        period = request.query.get("period", "today")
+        session_id = request.query.get("session_id")
+        provider = request.query.get("provider")
+        model = request.query.get("model")
+
+        now = datetime.now(timezone.utc)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        period_map = {
+            "last_hour": (now - timedelta(hours=1), now),
+            "today": (today_start, now),
+            "yesterday": (today_start - timedelta(days=1), today_start),
+            "this_week": (today_start - timedelta(days=now.weekday()), now),
+            "last_week": (
+                today_start - timedelta(days=now.weekday() + 7),
+                today_start - timedelta(days=now.weekday()),
+            ),
+            "this_month": (today_start.replace(day=1), now),
+            "last_month": (
+                (today_start.replace(day=1) - timedelta(days=1)).replace(day=1),
+                today_start.replace(day=1),
+            ),
+            "all": (None, None),
+        }
+
+        since_dt, until_dt = period_map.get(period, period_map["today"])
+        since = since_dt.isoformat() if since_dt else None
+        until = until_dt.isoformat() if until_dt else None
+
+        # Explicit overrides
+        if "since" in request.query:
+            since = request.query["since"]
+        if "until" in request.query:
+            until = request.query["until"]
+
+        rows = await sm.query_llm_usage(
+            since=since, until=until,
+            session_id=session_id, provider=provider, model=model,
+        )
+
+        totals = {
+            "prompt_tokens": sum(r["prompt_tokens"] for r in rows),
+            "completion_tokens": sum(r["completion_tokens"] for r in rows),
+            "total_tokens": sum(r["total_tokens"] for r in rows),
+            "cache_creation_input_tokens": sum(r["cache_creation_input_tokens"] for r in rows),
+            "cache_read_input_tokens": sum(r["cache_read_input_tokens"] for r in rows),
+            "input_bytes": sum(r["input_bytes"] for r in rows),
+            "output_bytes": sum(r["output_bytes"] for r in rows),
+            "total_calls": len(rows),
+            "avg_latency_ms": (
+                sum(r["latency_ms"] for r in rows) // len(rows) if rows else 0
+            ),
+            "error_count": sum(1 for r in rows if r["error"]),
+        }
+
+        return web.json_response(
+            {"totals": totals, "records": rows, "period": period,
+             "since": since, "until": until},
+            dumps=lambda obj: _json.dumps(obj, default=str),
+        )
+
     # Playbooks REST
     async def _pb_list(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_playbooks import list_playbooks
@@ -1356,6 +1428,8 @@ class WebServer:
             app.router.add_get("/browser-workflows", self._serve_browser_workflows)
             app.router.add_get("/direct-api-calls", self._serve_direct_api_calls)
             app.router.add_get("/skills", self._serve_skills)
+            app.router.add_get("/usage", self._serve_usage)
+            app.router.add_get("/api/usage", self._get_usage)
             app.router.add_get("/favicon.ico", self._serve_favicon)
         return app
 

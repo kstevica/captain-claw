@@ -398,17 +398,27 @@ def _convert_tools_for_openai_style(tools: list[ToolDefinition]) -> list[dict[st
 def _extract_usage(usage_obj: Any) -> dict[str, int]:
     """Extract usage token counts from provider response usage object."""
     if usage_obj is None:
-        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        return {
+            "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+        }
 
     prompt_tokens = int(_obj_get(usage_obj, "prompt_tokens", 0) or 0)
     completion_tokens = int(_obj_get(usage_obj, "completion_tokens", 0) or 0)
     total_tokens = int(_obj_get(usage_obj, "total_tokens", 0) or 0)
     if total_tokens <= 0:
         total_tokens = prompt_tokens + completion_tokens
+
+    # Anthropic cache tokens (passed through by LiteLLM)
+    cache_creation = int(_obj_get(usage_obj, "cache_creation_input_tokens", 0) or 0)
+    cache_read = int(_obj_get(usage_obj, "cache_read_input_tokens", 0) or 0)
+
     return {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
+        "cache_creation_input_tokens": cache_creation,
+        "cache_read_input_tokens": cache_read,
     }
 
 

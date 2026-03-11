@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Usage - Captain Claw</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <style>
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --bg-hover: #30363d;
+    --border: #30363d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --accent: #58a6ff;
+    --accent-hover: #79c0ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --purple: #bc8cff;
+    --orange: #f78166;
+    --radius: 8px;
+    --radius-sm: 4px;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    --font-mono: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
+    --header-height: 48px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+/* ─── Header ─────────────────────────────────── */
+
+.usage-header {
+    height: var(--header-height);
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    flex-shrink: 0;
+}
+
+.usage-header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.usage-header-left h1 {
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.usage-logo-link {
+    display: flex;
+    align-items: center;
+    text-decoration: none;
+}
+
+.usage-badge {
+    background: var(--accent);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+}
+
+.usage-header-right { display: flex; align-items: center; gap: 12px; }
+
+.usage-nav-link {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 13px;
+}
+.usage-nav-link:hover { color: var(--accent); }
+
+/* ─── Main layout ────────────────────────────── */
+
+.usage-main {
+    height: calc(100% - var(--header-height));
+    overflow-y: auto;
+    padding: 20px;
+}
+
+/* ─── Period filter ──────────────────────────── */
+
+.usage-filters {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+}
+
+.period-btn {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    padding: 5px 12px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    cursor: pointer;
+    font-family: var(--font);
+    transition: all 0.15s;
+}
+.period-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+.period-btn.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+}
+
+/* ─── Summary cards ──────────────────────────── */
+
+.usage-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(155px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+}
+
+.summary-card {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    text-align: center;
+}
+
+.summary-card .label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+}
+
+.summary-card .value {
+    font-size: 22px;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    color: var(--text-primary);
+}
+
+.summary-card .value.accent { color: var(--accent); }
+.summary-card .value.green { color: var(--green); }
+.summary-card .value.purple { color: var(--purple); }
+.summary-card .value.orange { color: var(--orange); }
+.summary-card .value.red { color: var(--red); }
+
+/* ─── Detail table ───────────────────────────── */
+
+.usage-table-wrap {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: auto;
+}
+
+.usage-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.usage-table th {
+    position: sticky;
+    top: 0;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-weight: 600;
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.usage-table td {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+
+.usage-table tr:last-child td { border-bottom: none; }
+
+.usage-table tr:hover td { background: var(--bg-hover); }
+
+.usage-table .num { text-align: right; }
+.usage-table .status-ok { color: var(--green); }
+.usage-table .status-err { color: var(--red); }
+
+.usage-empty {
+    text-align: center;
+    padding: 40px;
+    color: var(--text-muted);
+}
+
+.usage-loading {
+    text-align: center;
+    padding: 40px;
+    color: var(--text-muted);
+}
+    </style>
+</head>
+<body>
+
+<header class="usage-header">
+    <div class="usage-header-left">
+        <a href="/" class="usage-logo-link"><img src="/static/logo.svg" width="28" height="28"></a>
+        <h1>LLM Usage</h1>
+        <span class="usage-badge" id="usageBadge">0 calls</span>
+    </div>
+    <div class="usage-header-right">
+        <a href="/chat" class="usage-nav-link">&larr; Chat</a>
+    </div>
+</header>
+
+<main class="usage-main">
+
+    <div class="usage-filters" id="filterBar"></div>
+
+    <div class="usage-summary" id="summaryCards">
+        <div class="usage-loading">Loading...</div>
+    </div>
+
+    <div class="usage-table-wrap">
+        <table class="usage-table" id="usageTable">
+            <thead>
+                <tr>
+                    <th>Time</th>
+                    <th>Interaction</th>
+                    <th>Provider</th>
+                    <th>Model</th>
+                    <th class="num">Prompt</th>
+                    <th class="num">Completion</th>
+                    <th class="num">Cache Read</th>
+                    <th class="num">Input</th>
+                    <th class="num">Output</th>
+                    <th class="num">Latency</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody id="usageBody">
+            </tbody>
+        </table>
+    </div>
+
+</main>
+
+<script>
+const PERIODS = [
+    { key: "last_hour",  label: "Last Hour" },
+    { key: "today",      label: "Today" },
+    { key: "yesterday",  label: "Yesterday" },
+    { key: "this_week",  label: "This Week" },
+    { key: "last_week",  label: "Last Week" },
+    { key: "this_month", label: "This Month" },
+    { key: "last_month", label: "Last Month" },
+    { key: "all",        label: "All Time" },
+];
+
+let currentPeriod = "today";
+
+/* ── Helpers ──────────────────────────────────── */
+
+function fmtNum(n) {
+    if (n == null) return "—";
+    return n.toLocaleString();
+}
+
+function fmtBytes(b) {
+    if (b == null || b === 0) return "0 B";
+    if (b < 1024) return b + " B";
+    if (b < 1024 * 1024) return (b / 1024).toFixed(1) + " KB";
+    return (b / (1024 * 1024)).toFixed(2) + " MB";
+}
+
+function fmtMs(ms) {
+    if (ms == null || ms === 0) return "—";
+    if (ms < 1000) return ms + " ms";
+    return (ms / 1000).toFixed(1) + " s";
+}
+
+function fmtTime(iso) {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    const pad = n => String(n).padStart(2, "0");
+    return `${pad(d.getMonth()+1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function shortModel(m) {
+    if (!m) return "—";
+    // Trim common prefixes for display
+    return m.replace(/^anthropic\//, "").replace(/^openai\//, "");
+}
+
+/* ── Build filter bar ─────────────────────────── */
+
+const filterBar = document.getElementById("filterBar");
+PERIODS.forEach(p => {
+    const btn = document.createElement("button");
+    btn.className = "period-btn" + (p.key === currentPeriod ? " active" : "");
+    btn.dataset.period = p.key;
+    btn.textContent = p.label;
+    btn.onclick = () => loadUsage(p.key);
+    filterBar.appendChild(btn);
+});
+
+/* ── Render ────────────────────────────────────── */
+
+function renderSummary(totals) {
+    const cards = [
+        { label: "Total Calls", value: fmtNum(totals.total_calls), cls: "accent" },
+        { label: "Total Tokens", value: fmtNum(totals.total_tokens), cls: "" },
+        { label: "Prompt Tokens", value: fmtNum(totals.prompt_tokens), cls: "" },
+        { label: "Completion Tokens", value: fmtNum(totals.completion_tokens), cls: "" },
+        { label: "Cache Read", value: fmtNum(totals.cache_read_input_tokens), cls: "green" },
+        { label: "Cache Created", value: fmtNum(totals.cache_creation_input_tokens), cls: "purple" },
+        { label: "Input Size", value: fmtBytes(totals.input_bytes), cls: "" },
+        { label: "Output Size", value: fmtBytes(totals.output_bytes), cls: "" },
+        { label: "Avg Latency", value: fmtMs(totals.avg_latency_ms), cls: "orange" },
+        { label: "Errors", value: fmtNum(totals.error_count), cls: totals.error_count > 0 ? "red" : "" },
+    ];
+
+    const el = document.getElementById("summaryCards");
+    el.innerHTML = cards.map(c =>
+        `<div class="summary-card">
+            <div class="label">${c.label}</div>
+            <div class="value ${c.cls}">${c.value}</div>
+        </div>`
+    ).join("");
+}
+
+function renderTable(records) {
+    const tbody = document.getElementById("usageBody");
+    if (!records || records.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="11" class="usage-empty">No usage records for this period</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = records.map(r => `
+        <tr>
+            <td>${fmtTime(r.created_at)}</td>
+            <td>${r.interaction || "—"}</td>
+            <td>${r.provider || "—"}</td>
+            <td>${shortModel(r.model)}</td>
+            <td class="num">${fmtNum(r.prompt_tokens)}</td>
+            <td class="num">${fmtNum(r.completion_tokens)}</td>
+            <td class="num">${fmtNum(r.cache_read_input_tokens)}</td>
+            <td class="num">${fmtBytes(r.input_bytes)}</td>
+            <td class="num">${fmtBytes(r.output_bytes)}</td>
+            <td class="num">${fmtMs(r.latency_ms)}</td>
+            <td class="${r.error ? 'status-err' : 'status-ok'}">${r.error ? '✗' : '✓'}</td>
+        </tr>
+    `).join("");
+}
+
+/* ── Load data ─────────────────────────────────── */
+
+async function loadUsage(period) {
+    currentPeriod = period;
+
+    // Highlight active button
+    document.querySelectorAll(".period-btn").forEach(btn => {
+        btn.classList.toggle("active", btn.dataset.period === period);
+    });
+
+    document.getElementById("summaryCards").innerHTML = '<div class="usage-loading">Loading...</div>';
+    document.getElementById("usageBody").innerHTML = "";
+
+    try {
+        const resp = await fetch(`/api/usage?period=${encodeURIComponent(period)}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+
+        document.getElementById("usageBadge").textContent =
+            `${fmtNum(data.totals.total_calls)} call${data.totals.total_calls === 1 ? "" : "s"}`;
+
+        renderSummary(data.totals);
+        renderTable(data.records);
+    } catch (err) {
+        document.getElementById("summaryCards").innerHTML =
+            `<div class="usage-loading" style="color:var(--red)">Error loading usage data: ${err.message}</div>`;
+    }
+}
+
+/* ── Init ──────────────────────────────────────── */
+loadUsage(currentPeriod);
+</script>
+
+</body>
+</html>

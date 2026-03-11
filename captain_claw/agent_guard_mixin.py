@@ -349,11 +349,21 @@ class AgentGuardMixin:
         if not allowed_input:
             raise GuardBlockedError("input", input_error)
 
-        response = await self.provider.complete(
-            messages=messages,
-            tools=tools,
-            max_tokens=max_tokens,
-        )
+        import time as _time
+        _t0 = _time.monotonic()
+        _error_occurred = False
+        try:
+            response = await self.provider.complete(
+                messages=messages,
+                tools=tools,
+                max_tokens=max_tokens,
+            )
+        except Exception:
+            _error_occurred = True
+            raise
+        finally:
+            _latency_ms = int((_time.monotonic() - _t0) * 1000)
+
         if turn_usage is not None:
             self._accumulate_usage(turn_usage, response.usage or {})
 
@@ -383,7 +393,68 @@ class AgentGuardMixin:
             max_tokens=max_tokens,
         )
 
+        # ── Persist usage to DB (fire-and-forget) ──
+        self._record_usage_to_db(
+            interaction_label=interaction_label,
+            messages=messages,
+            response=response,
+            tools_enabled=bool(tools),
+            max_tokens=max_tokens,
+            latency_ms=_latency_ms,
+            error=_error_occurred,
+        )
+
         return response
+
+    def _record_usage_to_db(
+        self,
+        interaction_label: str,
+        messages: list[Message],
+        response: Any,
+        tools_enabled: bool,
+        max_tokens: int | None,
+        latency_ms: int,
+        error: bool,
+    ) -> None:
+        """Fire-and-forget persist of LLM usage to SQLite."""
+        try:
+            usage = getattr(response, "usage", {}) or {}
+            model_name = str(getattr(response, "model", "") or "")
+            provider_name = str(getattr(self.provider, "provider", "") or "")
+            finish_reason = str(getattr(response, "finish_reason", "") or "")
+            content = str(getattr(response, "content", "") or "")
+            session_id = self._current_session_slug() if self.session else None
+
+            # Estimate bytes from message content
+            input_bytes = 0
+            for m in messages:
+                c = getattr(m, "content", None) or ""
+                if isinstance(c, str):
+                    input_bytes += len(c.encode("utf-8", errors="replace"))
+            output_bytes = len(content.encode("utf-8", errors="replace"))
+
+            loop = asyncio.get_event_loop()
+            loop.create_task(self.session_manager.record_llm_usage(
+                session_id=session_id,
+                interaction=interaction_label,
+                provider=provider_name,
+                model=model_name,
+                prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+                completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+                total_tokens=int(usage.get("total_tokens", 0) or 0),
+                cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens", 0) or 0),
+                cache_read_input_tokens=int(usage.get("cache_read_input_tokens", 0) or 0),
+                input_bytes=input_bytes,
+                output_bytes=output_bytes,
+                streaming=False,
+                tools_enabled=tools_enabled,
+                max_tokens=max_tokens,
+                finish_reason=finish_reason,
+                error=error,
+                latency_ms=latency_ms,
+            ))
+        except Exception:
+            pass  # Never fail the main flow
 
     async def _execute_tool_with_guard(
         self,
