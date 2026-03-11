@@ -777,8 +777,8 @@ class AgentToolLoopMixin:
             # limits is still a duplicate.
             _dup_max = max(1, int(get_config().tools.duplicate_call_max))
             _tool_lower = str(tc.name or "").strip().lower()
-            # Stateful tools that modify data between calls — exempt from
-            # duplicate detection because index→search sequences are normal.
+            # Stateful tools that modify data between calls — allow more
+            # repeated calls (CRUD patterns) but still catch infinite loops.
             _STATEFUL_TOOLS = {"typesense", "todo", "contacts", "scripts", "apis", "send_mail", "browser", "gws"}
             # During scale-progress tasks, give extra headroom so the LLM
             # can recover from a failed first attempt or a write-before-read
@@ -807,10 +807,11 @@ class AgentToolLoopMixin:
                 _dup_sig = f"{tc.name}|{_sig_args}"
             _dup_counts: dict[str, int] = getattr(self, "_turn_tool_call_counts", {})
             _dup_count = _dup_counts.get(_dup_sig, 0)
-            # Stateful tools (index→search, CRUD operations) skip duplicate
-            # detection — repeated calls are expected and legitimate.
+            # Stateful tools (index→search, CRUD operations) get a higher
+            # threshold — repeated calls with *different* args are normal,
+            # but identical args 3+ times is almost certainly a loop.
             if _tool_lower in _STATEFUL_TOOLS:
-                _dup_count = 0
+                _dup_max = max(_dup_max, 3)
             if _dup_count >= _dup_max:
                 # During scale tasks, give a more actionable message that
                 # tells the LLM to write what it has or skip the item.

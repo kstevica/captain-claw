@@ -912,6 +912,34 @@ class AgentOrchestrationMixin:
                         if "timeout" in _lower or "timed out" in _lower or "overloaded" in _lower:
                             _is_transient = True
 
+                    # Orphaned tool_result → rebuild messages and retry once.
+                    if (
+                        isinstance(e, LLMAPIError)
+                        and e.status_code == 400
+                        and "tool_use_id" in error_str
+                        and "tool_result" in error_str
+                        and _llm_attempt < _max_llm_retries
+                    ):
+                        log.warning(
+                            "Orphaned tool_result detected, rebuilding messages",
+                            error=error_str,
+                            attempt=_llm_attempt + 1,
+                        )
+                        # Force compact to clean up the broken session state.
+                        try:
+                            await self.compact_session(force=True, trigger="orphan_fix")
+                        except Exception:
+                            pass
+                        messages = self._build_messages(
+                            tool_messages_from_index=turn_start_idx,
+                            query=effective_user_input,
+                            planning_pipeline=planning_pipeline,
+                            list_task_plan=list_task_plan,
+                        )
+                        if completion_feedback:
+                            messages.append(Message(role="user", content=completion_feedback))
+                        continue
+
                     if _is_transient and _llm_attempt < _max_llm_retries:
                         _delay = 5 * (_llm_attempt + 1)
                         log.warning(

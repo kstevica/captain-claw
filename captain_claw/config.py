@@ -355,6 +355,7 @@ class ScreenCaptureToolConfig(BaseModel):
     hotkey_enabled: bool = True
     hotkey_trigger_key: str = "shift"  # key to double-tap (shift, ctrl, alt, caps_lock)
     hotkey_double_tap_ms: int = 400  # ms between taps to count as double
+    hotkey_triple_tap_wait_ms: int = 300  # ms to wait after double-tap for a potential 3rd tap
 
     # Capture settings
     default_monitor: int = 0  # 0=all monitors, 1=primary, 2=secondary, ...
@@ -368,6 +369,12 @@ class ScreenCaptureToolConfig(BaseModel):
     # STT settings
     stt_provider: str = ""  # "soniox", "openai", "gemini", or "" for auto-detect
     stt_model: str = ""  # explicit model ID; empty = auto-detect provider
+
+
+class ClipboardToolConfig(BaseModel):
+    """Clipboard tool configuration."""
+
+    timeout_seconds: int = 10
 
 
 class ToolsConfig(BaseModel):
@@ -420,6 +427,7 @@ class ToolsConfig(BaseModel):
     edit: EditToolConfig = Field(default_factory=EditToolConfig)
     browser: BrowserToolConfig = Field(default_factory=BrowserToolConfig)
     pinchtab: PinchTabConfig = Field(default_factory=PinchTabConfig)
+    clipboard: ClipboardToolConfig = Field(default_factory=ClipboardToolConfig)
     screen_capture: ScreenCaptureToolConfig = Field(default_factory=ScreenCaptureToolConfig)
     require_confirmation: list[str] = ["shell", "write", "edit"]
     plugin_dirs: list[str] = ["skills/tools"]

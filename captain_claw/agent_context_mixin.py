@@ -1265,6 +1265,11 @@ class AgentContextMixin:
             elif tool_name == "screen_capture":
                 from captain_claw.tools.screen_capture import ScreenCaptureTool
                 self.tools.register(ScreenCaptureTool())
+
+        # Always-on tools (registered regardless of tools.enabled).
+        from captain_claw.tools.clipboard import ClipboardTool
+        self.tools.register(ClipboardTool())
+
         self._register_plugin_tools()
 
     def reload_tools(self) -> None:
@@ -1792,7 +1797,20 @@ class AgentContextMixin:
         def _clear_pending_assistant_tool_calls() -> None:
             nonlocal pending_tool_ids, pending_assistant_idx
             if pending_assistant_idx is not None and 0 <= pending_assistant_idx < len(normalized):
-                normalized[pending_assistant_idx].pop("tool_calls", None)
+                msg = normalized[pending_assistant_idx]
+                if pending_tool_ids and msg.get("tool_calls"):
+                    # Keep tool_calls whose results were already appended;
+                    # only strip the unmatched ones (still in pending_tool_ids).
+                    remaining = [
+                        tc for tc in msg["tool_calls"]
+                        if str(tc.get("id", "")).strip() not in pending_tool_ids
+                    ]
+                    if remaining:
+                        msg["tool_calls"] = remaining
+                    else:
+                        msg.pop("tool_calls", None)
+                else:
+                    msg.pop("tool_calls", None)
             pending_tool_ids = set()
             pending_assistant_idx = None
 

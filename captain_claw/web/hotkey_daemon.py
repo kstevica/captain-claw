@@ -148,31 +148,44 @@ def _grab_selected_text() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Double-tap + hold state machine
+# Tap-count state machine (double-tap / triple-tap + hold)
 # ---------------------------------------------------------------------------
 
 
 class HotkeyState:
-    """Tracks double-tap detection and hold-to-record state.
+    """Tracks multi-tap detection and hold-to-record state.
 
-    The trigger key (e.g. Ctrl) must be tapped twice within
-    ``double_tap_ms`` to activate.  While the key stays held after
-    activation, audio is recorded.  Releasing the key ends the
-    recording phase.
+    * **Double-tap + hold** → ``"voice"`` mode (voice-only, no screenshot).
+    * **Triple-tap + hold** → ``"screen"`` mode (screenshot / selected text + voice).
+
+    After the 2nd tap the state machine waits ``triple_tap_wait_ms`` for
+    a potential 3rd tap.  If none arrives and the key is still held, it
+    activates in ``"voice"`` mode.  A 3rd tap within the window
+    immediately activates ``"screen"`` mode.
     """
 
-    def __init__(self, trigger_key: str = "ctrl", double_tap_ms: int = 400) -> None:
+    def __init__(
+        self,
+        trigger_key: str = "ctrl",
+        double_tap_ms: int = 400,
+        triple_tap_wait_ms: int = 300,
+    ) -> None:
         self.trigger_key = trigger_key.lower()
         self.double_tap_threshold = double_tap_ms / 1000.0
+        self.triple_tap_wait = triple_tap_wait_ms / 1000.0
 
+        self._lock = threading.Lock()
         self._last_press_time: float = 0.0
         self._tap_count: int = 0
         self._activated: bool = False
         self._held: bool = False
+        self._key_is_pressed: bool = False
+        self._pending_timer: threading.Timer | None = None
+        self._activation_mode: str = ""  # "voice" or "screen"
 
         # Callbacks set by the daemon after construction.
-        self.on_activate: Any = None  # () -> None
-        self.on_release: Any = None  # () -> None
+        self.on_activate: Any = None  # (mode: str) -> None
+        self.on_release: Any = None   # () -> None
 
     # -- helpers --
 
@@ -183,43 +196,84 @@ class HotkeyState:
             key_name = str(key.name).lower()
         return self.trigger_key in key_name or key_name.startswith(self.trigger_key)
 
+    def _cancel_pending(self) -> None:
+        """Cancel any pending triple-tap wait timer.  Caller must hold ``_lock``."""
+        if self._pending_timer is not None:
+            self._pending_timer.cancel()
+            self._pending_timer = None
+
+    def _do_activate(self, mode: str) -> None:
+        """Fire activation.  Caller must hold ``_lock``."""
+        if self._activated:
+            return
+        self._activated = True
+        self._activation_mode = mode
+        self._held = self._key_is_pressed
+        self._tap_count = 0
+        if self.on_activate:
+            self.on_activate(mode)
+
+    def _timer_fired(self) -> None:
+        """Called by the background Timer when triple-tap wait expires."""
+        with self._lock:
+            self._pending_timer = None
+            if not self._activated and self._key_is_pressed:
+                self._do_activate("voice")
+
     # -- pynput callbacks (run in the listener thread) --
 
     def on_press(self, key: Any) -> None:
-        if not self._key_matches(key):
-            # Non-trigger key resets tap counter.
-            self._tap_count = 0
-            return
+        with self._lock:
+            if not self._key_matches(key):
+                # Non-trigger key resets tap counter.
+                self._tap_count = 0
+                self._cancel_pending()
+                return
 
-        now = time.monotonic()
+            # Ignore auto-repeat while the key is physically held.
+            if self._key_is_pressed:
+                return
 
-        # Already activated and key re-pressed → mark as held.
-        if self._activated and not self._held:
-            self._held = True
-            return
+            self._key_is_pressed = True
+            now = time.monotonic()
 
-        # Double-tap detection.
-        if now - self._last_press_time <= self.double_tap_threshold:
-            self._tap_count += 1
-        else:
-            self._tap_count = 1
-        self._last_press_time = now
+            # Already activated and key re-pressed → mark as held.
+            if self._activated and not self._held:
+                self._held = True
+                return
 
-        if self._tap_count >= 2 and not self._activated:
-            self._activated = True
-            self._held = True
-            self._tap_count = 0
-            if self.on_activate:
-                self.on_activate()
+            # Tap counting.
+            if now - self._last_press_time <= self.double_tap_threshold:
+                self._tap_count += 1
+            else:
+                self._tap_count = 1
+                self._cancel_pending()
+            self._last_press_time = now
+
+            if self._tap_count >= 3 and not self._activated:
+                # Triple-tap → immediate screen mode activation.
+                self._cancel_pending()
+                self._do_activate("screen")
+            elif self._tap_count == 2 and not self._activated:
+                # Double-tap → start timer; voice mode unless 3rd tap arrives.
+                self._cancel_pending()
+                self._pending_timer = threading.Timer(
+                    self.triple_tap_wait, self._timer_fired,
+                )
+                self._pending_timer.daemon = True
+                self._pending_timer.start()
 
     def on_release_key(self, key: Any) -> None:
-        if not self._key_matches(key):
-            return
-        if self._activated and self._held:
-            self._held = False
-            self._activated = False
-            if self.on_release:
-                self.on_release()
+        with self._lock:
+            if not self._key_matches(key):
+                return
+            self._key_is_pressed = False
+            if self._activated and self._held:
+                self._held = False
+                self._activated = False
+                self._activation_mode = ""
+                if self.on_release:
+                    self.on_release()
 
 
 # ---------------------------------------------------------------------------
@@ -271,18 +325,19 @@ async def start_hotkey_daemon(server: WebServer) -> None:
     state = HotkeyState(
         trigger_key=screen_cfg.hotkey_trigger_key,
         double_tap_ms=screen_cfg.hotkey_double_tap_ms,
+        triple_tap_wait_ms=screen_cfg.hotkey_triple_tap_wait_ms,
     )
 
     # Bridge between pynput thread and asyncio: a threading.Event signals
     # the audio recording thread to stop when the key is released.
     audio_stop_event = threading.Event()
 
-    # -- callbacks (run in pynput's listener thread) --
+    # -- callbacks (run in pynput's / timer thread) --
 
-    def _on_activate() -> None:
+    def _on_activate(mode: str) -> None:
         audio_stop_event.clear()
         asyncio.run_coroutine_threadsafe(
-            _handle_activation(server, audio_stop_event),
+            _handle_activation(server, audio_stop_event, mode=mode),
             loop,
         )
 
@@ -321,8 +376,9 @@ async def start_hotkey_daemon(server: WebServer) -> None:
         "hotkey_daemon_started",
         trigger=trigger,
         double_tap_ms=screen_cfg.hotkey_double_tap_ms,
+        triple_tap_wait_ms=screen_cfg.hotkey_triple_tap_wait_ms,
     )
-    print(f"  Screen capture hotkey active (double-tap {trigger})")
+    print(f"  Hotkey active: 2×{trigger} = voice · 3×{trigger} = screen+voice")
 
 
 async def stop_hotkey_daemon(server: WebServer) -> None:
@@ -348,26 +404,28 @@ _activation_lock = asyncio.Lock()
 async def _handle_activation(
     server: WebServer,
     audio_stop_event: threading.Event,
+    *,
+    mode: str = "screen",
 ) -> None:
-    """Orchestrate: record audio (while held) → on release: screenshot + transcribe → submit.
+    """Orchestrate hotkey activation.
 
-    Flow:
-      1. Double-tap Ctrl detected (key still held) → start audio recording
-      2. User speaks instructions while holding the key
-      3. Key released → stop recording + capture screenshot simultaneously
-      4. Transcribe audio → submit screenshot + transcription to agent
+    Modes:
+      * ``"voice"``  — double-tap: record voice → transcribe → submit text only.
+      * ``"screen"`` — triple-tap: record voice + capture screenshot / selected text → submit.
     """
 
     if _activation_lock.locked():
         return  # already processing a capture
 
     async with _activation_lock:
-        await _do_activation(server, audio_stop_event)
+        await _do_activation(server, audio_stop_event, mode=mode)
 
 
 async def _do_activation(
     server: WebServer,
     audio_stop_event: threading.Event,
+    *,
+    mode: str = "screen",
 ) -> None:
     from captain_claw.config import get_config
 
@@ -442,29 +500,32 @@ async def _do_activation(
             server._broadcast({"type": "status", "status": "hold key... (release to capture)"})
             await asyncio.to_thread(audio_stop_event.wait, screen_cfg.max_recording_seconds)
 
-    # ── 2. Key was released — grab selected text (or screenshot as fallback) ──
-    server._broadcast({"type": "status", "status": "capturing..."})
-
-    # Try to grab any selected text from the focused app via a clipboard
-    # swap: save current clipboard → Cmd+C → read new clipboard → restore.
-    selected_text = await asyncio.to_thread(_grab_selected_text)
-
-    # If we got selected text, skip the screenshot — text is the context.
+    # ── 2. Key was released — grab context (screen mode only) ──
+    selected_text = ""
     screenshot_path: Path | None = None
-    if not selected_text:
-        from captain_claw.tools.screen_capture import capture_and_save
 
-        try:
-            screenshot_path = await capture_and_save(
-                session_id=session_id,
-                saved_root=saved_root,
-                monitor_index=screen_cfg.default_monitor,
-                label="hotkey-capture",
-            )
-        except Exception as exc:
-            log.error("hotkey_screenshot_failed", error=str(exc))
-            server._broadcast({"type": "error", "message": f"Screenshot failed: {exc}"})
-            return
+    if mode == "screen":
+        server._broadcast({"type": "status", "status": "capturing..."})
+
+        # Try to grab any selected text from the focused app via a clipboard
+        # swap: save current clipboard → Cmd+C → read new clipboard → restore.
+        selected_text = await asyncio.to_thread(_grab_selected_text)
+
+        # If we got selected text, skip the screenshot — text is the context.
+        if not selected_text:
+            from captain_claw.tools.screen_capture import capture_and_save
+
+            try:
+                screenshot_path = await capture_and_save(
+                    session_id=session_id,
+                    saved_root=saved_root,
+                    monitor_index=screen_cfg.default_monitor,
+                    label="hotkey-capture",
+                )
+            except Exception as exc:
+                log.error("hotkey_screenshot_failed", error=str(exc))
+                server._broadcast({"type": "error", "message": f"Screenshot failed: {exc}"})
+                return
 
     # ── 3. Transcribe audio (WAV fallback path only) ──
     if not use_realtime and wav_bytes:
@@ -493,8 +554,19 @@ async def _do_activation(
     voice_text = transcription.strip()
     image_path: str | None = str(screenshot_path) if screenshot_path else None
 
-    if selected_text:
-        # ── Selected text mode (no screenshot) ──
+    if mode == "voice":
+        # ── Voice-only mode (double-tap) ──
+        if not voice_text:
+            server._broadcast({"type": "status", "status": "No voice detected."})
+            return
+        user_content = (
+            f"{voice_text}\n\n"
+            f"IMPORTANT: After completing the task, use the pocket_tts tool "
+            f"to speak your answer aloud so I can hear it. Keep the spoken "
+            f"response brief and conversational."
+        )
+    elif selected_text:
+        # ── Selected text mode (triple-tap, no screenshot) ──
         if voice_text:
             user_content = (
                 f"Here is some text I selected on my screen:\n\n"
@@ -512,7 +584,7 @@ async def _do_activation(
                 f"Suggest 2-3 useful actions I could take with it."
             )
     else:
-        # ── Screenshot mode (no selected text) ──
+        # ── Screenshot mode (triple-tap, no selected text) ──
         if voice_text:
             user_content = (
                 f"I'm looking at my screen (screenshot attached). "

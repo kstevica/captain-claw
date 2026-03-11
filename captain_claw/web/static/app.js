@@ -2161,7 +2161,7 @@
         html = html.replace(/\[Audio: ([^\]]+)\]/gi, function(_, path) {
             var p = path.trim();
             var url = /^https?:\/\//.test(p) ? p : '/api/media?path=' + encodeURIComponent(p);
-            return '<audio controls autoplay style="display:block;width:100%;margin:6px 0;border-radius:8px;">' +
+            return '<audio controls style="display:block;width:100%;margin:6px 0;border-radius:8px;">' +
                 '<source src="' + url + '">Your browser does not support audio.</audio>';
         });
 
@@ -2169,7 +2169,7 @@
         html = html.replace(/\[([^\]]+)\]\(([^)]+\.(?:mp3|wav|ogg|flac|m4a|aac))\)/gi, function(_, label, src) {
             var url = /^https?:\/\//.test(src) ? src : '/api/media?path=' + encodeURIComponent(src);
             return '<div style="margin:6px 0;"><strong>' + label + '</strong>' +
-                '<audio controls autoplay style="display:block;width:100%;margin:4px 0;border-radius:8px;">' +
+                '<audio controls style="display:block;width:100%;margin:4px 0;border-radius:8px;">' +
                 '<source src="' + url + '">Your browser does not support audio.</audio></div>';
         });
 
@@ -2178,7 +2178,7 @@
         // regex that runs later won't wrap the <audio> tag in <code>.
         html = html.replace(/`?((?:\/|saved\/|output\/)[^\s<>&"'`]+\.(?:mp3|wav|ogg|flac|m4a|aac))`?/gi, function(_, path) {
             var url = '/api/media?path=' + encodeURIComponent(path);
-            return '<audio controls autoplay style="display:block;width:100%;margin:6px 0;border-radius:8px;">' +
+            return '<audio controls style="display:block;width:100%;margin:6px 0;border-radius:8px;">' +
                 '<source src="' + url + '">Your browser does not support audio.</audio>';
         });
 

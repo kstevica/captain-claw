@@ -104,7 +104,7 @@ pip install captain-claw
 pip install captain-claw[tts]      # Local text-to-speech (pocket-tts, requires PyTorch)
 pip install captain-claw[vector]   # Vector memory / RAG (numpy, scikit-learn)
 pip install captain-claw[vision]   # Image resize before LLM calls (Pillow)
-pip install captain-claw[screen]   # Screen capture + voice commands (mss, pynput, sounddevice)
+pip install captain-claw[screen]   # Screen capture + voice commands (mss, pynput, sounddevice, soniox)
 ```
 
 **ImageMagick** can be used instead of (or alongside) Pillow for image resizing before vision/OCR LLM calls. This is especially useful on Termux/Android where Pillow's JPEG encoder may not work correctly.
@@ -643,16 +643,37 @@ Requires a model with `model_type: "vision"` in `model.allowed`. Telegram photo 
 
 ### pocket_tts
 
-Generate speech audio locally and save as MP3.
+Generate speech audio locally and save as MP3. The agent can use this tool to speak responses aloud — when voice commands are given via the hotkey, the agent is automatically instructed to reply with audio.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `text` | string | yes | Text to convert to speech |
-| `voice` | string | no | Voice preset (default: from config or model default) |
+| `voice` | string | no | Voice preset (default: from config or `alba`) |
 | `sample_rate` | number | no | Sample rate in Hz (default: 24000) |
 | `bitrate_kbps` | number | no | MP3 bitrate (default: 128) |
 
 Uses `pocket-tts`. Output saved to `saved/media/<session-id>/`.
+
+**Built-in voices:** `alba` (default), `marius`, `javert`, `jean`, `fantine`, `cosette`, `eponine`, `azelma`. You can also pass a path to a WAV/MP3 file for voice cloning.
+
+**Server-side playback:** When the agent generates audio, it is automatically played on the server machine's speakers using the system audio player (`afplay` on macOS, `ffplay` or `mpv` on Linux). This works regardless of browser tab focus — no need to have the web UI in the foreground. An `<audio>` player element also appears in the chat for manual replay.
+
+### stt
+
+Speech-to-text transcription. Used internally by the hotkey daemon for voice commands, but also available as a standalone tool.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `audio` | string | yes | Path to audio file (WAV, MP3, etc.) or base64-encoded audio |
+| `provider` | string | no | `soniox`, `openai`, or `gemini` (default: auto-detect) |
+
+**Providers (in priority order):**
+
+1. **Soniox** (recommended) — Realtime streaming transcription. Set `SONIOX_API_KEY` env var. When used via the hotkey, audio streams directly from the microphone to Soniox over WebSocket — no audio files are saved.
+2. **OpenAI Whisper** — File-upload transcription. Uses the configured OpenAI API key.
+3. **Gemini** — File-upload transcription via a Gemini model with audio understanding.
+
+The provider is auto-detected based on available API keys, or set explicitly via `tools.screen_capture.stt_provider` in config.
 
 ### send_mail
 
@@ -875,21 +896,44 @@ Screenshots are saved to `saved/media/<session_id>/screenshot-<timestamp>.png`.
 
 **Slash command:** `/screenshot [prompt]` — capture from the web UI without the agent needing to call the tool.
 
-**Global hotkey (optional):** Double-tap Ctrl (configurable) to capture the screen and record voice instructions. Audio is transcribed via Whisper or Gemini and submitted to the agent alongside the screenshot. Configure in `tools.screen_capture`:
+#### Global hotkey
+
+Double-tap Shift (configurable) to activate the voice command flow. The full sequence:
+
+1. **Double-tap Shift** — activates the hotkey and starts recording audio from the microphone.
+2. **Hold and speak** — give your voice instruction while holding the key. Audio is transcribed in realtime via Soniox (preferred), or recorded and transcribed via Whisper/Gemini as a fallback.
+3. **Release the key** — recording stops. The daemon checks for selected text in the active app (via a clipboard swap: save clipboard → Cmd+C → read → restore). If text is selected, it becomes the context. If not, a screenshot is captured instead.
+4. **Submit to agent** — the agent receives either the selected text or the screenshot, plus the voice transcription as instructions.
+5. **Voice response** — when the input came via voice, the agent is instructed to reply using `pocket_tts` so you hear the answer spoken aloud through your speakers.
+
+**Selected text detection (macOS):** When you have text selected in any app (browser, editor, terminal, etc.), the hotkey daemon automatically detects it via a clipboard round-trip. If selected text is found, it replaces the screenshot as context — faster and more precise for text-heavy workflows like code review, reading articles, or analyzing logs.
+
+**Configuration:**
 
 ```yaml
 tools:
   screen_capture:
     hotkey_enabled: true           # enable global hotkey listener
-    hotkey_trigger_key: ctrl       # key to double-tap
+    hotkey_trigger_key: shift      # key to double-tap (shift, ctrl, alt, caps_lock)
     hotkey_double_tap_ms: 400      # max ms between taps
     default_monitor: 0             # 0=all, 1=primary
     max_recording_seconds: 30      # max voice recording duration
     audio_sample_rate: 16000       # mic sample rate (Hz)
     save_audio: false              # persist WAV files
+    stt_provider: ""               # "soniox", "openai", "gemini", or "" for auto-detect
 ```
 
-**macOS permissions required:** Screen Recording, Input Monitoring (for hotkey), Microphone (for voice). **Linux:** X11 required for hotkey (Wayland not supported; `/screenshot` still works). **Windows:** works out of the box.
+**STT provider setup:**
+
+| Provider | Setup | How it works |
+|---|---|---|
+| Soniox (recommended) | Set `SONIOX_API_KEY` env var | Realtime streaming — audio goes from mic to Soniox WebSocket, no files saved |
+| OpenAI Whisper | Set `OPENAI_API_KEY` env var | Records WAV, uploads to Whisper API after key release |
+| Gemini | Set `GOOGLE_API_KEY` or `GEMINI_API_KEY` | Records WAV, transcribes via Gemini audio model |
+
+Auto-detection priority: Soniox → OpenAI → Gemini. Override with `stt_provider` in config.
+
+**macOS permissions required:** Screen Recording, Input Monitoring (for hotkey), Microphone (for voice), Accessibility (for Cmd+C simulation in selected-text detection). **Linux:** X11 required for hotkey (Wayland not supported; `/screenshot` still works). **Windows:** works out of the box (selected text detection is macOS-only for now).
 
 ### termux
 
@@ -1111,6 +1155,7 @@ tools:
     - image_ocr
     - image_vision
     - pocket_tts
+    - stt
     - send_mail
     - gws
     - todo
@@ -1167,7 +1212,7 @@ tools:
     jpeg_quality: 85              # JPEG quality for resized images (1-100)
   pocket_tts:
     max_chars: 4000
-    default_voice: ""
+    default_voice: ""              # voice preset; empty = "alba". Options: alba, marius, javert, jean, fantine, cosette, eponine, azelma (or path to audio file for voice cloning)
     sample_rate: 24000
     mp3_bitrate_kbps: 128
     timeout_seconds: 600
@@ -1191,13 +1236,14 @@ tools:
     binary_path: ""                 # custom path to gws binary (empty = find in PATH)
   screen_capture:
     hotkey_enabled: true            # enable global hotkey listener
-    hotkey_trigger_key: ctrl        # key to double-tap (ctrl, alt, shift)
+    hotkey_trigger_key: shift       # key to double-tap (shift, ctrl, alt, caps_lock)
     hotkey_double_tap_ms: 400       # max ms between taps to count as double-tap
     default_monitor: 0              # 0=all monitors, 1=primary, 2=secondary
     timeout_seconds: 30
     max_recording_seconds: 30.0     # max voice recording duration
     audio_sample_rate: 16000        # Hz for mic recording
     save_audio: false               # persist WAV files to workspace
+    stt_provider: ""                # "soniox", "openai", "gemini", or "" for auto-detect
     stt_model: ""                   # explicit STT model ID; empty = auto-detect
 ```
 

@@ -57,6 +57,8 @@ class GwsTool(Tool):
         "already in the response), docs_append (append text to a Doc), "
         "mail_list (list recent emails), mail_search (search emails), "
         "mail_read (read a specific email), "
+        "mail_threads (list recent email threads — grouped conversations), "
+        "mail_read_thread (read all messages in an email thread by thread_id), "
         "calendar_list (list upcoming events), calendar_search (search events), "
         "calendar_create (create a calendar event), calendar_agenda (show agenda). "
         "Requires the gws CLI to be installed and authenticated (gws auth login)."
@@ -78,6 +80,8 @@ class GwsTool(Tool):
                     "mail_list",
                     "mail_search",
                     "mail_read",
+                    "mail_threads",
+                    "mail_read_thread",
                     "calendar_list",
                     "calendar_search",
                     "calendar_create",
@@ -125,6 +129,10 @@ class GwsTool(Tool):
             "message_id": {
                 "type": "string",
                 "description": "Gmail message ID (for mail_read).",
+            },
+            "thread_id": {
+                "type": "string",
+                "description": "Gmail thread ID (for mail_read_thread).",
             },
             "max_results": {
                 "type": "number",
@@ -233,6 +241,8 @@ class GwsTool(Tool):
             "mail_list": self._mail_list,
             "mail_search": self._mail_search,
             "mail_read": self._mail_read,
+            "mail_threads": self._mail_threads,
+            "mail_read_thread": self._mail_read_thread,
             "calendar_list": self._calendar_list,
             "calendar_search": self._calendar_search,
             "calendar_create": self._calendar_create,
@@ -1207,6 +1217,118 @@ class GwsTool(Tool):
             "format": "full",
         }
         args = ["gmail", "users", "messages", "get", "--params", json.dumps(params)]
+        return await self._run_gws(binary, args)
+
+    async def _mail_threads(
+        self,
+        binary: str,
+        label: str = "INBOX",
+        query: str = "",
+        max_results: int | float | None = None,
+        **kw: Any,
+    ) -> ToolResult:
+        """List recent email threads (grouped conversations)."""
+        limit = min(int(max_results or 10), 50)
+        params: dict[str, Any] = {
+            "userId": "me",
+            "maxResults": limit,
+        }
+        if label:
+            params["labelIds"] = label.upper()
+        if query:
+            params["q"] = query
+        args = ["gmail", "users", "threads", "list", "--params", json.dumps(params)]
+        result = await self._run_gws(binary, args)
+
+        if not result.success:
+            return result
+
+        # Fetch summary for each thread (metadata of first message).
+        try:
+            data = json.loads(result.content)
+            threads = data.get("threads", [])
+            if not threads:
+                return ToolResult(success=True, content=f"No threads found in {label or 'mailbox'}.")
+
+            summaries: list[str] = []
+            for thread in threads[:limit]:
+                thread_id = thread.get("id", "")
+                if not thread_id:
+                    continue
+                # Get thread with metadata only (lightweight).
+                thread_result = await self._run_gws(binary, [
+                    "gmail", "users", "threads", "get",
+                    "--params", json.dumps({
+                        "userId": "me",
+                        "id": thread_id,
+                        "format": "metadata",
+                        "metadataHeaders": "From,To,Subject,Date",
+                    }),
+                ])
+                if not thread_result.success:
+                    continue
+
+                try:
+                    thread_data = json.loads(thread_result.content)
+                except (json.JSONDecodeError, TypeError):
+                    summaries.append(thread_result.content)
+                    continue
+
+                messages = thread_data.get("messages", [])
+                msg_count = len(messages)
+                # Extract headers from the first message.
+                first_msg = messages[0] if messages else {}
+                headers = {}
+                for h in (first_msg.get("payload", {}).get("headers", [])):
+                    name = h.get("name", "")
+                    if name in ("From", "To", "Subject", "Date"):
+                        headers[name] = h.get("value", "")
+
+                # Collect unique senders across the thread.
+                senders: list[str] = []
+                seen: set[str] = set()
+                for m in messages:
+                    for h in (m.get("payload", {}).get("headers", [])):
+                        if h.get("name") == "From":
+                            val = h.get("value", "")
+                            if val and val not in seen:
+                                senders.append(val)
+                                seen.add(val)
+
+                snippet = first_msg.get("snippet", "")
+                summary_parts = [
+                    f"Thread ID: {thread_id}",
+                    f"Subject: {headers.get('Subject', '(no subject)')}",
+                    f"From: {headers.get('From', '?')}",
+                    f"Date: {headers.get('Date', '?')}",
+                    f"Messages: {msg_count}",
+                ]
+                if len(senders) > 1:
+                    summary_parts.append(f"Participants: {', '.join(senders)}")
+                if snippet:
+                    summary_parts.append(f"Preview: {snippet[:120]}")
+                summaries.append("\n".join(summary_parts))
+
+            if summaries:
+                return ToolResult(success=True, content="\n---\n".join(summaries))
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        return result
+
+    async def _mail_read_thread(
+        self, binary: str, thread_id: str = "", **kw: Any,
+    ) -> ToolResult:
+        """Read all messages in an email thread by thread ID."""
+        if not thread_id:
+            return ToolResult(success=False, error="thread_id is required for mail_read_thread.")
+
+        params = {
+            "userId": "me",
+            "id": thread_id,
+            "format": "full",
+        }
+        args = ["gmail", "users", "threads", "get", "--params", json.dumps(params)]
         return await self._run_gws(binary, args)
 
     # ------------------------------------------------------------------
