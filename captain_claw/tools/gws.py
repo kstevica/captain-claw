@@ -9,6 +9,7 @@ the JSON (or formatted text) output to the agent.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 import shutil
@@ -41,6 +42,190 @@ def _strip_base64_images(text: str) -> str:
             cleaned_len=len(cleaned),
         )
     return cleaned
+
+
+# ---------------------------------------------------------------------------
+# Gmail payload cleaner — strip base64, decode text, save images
+# ---------------------------------------------------------------------------
+
+_HEADER_KEYS = ("From", "To", "Cc", "Bcc", "Subject", "Date", "Reply-To")
+
+
+def _decode_base64url(data: str) -> bytes:
+    """Decode Gmail-style base64url data (padding-tolerant)."""
+    # Gmail uses URL-safe base64 without padding.
+    padded = data + "=" * (4 - len(data) % 4)
+    return base64.urlsafe_b64decode(padded)
+
+
+def _html_to_text(html: str) -> str:
+    """Best-effort HTML-to-text for email bodies."""
+    t = re.sub(r"<style[^>]*>.*?</style>", "", html, flags=re.DOTALL | re.IGNORECASE)
+    t = re.sub(r"<script[^>]*>.*?</script>", "", t, flags=re.DOTALL | re.IGNORECASE)
+    t = re.sub(r"<br\s*/?>", "\n", t, flags=re.IGNORECASE)
+    t = re.sub(r"</(?:p|div|tr|li|h[1-6])>", "\n", t, flags=re.IGNORECASE)
+    t = re.sub(r"<[^>]+>", "", t)
+    for entity, char in (("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"),
+                          ("&gt;", ">"), ("&quot;", '"'), ("&#39;", "'")):
+        t = t.replace(entity, char)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
+
+
+def _clean_gmail_message(
+    msg_data: dict[str, Any],
+    save_dir: Path | None = None,
+) -> str:
+    """Convert a Gmail API message (format=full) to clean LLM-friendly text.
+
+    * Decodes text/plain and text/html body parts into readable text.
+    * Strips all base64-encoded data from the output.
+    * Saves image attachments to *save_dir* (if provided).
+    """
+    payload = msg_data.get("payload", {})
+
+    # ── Headers ──
+    headers: dict[str, str] = {}
+    for h in payload.get("headers", []):
+        name = h.get("name", "")
+        if name in _HEADER_KEYS:
+            headers[name] = h.get("value", "")
+
+    # ── Walk MIME parts ──
+    text_parts: list[str] = []
+    html_parts: list[str] = []
+    attachments: list[dict[str, Any]] = []
+
+    def _walk(part: dict[str, Any]) -> None:
+        mime = part.get("mimeType", "")
+        filename = part.get("filename", "")
+        body = part.get("body", {})
+        data = body.get("data", "")
+        size = body.get("size", 0)
+
+        # Recurse into multipart containers.
+        for sub in part.get("parts", []):
+            _walk(sub)
+
+        # Text body parts (no filename → inline content, not attachment).
+        if mime == "text/plain" and data and not filename:
+            try:
+                text_parts.append(_decode_base64url(data).decode("utf-8", errors="replace"))
+            except Exception:
+                pass
+            return
+        if mime == "text/html" and data and not filename:
+            try:
+                html_parts.append(_decode_base64url(data).decode("utf-8", errors="replace"))
+            except Exception:
+                pass
+            return
+
+        # Skip multipart containers themselves.
+        if mime.startswith("multipart/"):
+            return
+
+        # Attachments (files, images, etc.).
+        if not filename and not data and not body.get("attachmentId"):
+            return
+        att_info: dict[str, Any] = {
+            "filename": filename or "(unnamed)",
+            "type": mime,
+            "size": size,
+        }
+
+        # Save images to workspace.
+        if data and mime.startswith("image/") and save_dir:
+            try:
+                save_dir.mkdir(parents=True, exist_ok=True)
+                ext = mime.split("/")[-1].split(";")[0]
+                safe_name = filename or f"image.{ext}"
+                # Avoid overwriting: append counter if needed.
+                dest = save_dir / safe_name
+                counter = 1
+                while dest.exists():
+                    stem = Path(safe_name).stem
+                    suffix = Path(safe_name).suffix
+                    dest = save_dir / f"{stem}_{counter}{suffix}"
+                    counter += 1
+                dest.write_bytes(_decode_base64url(data))
+                att_info["saved_to"] = str(dest)
+            except Exception as exc:
+                log.debug("failed to save mail image", error=str(exc))
+
+        attachments.append(att_info)
+
+    _walk(payload)
+
+    # ── Build clean output ──
+    lines: list[str] = []
+    msg_id = msg_data.get("id", "")
+    thread_id = msg_data.get("threadId", "")
+    if msg_id:
+        lines.append(f"Message ID: {msg_id}")
+    if thread_id:
+        lines.append(f"Thread ID: {thread_id}")
+    for key in _HEADER_KEYS:
+        if key in headers:
+            lines.append(f"{key}: {headers[key]}")
+    lines.append("")
+
+    if text_parts:
+        lines.append("".join(text_parts).strip())
+    elif html_parts:
+        lines.append(_html_to_text("".join(html_parts)))
+    else:
+        snippet = msg_data.get("snippet", "")
+        if snippet:
+            lines.append(f"[snippet] {snippet}")
+
+    if attachments:
+        lines.append("")
+        lines.append(f"Attachments ({len(attachments)}):")
+        for att in attachments:
+            saved = att.get("saved_to")
+            if saved:
+                lines.append(
+                    f"  - {att['filename']} ({att['type']}, {att['size']} bytes)"
+                    f" → saved: {saved}"
+                )
+            else:
+                lines.append(f"  - {att['filename']} ({att['type']}, {att['size']} bytes)")
+
+    return "\n".join(lines)
+
+
+def _clean_gmail_thread(
+    thread_data: dict[str, Any],
+    save_dir: Path | None = None,
+) -> str:
+    """Convert a Gmail API thread (format=full) to clean LLM-friendly text."""
+    messages = thread_data.get("messages", [])
+    if not messages:
+        return "Empty thread."
+
+    # Thread-level info from the first message.
+    first = messages[0]
+    first_headers: dict[str, str] = {}
+    for h in first.get("payload", {}).get("headers", []):
+        name = h.get("name", "")
+        if name in ("Subject",):
+            first_headers[name] = h.get("value", "")
+
+    parts: list[str] = []
+    thread_id = thread_data.get("id", first.get("threadId", ""))
+    parts.append(f"Thread ID: {thread_id}")
+    if "Subject" in first_headers:
+        parts.append(f"Subject: {first_headers['Subject']}")
+    parts.append(f"Messages: {len(messages)}")
+    parts.append("")
+
+    for idx, msg in enumerate(messages, 1):
+        parts.append(f"── Message {idx}/{len(messages)} ──")
+        parts.append(_clean_gmail_message(msg, save_dir=save_dir))
+        parts.append("")
+
+    return "\n".join(parts)
 
 
 class GwsTool(Tool):
@@ -1099,6 +1284,16 @@ class GwsTool(Tool):
     # Gmail actions
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _mail_attachment_dir() -> Path | None:
+        """Return the workspace directory for saving mail attachments."""
+        try:
+            cfg = get_config()
+            workspace = cfg.resolved_workspace_path()
+            return workspace / "saved" / "mail_attachments"
+        except Exception:
+            return None
+
     async def _mail_list(
         self,
         binary: str,
@@ -1217,7 +1412,17 @@ class GwsTool(Tool):
             "format": "full",
         }
         args = ["gmail", "users", "messages", "get", "--params", json.dumps(params)]
-        return await self._run_gws(binary, args)
+        result = await self._run_gws(binary, args)
+        if not result.success:
+            return result
+
+        try:
+            msg_data = json.loads(result.content)
+            save_dir = self._mail_attachment_dir()
+            return ToolResult(success=True, content=_clean_gmail_message(msg_data, save_dir=save_dir))
+        except (json.JSONDecodeError, TypeError):
+            # Fallback: strip any raw base64 from the output.
+            return ToolResult(success=True, content=_strip_base64_images(result.content))
 
     async def _mail_threads(
         self,
@@ -1329,7 +1534,16 @@ class GwsTool(Tool):
             "format": "full",
         }
         args = ["gmail", "users", "threads", "get", "--params", json.dumps(params)]
-        return await self._run_gws(binary, args)
+        result = await self._run_gws(binary, args)
+        if not result.success:
+            return result
+
+        try:
+            thread_data = json.loads(result.content)
+            save_dir = self._mail_attachment_dir()
+            return ToolResult(success=True, content=_clean_gmail_thread(thread_data, save_dir=save_dir))
+        except (json.JSONDecodeError, TypeError):
+            return ToolResult(success=True, content=_strip_base64_images(result.content))
 
     # ------------------------------------------------------------------
     # Calendar actions
