@@ -245,6 +245,22 @@ tools:
   - datastore
   - termux
   - personality
+  #- pinchtab  # parked — browser tool handles navigation better
+  pinchtab:
+    enabled: false
+    host: 127.0.0.1
+    port: 9867
+    token: ''
+    auto_start: true
+    binary_path: ''
+    headless: true
+    stealth_level: light
+    default_profile: ''
+    timeout_seconds: 60
+    max_tabs: 10
+    block_ads: false
+    block_images: false
+    allow_evaluate: false
   read:
     max_file_bytes: 200000
   shell:

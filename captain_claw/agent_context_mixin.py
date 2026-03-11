@@ -1133,12 +1133,15 @@ class AgentContextMixin:
         "datastore": ["datastore"],
         "personality": ["personality"],
         "termux": ["termux"],
+        "browser": ["browser"],
+        "pinchtab": ["pinchtab"],
     }
 
     def _register_default_tools(self) -> None:
         """Register the default tool set."""
         from captain_claw.tools import (
             BrowserTool,
+            PinchTabTool,
             DocxExtractTool,
             EditTool,
             GlobTool,
@@ -1256,6 +1259,8 @@ class AgentContextMixin:
                 self.tools.register(bt)
             elif tool_name == "browser":
                 self.tools.register(BrowserTool())
+            elif tool_name == "pinchtab":
+                self.tools.register(PinchTabTool())
         self._register_plugin_tools()
 
     def reload_tools(self) -> None:

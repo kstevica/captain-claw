@@ -324,6 +324,30 @@ class BrowserToolConfig(BaseModel):
     login_verify_wait_seconds: float = 3.0  # wait after submit before checking login success
 
 
+class PinchTabConfig(BaseModel):
+    """PinchTab browser automation configuration.
+
+    PinchTab is an HTTP-based browser automation server (standalone Go binary)
+    that provides token-efficient browser control via accessibility tree
+    snapshots rather than expensive screenshots.
+    """
+
+    enabled: bool = False
+    host: str = "127.0.0.1"
+    port: int = 9867
+    token: str = ""  # bearer token — or PINCHTAB_TOKEN env var
+    auto_start: bool = True  # auto-start pinchtab server if not running
+    binary_path: str = ""  # custom path to pinchtab binary; empty = find in PATH
+    headless: bool = True
+    stealth_level: str = "light"  # light | medium | full
+    default_profile: str = ""  # persistent profile name; empty = no profile
+    timeout_seconds: int = 60
+    max_tabs: int = 10
+    block_ads: bool = False
+    block_images: bool = False
+    allow_evaluate: bool = False  # JS eval disabled by default for security
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
 
@@ -372,6 +396,7 @@ class ToolsConfig(BaseModel):
     gws: GwsToolConfig = Field(default_factory=GwsToolConfig)
     edit: EditToolConfig = Field(default_factory=EditToolConfig)
     browser: BrowserToolConfig = Field(default_factory=BrowserToolConfig)
+    pinchtab: PinchTabConfig = Field(default_factory=PinchTabConfig)
     require_confirmation: list[str] = ["shell", "write", "edit"]
     plugin_dirs: list[str] = ["skills/tools"]
 

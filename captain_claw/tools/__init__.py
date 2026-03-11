@@ -41,6 +41,7 @@ from captain_claw.tools.termux import TermuxTool
 from captain_claw.tools.playbooks import PlaybooksTool
 from captain_claw.tools.botport import BotPortTool
 from captain_claw.tools.browser import BrowserTool
+from captain_claw.tools.pinchtab import PinchTabTool
 
 __all__ = [
     "Tool",
@@ -82,4 +83,5 @@ __all__ = [
     "PlaybooksTool",
     "BotPortTool",
     "BrowserTool",
+    "PinchTabTool",
 ]
