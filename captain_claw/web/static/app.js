@@ -218,6 +218,12 @@
             return;
         }
 
+        // Audio messages render as inline audio players.
+        if (role === 'audio') {
+            addAudioPanel(content, isReplay);
+            return;
+        }
+
         const div = document.createElement('div');
         div.className = `msg ${role}`;
         if (isReplay) div.style.animation = 'none';
@@ -325,6 +331,42 @@
             bubble.replaceChild(fallback, img);
         };
         bubble.appendChild(img);
+
+        div.appendChild(header);
+        div.appendChild(bubble);
+        chatMessages.appendChild(div);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+        msgCount++;
+        chatCount.textContent = `${msgCount} messages`;
+    }
+
+    function addAudioPanel(audioPath, isReplay) {
+        chatEmpty.style.display = 'none';
+        const div = document.createElement('div');
+        div.className = 'msg assistant';
+        if (isReplay) div.style.animation = 'none';
+
+        const header = document.createElement('div');
+        header.className = 'msg-header';
+        const label = document.createElement('span');
+        label.className = 'msg-label';
+        label.innerHTML = '<span class="msg-avatar">&#x1F980;</span> Captain Claw';
+        header.appendChild(label);
+
+        const bubble = document.createElement('div');
+        bubble.className = 'msg-bubble';
+
+        const audio = document.createElement('audio');
+        audio.controls = true;
+        audio.style.cssText = 'display:block;width:100%;border-radius:8px;';
+        audio.src = '/api/media?path=' + encodeURIComponent(audioPath);
+        audio.onerror = function() {
+            const fallback = document.createElement('div');
+            fallback.style.cssText = 'padding:12px;color:#aaa;font-size:13px;';
+            fallback.textContent = 'Audio: ' + audioPath;
+            bubble.replaceChild(fallback, audio);
+        };
+        bubble.appendChild(audio);
 
         div.appendChild(header);
         div.appendChild(bubble);
@@ -2113,6 +2155,31 @@
             return '<img src="' + url + '" alt="Attached image" ' +
                 'style="max-width:100%;max-height:300px;border-radius:8px;cursor:pointer;display:block;margin:6px 0;" ' +
                 'onclick="window.open(this.src,\'_blank\')">';
+        });
+
+        // Audio: [Audio: /path/to/file.mp3]
+        html = html.replace(/\[Audio: ([^\]]+)\]/gi, function(_, path) {
+            var p = path.trim();
+            var url = /^https?:\/\//.test(p) ? p : '/api/media?path=' + encodeURIComponent(p);
+            return '<audio controls autoplay style="display:block;width:100%;margin:6px 0;border-radius:8px;">' +
+                '<source src="' + url + '">Your browser does not support audio.</audio>';
+        });
+
+        // Links to audio files: [text](path.mp3) → inline <audio> player
+        html = html.replace(/\[([^\]]+)\]\(([^)]+\.(?:mp3|wav|ogg|flac|m4a|aac))\)/gi, function(_, label, src) {
+            var url = /^https?:\/\//.test(src) ? src : '/api/media?path=' + encodeURIComponent(src);
+            return '<div style="margin:6px 0;"><strong>' + label + '</strong>' +
+                '<audio controls autoplay style="display:block;width:100%;margin:4px 0;border-radius:8px;">' +
+                '<source src="' + url + '">Your browser does not support audio.</audio></div>';
+        });
+
+        // Auto-detect bare audio file paths → inline <audio> player.
+        // Optional surrounding backticks are consumed so the inline-code
+        // regex that runs later won't wrap the <audio> tag in <code>.
+        html = html.replace(/`?((?:\/|saved\/|output\/)[^\s<>&"'`]+\.(?:mp3|wav|ogg|flac|m4a|aac))`?/gi, function(_, path) {
+            var url = '/api/media?path=' + encodeURIComponent(path);
+            return '<audio controls autoplay style="display:block;width:100%;margin:6px 0;border-radius:8px;">' +
+                '<source src="' + url + '">Your browser does not support audio.</audio>';
         });
 
         // Links: [text](url)

@@ -60,6 +60,13 @@ browser = [
     # Included in core deps; kept for backward compat with pip install captain-claw[browser].
     "playwright>=1.40.0",
 ]
+screen = [
+    "mss>=9.0.0",
+    "pynput>=1.7.0",
+    "sounddevice>=0.4.0",
+    "numpy>=1.24.0",
+    "soniox>=0.1.0",
+]
 build = [
     "pyinstaller>=6.0.0",
 ]

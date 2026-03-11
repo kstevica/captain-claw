@@ -348,6 +348,28 @@ class PinchTabConfig(BaseModel):
     allow_evaluate: bool = False  # JS eval disabled by default for security
 
 
+class ScreenCaptureToolConfig(BaseModel):
+    """Screen capture and voice command configuration."""
+
+    # Hotkey settings
+    hotkey_enabled: bool = True
+    hotkey_trigger_key: str = "shift"  # key to double-tap (shift, ctrl, alt, caps_lock)
+    hotkey_double_tap_ms: int = 400  # ms between taps to count as double
+
+    # Capture settings
+    default_monitor: int = 0  # 0=all monitors, 1=primary, 2=secondary, ...
+    timeout_seconds: int = 30
+
+    # Audio settings
+    max_recording_seconds: float = 30.0  # max voice recording duration
+    audio_sample_rate: int = 16000  # Hz for mic recording
+    save_audio: bool = False  # persist WAV files to workspace
+
+    # STT settings
+    stt_provider: str = ""  # "soniox", "openai", "gemini", or "" for auto-detect
+    stt_model: str = ""  # explicit model ID; empty = auto-detect provider
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
 
@@ -382,6 +404,7 @@ class ToolsConfig(BaseModel):
         "termux",
         "edit",
         "browser",
+        "screen_capture",
     ]
     shell: ShellToolConfig = Field(default_factory=ShellToolConfig)
     read: ReadToolConfig = Field(default_factory=ReadToolConfig)
@@ -397,6 +420,7 @@ class ToolsConfig(BaseModel):
     edit: EditToolConfig = Field(default_factory=EditToolConfig)
     browser: BrowserToolConfig = Field(default_factory=BrowserToolConfig)
     pinchtab: PinchTabConfig = Field(default_factory=PinchTabConfig)
+    screen_capture: ScreenCaptureToolConfig = Field(default_factory=ScreenCaptureToolConfig)
     require_confirmation: list[str] = ["shell", "write", "edit"]
     plugin_dirs: list[str] = ["skills/tools"]
 

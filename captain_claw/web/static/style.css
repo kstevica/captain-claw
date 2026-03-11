@@ -708,6 +708,10 @@ html, body {
     font-size: 13px;
 }
 .msg-bubble th { background: var(--bg-tertiary); font-weight: 600; }
+.msg-bubble audio {
+    filter: invert(0.85) hue-rotate(180deg);
+    border-radius: 8px;
+}
 
 /* Streaming cursor */
 .streaming-cursor::after {

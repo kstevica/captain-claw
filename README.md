@@ -22,7 +22,7 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Per-session model selection | Keep one session on Claude, another on GPT, another on Ollama |
 | Persistent multi-session workflows | Resume any session exactly where you left off |
 | Built-in safety guards | Input, output, and script/tool checks before anything runs |
-| 27 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, image gen/OCR/vision, Google Workspace CLI (gws — Drive, Docs, Calendar, Gmail), todo, contacts, scripts, APIs, datastore, deep memory, playbooks, personality, BotPort, Termux (Android) |
+| 28 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, image gen/OCR/vision, screen capture + voice commands, Google Workspace CLI (gws — Drive, Docs, Calendar, Gmail), todo, contacts, scripts, APIs, datastore, deep memory, playbooks, personality, BotPort, Termux (Android) |
 | Personality system | Dual-profile system — global agent identity plus per-user profiles for tailored responses |
 | Skills system | OpenClaw-compatible skills with auto-discovery and GitHub install |
 | Orchestrator / DAG mode | Decompose complex tasks into parallel multi-session execution |
@@ -57,6 +57,7 @@ pip install captain-claw
 pip install captain-claw[tts]      # Local text-to-speech (pocket-tts, requires PyTorch)
 pip install captain-claw[vector]   # Vector memory / RAG (numpy, scikit-learn)
 pip install captain-claw[vision]   # Image resize before LLM calls (Pillow; or use ImageMagick)
+pip install captain-claw[screen]   # Screen capture + voice commands (mss, pynput, sounddevice)
 ```
 
 ### 2. Set an API key
@@ -221,11 +222,12 @@ Sessions are first-class. Create named sessions for separate projects, switch in
 /session procreate #1 #2 "merged context"      # merge two sessions
 /session run #2 summarize current blockers     # run prompt in another session
 /session export all                            # export chat + monitor history
+/nuke                                          # wipe everything and start fresh
 ```
 
 ### Tools
 
-Captain Claw ships with 27 built-in tools. The agent picks the right tool for each task automatically.
+Captain Claw ships with 28 built-in tools. The agent picks the right tool for each task automatically.
 
 | Tool | What it does |
 |---|---|
@@ -253,6 +255,7 @@ Captain Claw ships with 27 built-in tools. The agent picks the right tool for ea
 | `typesense` | Index, search, and manage documents in deep memory (Typesense) |
 | `playbooks` | Persistent cross-session orchestration pattern memory with auto-distillation |
 | `botport` | Consult specialist agents through the BotPort agent-to-agent network |
+| `screen_capture` | Capture screenshots and analyze with vision; global hotkey with voice commands |
 | `termux` | Interact with Android device via Termux API (camera, battery, GPS, torch) |
 
 See [USAGE.md](USAGE.md#tools-reference) for full parameters and configuration.
@@ -294,7 +297,8 @@ tools:
             "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract",
             "image_gen", "image_ocr", "image_vision",
             "pocket_tts", "send_mail", "gws", "todo", "contacts", "scripts",
-            "apis", "datastore", "playbooks", "personality", "botport", "termux"]
+            "apis", "datastore", "playbooks", "personality", "botport", "termux",
+            "screen_capture"]
 
 web:
   enabled: true
@@ -353,6 +357,8 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 
 - **[Personality system](USAGE.md#personality-system)** — Dual-profile system with a global agent identity (name, background, expertise) and per-user profiles that tailor responses to each user's perspective. Editable via the `personality` tool, REST API, or the Settings page. Telegram users get automatic per-user profiles.
 
+- **[Screen capture + voice commands](USAGE.md#screen-capture)** — Capture screenshots via `/screenshot`, the `screen_capture` tool, or a global hotkey (double-tap Ctrl). Optionally record voice instructions while holding the key — audio is transcribed via Whisper or Gemini and submitted alongside the screenshot for agentic analysis. Install with `pip install captain-claw[screen]`.
+
 - **[Session export](USAGE.md#session-commands)** — Export chat, monitor, pipeline trace, or pipeline summary to files.
 
 ## Development
@@ -369,7 +375,7 @@ ruff check captain_claw/
 |---|---|
 | `captain_claw/agent.py` | Main orchestration logic |
 | `captain_claw/llm/` | Provider abstraction (OpenAI, Anthropic, Gemini, Ollama) |
-| `captain_claw/tools/` | Tool registry and 26 tool implementations |
+| `captain_claw/tools/` | Tool registry and 28 tool implementations |
 | `captain_claw/personality.py` | Agent and per-user personality profiles |
 | `captain_claw/session/` | SQLite-backed session persistence |
 | `captain_claw/skills.py` | Skill discovery, loading, and invocation |

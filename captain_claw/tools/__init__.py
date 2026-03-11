@@ -42,6 +42,7 @@ from captain_claw.tools.playbooks import PlaybooksTool
 from captain_claw.tools.botport import BotPortTool
 from captain_claw.tools.browser import BrowserTool
 from captain_claw.tools.pinchtab import PinchTabTool
+from captain_claw.tools.screen_capture import ScreenCaptureTool
 
 __all__ = [
     "Tool",
@@ -84,4 +85,5 @@ __all__ = [
     "BotPortTool",
     "BrowserTool",
     "PinchTabTool",
+    "ScreenCaptureTool",
 ]

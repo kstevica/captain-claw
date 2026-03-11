@@ -13,12 +13,24 @@ if TYPE_CHECKING:
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
-async def serve_home(server: WebServer, request: web.Request) -> web.FileResponse:
-    return web.FileResponse(STATIC_DIR / "home.html")
+def _cache_bust(html_path: Path) -> web.Response:
+    """Read an HTML file and append cache-busting query params to static assets."""
+    text = html_path.read_text(encoding="utf-8")
+    # Use mtime of app.js / style.css as cache buster.
+    for fname in ("app.js", "style.css"):
+        asset = STATIC_DIR / fname
+        if asset.is_file():
+            v = int(asset.stat().st_mtime)
+            text = text.replace(f"/static/{fname}", f"/static/{fname}?v={v}")
+    return web.Response(text=text, content_type="text/html")
 
 
-async def serve_chat(server: WebServer, request: web.Request) -> web.FileResponse:
-    return web.FileResponse(STATIC_DIR / "index.html")
+async def serve_home(server: WebServer, request: web.Request) -> web.Response:
+    return _cache_bust(STATIC_DIR / "home.html")
+
+
+async def serve_chat(server: WebServer, request: web.Request) -> web.Response:
+    return _cache_bust(STATIC_DIR / "index.html")
 
 
 async def serve_favicon(server: WebServer, request: web.Request) -> web.Response:

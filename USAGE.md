@@ -104,6 +104,7 @@ pip install captain-claw
 pip install captain-claw[tts]      # Local text-to-speech (pocket-tts, requires PyTorch)
 pip install captain-claw[vector]   # Vector memory / RAG (numpy, scikit-learn)
 pip install captain-claw[vision]   # Image resize before LLM calls (Pillow)
+pip install captain-claw[screen]   # Screen capture + voice commands (mss, pynput, sounddevice)
 ```
 
 **ImageMagick** can be used instead of (or alongside) Pillow for image resizing before vision/OCR LLM calls. This is especially useful on Termux/Android where Pillow's JPEG encoder may not work correctly.
@@ -296,6 +297,8 @@ services:
 | `/history` | Show recent conversation history |
 | `/compact` | Manually compact session context |
 | `/clear` | Clear current session messages (blocked if `/session protect on`) |
+| `/nuke` | Delete all workspace files, memory, sessions, and datastore (two-step confirmation) |
+| `/screenshot [prompt]` | Capture screen; if prompt given, analyze with vision model |
 | `/exit` or `/quit` | Exit Captain Claw |
 
 ### Session Commands
@@ -857,6 +860,37 @@ Consult specialist agents through the BotPort agent-to-agent network. Use this t
 
 Requires `botport_client.enabled: true` and a valid BotPort server URL in config. See [BotPort](#botport) for setup details.
 
+### screen_capture
+
+Capture a screenshot of the user's screen and optionally analyze it with a vision model. Requires `pip install captain-claw[screen]`.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `monitor` | number | no | Monitor index: 0 = all monitors combined (default), 1 = primary, 2 = secondary |
+| `prompt` | string | no | If provided, automatically analyze the screenshot with the vision model using this prompt |
+
+When a `prompt` is given, the tool chains into `image_vision` automatically — one call captures and analyzes. Without a prompt, it returns the saved file path for use with `image_vision` or `image_ocr`.
+
+Screenshots are saved to `saved/media/<session_id>/screenshot-<timestamp>.png`.
+
+**Slash command:** `/screenshot [prompt]` — capture from the web UI without the agent needing to call the tool.
+
+**Global hotkey (optional):** Double-tap Ctrl (configurable) to capture the screen and record voice instructions. Audio is transcribed via Whisper or Gemini and submitted to the agent alongside the screenshot. Configure in `tools.screen_capture`:
+
+```yaml
+tools:
+  screen_capture:
+    hotkey_enabled: true           # enable global hotkey listener
+    hotkey_trigger_key: ctrl       # key to double-tap
+    hotkey_double_tap_ms: 400      # max ms between taps
+    default_monitor: 0             # 0=all, 1=primary
+    max_recording_seconds: 30      # max voice recording duration
+    audio_sample_rate: 16000       # mic sample rate (Hz)
+    save_audio: false              # persist WAV files
+```
+
+**macOS permissions required:** Screen Recording, Input Monitoring (for hotkey), Microphone (for voice). **Linux:** X11 required for hotkey (Wayland not supported; `/screenshot` still works). **Windows:** works out of the box.
+
 ### termux
 
 Interact with an Android device via Termux API. Requires the [Termux:API](https://wiki.termux.com/wiki/Termux:API) app and `termux-api` package (`pkg install termux-api`). Supports camera photo capture, battery status, GPS/network location, and flashlight (torch) control.
@@ -1088,6 +1122,7 @@ tools:
     - personality
     - botport
     - termux
+    - screen_capture
   require_confirmation:           # tools that require user approval
     - shell
     - write
@@ -1154,6 +1189,16 @@ tools:
     max_attachment_bytes: 26214400  # 25 MB
   gws:
     binary_path: ""                 # custom path to gws binary (empty = find in PATH)
+  screen_capture:
+    hotkey_enabled: true            # enable global hotkey listener
+    hotkey_trigger_key: ctrl        # key to double-tap (ctrl, alt, shift)
+    hotkey_double_tap_ms: 400       # max ms between taps to count as double-tap
+    default_monitor: 0              # 0=all monitors, 1=primary, 2=secondary
+    timeout_seconds: 30
+    max_recording_seconds: 30.0     # max voice recording duration
+    audio_sample_rate: 16000        # Hz for mic recording
+    save_audio: false               # persist WAV files to workspace
+    stt_model: ""                   # explicit STT model ID; empty = auto-detect
 ```
 
 ### skills

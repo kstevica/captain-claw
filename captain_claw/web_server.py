@@ -21,6 +21,64 @@ from captain_claw.telegram_bridge import TelegramBridge, TelegramMessage
 
 log = get_logger(__name__)
 
+
+# ── Server-side audio playback ─────────────────────────────
+_audio_player_proc: "subprocess.Popen[bytes] | None" = None
+
+
+def _play_audio_local(file_path: str) -> None:
+    """Play an audio file on the server machine using the system player.
+
+    Uses afplay (macOS), ffplay, or aplay (Linux) — whichever is found first.
+    Runs as a background subprocess so it doesn't block the event loop.
+    Any previous playback is stopped before starting a new one.
+    """
+    import shutil
+    import subprocess
+
+    global _audio_player_proc
+
+    resolved = Path(file_path)
+    if not resolved.is_file():
+        log.debug("play_audio_local: file not found", path=file_path)
+        return
+
+    # Stop any currently playing audio.
+    if _audio_player_proc is not None:
+        try:
+            _audio_player_proc.terminate()
+        except Exception:
+            pass
+        _audio_player_proc = None
+
+    # Find a suitable player.
+    player_cmds: list[list[str]] = []
+    if sys.platform == "darwin":
+        if shutil.which("afplay"):
+            player_cmds.append(["afplay", str(resolved)])
+    if shutil.which("ffplay"):
+        player_cmds.append(["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", str(resolved)])
+    if shutil.which("mpv"):
+        player_cmds.append(["mpv", "--no-video", str(resolved)])
+    if shutil.which("aplay") and resolved.suffix.lower() == ".wav":
+        player_cmds.append(["aplay", str(resolved)])
+
+    if not player_cmds:
+        log.warning("play_audio_local: no audio player found (install afplay/ffplay/mpv)")
+        return
+
+    cmd = player_cmds[0]
+    try:
+        _audio_player_proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        log.debug("play_audio_local: started", cmd=cmd[0], pid=_audio_player_proc.pid)
+    except Exception as e:
+        log.warning("play_audio_local: failed to start", cmd=cmd, error=str(e))
+
+
 STATIC_DIR = Path(
     os.environ.get("CAPTAIN_CLAW_STATIC_DIR", "")
     or str(Path(__file__).resolve().parent / "web" / "static")
@@ -89,6 +147,7 @@ COMMANDS: list[dict[str, str]] = [
     {"command": "/monitor trace on|off", "description": "Toggle LLM trace logging", "category": "Monitor"},
     {"command": "/approve user telegram <token>", "description": "Approve a Telegram user pairing", "category": "Telegram"},
     {"command": "/orchestrate <request>", "description": "Run parallel multi-session orchestration", "category": "Orchestrator"},
+    {"command": "/screenshot [prompt]", "description": "Capture screen and analyze with vision", "category": "Screen"},
 ]
 
 
@@ -137,6 +196,9 @@ class WebServer:
         self._pending_oauth: dict[str, dict[str, Any]] = {}  # state → {verifier, ts}
         # BotPort client
         self._botport_client: Any = None
+        # Hotkey daemon state
+        self._hotkey_listener: Any = None
+        self._hotkey_state: Any = None
 
     async def _init_agent(self) -> None:
         """Initialize the agent with web callbacks."""
@@ -228,6 +290,19 @@ class WebServer:
                     "role": "image",
                     "content": str(img_path),
                 })
+        # Auto-broadcast audio player when pocket_tts (or similar) produces a file.
+        if normalized in ("pocket_tts", "tts") and output and not str(output).strip().lower().startswith("error"):
+            import re
+            audio_match = re.search(r"Path:\s*(\S+\.(?:mp3|wav|ogg|flac|m4a|aac))", str(output))
+            if audio_match:
+                audio_path = audio_match.group(1).strip()
+                self._broadcast({
+                    "type": "chat_message",
+                    "role": "audio",
+                    "content": audio_path,
+                })
+                # Play audio on the server machine (works even when browser tab is unfocused).
+                _play_audio_local(audio_path)
         if normalized not in self._THINKING_SILENT_TOOLS:
             from captain_claw.agent_tool_loop_mixin import AgentToolLoopMixin
             summary = AgentToolLoopMixin._tool_thinking_summary(tool_name, arguments or {})
@@ -744,11 +819,11 @@ class WebServer:
         return await auth_google_logout(self, request)
 
     # Static pages
-    async def _serve_home(self, request: web.Request) -> web.FileResponse:
+    async def _serve_home(self, request: web.Request) -> web.Response:
         from captain_claw.web.static_pages import serve_home
         return await serve_home(self, request)
 
-    async def _serve_chat(self, request: web.Request) -> web.FileResponse:
+    async def _serve_chat(self, request: web.Request) -> web.Response:
         from captain_claw.web.static_pages import serve_chat
         return await serve_chat(self, request)
 
@@ -1309,6 +1384,9 @@ async def _run_server(config: Config) -> None:
     from captain_claw.web.telegram import start_telegram, stop_telegram
     await start_telegram(server)
 
+    from captain_claw.web.hotkey_daemon import start_hotkey_daemon, stop_hotkey_daemon
+    await start_hotkey_daemon(server)
+
     # Start BotPort client if configured.
     if config.botport.enabled and config.botport.url.strip():
         try:
@@ -1398,6 +1476,10 @@ async def _run_server(config: Config) -> None:
             pass
     try:
         await stop_telegram(server)
+    except Exception:
+        pass
+    try:
+        await stop_hotkey_daemon(server)
     except Exception:
         pass
     if server._botport_client:

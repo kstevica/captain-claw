@@ -267,6 +267,9 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
         elif cmd in ("/apis",):
             result = await handle_apis_command(server, args.strip())
 
+        elif cmd in ("/screenshot",):
+            result = await _handle_screenshot_command(server, ws, args.strip())
+
         else:
             result = f"Unknown command: `{cmd}`. Type `/help` for available commands."
 
@@ -952,3 +955,72 @@ def format_help() -> str:
         lines.append("")
     lines.append("**Tip:** Type `/` to see command suggestions. Press `Ctrl+K` for the command palette.")
     return "\n".join(lines)
+
+
+async def _handle_screenshot_command(
+    server: "WebServer",
+    ws: web.WebSocketResponse,
+    args: str,
+) -> str:
+    """Handle ``/screenshot [prompt]`` — capture screen, optionally analyze."""
+
+    try:
+        from captain_claw.tools.screen_capture import (
+            _HAS_MSS,
+            _IS_MACOS,
+            capture_and_save,
+        )
+    except ImportError:
+        return (
+            "Screen capture not available. "
+            "Install with: `pip install captain-claw[screen]`"
+        )
+
+    if not _IS_MACOS and not _HAS_MSS:
+        return (
+            "Screen capture requires the `mss` package. "
+            "Install with: `pip install captain-claw[screen]`"
+        )
+
+    if not server.agent:
+        return "Agent not initialized."
+
+    from captain_claw.config import get_config
+
+    cfg = get_config()
+    session = getattr(server.agent, "session", None)
+    session_id = session.id if session else "screenshot"
+    workspace = cfg.resolved_workspace_path()
+    saved_root = workspace / "saved"
+
+    try:
+        path = await capture_and_save(
+            session_id=session_id,
+            saved_root=saved_root,
+            monitor_index=cfg.tools.screen_capture.default_monitor,
+            label="screenshot",
+        )
+    except Exception as exc:
+        return f"Screenshot failed: {exc}"
+
+    # Load the default screenshot prompt from the instructions system so
+    # users can customise it via ~/.captain-claw/instructions/.
+    prompt = args.strip()
+    if not prompt:
+        from captain_claw.instructions import InstructionLoader
+
+        try:
+            loader = InstructionLoader()
+            prompt = loader.load("screenshot_analysis_prompt.md")
+        except Exception:
+            prompt = (
+                "Use image_vision on the attached screenshot. "
+                "Briefly describe what is on screen. "
+                "List 2-3 suggestions for what I could do next. "
+                "Do NOT run any other tools."
+            )
+
+    from captain_claw.web.chat_handler import handle_chat
+
+    await handle_chat(server, ws, prompt, image_path=str(path))
+    return ""  # response will come from the agent stream

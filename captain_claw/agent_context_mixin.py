@@ -1135,6 +1135,7 @@ class AgentContextMixin:
         "termux": ["termux"],
         "browser": ["browser"],
         "pinchtab": ["pinchtab"],
+        "screen_capture": ["screen_capture"],
     }
 
     def _register_default_tools(self) -> None:
@@ -1261,6 +1262,9 @@ class AgentContextMixin:
                 self.tools.register(BrowserTool())
             elif tool_name == "pinchtab":
                 self.tools.register(PinchTabTool())
+            elif tool_name == "screen_capture":
+                from captain_claw.tools.screen_capture import ScreenCaptureTool
+                self.tools.register(ScreenCaptureTool())
         self._register_plugin_tools()
 
     def reload_tools(self) -> None:

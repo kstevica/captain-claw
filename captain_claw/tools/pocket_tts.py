@@ -16,6 +16,10 @@ from captain_claw.tools.write import WriteTool
 
 log = get_logger(__name__)
 
+# pocket-tts predefined voices (no audio file needed).
+_POCKET_TTS_VOICES = ("alba", "marius", "javert", "jean", "fantine", "cosette", "eponine", "azelma")
+_POCKET_TTS_DEFAULT_VOICE = "alba"
+
 
 def _iter_scalar_samples(value: Any):
     """Yield float samples from arbitrarily nested list/tensor-like values."""
@@ -160,7 +164,11 @@ class PocketTTSTool(Tool):
             },
             "voice": {
                 "type": "string",
-                "description": "Optional voice preset (for example af_bella).",
+                "description": (
+                    "Optional voice preset. Available: alba, marius, javert, jean, "
+                    "fantine, cosette, eponine, azelma. Default: alba. "
+                    "Can also be a path to a .wav file for voice cloning."
+                ),
             },
             "output_path": {
                 "type": "string",
@@ -229,25 +237,32 @@ class PocketTTSTool(Tool):
         return model
 
     @staticmethod
-    def _generate_audio(model: Any, text: str, state: Any | None) -> Any:
-        """Run model synthesis with light signature compatibility handling."""
-        if state is not None:
-            call_attempts = [
-                lambda: model.generate_audio(state, text),
-                lambda: model.generate_audio(text, state),
-                lambda: model.generate_audio(voice_state=state, text=text),
-                lambda: model.generate_audio(text=text, state=state),
-            ]
-            for call in call_attempts:
-                try:
-                    return call()
-                except TypeError:
-                    continue
-            raise TypeError("Unsupported pocket-tts generate_audio signature")
-        try:
-            return model.generate_audio(text)
-        except TypeError:
-            return model.generate_audio(text=text)
+    def _generate_audio(model: Any, text: str, state: dict) -> Any:
+        """Run model synthesis.
+
+        pocket-tts uses beartype for runtime type checking, so signature
+        mismatches raise ``BeartypeCallHintParamViolation`` (inherits from
+        ``Exception``, **not** ``TypeError``).  We therefore catch ``Exception``
+        when probing call patterns.
+
+        *state* must be a valid model-state dict produced by
+        ``model.get_state_for_audio_prompt(voice)`` — an empty ``{}`` will NOT
+        work because ``generate_audio`` expects KV-caches inside the dict.
+        """
+        # Known signature: generate_audio(model_state: dict, text_to_generate: str)
+        # We try multiple patterns for forward-compat with API changes.
+        call_attempts = [
+            lambda: model.generate_audio(state, text),
+            lambda: model.generate_audio(model_state=state, text_to_generate=text),
+            lambda: model.generate_audio(voice_state=state, text=text),
+            lambda: model.generate_audio(text=text, state=state),
+        ]
+        for call in call_attempts:
+            try:
+                return call()
+            except Exception:
+                continue
+        raise RuntimeError("Unsupported pocket-tts generate_audio signature")
 
     async def execute(
         self,
@@ -279,12 +294,45 @@ class PocketTTSTool(Tool):
         try:
             model = await self._ensure_model()
             configured_voice = str(getattr(cfg.tools.pocket_tts, "default_voice", "")).strip()
-            default_voice = str(getattr(model, "default_voice", "")).strip()
-            selected_voice = str(voice or "").strip() or configured_voice or default_voice
+            selected_voice = (
+                str(voice or "").strip()
+                or configured_voice
+                or _POCKET_TTS_DEFAULT_VOICE
+            )
 
+            # get_state_for_audio_prompt() accepts predefined voice names
+            # (alba, marius, …), audio file paths, or URLs.
             state = None
-            if selected_voice:
-                state = await asyncio.to_thread(model.get_state_for_audio_prompt, selected_voice)
+            try:
+                state = await asyncio.to_thread(
+                    model.get_state_for_audio_prompt, selected_voice,
+                )
+            except Exception as voice_err:
+                log.warning(
+                    "pocket_tts_voice_state_failed",
+                    voice=selected_voice,
+                    error=str(voice_err),
+                )
+                # If the requested voice failed and it wasn't already the
+                # default, retry with the default predefined voice.
+                if selected_voice != _POCKET_TTS_DEFAULT_VOICE:
+                    try:
+                        state = await asyncio.to_thread(
+                            model.get_state_for_audio_prompt,
+                            _POCKET_TTS_DEFAULT_VOICE,
+                        )
+                        selected_voice = _POCKET_TTS_DEFAULT_VOICE
+                    except Exception:
+                        pass
+
+            if not isinstance(state, dict) or not state:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"Failed to initialise voice state for '{selected_voice}'. "
+                        f"Available voices: {', '.join(_POCKET_TTS_VOICES)}"
+                    ),
+                )
 
             audio = await asyncio.to_thread(self._generate_audio, model, text_value, state)
             samples = await asyncio.to_thread(_coerce_samples, audio)
