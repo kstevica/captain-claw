@@ -479,6 +479,10 @@ class WebServer:
         from captain_claw.web.ws_handler import ws_handler
         return await ws_handler(self, request)
 
+    async def ws_stt_handler(self, request: web.Request) -> web.WebSocketResponse:
+        from captain_claw.web.ws_stt import handle_stt_ws
+        return await handle_stt_ws(self, request)
+
     # Instructions
     async def list_instructions(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_instructions import list_instructions
@@ -778,6 +782,10 @@ class WebServer:
     async def _file_upload(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_file_upload import upload_file
         return await upload_file(self, request)
+
+    async def _audio_transcribe(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_audio_transcribe import transcribe_audio_handler
+        return await transcribe_audio_handler(self, request)
 
     # Loop runner
     async def _start_loop(self, request: web.Request) -> web.Response:
@@ -1252,6 +1260,7 @@ class WebServer:
             from captain_claw.web.auth import create_auth_middleware
             app.middlewares.append(create_auth_middleware(self.config.web))
         app.router.add_get("/ws", self.ws_handler)
+        app.router.add_get("/ws/stt", self.ws_stt_handler)
         app.router.add_get("/api/instructions", self.list_instructions)
         app.router.add_get("/api/instructions/{name}", self.get_instruction)
         app.router.add_put("/api/instructions/{name}", self.put_instruction)
@@ -1349,6 +1358,7 @@ class WebServer:
         app.router.add_get("/api/media", self._serve_media)
         app.router.add_post("/api/image/upload", self._image_upload)
         app.router.add_post("/api/file/upload", self._file_upload)
+        app.router.add_post("/api/audio/transcribe", self._audio_transcribe)
         app.router.add_post("/api/loops/start", self._start_loop)
         app.router.add_get("/api/loops/status", self._get_loop_status)
         app.router.add_post("/api/loops/stop", self._stop_loop)

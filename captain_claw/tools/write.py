@@ -172,7 +172,22 @@ class WriteTool(Tool):
             
             # Ensure parent directory exists
             file_path.parent.mkdir(parents=True, exist_ok=True)
-            
+
+            # Detect overwrite — track pre-existing file size so we can
+            # warn the LLM that it's overwriting (and suggest edit instead).
+            _overwrite_info: str | None = None
+            if not append and file_path.exists():
+                try:
+                    _prev_size = file_path.stat().st_size
+                    _prev_lines = file_path.read_text(encoding="utf-8", errors="replace").count("\n") + 1
+                    _overwrite_info = (
+                        f"⚠️ Overwrote existing file (was {_prev_lines} lines, "
+                        f"{_prev_size} bytes). Consider using the edit tool "
+                        f"for targeted changes instead of rewriting the entire file."
+                    )
+                except Exception:
+                    _overwrite_info = "⚠️ Overwrote existing file."
+
             # Sanitize content: strip C0/C1 control characters that the LLM
             # may emit when it fails to reproduce Unicode (e.g. £→\x00a3,
             # €→\x01, '→\x02).  Preserve normal whitespace (\t \n \r).
@@ -208,9 +223,19 @@ class WriteTool(Tool):
                 except Exception:
                     pass  # Best-effort; don't fail writes on registry errors
 
+            _line_count = content.count("\n") + 1
+            result_msg = f"Written {len(content)} chars ({_line_count} lines) to {file_path}{redirect_note}"
+            if _overwrite_info:
+                result_msg = f"{result_msg}\n{_overwrite_info}"
+            # Hint: prevent read-after-write waste (LLM sometimes reads
+            # back a file it just wrote, wasting an iteration).
+            result_msg += (
+                "\nDo NOT read this file back — you already know its "
+                "contents. Proceed to the next file."
+            )
             return ToolResult(
                 success=True,
-                content=f"Written {len(content)} chars to {file_path}{redirect_note}",
+                content=result_msg,
             )
             
         except Exception as e:

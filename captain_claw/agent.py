@@ -84,7 +84,7 @@ class Agent(
         self.session_manager = get_session_manager()
         self.session: Session | None = None
         self._initialized = False
-        self.max_iterations = 20  # Max tool calls per message
+        self.max_iterations = 40  # Max tool calls per message
         self.last_usage: dict[str, int] = self._empty_usage()
         self.total_usage: dict[str, int] = self._empty_usage()
         self.last_context_window: dict[str, int | float] = {}

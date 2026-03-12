@@ -124,9 +124,21 @@ class GlobTool(Tool):
 
             # Also search configured extra read folders when using the
             # default workspace scope (no custom root, not workflow).
+            # But NOT when the pattern contains path-specific directory
+            # components — e.g. "saved/showcase/SESSION_ID/**/*" is
+            # looking for files in a specific directory, not globally.
+            # Also skip when the filename portion is just "*" (matches
+            # everything), which happens with "somepath/**/*" patterns.
+            _pat_parts = raw_pattern.replace("\\", "/").split("/")
+            _fname_part = _pat_parts[-1] if _pat_parts else raw_pattern
+            _has_specific_dirs = any(
+                p and p not in ("*", "**") for p in _pat_parts[:-1]
+            )
             search_extra_dirs = (
                 scope != "workflow"
                 and not user_provided_root
+                and not _has_specific_dirs
+                and _fname_part not in ("*",)
             )
 
             # Find files (sync, but run in executor to not block)

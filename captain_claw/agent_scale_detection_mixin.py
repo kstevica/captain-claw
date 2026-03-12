@@ -994,6 +994,26 @@ class AgentScaleDetectionMixin:
                 )
                 return []
 
+        # Positive confirmation: even if no skip pattern matched, the
+        # task must *positively* look like list/batch processing for
+        # glob-based scale init to fire.  Without this check, any glob
+        # that returns many files (e.g. a discovery glob to check if a
+        # directory exists) would falsely trigger scale progress for
+        # unrelated tasks like "build a web app".
+        if not (
+            self._input_suggests_large_scale(_stripped_input)
+            or self._is_list_processing_request(_stripped_input)
+        ):
+            # Check if the list_task_plan itself was marked as enabled
+            # by the LLM extraction — if so, trust it.
+            if not list_task_plan.get("enabled"):
+                log.info(
+                    "Glob scale init: skipped (task does not look like "
+                    "list processing and no LLM plan enabled)",
+                    glob_files=len(glob_files),
+                )
+                return []
+
         # Build a synthetic list_task_plan with the glob-discovered files.
         synthetic_plan = dict(list_task_plan)
         synthetic_plan["members"] = glob_files

@@ -27,11 +27,29 @@ class AgentSessionMixin:
         return max(1, len(text) // 4)
 
     def _ensure_message_token_count(self, msg: dict[str, Any]) -> int:
-        """Ensure persisted token_count exists on a session message."""
+        """Ensure persisted token_count exists on a session message.
+
+        Includes tool_calls arguments in the count because they are sent
+        to the LLM and consume prompt tokens.  Without this, assistant
+        messages with large write-file payloads are severely undercounted
+        and the context budget system cannot prune them.
+        """
+        has_tool_calls = bool(msg.get("tool_calls"))
         value = msg.get("token_count")
-        if isinstance(value, int) and value >= 0:
+        # Cached value is only reliable when tool_calls have been
+        # accounted for (flagged by ``_tc_counted``).  Legacy messages
+        # stored before this fix have content-only counts.
+        tc_counted = msg.get("_tc_counted", False)
+        if isinstance(value, int) and value >= 0 and (tc_counted or not has_tool_calls):
             return value
-        count = self._count_tokens(str(msg.get("content", "")))
+        text = str(msg.get("content", ""))
+        if has_tool_calls:
+            for tc in msg["tool_calls"]:
+                args_str = (tc.get("function") or {}).get("arguments", "")
+                if args_str:
+                    text += args_str
+            msg["_tc_counted"] = True
+        count = self._count_tokens(text)
         msg["token_count"] = count
         return count
 
@@ -808,6 +826,14 @@ class AgentSessionMixin:
             model = details.get("model", "")
             if provider and model:
                 model_label = f"{provider}:{model}"
+        # Compute token count including tool_calls arguments — these
+        # are sent to the LLM and must be budgeted accurately.
+        _token_text = content
+        if tool_calls:
+            for _tc in tool_calls:
+                _args_str = (_tc.get("function") or {}).get("arguments", "")
+                if _args_str:
+                    _token_text += _args_str
         self.session.add_message(
             role=role,
             content=content,
@@ -815,9 +841,241 @@ class AgentSessionMixin:
             tool_name=tool_name,
             tool_calls=tool_calls,
             tool_arguments=tool_arguments,
-            token_count=self._count_tokens(content),
+            token_count=self._count_tokens(_token_text),
             model=model_label,
         )
         memory = getattr(self, "memory", None)
         if memory is not None:
             memory.record_message(role, content)
+
+    # ------------------------------------------------------------------
+    # Post-write tool_call compaction
+    # ------------------------------------------------------------------
+
+    def _compact_write_tool_call(
+        self,
+        call_id: str,
+        arguments: dict[str, Any],
+    ) -> None:
+        """Replace full file content in stored tool_call with compact ref.
+
+        After a successful file write, the content lives on disk.  Keeping
+        the full body inside the assistant message's ``tool_calls`` wastes
+        context budget — especially in multi-file generation tasks where
+        tens of thousands of tokens of code accumulate in history.
+
+        This walks backwards through session messages, finds the parent
+        assistant message for *call_id*, and replaces the ``content``
+        argument with a short pointer (path + line count + size).
+        """
+        if not self.session:
+            return
+        path = str(arguments.get("path", ""))
+        content = str(arguments.get("content", ""))
+        lines = content.count("\n") + 1 if content else 0
+        size_kb = len(content.encode("utf-8", errors="replace")) / 1024 if content else 0
+
+        # Record in workspace manifest — lightweight tracking of all
+        # files created/modified this session for context injection.
+        self._record_workspace_write(path, lines, size_kb)
+
+        if not content or len(content) < 200:
+            # Not worth compacting tiny writes — the overhead of the
+            # reference string is comparable to the original content.
+            return
+        compact_ref = (
+            f"[written to disk: {path}, {lines} lines, {size_kb:.1f}KB"
+            f" — use read tool to view]"
+        )
+
+        import json as _json
+
+        for msg in reversed(self.session.messages):
+            if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+                continue
+            for tc_stored in msg["tool_calls"]:
+                if str(tc_stored.get("id", "")).strip() != str(call_id).strip():
+                    continue
+                # Found the matching tool_call — compact its arguments.
+                func = tc_stored.get("function") or {}
+                raw_args = func.get("arguments", "")
+                try:
+                    args_dict = (
+                        _json.loads(raw_args)
+                        if isinstance(raw_args, str)
+                        else dict(raw_args)
+                    )
+                    args_dict["content"] = compact_ref
+                    func["arguments"] = _json.dumps(
+                        args_dict, ensure_ascii=True
+                    )
+                except (ValueError, TypeError):
+                    return  # malformed — leave as-is
+                # Invalidate cached token count so _ensure_message_token_count
+                # recomputes with the smaller payload.
+                msg.pop("token_count", None)
+                msg.pop("_tc_counted", None)
+                log.info(
+                    "Write tool_call compacted",
+                    call_id=call_id,
+                    path=path,
+                    original_chars=len(content),
+                )
+                return
+
+    def _compact_shell_tool_call(
+        self,
+        call_id: str,
+        arguments: dict[str, Any],
+    ) -> None:
+        """Compact large shell commands in stored tool_call arguments.
+
+        When the LLM uses shell heredocs (``cat > file << 'EOF'...EOF``)
+        to write files instead of the write tool, the full file content
+        accumulates in the assistant message's tool_call arguments,
+        bypassing ``_compact_write_tool_call``.  This method detects
+        large shell commands and replaces the command text with a
+        compact summary, preserving only a leading snippet so the LLM
+        can remember the intent.
+        """
+        if not self.session:
+            return
+        command = str(arguments.get("command", ""))
+        if not command or len(command) < 500:
+            return  # not worth compacting
+
+        # Build a compact reference: first 120 chars + ellipsis + size.
+        # Keep the opening line(s) so the LLM knows what was executed.
+        snippet_lines = command.split("\n", 4)[:4]
+        snippet = "\n".join(snippet_lines)
+        if len(snippet) > 200:
+            snippet = snippet[:200]
+        lines_total = command.count("\n") + 1
+        size_kb = len(command.encode("utf-8", errors="replace")) / 1024
+        compact = (
+            f"{snippet}\n\n"
+            f"[... shell command truncated — {lines_total} lines, "
+            f"{size_kb:.1f}KB total — files written to disk, "
+            f"use read tool to view]"
+        )
+
+        import json as _json
+
+        for msg in reversed(self.session.messages):
+            if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+                continue
+            for tc_stored in msg["tool_calls"]:
+                if str(tc_stored.get("id", "")).strip() != str(call_id).strip():
+                    continue
+                func = tc_stored.get("function") or {}
+                raw_args = func.get("arguments", "")
+                try:
+                    args_dict = (
+                        _json.loads(raw_args)
+                        if isinstance(raw_args, str)
+                        else dict(raw_args)
+                    )
+                    args_dict["command"] = compact
+                    func["arguments"] = _json.dumps(
+                        args_dict, ensure_ascii=True,
+                    )
+                except (ValueError, TypeError):
+                    return
+                msg.pop("token_count", None)
+                msg.pop("_tc_counted", None)
+                log.info(
+                    "Shell tool_call compacted",
+                    call_id=call_id,
+                    original_chars=len(command),
+                    compact_chars=len(compact),
+                )
+                return
+
+    # ------------------------------------------------------------------
+    # Workspace manifest — track files created/modified this session
+    # ------------------------------------------------------------------
+
+    def _record_workspace_write(
+        self, path: str, lines: int, size_kb: float
+    ) -> None:
+        """Record a file write in the workspace manifest.
+
+        The manifest is stored in session metadata so it persists across
+        session resumes.  Duplicate paths are updated (last-write-wins).
+        """
+        if not self.session or not path:
+            return
+        manifest: list[dict[str, Any]] = self.session.metadata.setdefault(
+            "workspace_manifest", []
+        )
+        # Update existing entry or append new one.
+        for entry in manifest:
+            if entry.get("path") == path:
+                entry["lines"] = lines
+                entry["size_kb"] = round(size_kb, 1)
+                entry["writes"] = entry.get("writes", 1) + 1
+                return
+        manifest.append({
+            "path": path,
+            "lines": lines,
+            "size_kb": round(size_kb, 1),
+            "writes": 1,
+        })
+
+    def _build_workspace_manifest_note(self) -> str:
+        """Build a compact context note listing files created this session.
+
+        Injected into the LLM context so it always knows what files
+        exist in the workspace without needing full contents in history.
+        When large files exist, includes a hint to prefer edit over write.
+        """
+        if not self.session:
+            return ""
+        manifest: list[dict[str, Any]] = self.session.metadata.get(
+            "workspace_manifest", []
+        )
+        if not manifest:
+            return ""
+        # Only inject once the project has meaningful size.
+        if len(manifest) < 3:
+            return ""
+        header = "## Workspace files created/modified this session\n"
+        lines_parts: list[str] = []
+        total_lines = 0
+        has_large_files = False
+        has_rewrites = False
+        for entry in manifest:
+            p = entry.get("path", "?")
+            ln = entry.get("lines", 0)
+            sk = entry.get("size_kb", 0)
+            writes = entry.get("writes", 1)
+            total_lines += ln
+            rewrite_tag = f"  ⚠️ rewritten {writes}x" if writes > 1 else ""
+            lines_parts.append(f"- {p}  ({ln} lines, {sk}KB){rewrite_tag}")
+            if ln > 50 or sk > 2.0:
+                has_large_files = True
+            if writes > 1:
+                has_rewrites = True
+        footer = f"\n_Total: {len(manifest)} files, ~{total_lines} lines_"
+
+        # Contextual hints based on workspace state.
+        hints: list[str] = []
+        if has_large_files:
+            hints.append(
+                "**Tip:** For files already on disk, prefer the `edit` tool "
+                "(replace_string, insert_after, delete_lines, etc.) for "
+                "targeted changes. Only use `write` for new files or "
+                "complete rewrites. This saves context tokens and avoids "
+                "accidental regressions."
+            )
+        if has_rewrites:
+            hints.append(
+                "**Note:** Some files above were written multiple times. "
+                "Use `read` to check existing content before deciding "
+                "whether a full rewrite is needed, or use `edit` for "
+                "surgical changes."
+            )
+        hint_block = "\n".join(hints)
+        if hint_block:
+            hint_block = "\n\n" + hint_block
+        return header + "\n".join(lines_parts) + footer + hint_block

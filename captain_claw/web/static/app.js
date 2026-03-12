@@ -21,6 +21,17 @@
     let activePlaybookName = 'Auto';
     let forceScriptMode = false;
 
+    // ── Voice recording state ─────────────────────────────
+    let micState = 'idle'; // 'idle' | 'recording' | 'transcribing'
+    let sttWs = null;
+    let sttAudioCtx = null;
+    let sttSource = null;
+    let sttProcessor = null;
+    let sttStream = null;
+    let sttIsRealtime = false;
+    let sttPreText = '';
+    const MAX_RECORDING_SECONDS = 30;
+
     // ── DOM references ──────────────────────────────────────
     const $ = (sel) => document.querySelector(sel);
     const $$ = (sel) => document.querySelectorAll(sel);
@@ -33,6 +44,7 @@
     const messageInput = $('#messageInput');
     const sendBtn = $('#sendBtn');
     const stopBtn = $('#stopBtn');
+    const micBtn = $('#micBtn');
     const sessionName = $('#sessionName');
     const modelName = $('#modelName');
     const statusDot = $('#statusDot');
@@ -1250,6 +1262,189 @@
         }
     }
 
+    // ── Voice Recording (live STT via WebSocket) ─────────────
+
+    function setMicState(state) {
+        micState = state;
+        if (!micBtn) return;
+
+        micBtn.classList.remove('recording', 'transcribing');
+        micBtn.disabled = false;
+
+        switch (state) {
+            case 'idle':
+                micBtn.textContent = '\uD83C\uDF99\uFE0F';
+                micBtn.title = 'Voice input (click to record)';
+                break;
+            case 'recording':
+                micBtn.classList.add('recording');
+                micBtn.textContent = '\u23F9';
+                micBtn.title = 'Click to stop recording';
+                break;
+            case 'transcribing':
+                micBtn.classList.add('transcribing');
+                micBtn.textContent = '\u23F3';
+                micBtn.title = 'Transcribing...';
+                micBtn.disabled = true;
+                break;
+        }
+    }
+
+    function sttCleanup() {
+        if (sttProcessor) { sttProcessor.disconnect(); sttProcessor = null; }
+        if (sttSource) { sttSource.disconnect(); sttSource = null; }
+        if (sttAudioCtx) { sttAudioCtx.close().catch(() => {}); sttAudioCtx = null; }
+        if (sttStream) { sttStream.getTracks().forEach(t => t.stop()); sttStream = null; }
+    }
+
+    async function startRecording() {
+        if (micState !== 'idle') return;
+
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            const msg = window.isSecureContext === false
+                ? 'Microphone requires HTTPS or localhost. Current page is not in a secure context.'
+                : 'Voice input is not supported in this browser.';
+            addChatMessage('error', msg);
+            return;
+        }
+
+        try {
+            sttStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        } catch (err) {
+            if (err.name === 'NotAllowedError') {
+                addChatMessage('error', 'Microphone permission denied. Please allow microphone access and try again.');
+            } else if (err.name === 'NotFoundError') {
+                addChatMessage('error', 'No microphone found. Please connect a microphone and try again.');
+            } else {
+                addChatMessage('error', 'Failed to start recording: ' + err.message);
+            }
+            return;
+        }
+
+        // Save text already in the input — transcription appends after it.
+        sttPreText = messageInput.value;
+
+        // Open STT WebSocket.
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        sttWs = new WebSocket(proto + '//' + location.host + '/ws/stt');
+        sttWs.binaryType = 'arraybuffer';
+
+        sttWs.onopen = () => {
+            // Wait for stt_ready before starting audio — handled in onmessage.
+        };
+
+        sttWs.onmessage = (e) => {
+            const data = JSON.parse(e.data);
+
+            if (data.type === 'stt_ready') {
+                sttIsRealtime = data.realtime;
+                console.log('[mic] STT ready, realtime:', sttIsRealtime);
+                _startAudioPipeline();
+                return;
+            }
+
+            if (data.type === 'stt_partial' || data.type === 'stt_final') {
+                const sep = sttPreText && !sttPreText.endsWith(' ') && !sttPreText.endsWith('\n') ? ' ' : '';
+                messageInput.value = sttPreText + (data.text ? sep + data.text : '');
+                autoResizeInput();
+            }
+
+            if (data.type === 'stt_final') {
+                _closeSttWs();
+                sttCleanup();
+                setMicState('idle');
+                messageInput.focus();
+            }
+
+            if (data.type === 'stt_error') {
+                addChatMessage('error', 'STT error: ' + data.error);
+                _closeSttWs();
+                sttCleanup();
+                setMicState('idle');
+            }
+        };
+
+        sttWs.onerror = () => {
+            sttCleanup();
+            setMicState('idle');
+            addChatMessage('error', 'STT WebSocket connection failed.');
+        };
+
+        sttWs.onclose = () => {
+            if (micState === 'recording') {
+                sttCleanup();
+                setMicState('idle');
+            }
+        };
+
+        setMicState('recording');
+    }
+
+    function _startAudioPipeline() {
+        // Create AudioContext at 16 kHz — browser resamples from native rate.
+        try {
+            sttAudioCtx = new AudioContext({ sampleRate: 16000 });
+        } catch (_) {
+            sttAudioCtx = new AudioContext();
+            console.warn('[mic] Could not set 16 kHz sample rate, using', sttAudioCtx.sampleRate);
+        }
+        sttSource = sttAudioCtx.createMediaStreamSource(sttStream);
+
+        // ScriptProcessorNode: capture raw PCM float32 → convert to int16 → send.
+        sttProcessor = sttAudioCtx.createScriptProcessor(4096, 1, 1);
+        sttProcessor.onaudioprocess = (e) => {
+            if (!sttWs || sttWs.readyState !== WebSocket.OPEN) return;
+            const f32 = e.inputBuffer.getChannelData(0);
+            const i16 = new Int16Array(f32.length);
+            for (let i = 0; i < f32.length; i++) {
+                const s = Math.max(-1, Math.min(1, f32[i]));
+                i16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+            sttWs.send(i16.buffer);
+        };
+
+        sttSource.connect(sttProcessor);
+        sttProcessor.connect(sttAudioCtx.destination);
+
+        // Auto-stop safety.
+        setTimeout(() => {
+            if (micState === 'recording') stopRecording();
+        }, MAX_RECORDING_SECONDS * 1000);
+    }
+
+    function _closeSttWs() {
+        if (sttWs) {
+            try { sttWs.close(); } catch (_) {}
+            sttWs = null;
+        }
+    }
+
+    function stopRecording() {
+        if (micState !== 'recording') return;
+
+        // Stop audio capture first.
+        sttCleanup();
+
+        // Tell backend we're done.
+        if (sttWs && sttWs.readyState === WebSocket.OPEN) {
+            sttWs.send(JSON.stringify({ type: 'stop' }));
+        }
+
+        // In realtime mode the final text is already visible; in batch mode
+        // we wait for stt_final, so show transcribing state.
+        if (!sttIsRealtime) {
+            setMicState('transcribing');
+        } else {
+            // Small grace period for last stt_final to arrive.
+            setMicState('transcribing');
+        }
+    }
+
+    function toggleMic() {
+        if (micState === 'idle') startRecording();
+        else if (micState === 'recording') stopRecording();
+    }
+
     // ── Input Handling ──────────────────────────────────────
 
     function handleSend() {
@@ -2382,6 +2577,13 @@
                 return;
             }
 
+            // Ctrl+Shift+M - toggle voice recording
+            if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'M') {
+                e.preventDefault();
+                toggleMic();
+                return;
+            }
+
             // Escape - close modals/palette
             if (e.key === 'Escape') {
                 if (!approvalModal.classList.contains('hidden')) return; // Don't close approval modal with Esc
@@ -2494,6 +2696,9 @@
                 uploadFile(fileInput.files[0]);
             }
         });
+
+        // Mic button
+        if (micBtn) micBtn.addEventListener('click', toggleMic);
 
         // Drag and drop on chat pane
         var dragCounter = 0;

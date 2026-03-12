@@ -1171,7 +1171,7 @@ class SemanticMemoryIndex:
         self._cache.clear()
 
     def clear_all(self) -> int:
-        """Delete all documents, chunks, embeddings, and FTS data. Returns count of deleted docs."""
+        """Delete all documents, chunks, embeddings, FTS, and sync state. Returns count of deleted docs."""
         conn = self._conn_or_raise()
         with self._db_lock:
             count = conn.execute("SELECT COUNT(*) FROM memory_documents").fetchone()[0]
@@ -1179,6 +1179,7 @@ class SemanticMemoryIndex:
             conn.execute("DELETE FROM memory_chunks_fts")
             conn.execute("DELETE FROM memory_chunks")
             conn.execute("DELETE FROM memory_documents")
+            conn.execute("DELETE FROM memory_sync_state")
             conn.commit()
             self._clear_cache()
         return int(count)

@@ -982,44 +982,89 @@ class AgentToolLoopMixin:
                 # When the LLM writes a DATA file that is suspiciously
                 # small relative to tool data already in context, warn
                 # it so it rewrites with the actual content.
-                # Skip for code/script files — those are intentionally
-                # different from the tool data in context.
+                # Skip for code/script/config files — those are
+                # intentionally different from the tool data in context.
                 if (
                     result.success
                     and _tool_lower == "write"
                     and isinstance(arguments, dict)
                 ):
                     _write_path = str(arguments.get("path", "")).lower()
-                    _CODE_EXTS = (".py", ".sh", ".js", ".ts", ".rb", ".go", ".rs", ".java")
-                    _is_code_file = (
-                        any(_write_path.endswith(ext) for ext in _CODE_EXTS)
+                    _write_basename = _write_path.rsplit("/", 1)[-1]
+                    # Extensions that are inherently small or structural
+                    _SKIP_EXTS = (
+                        # Code / scripts
+                        ".py", ".sh", ".js", ".ts", ".rb", ".go", ".rs",
+                        ".java", ".c", ".cpp", ".h", ".hpp", ".swift",
+                        ".kt", ".lua", ".pl", ".r",
+                        # Config / env / manifest
+                        ".env", ".ini", ".cfg", ".conf", ".toml", ".yaml",
+                        ".yml", ".xml", ".properties",
+                        # Package manifests
+                        ".lock",
+                        # Web
+                        ".html", ".htm", ".css", ".scss", ".less",
+                        # Misc structural
+                        ".sql", ".graphql",
+                    )
+                    # Filenames that are inherently small config files
+                    _SKIP_NAMES = (
+                        "requirements.txt", "requirements-dev.txt",
+                        "constraints.txt", "package.json", "package-lock.json",
+                        "tsconfig.json", "pyproject.toml", "setup.py",
+                        "setup.cfg", "cargo.toml", "gemfile", "gemfile.lock",
+                        "dockerfile", "docker-compose.yml",
+                        "docker-compose.yaml", "makefile", "cmakelists.txt",
+                        ".gitignore", ".dockerignore", ".editorconfig",
+                        ".eslintrc", ".prettierrc", ".babelrc",
+                        "procfile", "runtime.txt", "manifest.json",
+                    )
+                    _is_skip_file = (
+                        any(_write_path.endswith(ext) for ext in _SKIP_EXTS)
+                        or _write_basename in _SKIP_NAMES
+                        or _write_basename.startswith(".env")  # .env, .env.example, .env.local, etc.
                         or "/scripts/" in _write_path
                     )
-                    if not _is_code_file:
+                    if not _is_skip_file:
                         written_len = len(str(arguments.get("content", "")))
+                        # Only count data from DATA-FETCH tools (not all
+                        # tool results).  Google Docs content, web scrapes,
+                        # and file reads are data sources.  Exclude write,
+                        # shell, glob, edit, image_vision — those are
+                        # action tools whose output is not "data to embed".
+                        _DATA_FETCH_TOOLS = frozenset({
+                            "gws", "read_file", "scrape", "scrape_url",
+                            "web_fetch", "fetch_url", "read", "curl",
+                        })
                         _data_in_context = 0
                         if self.session:
-                            _recent = self.session.messages[-30:]
+                            # Only look at the last 15 messages (not 30)
+                            # to reduce false positives from stale data.
+                            _recent = self.session.messages[-15:]
                             for _prev in _recent:
                                 if _prev.get("role") != "tool":
                                     continue
                                 _pname = str(_prev.get("tool_name", "")).strip().lower()
-                                if _pname in ("write", "shell"):
+                                if _pname not in _DATA_FETCH_TOOLS:
                                     continue
                                 _pc = str(_prev.get("content", ""))
-                                if len(_pc) > 500:
+                                if len(_pc) > 1000:
                                     _data_in_context = max(_data_in_context, len(_pc))
-                        if _data_in_context > 500 and written_len < _data_in_context * 0.10:
+                        # Higher threshold: written file must be < 5% of
+                        # data (was 10%) and data must be > 1000 chars
+                        # (was 500) to reduce false positives.
+                        if _data_in_context > 1000 and written_len < _data_in_context * 0.05:
                             _result_content += (
-                                "\n\n⚠️ WARNING: The file you just wrote is nearly empty "
-                                f"({written_len} chars) but you have substantial data "
-                                f"({_data_in_context} chars) from tool results in this "
-                                "conversation. You likely forgot to include the actual "
-                                "data in the file content. Please rewrite the file NOW "
-                                "with the complete data formatted as requested by the user."
+                                "\n\nNote: The file you wrote is relatively small "
+                                f"({written_len} chars) compared to data "
+                                f"({_data_in_context} chars) available from "
+                                "fetched content in this conversation. If you "
+                                "intended to include that data in this file, "
+                                "consider rewriting it with the full content. "
+                                "Otherwise, continue with the next file."
                             )
-                            log.warning(
-                                "Post-write empty-content warning injected",
+                            log.info(
+                                "Post-write small-file note injected",
                                 written_len=written_len,
                                 data_in_context=_data_in_context,
                             )
@@ -1036,6 +1081,34 @@ class AgentToolLoopMixin:
                     arguments if isinstance(arguments, dict) else {},
                     _result_content,
                 )
+
+                # ── Post-write context compaction ─────────────────
+                # After a successful file write the full content lives
+                # on disk.  Replace it in the parent assistant message's
+                # tool_calls with a compact reference to free context
+                # budget for subsequent iterations.
+                if (
+                    result.success
+                    and _tool_lower == "write"
+                    and isinstance(arguments, dict)
+                    and hasattr(self, "_compact_write_tool_call")
+                ):
+                    self._compact_write_tool_call(tc.id, arguments)
+
+                # ── Shell heredoc compaction ──────────────────────
+                # LLMs sometimes bypass the write tool and use shell
+                # heredocs (cat > file << 'EOF'...EOF) to write files.
+                # These can be thousands of tokens.  Compact the
+                # command argument after execution so subsequent
+                # iterations don't carry the full file content.
+                if (
+                    result.success
+                    and _tool_lower == "shell"
+                    and isinstance(arguments, dict)
+                    and len(str(arguments.get("command", ""))) >= 500
+                    and hasattr(self, "_compact_shell_tool_call")
+                ):
+                    self._compact_shell_tool_call(tc.id, arguments)
 
                 results.append({
                     "tool_call_id": tc.id,
@@ -1365,12 +1438,13 @@ class AgentToolLoopMixin:
                 blocked_count=len(results),
                 streak=_streak,
             )
-            if _streak >= 2:
+            if _streak >= 1:
                 stop_msg = (
-                    "STOP: All your tool calls have been blocked as duplicates for "
-                    f"{_streak} consecutive iterations. You already have the data you need "
-                    "from earlier calls. Do NOT call any more tools. Respond with your "
-                    "final answer using the data you have already collected."
+                    "STOP: All your tool calls were blocked as duplicates. "
+                    "You already have the data you need from earlier calls. "
+                    "Do NOT retry the same calls. Move on to the next step "
+                    "in your plan — write the next file, or respond with "
+                    "your final answer."
                 )
                 self._add_session_message(
                     role="user",

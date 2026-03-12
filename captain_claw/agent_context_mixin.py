@@ -2059,6 +2059,11 @@ class AgentContextMixin:
                             msg["tool_calls"] = remaining_calls
                         else:
                             msg.pop("tool_calls", None)
+                        # Invalidate cached token count — the tool_calls
+                        # arguments that were just stripped contributed
+                        # tokens that are no longer present.
+                        msg.pop("token_count", None)
+                        msg.pop("_tc_counted", None)
                 candidate_messages.append(msg)
 
         memory_note, memory_debug = self._build_tool_memory_note(
@@ -2212,6 +2217,21 @@ class AgentContextMixin:
                 "tool_name": "datastore_context",
                 "token_count": self._count_tokens(datastore_note),
             })
+        # Workspace manifest — compact listing of files created/modified
+        # this session.  Gives the LLM a project map without needing
+        # full file contents in history (those are compacted on disk).
+        workspace_note = (
+            self._build_workspace_manifest_note()
+            if hasattr(self, "_build_workspace_manifest_note")
+            else ""
+        )
+        if workspace_note:
+            candidate_messages.append({
+                "role": "assistant",
+                "content": workspace_note,
+                "tool_name": "workspace_manifest",
+                "token_count": self._count_tokens(workspace_note),
+            })
 
         selected_reversed: list[dict[str, Any]] = []
         used_tokens = 0
@@ -2263,6 +2283,7 @@ class AgentContextMixin:
             "planning_note_used": 1 if planning_note else 0,
             "scale_progress_note_used": 1 if scale_note else 0,
             "todo_note_used": 1 if todo_note else 0,
+            "workspace_manifest_used": 1 if workspace_note else 0,
             "over_budget": 1 if prompt_tokens > context_budget else 0,
             "utilization": (prompt_tokens / context_budget) if context_budget else 0.0,
         }

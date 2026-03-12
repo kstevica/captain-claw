@@ -71,6 +71,7 @@ class AgentOrchestrationMixin:
         # Reset per-turn coverage gate streak.
         self._coverage_gate_streak: int = 0
         self._coverage_gate_prev_missing: int = -1
+        self._pw_enforcement_streak: int = 0
         # Reset per-turn success flag (updated by finish()).
         self._last_complete_success = True
         # Scale-progress tracker: populated when the scale advisory fires.

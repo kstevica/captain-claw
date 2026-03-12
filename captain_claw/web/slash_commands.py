@@ -307,17 +307,79 @@ async def _execute_nuke(server: WebServer) -> str:
             shutil.rmtree(folder)
             lines.append(f"📁 Deleted **{folder_name}/** folder")
 
-    # 2. Clear deep memory (Typesense) — delete all documents.
-    dm = getattr(server.agent, "_deep_memory", None)
+    # 2. Clear deep memory (Typesense) — DROP the collection entirely.
+    #    This guarantees a clean slate: all documents, embeddings, and
+    #    schema state are removed.  The collection will be auto-recreated
+    #    on next use.  We use direct HTTP so it works regardless of
+    #    whether DeepMemoryIndex is initialized.
     dm_count = 0
-    if dm is not None:
-        try:
-            dm_count = dm.delete_by_filter("doc_id:!=__impossible__")
-        except Exception as e:
-            lines.append(f"⚠️ Deep memory clear failed: {e}")
-    lines.append(f"🧠 Deleted **{dm_count}** deep memory documents")
+    dm_cleared = False
+    try:
+        cfg = get_config()
+        ts_cfg = getattr(cfg, "tools", None)
+        ts_cfg = getattr(ts_cfg, "typesense", None) if ts_cfg else None
+        dm_cfg = getattr(cfg, "deep_memory", None)
+        # Resolve the collection name: prefer deep_memory config,
+        # fall back to typesense tool default_collection.
+        coll_name = ""
+        if dm_cfg:
+            coll_name = str(getattr(dm_cfg, "collection_name", "")).strip()
+        if not coll_name and ts_cfg:
+            coll_name = str(getattr(ts_cfg, "default_collection", "")).strip()
+        # Resolve connection params (try deep_memory first, then tool).
+        ts_host = ""
+        ts_port = 8108
+        ts_proto = "http"
+        ts_key = ""
+        if dm_cfg and str(getattr(dm_cfg, "api_key", "")).strip():
+            ts_host = str(getattr(dm_cfg, "host", "localhost")).strip()
+            ts_port = int(getattr(dm_cfg, "port", 8108))
+            ts_proto = str(getattr(dm_cfg, "protocol", "http")).strip()
+            ts_key = str(getattr(dm_cfg, "api_key", "")).strip()
+        elif ts_cfg:
+            ts_host = str(getattr(ts_cfg, "host", "localhost")).strip()
+            ts_port = int(getattr(ts_cfg, "port", 8108))
+            ts_proto = str(getattr(ts_cfg, "protocol", "http")).strip()
+            ts_key = str(getattr(ts_cfg, "api_key", "")).strip()
+        if coll_name and ts_key:
+            import httpx
+            base = f"{ts_proto}://{ts_host}:{ts_port}"
+            headers = {"X-TYPESENSE-API-KEY": ts_key}
+            try:
+                resp = httpx.delete(
+                    f"{base}/collections/{coll_name}",
+                    headers=headers,
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    dm_count = resp.json().get("num_documents", 0)
+                    dm_cleared = True
+                elif resp.status_code == 404:
+                    dm_cleared = True  # already gone
+            except Exception as e:
+                lines.append(f"⚠️ Typesense collection drop failed: {e}")
+            # Reset in-memory state so collection is recreated on next use.
+            dm = getattr(server.agent, "_deep_memory", None)
+            if dm is not None:
+                dm._collection_ensured = False
+            # Also reset the TypesenseTool's cached flag.
+            try:
+                ts_tool = server.agent.tools.get("typesense")
+                ts_tool._collection_ensured = False
+            except Exception:
+                pass  # tool not registered
+    except Exception:
+        pass  # config not available — skip
+    if dm_count:
+        lines.append(f"🧠 Dropped Typesense collection — **{dm_count}** documents removed")
+    elif dm_cleared:
+        lines.append("🧠 Typesense collection dropped (was empty)")
+    else:
+        lines.append("🧠 Deep memory: not configured")
 
     # 2b. Clear semantic memory (SQLite FTS + embeddings).
+    #     Try via the memory object first, then fall back to direct
+    #     SQLite connection to the memory.db file.
     sm_count = 0
     memory = getattr(server.agent, "memory", None)
     if memory is not None:
@@ -325,8 +387,43 @@ async def _execute_nuke(server: WebServer) -> str:
             sm_count = memory.clear_all()
         except Exception as e:
             lines.append(f"⚠️ Semantic memory clear failed: {e}")
-    if sm_count:
+
+    # Fallback: directly clear the SQLite memory database file.
+    # This handles the case where memory.semantic is None (init failure)
+    # but the database file exists with stale data.
+    if sm_count == 0:
+        try:
+            import sqlite3
+            cfg = get_config()
+            mem_cfg = getattr(cfg, "memory", None)
+            mem_path = str(getattr(mem_cfg, "path", "~/.captain-claw/memory.db")) if mem_cfg else "~/.captain-claw/memory.db"
+            from pathlib import Path
+            mem_db = Path(mem_path).expanduser()
+            if mem_db.exists():
+                conn = sqlite3.connect(str(mem_db))
+                try:
+                    # Check if tables exist before trying to delete
+                    tables = [r[0] for r in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()]
+                    for tbl in ("memory_embeddings", "memory_chunks_fts",
+                                "memory_chunks", "memory_documents",
+                                "memory_sync_state"):
+                        if tbl in tables:
+                            conn.execute(f"DELETE FROM [{tbl}]")
+                    conn.execute("VACUUM")
+                    conn.commit()
+                    sm_count = -1  # sentinel: cleared via fallback
+                finally:
+                    conn.close()
+        except Exception as e:
+            lines.append(f"⚠️ Direct memory DB clear failed: {e}")
+    if sm_count > 0:
         lines.append(f"🧠 Cleared **{sm_count}** semantic memory documents")
+    elif sm_count == -1:
+        lines.append("🧠 Cleared semantic memory database (direct)")
+    else:
+        lines.append("🧠 Semantic memory: nothing to clear")
 
     # 3. Drop all datastore tables.
     from captain_claw.datastore import get_datastore_manager

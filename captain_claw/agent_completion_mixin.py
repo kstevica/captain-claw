@@ -373,15 +373,34 @@ class AgentCompletionMixin:
                 log.info("Finalize BLOCKED by python_worker_ran gate", iteration=iteration)
                 return False, "", finish_success, completion_feedback, python_worker_attempted
             if not (has_write and has_shell):
-                completion_feedback = (
-                    "Completion gate: execute Python worker workflow via tools before finalizing.\n"
-                    "- Generate or refine a Python script/tool that handles the full item list.\n"
-                    "- Run it through shell.\n"
-                    "- Then provide final concise summary."
-                )
-                if iteration < (hard_turn_iterations - 1):
+                # ── Stuck-loop safety valve ──────────────────────────
+                # Track consecutive blocks where write+shell never succeed.
+                # After _PW_MAX_BLOCKS, allow finalization to prevent
+                # infinite loops on conversational / non-script messages.
+                _pw_attr = "_pw_enforcement_streak"
+                _pw_streak: int = getattr(self, _pw_attr, 0) + 1
+                setattr(self, _pw_attr, _pw_streak)
+                _PW_MAX_BLOCKS = 3
+                if _pw_streak > _PW_MAX_BLOCKS:
+                    log.warning(
+                        "python_worker_enforcement stuck — allowing finalization",
+                        streak=_pw_streak,
+                        iteration=iteration,
+                    )
+                    setattr(self, _pw_attr, 0)
+                    # Fall through — do NOT block.
+                elif iteration < (hard_turn_iterations - 1):
+                    completion_feedback = (
+                        "Completion gate: execute Python worker workflow via tools before finalizing.\n"
+                        "- Generate or refine a Python script/tool that handles the full item list.\n"
+                        "- Run it through shell.\n"
+                        "- Then provide final concise summary."
+                    )
                     log.info("Finalize BLOCKED by python_worker_enforcement gate", iteration=iteration)
                     return False, "", finish_success, completion_feedback, python_worker_attempted
+            else:
+                # write+shell succeeded — reset streak.
+                setattr(self, "_pw_enforcement_streak", 0)
 
         # ── List member coverage ─────────────────────────────────────
         if bool(list_task_plan.get("enabled", False)):

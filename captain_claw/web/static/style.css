@@ -2246,6 +2246,29 @@ html, body {
 .upload-btn { font-size: 16px; }
 .upload-btn:disabled { opacity: 0.5; cursor: wait; }
 
+/* ── Mic Button & Recording States ──────────────────── */
+
+.mic-btn { font-size: 16px; transition: all 0.2s; }
+
+.mic-btn.recording {
+    background: var(--red);
+    border-color: var(--red);
+    color: #fff;
+    animation: micPulse 1.2s ease-in-out infinite;
+}
+
+.mic-btn.transcribing {
+    opacity: 0.6;
+    cursor: wait;
+}
+
+.mic-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+@keyframes micPulse {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.4); }
+    50%      { opacity: 0.85; box-shadow: 0 0 0 6px rgba(248, 81, 73, 0); }
+}
+
 .drop-overlay {
     position: absolute;
     inset: 0;
