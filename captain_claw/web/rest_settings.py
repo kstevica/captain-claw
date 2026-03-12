@@ -434,6 +434,29 @@ def _build_schema() -> list[dict[str, Any]]:
                                hint="Enable the eval action for running JavaScript in the browser. Disabled by default for security."),
                     ],
                 },
+                {
+                    "id": "tools_hotkey",
+                    "title": "Voice & Hotkey",
+                    "description": "Global hotkey for voice commands and screen capture. Double-tap the trigger key to dictate, triple-tap to include a screenshot.",
+                    "fields": [
+                        _field("tools.screen_capture.hotkey_enabled", "Enable hotkey", type="toggle",
+                               hint="Start the global hotkey listener on server launch. Requires pynput."),
+                        _field("tools.screen_capture.hotkey_trigger_key", "Trigger key", type="select",
+                               options=["shift", "ctrl", "alt", "caps_lock"]),
+                        _field("tools.screen_capture.hotkey_double_tap_ms", "Double-tap window (ms)", type="number",
+                               min=100, max=1000,
+                               hint="Max milliseconds between taps to count as a multi-tap."),
+                        _field("tools.screen_capture.hotkey_triple_tap_wait_ms", "Triple-tap wait (ms)", type="number",
+                               min=100, max=1000,
+                               hint="Milliseconds to wait after a double-tap for a potential third tap."),
+                        _field("tools.screen_capture.max_recording_seconds", "Max recording (s)", type="number",
+                               min=5, max=120,
+                               hint="Maximum voice recording duration in seconds."),
+                        _field("tools.screen_capture.stt_provider", "STT provider", type="select",
+                               options=["", "soniox", "openai", "gemini"],
+                               hint="Speech-to-text provider. Leave empty for auto-detect."),
+                    ],
+                },
             ],
         },
         # ── 4. Email ─────────────────────────────────────────────
@@ -1000,5 +1023,18 @@ async def put_settings(server: WebServer, request: web.Request) -> web.Response:
             server.agent.reload_tools()
         except Exception as exc:
             log.warning("Tool hot-reload failed: %s", exc)
+
+    # ── Hot-reload hotkey daemon if its settings changed ──
+    _hotkey_keys = {k for k in changes if k.startswith("tools.screen_capture.hotkey")}
+    if _hotkey_keys:
+        try:
+            from captain_claw.web.hotkey_daemon import (
+                start_hotkey_daemon,
+                stop_hotkey_daemon,
+            )
+            await stop_hotkey_daemon(server)
+            await start_hotkey_daemon(server)
+        except Exception as exc:
+            log.warning("Hotkey daemon reload failed: %s", exc)
 
     return web.json_response({"ok": True})

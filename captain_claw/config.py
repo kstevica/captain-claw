@@ -352,7 +352,7 @@ class ScreenCaptureToolConfig(BaseModel):
     """Screen capture and voice command configuration."""
 
     # Hotkey settings
-    hotkey_enabled: bool = True
+    hotkey_enabled: bool = False
     hotkey_trigger_key: str = "shift"  # key to double-tap (shift, ctrl, alt, caps_lock)
     hotkey_double_tap_ms: int = 400  # ms between taps to count as double
     hotkey_triple_tap_wait_ms: int = 300  # ms to wait after double-tap for a potential 3rd tap

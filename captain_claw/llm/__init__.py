@@ -279,6 +279,92 @@ def _resolve_api_key(provider: str, explicit_api_key: str | None) -> str | None:
     return None
 
 
+_CACHE_SPLIT_MARKER = "<!-- CACHE_SPLIT -->"
+
+
+def _inject_anthropic_cache_control(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add ``cache_control`` to system and history messages for Anthropic prompt caching.
+
+    Anthropic caches the prompt prefix up to each ``cache_control`` breakpoint.
+    We use up to 2 breakpoints (out of 4 allowed):
+
+    1. **System message (static part)** — the large instruction text that is
+       identical across turns.  The system prompt template contains a
+       ``<!-- CACHE_SPLIT -->`` marker that separates static instructions
+       (above) from dynamic context (below, e.g. timestamp, file trees).
+       Only the static block gets ``cache_control``; the dynamic block is
+       sent as a separate content block without it so that changes to
+       timestamps/env info don't bust the cache.
+
+    2. **Last user or assistant message before the current turn** — during a
+       tool-use loop the same conversation prefix is sent multiple times.
+       Marking the last historical message lets Anthropic cache the entire
+       prefix (system + history) across tool-loop iterations within a turn.
+
+    LiteLLM passes ``cache_control`` through to Anthropic when the message
+    content is a list of content blocks (not a plain string).
+    """
+    result: list[dict[str, Any]] = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            content = msg.get("content", "")
+            if isinstance(content, str) and content:
+                if _CACHE_SPLIT_MARKER in content:
+                    # Split into static (cached) and dynamic (uncached) blocks.
+                    static_part, dynamic_part = content.split(_CACHE_SPLIT_MARKER, 1)
+                    static_part = static_part.rstrip()
+                    dynamic_part = dynamic_part.strip()
+                    blocks: list[dict[str, Any]] = [
+                        {
+                            "type": "text",
+                            "text": static_part,
+                            "cache_control": {"type": "ephemeral"},
+                        },
+                    ]
+                    if dynamic_part:
+                        blocks.append({"type": "text", "text": dynamic_part})
+                    msg = {**msg, "content": blocks}
+                else:
+                    # No marker — cache the whole thing.
+                    msg = {**msg, "content": [
+                        {
+                            "type": "text",
+                            "text": content,
+                            "cache_control": {"type": "ephemeral"},
+                        },
+                    ]}
+            elif isinstance(content, list):
+                blocks = [dict(b) if isinstance(b, dict) else b for b in content]
+                if blocks and isinstance(blocks[-1], dict):
+                    blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
+                msg = {**msg, "content": blocks}
+        result.append(msg)
+
+    # Breakpoint 2: mark the last user or assistant message in the
+    # conversation history so tool-loop iterations cache the prefix.
+    # Walk backwards to find the last user/assistant message.
+    for i in range(len(result) - 1, -1, -1):
+        role = result[i].get("role", "")
+        if role in ("user", "assistant"):
+            content = result[i].get("content", "")
+            if isinstance(content, str) and content:
+                result[i] = {**result[i], "content": [
+                    {
+                        "type": "text",
+                        "text": content,
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                ]}
+            elif isinstance(content, list):
+                blocks = [dict(b) if isinstance(b, dict) else b for b in content]
+                if blocks and isinstance(blocks[-1], dict):
+                    blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
+                result[i] = {**result[i], "content": blocks}
+            break
+
+    return result
+
+
 def _convert_messages_for_openai_style(messages: list[Message]) -> list[dict[str, Any]]:
     """Convert messages to OpenAI-style payload."""
     result: list[dict[str, Any]] = []
@@ -1090,6 +1176,17 @@ class LiteLLMProvider(LLMProvider):
         }
         if tools:
             kwargs["tools"] = _convert_tools_for_openai_style(tools)
+
+        # Anthropic prompt caching: split system message on CACHE_SPLIT marker
+        # into static (cached) + dynamic (uncached) blocks, and add a cache
+        # breakpoint on the last conversation message for tool-loop caching.
+        if self.provider == "anthropic":
+            kwargs["messages"] = _inject_anthropic_cache_control(kwargs["messages"])
+        else:
+            # Strip the cache-split marker for non-Anthropic providers.
+            for msg in kwargs["messages"]:
+                if msg.get("role") == "system" and isinstance(msg.get("content"), str):
+                    msg["content"] = msg["content"].replace(_CACHE_SPLIT_MARKER, "")
 
         # Force text-only output for Gemini so it uses function tools
         # (e.g. image_gen) instead of native image generation, which

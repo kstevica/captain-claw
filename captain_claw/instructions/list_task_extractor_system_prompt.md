@@ -37,15 +37,16 @@ Output strategy detection — carefully analyze the user's request to determine 
 - `output_filename_template` — when `output_strategy` is `"file_per_item"`, provide the filename pattern with `{member_label}` as placeholder for the per-item identifier. Extract the pattern from the user's naming instruction (e.g. "report-[date].csv" → `"report-{member_label}.csv"`). Leave empty for `"single_file"` or `"no_file"`.
 - `output_file` — when `output_strategy` is `"single_file"`, provide the output filename that the user wants (e.g. "results.md", "analysis-2025-07-31.md"). Extract this from the user's request or task description. If the user doesn't specify a filename, derive one from the task context (e.g. task about "Q3 report" → "Q3-report.md"). Leave empty for `"file_per_item"` or `"no_file"`.
 - `final_action` — what should happen with each processed result:
-  - `"write_file"` — write to file(s) (default for file_per_item and single_file)
-  - `"reply"` — return the result in the chat response
+  - `"reply"` — return the result in the chat response (THE DEFAULT — use unless the user explicitly asks for file output)
+  - `"write_file"` — write to file(s) (ONLY when user explicitly requests saving/writing/creating a file or document)
   - `"email"` — send via email
   - `"api_call"` — post to an API/service
+- CRITICAL: `final_action` must be `"reply"` unless the user explicitly asks to write/save/create/export a file. Verbs like "summarize", "analyze", "tell me", "get the gist", "list", "explain", "describe", "what is" → always `"reply"`. Only use `"write_file"` when the user says things like "save to", "write to", "create a report file", "export as", "generate a PDF/CSV/document".
 
 Key signals for detecting output_strategy:
 - File-per-item: filename includes a variable part that changes per member (date, name, ID), explicit "for each" file naming
 - Single-file: "write to [filename]", "append to", "create a report with all", one output filename with no variable parts
-- No-file: "send email", "reply with", "index on", "post to", "return the results"
+- No-file: "send email", "reply with", "summarize", "tell me", "get the gist", "analyze", "explain", "index on", "post to", "return the results", or any conversational request without explicit file output
 
 Processing mode detection — determine whether the LLM needs to process/transform each item's content:
 - `processing_mode` must be one of:

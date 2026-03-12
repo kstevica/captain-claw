@@ -114,7 +114,7 @@ def _build_scale_advisory(
     item_count: int | str,
     output_strategy: str = "single_file",
     filename_template: str = "",
-    final_action: str = "write_file",
+    final_action: str = "reply",
 ) -> str:
     """Build the appropriate scale advisory based on output strategy."""
     if output_strategy == "file_per_item":
@@ -342,7 +342,7 @@ class AgentScaleDetectionMixin:
 
         output_strategy = str(list_task_plan.get("output_strategy", "single_file")).strip().lower()
         filename_template = str(list_task_plan.get("output_filename_template", "")).strip()
-        final_action = str(list_task_plan.get("final_action", "write_file")).strip()
+        final_action = str(list_task_plan.get("final_action", "reply")).strip()
 
         advisory = _build_scale_advisory(
             item_count=estimated_count,
@@ -503,7 +503,7 @@ class AgentScaleDetectionMixin:
             item_count=len(new_members),
             output_strategy=_out_strategy,
             filename_template=str(new_plan.get("output_filename_template", "")).strip(),
-            final_action=str(new_plan.get("final_action", "write_file")).strip(),
+            final_action=str(new_plan.get("final_action", "reply")).strip(),
         )
 
         self._emit_tool_output(
@@ -700,7 +700,7 @@ class AgentScaleDetectionMixin:
             "_output_strategy": _out_strategy,
             "_output_filename_template": str(plan.get("output_filename_template", "")).strip(),
             "_output_file_from_plan": _plan_output_file,
-            "_final_action": str(plan.get("final_action", "write_file")).strip(),
+            "_final_action": str(plan.get("final_action", "reply")).strip(),
             "_extraction_mode": self._classify_item_extraction_mode(
                 members,
                 per_member_action=str(plan.get("per_member_action", "")),

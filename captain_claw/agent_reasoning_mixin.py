@@ -1464,7 +1464,7 @@ class AgentReasoningMixin:
             "confidence": "low",
             "output_strategy": "single_file",
             "output_filename_template": "",
-            "final_action": "write_file",
+            "final_action": "reply",
         }
         if not self._is_list_processing_request(user_input):
             return fallback
@@ -1512,7 +1512,7 @@ class AgentReasoningMixin:
         confidence = "low"
         output_strategy = "single_file"
         output_filename_template = ""
-        final_action = "write_file"
+        final_action = "reply"
         processing_mode = "summarize"
         if isinstance(payload, dict):
             has_list_work = bool(payload.get("has_list_work", False))
@@ -1524,9 +1524,9 @@ class AgentReasoningMixin:
             if output_strategy not in ("file_per_item", "single_file", "no_file"):
                 output_strategy = "single_file"
             output_filename_template = str(payload.get("output_filename_template", "")).strip()[:200]
-            final_action = str(payload.get("final_action", "write_file")).strip().lower()
+            final_action = str(payload.get("final_action", "reply")).strip().lower()
             if final_action not in ("write_file", "reply", "email", "api_call"):
-                final_action = "write_file"
+                final_action = "reply"
             processing_mode = str(payload.get("processing_mode", "summarize")).strip().lower()
             if processing_mode not in ("raw", "summarize"):
                 processing_mode = "summarize"

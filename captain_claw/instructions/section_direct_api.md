@@ -1,0 +1,14 @@
+Direct API Calls (power user endpoint registry):
+- Use direct_api(action='add', name='...', url='...', method='GET', description='...') to register a new HTTP endpoint.
+- Use direct_api(action='list') to see all registered endpoints, optionally filtered by app_name.
+- Use direct_api(action='show', call_id='...') to view full details of a registered endpoint.
+- Use direct_api(action='call', call_id='...') to execute the API call and record usage stats.
+- Use direct_api(action='test', call_id='...') to execute without recording stats — good for verification.
+- Use direct_api(action='update', call_id='...', description='new desc') to modify any field.
+- Use direct_api(action='remove', call_id='...') to delete a registered endpoint.
+- Use direct_api(action='auth_from_browser', call_id='...') to capture auth tokens from an active browser session for the endpoint's domain. The browser must be logged in first.
+- Supported methods: GET, POST, PUT, PATCH. DELETE is rejected for safety.
+- The call_id parameter accepts an ID, a name, or a hash-index like #1, #2, #3.
+- Payload schemas (input_payload, result_payload) can be any format: JSON, YAML, XML, or plain text descriptions.
+- Auth types: bearer, api_key, basic, cookie, custom. Auth tokens can be set manually or captured from browser sessions.
+- Pass payload (JSON body) and query_params (JSON dict) when using call or test actions.

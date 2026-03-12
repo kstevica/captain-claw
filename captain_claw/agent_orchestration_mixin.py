@@ -478,7 +478,7 @@ class AgentOrchestrationMixin:
                 list_task_plan.get("output_filename_template", "")
             ).strip()
             self._scale_progress["_final_action"] = str(
-                list_task_plan.get("final_action", "write_file")
+                list_task_plan.get("final_action", "reply")
             ).strip()
             if _out_strategy == "no_file":
                 self._scale_progress["_sink_collection"] = ""
@@ -1106,7 +1106,7 @@ class AgentOrchestrationMixin:
                                 (_sp_glob or {}).get("_output_filename_template", "")
                             ),
                             final_action=str(
-                                (_sp_glob or {}).get("_final_action", "write_file")
+                                (_sp_glob or {}).get("_final_action", "reply")
                             ),
                         )
                         if _glob_advisory:

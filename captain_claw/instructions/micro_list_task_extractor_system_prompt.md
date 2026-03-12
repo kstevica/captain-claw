@@ -29,7 +29,8 @@ output_strategy:
 - `single_file`: all results in one file. Set output_file.
 - `no_file`: email/API/reply, no file output.
 
-final_action: write_file | reply | email | api_call.
+final_action: reply (DEFAULT — use unless user explicitly asks to save/write/create a file) | write_file (ONLY when user says "save to", "write to", "export as", etc.) | email | api_call.
+CRITICAL: "summarize", "tell me", "get the gist", "analyze", "explain" → always "reply". Only "write_file" when user explicitly requests file output.
 
 processing_mode:
 - `summarize` (default): LLM processes/analyzes each item (summarize, extract, reformat, translate).

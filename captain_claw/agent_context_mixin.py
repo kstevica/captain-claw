@@ -17,6 +17,60 @@ from captain_claw.tools.registry import Tool
 
 log = get_logger(__name__)
 
+# ---------------------------------------------------------------------------
+# Tool prompt descriptions — used to build the dynamic tool list in the system
+# prompt.  Only tools that should appear in the textual list need an entry;
+# tools without one still get their API definition sent to the model.
+# ---------------------------------------------------------------------------
+
+_TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
+    "shell": "Execute shell commands in the terminal",
+    "read": "Read file contents from the filesystem",
+    "write": "Write content to files",
+    "edit": "Modify existing files by replacing specific text (find-and-replace)",
+    "glob": "Find files by pattern (ALWAYS use this instead of shell find/ls for file searching — it automatically searches extra read folders too)",
+    "web_fetch": "Fetch a URL and return clean readable TEXT (always text mode, never raw HTML)",
+    "web_get": "Fetch a URL and return raw HTML source (only for scraping/DOM inspection)",
+    "web_search": "Search the web for up-to-date sources",
+    "pdf_extract": "Extract PDF content into markdown",
+    "docx_extract": "Extract DOCX content into markdown",
+    "xlsx_extract": "Extract XLSX sheets into markdown tables",
+    "pptx_extract": "Extract PPTX slides into markdown",
+    "pocket_tts": "Convert text to local speech audio and save as MP3",
+    "send_mail": "Send emails via SMTP. Supports to, cc, bcc, subject, body, and file attachments.",
+    "clipboard": "Read or write the system clipboard. Supports text, images, and files.",
+    "gws": "Google Workspace CLI — access Google Drive (list, search, download, create), Docs (read, append), Calendar (list, search, create, agenda), and Gmail (list, search, read, threads). Uses the `gws` binary.",
+    "datastore": "Manage persistent relational data tables (create, query, insert, update, delete, import/export)",
+    "personality": "Read or update the agent personality profile (name, description, background, expertise)",
+    "browser": "Control a headless browser for web app interaction. Supports observe/act (page understanding), click/type with nth-match disambiguation, login with encrypted credentials + cookie persistence, network capture for API discovery, API replay (execute captured APIs directly — skip the browser!), and multi-app sessions. Use for login flows, form filling, and interacting with dynamic/React web apps.",
+    "direct_api": "Register, manage, and execute HTTP API endpoints directly. Users define endpoints with URL, method, description, and payload schemas. Supports auth capture from browser sessions. Methods: GET, POST, PUT, PATCH (DELETE is rejected for safety).",
+    "termux": "Interact with the Android device via Termux API (take photo, battery status, GPS location, torch on/off)",
+}
+
+_TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
+    "shell": "terminal commands",
+    "read": "read files",
+    "write": "write files",
+    "edit": "modify files by replacing text",
+    "glob": "find files by pattern",
+    "web_fetch": "clean text from URL",
+    "web_get": "raw HTML from URL",
+    "web_search": "web search",
+    "pdf_extract": "PDF to markdown",
+    "docx_extract": "DOCX to markdown",
+    "xlsx_extract": "XLSX to markdown",
+    "pptx_extract": "PPTX to markdown",
+    "pocket_tts": "text-to-speech MP3",
+    "send_mail": "send emails via SMTP",
+    "clipboard": "read/write system clipboard",
+    "gws": "Google Workspace: Drive, Docs, Calendar, Gmail",
+    "datastore": "persistent relational tables",
+    "personality": "agent personality profile",
+    "browser": "headless browser for dynamic web apps",
+    "direct_api": "register and call HTTP endpoints",
+    "termux": "Android device: photo/battery/location/torch",
+}
+
 
 class AgentContextMixin:
     """Build system/context/tool messages for model calls."""
@@ -1428,6 +1482,45 @@ class AgentContextMixin:
                     count=registered_count,
                 )
 
+    # ------------------------------------------------------------------
+    # Conditional system-prompt helpers
+    # ------------------------------------------------------------------
+
+    def _build_tool_list(self) -> str:
+        """Build the textual tool list from currently registered tools."""
+        registered = self.tools.list_tools()
+        use_micro = self.instructions.use_micro
+        descs = _TOOL_PROMPT_DESCRIPTIONS_MICRO if use_micro else _TOOL_PROMPT_DESCRIPTIONS
+
+        if use_micro:
+            parts = []
+            for name in registered:
+                desc = descs.get(name)
+                if desc:
+                    parts.append(f"{name} ({desc})")
+            return "Tools: " + ", ".join(parts) + "." if parts else ""
+        else:
+            lines = ["Available tools:"]
+            for name in registered:
+                desc = descs.get(name)
+                if desc:
+                    lines.append(f"- {name}: {desc}")
+            return "\n".join(lines)
+
+    def _build_conditional_section(
+        self, tool_name: str, section_file: str, **variables: object,
+    ) -> str:
+        """Load a section file only when *tool_name* is registered.
+
+        Returns the section content prefixed with ``\\n\\n`` when active,
+        or an empty string when the tool is not present.
+        """
+        if not self.tools.has_tool(tool_name):
+            return ""
+        if variables:
+            return "\n\n" + self.instructions.render(section_file, **variables)
+        return "\n\n" + self.instructions.load(section_file)
+
     def _build_system_prompt(self) -> str:
         """Build the system prompt."""
         session_id = self._current_session_slug()
@@ -1565,6 +1658,24 @@ class AgentContextMixin:
         except Exception:
             pass
 
+        # Conditional tool-specific sections (only when tool is registered).
+        tool_list_block = self._build_tool_list()
+        browser_policy_block = self._build_conditional_section(
+            "browser", "section_browser_policy.md",
+        )
+        direct_api_block = self._build_conditional_section(
+            "direct_api", "section_direct_api.md",
+        )
+        termux_policy_block = self._build_conditional_section(
+            "termux", "section_termux_policy.md",
+        )
+        gws_block = self._build_conditional_section(
+            "gws", "section_gws.md", session_id=session_id,
+        )
+        datastore_block = self._build_conditional_section(
+            "datastore", "section_datastore.md",
+        )
+
         base_prompt = self.instructions.render(
             "system_prompt.md",
             runtime_base_path=self.runtime_base_path,
@@ -1576,7 +1687,17 @@ class AgentContextMixin:
             user_context_block=user_context_block,
             system_info_block=system_info_block,
             extra_read_dirs_block=extra_read_dirs_block,
+            tool_list_block=tool_list_block,
+            browser_policy_block=browser_policy_block,
+            direct_api_block=direct_api_block,
+            termux_policy_block=termux_policy_block,
+            gws_block=gws_block,
+            datastore_block=datastore_block,
         )
+
+        # Collapse triple+ newlines left by absent conditional sections.
+        base_prompt = re.sub(r"\n{3,}", "\n\n", base_prompt)
+
         skills_section = ""
         build_skills = getattr(self, "_build_skills_system_prompt_section", None)
         if callable(build_skills):

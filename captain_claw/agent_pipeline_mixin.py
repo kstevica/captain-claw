@@ -1271,7 +1271,7 @@ class AgentPipelineMixin:
         action = str(list_task_plan.get("per_member_action", "")).strip()
         output_strategy = str(list_task_plan.get("output_strategy", "single_file")).strip().lower()
         filename_template = str(list_task_plan.get("output_filename_template", "")).strip()
-        final_action = str(list_task_plan.get("final_action", "write_file")).strip()
+        final_action = str(list_task_plan.get("final_action", "reply")).strip()
 
         lines = [
             "List task memory is active. You must process every extracted member before final response.",

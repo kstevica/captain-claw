@@ -79,6 +79,8 @@ For a quick overview and installation guide, see [README.md](README.md).
 - [Google OAuth, Drive, Calendar, and Gmail](#google-oauth-drive-calendar-and-gmail)
 - [Send Mail](#send-mail)
 - [Termux](#termux)
+- [Prompt Caching](#prompt-caching)
+- [LLM Usage Dashboard](#llm-usage-dashboard)
 - [File Output Policy](#file-output-policy)
 - [Environment Variables Reference](#environment-variables-reference)
 
@@ -913,15 +915,18 @@ Double-tap Shift (configurable) to activate the voice command flow. The full seq
 ```yaml
 tools:
   screen_capture:
-    hotkey_enabled: true           # enable global hotkey listener
+    hotkey_enabled: false          # opt-in; toggle in Settings → Voice & Hotkey (hot-reloads without restart)
     hotkey_trigger_key: shift      # key to double-tap (shift, ctrl, alt, caps_lock)
     hotkey_double_tap_ms: 400      # max ms between taps
+    hotkey_triple_tap_wait_ms: 500 # max ms to wait for a third tap
     default_monitor: 0             # 0=all, 1=primary
     max_recording_seconds: 30      # max voice recording duration
     audio_sample_rate: 16000       # mic sample rate (Hz)
     save_audio: false              # persist WAV files
     stt_provider: ""               # "soniox", "openai", "gemini", or "" for auto-detect
 ```
+
+> **Hotkey is opt-in.** The global hotkey listener is disabled by default. Enable it in the web UI at **Settings → Voice & Hotkey**, or set `hotkey_enabled: true` in config. Changes take effect immediately — no restart needed.
 
 **STT provider setup:**
 
@@ -1235,9 +1240,10 @@ tools:
   gws:
     binary_path: ""                 # custom path to gws binary (empty = find in PATH)
   screen_capture:
-    hotkey_enabled: true            # enable global hotkey listener
+    hotkey_enabled: false           # enable global hotkey listener (opt-in; toggle in Settings → Voice & Hotkey)
     hotkey_trigger_key: shift       # key to double-tap (shift, ctrl, alt, caps_lock)
     hotkey_double_tap_ms: 400       # max ms between taps to count as double-tap
+    hotkey_triple_tap_wait_ms: 500  # max ms to wait for a third tap
     default_monitor: 0              # 0=all monitors, 1=primary, 2=secondary
     timeout_seconds: 30
     max_recording_seconds: 30.0     # max voice recording duration
@@ -2715,6 +2721,7 @@ The homepage at `/` provides card-based navigation to all dashboard pages:
 | Deep Memory | `/deep-memory` | Browse and search Typesense-backed long-term archive |
 | Datastore | `/datastore` | Browse and manage structured data tables |
 | Files | `/files` | Browse agent-created files and download outputs |
+| LLM Usage | `/usage` | Token usage analytics with provider/model filters and cost breakdown |
 | Settings | `/settings` | Configure models, tools, agent personality, user profiles, and system options |
 
 ### Configuration
@@ -2892,6 +2899,54 @@ SMTP_PASSWORD="pass"
 ```
 
 Attachments are limited to 25 MB per file.
+
+---
+
+## Prompt Caching
+
+Captain Claw supports Anthropic prompt caching to reduce token costs and latency on repeated interactions.
+
+### How It Works
+
+The system prompt is split into two parts using an internal marker:
+
+1. **Static block** — tool definitions, policies, and instructions that remain constant across calls. This block is marked with `cache_control: ephemeral` so Anthropic caches it for 5 minutes.
+2. **Dynamic block** — system info (timestamp, memory, disk) and per-session read directories that change between calls. This block is never cached.
+
+A second cache breakpoint is placed on the last user or assistant message in conversation history, enabling cache hits during multi-turn tool loops where the same context is sent repeatedly.
+
+### Provider Compatibility
+
+| Provider | Caching behavior |
+|---|---|
+| **Anthropic** | Explicit prompt caching with two breakpoints. Cache reads are ~90% cheaper than fresh input tokens. |
+| **OpenAI** | Automatic prefix caching (no configuration needed). The static-first layout naturally benefits OpenAI's caching. |
+| **Gemini** | Context caching handled by Google's infrastructure. No impact. |
+| **Ollama** | Local inference — no caching overhead. |
+
+### Monitoring
+
+Cache performance is visible in the **LLM Usage** dashboard (`/usage`). The summary cards show **Cache Read** and **Cache Created** token counts, and each individual call displays cache read tokens in the detail table.
+
+---
+
+## LLM Usage Dashboard
+
+The LLM Usage page (`/usage`) provides detailed analytics for all LLM API calls made by the agent.
+
+### Accessing
+
+Navigate to `/usage` in the web UI, or click the **LLM Usage** card on the homepage.
+
+### Features
+
+- **Period filters** — Last Hour, Today, Yesterday, This Week, Last Week, This Month, Last Month, All Time
+- **Provider filter** — dropdown to filter by LLM provider (OpenAI, Anthropic, Gemini, Ollama)
+- **Model filter** — dropdown to filter by specific model (auto-filtered by selected provider)
+- **Summary cards** — Total Calls, Total Tokens, Prompt Tokens, Completion Tokens, Cache Read, Cache Created, Input Size, Output Size, Average Latency, Errors
+- **Detail table** — per-call breakdown with timestamp, interaction ID, provider, model, token counts, cache read, input/output sizes, latency, and status
+
+Filters are applied server-side so summary totals accurately reflect the filtered subset.
 
 ---
 

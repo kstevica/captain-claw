@@ -27,7 +27,8 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Skills system | OpenClaw-compatible skills with auto-discovery and GitHub install |
 | Orchestrator / DAG mode | Decompose complex tasks into parallel multi-session execution |
 | Memory / RAG | Hybrid vector + text retrieval across workspace and sessions |
-| Web UI | Chat, monitor pane, instruction editor, command palette, persona selector, datastore browser, deep memory dashboard |
+| Web UI | Chat, monitor pane, instruction editor, command palette, persona selector, datastore browser, deep memory dashboard, LLM usage analytics |
+| Prompt caching | Anthropic prompt caching with automatic cache breakpoints — reduces token costs by up to 90% on cache hits |
 | BotPort (agent-to-agent) | Route tasks to specialist agents across a network of Captain Claw instances |
 | Remote integrations | Telegram (per-user sessions), Slack, Discord with secure pairing |
 | Cross-session to-do memory | Persistent task list shared across sessions with auto-capture |
@@ -256,7 +257,7 @@ Captain Claw ships with 29 built-in tools. The agent picks the right tool for ea
 | `typesense` | Index, search, and manage documents in deep memory (Typesense) |
 | `playbooks` | Persistent cross-session orchestration pattern memory with auto-distillation |
 | `botport` | Consult specialist agents through the BotPort agent-to-agent network |
-| `screen_capture` | Capture screenshots and analyze with vision; global hotkey with voice commands and selected-text detection |
+| `screen_capture` | Capture screenshots and analyze with vision; opt-in global hotkey with voice commands and selected-text detection |
 | `termux` | Interact with Android device via Termux API (camera, battery, GPS, torch) |
 
 See [USAGE.md](USAGE.md#tools-reference) for full parameters and configuration.
@@ -358,7 +359,11 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 
 - **[Personality system](USAGE.md#personality-system)** — Dual-profile system with a global agent identity (name, background, expertise) and per-user profiles that tailor responses to each user's perspective. Editable via the `personality` tool, REST API, or the Settings page. Telegram users get automatic per-user profiles.
 
-- **[Screen capture + voice commands](USAGE.md#screen-capture)** — Capture screenshots via `/screenshot`, the `screen_capture` tool, or a global hotkey (double-tap Shift, configurable). Hold the key and speak — audio is transcribed in realtime via Soniox (or Whisper/Gemini) and submitted alongside the screenshot. If text is selected in any app, it's captured via the clipboard and used as context instead of a screenshot. Voice instructions trigger an audio response via TTS so the agent speaks back. Install with `pip install captain-claw[screen]`.
+- **[Screen capture + voice commands](USAGE.md#screen-capture)** — Capture screenshots via `/screenshot`, the `screen_capture` tool, or a global hotkey (double-tap Shift, configurable). Hold the key and speak — audio is transcribed in realtime via Soniox (or Whisper/Gemini) and submitted alongside the screenshot. If text is selected in any app, it's captured via the clipboard and used as context instead of a screenshot. Voice instructions trigger an audio response via TTS so the agent speaks back. The global hotkey is opt-in — enable it in **Settings → Voice & Hotkey** (hot-reloads without restart). Install with `pip install captain-claw[screen]`.
+
+- **[Prompt caching](USAGE.md#prompt-caching)** — Automatic Anthropic prompt caching with two cache breakpoints (static system prompt + last conversation message). Cache reads are ~90% cheaper. The static-first prompt layout also benefits OpenAI's automatic prefix caching. All other providers are unaffected.
+
+- **[LLM Usage Dashboard](USAGE.md#llm-usage-dashboard)** — Token usage analytics at `/usage` with period selection, provider/model dropdown filters, summary cards (tokens, cache read/created, latency, errors), and a per-call detail table.
 
 - **[Session export](USAGE.md#session-commands)** — Export chat, monitor, pipeline trace, or pipeline summary to files.
 
