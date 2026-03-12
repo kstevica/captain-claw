@@ -66,6 +66,11 @@ class AgentOrchestrationMixin:
         # detect the LLM re-requesting the exact same tool call and stop it
         # before wasting resources on an infinite re-fetch loop.
         self._turn_tool_call_counts: dict[str, int] = {}
+        # Reset per-turn all-blocked streak counter.
+        self._all_blocked_streak: int = 0
+        # Reset per-turn coverage gate streak.
+        self._coverage_gate_streak: int = 0
+        self._coverage_gate_prev_missing: int = -1
         # Reset per-turn success flag (updated by finish()).
         self._last_complete_success = True
         # Scale-progress tracker: populated when the scale advisory fires.
@@ -925,7 +930,7 @@ class AgentOrchestrationMixin:
                 dropped=int(_ctx.get("dropped_messages", 0)),
             )
             # ── LLM call with retry for transient errors ───────────
-            _max_llm_retries = 2
+            _max_llm_retries = 4
             for _llm_attempt in range(_max_llm_retries + 1):
                 try:
                     response = await self._complete_with_guards(
@@ -985,7 +990,7 @@ class AgentOrchestrationMixin:
                         continue
 
                     if _is_transient and _llm_attempt < _max_llm_retries:
-                        _delay = 5 * (_llm_attempt + 1)
+                        _delay = min(5 * (2 ** _llm_attempt), 60)  # 5, 10, 20, 40 (cap 60s)
                         log.warning(
                             "Transient LLM error, retrying",
                             error=error_str,

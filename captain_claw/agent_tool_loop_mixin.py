@@ -1345,5 +1345,45 @@ class AgentToolLoopMixin:
                 if _dup_sig in _dup_counts and _dup_counts[_dup_sig] > 0:
                     _dup_counts[_dup_sig] -= 1
 
+        # ── All-blocked detection ──────────────────────────────────
+        # When EVERY tool call in the batch was blocked (duplicate or
+        # scale guard), the LLM received no new data and is likely to
+        # repeat the same calls.  Inject a single clear directive and
+        # track consecutive all-blocked batches.  After a threshold,
+        # set a flag the orchestration loop can use to force finalize.
+        if results and all(
+            "DUPLICATE CALL BLOCKED" in str(r.get("content", ""))
+            or "DUPLICATE CALL BLOCKED" in str(r.get("role", ""))
+            or "Scale guard" in str(r.get("content", ""))
+            for r in results
+        ):
+            _streak_attr = "_all_blocked_streak"
+            _streak = getattr(self, _streak_attr, 0) + 1
+            setattr(self, _streak_attr, _streak)
+            log.warning(
+                "All tool calls in batch were blocked",
+                blocked_count=len(results),
+                streak=_streak,
+            )
+            if _streak >= 2:
+                stop_msg = (
+                    "STOP: All your tool calls have been blocked as duplicates for "
+                    f"{_streak} consecutive iterations. You already have the data you need "
+                    "from earlier calls. Do NOT call any more tools. Respond with your "
+                    "final answer using the data you have already collected."
+                )
+                self._add_session_message(
+                    role="user",
+                    content=stop_msg,
+                )
+                log.warning(
+                    "Injected all-blocked stop directive",
+                    streak=_streak,
+                )
+        else:
+            # Reset streak when at least one call went through.
+            if hasattr(self, "_all_blocked_streak"):
+                self._all_blocked_streak = 0
+
         self._set_runtime_status("thinking")
         return results
