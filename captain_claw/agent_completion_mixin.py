@@ -421,6 +421,20 @@ class AgentCompletionMixin:
                             )
                             _skip_coverage = True
 
+                # When the write tool produced a file AND final_action
+                # is write_file, the file content lives on disk — not in
+                # the conversation messages that the coverage gate scans.
+                # The write-file enforcement gate (above) already verified
+                # a file was produced, so skip the member-text check.
+                if not _skip_coverage:
+                    _fa = str(list_task_plan.get("final_action", "")).strip().lower()
+                    if _fa == "write_file" and self._turn_has_successful_tool(turn_start_idx, "write"):
+                        log.info(
+                            "Skipping list_member_coverage — write tool produced output file",
+                            member_count=len(members),
+                        )
+                        _skip_coverage = True
+
                 if _skip_coverage:
                     members = []  # prevent downstream evaluation
 
@@ -478,22 +492,55 @@ class AgentCompletionMixin:
                     ),
                 )
                 if missing_members:
-                    completion_feedback = self._build_list_coverage_feedback(
-                        missing_members=missing_members,
-                        strategy=str(list_task_plan.get("strategy", "direct")).strip().lower(),
-                        per_member_action=str(list_task_plan.get("per_member_action", "")).strip(),
-                    )
-                    self._emit_tool_output(
-                        "task_contract",
-                        {
-                            "step": "list_member_retry",
-                            "missing": len(missing_members),
-                        },
-                        completion_feedback,
-                    )
-                    if iteration < (hard_turn_iterations - 1):
-                        log.info("Finalize BLOCKED by list_member_coverage gate", iteration=iteration, missing=len(missing_members))
-                        return False, "", finish_success, completion_feedback, python_worker_attempted
+                    # ── Stuck-loop detection ──────────────────────────
+                    # If the gate blocks repeatedly with the same missing
+                    # count the agent is stuck (e.g. file content is not
+                    # in the conversation haystack).  After a few retries
+                    # with zero progress, let finalisation through.
+                    _streak_attr = "_coverage_gate_streak"
+                    _prev_attr = "_coverage_gate_prev_missing"
+                    _streak: int = getattr(self, _streak_attr, 0)
+                    _prev: int = getattr(self, _prev_attr, -1)
+                    _cur = len(missing_members)
+                    if _cur == _prev:
+                        _streak += 1
+                    else:
+                        _streak = 1
+                    setattr(self, _streak_attr, _streak)
+                    setattr(self, _prev_attr, _cur)
+
+                    _max_retries = 3
+                    if _streak > _max_retries:
+                        log.warning(
+                            "Coverage gate stuck — same missing count for %d consecutive blocks; allowing finalization",
+                            _streak,
+                            missing=_cur,
+                        )
+                        # Reset streak and fall through to finalize.
+                        setattr(self, _streak_attr, 0)
+                        setattr(self, _prev_attr, -1)
+                    else:
+                        completion_feedback = self._build_list_coverage_feedback(
+                            missing_members=missing_members,
+                            strategy=str(list_task_plan.get("strategy", "direct")).strip().lower(),
+                            per_member_action=str(list_task_plan.get("per_member_action", "")).strip(),
+                        )
+                        self._emit_tool_output(
+                            "task_contract",
+                            {
+                                "step": "list_member_retry",
+                                "missing": len(missing_members),
+                            },
+                            completion_feedback,
+                        )
+                        if iteration < (hard_turn_iterations - 1):
+                            log.info("Finalize BLOCKED by list_member_coverage gate", iteration=iteration, missing=len(missing_members), streak=_streak)
+                            return False, "", finish_success, completion_feedback, python_worker_attempted
+                else:
+                    # Reset streak on success.
+                    if hasattr(self, "_coverage_gate_streak"):
+                        self._coverage_gate_streak = 0
+                        self._coverage_gate_prev_missing = -1
 
         # ── Contract completion validation ───────────────────────────
         if completion_requirements and task_contract is not None:

@@ -1297,6 +1297,25 @@ class AgentReasoningMixin:
             if domain_match:
                 aliases.add(domain_match.group(1))
 
+        # ── Extract entity name from "Name — description" format ──
+        # Members often have a short entity name followed by a dash
+        # separator and a description (e.g. "Accenture — exposed internal
+        # security tools").  The entity name is the key matching target;
+        # the description may differ from the actual output wording.
+        if not url_match:
+            for sep in (" — ", " – ", " \u2014 ", " - "):
+                if sep in base:
+                    name_part = base.split(sep, 1)[0].strip()
+                    if name_part and len(name_part) >= 2:
+                        aliases.add(name_part)
+                        name_normalized = re.sub(r"[^a-z0-9]+", " ", name_part).strip()
+                        if name_normalized and len(name_normalized) >= 2:
+                            aliases.add(name_normalized)
+                            aliases.add(name_normalized.replace(" ", "-"))
+                            aliases.add(name_normalized.replace(" ", "_"))
+                            aliases.add(name_normalized.replace(" ", ""))
+                    break
+
         # ── Full-string aliases (backward compatibility) ──
         aliases.add(base)
         normalized_words = re.sub(r"[^a-z0-9]+", " ", base).strip()
