@@ -128,7 +128,7 @@
                 // Session history replay finished
                 break;
             case 'usage':
-                // Could display token usage somewhere
+                updateContextInfo(data);
                 break;
             case 'approval_request':
                 showApprovalModal(data.id, data.message);
@@ -413,6 +413,70 @@
         chatEmpty.style.display = '';
         msgCount = 0;
         chatCount.textContent = '0 messages';
+        const ctxEl = document.getElementById('contextInfo');
+        if (ctxEl) ctxEl.innerHTML = '';
+    }
+
+    // ── Context Token Info ────────────────────────────────────
+
+    function updateContextInfo(data) {
+        const el = document.getElementById('contextInfo');
+        if (!el) return;
+        const ctx = data.context_window || {};
+        const last = data.last || {};
+        const total = data.total || {};
+        const budget = ctx.context_budget_tokens || 0;
+        const prompt = ctx.prompt_tokens || 0;
+        const util = ctx.utilization || 0;
+        const completion = last.completion_tokens || 0;
+        const cacheRead = last.cache_read_input_tokens || 0;
+        const totalTokens = total.total_tokens || 0;
+        if (!budget && !totalTokens) {
+            el.innerHTML = '';
+            return;
+        }
+        const fmtK = (n) => {
+            if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+            if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+            return String(n);
+        };
+        const pct = Math.round(util * 100);
+        const barClass = pct >= 90 ? 'critical' : pct >= 70 ? 'warn' : '';
+        let parts = [];
+        if (budget) {
+            parts.push(
+                `<span class="ctx-item">`
+                + `<span class="ctx-label">ctx</span>`
+                + `<span class="ctx-bar"><span class="ctx-bar-fill ${barClass}" style="width:${Math.min(pct, 100)}%"></span></span>`
+                + `<span class="ctx-value">${fmtK(prompt)}/${fmtK(budget)} (${pct}%)</span>`
+                + `</span>`
+            );
+        }
+        if (completion) {
+            parts.push(
+                `<span class="ctx-item">`
+                + `<span class="ctx-label">out</span>`
+                + `<span class="ctx-value">${fmtK(completion)}</span>`
+                + `</span>`
+            );
+        }
+        if (cacheRead) {
+            parts.push(
+                `<span class="ctx-item">`
+                + `<span class="ctx-label">cache</span>`
+                + `<span class="ctx-value">${fmtK(cacheRead)}</span>`
+                + `</span>`
+            );
+        }
+        if (totalTokens) {
+            parts.push(
+                `<span class="ctx-item">`
+                + `<span class="ctx-label">session</span>`
+                + `<span class="ctx-value">${fmtK(totalTokens)}</span>`
+                + `</span>`
+            );
+        }
+        el.innerHTML = parts.join('');
     }
 
     // ── Next Steps ──────────────────────────────────────────

@@ -132,6 +132,7 @@ async def _run_agent(server: WebServer, content: str) -> None:
             "type": "usage",
             "last": server.agent.last_usage,
             "total": server.agent.total_usage,
+            "context_window": server.agent.last_context_window,
         })
         server._broadcast({
             "type": "session_info",

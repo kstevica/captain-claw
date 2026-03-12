@@ -1222,6 +1222,53 @@ html, body {
 }
 .attachment-remove:hover { opacity: 1; color: var(--accent-red, #e55); }
 
+/* ── Context token info (in chat pane header) ────────── */
+.context-info {
+    display: inline-flex;
+    flex: 1;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 0 12px;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+}
+.context-info:empty { padding: 0; }
+.context-info .ctx-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    white-space: nowrap;
+}
+.context-info .ctx-label {
+    opacity: 0.6;
+}
+.context-info .ctx-value {
+    color: var(--text-secondary);
+}
+.context-info .ctx-bar {
+    display: inline-block;
+    width: 48px;
+    height: 5px;
+    background: var(--bg-tertiary, #333);
+    border-radius: 3px;
+    overflow: hidden;
+    vertical-align: middle;
+}
+.context-info .ctx-bar-fill {
+    display: block;
+    height: 100%;
+    border-radius: 3px;
+    background: var(--accent);
+    transition: width 0.4s ease, background 0.4s ease;
+}
+.context-info .ctx-bar-fill.warn {
+    background: var(--orange, #e8a838);
+}
+.context-info .ctx-bar-fill.critical {
+    background: var(--red, #e05050);
+}
+
 .input-row {
     display: flex;
     gap: 8px;
