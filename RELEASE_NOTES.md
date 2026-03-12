@@ -1,4 +1,4 @@
-# Captain Claw v0.3.3.7 Release Notes
+# Captain Claw v0.3.4 Release Notes
 
 **Release title:** Google Drive Scale Loop + Sheets & Slides Support
 
