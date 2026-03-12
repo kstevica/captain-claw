@@ -343,7 +343,21 @@ async def run_prompt_in_active_session(
             log.error("Error in agent", error=str(e))
             if on_assistant_text:
                 try:
-                    await on_assistant_text(f"Error: {e}")
+                    # Try to recover partial results from session messages.
+                    _err_partial = ""
+                    if agent.session:
+                        for _msg in reversed(agent.session.messages[turn_start_idx:]):
+                            if str(_msg.get("role", "")).strip().lower() == "assistant":
+                                _cand = str(_msg.get("content", "")).strip()
+                                if _cand and len(_cand) > 30:
+                                    _err_partial = _cand
+                                    break
+                    if _err_partial:
+                        await on_assistant_text(
+                            f"An error occurred, but here's partial progress:\n\n{_err_partial}"
+                        )
+                    else:
+                        await on_assistant_text(f"Error: {e}")
                 except Exception:
                     pass
             if raise_on_error:

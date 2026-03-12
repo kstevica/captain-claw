@@ -203,6 +203,7 @@ class TelegramBridge:
         Markdown in *text* is converted to Telegram HTML so formatting
         renders natively in the Telegram app.  If the API rejects the
         HTML (malformed tags etc.), the message is re-sent as plain text.
+        If reply_to_message_id is stale, the message is re-sent without it.
         """
         raw = str(text or "").strip()
         if not raw:
@@ -230,10 +231,14 @@ class TelegramBridge:
             if reply_to_message_id and idx == 0:
                 payload["reply_to_message_id"] = int(reply_to_message_id)
             response = await self._client.post(self._url("sendMessage"), json=payload)
-            # Fallback: if Telegram rejects the HTML, resend as plain text.
+            # Fallback 1: if Telegram rejects the HTML, resend as plain text.
             if response.status_code == 400:
                 payload["text"] = chunk
-                del payload["parse_mode"]
+                payload.pop("parse_mode", None)
+                response = await self._client.post(self._url("sendMessage"), json=payload)
+            # Fallback 2: if reply_to target is stale/deleted, drop it and retry.
+            if response.status_code == 400 and "reply_to_message_id" in payload:
+                payload.pop("reply_to_message_id", None)
                 response = await self._client.post(self._url("sendMessage"), json=payload)
             response.raise_for_status()
 

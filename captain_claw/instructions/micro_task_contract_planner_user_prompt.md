@@ -14,4 +14,6 @@ Extracted list members:
 If must-cover=true, include all URLs in prefetch_urls with coverage requirements.
 If list members present, require coverage of each member.
 
+{playbook_block}
+
 Plan for complete execution. Use nested children for phases. JSON only.

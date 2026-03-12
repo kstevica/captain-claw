@@ -208,8 +208,8 @@ def _build_schema() -> list[dict[str, Any]]:
                                type="range", min=0.1, max=1.0, step=0.05,
                                hint="Target size after compaction (fraction of max)."),
                         _field("context.micro_instructions", "Micro instructions",
-                               type="checkbox",
-                               hint="Use compact instruction prompts (~66% fewer tokens). Faster and cheaper but less detailed guidance for the LLM."),
+                               type="toggle",
+                               hint="Use compact instruction prompts (~66 % fewer tokens). Faster and cheaper but less detailed guidance for the LLM. Takes effect on new sessions."),
                     ],
                 },
                 {

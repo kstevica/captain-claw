@@ -251,7 +251,32 @@ class PlatformAdapter:
                 text_preview=truncate_chat_text(text),
             )
         except Exception as e:
+            log.warning(
+                f"{self.platform.title()} send failed",
+                error=str(e),
+                channel_id=str(channel_id),
+            )
             self.ctx.ui.append_system_line(f"{self.platform.title()} send failed: {e}")
+            # Retry once without reply_to in case the reply target is stale.
+            if reply_to:
+                try:
+                    if self.platform == "telegram":
+                        await self.bridge.send_message(
+                            chat_id=int(channel_id), text=text,
+                        )
+                    elif self.platform == "slack":
+                        await self.bridge.send_message(
+                            channel_id=str(channel_id), text=text,
+                            reply_to_message_ts="",
+                        )
+                    elif self.platform == "discord":
+                        await self.bridge.send_message(
+                            channel_id=str(channel_id), text=text,
+                            reply_to_message_id="",
+                        )
+                    log.info(f"{self.platform.title()} send retry without reply_to succeeded")
+                except Exception:
+                    log.error(f"{self.platform.title()} send retry also failed", exc_info=True)
 
     # -- Chat action (typing indicator) -----------------------------------
 

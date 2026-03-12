@@ -11,7 +11,8 @@ Return ONLY JSON (no markdown, no fences):
   "output_strategy": "file_per_item",
   "output_filename_template": "report-{member_label}.csv",
   "output_file": "",
-  "final_action": "write_file"
+  "final_action": "write_file",
+  "processing_mode": "summarize"
 }
 
 Rules:
@@ -29,5 +30,9 @@ output_strategy:
 - `no_file`: email/API/reply, no file output.
 
 final_action: write_file | reply | email | api_call.
+
+processing_mode:
+- `summarize` (default): LLM processes/analyzes each item (summarize, extract, reformat, translate).
+- `raw`: pass content through as-is without LLM processing. Use ONLY for raw indexing/archiving (e.g. "index in deep memory", "store in typesense") with NO analysis requested.
 
 Single follow-up referencing one item = NOT list work.

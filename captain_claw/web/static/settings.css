@@ -188,11 +188,6 @@ html, body {
     flex: 1;
     overflow-y: auto;
     padding: 24px 32px 80px;
-    max-width: 800px;
-}
-
-.st-main:has(.st-pp-split) {
-    max-width: none;
 }
 
 /* ─── Sidebar navigation ─────────────────────────────── */
@@ -317,7 +312,7 @@ html, body {
 
 .st-field-control {
     flex: 1;
-    max-width: 400px;
+    max-width: 480px;
     display: flex;
     flex-direction: column;
     gap: 4px;

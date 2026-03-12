@@ -165,6 +165,71 @@ class AgentOrchestrationMixin:
             self._last_complete_success = success
             return text
 
+        async def _salvage_partial_result(reason: str) -> str:
+            """Try to produce a useful partial result when the agent gets
+            stuck, exhausts its budget, or fails after retries.
+
+            1. Checks for a substantial assistant text (>100 chars) — if
+               found, returns it directly.
+            2. Checks whether tool results contain meaningful content —
+               if so, makes one final LLM call asking the model to
+               summarise what it has gathered so far.
+            3. Falls back to the last short assistant text (>20 chars).
+            4. Returns empty string if nothing useful is available.
+            """
+            if not self.session:
+                return ""
+            turn_msgs = self.session.messages[turn_start_idx:]
+
+            # 1. Look for a substantial assistant response (likely a real answer).
+            last_short_assistant = ""
+            for _msg in reversed(turn_msgs):
+                if _msg.get("role") == "assistant":
+                    _c = str(_msg.get("content", "")).strip()
+                    if _c and len(_c) > 100:
+                        return _c
+                    if _c and len(_c) > 20 and not last_short_assistant:
+                        last_short_assistant = _c
+
+            # 2. Check if tool results have meaningful content worth
+            #    salvaging via a quick LLM summary call.
+            has_tool_results = any(
+                _msg.get("role") == "tool"
+                and len(str(_msg.get("content", ""))) > 80
+                for _msg in turn_msgs
+            )
+            if has_tool_results:
+                try:
+                    self._set_runtime_status("thinking")
+                    salvage_messages = self._build_messages(
+                        tool_messages_from_index=turn_start_idx,
+                        query=effective_user_input,
+                    )
+                    salvage_messages.append(Message(
+                        role="user",
+                        content=(
+                            f"[SYSTEM: {reason}. Based on the tools you used "
+                            "and data you gathered, provide the best possible "
+                            "response to the original request. Summarise what "
+                            "you found. Do NOT call any tools.]"
+                        ),
+                    ))
+                    salvage_resp = await self.provider.complete(
+                        messages=salvage_messages,
+                        tools=None,
+                        max_tokens=2048,
+                    )
+                    salvage_text = str(
+                        getattr(salvage_resp, "content", "") or ""
+                    ).strip()
+                    if salvage_text and len(salvage_text) > 30:
+                        return salvage_text
+                except Exception as _salv_err:
+                    log.debug("Salvage LLM call failed", error=str(_salv_err))
+
+            # 3. Fall back to last short assistant text.
+            return last_short_assistant
+
         async def attempt_finalize(
             output_text: str,
             iteration: int,
@@ -664,16 +729,7 @@ class AgentOrchestrationMixin:
                     self._emit_pipeline_update("runtime_update", planning_pipeline)
                 if str(planning_pipeline.get("state", "")).strip().lower() == "failed":
                     self._set_runtime_status("waiting")
-                    # Recover the last assistant text as partial results
-                    # so the user sees what was accomplished before failure.
-                    _partial = ""
-                    if self.session:
-                        for _msg in reversed(self.session.messages[turn_start_idx:]):
-                            if _msg.get("role") == "assistant":
-                                _content = str(_msg.get("content", "")).strip()
-                                if _content and len(_content) > 20:
-                                    _partial = _content
-                                    break
+                    _partial = await _salvage_partial_result("Retries exhausted")
                     if _partial:
                         return finish(
                             "⚠️ I wasn't able to fully complete this request "
@@ -732,15 +788,9 @@ class AgentOrchestrationMixin:
                         ),
                     )
                     self._set_runtime_status("waiting")
-                    # Recover the last assistant text as partial results.
-                    _partial_budget = ""
-                    if self.session:
-                        for _msg in reversed(self.session.messages[turn_start_idx:]):
-                            if _msg.get("role") == "assistant":
-                                _content = str(_msg.get("content", "")).strip()
-                                if _content and len(_content) > 20:
-                                    _partial_budget = _content
-                                    break
+                    _partial_budget = await _salvage_partial_result(
+                        "Iteration budget exhausted"
+                    )
                     if _partial_budget:
                         return finish(
                             "⚠️ I wasn't able to fully complete this request "
@@ -789,15 +839,9 @@ class AgentOrchestrationMixin:
                             ),
                         )
                         self._set_runtime_status("waiting")
-                        # Recover the last assistant text as partial results.
-                        _partial_stuck = ""
-                        if self.session:
-                            for _msg in reversed(self.session.messages[turn_start_idx:]):
-                                if _msg.get("role") == "assistant":
-                                    _content = str(_msg.get("content", "")).strip()
-                                    if _content and len(_content) > 20:
-                                        _partial_stuck = _content
-                                        break
+                        _partial_stuck = await _salvage_partial_result(
+                            "Agent is stuck and not making progress"
+                        )
                         if _partial_stuck:
                             return finish(
                                 "⚠️ I got stuck and couldn't make further "
