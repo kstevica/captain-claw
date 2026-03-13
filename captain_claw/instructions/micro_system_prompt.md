@@ -1,6 +1,7 @@
 {personality_block}
 {user_context_block}
 {visualization_style_block}
+{reflection_block}
 
 {tool_list_block}
 

@@ -283,6 +283,14 @@ async def _run_agent(
             **server._session_info(),
         })
 
+        # Auto-reflection: fire-and-forget after agent turns.
+        try:
+            import asyncio as _asyncio
+            from captain_claw.reflections import maybe_auto_reflect
+            _asyncio.create_task(maybe_auto_reflect(server.agent))
+        except Exception:
+            pass
+
     except Exception as e:
         log.error("Chat error", error=str(e))
         server._broadcast({

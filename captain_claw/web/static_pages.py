@@ -106,3 +106,7 @@ async def serve_skills(server: WebServer, request: web.Request) -> web.FileRespo
 
 async def serve_usage(server: WebServer, request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "usage.html")
+
+
+async def serve_reflections(server: WebServer, request: web.Request) -> web.FileResponse:
+    return web.FileResponse(STATIC_DIR / "reflections.html")

@@ -106,7 +106,7 @@
                 handleWelcome(data);
                 break;
             case 'chat_message':
-                addChatMessage(data.role, data.content, data.replay, data.timestamp, data.model);
+                addChatMessage(data.role, data.content, data.replay, data.timestamp, data.model, data.feedback);
                 break;
             case 'command_result':
                 addCommandResult(data.command, data.content);
@@ -204,7 +204,7 @@
         }
     }
 
-    function addChatMessage(role, content, isReplay, timestamp, model) {
+    function addChatMessage(role, content, isReplay, timestamp, model, feedback) {
         // Remove stale next-steps buttons when new messages arrive.
         if (role === 'user' || role === 'assistant' || role === 'error') {
             removeNextSteps();
@@ -275,8 +275,72 @@
         bubble.className = 'msg-bubble';
         bubble.innerHTML = renderMarkdown(content);
 
+        // Copy button
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'msg-copy-btn';
+        copyBtn.title = 'Copy to clipboard';
+        copyBtn.innerHTML = '&#x1F4CB;';
+        copyBtn.addEventListener('click', function () {
+            var text = bubble.innerText || bubble.textContent || '';
+            navigator.clipboard.writeText(text).then(function () {
+                copyBtn.innerHTML = '&#x2705;';
+                setTimeout(function () { copyBtn.innerHTML = '&#x1F4CB;'; }, 1500);
+            });
+        });
+
         div.appendChild(header);
         div.appendChild(bubble);
+        div.appendChild(copyBtn);
+
+        // Feedback buttons (like/dislike) for assistant messages
+        if (role === 'assistant' && timestamp) {
+            var fbRow = document.createElement('div');
+            fbRow.className = 'msg-feedback';
+
+            var likeBtn = document.createElement('button');
+            likeBtn.className = 'msg-fb-btn' + (feedback === 'good' ? ' active' : '');
+            likeBtn.title = 'Good response';
+            likeBtn.innerHTML = '&#x1F44D;';
+
+            var dislikeBtn = document.createElement('button');
+            dislikeBtn.className = 'msg-fb-btn' + (feedback === 'bad' ? ' active' : '');
+            dislikeBtn.title = 'Bad response';
+            dislikeBtn.innerHTML = '&#x1F44E;';
+
+            var fbSaved = document.createElement('span');
+            fbSaved.className = 'msg-fb-saved';
+            fbSaved.textContent = 'Saved';
+
+            function sendFeedback(value) {
+                // Toggle: clicking the same button clears feedback
+                var current = fbRow.dataset.feedback || '';
+                var newValue = current === value ? '' : value;
+                fbRow.dataset.feedback = newValue;
+                likeBtn.className = 'msg-fb-btn' + (newValue === 'good' ? ' active' : '');
+                dislikeBtn.className = 'msg-fb-btn' + (newValue === 'bad' ? ' active' : '');
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'message_feedback',
+                        timestamp: timestamp,
+                        feedback: newValue || null,
+                    }));
+                }
+                // Flash "Saved" acknowledgment
+                fbSaved.classList.remove('show');
+                void fbSaved.offsetWidth; // reflow to restart animation
+                fbSaved.classList.add('show');
+            }
+
+            likeBtn.addEventListener('click', function () { sendFeedback('good'); });
+            dislikeBtn.addEventListener('click', function () { sendFeedback('bad'); });
+
+            if (feedback) fbRow.dataset.feedback = feedback;
+            fbRow.appendChild(likeBtn);
+            fbRow.appendChild(dislikeBtn);
+            fbRow.appendChild(fbSaved);
+            div.appendChild(fbRow);
+        }
+
         chatMessages.appendChild(div);
         chatMessages.scrollTop = chatMessages.scrollHeight;
         msgCount++;

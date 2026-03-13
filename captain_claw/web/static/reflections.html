@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reflections - Captain Claw</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            min-height: 100vh;
+        }
+
+        /* Header */
+        .ref-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 24px;
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        .ref-header-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .ref-header-left h1 {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: #e6edf3;
+        }
+        .ref-logo-link { display: flex; align-items: center; }
+        .ref-header-right { display: flex; gap: 12px; align-items: center; }
+        .ref-nav-link {
+            color: #58a6ff;
+            text-decoration: none;
+            font-size: 0.9rem;
+        }
+        .ref-nav-link:hover { text-decoration: underline; }
+        .ref-generate-btn {
+            background: #238636;
+            color: #fff;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+        .ref-generate-btn:hover { background: #2ea043; }
+        .ref-generate-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Main content */
+        .ref-content {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        /* Empty state */
+        .ref-empty {
+            text-align: center;
+            padding: 80px 20px;
+            color: #8b949e;
+        }
+        .ref-empty-icon { font-size: 3rem; margin-bottom: 16px; }
+        .ref-empty-text { font-size: 1.1rem; margin-bottom: 8px; }
+        .ref-empty-hint { font-size: 0.85rem; color: #6e7681; }
+
+        /* Reflection card */
+        .ref-card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            overflow: hidden;
+            transition: border-color 0.15s;
+        }
+        .ref-card:first-child {
+            border-color: #238636;
+        }
+        .ref-card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 18px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .ref-card-header:hover { background: #1c2129; }
+        .ref-card-meta {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .ref-card-timestamp {
+            font-size: 0.9rem;
+            color: #e6edf3;
+            font-weight: 500;
+        }
+        .ref-card-badge {
+            display: inline-block;
+            font-size: 0.7rem;
+            padding: 2px 8px;
+            border-radius: 10px;
+            background: #238636;
+            color: #fff;
+            margin-left: 8px;
+        }
+        .ref-card-topics {
+            font-size: 0.78rem;
+            color: #8b949e;
+        }
+        .ref-card-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .ref-card-toggle {
+            font-size: 0.9rem;
+            color: #8b949e;
+            transition: transform 0.2s;
+        }
+        .ref-card.expanded .ref-card-toggle { transform: rotate(90deg); }
+        .ref-delete-btn {
+            background: none;
+            border: none;
+            color: #f85149;
+            cursor: pointer;
+            font-size: 0.85rem;
+            padding: 4px 8px;
+            border-radius: 4px;
+            opacity: 0.5;
+            transition: opacity 0.15s;
+        }
+        .ref-card-header:hover .ref-delete-btn { opacity: 1; }
+        .ref-delete-btn:hover { background: rgba(248, 81, 73, 0.1); }
+
+        .ref-card-body {
+            display: none;
+            padding: 0 18px 18px;
+            border-top: 1px solid #30363d;
+        }
+        .ref-card.expanded .ref-card-body { display: block; }
+        .ref-card-summary {
+            white-space: pre-wrap;
+            font-size: 0.88rem;
+            line-height: 1.6;
+            color: #c9d1d9;
+            padding-top: 14px;
+        }
+        .ref-card-usage {
+            margin-top: 12px;
+            font-size: 0.78rem;
+            color: #6e7681;
+        }
+
+        /* Loading spinner */
+        .ref-loading {
+            text-align: center;
+            padding: 40px;
+            color: #8b949e;
+        }
+
+        /* Status message */
+        .ref-status {
+            text-align: center;
+            padding: 12px;
+            margin-bottom: 16px;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            display: none;
+        }
+        .ref-status.success { display: block; background: rgba(35, 134, 54, 0.15); color: #3fb950; border: 1px solid #238636; }
+        .ref-status.error { display: block; background: rgba(248, 81, 73, 0.15); color: #f85149; border: 1px solid #f85149; }
+    </style>
+</head>
+<body>
+
+<header class="ref-header">
+    <div class="ref-header-left">
+        <a href="/" class="ref-logo-link"><img src="/static/logo.svg" width="28" height="28"></a>
+        <h1>&#x1FA9E; Reflections</h1>
+    </div>
+    <div class="ref-header-right">
+        <button class="ref-generate-btn" id="generateBtn">&#x2728; Generate Reflection</button>
+        <a href="/chat" class="ref-nav-link">&larr; Chat</a>
+    </div>
+</header>
+
+<div class="ref-content">
+    <div class="ref-status" id="statusBar"></div>
+    <div id="refList">
+        <div class="ref-loading" id="refLoading">Loading reflections...</div>
+    </div>
+</div>
+
+<script>
+(function () {
+    var listEl = document.getElementById('refList');
+    var loadingEl = document.getElementById('refLoading');
+    var generateBtn = document.getElementById('generateBtn');
+    var statusBar = document.getElementById('statusBar');
+
+    function formatTimestamp(iso) {
+        try {
+            var d = new Date(iso);
+            return d.toLocaleString(undefined, {
+                year: 'numeric', month: 'short', day: 'numeric',
+                hour: '2-digit', minute: '2-digit'
+            });
+        } catch (e) {
+            return iso;
+        }
+    }
+
+    function showStatus(message, type) {
+        statusBar.textContent = message;
+        statusBar.className = 'ref-status ' + type;
+        if (type === 'success') {
+            setTimeout(function () { statusBar.className = 'ref-status'; }, 4000);
+        }
+    }
+
+    function renderReflections(reflections) {
+        if (!reflections || reflections.length === 0) {
+            listEl.innerHTML =
+                '<div class="ref-empty">' +
+                '<div class="ref-empty-icon">&#x1FA9E;</div>' +
+                '<div class="ref-empty-text">No reflections yet</div>' +
+                '<div class="ref-empty-hint">Click "Generate Reflection" to create your first self-assessment</div>' +
+                '</div>';
+            return;
+        }
+
+        var html = '';
+        for (var i = 0; i < reflections.length; i++) {
+            var r = reflections[i];
+            var isActive = (i === 0);
+            var topics = (r.topics_reviewed || []).join(', ') || 'general';
+            var usage = r.token_usage || {};
+            var usageText = '';
+            if (usage.prompt_tokens || usage.completion_tokens) {
+                usageText = 'Tokens: ' + (usage.prompt_tokens || 0) + ' prompt, ' +
+                    (usage.completion_tokens || 0) + ' completion';
+            }
+
+            html += '<div class="ref-card' + (isActive ? ' expanded' : '') + '" data-timestamp="' + escapeAttr(r.timestamp) + '">';
+            html += '<div class="ref-card-header" onclick="this.parentElement.classList.toggle(\'expanded\')">';
+            html += '<div class="ref-card-meta">';
+            html += '<div class="ref-card-timestamp">' + escapeHtml(formatTimestamp(r.timestamp));
+            if (isActive) {
+                html += '<span class="ref-card-badge">Active</span>';
+            }
+            html += '</div>';
+            html += '<div class="ref-card-topics">' + escapeHtml(topics) + '</div>';
+            html += '</div>';
+            html += '<div class="ref-card-actions">';
+            html += '<button class="ref-delete-btn" onclick="event.stopPropagation(); deleteReflection(\'' + escapeAttr(r.timestamp) + '\')" title="Delete">&#x1F5D1;&#xFE0F;</button>';
+            html += '<span class="ref-card-toggle">&#x25B6;</span>';
+            html += '</div>';
+            html += '</div>';
+            html += '<div class="ref-card-body">';
+            html += '<div class="ref-card-summary">' + escapeHtml(r.summary || '(empty)') + '</div>';
+            if (usageText) {
+                html += '<div class="ref-card-usage">' + escapeHtml(usageText) + '</div>';
+            }
+            html += '</div>';
+            html += '</div>';
+        }
+        listEl.innerHTML = html;
+    }
+
+    function escapeHtml(text) {
+        var div = document.createElement('div');
+        div.appendChild(document.createTextNode(text));
+        return div.innerHTML;
+    }
+
+    function escapeAttr(text) {
+        return text.replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function loadReflections() {
+        fetch('/api/reflections')
+            .then(function (res) { return res.json(); })
+            .then(function (data) {
+                loadingEl.style.display = 'none';
+                renderReflections(data);
+            })
+            .catch(function (err) {
+                loadingEl.textContent = 'Failed to load reflections.';
+                console.error(err);
+            });
+    }
+
+    window.deleteReflection = function (timestamp) {
+        if (!confirm('Delete this reflection?')) return;
+        fetch('/api/reflections/' + encodeURIComponent(timestamp), { method: 'DELETE' })
+            .then(function (res) { return res.json(); })
+            .then(function (data) {
+                if (data.ok) {
+                    showStatus('Reflection deleted.', 'success');
+                    loadReflections();
+                } else {
+                    showStatus(data.error || 'Delete failed.', 'error');
+                }
+            })
+            .catch(function (err) {
+                showStatus('Delete failed: ' + err.message, 'error');
+            });
+    };
+
+    generateBtn.addEventListener('click', function () {
+        generateBtn.disabled = true;
+        generateBtn.textContent = 'Generating...';
+        showStatus('Generating self-reflection... This may take a moment.', 'success');
+
+        fetch('/api/reflections/generate', { method: 'POST' })
+            .then(function (res) { return res.json(); })
+            .then(function (data) {
+                generateBtn.disabled = false;
+                generateBtn.innerHTML = '&#x2728; Generate Reflection';
+                if (data.error) {
+                    showStatus(data.error, 'error');
+                } else {
+                    showStatus('New reflection generated!', 'success');
+                    loadReflections();
+                }
+            })
+            .catch(function (err) {
+                generateBtn.disabled = false;
+                generateBtn.innerHTML = '&#x2728; Generate Reflection';
+                showStatus('Generation failed: ' + err.message, 'error');
+            });
+    });
+
+    loadReflections();
+})();
+</script>
+
+</body>
+</html>

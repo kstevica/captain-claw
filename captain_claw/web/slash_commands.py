@@ -270,6 +270,9 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
         elif cmd in ("/screenshot",):
             result = await _handle_screenshot_command(server, ws, args.strip())
 
+        elif cmd in ("/reflection", "/reflect"):
+            result = await _handle_reflection_command(server, args.strip())
+
         else:
             result = f"Unknown command: `{cmd}`. Type `/help` for available commands."
 
@@ -1034,6 +1037,45 @@ async def handle_apis_command(server: WebServer, args: str) -> str:
         auth_part = f" [{a.auth_type}]" if a.auth_type else ""
         lines.append(f"#{idx} {a.name}{auth_part} ({a.base_url})  `{a.id[:8]}`")
     return "**Search results:**\n" + "\n".join(lines)
+
+
+async def _handle_reflection_command(server: WebServer, args: str) -> str:
+    """Handle /reflection command variants."""
+    from captain_claw.reflections import (
+        generate_reflection,
+        list_reflections,
+        load_latest_reflection,
+    )
+
+    subcmd = args.lower()
+
+    if subcmd in ("generate", "start", "new"):
+        if not server.agent:
+            return "Agent not available."
+        try:
+            r = await generate_reflection(server.agent)
+            return f"**New reflection generated** ({r.timestamp}):\n\n{r.summary}"
+        except Exception as exc:
+            return f"Reflection generation failed: {exc}"
+
+    elif subcmd == "list":
+        refs = list_reflections(limit=10)
+        if not refs:
+            return "No reflections yet. Use `/reflection generate` to create one."
+        lines = []
+        for r in refs:
+            preview = r.summary[:80].replace("\n", " ")
+            if len(r.summary) > 80:
+                preview += "..."
+            lines.append(f"- **{r.timestamp}**: {preview}")
+        return "**Recent reflections:**\n" + "\n".join(lines)
+
+    else:
+        # Show latest
+        r = load_latest_reflection()
+        if r:
+            return f"**Latest reflection** ({r.timestamp}):\n\n{r.summary}"
+        return "No reflections yet. Use `/reflection generate` to create one."
 
 
 def format_help() -> str:

@@ -46,6 +46,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "direct_api": "Register, manage, and execute HTTP API endpoints directly. Users define endpoints with URL, method, description, and payload schemas. Supports auth capture from browser sessions. Methods: GET, POST, PUT, PATCH (DELETE is rejected for safety).",
     "termux": "Interact with the Android device via Termux API (take photo, battery status, GPS location, torch on/off)",
     "summarize_files": "IMPORTANT: When the user asks you to go through, review, analyse, or summarise multiple files or documents in a folder, ALWAYS use this tool FIRST instead of reading/extracting files one by one. This tool handles the entire pipeline internally (reads all files including PDF/DOCX/XLSX/PPTX, summarises each one via LLM, combines into final output) and returns only the output file path — massively saving context. After getting the summary file, you can read it and use it to write reports, answer questions, etc.",
+    "desktop_action": "Control the desktop: click/type/scroll at screen coordinates, press keys/hotkeys, drag, open apps/folders/URLs. Use with screen_capture to see the screen first, then act on it. The 'screenshot_click' action chains screenshot+vision+click in one call — describe the element and it finds and clicks it automatically.",
 }
 
 _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
@@ -71,6 +72,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "direct_api": "register and call HTTP endpoints",
     "termux": "Android device: photo/battery/location/torch",
     "summarize_files": "ALWAYS use for reviewing/analysing/summarising multiple files in a folder — handles PDF/DOCX/XLSX/PPTX internally, returns summary file path",
+    "desktop_action": "desktop GUI: click/type/scroll/keys/open apps (use with screen_capture)",
 }
 
 
@@ -1192,6 +1194,7 @@ class AgentContextMixin:
         "browser": ["browser"],
         "pinchtab": ["pinchtab"],
         "screen_capture": ["screen_capture"],
+        "desktop_action": ["desktop_action"],
     }
 
     def _register_default_tools(self) -> None:
@@ -1322,6 +1325,9 @@ class AgentContextMixin:
             elif tool_name == "screen_capture":
                 from captain_claw.tools.screen_capture import ScreenCaptureTool
                 self.tools.register(ScreenCaptureTool())
+            elif tool_name == "desktop_action":
+                from captain_claw.tools.desktop_action import DesktopActionTool
+                self.tools.register(DesktopActionTool())
         # Always-on tools (registered regardless of tools.enabled).
         from captain_claw.tools.clipboard import ClipboardTool
         self.tools.register(ClipboardTool())
@@ -1571,6 +1577,17 @@ class AgentContextMixin:
         except Exception:
             pass
 
+        # Self-reflection: latest self-improvement instructions.
+        reflection_block = ""
+        try:
+            from captain_claw.reflections import (
+                load_latest_reflection,
+                reflection_to_prompt_block,
+            )
+            reflection_block = reflection_to_prompt_block(load_latest_reflection())
+        except Exception:
+            pass
+
         from captain_claw.system_info import build_system_info_block
 
         system_info_block = build_system_info_block(
@@ -1706,6 +1723,7 @@ class AgentContextMixin:
             personality_block=personality_block,
             user_context_block=user_context_block,
             visualization_style_block=visualization_style_block,
+            reflection_block=reflection_block,
             system_info_block=system_info_block,
             extra_read_dirs_block=extra_read_dirs_block,
             tool_list_block=tool_list_block,

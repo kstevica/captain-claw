@@ -44,6 +44,7 @@ from captain_claw.tools.browser import BrowserTool
 from captain_claw.tools.pinchtab import PinchTabTool
 from captain_claw.tools.clipboard import ClipboardTool
 from captain_claw.tools.screen_capture import ScreenCaptureTool
+from captain_claw.tools.desktop_action import DesktopActionTool
 from captain_claw.tools.summarize_files import SummarizeFilesTool
 
 __all__ = [
@@ -89,5 +90,6 @@ __all__ = [
     "PinchTabTool",
     "ClipboardTool",
     "ScreenCaptureTool",
+    "DesktopActionTool",
     "SummarizeFilesTool",
 ]

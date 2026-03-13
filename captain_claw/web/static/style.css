@@ -580,6 +580,71 @@ html, body {
     max-width: 85%;
     margin-bottom: 20px;
     animation: fadeIn 0.25s ease;
+    position: relative;
+}
+.msg-copy-btn {
+    position: absolute;
+    top: 0;
+    right: 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+    padding: 2px 4px;
+    opacity: 0;
+    transition: opacity 0.15s;
+    line-height: 1;
+}
+.msg:hover .msg-copy-btn {
+    opacity: 0.5;
+}
+.msg-copy-btn:hover {
+    opacity: 1 !important;
+}
+.msg-feedback {
+    display: flex;
+    gap: 4px;
+    margin-top: 4px;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+.msg:hover .msg-feedback,
+.msg-feedback:has(.active) {
+    opacity: 1;
+}
+.msg-fb-btn {
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    padding: 2px 6px;
+    opacity: 0.4;
+    transition: opacity 0.15s, border-color 0.15s;
+    line-height: 1;
+}
+.msg-fb-btn:hover {
+    opacity: 0.8;
+}
+.msg-fb-btn.active {
+    opacity: 1;
+    border-color: var(--border-light);
+}
+.msg-fb-saved {
+    font-size: 11px;
+    color: var(--green);
+    opacity: 0;
+    margin-left: 4px;
+    transition: opacity 0.3s;
+}
+.msg-fb-saved.show {
+    animation: fbSavedFlash 1.5s ease forwards;
+}
+@keyframes fbSavedFlash {
+    0%   { opacity: 0; }
+    15%  { opacity: 1; }
+    70%  { opacity: 1; }
+    100% { opacity: 0; }
 }
 @keyframes fadeIn {
     from { opacity: 0; transform: translateY(6px); }

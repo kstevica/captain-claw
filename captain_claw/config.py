@@ -412,6 +412,7 @@ class ToolsConfig(BaseModel):
         "edit",
         "browser",
         "screen_capture",
+        "desktop_action",
     ]
     shell: ShellToolConfig = Field(default_factory=ShellToolConfig)
     read: ReadToolConfig = Field(default_factory=ReadToolConfig)

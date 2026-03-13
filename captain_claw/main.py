@@ -416,6 +416,11 @@ def version() -> None:
 if __name__ == "__main__":
     import typer
 
+    def _version_callback(value: bool) -> None:
+        if value:
+            version()
+            raise typer.Exit()
+
     cli = typer.Typer(help="Captain Claw - A powerful console-based AI agent")
 
     @cli.command()
@@ -434,6 +439,13 @@ if __name__ == "__main__":
             False,
             "--tui",
             help="Start the terminal UI instead of the web UI",
+        ),
+        version_flag: bool = typer.Option(
+            False,
+            "--version",
+            help="Show version information and exit",
+            callback=_version_callback,
+            is_eager=True,
         ),
     ) -> None:
         main(config, model, provider, no_stream, verbose, onboarding, tui=tui)

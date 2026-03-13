@@ -88,6 +88,7 @@ hidden_imports = [
     "captain_claw.web.rest_cron",
     "captain_claw.web.rest_entities",
     "captain_claw.web.rest_workflows",
+    "captain_claw.web.rest_reflections",
     "captain_claw.web.rest_loops",
     "captain_claw.web.openai_proxy",
     "captain_claw.web.google_oauth",
@@ -107,6 +108,7 @@ hidden_imports = [
     "captain_claw.prompt_execution",
     "captain_claw.onboarding",
     "captain_claw.session_export",
+    "captain_claw.reflections",
     "captain_claw.google_oauth",
     "captain_claw.google_oauth_manager",
 

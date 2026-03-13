@@ -63,6 +63,7 @@ browser = [
 screen = [
     "mss>=9.0.0",
     "pynput>=1.7.0",
+    "pyautogui>=0.9.54",
     "sounddevice>=0.4.0",
     "numpy>=1.24.0",
     "soniox>=0.1.0",

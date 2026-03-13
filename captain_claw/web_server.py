@@ -148,6 +148,9 @@ COMMANDS: list[dict[str, str]] = [
     {"command": "/approve user telegram <token>", "description": "Approve a Telegram user pairing", "category": "Telegram"},
     {"command": "/orchestrate <request>", "description": "Run parallel multi-session orchestration", "category": "Orchestrator"},
     {"command": "/screenshot [prompt]", "description": "Capture screen and analyze with vision", "category": "Screen"},
+    {"command": "/reflection", "description": "Show latest self-reflection", "category": "Reflections"},
+    {"command": "/reflection generate", "description": "Trigger a new self-reflection", "category": "Reflections"},
+    {"command": "/reflection list", "description": "List recent reflections", "category": "Reflections"},
 ]
 
 
@@ -954,6 +957,26 @@ class WebServer:
         from captain_claw.web.static_pages import serve_usage
         return await serve_usage(self, request)
 
+    async def _serve_reflections(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_reflections
+        return await serve_reflections(self, request)
+
+    async def _list_reflections(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_reflections import list_reflections_api
+        return await list_reflections_api(self, request)
+
+    async def _get_latest_reflection(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_reflections import get_latest_reflection
+        return await get_latest_reflection(self, request)
+
+    async def _generate_reflection(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_reflections import trigger_reflection
+        return await trigger_reflection(self, request)
+
+    async def _delete_reflection(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_reflections import delete_reflection_api
+        return await delete_reflection_api(self, request)
+
     async def _get_usage(self, request: web.Request) -> web.Response:
         """GET /api/usage — query LLM usage records with date filtering."""
         import json as _json
@@ -1384,6 +1407,11 @@ class WebServer:
         app.router.add_put("/api/visualization-style", self._put_visualization_style)
         app.router.add_post("/api/visualization-style/analyze", self._analyze_visualization_style)
         app.router.add_post("/api/visualization-style/rephrase", self._rephrase_visualization_style)
+        # Reflections
+        app.router.add_get("/api/reflections", self._list_reflections)
+        app.router.add_get("/api/reflections/latest", self._get_latest_reflection)
+        app.router.add_post("/api/reflections/generate", self._generate_reflection)
+        app.router.add_delete("/api/reflections/{timestamp}", self._delete_reflection)
         app.router.add_get("/api/workflow-browser", self._list_workflow_outputs)
         app.router.add_get("/api/workflow-browser/output/{filename}", self._get_workflow_output)
         app.router.add_get("/api/files", self._list_files)
@@ -1476,6 +1504,7 @@ class WebServer:
             app.router.add_get("/direct-api-calls", self._serve_direct_api_calls)
             app.router.add_get("/skills", self._serve_skills)
             app.router.add_get("/usage", self._serve_usage)
+            app.router.add_get("/reflections", self._serve_reflections)
             app.router.add_get("/api/usage", self._get_usage)
             app.router.add_get("/favicon.ico", self._serve_favicon)
         return app

@@ -66,14 +66,17 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
             timestamp = msg.get("timestamp", "")
             model = msg.get("model", "")
             if role in ("user", "assistant"):
-                await server._send(ws, {
+                payload = {
                     "type": "chat_message",
                     "role": role,
                     "content": content,
                     "replay": True,
                     "timestamp": timestamp,
                     "model": model,
-                })
+                }
+                if msg.get("feedback"):
+                    payload["feedback"] = msg["feedback"]
+                await server._send(ws, payload)
             elif role == "tool" and tool_name == "task_rephrase":
                 # Replay task rephrase as a visible chat panel.
                 await server._send(ws, {
@@ -208,6 +211,23 @@ async def handle_ws_message(
             server.agent._force_script_mode = enabled
             server._broadcast({"type": "session_info", **server._session_info()})
             log.info("Force script mode toggled", enabled=enabled)
+
+    elif msg_type == "message_feedback":
+        # Store like/dislike feedback on a session message.
+        ts = str(data.get("timestamp", "")).strip()
+        fb = data.get("feedback")  # "good", "bad", or null to clear
+        if ts and server.agent and server.agent.session:
+            from captain_claw.session import get_session_manager
+            session = server.agent.session
+            for msg in session.messages:
+                if msg.get("timestamp") == ts and msg.get("role") == "assistant":
+                    if fb:
+                        msg["feedback"] = fb
+                    else:
+                        msg.pop("feedback", None)
+                    break
+            sm = get_session_manager()
+            await sm.save_session(session)
 
     elif msg_type == "cancel":
         if server.agent and hasattr(server.agent, "cancel_event"):
