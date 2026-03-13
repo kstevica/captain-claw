@@ -22,12 +22,13 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Per-session model selection | Keep one session on Claude, another on GPT, another on Ollama |
 | Persistent multi-session workflows | Resume any session exactly where you left off |
 | Built-in safety guards | Input, output, and script/tool checks before anything runs |
-| 29 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, STT, image gen/OCR/vision, screen capture + voice commands, Google Workspace CLI (gws — Drive, Docs, Calendar, Gmail), todo, contacts, scripts, APIs, datastore, deep memory, playbooks, personality, BotPort, Termux (Android) |
+| 30 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, STT, image gen/OCR/vision, screen capture + voice commands, desktop automation, Google Workspace CLI (gws — Drive, Docs, Calendar, Gmail), todo, contacts, scripts, APIs, datastore, deep memory, playbooks, personality, BotPort, Termux (Android) |
 | Personality system | Dual-profile system — global agent identity plus per-user profiles for tailored responses |
+| Self-reflection | Periodic self-assessment — reviews recent interactions, memory, and tasks to generate improvement directives injected into the system prompt |
 | Skills system | OpenClaw-compatible skills with auto-discovery and GitHub install |
 | Orchestrator / DAG mode | Decompose complex tasks into parallel multi-session execution |
 | Memory / RAG | Hybrid vector + text retrieval across workspace and sessions |
-| Web UI | Chat, monitor pane, instruction editor, command palette, persona selector, datastore browser, deep memory dashboard, LLM usage analytics |
+| Web UI | Chat, monitor pane, instruction editor, command palette, persona selector, datastore browser, deep memory dashboard, reflections dashboard, LLM usage analytics |
 | Prompt caching | Anthropic prompt caching with automatic cache breakpoints — reduces token costs by up to 90% on cache hits |
 | BotPort (agent-to-agent) | Route tasks to specialist agents across a network of Captain Claw instances |
 | Remote integrations | Telegram (per-user sessions), Slack, Discord with secure pairing |
@@ -228,7 +229,7 @@ Sessions are first-class. Create named sessions for separate projects, switch in
 
 ### Tools
 
-Captain Claw ships with 29 built-in tools. The agent picks the right tool for each task automatically.
+Captain Claw ships with 30 built-in tools. The agent picks the right tool for each task automatically.
 
 | Tool | What it does |
 |---|---|
@@ -258,6 +259,7 @@ Captain Claw ships with 29 built-in tools. The agent picks the right tool for ea
 | `playbooks` | Persistent cross-session orchestration pattern memory with auto-distillation |
 | `botport` | Consult specialist agents through the BotPort agent-to-agent network |
 | `screen_capture` | Capture screenshots and analyze with vision; opt-in global hotkey with voice commands and selected-text detection |
+| `desktop_action` | Desktop GUI automation — click, type, scroll, press keys, open apps/URLs; pairs with screen_capture for coordinate-based interaction |
 | `termux` | Interact with Android device via Termux API (camera, battery, GPS, torch) |
 
 See [USAGE.md](USAGE.md#tools-reference) for full parameters and configuration.
@@ -300,7 +302,7 @@ tools:
             "image_gen", "image_ocr", "image_vision",
             "pocket_tts", "stt", "send_mail", "gws", "todo", "contacts",
             "scripts", "apis", "datastore", "playbooks", "personality",
-            "botport", "termux", "screen_capture"]
+            "botport", "termux", "screen_capture", "desktop_action"]
 
 web:
   enabled: true
@@ -359,6 +361,10 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 
 - **[Personality system](USAGE.md#personality-system)** — Dual-profile system with a global agent identity (name, background, expertise) and per-user profiles that tailor responses to each user's perspective. Editable via the `personality` tool, REST API, or the Settings page. Telegram users get automatic per-user profiles.
 
+- **[Self-reflection system](USAGE.md#self-reflection-system)** — Periodic self-assessment that reviews recent conversations, memory facts, completed tasks, and the previous reflection to generate actionable improvement directives. The latest reflection is injected into the system prompt, enabling the agent to learn and adapt over time. Auto-triggers after sufficient activity (configurable cooldown), or run on demand with `/reflection generate`. Includes a web UI dashboard at `/reflections` and REST API.
+
+- **[Desktop automation](USAGE.md#desktop-action)** — Cross-platform desktop GUI automation via `pyautogui`. Click, double-click, right-click, type text, press keys, trigger hotkeys, scroll, drag, and open apps/folders/URLs. Pairs with `screen_capture` — capture a screenshot first, identify coordinates, then act on them. Includes a `screenshot_click` action that combines vision-based element detection with clicking. Requires `pip install pyautogui`.
+
 - **[Screen capture + voice commands](USAGE.md#screen-capture)** — Capture screenshots via `/screenshot`, the `screen_capture` tool, or a global hotkey (double-tap Shift, configurable). Hold the key and speak — audio is transcribed in realtime via Soniox (or Whisper/Gemini) and submitted alongside the screenshot. If text is selected in any app, it's captured via the clipboard and used as context instead of a screenshot. Voice instructions trigger an audio response via TTS so the agent speaks back. The global hotkey is opt-in — enable it in **Settings → Voice & Hotkey** (hot-reloads without restart). Install with `pip install captain-claw[screen]`.
 
 - **[Prompt caching](USAGE.md#prompt-caching)** — Automatic Anthropic prompt caching with two cache breakpoints (static system prompt + last conversation message). Cache reads are ~90% cheaper. The static-first prompt layout also benefits OpenAI's automatic prefix caching. All other providers are unaffected.
@@ -381,8 +387,9 @@ ruff check captain_claw/
 |---|---|
 | `captain_claw/agent.py` | Main orchestration logic |
 | `captain_claw/llm/` | Provider abstraction (OpenAI, Anthropic, Gemini, Ollama) |
-| `captain_claw/tools/` | Tool registry and 29 tool implementations |
+| `captain_claw/tools/` | Tool registry and 30 tool implementations |
 | `captain_claw/personality.py` | Agent and per-user personality profiles |
+| `captain_claw/reflections.py` | Self-reflection system with auto-trigger and prompt injection |
 | `captain_claw/session/` | SQLite-backed session persistence |
 | `captain_claw/skills.py` | Skill discovery, loading, and invocation |
 | `captain_claw/session_orchestrator.py` | Parallel multi-session DAG orchestrator |

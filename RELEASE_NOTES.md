@@ -1,133 +1,78 @@
-# Captain Claw v0.3.4 Release Notes
+# Captain Claw v0.3.5 Release Notes
 
-**Release title:** Prompt Caching, LLM Usage Dashboard, Screen Capture & Voice Commands, Clipboard Tool
+**Release title:** Self-Reflection System, Desktop Automation, Chat UX Improvements
 
-**Release date:** 2026-03-12
+**Release date:** 2026-03-13
 
 ## Highlights
 
-This release introduces Anthropic prompt caching for up to 90% cheaper cache-hit token costs, a full LLM usage analytics dashboard, and the screen capture + voice command system with a global hotkey. The system prompt has been restructured into conditional sections for better cacheability and maintainability, and a new clipboard tool enables cross-app clipboard integration.
+This release introduces a self-reflection system that enables the agent to periodically assess its own performance and inject improvement directives into the system prompt. A new desktop automation tool (`desktop_action`) adds cross-platform GUI control via `pyautogui`, pairing with the existing screen capture tool for coordinate-based interaction. The chat UI gains message feedback (like/dislike) and a copy-to-clipboard button on every message.
 
 ## New Features
 
-### Anthropic Prompt Caching
-- System prompt templates restructured with a `<!-- CACHE_SPLIT -->` marker separating static (cached) and dynamic (uncached) content
-- Two cache breakpoints: (1) static system prompt block, (2) last user/assistant message for tool-loop caching
-- Dynamic content (`datetime.now()`, system info, read directories) moved to the end of templates so the static prefix stays byte-identical across calls
-- Non-Anthropic providers have the marker stripped transparently — no impact on OpenAI, Gemini, or Ollama
-- OpenAI benefits from the static-first layout via its automatic prefix caching
-- 14 new tests covering split logic, history breakpoints, mutation safety, and provider integration
+### Self-Reflection System
+- New `reflections.py` module following the personality.py pattern: dataclass → markdown file → mtime caching → prompt block injection
+- Gathers context from recent session messages (last 20), memory facts (up to 30), completed tasks/cron since the last reflection, and the previous reflection summary
+- LLM generates actionable, generalized self-improvement instructions — never references specific tasks or sessions
+- Latest reflection injected into the system prompt via `{reflection_block}` placeholder (both full and micro prompts)
+- Auto-trigger fires after agent turns when both cooldown (4 hours) and minimum activity (10 messages) thresholds are met
+- Auto-trigger runs as fire-and-forget `asyncio.create_task()` — non-blocking, failures are non-fatal
+- Reflections stored as timestamped Markdown files in `~/.captain-claw/reflections/`
+- Mtime-based caching ensures the file is only re-read when modified
+- Token usage logged to the LLM usage table (`interaction="reflection"`)
+- Slash commands: `/reflection` (show latest), `/reflection generate` (trigger new), `/reflection list` (list recent)
+- Web UI dashboard at `/reflections` — expandable cards with timestamps, topics, active badge, delete button, and generate button
+- REST API: `GET /api/reflections`, `GET /api/reflections/latest`, `POST /api/reflections/generate`, `DELETE /api/reflections/{timestamp}`
+- Homepage card added (🪞 Reflections)
 
-### LLM Usage Dashboard
-- New `/usage` page with dark-themed analytics UI
-- Per-call token tracking: prompt, completion, total, cache read, cache created, input/output bytes, latency, finish reason, error status
-- Period filters: Last Hour, Today, Yesterday, This Week, Last Week, This Month, Last Month, All Time
-- Provider and model dropdown filters with server-side filtering for accurate totals
-- Model dropdown auto-filters by selected provider
-- Summary cards: Total Calls, Total Tokens, Prompt/Completion Tokens, Cache Read/Created, Input/Output Size, Avg Latency, Errors
-- New `llm_usage` SQLite table with indexed `created_at` and `session_id` columns
-- REST API: `GET /api/usage?period=...&provider=...&model=...`
-- Homepage card added for navigation
+### Desktop Automation Tool
+- New `desktop_action` tool: cross-platform desktop GUI automation via `pyautogui`
+- Actions: `click`, `double_click`, `right_click`, `move`, `type`, `press`, `hotkey`, `scroll`, `drag`, `open`, `mouse_position`, `screenshot_click`
+- The `screenshot_click` action combines vision-based element detection with automated clicking — describe what to click and the agent finds and clicks it
+- Platform-specific app/URL launchers: macOS `open -a`, Linux `xdg-open`, Windows `os.startfile`
+- `pyautogui.FAILSAFE` enabled — move mouse to top-left corner to abort runaway automation
+- Pairs naturally with `screen_capture` for a see-then-act workflow
+- Requires `pip install pyautogui`
 
-### LLM Usage Tracking
-- Every LLM call (conversation, guard, scale loop, orchestrator, etc.) now records token metrics to the session database
-- Tracks provider, model, token counts, cache metrics, byte sizes, latency, streaming flag, and error status
-- Integrated into the LLM provider layer — works automatically for all providers
+### Chat UI: Message Feedback
+- Like/dislike buttons on every assistant message in the chat UI
+- Feedback stored per-message in the session via WebSocket (`message_feedback` event)
+- Visual toggle: click to set, click again to clear
+- Thumbs-up (good) and thumbs-down (bad) with hover states
 
-### Screen Capture Tool
-- New `screen_capture` tool: capture screenshots and optionally analyze with a vision model in one call
-- macOS uses native `screencapture` CLI; Linux/Windows use `mss`
-- Active display detection on macOS (captures the monitor with the mouse cursor)
-- Slash command: `/screenshot [prompt]` for quick capture from the web UI
-
-### Global Hotkey + Voice Commands
-- Double-tap Shift (configurable) activates voice command flow
-- Hold and speak — audio transcribed in realtime via Soniox, or recorded and transcribed via Whisper/Gemini
-- Selected text detection on macOS — if text is selected in any app, it's captured via clipboard round-trip and used as context instead of a screenshot
-- Voice responses via TTS so the agent speaks back
-- **Hotkey is now opt-in** (disabled by default) — enable in Settings → Voice & Hotkey or set `hotkey_enabled: true` in config
-- Hot-reload: toggling the setting starts/stops the daemon without restart
-- Web UI settings section added: trigger key, double-tap window, triple-tap wait, max recording duration, STT provider
-
-### STT Tool
-- New `stt` tool for speech-to-text transcription
-- Provider auto-detection: Soniox (realtime streaming) → OpenAI Whisper → Gemini multimodal
-- Supports explicit `stt_provider` and `stt_model` config overrides
-- Configurable sample rate, max recording duration, and audio save options
-
-### Clipboard Tool
-- New `clipboard` tool: read and write system clipboard (text, images, files)
-- macOS-first implementation using native `pbcopy`/`pbpaste`/`osascript`
-- Supports text read/write and image/file copy to clipboard
-
-### Conditional System Prompt Assembly
-- System prompt split into modular section files: `section_browser_policy.md`, `section_datastore.md`, `section_direct_api.md`, `section_gws.md`, `section_termux_policy.md`
-- Micro prompt equivalents: `micro_section_*.md`
-- Sections are conditionally included based on enabled tools — unused tool instructions no longer consume context
-- Reduces token usage for configurations with fewer tools enabled
-
-### GWS (Google Workspace) Enhancements
-- Gmail: base64 attachment content now stripped from LLM context to avoid wasting tokens on binary data
-- 700+ lines of new functionality across the GWS tool
-
-### Cron Telegram Integration
-- Cron-dispatched tasks now support Telegram delivery
-- Results from scheduled tasks can be forwarded to Telegram users
-- Runtime context properly propagated through cron execution
-
-### File Export (Markdown → PDF/DOCX)
-- REST endpoint for exporting markdown files as styled PDF or DOCX
-- Professional CSS styling with proper typography, tables, and code blocks
+### Chat UI: Copy Button
+- Copy-to-clipboard button on every message bubble (chat and assistant)
+- One-click copy of the full message text
+- Brief checkmark confirmation after copying
 
 ## Bug Fixes
 
-### File Write Enforcement (Completion Gate)
-- The completion gate no longer forces file writes for conversational requests
-- Changed default `final_action` from `"write_file"` to `"reply"` across all fallback paths (7 locations in 4 files)
-- Updated list task extractor prompts with explicit guidance: "summarize", "tell me", "analyze" → always `"reply"`
-- Only triggers `"write_file"` when user explicitly requests file output ("save to", "write to", "export as")
+### Reflection Parser: Empty Summary
+- Fixed a bug where LLM-generated markdown headers inside the reflection summary were treated as section delimiters, causing the summary to appear empty despite successful token generation
+- Parser now only recognizes known section headers (`Timestamp`, `Summary`, `Topics Reviewed`, `Token Usage`) as delimiters — all other `##` headers in the LLM response are preserved as content
 
-### Shell Tool Timeout System
-- Activity-based timeout with automatic extension when process produces output
-- Script interpreters (python, node, ruby, etc.) get minimum 120s floor
-- Hard wall-time cap at 30 minutes prevents runaway processes
-- Quick commands (ls, cat, echo, etc.) get fast 5s timeout
-
-### Orchestrator Improvements
-- Multiple fixes to parallel DAG task execution
-- Improved session orchestrator reliability
-- Better error handling in multi-session workflows
-
-### Other Fixes
-- Deep memory: additional error handling for Typesense operations
-- Semantic memory: improved indexing reliability
-- Agent pool: better idle session cleanup
-- Guard system: improved guard evaluation reliability
-- Web UI: various CSS and JavaScript fixes
-- Orchestrator UI: improved real-time monitoring display
-- Typesense tool: minor fix in document operations
+### Reflection Quality
+- Updated the reflection system prompt with explicit rules: generalize insights into reusable principles, never reference specific tasks/sessions/turns, output flat bullet lists only (no markdown headers)
 
 ## Configuration Changes
 
-### New Settings
-- `tools.screen_capture.hotkey_enabled`: `false` (was `true`) — global hotkey is now opt-in
-- `tools.screen_capture.hotkey_trigger_key`: `shift` — configurable trigger key
-- `tools.screen_capture.hotkey_double_tap_ms`: `400` — double-tap detection window
-- `tools.screen_capture.hotkey_triple_tap_wait_ms`: `500` — triple-tap wait window
-- `tools.screen_capture.max_recording_seconds`: `30` — voice recording cap
-- `tools.screen_capture.stt_provider`: `""` — explicit STT provider override
+### New Tool
+- `desktop_action` added to the default enabled tools list in config
 
-### Web UI Settings
-- New "Voice & Hotkey" section in Settings page with 6 configurable fields
-- Hot-reload support: changes apply immediately without server restart
+### New System Prompt Variables
+- `{reflection_block}` — injected into both `system_prompt.md` and `micro_system_prompt.md` after `{visualization_style_block}`
+
+## Web UI Changes
+
+- New `/reflections` page with dark-themed card layout, expandable summaries, and active reflection indicator
+- 🪞 Reflections card added to the homepage navigation grid
+- Like/dislike feedback buttons on assistant messages
+- Copy-to-clipboard button on all message bubbles
+- Delete button on reflection cards (visible at 50% opacity, full opacity on hover)
 
 ## Internal
 
-- New files: `tools/clipboard.py`, `tools/screen_capture.py`, `tools/stt.py`, `web/hotkey_daemon.py`, `web/static/usage.html`, `tests/test_llm/test_anthropic_cache.py`
-- New instruction sections: `section_browser_policy.md`, `section_datastore.md`, `section_direct_api.md`, `section_gws.md`, `section_termux_policy.md` (plus micro equivalents)
-- New instruction files: `screenshot_analysis_prompt.md`, `script_rephrase_system_prompt.md`
-- `_CACHE_SPLIT_MARKER` constant and `_inject_anthropic_cache_control()` rewrite in `llm/__init__.py`
-- `llm_usage` table schema, `record_llm_usage()`, and `query_llm_usage()` in `session/__init__.py`
-- `_build_gdrive_file_map()`, `_lookup_gdrive_file()` moved to scale loop
-- Nuke confirmation codes in slash commands (safety for `/nuke`)
-- 78 files changed, ~8,500 insertions, ~470 deletions
+- New files: `captain_claw/reflections.py`, `captain_claw/web/rest_reflections.py`, `captain_claw/web/static/reflections.html`, `captain_claw/instructions/reflection_system_prompt.md`, `captain_claw/instructions/reflection_user_prompt.md`, `captain_claw/tools/desktop_action.py`
+- Modified: `agent_context_mixin.py` (reflection block loading + render), `web_server.py` (routes + commands), `slash_commands.py` (`/reflection` handler), `chat_handler.py` (auto-reflection trigger), `static_pages.py` (serve reflections), `home.html` (reflections card), `system_prompt.md` and `micro_system_prompt.md` (`{reflection_block}`), `app.js` (feedback + copy buttons), `ws_handler.py` (feedback event), `style.css` (feedback + copy styling)
+- PyInstaller `captain_claw.spec` updated with new hidden imports
+- Version bumped from 0.3.4.1 to 0.3.5

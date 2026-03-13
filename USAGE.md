@@ -66,6 +66,7 @@ For a quick overview and installation guide, see [README.md](README.md).
 - [Cross-Session Playbook Memory](#cross-session-playbook-memory)
   - [Playbooks Editor](#playbooks-editor)
 - [Personality System](#personality-system)
+- [Self-Reflection System](#self-reflection-system)
 - [Session Management](#session-management)
 - [Chunked Processing Pipeline](#chunked-processing-pipeline)
 - [Context Compaction](#context-compaction)
@@ -462,6 +463,14 @@ The agent can also manage APIs via the `apis` tool during conversation. APIs are
 | `/skill search <criteria>` | Search the skill catalog |
 | `/skill install <github-url>` | Install a skill from GitHub |
 | `/skill install <name> [install-id]` | Install skill dependencies |
+
+### Reflection Commands
+
+| Command | Description |
+|---|---|
+| `/reflection` | Show the latest self-reflection |
+| `/reflection generate` | Trigger a new self-reflection |
+| `/reflection list` | List recent reflections with timestamps |
 
 ### Orchestrator Commands
 
@@ -939,6 +948,28 @@ tools:
 Auto-detection priority: Soniox → OpenAI → Gemini. Override with `stt_provider` in config.
 
 **macOS permissions required:** Screen Recording, Input Monitoring (for hotkey), Microphone (for voice), Accessibility (for Cmd+C simulation in selected-text detection). **Linux:** X11 required for hotkey (Wayland not supported; `/screenshot` still works). **Windows:** works out of the box (selected text detection is macOS-only for now).
+
+### desktop_action
+
+Cross-platform desktop GUI automation — click, type, scroll, press keys, open apps/folders/URLs. Pairs with `screen_capture` to identify coordinates before acting. Requires `pip install pyautogui`.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `click`, `double_click`, `right_click`, `move`, `type`, `press`, `hotkey`, `scroll`, `drag`, `open`, `mouse_position`, `screenshot_click` |
+| `x` | number | for click/move/scroll/drag | X coordinate (pixels from left edge) |
+| `y` | number | for click/move/scroll/drag | Y coordinate (pixels from top edge) |
+| `text` | string | for type/press/screenshot_click | Text to type, key name to press, or UI element description for screenshot_click |
+| `keys` | array | for hotkey | Keys to press simultaneously (e.g. `["command", "c"]`) |
+| `target` | string | for open | App name, folder path, or URL to open |
+| `dx` | number | for drag/scroll | Destination X (drag) or horizontal scroll amount |
+| `dy` | number | for drag/scroll | Destination Y (drag) or vertical scroll amount |
+| `clicks` | number | no | Number of clicks (default: 1) |
+| `interval` | number | no | Seconds between actions (default: 0.05) |
+| `duration` | number | no | Seconds for mouse movement animation (default: 0.3) |
+
+**Typical workflow:** capture a screenshot with `screen_capture`, identify the element and its coordinates, then use `desktop_action` to interact with it. The `screenshot_click` action combines these steps — it captures a screenshot, uses vision to locate the described element, and clicks it automatically.
+
+**Platform support:** macOS uses `open -a` for apps; Linux uses `xdg-open`; Windows uses `os.startfile`. Mouse and keyboard actions work on all platforms via `pyautogui`. The `pyautogui.FAILSAFE` is enabled — move the mouse to the top-left corner of the screen to abort any runaway automation.
 
 ### termux
 
@@ -2202,6 +2233,54 @@ Each approved Telegram user can have a personality profile. When a Telegram user
 ### Caching
 
 Profiles are cached in memory and automatically refreshed when the underlying file's modification time changes. User IDs are sanitized to prevent path traversal.
+
+---
+
+## Self-Reflection System
+
+Captain Claw can periodically assess its own performance by reviewing recent conversations, memory facts, completed tasks, and the previous reflection. The output is a set of actionable self-improvement directives injected into the system prompt, enabling the agent to learn and adapt over time.
+
+### How It Works
+
+1. **Context gathering** — collects the last 20 session messages, memory facts (up to 30), completed tasks/cron since the last reflection, and the previous reflection summary.
+2. **LLM generation** — sends the gathered context to the LLM with a specialized reflection system prompt. The LLM produces generalized, reusable improvement instructions (never references specific tasks or sessions).
+3. **Persistence** — the reflection is saved as a timestamped Markdown file in `~/.captain-claw/reflections/`.
+4. **Prompt injection** — only the newest reflection is loaded into the system prompt via the `{reflection_block}` placeholder, keeping the prompt lean.
+5. **Token tracking** — each reflection generation call is logged to the LLM usage table like any other interaction.
+
+### Auto-Trigger
+
+Self-reflection runs automatically when both conditions are met:
+
+- At least **4 hours** since the last reflection (`AUTO_REFLECT_COOLDOWN_SECONDS`)
+- At least **10 messages** in the current session (`AUTO_REFLECT_MIN_MESSAGES`)
+
+The trigger fires as a fire-and-forget `asyncio.create_task()` after agent turns — it never blocks the chat loop. Failures are logged but non-fatal.
+
+### Slash Commands
+
+| Command | Description |
+|---|---|
+| `/reflection` | Show the latest self-reflection summary |
+| `/reflection generate` | Manually trigger a new reflection |
+| `/reflection list` | List recent reflections with timestamps |
+
+### Web UI
+
+Navigate to `/reflections` to view all reflections. The page shows expandable cards with timestamps, topics reviewed, and the full reflection text. The newest reflection is highlighted as "Active". Each card has a delete button, and a "Generate Reflection" button triggers a new reflection on demand.
+
+### REST API
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/reflections` | List all reflections (newest first) |
+| `GET` | `/api/reflections/latest` | Get the current active reflection |
+| `POST` | `/api/reflections/generate` | Trigger a new reflection |
+| `DELETE` | `/api/reflections/{timestamp}` | Delete a reflection by timestamp |
+
+### Storage
+
+Reflections are stored as Markdown files in `~/.captain-claw/reflections/` with timestamps as filenames. The format uses `## Section` headers for metadata (Timestamp, Summary, Topics Reviewed, Token Usage). Loading uses mtime-based caching — the file is only re-read when its modification time changes.
 
 ---
 
