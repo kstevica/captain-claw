@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Captain Claw - Comprehensive System Analysis & Architecture Report</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: Arial, Helvetica, sans-serif;
+            background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+            color: #ffffff;
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+        
+        header {
+            text-align: center;
+            margin-bottom: 60px;
+            border-bottom: 3px solid #EF3B39;
+            padding-bottom: 40px;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 40px;
+            border-radius: 8px;
+        }
+        
+        .logo {
+            display: inline-block;
+            width: 60px;
+            height: 60px;
+            background: #EF3B39;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        
+        h1 {
+            font-size: 3em;
+            margin: 20px 0;
+            color: #ffffff;
+            font-weight: bold;
+        }
+        
+        .subtitle {
+            font-size: 1.2em;
+            color: #b0b0b0;
+            margin-bottom: 10px;
+        }
+        
+        .tagline {
+            font-size: 0.95em;
+            color: #808080;
+            font-style: italic;
+        }
+        
+        section {
+            margin-bottom: 60px;
+            background: rgba(0, 0, 0, 0.4);
+            padding: 40px;
+            border-radius: 8px;
+            border-left: 4px solid #EF3B39;
+        }
+        
+        h2 {
+            font-size: 2em;
+            margin-bottom: 30px;
+            color: #EF3B39;
+            font-weight: bold;
+        }
+        
+        h3 {
+            font-size: 1.3em;
+            margin-top: 25px;
+            margin-bottom: 15px;
+            color: #ffffff;
+            font-weight: bold;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+        
+        .card {
+            background: rgba(50, 50, 50, 0.6);
+            padding: 20px;
+            border-radius: 6px;
+            border: 1px solid #404040;
+            transition: all 0.3s ease;
+        }
+        
+        .card:hover {
+            border-color: #EF3B39;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(239, 59, 57, 0.2);
+        }
+        
+        .card h4 {
+            color: #EF3B39;
+            margin-bottom: 10px;
+            font-weight: bold;
+        }
+        
+        .card p {
+            color: #d0d0d0;
+            font-size: 0.95em;
+        }
+        
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin: 30px 0;
+        }
+        
+        .stat-box {
+            background: rgba(50, 50, 50, 0.8);
+            padding: 25px;
+            border-radius: 6px;
+            text-align: center;
+            border: 2px solid #EF3B39;
+        }
+        
+        .stat-number {
+            font-size: 2.5em;
+            color: #EF3B39;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        
+        .stat-label {
+            color: #b0b0b0;
+            font-size: 0.95em;
+        }
+        
+        .chart-container {
+            position: relative;
+            height: 400px;
+            margin: 30px 0;
+            background: rgba(50, 50, 50, 0.6);
+            padding: 20px;
+            border-radius: 6px;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: rgba(50, 50, 50, 0.6);
+        }
+        
+        th, td {
+            padding: 15px;
+            text-align: left;
+            border-bottom: 1px solid #404040;
+        }
+        
+        th {
+            background: rgba(239, 59, 57, 0.2);
+            color: #EF3B39;
+            font-weight: bold;
+        }
+        
+        tr:hover {
+            background: rgba(239, 59, 57, 0.1);
+        }
+        
+        .architecture-diagram {
+            background: rgba(50, 50, 50, 0.6);
+            padding: 20px;
+            border-radius: 6px;
+            margin: 20px 0;
+            border: 1px solid #404040;
+        }
+        
+        .layer {
+            margin: 15px 0;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.4);
+            border-left: 4px solid #EF3B39;
+            border-radius: 4px;
+        }
+        
+        .layer-title {
+            color: #EF3B39;
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+        
+        .layer-content {
+            color: #d0d0d0;
+            font-size: 0.95em;
+        }
+        
+        ul, ol {
+            margin: 15px 0 15px 30px;
+            color: #d0d0d0;
+        }
+        
+        li {
+            margin: 8px 0;
+        }
+        
+        code {
+            background: rgba(0, 0, 0, 0.5);
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #88dd88;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .highlight {
+            color: #EF3B39;
+            font-weight: bold;
+        }
+        
+        footer {
+            text-align: center;
+            padding: 20px;
+            color: #808080;
+            border-top: 2px solid #EF3B39;
+            margin-top: 60px;
+        }
+        
+        .pattern-box {
+            background: rgba(239, 59, 57, 0.1);
+            border: 2px solid #EF3B39;
+            padding: 20px;
+            border-radius: 6px;
+            margin: 15px 0;
+        }
+        
+        .achievement {
+            background: rgba(50, 50, 50, 0.8);
+            padding: 20px;
+            margin: 15px 0;
+            border-left: 4px solid #EF3B39;
+            border-radius: 4px;
+        }
+        
+        .achievement-title {
+            color: #EF3B39;
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo"></div>
+            <h1>Captain Claw</h1>
+            <p class="subtitle">Comprehensive System Analysis & Architecture Report</p>
+            <p class="tagline">Multi-modal AI Agent Framework with Advanced Orchestration & Tool Ecosystem</p>
+        </header>
+
+        <!-- Executive Summary -->
+        <section>
+            <h2>📊 Executive Summary</h2>
+            <p>Captain Claw is a sophisticated, multi-modal AI agent framework built on Python that orchestrates complex workflows through LLM-powered task decomposition, parallel execution, and intelligent tool management. The system spans <span class="highlight">137 Python files</span> organized into core agent logic, a comprehensive tool ecosystem (40+ tools), web UI infrastructure, session/memory management, and platform integrations.</p>
+            
+            <div class="stats">
+                <div class="stat-box">
+                    <div class="stat-number">137</div>
+                    <div class="stat-label">Python Files</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number">40+</div>
+                    <div class="stat-label">Integrated Tools</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number">13</div>
+                    <div class="stat-label">Agent Mixins</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number">50+</div>
+                    <div class="stat-label">REST API Endpoints</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- System Architecture Overview -->
+        <section>
+            <h2>🏗️ System Architecture Overview</h2>
+            
+            <h3>Core Agent Engine</h3>
+            <p>The agent system centers on a <span class="highlight">mixin-based architecture</span> where the Agent class inherits from 13 specialized mixins providing distinct capabilities:</p>
+            
+            <div class="architecture-diagram">
+                <div class="layer">
+                    <div class="layer-title">1. Orchestration Mixin</div>
+                    <div class="layer-content">Main turn-level request processing loop managing iteration budgets, progress tracking, and completion gating</div>
+                </div>
+                <div class="layer">
+                    <div class="layer-title">2. Tool Loop Mixin</div>
+                    <div class="layer-content">LLM tool call extraction, execution, and result management with duplicate detection and scale-aware guards</div>
+                </div>
+                <div class="layer">
+                    <div class="layer-title">3. Completion Mixin</div>
+                    <div class="layer-content">Multi-stage validation gates ensuring task requirements are met before response finalization</div>
+                </div>
+                <div class="layer">
+                    <div class="layer-title">4. Context Mixin</div>
+                    <div class="layer-content">Dynamic system prompt construction, semantic memory integration, and intelligent message selection within token budgets</div>
+                </div>
+                <div class="layer">
+                    <div class="layer-title">5. Session Mixin</div>
+                    <div class="layer-content">Token-aware message handling, context compaction, and runtime configuration synchronization</div>
+                </div>
+                <div class="layer">
+                    <div class="layer-title">6. File Operations Mixin</div>
+                    <div class="layer-content">Script generation, execution, and structured result wrapping</div>
+                </div>
+                <div class="layer">
+                    <div class="layer-title">7. Guard Mixin</div>
+                    <div class="layer-content">Input/output content filtering and approval workflows</div>
+                </div>
+                <div class="layer">
+                    <div class="layer-title">8. Model Mixin</div>
+                    <div class="layer-content">Runtime model selection and provider resolution</div>
+                </div>
+                <div class="layer">
+                    <div class="layer-title">9. Pipeline Mixin</div>
+                    <div class="layer-content">DAG-based task pipeline construction with dependency resolution and timeout management</div>
+                </div>
+                <div class="layer">
+                    <div class="layer-title">10. Reasoning Mixin</div>
+                    <div class="layer-content">Task contract generation, critic validation, and list-member extraction</div>
+                </div>
+                <div class="layer">
+                    <div class="layer-title">11. Research Mixin</div>
+                    <div class="layer-content">Multi-stage web research pipeline for entity extraction and content aggregation</div>
+                </div>
+                <div class="layer">
+                    <div class="layer-title">12. Scale Detection Mixin</div>
+                    <div class="layer-content">Large-scale list-processing task detection and advisory injection</div>
+                </div>
+                <div class="layer">
+                    <div class="layer-title">13. Scale Loop Mixin</div>
+                    <div class="layer-content">Per-item batch processing with constant-context isolation</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Tool Ecosystem -->
+        <section>
+            <h2>🛠️ Tool Ecosystem (40+ Tools)</h2>
+            <p>Tools are organized into functional categories for modular capability management:</p>
+            
+            <h3>File & Text Operations</h3>
+            <div class="grid">
+                <div class="card">
+                    <h4>read.py</h4>
+                    <p>Safe file reading with path resolution across multiple contexts</p>
+                </div>
+                <div class="card">
+                    <h4>write.py</h4>
+                    <p>Sandboxed file writing with session-based scoping</p>
+                </div>
+                <div class="card">
+                    <h4>edit.py</h4>
+                    <p>Surgical file editing with backup/undo capability</p>
+                </div>
+                <div class="card">
+                    <h4>glob.py</h4>
+                    <p>Pattern-based file discovery with case-insensitive matching</p>
+                </div>
+            </div>
+            
+            <h3>Web & Data Integration</h3>
+            <div class="grid">
+                <div class="card">
+                    <h4>web_fetch.py / web_get.py</h4>
+                    <p>HTTP content retrieval with text extraction or raw HTML</p>
+                </div>
+                <div class="card">
+                    <h4>web_search.py</h4>
+                    <p>Brave Search API integration for real-time web queries</p>
+                </div>
+                <div class="card">
+                    <h4>google_drive.py</h4>
+                    <p>Google Drive file operations with OAuth authentication</p>
+                </div>
+                <div class="card">
+                    <h4>gws.py</h4>
+                    <p>Google Workspace CLI wrapper for Drive/Docs/Sheets/Gmail</p>
+                </div>
+                <div class="card">
+                    <h4>typesense.py</h4>
+                    <p>Vector search and document indexing via Typesense</p>
+                </div>
+                <div class="card">
+                    <h4>datastore.py</h4>
+                    <p>Relational database operations with protection rules</p>
+                </div>
+            </div>
+            
+            <h3>Document Processing</h3>
+            <div class="grid">
+                <div class="card">
+                    <h4>document_extract.py</h4>
+                    <p>Multi-format extraction (PDF, DOCX, XLSX, PPTX) to Markdown</p>
+                </div>
+                <div class="card">
+                    <h4>image_ocr.py / image_gen.py</h4>
+                    <p>OCR and image generation via vision-capable LLMs</p>
+                </div>
+                <div class="card">
+                    <h4>summarize_files.py</h4>
+                    <p>Batch file summarization with map-reduce pattern</p>
+                </div>
+            </div>
+            
+            <h3>Browser Automation</h3>
+            <div class="grid">
+                <div class="card">
+                    <h4>browser.py</h4>
+                    <p>Playwright-based browser with persistent sessions and workflow recording</p>
+                </div>
+                <div class="card">
+                    <h4>pinchtab.py</h4>
+                    <p>Token-efficient accessibility tree-based browser automation</p>
+                </div>
+                <div class="card">
+                    <h4>browser_workflow.py</h4>
+                    <p>Record-and-replay workflow automation</p>
+                </div>
+                <div class="card">
+                    <h4>browser_api_replay.py</h4>
+                    <p>Direct API execution from captured network traffic</p>
+                </div>
+            </div>
+            
+            <h3>System & Hardware</h3>
+            <div class="grid">
+                <div class="card">
+                    <h4>shell.py</h4>
+                    <p>Secure shell command execution with timeout management</p>
+                </div>
+                <div class="card">
+                    <h4>desktop_action.py</h4>
+                    <p>Cross-platform GUI automation (mouse, keyboard, application launching)</p>
+                </div>
+                <div class="card">
+                    <h4>screen_capture.py</h4>
+                    <p>Screenshot capture with optional vision analysis</p>
+                </div>
+                <div class="card">
+                    <h4>stt.py</h4>
+                    <p>Speech-to-text with multi-provider support</p>
+                </div>
+                <div class="card">
+                    <h4>pocket_tts.py</h4>
+                    <p>Local text-to-speech synthesis</p>
+                </div>
+            </div>
+            
+            <h3>Productivity & Context</h3>
+            <div class="grid">
+                <div class="card">
+                    <h4>todo.py</h4>
+                    <p>Cross-session task management with priority/responsibility tracking</p>
+                </div>
+                <div class="card">
+                    <h4>contacts.py</h4>
+                    <p>Address book with importance scoring and privacy tiers</p>
+                </div>
+                <div class="card">
+                    <h4>playbooks.py</h4>
+                    <p>Reusable task pattern library with LLM-based distillation</p>
+                </div>
+                <div class="card">
+                    <h4>direct_api.py</h4>
+                    <p>Direct HTTP API call management and execution</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Session & Memory Management -->
+        <section>
+            <h2>💾 Session & Memory Management</h2>
+            
+            <h3>Multi-Layer Memory Architecture</h3>
+            <div class="architecture-diagram">
+                <div class="layer">
+                    <div class="layer-title">Working Memory (In-Turn)</div>
+                    <div class="layer-content">Context buffer with automatic compaction for current turn processing</div>
+                </div>
+                <div class="layer">
+                    <div class="layer-title">Semantic Memory (Session-Scoped)</div>
+                    <div class="layer-content">SQLite FTS5 + vector embeddings with hybrid search for session-level retrieval</div>
+                </div>
+                <div class="layer">
+                    <div class="layer-title">Deep Memory (Long-Term Archive)</div>
+                    <div class="layer-content">Typesense-backed long-term archive with chunking and embedding</div>
+                </div>
+            </div>
+            
+            <h3>Session Persistence</h3>
+            <ul>
+                <li>SQLite-backed persistence for conversations, tasks, contacts, scripts, APIs, playbooks, workflows, credentials</li>
+                <li>Message history with tool call metadata and token counting</li>
+                <li>Cron job scheduling with execution history</li>
+                <li>Cross-session state management via app_state table</li>
+            </ul>
+        </section>
+
+        <!-- LLM Provider Support -->
+        <section>
+            <h2>🤖 LLM Provider Abstraction</h2>
+            <p>Multi-provider support with unified interface:</p>
+            
+            <table>
+                <thead>
+                    <tr>
+                        <th>Provider</th>
+                        <th>Implementation</th>
+                        <th>Key Features</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Ollama</strong></td>
+                        <td>Direct HTTP client</td>
+                        <td>Local model support, no API keys needed</td>
+                    </tr>
+                    <tr>
+                        <td><strong>OpenAI/ChatGPT</strong></td>
+                        <td>Standard API + Responses API</td>
+                        <td>SSE streaming, function calling</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Anthropic Claude</strong></td>
+                        <td>Native API client</td>
+                        <td>Prompt caching, vision support</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Google Gemini</strong></td>
+                        <td>Via LiteLLM</td>
+                        <td>Async/sync handling, multimodal</td>
+                    </tr>
+                    <tr>
+                        <td><strong>xAI Grok</strong></td>
+                        <td>Via LiteLLM</td>
+                        <td>Real-time knowledge, function calling</td>
+                    </tr>
+                </tbody>
+            </table>
+            
+            <h3>Core Features</h3>
+            <ul>
+                <li>Token rate limiting with sliding-window backpressure</li>
+                <li>Provider-specific message/tool conversion</li>
+                <li>Unified tool definition schema</li>
+                <li>Streaming response collection</li>
+                <li>Token counting and usage tracking</li>
+            </ul>
+        </section>
+
+        <!-- Web UI Infrastructure -->
+        <section>
+            <h2>🌐 Web UI Infrastructure</h2>
+            
+            <h3>Core Server</h3>
+            <ul>
+                <li>aiohttp-based async web server</li>
+                <li>100+ HTTP/WebSocket route handlers</li>
+                <li>Real-time callback routing to connected clients</li>
+                <li>Multi-session state management</li>
+                <li>Third-party integration orchestration</li>
+            </ul>
+            
+            <h3>REST API Modules (50+ Endpoints)</h3>
+            <ul>
+                <li><strong>Session Management:</strong> List, create, switch, export sessions</li>
+                <li><strong>Entity CRUD:</strong> Todos, contacts, scripts, APIs, playbooks</li>
+                <li><strong>Datastore Operations:</strong> Table/row management, import/export</li>
+                <li><strong>Cron Jobs:</strong> Scheduling and execution management</li>
+                <li><strong>File Browsing:</strong> Local and cloud file management</li>
+                <li><strong>Configuration:</strong> Hot-reload settings management</li>
+                <li><strong>Orchestration:</strong> Workflow control and execution</li>
+                <li><strong>Memory:</strong> Deep memory search and indexing</li>
+                <li><strong>OAuth:</strong> Google authentication flows</li>
+            </ul>
+            
+            <h3>Static Pages</h3>
+            <p>23 HTML page templates with cache-busting for: Chat, Orchestration, Workflows, Memory, Settings, Sessions, Datastore, Playbooks, Skills, and more.</p>
+        </section>
+
+        <!-- Platform Integrations -->
+        <section>
+            <h2>🔗 Platform Integrations</h2>
+            
+            <div class="grid">
+                <div class="card">
+                    <h4>Telegram</h4>
+                    <p>Per-user Agent instances with session isolation, user approval workflow, typing indicators, image support, and cron management</p>
+                </div>
+                <div class="card">
+                    <h4>Discord</h4>
+                    <p>DM-based polling interface with message normalization and audio file upload support</p>
+                </div>
+                <div class="card">
+                    <h4>Slack</h4>
+                    <p>DM-first polling with pagination, user caching, and thread reply support</p>
+                </div>
+                <div class="card">
+                    <h4>Google OAuth</h4>
+                    <p>PKCE-based authorization flow with token lifecycle management and credential injection</p>
+                </div>
+                <div class="card">
+                    <h4>BotPort</h4>
+                    <p>Distributed agent coordination with concern-based task delegation</p>
+                </div>
+                <div class="card">
+                    <h4>Hotkey Daemon</h4>
+                    <p>Global keyboard listener for voice activation with screenshot capture and clipboard detection</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Key Design Patterns -->
+        <section>
+            <h2>🎯 Key Design Patterns</h2>
+            
+            <div class="pattern-box">
+                <strong>1. Mixin-Based Composition</strong>
+                <p>13 specialized mixins provide distinct capabilities without deep inheritance hierarchies, enabling modular testing and feature toggling.</p>
+            </div>
+            
+            <div class="pattern-box">
+                <strong>2. Callback-Driven Architecture</strong>
+                <p>Agent execution feeds events through registered callbacks (status, thinking, tool_output, approval) that route to UI layers without tight coupling.</p>
+            </div>
+            
+            <div class="pattern-box">
+                <strong>3. Async-First Design</strong>
+                <p>All I/O operations use asyncio with non-blocking patterns. Long-running operations run in thread pools to prevent event loop blocking.</p>
+            </div>
+            
+            <div class="pattern-box">
+                <strong>4. Token-Aware Context Management</strong>
+                <p>System tracks token consumption at multiple levels and implements intelligent context compaction, chunking, and message selection.</p>
+            </div>
+            
+            <div class="pattern-box">
+                <strong>5. Multi-Layer Memory</strong>
+                <p>Working memory (in-turn), semantic memory (session-scoped), and deep memory (long-term) provide different retrieval patterns optimized for different timescales.</p>
+            </div>
+            
+            <div class="pattern-box">
+                <strong>6. Guard Rails & Approval Workflows</strong>
+                <p>Input/output guards with configurable levels enable safe autonomous operation with human oversight.</p>
+            </div>
+            
+            <div class="pattern-box">
+                <strong>7. Scale Detection & Micro-Loops</strong>
+                <p>Automatic detection of large-scale list-processing tasks triggers specialized micro-loop for per-item processing with constant context.</p>
+            </div>
+            
+            <div class="pattern-box">
+                <strong>8. Orchestration & Parallelization</strong>
+                <p>DAG-based task decomposition with parallel execution, dependency constraints, and timeout/retry policies for resilient workflows.</p>
+            </div>
+            
+            <div class="pattern-box">
+                <strong>9. File Registry & Cross-Task Sharing</strong>
+                <p>Logical-to-physical path mapping enables downstream tasks to discover and reference upstream artifacts seamlessly.</p>
+            </div>
+            
+            <div class="pattern-box">
+                <strong>10. Configuration Hierarchy</strong>
+                <p>Environment variables → .env file → config.yaml (home) → config.yaml (local) → hardcoded defaults provide flexible configuration.</p>
+            </div>
+        </section>
+
+        <!-- Technical Achievements -->
+        <section>
+            <h2>⭐ Notable Technical Achievements</h2>
+            
+            <div class="achievement">
+                <div class="achievement-title">1. Token-Efficient Browser Automation</div>
+                <p>PinchTab uses accessibility trees (~800 tokens) instead of screenshots (~2K+ tokens), achieving <span class="highlight">2-3x token efficiency</span> for web automation.</p>
+            </div>
+            
+            <div class="achievement">
+                <div class="achievement-title">2. Chunked Processing Pipeline</div>
+                <p>Automatically detects context overflow and splits large documents into chunks, processes independently, and combines results via LLM synthesis.</p>
+            </div>
+            
+            <div class="achievement">
+                <div class="achievement-title">3. Dual-Mode Orchestration</div>
+                <p>Supports both fast "loop" mode (direct tool execution) and "contracts" mode (planner + critic validation) for different task complexity levels.</p>
+            </div>
+            
+            <div class="achievement">
+                <div class="achievement-title">4. Intelligent Scale Detection</div>
+                <p>Automatically detects large-scale tasks and switches to per-item processing to prevent context explosion, with automatic list extraction after content fetch.</p>
+            </div>
+            
+            <div class="achievement">
+                <div class="achievement-title">5. Multi-Provider LLM Abstraction</div>
+                <p>Unified interface supporting Ollama, OpenAI, Anthropic, Gemini, xAI with provider-specific quirks handled transparently.</p>
+            </div>
+            
+            <div class="achievement">
+                <div class="achievement-title">6. Hybrid Memory Search</div>
+                <p>Combines full-text search (BM25) with vector embeddings and temporal decay scoring for intelligent context retrieval.</p>
+            </div>
+            
+            <div class="achievement">
+                <div class="achievement-title">7. Graceful Degradation</div>
+                <p>Every failure point has a fallback mechanism ensuring system resilience and continuous operation.</p>
+            </div>
+        </section>
+
+        <!-- Configuration & Utilities -->
+        <section>
+            <h2>⚙️ Configuration & Utilities</h2>
+            
+            <h3>Core Systems</h3>
+            <ul>
+                <li><strong>Configuration:</strong> Pydantic v2 with nested models, YAML persistence, environment variable overrides</li>
+                <li><strong>Logging:</strong> structlog-based structured logging with dynamic sink routing</li>
+                <li><strong>Cron System:</strong> Human-readable schedule parsing with job execution tracking</li>
+                <li><strong>Instruction Management:</strong> Two-tier directory system with Markdown template rendering</li>
+                <li><strong>Personality System:</strong> Agent and per-user personality profiles with prompt block injection</li>
+                <li><strong>Visualization Styles:</strong> Design preference management with LLM-powered style extraction</li>
+                <li><strong>Datastore:</strong> SQLite-backed relational database with granular protection system</li>
+                <li><strong>Orchestration:</strong> DAG-based task decomposition and parallel execution</li>
+                <li><strong>Skills System:</strong> Skill discovery, installation, and dependency management</li>
+                <li><strong>File Tree Builder:</strong> Local directory tree generation and Google Drive folder browsing</li>
+                <li><strong>Session Export:</strong> Multi-format session history export (Markdown, JSONL)</li>
+            </ul>
+        </section>
+
+        <!-- System Statistics Chart -->
+        <section>
+            <h2>📈 System Composition Analysis</h2>
+            
+            <div class="chart-container">
+                <canvas id="componentChart"></canvas>
+            </div>
+            
+            <div class="chart-container">
+                <canvas id="toolCategoryChart"></canvas>
+            </div>
+        </section>
+
+        <!-- Key Modules Table -->
+        <section>
+            <h2>📋 Core Modules & Responsibilities</h2>
+            
+            <table>
+                <thead>
+                    <tr>
+                        <th>Module</th>
+                        <th>Primary Responsibility</th>
+                        <th>Key Classes/Functions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>agent.py</code></td>
+                        <td>Main Agent class composition with 13 mixins</td>
+                        <td>Agent, execute(), process_tool_calls()</td>
+                    </tr>
+                    <tr>
+                        <td><code>web_server.py</code></td>
+                        <td>aiohttp async web server and routing</td>
+                        <td>WebServer, setup_routes(), handle_ws()</td>
+                    </tr>
+                    <tr>
+                        <td><code>session_orchestrator.py</code></td>
+                        <td>DAG-based task orchestration and execution</td>
+                        <td>SessionOrchestrator, execute_task_graph()</td>
+                    </tr>
+                    <tr>
+                        <td><code>semantic_memory.py</code></td>
+                        <td>Hybrid search with FTS5 + embeddings</td>
+                        <td>SemanticMemory, search(), index()</td>
+                    </tr>
+                    <tr>
+                        <td><code>datastore.py</code></td>
+                        <td>SQLite relational database management</td>
+                        <td>Datastore, query(), insert(), update()</td>
+                    </tr>
+                    <tr>
+                        <td><code>config.py</code></td>
+                        <td>Configuration management with Pydantic</td>
+                        <td>Config, load_config(), validate()</td>
+                    </tr>
+                    <tr>
+                        <td><code>llm/__init__.py</code></td>
+                        <td>Multi-provider LLM abstraction</td>
+                        <td>LLMProvider, call(), stream()</td>
+                    </tr>
+                    <tr>
+                        <td><code>skills.py</code></td>
+                        <td>Skill discovery and management</td>
+                        <td>SkillManager, discover(), install()</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <!-- Conclusion -->
+        <section>
+            <h2>🎓 Conclusion</h2>
+            <p>Captain Claw represents a <span class="highlight">comprehensive, production-grade AI agent framework</span> that combines sophisticated architectural patterns with practical tool integrations. The system demonstrates advanced engineering practices including:</p>
+            <ul>
+                <li><strong>Modular Design:</strong> Mixin-based composition for clean separation of concerns</li>
+                <li><strong>Scalability:</strong> Automatic scale detection and adaptive processing strategies</li>
+                <li><strong>Reliability:</strong> Multi-layer memory, graceful degradation, and comprehensive error handling</li>
+                <li><strong>Extensibility:</strong> 40+ integrated tools with easy plugin architecture</li>
+                <li><strong>Intelligence:</strong> Multi-provider LLM support with advanced context management</li>
+                <li><strong>Usability:</strong> Web UI, multiple platform integrations, and rich configuration options</li>
+            </ul>
+            <p style="margin-top: 20px; color: #EF3B39; font-weight: bold;">The system is designed for autonomous operation with human oversight, enabling complex multi-step workflows while maintaining safety and transparency.</p>
+        </section>
+
+        <footer>
+            <p>© 2024-2026 Captain Claw Framework | Comprehensive System Analysis Report</p>
+            <p>Generated: March 13, 2026 | System: 137 Python Files | Tools: 40+ | Mixins: 13</p>
+        </footer>
+    </div>
+
+    <script>
+        // Component Distribution Chart
+        const componentCtx = document.getElementById('componentChart').getContext('2d');
+        new Chart(componentCtx, {
+            type: 'doughnut',
+            data: {
+                labels: ['Core Agent (13 Mixins)', 'Tools (40+)', 'Web/UI (50+ Endpoints)', 'Memory/Session', 'Configuration', 'Integrations', 'Utilities'],
+                datasets: [{
+                    data: [13, 40, 50, 15, 10, 6, 8],
+                    backgroundColor: [
+                        '#EF3B39',
+                        '#FF6B6B',
+                        '#FF8888',
+                        '#E74C3C',
+                        '#C0392B',
+                        '#A93226',
+                        '#922B21'
+                    ],
+                    borderColor: '#1a1a1a',
+                    borderWidth: 2
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        labels: {
+                            color: '#ffffff',
+                            font: { size: 12 }
+                        }
+                    },
+                    title: {
+                        display: true,
+                        text: 'System Component Distribution',
+                        color: '#EF3B39',
+                        font: { size: 16, weight: 'bold' }
+                    }
+                }
+            }
+        });
+
+        // Tool Category Chart
+        const toolCtx = document.getElementById('toolCategoryChart').getContext('2d');
+        new Chart(toolCtx, {
+            type: 'bar',
+            data: {
+                labels: ['File Ops', 'Web/Data', 'Document', 'Browser', 'System', 'Productivity', 'Specialized'],
+                datasets: [{
+                    label: 'Number of Tools',
+                    data: [4, 8, 3, 5, 5, 8, 4],
+                    backgroundColor: '#EF3B39',
+                    borderColor: '#FF6B6B',
+                    borderWidth: 2
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                indexAxis: 'y',
+                plugins: {
+                    legend: {
+                        labels: {
+                            color: '#ffffff',
+                            font: { size: 12 }
+                        }
+                    },
+                    title: {
+                        display: true,
+                        text: 'Tool Ecosystem Breakdown',
+                        color: '#EF3B39',
+                        font: { size: 16, weight: 'bold' }
+                    }
+                },
+                scales: {
+                    x: {
+                        ticks: { color: '#ffffff' },
+                        grid: { color: '#404040' }
+                    },
+                    y: {
+                        ticks: { color: '#ffffff' },
+                        grid: { color: '#404040' }
+                    }
+                }
+            }
+        });
+    </script>
+</body>
+</html>
