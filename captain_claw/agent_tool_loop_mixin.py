@@ -1151,29 +1151,37 @@ class AgentToolLoopMixin:
                         # "forgetting" the list as context grows).
                         # Filter out non-path lines like "Found 27 file(s):"
                         # or other header/summary text the glob tool may emit.
-                        lines = [
-                            ln.strip() for ln in result.content.strip().splitlines()
-                            if ln.strip()
-                            and not re.match(r"^Found \d+", ln.strip())
-                            and (
-                                "/" in ln
-                                or "\\" in ln
-                                or "." in ln.strip().rsplit("/", 1)[-1]
-                            )
-                        ]
-                        if lines:
-                            sp["total"] = len(lines)
-                            sp["completed"] = 0
-                            sp["items"] = list(lines)
-                            sp["done_items"] = set()
-                            sp["_extraction_mode"] = self._classify_item_extraction_mode(
-                                lines,
-                                per_member_action=str(sp.get("_per_member_action", "")),
-                                user_input=str(sp.get("_per_member_action", "")),
-                            )
-                            # Mark glob as completed so the scale guard
-                            # blocks any subsequent re-glob attempts.
-                            sp["_glob_completed"] = True
+                        #
+                        # GUARD: Do not overwrite items when a glob has
+                        # already been absorbed (_glob_completed) — that
+                        # would replace a fully-populated item list with a
+                        # new discovery glob the LLM issued for unrelated
+                        # reasons (e.g. codebase exploration after a failed
+                        # early micro-loop).
+                        if not sp.get("_glob_completed", False):
+                            lines = [
+                                ln.strip() for ln in result.content.strip().splitlines()
+                                if ln.strip()
+                                and not re.match(r"^Found \d+", ln.strip())
+                                and (
+                                    "/" in ln
+                                    or "\\" in ln
+                                    or "." in ln.strip().rsplit("/", 1)[-1]
+                                )
+                            ]
+                            if lines:
+                                sp["total"] = len(lines)
+                                sp["completed"] = 0
+                                sp["items"] = list(lines)
+                                sp["done_items"] = set()
+                                sp["_extraction_mode"] = self._classify_item_extraction_mode(
+                                    lines,
+                                    per_member_action=str(sp.get("_per_member_action", "")),
+                                    user_input=str(sp.get("_per_member_action", "")),
+                                )
+                                # Mark glob as completed so the scale guard
+                                # blocks any subsequent re-glob attempts.
+                                sp["_glob_completed"] = True
                     elif tool_lower == "write" and isinstance(arguments, dict):
                         # Track the output file path so the scale guard
                         # can block re-reads of it during the loop.

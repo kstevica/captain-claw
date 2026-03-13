@@ -650,6 +650,19 @@ class AgentOrchestrationMixin:
                 return finish(micro_summary, success=False)
             # Scale processing done — fall through to main loop so the
             # LLM can handle remaining steps (summarise, email, etc.).
+            #
+            # If the micro-loop processed NOTHING (all items failed),
+            # the scale detection was wrong (e.g. items were glob
+            # patterns, not actual files).  Clear _scale_progress so
+            # subsequent globs don't get their results hijacked into
+            # a zombie scale state.
+            if micro_result.get("processed", 0) == 0:
+                log.info(
+                    "Early scale micro-loop processed nothing — clearing scale progress",
+                    failed=micro_result.get("failed", 0),
+                    total=micro_result.get("total", 0),
+                )
+                self._scale_progress = None
             _sp_cont = getattr(self, "_scale_progress", None)
             _cont_out = _sp_cont.get("_output_file", "") if _sp_cont else ""
             completion_feedback = (
