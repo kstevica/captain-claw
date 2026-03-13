@@ -101,6 +101,22 @@ def _build_schema() -> list[dict[str, Any]]:
                 },
             ],
         },
+        # ── 0b. Visualization Style ──────────────────────────────────
+        {
+            "id": "visualization_style",
+            "title": "Visualization Style",
+            "icon": "\U0001F3A8",
+            "sections": [
+                {
+                    "id": "visualization_style_editor",
+                    "title": "Visualization Style",
+                    "description": "Define the visual style for charts, dashboards, and reports. Upload a brand reference or design screenshot to extract colors, fonts, and layout rules.",
+                    "type": "custom",
+                    "custom_id": "visualization_style",
+                    "fields": [],
+                },
+            ],
+        },
         # ── 1. Provider API Keys ───────────────────────────────────
         {
             "id": "provider_keys",

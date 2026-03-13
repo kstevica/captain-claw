@@ -32,10 +32,10 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "web_fetch": "Fetch a URL and return clean readable TEXT (always text mode, never raw HTML)",
     "web_get": "Fetch a URL and return raw HTML source (only for scraping/DOM inspection)",
     "web_search": "Search the web for up-to-date sources",
-    "pdf_extract": "Extract PDF content into markdown",
-    "docx_extract": "Extract DOCX content into markdown",
-    "xlsx_extract": "Extract XLSX sheets into markdown tables",
-    "pptx_extract": "Extract PPTX slides into markdown",
+    "pdf_extract": "Extract a single .pdf file into markdown. ONLY for .pdf files. For multiple files in a folder use summarize_files instead.",
+    "docx_extract": "Extract a single .docx file into markdown. ONLY for .docx files — never use on .pdf/.xlsx/.pptx. For multiple files in a folder use summarize_files instead.",
+    "xlsx_extract": "Extract a single .xlsx file into markdown tables. ONLY for .xlsx files — never use on .pdf/.docx/.pptx. For multiple files in a folder use summarize_files instead.",
+    "pptx_extract": "Extract a single .pptx file into markdown. ONLY for .pptx files — never use on .pdf/.docx/.xlsx. For multiple files in a folder use summarize_files instead.",
     "pocket_tts": "Convert text to local speech audio and save as MP3",
     "send_mail": "Send emails via SMTP. Supports to, cc, bcc, subject, body, and file attachments.",
     "clipboard": "Read or write the system clipboard. Supports text, images, and files.",
@@ -45,6 +45,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "browser": "Control a headless browser for web app interaction. Supports observe/act (page understanding), click/type with nth-match disambiguation, login with encrypted credentials + cookie persistence, network capture for API discovery, API replay (execute captured APIs directly — skip the browser!), and multi-app sessions. Use for login flows, form filling, and interacting with dynamic/React web apps.",
     "direct_api": "Register, manage, and execute HTTP API endpoints directly. Users define endpoints with URL, method, description, and payload schemas. Supports auth capture from browser sessions. Methods: GET, POST, PUT, PATCH (DELETE is rejected for safety).",
     "termux": "Interact with the Android device via Termux API (take photo, battery status, GPS location, torch on/off)",
+    "summarize_files": "IMPORTANT: When the user asks you to go through, review, analyse, or summarise multiple files or documents in a folder, ALWAYS use this tool FIRST instead of reading/extracting files one by one. This tool handles the entire pipeline internally (reads all files including PDF/DOCX/XLSX/PPTX, summarises each one via LLM, combines into final output) and returns only the output file path — massively saving context. After getting the summary file, you can read it and use it to write reports, answer questions, etc.",
 }
 
 _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
@@ -56,10 +57,10 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "web_fetch": "clean text from URL",
     "web_get": "raw HTML from URL",
     "web_search": "web search",
-    "pdf_extract": "PDF to markdown",
-    "docx_extract": "DOCX to markdown",
-    "xlsx_extract": "XLSX to markdown",
-    "pptx_extract": "PPTX to markdown",
+    "pdf_extract": "single .pdf → markdown (for multiple files use summarize_files)",
+    "docx_extract": "single .docx → markdown (ONLY .docx, never .pdf; for multiple files use summarize_files)",
+    "xlsx_extract": "single .xlsx → markdown (ONLY .xlsx, never .pdf; for multiple files use summarize_files)",
+    "pptx_extract": "single .pptx → markdown (ONLY .pptx, never .pdf; for multiple files use summarize_files)",
     "pocket_tts": "text-to-speech MP3",
     "send_mail": "send emails via SMTP",
     "clipboard": "read/write system clipboard",
@@ -69,6 +70,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "browser": "headless browser for dynamic web apps",
     "direct_api": "register and call HTTP endpoints",
     "termux": "Android device: photo/battery/location/torch",
+    "summarize_files": "ALWAYS use for reviewing/analysing/summarising multiple files in a folder — handles PDF/DOCX/XLSX/PPTX internally, returns summary file path",
 }
 
 
@@ -1227,6 +1229,7 @@ class AgentContextMixin:
             WebSearchTool,
             WriteTool,
             XlsxExtractTool,
+            SummarizeFilesTool,
         )
 
         config = get_config()
@@ -1319,10 +1322,14 @@ class AgentContextMixin:
             elif tool_name == "screen_capture":
                 from captain_claw.tools.screen_capture import ScreenCaptureTool
                 self.tools.register(ScreenCaptureTool())
-
         # Always-on tools (registered regardless of tools.enabled).
         from captain_claw.tools.clipboard import ClipboardTool
         self.tools.register(ClipboardTool())
+        sft = SummarizeFilesTool()
+        uid = getattr(self, "_active_personality_id", None) or getattr(self, "_user_id", None)
+        if uid:
+            sft.set_user_mode(uid)
+        self.tools.register(sft)
 
         self._register_plugin_tools()
 
@@ -1551,6 +1558,19 @@ class AgentContextMixin:
             if user_p is not None:
                 user_context_block = user_context_to_prompt_block(user_p)
 
+        # Visualization style: brand-aware chart/dashboard generation.
+        visualization_style_block = ""
+        try:
+            from captain_claw.visualization_style import (
+                load_visualization_style,
+                visualization_style_to_prompt_block,
+            )
+            visualization_style_block = visualization_style_to_prompt_block(
+                load_visualization_style()
+            )
+        except Exception:
+            pass
+
         from captain_claw.system_info import build_system_info_block
 
         system_info_block = build_system_info_block(
@@ -1685,6 +1705,7 @@ class AgentContextMixin:
             planning_block=planning_block,
             personality_block=personality_block,
             user_context_block=user_context_block,
+            visualization_style_block=visualization_style_block,
             system_info_block=system_info_block,
             extra_read_dirs_block=extra_read_dirs_block,
             tool_list_block=tool_list_block,

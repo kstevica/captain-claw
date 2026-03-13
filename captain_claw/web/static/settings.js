@@ -77,6 +77,12 @@
         h.innerHTML = '<span class="icon">' + group.icon + '</span> ' + esc(group.title);
         main.appendChild(h);
 
+        // Visualization style group gets a special layout.
+        if (group.id === 'visualization_style') {
+            renderVisualizationStylePane(main);
+            return;
+        }
+
         // Personality group gets a special split-pane layout.
         if (group.id === 'personality') {
             renderPersonalitySplitPane(main);
@@ -881,6 +887,319 @@
 
     function collectWizardValues() {
         // Values are collected via input handlers above; nothing extra needed.
+    }
+
+    // ── Visualization Style editor ─────────────────────────
+
+    var _vsData = {};
+
+    function renderVisualizationStylePane(container) {
+        var pane = document.createElement('div');
+        pane.className = 'st-vs-pane';
+        pane.innerHTML = '<div class="st-personality-loading">Loading...</div>';
+        container.appendChild(pane);
+
+        fetch('/api/visualization-style').then(function (r) { return r.json(); })
+        .then(function (data) {
+            _vsData = data;
+            _vsRender(pane);
+        })
+        .catch(function (err) {
+            pane.innerHTML = '<div class="st-personality-loading" style="color:var(--red)">'
+                + 'Failed to load: ' + esc(err.message) + '</div>';
+        });
+    }
+
+    function _vsRender(pane) {
+        pane.innerHTML = '';
+
+        // Upload zone
+        var uploadZone = document.createElement('div');
+        uploadZone.className = 'st-vs-upload-zone';
+        uploadZone.innerHTML =
+            '<div class="st-vs-upload-icon">\uD83D\uDCC4</div>'
+            + '<div class="st-vs-upload-label">Drop a brand guide, styled report, or design screenshot</div>'
+            + '<div class="st-vs-upload-hint">PNG, JPG, WEBP, PDF, DOCX — AI extracts colors, fonts, and layout rules</div>'
+            + '<input type="file" class="st-vs-file-input" accept=".png,.jpg,.jpeg,.webp,.pdf,.docx" style="display:none">';
+        pane.appendChild(uploadZone);
+
+        var fileInput = uploadZone.querySelector('.st-vs-file-input');
+        uploadZone.addEventListener('click', function () { fileInput.click(); });
+        uploadZone.addEventListener('dragover', function (e) {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+        uploadZone.addEventListener('dragleave', function () {
+            uploadZone.classList.remove('dragover');
+        });
+        uploadZone.addEventListener('drop', function (e) {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) _vsAnalyzeFile(e.dataTransfer.files[0], pane);
+        });
+        fileInput.addEventListener('change', function () {
+            if (fileInput.files.length) _vsAnalyzeFile(fileInput.files[0], pane);
+        });
+
+        // Form
+        var form = document.createElement('div');
+        form.className = 'st-pp-editor-form st-vs-form';
+        pane.appendChild(form);
+
+        // Color palette editor
+        var palRow = document.createElement('div');
+        palRow.className = 'st-pp-field';
+        var palLabel = document.createElement('label');
+        palLabel.className = 'st-pp-field-label';
+        palLabel.textContent = 'Color Palette';
+        palRow.appendChild(palLabel);
+
+        var palCtrl = document.createElement('div');
+        palCtrl.className = 'st-pp-field-ctrl st-vs-palette-ctrl';
+
+        var palSwatches = document.createElement('div');
+        palSwatches.className = 'st-vs-palette';
+        palCtrl.appendChild(palSwatches);
+
+        var addColorBtn = document.createElement('button');
+        addColorBtn.className = 'st-btn sm';
+        addColorBtn.textContent = '+ Add Color';
+        addColorBtn.addEventListener('click', function () {
+            _vsData.color_palette = _vsData.color_palette || [];
+            _vsData.color_palette.push('#666666');
+            _vsRenderPalette(palSwatches);
+        });
+        palCtrl.appendChild(addColorBtn);
+
+        palRow.appendChild(palCtrl);
+        form.appendChild(palRow);
+        _vsRenderPalette(palSwatches);
+
+        // Text fields
+        var nameEl = _vsFormField(form, 'Name', 'text', _vsData.name || '', 'Style profile name');
+        var fontPEl = _vsFormField(form, 'Font Primary', 'text', _vsData.font_primary || '', 'e.g. Inter, system-ui, sans-serif');
+        var fontHEl = _vsFormField(form, 'Font Headings', 'text', _vsData.font_headings || '', 'e.g. Poppins, sans-serif');
+        var fontMEl = _vsFormField(form, 'Font Mono', 'text', _vsData.font_mono || '', 'e.g. JetBrains Mono, monospace');
+        var bgEl = _vsFormField(form, 'Background Style', 'text', _vsData.background_style || '', 'e.g. dark, light, gradient');
+        var chartEl = _vsFormField(form, 'Chart Style', 'text', _vsData.chart_style || '', 'e.g. minimal, corporate, modern');
+        var layoutEl = _vsFormField(form, 'Layout Notes', 'textarea', _vsData.layout_notes || '', 'Layout and spacing observations', 4);
+        var rulesEl = _vsFormField(form, 'Additional Rules', 'textarea', _vsData.additional_rules || '', 'Extra CSS/design conventions', 4);
+
+        // Source description (readonly)
+        if (_vsData.source_description) {
+            var srcRow = document.createElement('div');
+            srcRow.className = 'st-pp-field';
+            var srcLbl = document.createElement('label');
+            srcLbl.className = 'st-pp-field-label';
+            srcLbl.textContent = 'Source';
+            srcRow.appendChild(srcLbl);
+            var srcVal = document.createElement('div');
+            srcVal.className = 'st-vs-source-desc';
+            srcVal.textContent = _vsData.source_description;
+            srcRow.appendChild(srcVal);
+            form.appendChild(srcRow);
+        }
+
+        // Buttons
+        var btnRow = document.createElement('div');
+        btnRow.className = 'st-vs-btn-row';
+
+        var saveBtn = document.createElement('button');
+        saveBtn.className = 'st-btn primary';
+        saveBtn.textContent = 'Save Style';
+        saveBtn.addEventListener('click', function () {
+            _vsData.name = nameEl.value.trim();
+            _vsData.font_primary = fontPEl.value.trim();
+            _vsData.font_headings = fontHEl.value.trim();
+            _vsData.font_mono = fontMEl.value.trim();
+            _vsData.background_style = bgEl.value.trim();
+            _vsData.chart_style = chartEl.value.trim();
+            _vsData.layout_notes = layoutEl.value.trim();
+            _vsData.additional_rules = rulesEl.value.trim();
+            // color_palette already updated via _vsRenderPalette handlers
+
+            saveBtn.disabled = true;
+            saveBtn.textContent = 'Saving...';
+            fetch('/api/visualization-style', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(_vsData)
+            })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (data.error) { toast(data.error, 'error'); }
+                else { _vsData = data; toast('Visualization style saved', 'success'); }
+            })
+            .catch(function (err) { toast('Save failed: ' + err.message, 'error'); })
+            .finally(function () { saveBtn.disabled = false; saveBtn.textContent = 'Save Style'; });
+        });
+        btnRow.appendChild(saveBtn);
+
+        var clearBtn = document.createElement('button');
+        clearBtn.className = 'st-btn';
+        clearBtn.textContent = 'Clear All';
+        clearBtn.addEventListener('click', function () {
+            if (!confirm('Clear all visualization style settings?')) return;
+            _vsData = { name: 'Default', color_palette: [], font_primary: '', font_headings: '', font_mono: '', background_style: '', chart_style: '', layout_notes: '', additional_rules: '', source_description: '' };
+            fetch('/api/visualization-style', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(_vsData)
+            })
+            .then(function () { toast('Style cleared', 'success'); _vsRender(pane); })
+            .catch(function (err) { toast('Clear failed: ' + err.message, 'error'); });
+        });
+        btnRow.appendChild(clearBtn);
+
+        form.appendChild(btnRow);
+    }
+
+    function _vsRenderPalette(container) {
+        container.innerHTML = '';
+        var palette = _vsData.color_palette || [];
+        palette.forEach(function (color, idx) {
+            var swatch = document.createElement('div');
+            swatch.className = 'st-vs-swatch-wrap';
+
+            var colorDot = document.createElement('div');
+            colorDot.className = 'st-vs-swatch';
+            colorDot.style.backgroundColor = color;
+            swatch.appendChild(colorDot);
+
+            var inp = document.createElement('input');
+            inp.className = 'st-input st-vs-color-input';
+            inp.type = 'text';
+            inp.value = color;
+            inp.addEventListener('change', function () {
+                _vsData.color_palette[idx] = inp.value.trim();
+                colorDot.style.backgroundColor = inp.value.trim();
+            });
+            swatch.appendChild(inp);
+
+            var rmBtn = document.createElement('button');
+            rmBtn.className = 'st-btn sm st-vs-color-rm';
+            rmBtn.textContent = '\u00D7';
+            rmBtn.title = 'Remove color';
+            rmBtn.addEventListener('click', function () {
+                _vsData.color_palette.splice(idx, 1);
+                _vsRenderPalette(container);
+            });
+            swatch.appendChild(rmBtn);
+
+            container.appendChild(swatch);
+        });
+    }
+
+    function _vsFormField(container, label, type, value, placeholder, rows) {
+        var row = document.createElement('div');
+        row.className = 'st-pp-field';
+
+        var lbl = document.createElement('label');
+        lbl.className = 'st-pp-field-label';
+        lbl.textContent = label;
+        row.appendChild(lbl);
+
+        var ctrlWrap = document.createElement('div');
+        ctrlWrap.className = 'st-pp-field-ctrl';
+
+        var el;
+        if (type === 'textarea') {
+            el = document.createElement('textarea');
+            el.className = 'st-input st-textarea';
+            el.rows = rows || 3;
+        } else {
+            el = document.createElement('input');
+            el.className = 'st-input';
+            el.type = type || 'text';
+        }
+        el.value = value;
+        if (placeholder) el.placeholder = placeholder;
+        ctrlWrap.appendChild(el);
+
+        // Rephrase button for textareas
+        if (type === 'textarea') {
+            var fieldKey = label.toLowerCase().replace(/ /g, '_');
+            var rephraseBtn = document.createElement('button');
+            rephraseBtn.className = 'st-btn sm st-pp-rephrase-btn';
+            rephraseBtn.innerHTML = '\u2728 Rephrase & Enrich';
+            rephraseBtn.addEventListener('click', function () {
+                var text = el.value.trim();
+                if (!text) { toast('Nothing to rephrase', 'error'); return; }
+                rephraseBtn.disabled = true;
+                rephraseBtn.innerHTML = '\u23F3 Rephrasing...';
+                el.classList.add('st-pp-rephrasing');
+
+                fetch('/api/visualization-style/rephrase', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ field: fieldKey, text: text })
+                })
+                .then(function (r) { return r.json(); })
+                .then(function (result) {
+                    if (result.error) toast(result.error, 'error');
+                    else if (result.text) el.value = result.text;
+                })
+                .catch(function (err) { toast('Rephrase failed: ' + err.message, 'error'); })
+                .finally(function () {
+                    rephraseBtn.disabled = false;
+                    rephraseBtn.innerHTML = '\u2728 Rephrase & Enrich';
+                    el.classList.remove('st-pp-rephrasing');
+                });
+            });
+            ctrlWrap.appendChild(rephraseBtn);
+        }
+
+        row.appendChild(ctrlWrap);
+        container.appendChild(row);
+        return el;
+    }
+
+    function _vsAnalyzeFile(file, pane) {
+        var allowed = ['.png', '.jpg', '.jpeg', '.webp', '.pdf', '.docx'];
+        var ext = '.' + file.name.split('.').pop().toLowerCase();
+        if (allowed.indexOf(ext) === -1) {
+            toast('Unsupported file type: ' + ext, 'error');
+            return;
+        }
+
+        var zone = pane.querySelector('.st-vs-upload-zone');
+        var origHTML = zone.innerHTML;
+        zone.innerHTML =
+            '<div class="st-vs-upload-icon">\u23F3</div>'
+            + '<div class="st-vs-upload-label">Analyzing ' + esc(file.name) + '...</div>'
+            + '<div class="st-vs-upload-hint">Extracting colors, fonts, and layout rules via AI</div>';
+        zone.classList.add('analyzing');
+
+        var fd = new FormData();
+        fd.append('file', file);
+
+        fetch('/api/visualization-style/analyze', { method: 'POST', body: fd })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            if (data.error) {
+                toast('Analysis failed: ' + data.error, 'error');
+                zone.innerHTML = origHTML;
+                zone.classList.remove('analyzing');
+                return;
+            }
+            // Merge extracted data into current state.
+            if (data.color_palette && data.color_palette.length) _vsData.color_palette = data.color_palette;
+            if (data.font_primary) _vsData.font_primary = data.font_primary;
+            if (data.font_headings) _vsData.font_headings = data.font_headings;
+            if (data.font_mono) _vsData.font_mono = data.font_mono;
+            if (data.background_style) _vsData.background_style = data.background_style;
+            if (data.chart_style) _vsData.chart_style = data.chart_style;
+            if (data.layout_notes) _vsData.layout_notes = data.layout_notes;
+            if (data.additional_rules) _vsData.additional_rules = data.additional_rules;
+            if (data.source_description) _vsData.source_description = data.source_description;
+            toast('Style extracted from ' + file.name, 'success');
+            _vsRender(pane);
+        })
+        .catch(function (err) {
+            toast('Analysis failed: ' + err.message, 'error');
+            zone.innerHTML = origHTML;
+            zone.classList.remove('analyzing');
+        });
     }
 
     // ── Personality split-pane layout ───────────────────────

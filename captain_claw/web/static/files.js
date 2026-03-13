@@ -21,6 +21,7 @@
     var fbInfoPath = document.getElementById('fbInfoPath');
     var fbInfoMeta = document.getElementById('fbInfoMeta');
     var fbDownloadBtn = document.getElementById('fbDownloadBtn');
+    var fbViewBtn = document.getElementById('fbViewBtn');
     var fbContent = document.getElementById('fbContent');
     var fbCode = document.getElementById('fbCode');
     var fbBinary = document.getElementById('fbBinary');
@@ -156,16 +157,26 @@
         fbInfoMeta.textContent = formatSize(file.size) + '  \u00B7  ' + (file.mime_type || 'unknown');
 
         var downloadUrl = '/api/files/download?path=' + encodeURIComponent(file.physical);
+        var viewUrl = '/api/files/view?path=' + encodeURIComponent(file.physical);
+        var ext = (file.extension || '').toLowerCase();
 
         if (!file.exists) {
             fbMissing.style.display = 'flex';
             fbMissingPath.textContent = file.physical;
             fbDownloadBtn.style.display = 'none';
+            fbViewBtn.style.display = 'none';
             return;
         }
 
         fbDownloadBtn.style.display = '';
         fbDownloadBtn.href = downloadUrl;
+
+        if (ext === '.html' || ext === '.htm' || ext === '.svg') {
+            fbViewBtn.style.display = '';
+            fbViewBtn.href = viewUrl;
+        } else {
+            fbViewBtn.style.display = 'none';
+        }
 
         if (file.is_text) {
             fbContentLoading.style.display = 'flex';

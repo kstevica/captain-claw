@@ -1068,3 +1068,107 @@ html, body {
         padding: 16px;
     }
 }
+
+/* ── Visualization Style ──────────────────────────────── */
+
+.st-vs-pane {
+    padding: 0 4px;
+}
+
+.st-vs-upload-zone {
+    border: 2px dashed var(--border);
+    border-radius: var(--radius-lg);
+    padding: 32px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background-color 0.2s;
+    margin-bottom: 24px;
+}
+.st-vs-upload-zone:hover,
+.st-vs-upload-zone.dragover {
+    border-color: var(--accent);
+    background: rgba(88, 166, 255, 0.05);
+}
+.st-vs-upload-zone.analyzing {
+    border-color: var(--orange);
+    background: rgba(247, 129, 102, 0.05);
+    cursor: wait;
+    pointer-events: none;
+}
+
+.st-vs-upload-icon {
+    font-size: 36px;
+    margin-bottom: 8px;
+}
+.st-vs-upload-label {
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 500;
+    margin-bottom: 4px;
+}
+.st-vs-upload-hint {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+/* Color palette */
+.st-vs-palette {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.st-vs-swatch-wrap {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius);
+    padding: 4px 6px;
+}
+.st-vs-swatch {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: 2px solid var(--border);
+    flex-shrink: 0;
+}
+.st-vs-color-input {
+    width: 90px !important;
+    font-size: 12px !important;
+    padding: 2px 6px !important;
+    font-family: var(--font-mono, monospace) !important;
+}
+.st-vs-color-rm {
+    padding: 2px 6px !important;
+    font-size: 14px;
+    line-height: 1;
+    color: var(--text-muted);
+}
+.st-vs-color-rm:hover {
+    color: var(--red);
+}
+
+.st-vs-palette-ctrl {
+    flex-direction: column;
+    align-items: flex-start;
+}
+
+.st-vs-btn-row {
+    display: flex;
+    gap: 12px;
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+}
+
+.st-vs-source-desc {
+    color: var(--text-muted);
+    font-size: 12px;
+    font-style: italic;
+    padding: 4px 0;
+}
+
+.st-vs-form {
+    max-width: 640px;
+}

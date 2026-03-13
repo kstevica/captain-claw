@@ -108,7 +108,7 @@ class WriteTool(Tool):
         if safe_parts and safe_parts[0].lower() == "saved":
             safe_parts = safe_parts[1:] or ["output.txt"]
 
-        categories = {"downloads", "media", "output", "scripts", "showcase", "skills", "tmp", "tools"}
+        categories = {"downloads", "media", "output", "scripts", "showcase", "skills", "summaries", "tmp", "tools"}
         scoped_parts: list[str]
         if safe_parts[0] in categories:
             if len(safe_parts) >= 2 and safe_parts[1] == session_id:
@@ -156,7 +156,7 @@ class WriteTool(Tool):
                 # Strip any leading "saved/<category>/<session-id>" prefix
                 # the LLM might have added from observed tool output.
                 _categories = {"downloads", "media", "output", "scripts",
-                               "showcase", "skills", "tmp", "tools", "saved"}
+                               "showcase", "skills", "summaries", "tmp", "tools", "saved"}
                 while parts and parts[0].lower() in _categories:
                     parts = parts[1:]
                 # Strip a UUID-shaped segment (session id) if it leads.

@@ -236,6 +236,12 @@
             return;
         }
 
+        // HTML file messages render as inline view cards.
+        if (role === 'html_file') {
+            addHtmlFilePanel(content, isReplay);
+            return;
+        }
+
         const div = document.createElement('div');
         div.className = `msg ${role}`;
         if (isReplay) div.style.animation = 'none';
@@ -380,6 +386,58 @@
         };
         bubble.appendChild(audio);
 
+        div.appendChild(header);
+        div.appendChild(bubble);
+        chatMessages.appendChild(div);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+        msgCount++;
+        chatCount.textContent = `${msgCount} messages`;
+    }
+
+    function addHtmlFilePanel(filePath, isReplay) {
+        chatEmpty.style.display = 'none';
+        const div = document.createElement('div');
+        div.className = 'msg assistant';
+        if (isReplay) div.style.animation = 'none';
+
+        const header = document.createElement('div');
+        header.className = 'msg-header';
+        const label = document.createElement('span');
+        label.className = 'msg-label';
+        label.innerHTML = '<span class="msg-avatar">&#x1F980;</span> Captain Claw';
+        header.appendChild(label);
+
+        const bubble = document.createElement('div');
+        bubble.className = 'msg-bubble';
+
+        const card = document.createElement('div');
+        card.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 0;';
+
+        const icon = document.createElement('span');
+        icon.style.cssText = 'font-size:24px;';
+        icon.textContent = '\u{1F310}';
+        card.appendChild(icon);
+
+        const info = document.createElement('div');
+        info.style.cssText = 'flex:1;min-width:0;';
+        const fname = document.createElement('div');
+        fname.style.cssText = 'font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+        fname.textContent = filePath.split('/').pop();
+        info.appendChild(fname);
+        const fpath = document.createElement('div');
+        fpath.style.cssText = 'font-size:11px;opacity:0.6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+        fpath.textContent = filePath;
+        info.appendChild(fpath);
+        card.appendChild(info);
+
+        const viewBtn = document.createElement('a');
+        viewBtn.href = '/api/files/view?path=' + encodeURIComponent(filePath);
+        viewBtn.target = '_blank';
+        viewBtn.textContent = '\u{1F441} View';
+        viewBtn.style.cssText = 'padding:5px 14px;background:var(--accent,#3b82f6);color:#fff;border-radius:6px;font-size:12px;font-weight:500;text-decoration:none;white-space:nowrap;';
+        card.appendChild(viewBtn);
+
+        bubble.appendChild(card);
         div.appendChild(header);
         div.appendChild(bubble);
         chatMessages.appendChild(div);
@@ -1753,6 +1811,7 @@
     const filePreviewMeta = $('#filePreviewMeta');
     const filePreviewBody = $('#filePreviewBody');
     const fileDownloadBtn = $('#fileDownloadBtn');
+    const fileViewBtn = $('#fileViewBtn');
     const fileMdViewBtn = $('#fileMdViewBtn');
     var currentMdContent = null;
     var currentMdFilename = null;
@@ -1798,7 +1857,7 @@
 
     function getFileCategory(logical) {
         var first = (logical || '').split('/')[0];
-        var cats = ['downloads','media','output','scripts','showcase','skills','tmp','tools'];
+        var cats = ['downloads','media','output','scripts','showcase','skills','summaries','tmp','tools'];
         return cats.indexOf(first) >= 0 ? first : 'other';
     }
 
@@ -1809,6 +1868,7 @@
         downloads: '\u{2B07}\uFE0F Downloads',
         tools: '\u{1F527} Tools',
         showcase: '\u{2B50} Showcase',
+        summaries: '\u{1F4DD} Summaries',
         skills: '\u{26A1} Skills',
         tmp: '\u{1F4C2} Temp',
         other: '\u{1F4C1} Other',
@@ -1841,7 +1901,7 @@
             groups[cat].push(f);
         });
 
-        var order = ['scripts','output','media','downloads','tools','showcase','skills','tmp','other'];
+        var order = ['scripts','output','media','downloads','tools','showcase','summaries','skills','tmp','other'];
         var html = '';
         order.forEach(function(cat) {
             var items = groups[cat];
@@ -1887,6 +1947,14 @@
         currentMdFilename = null;
         fileMdViewBtn.style.display = 'none';
 
+        var ext = (f.extension || '').toLowerCase();
+        if (ext === '.html' || ext === '.htm' || ext === '.svg') {
+            fileViewBtn.href = '/api/files/view?path=' + encodeURIComponent(f.physical);
+            fileViewBtn.style.display = '';
+        } else {
+            fileViewBtn.style.display = 'none';
+        }
+
         if (!f.exists) {
             filePreviewBody.innerHTML = '<div class="file-preview-empty">File no longer exists on disk</div>';
             return;
@@ -1923,6 +1991,7 @@
         currentMdContent = null;
         currentMdFilename = null;
         fileMdViewBtn.style.display = 'none';
+        fileViewBtn.style.display = 'none';
     }
 
     function openMdViewer() {

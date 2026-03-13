@@ -343,7 +343,7 @@ class PdfExtractTool(Tool):
     """Extract PDF text and return markdown."""
 
     name = "pdf_extract"
-    description = "Extract text from a PDF file and return Markdown content."
+    description = "Extract text from a single .pdf file and return Markdown. ONLY for .pdf files. For processing multiple files in a folder, use summarize_files instead."
     parameters = {
         "type": "object",
         "properties": {
@@ -366,6 +366,13 @@ class PdfExtractTool(Tool):
         file_path, error = _require_existing_file(path, runtime_base_path=_runtime_base)
         if error:
             return ToolResult(success=False, error=error)
+        ext = file_path.suffix.lower()
+        if ext != ".pdf":
+            return ToolResult(
+                success=False,
+                error=f"Wrong tool: pdf_extract only handles .pdf files, got '{ext}'. "
+                      f"Use the correct tool for this extension, or use summarize_files for batch processing.",
+            )
         try:
             content, pdf_error = await asyncio.to_thread(
                 _extract_pdf_markdown,
@@ -385,7 +392,7 @@ class DocxExtractTool(Tool):
     """Extract DOCX text and return markdown."""
 
     name = "docx_extract"
-    description = "Extract text from a DOCX file and return Markdown content."
+    description = "Extract text from a single .docx file and return Markdown. ONLY for .docx files — do NOT use on .pdf, .xlsx, or .pptx. For processing multiple files in a folder, use summarize_files instead."
     parameters = {
         "type": "object",
         "properties": {
@@ -401,6 +408,13 @@ class DocxExtractTool(Tool):
         file_path, error = _require_existing_file(path, runtime_base_path=_runtime_base)
         if error:
             return ToolResult(success=False, error=error)
+        ext = file_path.suffix.lower()
+        if ext != ".docx":
+            return ToolResult(
+                success=False,
+                error=f"Wrong tool: docx_extract only handles .docx files, got '{ext}'. "
+                      f"Use the correct tool for this extension, or use summarize_files for batch processing.",
+            )
         try:
             content = await asyncio.to_thread(_extract_docx_markdown, file_path)
             return ToolResult(success=True, content=_truncate_markdown(content, max(1, int(max_chars))))
@@ -417,7 +431,7 @@ class XlsxExtractTool(Tool):
     """Extract XLSX sheets and return markdown."""
 
     name = "xlsx_extract"
-    description = "Extract worksheet content from an XLSX file and return Markdown tables."
+    description = "Extract worksheet content from a single .xlsx file and return Markdown tables. ONLY for .xlsx files — do NOT use on .pdf, .docx, or .pptx. For processing multiple files in a folder, use summarize_files instead."
     parameters = {
         "type": "object",
         "properties": {
@@ -440,6 +454,13 @@ class XlsxExtractTool(Tool):
         file_path, error = _require_existing_file(path, runtime_base_path=_runtime_base)
         if error:
             return ToolResult(success=False, error=error)
+        ext = file_path.suffix.lower()
+        if ext not in (".xlsx", ".xls"):
+            return ToolResult(
+                success=False,
+                error=f"Wrong tool: xlsx_extract only handles .xlsx/.xls files, got '{ext}'. "
+                      f"Use the correct tool for this extension, or use summarize_files for batch processing.",
+            )
         try:
             content = await asyncio.to_thread(
                 _extract_xlsx_markdown,
@@ -460,7 +481,7 @@ class PptxExtractTool(Tool):
     """Extract PPTX slides and return markdown."""
 
     name = "pptx_extract"
-    description = "Extract slide text from a PPTX file and return Markdown content."
+    description = "Extract slide text from a single .pptx file and return Markdown. ONLY for .pptx files — do NOT use on .pdf, .docx, or .xlsx. For processing multiple files in a folder, use summarize_files instead."
     parameters = {
         "type": "object",
         "properties": {
@@ -483,6 +504,13 @@ class PptxExtractTool(Tool):
         file_path, error = _require_existing_file(path, runtime_base_path=_runtime_base)
         if error:
             return ToolResult(success=False, error=error)
+        ext = file_path.suffix.lower()
+        if ext != ".pptx":
+            return ToolResult(
+                success=False,
+                error=f"Wrong tool: pptx_extract only handles .pptx files, got '{ext}'. "
+                      f"Use the correct tool for this extension, or use summarize_files for batch processing.",
+            )
         try:
             content = await asyncio.to_thread(
                 _extract_pptx_markdown,

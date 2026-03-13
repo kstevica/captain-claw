@@ -316,6 +316,7 @@ html, body {
 
 /* ─── Download buttons ────────────────────────────────── */
 
+.fb-view-btn,
 .fb-download-btn, .fb-download-link {
     display: inline-flex;
     align-items: center;
@@ -331,6 +332,7 @@ html, body {
     transition: background 0.15s, color 0.15s;
 }
 
+.fb-view-btn:hover,
 .fb-download-btn:hover, .fb-download-link:hover {
     background: var(--bg-hover);
     color: var(--accent-hover);

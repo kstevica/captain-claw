@@ -303,6 +303,16 @@ class WebServer:
                 })
                 # Play audio on the server machine (works even when browser tab is unfocused).
                 _play_audio_local(audio_path)
+        # Auto-broadcast HTML view card when write tool produces an HTML/SVG file.
+        if normalized == "write" and output and not str(output).strip().lower().startswith("error"):
+            import re as _re
+            html_match = _re.search(r"to\s+(\S+\.(?:html|htm|svg))", str(output))
+            if html_match:
+                self._broadcast({
+                    "type": "chat_message",
+                    "role": "html_file",
+                    "content": html_match.group(1).strip(),
+                })
         if normalized not in self._THINKING_SILENT_TOOLS:
             from captain_claw.agent_tool_loop_mixin import AgentToolLoopMixin
             summary = AgentToolLoopMixin._tool_thinking_summary(tool_name, arguments or {})
@@ -691,6 +701,23 @@ class WebServer:
         from captain_claw.web.rest_personality import rephrase_personality_field
         return await rephrase_personality_field(self, request)
 
+    # Visualization style
+    async def _get_visualization_style(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_visualization_style import get_visualization_style
+        return await get_visualization_style(self, request)
+
+    async def _put_visualization_style(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_visualization_style import put_visualization_style
+        return await put_visualization_style(self, request)
+
+    async def _analyze_visualization_style(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_visualization_style import analyze_visualization_style
+        return await analyze_visualization_style(self, request)
+
+    async def _rephrase_visualization_style(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_visualization_style import rephrase_visualization_style
+        return await rephrase_visualization_style(self, request)
+
     # Scripts
     async def _list_scripts(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_entities import list_scripts
@@ -766,6 +793,10 @@ class WebServer:
     async def _download_file(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_files import download_file
         return await download_file(self, request)
+
+    async def _view_file(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_files import view_file
+        return await view_file(self, request)
 
     async def _export_md(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_files import export_md
@@ -1348,12 +1379,18 @@ class WebServer:
         app.router.add_delete("/api/user-personalities/{user_id}", self._delete_user_personality)
         app.router.add_get("/api/telegram-users", self._list_telegram_users)
         app.router.add_post("/api/personality/rephrase", self._rephrase_personality_field)
+        # Visualization style
+        app.router.add_get("/api/visualization-style", self._get_visualization_style)
+        app.router.add_put("/api/visualization-style", self._put_visualization_style)
+        app.router.add_post("/api/visualization-style/analyze", self._analyze_visualization_style)
+        app.router.add_post("/api/visualization-style/rephrase", self._rephrase_visualization_style)
         app.router.add_get("/api/workflow-browser", self._list_workflow_outputs)
         app.router.add_get("/api/workflow-browser/output/{filename}", self._get_workflow_output)
         app.router.add_get("/api/files", self._list_files)
         app.router.add_get("/api/files/session/{session_id}", self._list_session_files)
         app.router.add_get("/api/files/content", self._get_file_content)
         app.router.add_get("/api/files/download", self._download_file)
+        app.router.add_get("/api/files/view", self._view_file)
         app.router.add_post("/api/files/export", self._export_md)
         app.router.add_get("/api/media", self._serve_media)
         app.router.add_post("/api/image/upload", self._image_upload)

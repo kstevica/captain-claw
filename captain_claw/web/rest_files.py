@@ -207,7 +207,7 @@ async def list_session_files(server: WebServer, request: web.Request) -> web.Res
         # Scan workspace/saved/<category>/<session_id>/
         _CATEGORIES = (
             "downloads", "media", "output", "scripts",
-            "showcase", "skills", "tmp", "tools",
+            "showcase", "skills", "summaries", "tmp", "tools",
         )
         for cat in _CATEGORIES:
             cat_dir = saved_root / cat / safe_id
@@ -306,6 +306,24 @@ async def download_file(server: WebServer, request: web.Request) -> web.Response
             "Content-Disposition": f'attachment; filename="{p.name}"',
         },
     )
+
+
+async def view_file(server: WebServer, request: web.Request) -> web.Response:
+    """GET /api/files/view?path=<physical_path> — serve a file inline (no download)."""
+    physical = request.query.get("path", "").strip()
+    if not physical:
+        return web.json_response({"error": "Missing 'path' parameter"}, status=400)
+
+    if not _is_allowed_path(physical):
+        known_physicals = {f["physical"] for f in await _collect_files(server)}
+        if physical not in known_physicals:
+            return web.json_response({"error": "File not in registry"}, status=403)
+
+    p = Path(physical)
+    if not p.is_file():
+        return web.json_response({"error": "File not found on disk"}, status=404)
+
+    return web.FileResponse(p)
 
 
 # Allowed media extensions for the /api/media endpoint.
