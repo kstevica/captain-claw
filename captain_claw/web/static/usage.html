@@ -256,6 +256,13 @@ html, body {
 .usage-table tr:hover td { background: var(--bg-hover); }
 
 .usage-table .num { text-align: right; }
+.usage-table .task-cell {
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-main, sans-serif);
+}
 .usage-table .status-ok { color: var(--green); }
 .usage-table .status-err { color: var(--red); }
 
@@ -309,6 +316,7 @@ html, body {
             <thead>
                 <tr>
                     <th>Time</th>
+                    <th>Task</th>
                     <th>Interaction</th>
                     <th>Provider</th>
                     <th>Model</th>
@@ -417,12 +425,13 @@ function renderSummary(totals) {
 function renderTable(records) {
     const tbody = document.getElementById("usageBody");
     if (!records || records.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="11" class="usage-empty">No usage records for this period</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="12" class="usage-empty">No usage records for this period</td></tr>`;
         return;
     }
     tbody.innerHTML = records.map(r => `
         <tr>
             <td>${fmtTime(r.created_at)}</td>
+            <td class="task-cell" title="${(r.task_name || '').replace(/"/g, '&quot;')}">${r.task_name || "—"}</td>
             <td>${r.interaction || "—"}</td>
             <td>${r.provider || "—"}</td>
             <td>${shortModel(r.model)}</td>

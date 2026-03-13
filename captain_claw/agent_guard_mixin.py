@@ -424,6 +424,7 @@ class AgentGuardMixin:
             finish_reason = str(getattr(response, "finish_reason", "") or "")
             content = str(getattr(response, "content", "") or "")
             session_id = self._current_session_slug() if self.session else None
+            task_name = str(getattr(self, "_current_task_name", "") or "")
 
             # Estimate bytes from message content
             input_bytes = 0
@@ -452,6 +453,7 @@ class AgentGuardMixin:
                 finish_reason=finish_reason,
                 error=error,
                 latency_ms=latency_ms,
+                task_name=task_name,
             ))
         except Exception:
             pass  # Never fail the main flow

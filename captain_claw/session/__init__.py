@@ -922,6 +922,7 @@ class SessionManager:
                     finish_reason               TEXT NOT NULL DEFAULT '',
                     error                       INTEGER NOT NULL DEFAULT 0,
                     latency_ms                  INTEGER NOT NULL DEFAULT 0,
+                    task_name                   TEXT NOT NULL DEFAULT '',
                     created_at                  TEXT NOT NULL
                 )
             """)
@@ -931,6 +932,13 @@ class SessionManager:
             await self._db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_llm_usage_session_id ON llm_usage(session_id)"
             )
+            # Migration: add task_name column for existing databases.
+            try:
+                await self._db.execute(
+                    "ALTER TABLE llm_usage ADD COLUMN task_name TEXT NOT NULL DEFAULT ''"
+                )
+            except Exception:
+                pass  # column already exists
             await self._ensure_cron_jobs_migrations()
             await self._db.commit()
 
@@ -3009,6 +3017,7 @@ class SessionManager:
         finish_reason: str = "",
         error: bool = False,
         latency_ms: int = 0,
+        task_name: str = "",
     ) -> None:
         """Persist a single LLM call usage record."""
         await self._ensure_db()
@@ -3021,14 +3030,16 @@ class SessionManager:
                 prompt_tokens, completion_tokens, total_tokens,
                 cache_creation_input_tokens, cache_read_input_tokens,
                 input_bytes, output_bytes, streaming, tools_enabled,
-                max_tokens, finish_reason, error, latency_ms, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                max_tokens, finish_reason, error, latency_ms, task_name,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 row_id, session_id, interaction, provider, model,
                 prompt_tokens, completion_tokens, total_tokens,
                 cache_creation_input_tokens, cache_read_input_tokens,
                 input_bytes, output_bytes, int(streaming), int(tools_enabled),
-                max_tokens, finish_reason, int(error), latency_ms, now_iso,
+                max_tokens, finish_reason, int(error), latency_ms, task_name,
+                now_iso,
             ),
         )
         await self._db.commit()
@@ -3072,7 +3083,8 @@ class SessionManager:
             " prompt_tokens, completion_tokens, total_tokens,"
             " cache_creation_input_tokens, cache_read_input_tokens,"
             " input_bytes, output_bytes, streaming, tools_enabled,"
-            " max_tokens, finish_reason, error, latency_ms, created_at"
+            " max_tokens, finish_reason, error, latency_ms, task_name,"
+            " created_at"
             f" FROM llm_usage{where}"
             " ORDER BY created_at DESC LIMIT ?"
         )
@@ -3084,7 +3096,8 @@ class SessionManager:
             "prompt_tokens", "completion_tokens", "total_tokens",
             "cache_creation_input_tokens", "cache_read_input_tokens",
             "input_bytes", "output_bytes", "streaming", "tools_enabled",
-            "max_tokens", "finish_reason", "error", "latency_ms", "created_at",
+            "max_tokens", "finish_reason", "error", "latency_ms", "task_name",
+            "created_at",
         ]
         return [dict(zip(cols, row)) for row in rows]
 
