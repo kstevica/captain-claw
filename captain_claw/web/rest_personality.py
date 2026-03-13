@@ -37,6 +37,9 @@ def _merge_personality_fields(p: "Personality", body: dict) -> None:  # type: ig
         elif isinstance(expertise_raw, str):
             p.expertise = [e.strip() for e in expertise_raw.split(",") if e.strip()]
 
+    if "instructions" in body:
+        p.instructions = str(body["instructions"]).strip()
+
 
 def _clear_instruction_caches(server: "WebServer") -> None:
     """Clear instruction caches so prompts are rebuilt with new personality."""
@@ -192,7 +195,7 @@ async def rephrase_personality_field(
     if not text:
         return web.json_response({"error": "Empty text"}, status=400)
 
-    if field_name not in ("description", "background", "expertise"):
+    if field_name not in ("description", "background", "expertise", "instructions"):
         return web.json_response({"error": "Invalid field"}, status=400)
 
     # Build a focused prompt for rephrasing/enriching.
@@ -210,6 +213,15 @@ async def rephrase_personality_field(
             "You are a writing assistant. The user has a short description "
             f"for a persona named '{persona_name}'. Rewrite it to be more vivid, "
             "specific, and engaging. Keep it to 1-3 sentences. "
+            "Do not add markdown formatting."
+        )
+    elif field_name == "instructions":
+        system_msg = (
+            "You are a writing assistant. The user has freeform instructions "
+            f"for a persona named '{persona_name}'. These instructions tell an AI "
+            "assistant how to behave when interacting with or as this persona. "
+            "Rewrite and enrich the instructions to be clearer, more specific, "
+            "and more actionable. Keep the same intent but improve phrasing. "
             "Do not add markdown formatting."
         )
     else:  # background

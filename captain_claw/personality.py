@@ -49,6 +49,7 @@ class Personality:
             "Structured data management",
         ]
     )
+    instructions: str = ""
 
 
 DEFAULT_PERSONALITY = Personality()
@@ -72,6 +73,10 @@ def personality_to_markdown(p: Personality) -> str:
     for item in p.expertise:
         lines.append(f"- {item.strip()}")
     lines.append("")
+    if p.instructions.strip():
+        lines.append("# Instructions\n")
+        lines.append(p.instructions.strip())
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -118,11 +123,14 @@ def parse_personality_markdown(text: str) -> Personality:
     if not expertise:
         expertise = list(DEFAULT_PERSONALITY.expertise)
 
+    instructions = sections.get("instructions", "").strip()
+
     return Personality(
         name=name or DEFAULT_PERSONALITY.name,
         description=description or DEFAULT_PERSONALITY.description,
         background=background or DEFAULT_PERSONALITY.background,
         expertise=expertise,
+        instructions=instructions,
     )
 
 
@@ -136,6 +144,7 @@ def personality_to_dict(p: Personality) -> dict[str, Any]:
         "description": p.description,
         "background": p.background,
         "expertise": list(p.expertise),
+        "instructions": p.instructions,
     }
 
 
@@ -157,6 +166,7 @@ def personality_from_dict(d: dict[str, Any]) -> Personality:
         background=str(d.get("background", DEFAULT_PERSONALITY.background)).strip()
         or DEFAULT_PERSONALITY.background,
         expertise=expertise or list(DEFAULT_PERSONALITY.expertise),
+        instructions=str(d.get("instructions", "")).strip(),
     )
 
 
@@ -181,12 +191,15 @@ def personality_to_prompt_block(p: Personality) -> str:
     if "captain claw" not in p.name.lower():
         escaped_name += " of the Captain Claw family"
 
-    return (
+    block = (
         f"You are {escaped_name}.\n"
         f"{_esc(p.description)}\n\n"
         f"Background: {_esc(p.background)}\n\n"
         f"Your areas of expertise: {expertise_list}."
     )
+    if p.instructions.strip():
+        block += f"\n\nAdditional instructions:\n{_esc(p.instructions.strip())}"
+    return block
 
 
 def user_context_to_prompt_block(p: Personality) -> str:
@@ -202,13 +215,16 @@ def user_context_to_prompt_block(p: Personality) -> str:
 
     expertise_list = ", ".join(_esc(e) for e in p.expertise) if p.expertise else "various topics"
 
-    return (
+    block = (
         f"\nThe user you are talking to is {_esc(p.name)}.\n"
         f"{_esc(p.description)}\n"
         f"Background: {_esc(p.background)}\n"
         f"Areas of expertise: {expertise_list}.\n"
         f"Tailor your responses to their level of expertise and perspective."
     )
+    if p.instructions.strip():
+        block += f"\nAdditional instructions from {_esc(p.name)}:\n{_esc(p.instructions.strip())}"
+    return block
 
 
 # ── File I/O with caching ────────────────────────────────────────────

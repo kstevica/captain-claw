@@ -994,7 +994,7 @@
             if (!userId || !userId.trim()) return;
             userId = userId.trim();
             if (personalityMap[userId]) { toast('Personality already exists', 'error'); return; }
-            var payload = { name: 'New User', description: '', background: '', expertise: [] };
+            var payload = { name: 'New User', description: '', background: '', expertise: [], instructions: '' };
             fetch('/api/user-personalities/' + userId, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
@@ -1028,7 +1028,7 @@
     function _ppSetupUser(pane, u) {
         var payload = {
             name: u.first_name || u.username || 'User ' + u.user_id,
-            description: '', background: '', expertise: []
+            description: '', background: '', expertise: [], instructions: ''
         };
         fetch('/api/user-personalities/' + u.user_id, {
             method: 'PUT',
@@ -1103,6 +1103,9 @@
         // Expertise
         var expInp = _ppFormField(form, 'Expertise', 'textarea', (data.expertise || []).join('\n'), 'One expertise per line', 8);
 
+        // Instructions
+        var instrInp = _ppFormField(form, 'Instructions', 'textarea', data.instructions || '', 'Additional freeform instructions injected into the system prompt', 5);
+
         container.appendChild(form);
 
         // Actions
@@ -1118,7 +1121,8 @@
                 name: name,
                 description: descInp.value.trim(),
                 background: bgInp.value.trim(),
-                expertise: expInp.value.split('\n').map(function (e) { return e.trim(); }).filter(function (e) { return e.length > 0; })
+                expertise: expInp.value.split('\n').map(function (e) { return e.trim(); }).filter(function (e) { return e.length > 0; }),
+                instructions: instrInp.value.trim()
             };
             saveBtn.disabled = true; saveBtn.textContent = 'Saving...';
             fetch('/api/personality', {
@@ -1171,6 +1175,7 @@
         var descInp = _ppFormField(form, 'Description', 'textarea', p.description || '', '', 3);
         var bgInp = _ppFormField(form, 'Background', 'textarea', p.background || '', '', 5);
         var expInp = _ppFormField(form, 'Expertise', 'textarea', (p.expertise || []).join('\n'), 'One expertise per line', 8);
+        var instrInp = _ppFormField(form, 'Instructions', 'textarea', p.instructions || '', 'Additional freeform instructions for the agent when talking to this user', 5);
 
         container.appendChild(form);
 
@@ -1184,7 +1189,8 @@
                 name: nameInp.value.trim(),
                 description: descInp.value.trim(),
                 background: bgInp.value.trim(),
-                expertise: expInp.value.split('\n').map(function (e) { return e.trim(); }).filter(function (e) { return e.length > 0; })
+                expertise: expInp.value.split('\n').map(function (e) { return e.trim(); }).filter(function (e) { return e.length > 0; }),
+                instructions: instrInp.value.trim()
             };
             if (!payload.name) { toast('Name is required', 'error'); return; }
             saveBtn.disabled = true; saveBtn.textContent = 'Saving...';

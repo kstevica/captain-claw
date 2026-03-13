@@ -49,6 +49,10 @@ _AGENT_PARAMETERS = {
             "type": "string",
             "description": "Comma-separated list of expertise areas. For 'update' only.",
         },
+        "instructions": {
+            "type": "string",
+            "description": "Additional freeform instructions injected into the system prompt. For 'update' only.",
+        },
     },
     "required": ["action"],
 }
@@ -76,6 +80,10 @@ _USER_PARAMETERS = {
         "expertise": {
             "type": "string",
             "description": "Comma-separated list of the user's expertise areas. For 'update' only.",
+        },
+        "instructions": {
+            "type": "string",
+            "description": "Additional freeform instructions for the agent when talking to this user. For 'update' only.",
         },
     },
     "required": ["action"],
@@ -111,6 +119,7 @@ class PersonalityTool(Tool):
         description: str | None = None,
         background: str | None = None,
         expertise: str | None = None,
+        instructions: str | None = None,
         **kwargs: Any,
     ) -> ToolResult:
         try:
@@ -122,6 +131,7 @@ class PersonalityTool(Tool):
                     description=description,
                     background=background,
                     expertise=expertise,
+                    instructions=instructions,
                 )
             return ToolResult(success=False, error=f"Unknown action: {action}")
         except Exception as e:
@@ -141,6 +151,7 @@ class PersonalityTool(Tool):
             f"Description: {p.description}",
             f"Background: {p.background}",
             f"Expertise: {', '.join(p.expertise)}",
+            f"Instructions: {p.instructions or '(none)'}",
         ]
         return ToolResult(success=True, content="\n".join(lines))
 
@@ -151,6 +162,7 @@ class PersonalityTool(Tool):
         description: str | None,
         background: str | None,
         expertise: str | None,
+        instructions: str | None,
     ) -> ToolResult:
         from captain_claw.personality import (
             Personality,
@@ -189,6 +201,10 @@ class PersonalityTool(Tool):
         if expertise is not None:
             p.expertise = [e.strip() for e in expertise.split(",") if e.strip()]
             changed.append("expertise")
+
+        if instructions is not None:
+            p.instructions = instructions.strip()
+            changed.append("instructions")
 
         if not changed:
             return ToolResult(
