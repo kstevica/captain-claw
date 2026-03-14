@@ -289,6 +289,9 @@ function showExploreConfirm(topic, context) {
   bar.classList.add("active");
   bar.style.display = "flex";
 
+  // Hide the Send button — Explore button replaces it.
+  $("#send-btn").style.display = "none";
+
   // Focus the input so the user can immediately type additions.
   input.focus();
   // Place cursor at end.
@@ -310,9 +313,10 @@ function confirmExploration() {
     source: 'click',
   };
 
-  // Hide the bar.
+  // Hide the bar and restore Send button.
   bar.classList.remove("active");
   bar.style.display = "none";
+  $("#send-btn").style.display = "";
 
   // Send whatever is in the input box (user may have edited it).
   handleSend();
@@ -324,6 +328,7 @@ function cancelExploration() {
     bar.classList.remove("active");
     bar.style.display = "none";
   }
+  $("#send-btn").style.display = "";
   $("#input-box").value = "";
   logEntry("system", "Exploration cancelled");
 }
@@ -624,6 +629,7 @@ function handleSend() {
     };
     bar.classList.remove("active");
     bar.style.display = "none";
+    $("#send-btn").style.display = "";
   }
 
   input.value = "";

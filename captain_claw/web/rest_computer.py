@@ -178,6 +178,9 @@ def _resolve_provider(server: "WebServer", model_id: str | None):
     If *model_id* matches an entry in the allowed-models list, a new
     provider is created for that model.  Otherwise the session provider
     (or global default) is returned.
+
+    Uses the same key-resolution logic as the orchestrator and chat:
+    normalize provider name → check env/dotenv → check provider_keys.
     """
     if model_id and server.agent:
         try:
@@ -188,17 +191,29 @@ def _resolve_provider(server: "WebServer", model_id: str | None):
                     from captain_claw.config import get_config
 
                     cfg = get_config()
-                    provider_name = m.get("provider", cfg.model.provider)
-                    headers = cfg.provider_keys.headers_for(provider_name) or None
-                    api_key = None if headers else (m.get("api_key") or cfg.model.api_key or None)
+                    provider_name = str(m.get("provider", cfg.model.provider)).strip()
+
+                    # Normalize the provider key the same way chat/orchestrator do.
+                    norm_key = server.agent._normalize_provider_key(provider_name)
+                    extra_headers = cfg.provider_keys.headers_for(norm_key) or None
+                    if extra_headers:
+                        api_key = None  # auth is carried in headers
+                    else:
+                        api_key = (
+                            server.agent._resolve_provider_api_key(norm_key)
+                            or m.get("api_key")
+                            or cfg.model.api_key
+                            or None
+                        )
+
                     return create_provider(
                         provider=provider_name,
-                        model=m.get("model", cfg.model.model),
-                        temperature=m.get("temperature") or cfg.model.temperature,
-                        max_tokens=m.get("max_tokens") or cfg.model.max_tokens,
+                        model=str(m.get("model", cfg.model.model)).strip(),
+                        temperature=float(m.get("temperature") if m.get("temperature") is not None else cfg.model.temperature),
+                        max_tokens=int(m.get("max_tokens") if m.get("max_tokens") is not None else cfg.model.max_tokens),
                         api_key=api_key,
-                        base_url=m.get("base_url") or cfg.model.base_url or None,
-                        extra_headers=headers,
+                        base_url=str(m.get("base_url", "") or "") or cfg.model.base_url or None,
+                        extra_headers=extra_headers,
                     )
         except Exception as exc:
             log.warning("Failed to resolve model override", model_id=model_id, error=str(exc))
