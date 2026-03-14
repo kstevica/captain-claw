@@ -401,6 +401,30 @@ const BOOT_SEQUENCES = {
     { html: '<div style="font-size:28px;font-weight:300;letter-spacing:2px;opacity:0.7">Computer</div>', delay: 600 },
     { html: '<div style="font-size:28px;font-weight:300;letter-spacing:2px">Computer</div><div style="margin-top:16px;width:120px;height:3px;border-radius:2px;background:#2a2e3d;overflow:hidden"><div style="width:0%;height:100%;background:#6c8cff;border-radius:2px;animation:modern-load 0.8s ease-out forwards"></div></div>', delay: 900 },
   ],
+  win11: [
+    { html: '<div style="font-size:32px">⊞</div><div style="margin-top:12px;font-family:Segoe UI,sans-serif;font-size:14px;color:#1a1a1a">Windows 11</div>', delay: 600 },
+    { html: '<div style="font-size:32px">⊞</div><div style="margin-top:12px;font-family:Segoe UI,sans-serif;font-size:14px;color:#1a1a1a">Windows 11</div><div style="margin-top:16px;width:100px;height:3px;border-radius:2px;background:#e5e5e5;overflow:hidden"><div style="width:0%;height:100%;background:#0078d4;border-radius:2px;animation:modern-load 0.8s ease-out forwards"></div></div>', delay: 900 },
+  ],
+  macos: [
+    { html: '<div style="font-size:48px"></div><div style="margin-top:12px;font-family:-apple-system,sans-serif;font-size:14px;color:#e0e0e0">macOS</div>', delay: 600 },
+    { html: '<div style="font-size:48px"></div><div style="margin-top:12px;font-family:-apple-system,sans-serif;font-size:14px;color:#e0e0e0">macOS</div><div style="margin-top:16px;width:120px;height:4px;border-radius:4px;background:#3d3d3d;overflow:hidden"><div style="width:0%;height:100%;background:#fff;border-radius:4px;animation:modern-load 0.8s ease-out forwards"></div></div>', delay: 900 },
+  ],
+  iphone: [
+    { html: '<div style="font-size:48px"></div>', delay: 500 },
+    { html: '<div style="font-size:48px"></div><div style="margin-top:16px;font-family:-apple-system,sans-serif;font-size:24px;font-weight:200;color:#fff;letter-spacing:2px">iPhone</div>', delay: 700 },
+  ],
+  android: [
+    { html: '<div style="font-size:48px;color:#3ddc84">▲</div><div style="margin-top:12px;font-family:Roboto,sans-serif;font-size:16px;color:#e8eaed;letter-spacing:1px">android</div>', delay: 800 },
+    { html: '<div style="font-size:48px;color:#3ddc84">▲</div><div style="margin-top:12px;font-family:Roboto,sans-serif;font-size:16px;color:#e8eaed;letter-spacing:1px">android</div><div style="margin-top:12px;width:80px;height:3px;border-radius:2px;background:#333;overflow:hidden"><div style="width:0%;height:100%;background:#8ab4f8;border-radius:2px;animation:modern-load 0.8s ease-out forwards"></div></div>', delay: 800 },
+  ],
+  nokia7110: [
+    { html: '<div style="font-size:12px;font-family:Share Tech Mono,monospace;font-weight:700;color:#1a2a0a;line-height:1.6;text-align:center">NOKIA<br><br>CONNECTING PEOPLE</div>', delay: 1000 },
+    { html: '<div style="font-size:11px;font-family:Share Tech Mono,monospace;font-weight:700;color:#1a2a0a;line-height:1.5;text-align:left">Menu<br>──────────<br>1 Messages<br>2 Contacts<br>3 Computer<br>──────────<br>Select ▸</div>', delay: 800 },
+  ],
+  nokiacomm: [
+    { html: '<div style="font-size:13px;font-family:Space Mono,monospace;color:#b0c0a0;text-align:left;line-height:1.8">Nokia 9110 Communicator<br><br>ROM Version 5.02<br><br>Initializing applications...</div>', delay: 1000 },
+    { html: '<div style="font-size:13px;font-family:Space Mono,monospace;color:#b0c0a0;text-align:left;line-height:1.8">Nokia 9110 Communicator<br><br>ROM Version 5.02<br><br>Loading Computer...</div>', delay: 700 },
+  ],
 };
 
 /* ── Theme descriptions for Visual tab LLM prompt ────────────── */
@@ -413,6 +437,12 @@ const THEME_INSTRUCTIONS = {
   win31: "Style it like a Windows 3.1 Program Manager application: teal (#008080) and navy (#000080) accents, silver (#c0c0c0) surfaces, beveled borders. MS Sans Serif style font. Think 1992 Windows 3.1.",
   hacker: "Style it like a hacker terminal: pure black background, electric green (#00ff41) text and borders. Monospaced font. Text should glow with text-shadow. Add subtle scanline effect. Think The Matrix.",
   modern: "Style it as a modern dark web application: dark slate background (#0f1117, #1a1d27), blue accent (#6c8cff), clean sans-serif typography, rounded corners (8px), subtle shadows. Polished SaaS aesthetic.",
+  win11: "Style it like a Windows 11 application: light theme with white (#fff) surfaces, subtle grey (#e5e5e5) borders, blue (#0078d4) accent. Segoe UI font. Rounded corners (8px), Mica-like frosted feel. Clean modern Microsoft design.",
+  macos: "Style it like a modern macOS dark mode application: dark (#2d2d2d) surfaces, blue (#0a84ff) accent, SF Pro-like sans-serif font. Rounded corners (10px), subtle vibrancy. Think modern Apple desktop app.",
+  iphone: "Style it like an iOS dark mode app: pure black (#000) background, dark grey (#1c1c1e) surfaces, blue (#0a84ff) accent. SF Pro-like sans-serif, large rounded corners (12px). Think iOS 17 native app.",
+  android: "Style it like a Material You Android app: dark (#121212) background, pastel blue (#8ab4f8) and purple (#bb86fc) accents, Roboto font. Large rounded corners (12px), subtle elevation shadows. Think Material Design 3.",
+  nokia7110: "Style it like a Nokia 7110 phone screen: olive-green LCD background (#8b9f6b, #9aaf7a), dark green (#1a2a0a) text, very simple chunky layout. Monospaced font, no decoration, minimalist. Think 1999 WAP phone.",
+  nokiacomm: "Style it like a Nokia Communicator (9110) app: grey-green (#d0d8c0, #dce4cc) background, dark green (#202820) text, navy blue (#004488) accent. Monospaced font, simple beveled borders. Think 1998 PDA phone.",
 };
 
 /* ── Boot ────────────────────────────────────────────────────── */
@@ -446,6 +476,433 @@ function setTheme(theme) {
   document.body.classList.add(`theme-${theme}`);
   currentTheme = theme;
   localStorage.setItem("computer-theme", theme);
+}
+
+/* ── Theme modal ─────────────────────────────────────────────── */
+
+const THEME_LIST = [
+  { id: "amiga",      name: "Amiga Workbench", bg: "#0055aa", fg: "#ff8800", pattern: "repeating-conic-gradient(#0055aa 0% 25%, #004488 0% 50%) 0 0 / 4px 4px" },
+  { id: "atarist",    name: "Atari ST GEM",    bg: "#00aa00", fg: "#000000", pattern: null },
+  { id: "c64",        name: "C64 GEOS",        bg: "#6c6c9e", fg: "#d4d4ee", pattern: "repeating-conic-gradient(#6c6c9e 0% 25%, #5a5a8a 0% 50%) 0 0 / 2px 2px" },
+  { id: "mac",        name: "Classic Mac",      bg: "#666699", fg: "#000000", pattern: "repeating-conic-gradient(#666699 0% 25%, #555588 0% 50%) 0 0 / 2px 2px" },
+  { id: "win31",      name: "Windows 3.1",      bg: "#008080", fg: "#ffffff", pattern: null },
+  { id: "hacker",     name: "Hacker",           bg: "#000000", fg: "#00ff41", pattern: null },
+  { id: "modern",     name: "Modern",           bg: "#0f1117", fg: "#6c8cff", pattern: null },
+  { id: "win11",      name: "Windows 11",       bg: "#f3f3f3", fg: "#0078d4", pattern: null },
+  { id: "macos",      name: "macOS",            bg: "#1e1e1e", fg: "#0a84ff", pattern: null },
+  { id: "iphone",     name: "iPhone",           bg: "#000000", fg: "#0a84ff", pattern: null },
+  { id: "android",    name: "Android",          bg: "#121212", fg: "#8ab4f8", pattern: null },
+  { id: "nokia7110",  name: "Nokia 7110",       bg: "#8b9f6b", fg: "#1a2a0a", pattern: null },
+  { id: "nokiacomm",  name: "Nokia Communicator", bg: "#d0d8c0", fg: "#004488", pattern: null },
+];
+
+/* ── Custom themes (user-uploaded, stored in localStorage) ──── */
+
+// All CSS variable keys that define a theme.
+const THEME_VARS = [
+  "bg", "bg-pattern", "surface", "surface-alt",
+  "chrome", "chrome-hi", "chrome-lo", "chrome-dark",
+  "titlebar-bg", "titlebar-fg", "titlebar-stripe",
+  "text", "text-dim", "text-inv",
+  "accent", "accent-alt",
+  "input-bg", "input-border",
+  "btn-bg", "btn-fg", "btn-active",
+  "log-bg", "log-text", "log-dim",
+  "led-on", "led-off",
+  "scrollbar-track", "scrollbar-thumb",
+  "font", "font-size", "font-weight", "line-height",
+  "font-title", "font-title-size",
+  "bevel", "radius",
+  "win-close-w", "win-depth-w", "win-gadget-h",
+];
+
+// Template based on the Modern theme — a clean starting point.
+const THEME_TEMPLATE = {
+  name: "My Custom Theme",
+  description: "Describe your theme style for visual generation prompts.",
+  variables: {
+    "bg":             "#0f1117",
+    "bg-pattern":     "none",
+    "surface":        "#1a1d27",
+    "surface-alt":    "#222633",
+    "chrome":         "#1a1d27",
+    "chrome-hi":      "#2a2e3d",
+    "chrome-lo":      "#13151c",
+    "chrome-dark":    "#2a2e3d",
+    "titlebar-bg":    "#1a1d27",
+    "titlebar-fg":    "#e0e0e6",
+    "titlebar-stripe": "none",
+    "text":           "#e0e0e6",
+    "text-dim":       "#8888a0",
+    "text-inv":       "#0f1117",
+    "accent":         "#6c8cff",
+    "accent-alt":     "#a78bfa",
+    "input-bg":       "#13151c",
+    "input-border":   "#2a2e3d",
+    "btn-bg":         "#6c8cff",
+    "btn-fg":         "#ffffff",
+    "btn-active":     "#5070dd",
+    "log-bg":         "#0a0d14",
+    "log-text":       "#7ee787",
+    "log-dim":        "#4a6a52",
+    "led-on":         "#6c8cff",
+    "led-off":        "#2a2e3d",
+    "scrollbar-track": "#1a1d27",
+    "scrollbar-thumb": "#2a2e3d",
+    "font":           "-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif",
+    "font-size":      "14px",
+    "font-weight":    "400",
+    "line-height":    "1.55",
+    "font-title":     "var(--font)",
+    "font-title-size": "13px",
+    "bevel":          "1px",
+    "radius":         "8px",
+    "win-close-w":    "0px",
+    "win-depth-w":    "0px",
+    "win-gadget-h":   "0px",
+  },
+  boot: [
+    { text: "Loading custom theme...", delay: 600 },
+    { text: "Ready.", delay: 400 }
+  ]
+};
+
+let customThemes = []; // Array of { id, name, description, variables, boot }
+
+function loadCustomThemes() {
+  try {
+    const raw = localStorage.getItem("computer-custom-themes");
+    if (raw) customThemes = JSON.parse(raw);
+  } catch (e) {
+    console.warn("Failed to load custom themes:", e);
+    customThemes = [];
+  }
+}
+
+function saveCustomThemes() {
+  localStorage.setItem("computer-custom-themes", JSON.stringify(customThemes));
+}
+
+function customThemeId(name) {
+  // Generate a stable CSS-safe id from the name.
+  return "custom-" + name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 30);
+}
+
+function injectCustomThemeCSS(theme) {
+  // Remove old style element for this theme if present.
+  const existingEl = document.getElementById(`custom-theme-style-${theme.id}`);
+  if (existingEl) existingEl.remove();
+
+  // Build CSS from variables.
+  let css = `.theme-${theme.id} {\n`;
+  for (const [key, val] of Object.entries(theme.variables)) {
+    if (THEME_VARS.includes(key)) {
+      css += `  --${key}: ${val};\n`;
+    }
+  }
+  css += `}\n`;
+
+  // Boot screen.
+  const bg = theme.variables["bg"] || "#000";
+  const fg = theme.variables["text"] || "#fff";
+  css += `.theme-${theme.id} #boot-screen { background: ${bg}; }\n`;
+  css += `.theme-${theme.id} #boot-content { color: ${fg}; }\n`;
+
+  // Modern-style window overrides (hide retro gadgets, rounded corners).
+  const radius = theme.variables["radius"] || "8px";
+  const radiusPx = parseInt(radius);
+  if (radiusPx >= 6) {
+    css += `.theme-${theme.id} .window { border-radius: ${radius}; box-shadow: 0 2px 12px rgba(0,0,0,0.3); }\n`;
+    css += `.theme-${theme.id} .win-btn { display: none; }\n`;
+    css += `.theme-${theme.id} ::-webkit-scrollbar { width: 6px; }\n`;
+    css += `.theme-${theme.id} ::-webkit-scrollbar-button { display: none; }\n`;
+    css += `.theme-${theme.id} ::-webkit-scrollbar-thumb { border-radius: 3px; border: none; }\n`;
+  }
+
+  const style = document.createElement("style");
+  style.id = `custom-theme-style-${theme.id}`;
+  style.textContent = css;
+  document.head.appendChild(style);
+}
+
+function registerCustomThemeBoot(theme) {
+  // Register boot sequence from the theme definition.
+  const bootSteps = (theme.boot || []).map((step) => ({
+    html: `<div style="font-size:14px">${esc(step.text || "")}</div>`,
+    delay: step.delay || 500,
+  }));
+  if (bootSteps.length === 0) {
+    bootSteps.push({ html: `<div style="font-size:14px">${esc(theme.name)}</div>`, delay: 600 });
+  }
+  BOOT_SEQUENCES[theme.id] = bootSteps;
+
+  // Register theme instructions for visual generation.
+  if (theme.description) {
+    THEME_INSTRUCTIONS[theme.id] = theme.description;
+  } else {
+    const accent = theme.variables["accent"] || "#6c8cff";
+    const bg = theme.variables["bg"] || "#000";
+    THEME_INSTRUCTIONS[theme.id] = `Style it to match this custom theme: background ${bg}, accent color ${accent}. Use the aesthetic described by the theme name "${theme.name}".`;
+  }
+}
+
+function downloadThemeTemplate() {
+  const blob = new Blob([JSON.stringify(THEME_TEMPLATE, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "computer-theme-template.json";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function validateCustomTheme(obj) {
+  if (!obj || typeof obj !== "object") return "Invalid JSON — expected an object.";
+  if (!obj.name || typeof obj.name !== "string" || obj.name.trim().length < 2) {
+    return 'Missing or invalid "name" (must be at least 2 characters).';
+  }
+  if (!obj.variables || typeof obj.variables !== "object") {
+    return 'Missing "variables" object with CSS custom properties.';
+  }
+  // Check that at least some key variables are present.
+  const required = ["bg", "text", "accent", "surface"];
+  const missing = required.filter((k) => !obj.variables[k]);
+  if (missing.length > 0) {
+    return `Missing required variables: ${missing.join(", ")}`;
+  }
+  return null; // valid
+}
+
+function uploadCustomTheme(file) {
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const obj = JSON.parse(e.target.result);
+      const err = validateCustomTheme(obj);
+      if (err) {
+        alert("Invalid theme file:\n\n" + err);
+        return;
+      }
+
+      const id = customThemeId(obj.name);
+
+      // Check for duplicates — overwrite if same name.
+      const existingIdx = customThemes.findIndex((t) => t.id === id);
+
+      const theme = {
+        id,
+        name: obj.name.trim(),
+        description: (obj.description || "").trim(),
+        variables: {},
+        boot: obj.boot || [],
+      };
+
+      // Copy only valid variable keys.
+      for (const key of THEME_VARS) {
+        if (obj.variables[key] !== undefined) {
+          theme.variables[key] = String(obj.variables[key]);
+        }
+      }
+
+      if (existingIdx >= 0) {
+        customThemes[existingIdx] = theme;
+      } else {
+        customThemes.push(theme);
+      }
+
+      saveCustomThemes();
+      injectCustomThemeCSS(theme);
+      registerCustomThemeBoot(theme);
+      renderCustomThemeGrid();
+
+      logEntry("system", `Custom theme "${theme.name}" ${existingIdx >= 0 ? "updated" : "uploaded"}`);
+
+      // Auto-select the new theme.
+      setTheme(theme.id);
+      updateThemeModalSelection();
+      setTimeout(() => closeThemeModal(), 300);
+
+    } catch (parseErr) {
+      alert("Failed to parse theme file:\n\n" + parseErr.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+function deleteCustomTheme(id) {
+  const idx = customThemes.findIndex((t) => t.id === id);
+  if (idx < 0) return;
+
+  const theme = customThemes[idx];
+  customThemes.splice(idx, 1);
+  saveCustomThemes();
+
+  // Remove injected CSS.
+  const styleEl = document.getElementById(`custom-theme-style-${id}`);
+  if (styleEl) styleEl.remove();
+
+  // Remove boot/instructions.
+  delete BOOT_SEQUENCES[id];
+  delete THEME_INSTRUCTIONS[id];
+
+  // If this theme was active, switch to Modern.
+  if (currentTheme === id) {
+    setTheme("modern");
+  }
+
+  renderCustomThemeGrid();
+  updateThemeModalSelection();
+  logEntry("system", `Custom theme "${theme.name}" deleted`);
+}
+
+function renderCustomThemeGrid() {
+  const grid = $("#custom-theme-grid");
+  const empty = $("#custom-theme-empty");
+
+  // Remove old custom cards (but keep empty placeholder).
+  grid.querySelectorAll(".theme-card.custom-theme").forEach((c) => c.remove());
+
+  if (customThemes.length === 0) {
+    if (empty) empty.style.display = "";
+    return;
+  }
+
+  if (empty) empty.style.display = "none";
+
+  for (const t of customThemes) {
+    const card = document.createElement("div");
+    card.className = "theme-card custom-theme" + (t.id === currentTheme ? " selected" : "");
+    card.dataset.theme = t.id;
+
+    const preview = document.createElement("div");
+    preview.className = "theme-card-preview";
+    preview.style.background = t.variables["bg-pattern"] && t.variables["bg-pattern"] !== "none"
+      ? t.variables["bg-pattern"]
+      : (t.variables["bg"] || "#333");
+    preview.style.color = t.variables["accent"] || "#fff";
+    preview.textContent = "Aa";
+
+    const nameRow = document.createElement("div");
+    nameRow.className = "theme-card-name";
+
+    const nameSpan = document.createElement("span");
+    nameSpan.textContent = t.name;
+    nameSpan.style.flex = "1";
+    nameSpan.style.overflow = "hidden";
+    nameSpan.style.textOverflow = "ellipsis";
+
+    const delBtn = document.createElement("button");
+    delBtn.className = "theme-card-delete";
+    delBtn.title = "Delete this theme";
+    delBtn.textContent = "✕";
+    delBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (confirm(`Delete custom theme "${t.name}"?`)) {
+        deleteCustomTheme(t.id);
+      }
+    });
+
+    nameRow.appendChild(nameSpan);
+    nameRow.appendChild(delBtn);
+
+    card.appendChild(preview);
+    card.appendChild(nameRow);
+    card.addEventListener("click", () => {
+      setTheme(t.id);
+      updateThemeModalSelection();
+      setTimeout(() => closeThemeModal(), 200);
+    });
+
+    grid.appendChild(card);
+  }
+}
+
+function updateThemeModalSelection() {
+  const allCards = document.querySelectorAll("#theme-grid .theme-card, #custom-theme-grid .theme-card");
+  allCards.forEach((c) => {
+    c.classList.toggle("selected", c.dataset.theme === currentTheme);
+  });
+}
+
+function initThemeModal() {
+  const modal = $("#theme-modal");
+  const grid = $("#theme-grid");
+  const btn = $("#theme-btn");
+
+  // Load custom themes from localStorage and inject their CSS.
+  loadCustomThemes();
+  for (const t of customThemes) {
+    injectCustomThemeCSS(t);
+    registerCustomThemeBoot(t);
+  }
+
+  // Build built-in theme cards.
+  for (const t of THEME_LIST) {
+    const card = document.createElement("div");
+    card.className = "theme-card" + (t.id === currentTheme ? " selected" : "");
+    card.dataset.theme = t.id;
+
+    const preview = document.createElement("div");
+    preview.className = "theme-card-preview";
+    preview.style.background = t.pattern || t.bg;
+    preview.style.color = t.fg;
+    preview.textContent = "Aa";
+
+    const name = document.createElement("div");
+    name.className = "theme-card-name";
+    name.textContent = t.name;
+
+    card.appendChild(preview);
+    card.appendChild(name);
+    card.addEventListener("click", () => {
+      setTheme(t.id);
+      updateThemeModalSelection();
+      // Close modal after a short delay so user sees the selection.
+      setTimeout(() => closeThemeModal(), 200);
+    });
+    grid.appendChild(card);
+  }
+
+  // Render custom themes.
+  renderCustomThemeGrid();
+
+  // Download template button.
+  const dlBtn = $("#theme-download-tpl");
+  if (dlBtn) dlBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    downloadThemeTemplate();
+  });
+
+  // Upload button.
+  const uploadInput = $("#theme-upload-input");
+  if (uploadInput) uploadInput.addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      uploadCustomTheme(file);
+      e.target.value = ""; // reset so same file can be re-uploaded
+    }
+  });
+
+  // Open modal.
+  btn.addEventListener("click", () => {
+    modal.classList.add("active");
+    updateThemeModalSelection();
+  });
+
+  // Close on backdrop click.
+  modal.querySelector(".modal-backdrop").addEventListener("click", closeThemeModal);
+  modal.querySelector(".modal-close").addEventListener("click", closeThemeModal);
+
+  // Close on Escape.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && modal.classList.contains("active")) {
+      closeThemeModal();
+    }
+  });
+}
+
+function closeThemeModal() {
+  $("#theme-modal").classList.remove("active");
 }
 
 /* ── WebSocket connection ────────────────────────────────────── */
@@ -1135,6 +1592,13 @@ function initResize() {
   const workspace = $("#workspace");
   let dragging = false;
 
+  // Restore persisted panel width.
+  const saved = localStorage.getItem("panel-width");
+  if (saved) {
+    const pct = parseFloat(saved);
+    if (pct >= 25 && pct <= 70) left.style.width = pct + "%";
+  }
+
   handle.addEventListener("mousedown", (e) => {
     e.preventDefault();
     dragging = true;
@@ -1155,6 +1619,9 @@ function initResize() {
       dragging = false;
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
+      // Persist the panel width.
+      const pct = (left.getBoundingClientRect().width / workspace.getBoundingClientRect().width) * 100;
+      localStorage.setItem("panel-width", pct.toFixed(2));
     }
   });
 }
@@ -1600,9 +2067,9 @@ function renderFileCard(f) {
         <div class="file-meta">${esc(size)}${f.logical ? ' · ' + esc(f.logical) : ''}</div>
       </div>
       <div class="file-actions">
-        ${previewable ? '<button class="tab-btn file-preview-btn" title="Preview">👁</button>' : ''}
-        <a class="tab-btn" href="/api/files/view?path=${encodeURIComponent(f.physical)}" target="_blank" title="Open in new tab">↗</a>
-        <a class="tab-btn" href="/api/files/download?path=${encodeURIComponent(f.physical)}" title="Download">⬇</a>
+        ${previewable ? '<button class="file-action-btn file-preview-btn" title="Preview file"><span class="file-action-icon">👁</span><span class="file-action-label">Preview</span></button>' : ''}
+        <a class="file-action-btn" href="/api/files/view?path=${encodeURIComponent(f.physical)}" target="_blank" title="Open in new tab"><span class="file-action-icon">↗</span><span class="file-action-label">Open</span></a>
+        <a class="file-action-btn" href="/api/files/download?path=${encodeURIComponent(f.physical)}" title="Download file"><span class="file-action-icon">⬇</span><span class="file-action-label">Download</span></a>
       </div>
     </div>
   `;
@@ -1622,9 +2089,20 @@ async function loadFiles() {
     const files = await res.json();
 
     if (!files || files.length === 0) {
+      _filesCache = [];
       el.innerHTML = '<span class="output-placeholder">No files yet.</span>';
       el.classList.add("output-empty");
       countEl.textContent = '';
+      return;
+    }
+
+    _filesCache = files;
+
+    // Apply current search filter if any.
+    const searchInput = $("#files-search");
+    const q = searchInput ? searchInput.value.trim() : '';
+    if (q) {
+      filterFiles(q);
       return;
     }
 
@@ -1688,10 +2166,93 @@ async function loadFiles() {
   }
 }
 
+let _filesCache = [];   // cached file list for search filtering
+
+function filterFiles(query) {
+  const el = $("#files-content");
+  if (!_filesCache.length) return;
+
+  const q = (query || '').trim().toLowerCase();
+  const filtered = q
+    ? _filesCache.filter(f =>
+        (f.filename || '').toLowerCase().includes(q) ||
+        (f.extension || '').toLowerCase().includes(q) ||
+        (f.logical || '').toLowerCase().includes(q))
+    : _filesCache;
+
+  const countEl = $("#files-count");
+  if (q) {
+    countEl.textContent = `${filtered.length}/${_filesCache.length} files`;
+  } else {
+    countEl.textContent = `${_filesCache.length} file${_filesCache.length !== 1 ? 's' : ''}`;
+  }
+
+  if (filtered.length === 0) {
+    el.innerHTML = `<span class="output-placeholder">No files matching "${esc(q)}"</span>`;
+    el.classList.add("output-empty");
+    return;
+  }
+
+  el.classList.remove("output-empty");
+
+  // Group filtered files by folder.
+  const groups = new Map();
+  for (const f of filtered) {
+    const folder = extractFolder(f);
+    if (!groups.has(folder)) groups.set(folder, []);
+    groups.get(folder).push(f);
+  }
+  const order = ['output', 'media', 'downloads', 'scripts', 'tools', 'skills', 'summaries', 'showcase', 'tmp'];
+  const sortedKeys = Array.from(groups.keys()).sort((a, b) => {
+    const ia = order.indexOf(a); const ib = order.indexOf(b);
+    if (ia >= 0 && ib >= 0) return ia - ib;
+    if (ia >= 0) return -1;
+    if (ib >= 0) return 1;
+    return a.localeCompare(b);
+  });
+
+  let html = '';
+  for (const folder of sortedKeys) {
+    const groupFiles = groups.get(folder);
+    const folderIcon = FOLDER_ICONS[folder] || FOLDER_ICONS.other;
+    html += `
+      <div class="file-group">
+        <div class="file-group-header" onclick="this.parentElement.classList.toggle('collapsed')">
+          <span class="file-group-icon">${folderIcon}</span>
+          <span class="file-group-name">${esc(folder)}</span>
+          <span class="file-group-count">${groupFiles.length}</span>
+          <span class="file-group-chevron">▾</span>
+        </div>
+        <div class="file-group-body">
+          ${groupFiles.map(renderFileCard).join('')}
+        </div>
+      </div>
+    `;
+  }
+  el.innerHTML = html;
+
+  // Re-attach preview handlers.
+  for (const btn of el.querySelectorAll('.file-preview-btn')) {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const card = btn.closest('.file-card');
+      openFilePreview(card.dataset.path, card.dataset.ext, card.dataset.text === '1');
+    });
+  }
+}
+
 function initFiles() {
   const refreshBtn = $("#files-refresh-btn");
   if (refreshBtn) {
     refreshBtn.addEventListener("click", () => loadFiles());
+  }
+  const searchInput = $("#files-search");
+  if (searchInput) {
+    let debounceTimer;
+    searchInput.addEventListener("input", () => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => filterFiles(searchInput.value), 150);
+    });
   }
 }
 
@@ -1976,13 +2537,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   const saved = localStorage.getItem("computer-theme");
   if (saved && saved !== currentTheme) {
     setTheme(saved);
-    $("#theme-selector").value = saved;
   }
 
-  // Theme selector.
-  $("#theme-selector").addEventListener("change", (e) => {
-    setTheme(e.target.value);
-  });
+  // Theme modal.
+  initThemeModal();
 
   // Init subsystems.
   initTextarea();

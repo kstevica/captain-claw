@@ -6,7 +6,7 @@
   <title>Computer</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Space+Mono:wght@400;700&family=Silkscreen:wght@400;700&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Space+Mono:wght@400;700&family=Silkscreen:wght@400;700&family=Roboto:wght@400;500;700&display=swap">
   <link rel="stylesheet" href="/static/computer.css">
   <link rel="icon" href="/static/favicon.svg">
 </head>
@@ -37,15 +37,7 @@
         <option value="standard" selected>Standard (16k)</option>
         <option value="generous">Generous (32k)</option>
       </select>
-      <select id="theme-selector" title="Theme">
-        <option value="amiga">Amiga Workbench</option>
-        <option value="atarist">Atari ST GEM</option>
-        <option value="c64">C64 GEOS</option>
-        <option value="mac">Classic Mac</option>
-        <option value="win31">Windows 3.1</option>
-        <option value="hacker">Hacker</option>
-        <option value="modern">Modern</option>
-      </select>
+      <button id="theme-btn" title="Choose theme">🎨 Theme</button>
     </div>
   </header>
 
@@ -127,6 +119,7 @@
           <div id="files-toolbar">
             <button id="files-refresh-btn" class="tab-btn" title="Refresh files">↻ Refresh</button>
             <span id="files-count"></span>
+            <input id="files-search" type="text" placeholder="Filter files..." spellcheck="false" autocomplete="off">
           </div>
           <div id="files-content" class="output-empty">
             <span class="output-placeholder">Files created during this session will appear here...</span>
@@ -165,6 +158,39 @@
         </div>
       </div>
       <div class="window-body" id="preview-body"></div>
+    </div>
+  </div>
+
+  <!-- ── Theme selector modal ── -->
+  <div id="theme-modal">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content window">
+      <div class="window-title">
+        <span class="window-title-text">Choose Theme</span>
+        <div class="window-controls">
+          <button class="win-btn modal-close" title="Close">✕</button>
+        </div>
+      </div>
+      <div class="window-body">
+        <div class="theme-section-label">Built-in Themes</div>
+        <div class="theme-grid" id="theme-grid"></div>
+        <div class="theme-section-divider"></div>
+        <div class="theme-section-label">
+          Custom Themes
+          <span class="theme-section-actions">
+            <button id="theme-download-tpl" class="tab-btn" title="Download theme template">⬇ Template</button>
+            <label id="theme-upload-label" class="tab-btn" title="Upload a custom theme (.json)">⬆ Upload
+              <input type="file" id="theme-upload-input" accept=".json" style="display:none">
+            </label>
+          </span>
+        </div>
+        <div class="theme-grid" id="custom-theme-grid">
+          <div class="theme-card-empty" id="custom-theme-empty">
+            <span>No custom themes yet.</span>
+            <span>Download the template, customize it, and upload!</span>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 

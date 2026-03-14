@@ -362,6 +362,282 @@
 
 
 /* ═══════════════════════════════════════════════════════════════
+   THEME: Windows 11
+   ═══════════════════════════════════════════════════════════════ */
+
+.theme-win11 {
+  --bg:             #f3f3f3;
+  --bg-pattern:     none;
+  --surface:        #ffffff;
+  --surface-alt:    #f9f9f9;
+  --chrome:         #ffffff;
+  --chrome-hi:      #ffffff;
+  --chrome-lo:      #e5e5e5;
+  --chrome-dark:    #d1d1d1;
+  --titlebar-bg:    #ffffff;
+  --titlebar-fg:    #1a1a1a;
+  --titlebar-stripe: none;
+  --text:           #1a1a1a;
+  --text-dim:       #6e6e6e;
+  --text-inv:       #ffffff;
+  --accent:         #0078d4;
+  --accent-alt:     #005a9e;
+  --input-bg:       #ffffff;
+  --input-border:   #d1d1d1;
+  --btn-bg:         #0078d4;
+  --btn-fg:         #ffffff;
+  --btn-active:     #005a9e;
+  --log-bg:         #1e1e1e;
+  --log-text:       #d4d4d4;
+  --log-dim:        #808080;
+  --led-on:         #0078d4;
+  --led-off:        #d1d1d1;
+  --scrollbar-track: #f3f3f3;
+  --scrollbar-thumb: #c1c1c1;
+  --font:           "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-size:      14px;
+  --font-weight:    400;
+  --line-height:    1.5;
+  --font-title:     var(--font);
+  --font-title-size: 13px;
+  --bevel:          1px;
+  --radius:         8px;
+  --win-close-w:    0px;
+  --win-depth-w:    0px;
+  --win-gadget-h:   0px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   THEME: macOS (modern)
+   ═══════════════════════════════════════════════════════════════ */
+
+.theme-macos {
+  --bg:             #1e1e1e;
+  --bg-pattern:     none;
+  --surface:        #2d2d2d;
+  --surface-alt:    #383838;
+  --chrome:         #2d2d2d;
+  --chrome-hi:      #3d3d3d;
+  --chrome-lo:      #222222;
+  --chrome-dark:    #3d3d3d;
+  --titlebar-bg:    #2d2d2d;
+  --titlebar-fg:    #e0e0e0;
+  --titlebar-stripe: none;
+  --text:           #e0e0e0;
+  --text-dim:       #8e8e93;
+  --text-inv:       #1e1e1e;
+  --accent:         #0a84ff;
+  --accent-alt:     #5e5ce6;
+  --input-bg:       #1e1e1e;
+  --input-border:   #3d3d3d;
+  --btn-bg:         #0a84ff;
+  --btn-fg:         #ffffff;
+  --btn-active:     #0064d2;
+  --log-bg:         #161616;
+  --log-text:       #98d89e;
+  --log-dim:        #5a7a5e;
+  --led-on:         #30d158;
+  --led-off:        #3d3d3d;
+  --scrollbar-track: #2d2d2d;
+  --scrollbar-thumb: #555555;
+  --font:           -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  --font-size:      13px;
+  --font-weight:    400;
+  --line-height:    1.5;
+  --font-title:     var(--font);
+  --font-title-size: 13px;
+  --bevel:          1px;
+  --radius:         10px;
+  --win-close-w:    0px;
+  --win-depth-w:    0px;
+  --win-gadget-h:   0px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   THEME: iPhone
+   ═══════════════════════════════════════════════════════════════ */
+
+.theme-iphone {
+  --bg:             #000000;
+  --bg-pattern:     none;
+  --surface:        #1c1c1e;
+  --surface-alt:    #2c2c2e;
+  --chrome:         #1c1c1e;
+  --chrome-hi:      #3a3a3c;
+  --chrome-lo:      #1c1c1e;
+  --chrome-dark:    #3a3a3c;
+  --titlebar-bg:    #1c1c1e;
+  --titlebar-fg:    #ffffff;
+  --titlebar-stripe: none;
+  --text:           #ffffff;
+  --text-dim:       #8e8e93;
+  --text-inv:       #000000;
+  --accent:         #0a84ff;
+  --accent-alt:     #5e5ce6;
+  --input-bg:       #1c1c1e;
+  --input-border:   #3a3a3c;
+  --btn-bg:         #0a84ff;
+  --btn-fg:         #ffffff;
+  --btn-active:     #0064d2;
+  --log-bg:         #000000;
+  --log-text:       #30d158;
+  --log-dim:        #48a868;
+  --led-on:         #0a84ff;
+  --led-off:        #3a3a3c;
+  --scrollbar-track: #1c1c1e;
+  --scrollbar-thumb: #48484a;
+  --font:           -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  --font-size:      15px;
+  --font-weight:    400;
+  --line-height:    1.45;
+  --font-title:     var(--font);
+  --font-title-size: 14px;
+  --bevel:          0px;
+  --radius:         12px;
+  --win-close-w:    0px;
+  --win-depth-w:    0px;
+  --win-gadget-h:   0px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   THEME: Android
+   ═══════════════════════════════════════════════════════════════ */
+
+.theme-android {
+  --bg:             #121212;
+  --bg-pattern:     none;
+  --surface:        #1e1e1e;
+  --surface-alt:    #2a2a2a;
+  --chrome:         #1e1e1e;
+  --chrome-hi:      #333333;
+  --chrome-lo:      #1a1a1a;
+  --chrome-dark:    #333333;
+  --titlebar-bg:    #1e1e1e;
+  --titlebar-fg:    #e8eaed;
+  --titlebar-stripe: none;
+  --text:           #e8eaed;
+  --text-dim:       #9aa0a6;
+  --text-inv:       #121212;
+  --accent:         #8ab4f8;
+  --accent-alt:     #bb86fc;
+  --input-bg:       #2a2a2a;
+  --input-border:   #333333;
+  --btn-bg:         #8ab4f8;
+  --btn-fg:         #121212;
+  --btn-active:     #669df6;
+  --log-bg:         #0e0e0e;
+  --log-text:       #81c995;
+  --log-dim:        #5a8a62;
+  --led-on:         #8ab4f8;
+  --led-off:        #333333;
+  --scrollbar-track: #1e1e1e;
+  --scrollbar-thumb: #444444;
+  --font:           "Roboto", "Noto Sans", -apple-system, sans-serif;
+  --font-size:      14px;
+  --font-weight:    400;
+  --line-height:    1.5;
+  --font-title:     var(--font);
+  --font-title-size: 13px;
+  --bevel:          0px;
+  --radius:         12px;
+  --win-close-w:    0px;
+  --win-depth-w:    0px;
+  --win-gadget-h:   0px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   THEME: Nokia 7110 (WAP phone)
+   ═══════════════════════════════════════════════════════════════ */
+
+.theme-nokia7110 {
+  --bg:             #8b9f6b;
+  --bg-pattern:     none;
+  --surface:        #9aaf7a;
+  --surface-alt:    #a3b884;
+  --chrome:         #9aaf7a;
+  --chrome-hi:      #b3c898;
+  --chrome-lo:      #7a8f5a;
+  --chrome-dark:    #3a4a2a;
+  --titlebar-bg:    #3a4a2a;
+  --titlebar-fg:    #d4e4b8;
+  --titlebar-stripe: none;
+  --text:           #1a2a0a;
+  --text-dim:       #4a5a3a;
+  --text-inv:       #d4e4b8;
+  --accent:         #2a3a1a;
+  --accent-alt:     #5a6a4a;
+  --input-bg:       #a3b884;
+  --input-border:   #3a4a2a;
+  --btn-bg:         #7a8f5a;
+  --btn-fg:         #1a2a0a;
+  --btn-active:     #3a4a2a;
+  --log-bg:         #3a4a2a;
+  --log-text:       #b3c898;
+  --log-dim:        #7a8f5a;
+  --led-on:         #c8e0a0;
+  --led-off:        #5a6a4a;
+  --scrollbar-track: #8b9f6b;
+  --scrollbar-thumb: #5a6a4a;
+  --font:           "Share Tech Mono", "Courier New", monospace;
+  --font-size:      12px;
+  --font-weight:    700;
+  --line-height:    1.3;
+  --font-title:     var(--font);
+  --font-title-size: 11px;
+  --bevel:          1px;
+  --radius:         0px;
+  --win-close-w:    0px;
+  --win-depth-w:    0px;
+  --win-gadget-h:   0px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   THEME: Nokia Communicator (9110/9210)
+   ═══════════════════════════════════════════════════════════════ */
+
+.theme-nokiacomm {
+  --bg:             #d0d8c0;
+  --bg-pattern:     none;
+  --surface:        #dce4cc;
+  --surface-alt:    #e8eedc;
+  --chrome:         #c0c8b0;
+  --chrome-hi:      #e8eedc;
+  --chrome-lo:      #a0a890;
+  --chrome-dark:    #404840;
+  --titlebar-bg:    #004488;
+  --titlebar-fg:    #ffffff;
+  --titlebar-stripe: none;
+  --text:           #202820;
+  --text-dim:       #606860;
+  --text-inv:       #ffffff;
+  --accent:         #004488;
+  --accent-alt:     #006699;
+  --input-bg:       #e8eedc;
+  --input-border:   #404840;
+  --btn-bg:         #c0c8b0;
+  --btn-fg:         #202820;
+  --btn-active:     #004488;
+  --log-bg:         #202820;
+  --log-text:       #b0c0a0;
+  --log-dim:        #708060;
+  --led-on:         #00cc66;
+  --led-off:        #606860;
+  --scrollbar-track: #c0c8b0;
+  --scrollbar-thumb: #808880;
+  --font:           "Space Mono", "Courier New", monospace;
+  --font-size:      13px;
+  --font-weight:    400;
+  --line-height:    1.4;
+  --font-title:     var(--font);
+  --font-title-size: 12px;
+  --bevel:          2px;
+  --radius:         2px;
+  --win-close-w:    14px;
+  --win-depth-w:    14px;
+  --win-gadget-h:   14px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
    BASE LAYOUT — Theme-agnostic structure
    ═══════════════════════════════════════════════════════════════ */
 
@@ -456,15 +732,20 @@ body {
   gap: 8px;
 }
 
-#theme-selector {
+#theme-btn {
   font-family: var(--font);
   font-size: 11px;
   background: var(--btn-bg);
   color: var(--btn-fg);
   border: 1px solid var(--chrome-lo);
   border-radius: var(--radius);
-  padding: 1px 4px;
+  padding: 2px 8px;
   cursor: pointer;
+  white-space: nowrap;
+}
+
+#theme-btn:hover {
+  border-color: var(--accent);
 }
 
 /* ── Workspace (three-panel grid) ────────────────────────────── */
@@ -1638,6 +1919,31 @@ body.visual-fullscreen #visual-frame {
   color: var(--text-dim);
 }
 
+#files-search {
+  flex: 1;
+  min-width: 80px;
+  max-width: 220px;
+  margin-left: auto;
+  padding: 3px 8px;
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--text);
+  background: var(--input-bg, var(--bg));
+  border: 1px solid var(--chrome-lo);
+  border-radius: var(--radius);
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+#files-search:focus {
+  border-color: var(--accent);
+}
+
+#files-search::placeholder {
+  color: var(--text-dim);
+  opacity: 0.7;
+}
+
 #files-content {
   flex: 1;
   overflow-y: auto;
@@ -1704,10 +2010,39 @@ body.visual-fullscreen #visual-frame {
   flex-shrink: 0;
 }
 
-.file-actions .tab-btn {
-  font-size: 11px;
+.file-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   padding: 3px 8px;
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--text);
+  background: var(--chrome-hi);
+  border: 1px solid var(--chrome-lo);
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-decoration: none;
   white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  line-height: 1.3;
+}
+
+.file-action-btn:hover {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+.file-action-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.file-action-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 /* File groups (folder-based grouping) */
@@ -1967,6 +2302,430 @@ body.visual-fullscreen #visual-frame {
   pointer-events: none;
   z-index: 20;
   box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+/* ── Win11 specific ──────────────────────────────────────────── */
+
+.theme-win11 .window {
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08), 0 0 1px rgba(0, 0, 0, 0.08);
+}
+
+.theme-win11 .window-title {
+  border-bottom: 1px solid #e5e5e5;
+  height: 34px;
+  padding: 0 12px;
+}
+
+.theme-win11 .win-btn { display: none; }
+
+.theme-win11 #input-box {
+  border-radius: 8px;
+  border: 1px solid #d1d1d1;
+  padding: 10px 14px;
+}
+
+.theme-win11 #input-box:focus {
+  border-color: #0078d4;
+  box-shadow: 0 0 0 1px #0078d4;
+}
+
+.theme-win11 #send-btn {
+  border: none;
+  border-radius: 6px;
+  padding: 6px 20px;
+  font-weight: 600;
+}
+
+.theme-win11 .tab-btn {
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #6e6e6e;
+  opacity: 1;
+}
+
+.theme-win11 .tab-btn.active {
+  background: #0078d4;
+  color: #fff;
+}
+
+.theme-win11 ::-webkit-scrollbar { width: 6px; }
+.theme-win11 ::-webkit-scrollbar-button { display: none; }
+.theme-win11 ::-webkit-scrollbar-thumb { border-radius: 3px; border: none; }
+
+.theme-win11 #boot-screen { background: #ffffff; }
+.theme-win11 #boot-content { color: #1a1a1a; font-family: "Segoe UI", sans-serif; }
+
+/* ── macOS specific ─────────────────────────────────────────── */
+
+.theme-macos .window {
+  border: 1px solid #3d3d3d;
+  border-radius: 10px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+}
+
+.theme-macos .window-title {
+  border-bottom: 1px solid #3d3d3d;
+  height: 36px;
+  padding: 0 14px;
+}
+
+.theme-macos .window-title-text {
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.theme-macos .win-btn { display: none; }
+
+.theme-macos #input-box {
+  border-radius: 8px;
+  border: 1px solid #3d3d3d;
+  padding: 10px 14px;
+}
+
+.theme-macos #input-box:focus {
+  border-color: #0a84ff;
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.2);
+}
+
+.theme-macos #send-btn {
+  border: none;
+  border-radius: 6px;
+  padding: 6px 20px;
+  font-weight: 500;
+}
+
+.theme-macos .tab-btn {
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #8e8e93;
+  opacity: 1;
+}
+
+.theme-macos .tab-btn.active {
+  background: #0a84ff;
+  color: #fff;
+}
+
+.theme-macos ::-webkit-scrollbar { width: 6px; }
+.theme-macos ::-webkit-scrollbar-button { display: none; }
+.theme-macos ::-webkit-scrollbar-thumb { border-radius: 3px; border: none; }
+
+.theme-macos #boot-screen { background: #1e1e1e; }
+.theme-macos #boot-content { color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+
+/* ── iPhone specific ────────────────────────────────────────── */
+
+.theme-iphone .window {
+  border: none;
+  border-radius: 12px;
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.4);
+}
+
+.theme-iphone .window-title {
+  border-bottom: 1px solid #3a3a3c;
+  height: 34px;
+  padding: 0 14px;
+}
+
+.theme-iphone .win-btn { display: none; }
+
+.theme-iphone #input-box {
+  border-radius: 18px;
+  border: 1px solid #3a3a3c;
+  padding: 10px 16px;
+}
+
+.theme-iphone #input-box:focus {
+  border-color: #0a84ff;
+}
+
+.theme-iphone #send-btn {
+  border: none;
+  border-radius: 18px;
+  padding: 6px 20px;
+  font-weight: 600;
+}
+
+.theme-iphone .tab-btn {
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #8e8e93;
+  opacity: 1;
+}
+
+.theme-iphone .tab-btn.active {
+  background: #0a84ff;
+  color: #fff;
+}
+
+.theme-iphone ::-webkit-scrollbar { width: 4px; }
+.theme-iphone ::-webkit-scrollbar-button { display: none; }
+.theme-iphone ::-webkit-scrollbar-thumb { border-radius: 2px; border: none; }
+
+.theme-iphone #boot-screen { background: #000000; }
+.theme-iphone #boot-content { color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+
+/* ── Android specific ───────────────────────────────────────── */
+
+.theme-android .window {
+  border: none;
+  border-radius: 12px;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.3);
+}
+
+.theme-android .window-title {
+  border-bottom: 1px solid #333333;
+  height: 36px;
+  padding: 0 14px;
+}
+
+.theme-android .win-btn { display: none; }
+
+.theme-android #input-box {
+  border-radius: 24px;
+  border: 1px solid #333333;
+  padding: 10px 16px;
+}
+
+.theme-android #input-box:focus {
+  border-color: #8ab4f8;
+  box-shadow: 0 0 0 2px rgba(138, 180, 248, 0.2);
+}
+
+.theme-android #send-btn {
+  border: none;
+  border-radius: 20px;
+  padding: 6px 20px;
+  font-weight: 500;
+}
+
+.theme-android .tab-btn {
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #9aa0a6;
+  opacity: 1;
+}
+
+.theme-android .tab-btn.active {
+  background: #8ab4f8;
+  color: #121212;
+}
+
+.theme-android ::-webkit-scrollbar { width: 4px; }
+.theme-android ::-webkit-scrollbar-button { display: none; }
+.theme-android ::-webkit-scrollbar-thumb { border-radius: 2px; border: none; }
+
+.theme-android #boot-screen { background: #121212; }
+.theme-android #boot-content { color: #e8eaed; font-family: "Roboto", sans-serif; }
+
+/* ── Nokia 7110 specific ────────────────────────────────────── */
+
+.theme-nokia7110 .window {
+  border: 2px solid #3a4a2a;
+  border-radius: 0;
+}
+
+.theme-nokia7110 .win-btn { display: none; }
+
+.theme-nokia7110 #boot-screen { background: #8b9f6b; }
+.theme-nokia7110 #boot-content {
+  color: #1a2a0a;
+  font-family: "Share Tech Mono", monospace;
+  font-weight: 700;
+}
+
+/* ── Nokia Communicator specific ────────────────────────────── */
+
+.theme-nokiacomm .window {
+  border: 2px solid #404840;
+  border-radius: 2px;
+  box-shadow:
+    inset 1px 1px 0 #e8eedc,
+    inset -1px -1px 0 #a0a890;
+}
+
+.theme-nokiacomm #boot-screen { background: #202820; }
+.theme-nokiacomm #boot-content {
+  color: #b0c0a0;
+  font-family: "Space Mono", monospace;
+}
+
+/* ── Theme selector modal ───────────────────────────────────── */
+
+#theme-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 8600;
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+
+#theme-modal.active {
+  display: flex;
+}
+
+#theme-modal .modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+}
+
+#theme-modal .modal-content {
+  position: relative;
+  width: 580px;
+  max-width: 90vw;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  z-index: 1;
+}
+
+#theme-modal .window-body {
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.theme-card {
+  border: 2px solid var(--chrome-lo);
+  border-radius: var(--radius);
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 0.15s, transform 0.1s;
+  background: var(--surface);
+}
+
+.theme-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.theme-card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.theme-card-preview {
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  position: relative;
+  overflow: hidden;
+}
+
+.theme-card-name {
+  padding: 6px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+  border-top: 1px solid var(--chrome-lo);
+  color: var(--text);
+  background: var(--surface);
+}
+
+/* ── Theme modal: section labels, divider, custom cards ─────── */
+
+.theme-section-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.theme-section-actions {
+  display: flex;
+  gap: 6px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.theme-section-actions .tab-btn {
+  font-size: 10px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+#theme-upload-label {
+  cursor: pointer;
+}
+
+.theme-section-divider {
+  height: 1px;
+  background: var(--chrome-lo);
+  margin: 14px 0 12px;
+}
+
+.theme-card-empty {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 18px 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-style: italic;
+  text-align: center;
+  border: 2px dashed var(--chrome-lo);
+  border-radius: var(--radius);
+}
+
+/* Custom theme cards — slight visual distinction */
+.theme-card.custom-theme {
+  border-style: dashed;
+}
+
+.theme-card.custom-theme .theme-card-name {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+.theme-card-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  font-size: 10px;
+  line-height: 1;
+  border-radius: 50%;
+  border: 1px solid var(--chrome-lo);
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.12s, color 0.12s;
+}
+
+.theme-card-delete:hover {
+  background: #cc3333;
+  color: #fff;
+  border-color: #cc3333;
 }
 
 /* ── Responsive ──────────────────────────────────────────────── */
