@@ -148,6 +148,27 @@ class ContextReplyMessage(BaseMessage):
     answers: dict[str, Any] = Field(default_factory=dict)
 
 
+# ── Activity messages ────────────────────────────────────────────
+
+
+class ActivityMessage(BaseMessage):
+    """CC -> BotPort: live agent activity update (enriched heartbeat).
+
+    Each step_type replaces the previous value of the same type,
+    acting as a compact status line per instance.
+    """
+
+    type: str = "activity"
+    instance_id: str = ""
+    step_type: str = ""  # status | thinking | tool_stream | tool_output
+    data: dict[str, Any] = Field(default_factory=dict)
+    # data keys vary by step_type:
+    #   status:      { text: str }
+    #   thinking:    { text: str, tool: str, phase: str }
+    #   tool_stream: { chunk: str }
+    #   tool_output: { tool_name: str, arguments: dict, output: str }
+
+
 # ── Lifecycle messages ───────────────────────────────────────────
 
 
@@ -189,6 +210,7 @@ _MESSAGE_MAP: dict[str, type[BaseMessage]] = {
     "follow_up": FollowUpMessage,
     "context_request": ContextRequestMessage,
     "context_reply": ContextReplyMessage,
+    "activity": ActivityMessage,
     "close_concern": CloseConcernMessage,
     "concern_closed": ConcernClosedMessage,
     "timeout_notice": TimeoutNoticeMessage,

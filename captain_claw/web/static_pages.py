@@ -110,3 +110,7 @@ async def serve_usage(server: WebServer, request: web.Request) -> web.FileRespon
 
 async def serve_reflections(server: WebServer, request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "reflections.html")
+
+
+async def serve_computer(server: WebServer, request: web.Request) -> web.FileResponse:
+    return web.FileResponse(STATIC_DIR / "computer.html")

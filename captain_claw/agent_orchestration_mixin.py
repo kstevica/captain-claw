@@ -1561,6 +1561,22 @@ class AgentOrchestrationMixin:
                     result = None
                     tool_result = f"Error: {str(e)}"
 
+                # If the "command" was rejected as not-a-command (tree diagram,
+                # prose, etc.), the LLM response likely already contains the
+                # answer.  Use it directly instead of triggering a rewrite.
+                if result and not result.success and "not a shell command" in str(result.error or "").lower():
+                    original_text = str(response.content or "").strip()
+                    if original_text:
+                        log.info("Inline command rejected as non-command, using original response text")
+                        finalized, final_text, finish_success = await attempt_finalize(
+                            output_text=original_text,
+                            iteration=iteration,
+                            finish_success=True,
+                        )
+                        if finalized:
+                            return finish(final_text, success=finish_success)
+                        continue
+
                 self._add_session_message(
                     role="tool",
                     content=tool_result,

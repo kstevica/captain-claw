@@ -56,6 +56,10 @@ class BotPortClient:
         self._tool_output_callback = tool_output_callback
         self._thinking_callback = thinking_callback
 
+        # Activity emission throttle (avoid flooding botport).
+        self._activity_min_interval = 0.3  # seconds between activity messages
+        self._last_activity_sent: float = 0.0
+
         # Connection state.
         self._session: aiohttp.ClientSession | None = None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
@@ -604,9 +608,9 @@ class BotPortClient:
 
         agent = AgentCls(
             provider=self._provider,
-            status_callback=self._status_callback,
-            tool_output_callback=self._tool_output_callback,
-            thinking_callback=self._thinking_callback,
+            status_callback=self._make_activity_status_callback(self._status_callback),
+            tool_output_callback=self._make_activity_tool_output_callback(self._tool_output_callback),
+            thinking_callback=self._make_activity_thinking_callback(self._thinking_callback),
         )
         agent.session = session
         agent.session_manager = sm
@@ -628,6 +632,89 @@ class BotPortClient:
             concern_id[:8], session.id[:8], persona_hint or "default",
         )
         return agent
+
+    def wrap_callbacks(
+        self,
+        status_cb: Callable[[str], None] | None = None,
+        thinking_cb: Callable[[str, str, str], None] | None = None,
+        tool_output_cb: Callable[[str, dict[str, Any], str], None] | None = None,
+    ) -> tuple[
+        Callable[[str], None],
+        Callable[[str, str, str], None],
+        Callable[[str, dict[str, Any], str], None],
+    ]:
+        """Wrap callbacks so they also emit activity to BotPort.
+
+        Use this when creating the main agent so its activity is streamed too.
+        Returns (status_cb, thinking_cb, tool_output_cb).
+        """
+        return (
+            self._make_activity_status_callback(status_cb),
+            self._make_activity_thinking_callback(thinking_cb),
+            self._make_activity_tool_output_callback(tool_output_cb),
+        )
+
+    # ── Activity emission ────────────────────────────────────────
+
+    def _send_activity(self, step_type: str, data: dict[str, Any]) -> None:
+        """Send an activity message to BotPort (fire-and-forget).
+
+        Throttled to avoid flooding the server. Thinking 'done' phase
+        is always sent immediately to clear the slot.
+        """
+        import time
+
+        now = time.monotonic()
+        is_clear = step_type == "thinking" and data.get("phase") == "done"
+        if not is_clear and (now - self._last_activity_sent) < self._activity_min_interval:
+            return
+
+        if not self._connected or not self._ws or self._ws.closed:
+            return
+
+        self._last_activity_sent = now
+        msg = json.dumps({
+            "type": "activity",
+            "instance_id": self._instance_id,
+            "step_type": step_type,
+            "data": data,
+        })
+        # Fire-and-forget: schedule the send without blocking the agent loop.
+        asyncio.ensure_future(self._ws.send_str(msg))
+
+    def _make_activity_status_callback(
+        self, original: Callable[[str], None] | None,
+    ) -> Callable[[str], None]:
+        """Wrap a status callback to also emit activity to BotPort."""
+        def callback(status: str) -> None:
+            if original:
+                original(status)
+            self._send_activity("status", {"text": status})
+        return callback
+
+    def _make_activity_thinking_callback(
+        self, original: Callable[[str, str, str], None] | None,
+    ) -> Callable[[str, str, str], None]:
+        """Wrap a thinking callback to also emit activity to BotPort."""
+        def callback(text: str, tool: str = "", phase: str = "tool") -> None:
+            if original:
+                original(text, tool, phase)
+            self._send_activity("thinking", {"text": text, "tool": tool, "phase": phase})
+        return callback
+
+    def _make_activity_tool_output_callback(
+        self, original: Callable[[str, dict[str, Any], str], None] | None,
+    ) -> Callable[[str, dict[str, Any], str], None]:
+        """Wrap a tool_output callback to also emit activity to BotPort."""
+        def callback(tool_name: str, arguments: dict[str, Any], output: str) -> None:
+            if original:
+                original(tool_name, arguments, output)
+            self._send_activity("tool_output", {
+                "tool_name": tool_name,
+                "arguments": arguments,
+                "output": output[:500],  # Truncate to avoid huge messages.
+            })
+        return callback
 
     # ── Capabilities ─────────────────────────────────────────────
 

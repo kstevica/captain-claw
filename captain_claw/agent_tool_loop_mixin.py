@@ -179,6 +179,9 @@ class AgentToolLoopMixin:
                 cmd = match.group(1).strip()
                 # Must look like a shell command (has spaces or special chars)
                 if cmd and len(cmd) > 2 and (' ' in cmd or '|' in cmd or '&' in cmd or '/' in cmd):
+                    # Reject tree-drawing characters and multi-line prose.
+                    if re.search(r'[└├│─┌┐┘┤┬┴┼╔╗╚╝║═]', cmd):
+                        continue
                     return cmd
 
         return None

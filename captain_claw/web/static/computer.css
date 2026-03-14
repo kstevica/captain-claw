@@ -1,0 +1,1994 @@
+/* ═══════════════════════════════════════════════════════════════
+   Computer — Theme Engine + Retro UI System
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Reset ───────────────────────────────────────────────────── */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+/* ═══════════════════════════════════════════════════════════════
+   THEME ENGINE — CSS Custom Properties
+   Each theme overrides these variables.
+   ═══════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Layout */
+  --titlebar-h: 28px;
+  --left-width: 42%;
+  --input-ratio: 45%;    /* top-left gets this % of left column */
+
+  /* Timing */
+  --transition-fast: 0.15s;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   THEME: Amiga Workbench 1.3
+   ═══════════════════════════════════════════════════════════════ */
+
+.theme-amiga {
+  /* Amiga's legendary 4-color palette */
+  --bg:             #0055aa;   /* Workbench blue */
+  --bg-pattern:     repeating-conic-gradient(#0055aa 0% 25%, #004488 0% 50%) 0 0 / 4px 4px;
+  --surface:        #aaaaaa;   /* Window body grey */
+  --surface-alt:    #ffffff;   /* White for content areas */
+  --chrome:         #aaaaaa;   /* Window chrome */
+  --chrome-hi:      #ffffff;   /* Bevel highlight (top/left) */
+  --chrome-lo:      #555555;   /* Bevel shadow (bottom/right) */
+  --chrome-dark:    #000000;   /* Darkest edge */
+  --titlebar-bg:    #0055aa;   /* Title bar blue */
+  --titlebar-fg:    #ffffff;   /* Title bar text */
+  --titlebar-stripe: repeating-linear-gradient(
+    90deg,
+    #ff8800 0px, #ff8800 2px,
+    #0055aa 2px, #0055aa 4px
+  );
+  --text:           #000000;
+  --text-dim:       #555555;
+  --text-inv:       #ffffff;
+  --accent:         #ff8800;   /* Amiga orange */
+  --accent-alt:     #0055aa;   /* Blue accent */
+  --input-bg:       #ffffff;
+  --input-border:   #000000;
+  --btn-bg:         #aaaaaa;
+  --btn-fg:         #000000;
+  --btn-active:     #0055aa;
+  --log-bg:         #000022;   /* Dark blue terminal */
+  --log-text:       #ff8800;   /* Orange on dark blue */
+  --log-dim:        #7799bb;
+  --led-on:         #00cc00;
+  --led-off:        #333333;
+  --scrollbar-track: #aaaaaa;
+  --scrollbar-thumb: #555555;
+
+  /* Typography — Share Tech Mono closely matches Amiga's iconic Topaz bitmap font */
+  --font:           "Share Tech Mono", "Courier New", "Lucida Console", monospace;
+  --font-size:      14px;
+  --font-weight:    400;
+  --line-height:    1.4;
+  --font-title:     var(--font);
+  --font-title-size: 13px;
+
+  /* Borders */
+  --bevel:          2px;
+  --radius:         0px;       /* Amiga has no rounded corners */
+
+  /* Window decorations */
+  --win-close-w:    20px;
+  --win-depth-w:    20px;
+  --win-gadget-h:   16px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   THEME: Atari ST GEM
+   ═══════════════════════════════════════════════════════════════ */
+
+.theme-atarist {
+  --bg:             #00aa00;
+  --bg-pattern:     none;
+  --surface:        #ffffff;
+  --surface-alt:    #ffffff;
+  --chrome:         #ffffff;
+  --chrome-hi:      #ffffff;
+  --chrome-lo:      #888888;
+  --chrome-dark:    #000000;
+  --titlebar-bg:    #000000;
+  --titlebar-fg:    #ffffff;
+  --titlebar-stripe: none;
+  --text:           #000000;
+  --text-dim:       #666666;
+  --text-inv:       #ffffff;
+  --accent:         #000000;
+  --accent-alt:     #00aa00;
+  --input-bg:       #ffffff;
+  --input-border:   #000000;
+  --btn-bg:         #cccccc;
+  --btn-fg:         #000000;
+  --btn-active:     #000000;
+  --log-bg:         #004400;
+  --log-text:       #00ff00;
+  --log-dim:        #00aa00;
+  --led-on:         #00ff00;
+  --led-off:        #333333;
+  --scrollbar-track: #cccccc;
+  --scrollbar-thumb: #888888;
+  /* Space Mono — tight, geometric monospace matching GEM's clean precision */
+  --font:           "Space Mono", "Courier New", monospace;
+  --font-size:      14px;
+  --font-weight:    400;
+  --line-height:    1.4;
+  --font-title:     var(--font);
+  --font-title-size: 12px;
+  --bevel:          1px;
+  --radius:         0px;
+  --win-close-w:    18px;
+  --win-depth-w:    18px;
+  --win-gadget-h:   16px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   THEME: C64 GEOS
+   ═══════════════════════════════════════════════════════════════ */
+
+.theme-c64 {
+  --bg:             #6c6c9e;
+  --bg-pattern:     repeating-conic-gradient(#6c6c9e 0% 25%, #5a5a8a 0% 50%) 0 0 / 2px 2px;
+  --surface:        #b4b4dc;
+  --surface-alt:    #d4d4ee;
+  --chrome:         #b4b4dc;
+  --chrome-hi:      #d4d4ee;
+  --chrome-lo:      #6c6c9e;
+  --chrome-dark:    #3c3c6c;
+  --titlebar-bg:    #3c3c6c;
+  --titlebar-fg:    #d4d4ee;
+  --titlebar-stripe: none;
+  --text:           #3c3c6c;
+  --text-dim:       #6c6c9e;
+  --text-inv:       #d4d4ee;
+  --accent:         #3c3c6c;
+  --accent-alt:     #8888bb;
+  --input-bg:       #d4d4ee;
+  --input-border:   #3c3c6c;
+  --btn-bg:         #b4b4dc;
+  --btn-fg:         #3c3c6c;
+  --btn-active:     #3c3c6c;
+  --log-bg:         #1a1a3a;
+  --log-text:       #b4b4dc;
+  --log-dim:        #6c6c9e;
+  --led-on:         #88dd88;
+  --led-off:        #3c3c6c;
+  --scrollbar-track: #b4b4dc;
+  --scrollbar-thumb: #6c6c9e;
+  /* Silkscreen — pixel bitmap font capturing GEOS's clean chunky aesthetic */
+  --font:           "Silkscreen", "Courier New", monospace;
+  --font-size:      14px;
+  --font-weight:    400;
+  --line-height:    1.5;
+  --font-title:     var(--font);
+  --font-title-size: 13px;
+  --bevel:          2px;
+  --radius:         2px;
+  --win-close-w:    16px;
+  --win-depth-w:    16px;
+  --win-gadget-h:   14px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   THEME: Classic Mac (System 7)
+   ═══════════════════════════════════════════════════════════════ */
+
+.theme-mac {
+  --bg:             #666699;
+  --bg-pattern:     repeating-conic-gradient(#666699 0% 25%, #555588 0% 50%) 0 0 / 2px 2px;
+  --surface:        #ffffff;
+  --surface-alt:    #eeeeee;
+  --chrome:         #cccccc;
+  --chrome-hi:      #ffffff;
+  --chrome-lo:      #888888;
+  --chrome-dark:    #000000;
+  --titlebar-bg:    linear-gradient(180deg, #ffffff 0%, #cccccc 100%);
+  --titlebar-fg:    #000000;
+  --titlebar-stripe: repeating-linear-gradient(
+    180deg,
+    #cccccc 0px, #cccccc 1px,
+    #ffffff 1px, #ffffff 3px
+  );
+  --text:           #000000;
+  --text-dim:       #666666;
+  --text-inv:       #ffffff;
+  --accent:         #0000cc;
+  --accent-alt:     #666699;
+  --input-bg:       #ffffff;
+  --input-border:   #000000;
+  --btn-bg:         #dddddd;
+  --btn-fg:         #000000;
+  --btn-active:     #000000;
+  --log-bg:         #ffffff;
+  --log-text:       #000000;
+  --log-dim:        #888888;
+  --led-on:         #00cc00;
+  --led-off:        #cccccc;
+  --scrollbar-track: #eeeeee;
+  --scrollbar-thumb: #888888;
+  --font:           "Chicago", "Charcoal", "Geneva", "Lucida Grande", sans-serif;
+  --font-size:      13px;
+  --font-weight:    400;
+  --line-height:    1.45;
+  --font-title:     "Chicago", "Charcoal", sans-serif;
+  --font-title-size: 12px;
+  --bevel:          1px;
+  --radius:         3px;
+  --win-close-w:    14px;
+  --win-depth-w:    14px;
+  --win-gadget-h:   14px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   THEME: Windows 3.1
+   ═══════════════════════════════════════════════════════════════ */
+
+.theme-win31 {
+  --bg:             #008080;
+  --bg-pattern:     none;
+  --surface:        #c0c0c0;
+  --surface-alt:    #ffffff;
+  --chrome:         #c0c0c0;
+  --chrome-hi:      #ffffff;
+  --chrome-lo:      #808080;
+  --chrome-dark:    #000000;
+  --titlebar-bg:    #000080;
+  --titlebar-fg:    #ffffff;
+  --titlebar-stripe: none;
+  --text:           #000000;
+  --text-dim:       #808080;
+  --text-inv:       #ffffff;
+  --accent:         #000080;
+  --accent-alt:     #008080;
+  --input-bg:       #ffffff;
+  --input-border:   #808080;
+  --btn-bg:         #c0c0c0;
+  --btn-fg:         #000000;
+  --btn-active:     #000080;
+  --log-bg:         #000000;
+  --log-text:       #c0c0c0;
+  --log-dim:        #808080;
+  --led-on:         #00ff00;
+  --led-off:        #808080;
+  --scrollbar-track: #c0c0c0;
+  --scrollbar-thumb: #808080;
+  --font:           "MS Sans Serif", "Fixedsys", "Courier New", sans-serif;
+  --font-size:      13px;
+  --font-weight:    400;
+  --line-height:    1.4;
+  --font-title:     "System", "MS Sans Serif", sans-serif;
+  --font-title-size: 12px;
+  --bevel:          2px;
+  --radius:         0px;
+  --win-close-w:    18px;
+  --win-depth-w:    18px;
+  --win-gadget-h:   16px;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   THEME: Hacker (Matrix-inspired)
+   ═══════════════════════════════════════════════════════════════ */
+
+.theme-hacker {
+  --bg:             #000000;
+  --bg-pattern:     none;
+  --surface:        #0a0a0a;
+  --surface-alt:    #111111;
+  --chrome:         #0a0a0a;
+  --chrome-hi:      #1a3a1a;
+  --chrome-lo:      #0a1a0a;
+  --chrome-dark:    #00ff41;
+  --titlebar-bg:    #000000;
+  --titlebar-fg:    #00ff41;
+  --titlebar-stripe: none;
+  --text:           #00ff41;
+  --text-dim:       #00802a;
+  --text-inv:       #000000;
+  --accent:         #00ff41;
+  --accent-alt:     #00cc33;
+  --input-bg:       #0a0a0a;
+  --input-border:   #00ff41;
+  --btn-bg:         #0a1a0a;
+  --btn-fg:         #00ff41;
+  --btn-active:     #00ff41;
+  --log-bg:         #000000;
+  --log-text:       #00ff41;
+  --log-dim:        #00802a;
+  --led-on:         #00ff41;
+  --led-off:        #0a1a0a;
+  --scrollbar-track: #0a0a0a;
+  --scrollbar-thumb: #00802a;
+  --font:           "Fira Code", "Source Code Pro", "Courier New", monospace;
+  --font-size:      13px;
+  --font-weight:    400;
+  --line-height:    1.5;
+  --font-title:     var(--font);
+  --font-title-size: 12px;
+  --bevel:          1px;
+  --radius:         0px;
+  --win-close-w:    16px;
+  --win-depth-w:    16px;
+  --win-gadget-h:   14px;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   THEME: Modern (clean web app)
+   ═══════════════════════════════════════════════════════════════ */
+
+.theme-modern {
+  --bg:             #0f1117;
+  --bg-pattern:     none;
+  --surface:        #1a1d27;
+  --surface-alt:    #222633;
+  --chrome:         #1a1d27;
+  --chrome-hi:      #2a2e3d;
+  --chrome-lo:      #13151c;
+  --chrome-dark:    #2a2e3d;
+  --titlebar-bg:    #1a1d27;
+  --titlebar-fg:    #e0e0e6;
+  --titlebar-stripe: none;
+  --text:           #e0e0e6;
+  --text-dim:       #8888a0;
+  --text-inv:       #0f1117;
+  --accent:         #6c8cff;
+  --accent-alt:     #a78bfa;
+  --input-bg:       #13151c;
+  --input-border:   #2a2e3d;
+  --btn-bg:         #6c8cff;
+  --btn-fg:         #ffffff;
+  --btn-active:     #5070dd;
+  --log-bg:         #0a0d14;
+  --log-text:       #7ee787;
+  --log-dim:        #4a6a52;
+  --led-on:         #6c8cff;
+  --led-off:        #2a2e3d;
+  --scrollbar-track: #1a1d27;
+  --scrollbar-thumb: #2a2e3d;
+  --font:           -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, sans-serif;
+  --font-size:      14px;
+  --font-weight:    400;
+  --line-height:    1.55;
+  --font-title:     var(--font);
+  --font-title-size: 13px;
+  --bevel:          1px;
+  --radius:         8px;
+  --win-close-w:    0px;
+  --win-depth-w:    0px;
+  --win-gadget-h:   0px;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   BASE LAYOUT — Theme-agnostic structure
+   ═══════════════════════════════════════════════════════════════ */
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font);
+  font-size: var(--font-size);
+  font-weight: var(--font-weight);
+  line-height: var(--line-height);
+  color: var(--text);
+  background: var(--bg);
+  background: var(--bg-pattern, var(--bg));
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Title Bar ───────────────────────────────────────────────── */
+
+#titlebar {
+  height: var(--titlebar-h);
+  background: var(--titlebar-bg);
+  color: var(--titlebar-fg);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px;
+  font-family: var(--font-title);
+  font-size: var(--font-title-size);
+  flex-shrink: 0;
+  border-bottom: var(--bevel) solid var(--chrome-dark);
+  user-select: none;
+  position: relative;
+  z-index: 10;
+}
+
+#titlebar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+#home-link {
+  font-size: 16px;
+  text-decoration: none;
+  color: var(--text);
+  opacity: 0.7;
+  transition: opacity 0.15s;
+  line-height: 1;
+}
+
+#home-link:hover {
+  opacity: 1;
+  color: var(--accent);
+}
+
+#system-name {
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+#session-badge {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+#titlebar-center {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  background: var(--led-off);
+  transition: background 0.3s;
+}
+
+.status-dot.connected {
+  background: var(--led-on);
+}
+
+#titlebar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#theme-selector {
+  font-family: var(--font);
+  font-size: 11px;
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  border: 1px solid var(--chrome-lo);
+  border-radius: var(--radius);
+  padding: 1px 4px;
+  cursor: pointer;
+}
+
+/* ── Workspace (three-panel grid) ────────────────────────────── */
+
+#workspace {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  padding: 6px;
+  gap: 0;
+}
+
+#left-column {
+  width: var(--left-width);
+  min-width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+#input-panel {
+  flex: 0 0 var(--input-ratio);
+  min-height: 160px;
+  display: flex;
+  flex-direction: column;
+}
+
+#log-panel {
+  flex: 1;
+  min-height: 100px;
+  display: flex;
+  flex-direction: column;
+}
+
+#h-resize {
+  width: 6px;
+  cursor: col-resize;
+  flex-shrink: 0;
+  position: relative;
+}
+
+#h-resize::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 2px;
+  height: 40px;
+  background: var(--chrome-lo);
+  border-radius: 1px;
+}
+
+#output-panel {
+  flex: 1;
+  min-width: 300px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Window chrome (themed) ──────────────────────────────────── */
+
+.window {
+  background: var(--surface);
+  border: var(--bevel) solid var(--chrome-dark);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+/* Bevel effect: inset highlight */
+.window::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.window-title {
+  background: var(--titlebar-bg);
+  color: var(--titlebar-fg);
+  font-family: var(--font-title);
+  font-size: var(--font-title-size);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 6px;
+  height: 22px;
+  user-select: none;
+  flex-shrink: 0;
+  position: relative;
+}
+
+/* Amiga-style orange stripes on either side of title text */
+.theme-amiga .window-title::before,
+.theme-amiga .window-title::after {
+  content: "";
+  flex: 1;
+  height: 8px;
+  margin: 0 6px;
+  background: var(--titlebar-stripe);
+}
+
+.window-title-text {
+  font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.window-controls {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.win-btn {
+  width: var(--win-gadget-h);
+  height: var(--win-gadget-h);
+  background: var(--chrome);
+  border: 1px solid var(--chrome-dark);
+  cursor: pointer;
+  position: relative;
+}
+
+.win-btn:active {
+  background: var(--chrome-lo);
+}
+
+.window-body {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/* ── Input area ──────────────────────────────────────────────── */
+
+#input-area {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  flex-shrink: 0;
+}
+
+#input-box {
+  width: 100%;
+  resize: none;
+  font-family: var(--font);
+  font-size: var(--font-size);
+  line-height: var(--line-height);
+  color: var(--text);
+  background: var(--input-bg);
+  border: var(--bevel) solid var(--input-border);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+  outline: none;
+}
+
+/* Inset bevel on input */
+#input-box {
+  border-top-color: var(--chrome-lo);
+  border-left-color: var(--chrome-lo);
+  border-bottom-color: var(--chrome-hi);
+  border-right-color: var(--chrome-hi);
+}
+
+#input-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+#send-btn {
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 3px 16px;
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  border: var(--bevel) solid var(--chrome-dark);
+  border-top-color: var(--chrome-hi);
+  border-left-color: var(--chrome-hi);
+  border-radius: var(--radius);
+  cursor: pointer;
+  user-select: none;
+}
+
+#send-btn:active {
+  border-top-color: var(--chrome-lo);
+  border-left-color: var(--chrome-lo);
+  border-bottom-color: var(--chrome-hi);
+  border-right-color: var(--chrome-hi);
+  padding: 4px 15px 2px 17px;
+}
+
+/* ── Explore confirmation bar ─────────────────────────────────── */
+
+#explore-confirm-bar {
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  background: var(--surface-alt, var(--surface));
+  border: 2px solid var(--accent);
+  border-radius: var(--radius);
+  margin: 4px 0 0 0;
+  animation: explore-bar-in 0.2s ease-out;
+}
+
+#explore-confirm-bar.active {
+  display: flex;
+}
+
+@keyframes explore-bar-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.explore-confirm-topic {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.explore-confirm-hint {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.explore-confirm-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.explore-confirm-actions .tab-btn {
+  font-size: 11px;
+  padding: 3px 10px;
+}
+
+#explore-send-btn {
+  background: var(--accent) !important;
+  color: #fff !important;
+  font-weight: 700;
+}
+
+#explore-cancel-btn {
+  opacity: 0.7;
+}
+
+/* ── Visual choice bar (agent HTML vs generate new) ──────────── */
+
+#visual-choice-bar {
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--surface-alt, var(--surface));
+  border: 2px solid var(--accent);
+  border-radius: var(--radius);
+  margin: 8px;
+  animation: explore-bar-in 0.2s ease-out;
+}
+
+.visual-choice-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.visual-choice-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.visual-choice-text {
+  line-height: 1.4;
+}
+
+.visual-choice-text strong {
+  color: var(--accent);
+}
+
+.visual-choice-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.visual-choice-actions .tab-btn {
+  font-size: 11px;
+  padding: 4px 12px;
+}
+
+#visual-use-file-btn {
+  background: var(--accent) !important;
+  color: #fff !important;
+  font-weight: 700;
+}
+
+#visual-generate-btn {
+  opacity: 0.85;
+}
+
+/* ── Decomposition area ──────────────────────────────────────── */
+
+#decomposition-area {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px;
+  border-top: 1px solid var(--chrome-lo);
+}
+
+#decomposition-content {
+  font-size: 12px;
+}
+
+.decomp-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+
+.decomp-placeholder, .output-placeholder {
+  color: var(--text-dim);
+  font-style: italic;
+  font-size: 12px;
+}
+
+/* Decomposition nodes (injected HTML) */
+.decomp-node {
+  padding: 4px 8px;
+  margin: 2px 0;
+  border-left: 3px solid var(--accent);
+  background: var(--surface-alt);
+}
+
+.decomp-intent {
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.decomp-step {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.decomp-bullet {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.decomp-action {
+  font-weight: 600;
+}
+
+.decomp-target {
+  color: var(--text-dim);
+}
+
+.decomp-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px solid var(--chrome-lo);
+}
+
+/* ── Activity log ────────────────────────────────────────────── */
+
+#log-panel .window-body {
+  background: var(--log-bg);
+}
+
+#log-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 8px;
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--log-text);
+  line-height: 1.5;
+}
+
+.log-entry {
+  display: flex;
+  gap: 6px;
+  padding: 1px 0;
+  opacity: 1;
+  transition: opacity 0.3s;
+}
+
+.log-entry.fading {
+  opacity: 0.5;
+}
+
+.log-ts {
+  color: var(--log-dim);
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.log-icon {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+}
+
+.log-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log-tool {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.log-status {
+  color: var(--log-text);
+}
+
+.log-thinking {
+  color: var(--log-dim);
+  font-style: italic;
+}
+
+.log-error {
+  color: #ff5555;
+}
+
+/* ── Output panel ────────────────────────────────────────────── */
+
+#output-panel .window-title {
+  justify-content: space-between;
+}
+
+#output-tabs {
+  display: flex;
+  gap: 2px;
+}
+
+.tab-btn {
+  font-family: var(--font);
+  font-size: 11px;
+  padding: 1px 10px;
+  background: var(--chrome-lo);
+  color: var(--titlebar-fg);
+  border: 1px solid var(--chrome-dark);
+  border-radius: var(--radius);
+  cursor: pointer;
+  opacity: 0.7;
+  user-select: none;
+}
+
+.tab-btn.active {
+  background: var(--chrome);
+  color: var(--btn-fg);
+  opacity: 1;
+}
+
+.output-tab {
+  display: none;
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 14px;
+}
+
+.output-tab.active {
+  display: flex;
+  flex-direction: column;
+}
+
+.output-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+}
+
+/* Answer content: rendered markdown/HTML */
+#answer-content {
+  font-size: var(--font-size);
+  line-height: 1.6;
+}
+
+#answer-content h1, #answer-content h2, #answer-content h3 {
+  margin: 12px 0 6px;
+  font-weight: 700;
+}
+#answer-content h1 { font-size: 18px; }
+#answer-content h2 { font-size: 16px; }
+#answer-content h3 { font-size: 14px; }
+
+#answer-content p {
+  margin: 6px 0;
+}
+
+#answer-content pre {
+  background: var(--log-bg);
+  color: var(--log-text);
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  overflow-x: auto;
+  font-size: 12px;
+  margin: 6px 0;
+}
+
+#answer-content code {
+  background: var(--surface-alt);
+  padding: 1px 4px;
+  border-radius: 2px;
+  font-size: 12px;
+}
+
+#answer-content pre code {
+  background: none;
+  padding: 0;
+}
+
+#answer-content ul, #answer-content ol {
+  padding-left: 20px;
+  margin: 4px 0;
+}
+
+#answer-content blockquote {
+  border-left: 3px solid var(--accent);
+  padding-left: 10px;
+  margin: 6px 0;
+  color: var(--text-dim);
+}
+
+#answer-content table,
+.md-preview table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 12px;
+}
+
+#answer-content th,
+.md-preview th {
+  background: var(--surface-alt, var(--surface));
+  font-weight: 700;
+  text-align: left;
+  padding: 5px 8px;
+  border: 1px solid var(--chrome-lo);
+}
+
+#answer-content td,
+.md-preview td {
+  padding: 4px 8px;
+  border: 1px solid var(--chrome-lo);
+}
+
+#answer-content tr:nth-child(even),
+.md-preview tr:nth-child(even) {
+  background: var(--surface-alt, rgba(128,128,128,0.06));
+}
+
+/* Visual decomposition content */
+#visual-content {
+  font-size: 13px;
+}
+
+.blueprint-section {
+  border: 1px solid var(--chrome-lo);
+  border-radius: var(--radius);
+  margin: 6px 0;
+  overflow: hidden;
+}
+
+.blueprint-header {
+  background: var(--surface-alt);
+  padding: 6px 10px;
+  font-weight: 700;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--chrome-lo);
+  cursor: pointer;
+  user-select: none;
+}
+
+.blueprint-body {
+  padding: 8px 10px;
+}
+
+.blueprint-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.blueprint-arrow {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.blueprint-label {
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--surface-alt);
+  padding: 1px 6px;
+  border-radius: 2px;
+}
+
+/* ── Drive LED ───────────────────────────────────────────────── */
+
+#drive-led {
+  position: fixed;
+  bottom: 8px;
+  right: 10px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--led-off);
+  transition: background 0.15s;
+  z-index: 100;
+  box-shadow: 0 0 4px rgba(0,0,0,0.5);
+}
+
+#drive-led.on {
+  background: var(--led-on);
+  box-shadow: 0 0 8px var(--led-on);
+}
+
+/* ── Boot screen ─────────────────────────────────────────────── */
+
+#boot-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.5s;
+}
+
+#boot-screen.hiding {
+  opacity: 0;
+  pointer-events: none;
+}
+
+#boot-screen.hidden {
+  display: none;
+}
+
+/* Amiga boot */
+.theme-amiga #boot-screen {
+  background: #333;
+}
+
+#boot-content {
+  font-family: var(--font);
+  font-size: 16px;
+  text-align: center;
+  color: #ffffff;
+}
+
+/* Amiga: hand-insert-disk then checkmark */
+.boot-amiga-hand {
+  font-size: 48px;
+  margin-bottom: 16px;
+  animation: boot-blink 1s step-end infinite;
+}
+
+.boot-amiga-check {
+  color: #00cc00;
+  font-size: 48px;
+}
+
+.boot-text {
+  margin-top: 12px;
+  font-size: 13px;
+  opacity: 0.7;
+}
+
+@keyframes modern-load {
+  0% { width: 0%; }
+  100% { width: 100%; }
+}
+
+@keyframes boot-blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0.3; }
+}
+
+/* Atari ST boot */
+.theme-atarist #boot-screen {
+  background: #ffffff;
+}
+
+.theme-atarist #boot-content {
+  color: #000000;
+}
+
+/* C64 boot */
+.theme-c64 #boot-screen {
+  background: #3c3c6c;
+}
+
+.theme-c64 #boot-content {
+  color: #b4b4dc;
+  font-family: "Silkscreen", monospace;
+}
+
+/* Mac boot */
+.theme-mac #boot-screen {
+  background: #cccccc;
+}
+
+.theme-mac #boot-content {
+  color: #000000;
+}
+
+/* Win 3.1 boot */
+.theme-win31 #boot-screen {
+  background: #000000;
+}
+
+.theme-win31 #boot-content {
+  color: #c0c0c0;
+}
+
+/* Hacker boot */
+.theme-hacker #boot-screen {
+  background: #000000;
+}
+
+.theme-hacker #boot-content {
+  color: #00ff41;
+  font-family: "Fira Code", "Source Code Pro", monospace;
+  text-shadow: 0 0 8px #00ff41;
+}
+
+/* Modern boot */
+.theme-modern #boot-screen {
+  background: #0f1117;
+}
+
+.theme-modern #boot-content {
+  color: #e0e0e6;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+/* ── Scrollbars (themed) ─────────────────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 14px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border: 1px solid var(--chrome-dark);
+}
+
+::-webkit-scrollbar-button {
+  display: block;
+  height: 14px;
+  background: var(--chrome);
+  border: 1px solid var(--chrome-dark);
+}
+
+/* ── Amiga-specific decorations ──────────────────────────────── */
+
+/* Amiga window bevel: raised outer border */
+.theme-amiga .window {
+  border-top-color: var(--chrome-hi);
+  border-left-color: var(--chrome-hi);
+  border-bottom-color: var(--chrome-dark);
+  border-right-color: var(--chrome-dark);
+  box-shadow:
+    inset 1px 1px 0 var(--chrome-hi),
+    inset -1px -1px 0 var(--chrome-lo);
+}
+
+/* Amiga close gadget: small square with dot */
+.theme-amiga .win-btn {
+  border-top-color: var(--chrome-hi);
+  border-left-color: var(--chrome-hi);
+  border-bottom-color: var(--chrome-dark);
+  border-right-color: var(--chrome-dark);
+}
+
+/* ── Win 3.1 specific ────────────────────────────────────────── */
+
+.theme-win31 .window {
+  border-top-color: var(--chrome-hi);
+  border-left-color: var(--chrome-hi);
+  border-bottom-color: var(--chrome-dark);
+  border-right-color: var(--chrome-dark);
+  box-shadow:
+    inset 1px 1px 0 var(--chrome-hi),
+    inset -1px -1px 0 var(--chrome-lo);
+}
+
+/* ── Mac specific ────────────────────────────────────────────── */
+
+.theme-mac .window {
+  border: 1px solid #000000;
+  box-shadow: 1px 1px 0 #000000;
+  border-radius: 3px;
+}
+
+.theme-mac .window-title {
+  background: var(--titlebar-bg);
+  border-bottom: 1px solid #000000;
+}
+
+/* Mac title bar stripes */
+.theme-mac .window-title::before {
+  content: "";
+  position: absolute;
+  inset: 3px 24px;
+  background: var(--titlebar-stripe);
+  z-index: 0;
+}
+
+.theme-mac .window-title-text {
+  position: relative;
+  z-index: 1;
+  background: var(--chrome);
+  padding: 0 8px;
+}
+
+/* ── Hacker specific ─────────────────────────────────────────── */
+
+.theme-hacker .window {
+  border-color: #00ff41;
+  box-shadow: 0 0 6px rgba(0, 255, 65, 0.15);
+}
+
+.theme-hacker .window-title {
+  border-bottom: 1px solid #00ff41;
+  text-shadow: 0 0 6px #00ff41;
+  letter-spacing: 1px;
+}
+
+/* Scanline overlay on the whole body */
+.theme-hacker::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background: repeating-linear-gradient(
+    180deg,
+    transparent 0px,
+    transparent 2px,
+    rgba(0, 0, 0, 0.15) 2px,
+    rgba(0, 0, 0, 0.15) 4px
+  );
+}
+
+/* Subtle green glow on input */
+.theme-hacker #input-box {
+  text-shadow: 0 0 4px #00ff41;
+  caret-color: #00ff41;
+}
+
+.theme-hacker #input-box::placeholder {
+  color: #00802a;
+}
+
+/* Log text glow */
+.theme-hacker #log-content {
+  text-shadow: 0 0 3px rgba(0, 255, 65, 0.3);
+}
+
+/* Answer text glow */
+.theme-hacker #answer-content {
+  color: #00ff41;
+  text-shadow: 0 0 2px rgba(0, 255, 65, 0.2);
+}
+
+.theme-hacker #answer-content pre {
+  border: 1px solid #00802a;
+}
+
+.theme-hacker #answer-content code {
+  background: #0a1a0a;
+  color: #00ff41;
+}
+
+.theme-hacker #send-btn {
+  border-color: #00ff41;
+  text-shadow: 0 0 4px #00ff41;
+}
+
+.theme-hacker #send-btn:hover {
+  background: #00ff41;
+  color: #000000;
+  text-shadow: none;
+}
+
+.theme-hacker .tab-btn {
+  border-color: #00802a;
+  color: #00ff41;
+}
+
+.theme-hacker .tab-btn.active {
+  background: #00ff41;
+  color: #000000;
+  text-shadow: none;
+}
+
+.theme-hacker #drive-led.on {
+  box-shadow: 0 0 12px #00ff41, 0 0 24px rgba(0, 255, 65, 0.3);
+}
+
+.theme-hacker .decomp-node {
+  border-left-color: #00ff41;
+  background: #0a0a0a;
+}
+
+.theme-hacker .blueprint-section {
+  border-color: #00802a;
+}
+
+.theme-hacker .blueprint-header {
+  background: #0a1a0a;
+  border-bottom-color: #00802a;
+  color: #00ff41;
+}
+
+/* ── Modern specific ─────────────────────────────────────────── */
+
+.theme-modern .window {
+  border-color: var(--chrome-dark);
+  border-radius: 10px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+
+.theme-modern .window-title {
+  background: var(--surface);
+  border-bottom: 1px solid var(--chrome-dark);
+  height: 36px;
+  padding: 0 14px;
+}
+
+.theme-modern .window-title-text {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+}
+
+.theme-modern #input-box {
+  border-radius: 8px;
+  border-color: var(--chrome-dark);
+  padding: 10px 14px;
+  transition: border-color 0.2s;
+}
+
+.theme-modern #input-box:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(108, 140, 255, 0.15);
+}
+
+.theme-modern #input-box::placeholder {
+  color: var(--text-dim);
+}
+
+.theme-modern #send-btn {
+  border: none;
+  border-radius: 6px;
+  padding: 6px 20px;
+  font-weight: 600;
+  transition: background 0.15s, transform 0.1s;
+}
+
+.theme-modern #send-btn:hover {
+  background: #5070dd;
+}
+
+.theme-modern #send-btn:active {
+  transform: scale(0.97);
+  padding: 6px 20px;
+}
+
+.theme-modern .tab-btn {
+  border: none;
+  border-radius: 6px;
+  padding: 4px 14px;
+  transition: background 0.15s;
+  color: var(--text-dim);
+  background: transparent;
+  opacity: 1;
+}
+
+.theme-modern .tab-btn.active {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.theme-modern .tab-btn:hover:not(.active) {
+  background: var(--surface-alt);
+}
+
+.theme-modern #log-content {
+  font-family: "Fira Code", "Source Code Pro", monospace;
+  font-size: 12px;
+}
+
+.theme-modern .log-entry {
+  padding: 2px 0;
+}
+
+.theme-modern .decomp-node {
+  border-radius: 6px;
+  border-left: 3px solid var(--accent);
+  background: var(--surface-alt);
+}
+
+.theme-modern .blueprint-section {
+  border-radius: 8px;
+  border-color: var(--chrome-dark);
+}
+
+.theme-modern .blueprint-header {
+  background: var(--surface-alt);
+  border-bottom-color: var(--chrome-dark);
+  border-radius: 8px 8px 0 0;
+}
+
+.theme-modern #drive-led {
+  width: 8px;
+  height: 8px;
+}
+
+.theme-modern #drive-led.on {
+  box-shadow: 0 0 8px var(--accent), 0 0 16px rgba(108, 140, 255, 0.3);
+}
+
+/* Modern: hide retro window gadgets */
+.theme-modern .win-btn {
+  display: none;
+}
+
+/* Modern: thin elegant scrollbar */
+.theme-modern ::-webkit-scrollbar {
+  width: 6px;
+}
+
+.theme-modern ::-webkit-scrollbar-button {
+  display: none;
+}
+
+.theme-modern ::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  border: none;
+}
+
+/* ── Visual tab — iframe & fullscreen ─────────────────────────── */
+
+#visual-frame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: var(--surface);
+  display: none;
+}
+
+#output-visual {
+  position: relative;
+}
+
+#output-visual.active {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Fullscreen button in title bar */
+#fullscreen-btn {
+  cursor: pointer;
+  font-size: 16px;
+  padding: 2px 8px;
+  line-height: 1;
+}
+
+/* Fullscreen mode — output panel takes over the entire viewport */
+#output-panel.fullscreen {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 9000;
+  width: 100% !important;
+  height: 100% !important;
+  border-radius: 0;
+  margin: 0;
+}
+
+body.visual-fullscreen #titlebar,
+body.visual-fullscreen #left-column,
+body.visual-fullscreen #h-resize,
+body.visual-fullscreen #drive-led {
+  display: none !important;
+}
+
+body.visual-fullscreen #workspace {
+  padding: 0;
+  gap: 0;
+}
+
+body.visual-fullscreen #output-panel .window-body {
+  height: calc(100vh - 32px);
+}
+
+body.visual-fullscreen #visual-frame {
+  height: 100%;
+  flex: 1;
+}
+
+/* Blueprint content */
+#blueprint-content {
+  padding: 8px;
+}
+
+#blueprint-content.output-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+  color: var(--text-dim);
+}
+
+/* ── Files tab ───────────────────────────────────────────────── */
+
+#output-files {
+  padding: 0;
+}
+
+#output-files.active {
+  display: flex;
+  flex-direction: column;
+}
+
+#files-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--chrome-lo);
+  flex-shrink: 0;
+}
+
+#files-count {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+#files-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+#files-content.output-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+  color: var(--text-dim);
+}
+
+.file-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  margin-bottom: 4px;
+  background: var(--surface);
+  border: 1px solid var(--chrome-lo);
+  border-radius: var(--radius);
+  cursor: default;
+  transition: border-color 0.15s;
+}
+
+.file-card:hover {
+  border-color: var(--accent);
+}
+
+.file-icon {
+  font-size: 22px;
+  flex-shrink: 0;
+  width: 28px;
+  text-align: center;
+}
+
+.file-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.file-name {
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.file-meta {
+  font-size: 10px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.file-actions .tab-btn {
+  font-size: 11px;
+  padding: 3px 8px;
+  white-space: nowrap;
+}
+
+/* File groups (folder-based grouping) */
+
+.file-group {
+  margin-bottom: 6px;
+}
+
+.file-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  cursor: pointer;
+  border-radius: var(--radius);
+  user-select: none;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  transition: background 0.12s;
+}
+
+.file-group-header:hover {
+  background: var(--surface-alt, rgba(255,255,255,0.04));
+}
+
+.file-group-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.file-group-name {
+  flex: 1;
+  text-transform: capitalize;
+}
+
+.file-group-count {
+  font-size: 10px;
+  color: var(--text-dim);
+  background: var(--chrome-lo);
+  border-radius: 8px;
+  padding: 1px 6px;
+  min-width: 18px;
+  text-align: center;
+}
+
+.file-group-chevron {
+  font-size: 10px;
+  color: var(--text-dim);
+  transition: transform 0.15s;
+}
+
+.file-group.collapsed .file-group-chevron {
+  transform: rotate(-90deg);
+}
+
+.file-group-body {
+  padding-left: 4px;
+}
+
+.file-group.collapsed .file-group-body {
+  display: none;
+}
+
+/* ── File preview modal ──────────────────────────────────────── */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 8500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal.hidden {
+  display: none;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.modal-content {
+  position: relative;
+  width: 80%;
+  max-width: 900px;
+  height: 75vh;
+  display: flex;
+  flex-direction: column;
+  z-index: 1;
+}
+
+.modal-content .window-body {
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+}
+
+.modal-close {
+  font-size: 14px !important;
+  cursor: pointer;
+}
+
+#preview-body pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+#preview-body img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius);
+}
+
+#preview-body iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #fff;
+  border-radius: var(--radius);
+}
+
+#preview-body .md-preview {
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+#preview-body .md-preview h1,
+#preview-body .md-preview h2,
+#preview-body .md-preview h3 {
+  margin: 16px 0 8px 0;
+  color: var(--accent);
+}
+
+#preview-body .md-preview h1 { font-size: 20px; border-bottom: 1px solid var(--chrome-lo); padding-bottom: 4px; }
+#preview-body .md-preview h2 { font-size: 17px; }
+#preview-body .md-preview h3 { font-size: 14px; }
+
+#preview-body .md-preview p { margin: 6px 0; }
+
+#preview-body .md-preview ul { padding-left: 20px; margin: 6px 0; }
+#preview-body .md-preview li { margin: 2px 0; }
+
+#preview-body .md-preview code {
+  background: var(--surface-alt, var(--surface));
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+#preview-body .md-preview pre {
+  background: var(--surface-alt, var(--surface));
+  padding: 10px;
+  border-radius: var(--radius);
+  overflow-x: auto;
+  margin: 8px 0;
+}
+
+#preview-body .md-preview pre code { background: none; padding: 0; }
+
+#preview-body .md-preview blockquote {
+  border-left: 3px solid var(--accent);
+  margin: 8px 0;
+  padding: 4px 12px;
+  color: var(--text-dim);
+}
+
+#preview-body .md-preview strong { font-weight: 700; }
+#preview-body .md-preview em { font-style: italic; }
+
+/* ── Model & tier selectors ──────────────────────────────────── */
+
+#model-selector,
+#tier-selector {
+  font-family: var(--font);
+  font-size: 11px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--chrome-lo);
+  border-radius: var(--radius);
+  padding: 2px 4px;
+  cursor: pointer;
+  max-width: 150px;
+}
+
+/* ── Map tab (exploration mind-map) ───────────────────────────── */
+
+#output-map {
+  position: relative;
+  padding: 0;
+}
+
+#output-map.active {
+  display: flex;
+  flex-direction: column;
+}
+
+#map-container {
+  flex: 1;
+  overflow: hidden;
+  cursor: grab;
+  background: var(--log-bg);
+  border-radius: var(--radius);
+}
+
+#map-svg {
+  display: block;
+}
+
+#map-svg .map-node:hover rect {
+  stroke: var(--accent);
+  stroke-width: 2;
+  filter: brightness(1.15);
+}
+
+#map-controls {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  display: flex;
+  gap: 4px;
+  z-index: 10;
+}
+
+#map-controls .tab-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  opacity: 0.8;
+}
+
+#map-controls .tab-btn:hover {
+  opacity: 1;
+}
+
+#map-tooltip {
+  position: absolute;
+  background: var(--surface);
+  border: 1px solid var(--chrome-lo);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  font-size: 11px;
+  max-width: 300px;
+  pointer-events: none;
+  z-index: 20;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+/* ── Responsive ──────────────────────────────────────────────── */
+
+@media (max-width: 800px) {
+  #workspace {
+    flex-direction: column;
+  }
+  #left-column {
+    width: 100%;
+    flex: 0 0 45%;
+  }
+  #h-resize {
+    width: 100%;
+    height: 6px;
+    cursor: row-resize;
+  }
+  #h-resize::after {
+    width: 40px;
+    height: 2px;
+  }
+  #output-panel {
+    min-width: unset;
+  }
+}

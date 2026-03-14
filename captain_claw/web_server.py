@@ -961,6 +961,34 @@ class WebServer:
         from captain_claw.web.static_pages import serve_reflections
         return await serve_reflections(self, request)
 
+    async def _serve_computer(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_computer
+        return await serve_computer(self, request)
+
+    async def _computer_visualize(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_computer import computer_visualize
+        return await computer_visualize(self, request)
+
+    async def _exploration_save(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_computer import exploration_save
+        return await exploration_save(self, request)
+
+    async def _exploration_list(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_computer import exploration_list
+        return await exploration_list(self, request)
+
+    async def _exploration_get(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_computer import exploration_get
+        return await exploration_get(self, request)
+
+    async def _exploration_update_visual(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_computer import exploration_update_visual
+        return await exploration_update_visual(self, request)
+
+    async def _exploration_delete(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_computer import exploration_delete
+        return await exploration_delete(self, request)
+
     async def _list_reflections(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_reflections import list_reflections_api
         return await list_reflections_api(self, request)
@@ -1505,6 +1533,13 @@ class WebServer:
             app.router.add_get("/skills", self._serve_skills)
             app.router.add_get("/usage", self._serve_usage)
             app.router.add_get("/reflections", self._serve_reflections)
+            app.router.add_get("/computer", self._serve_computer)
+            app.router.add_post("/api/computer/visualize", self._computer_visualize)
+            app.router.add_post("/api/computer/exploration", self._exploration_save)
+            app.router.add_get("/api/computer/exploration", self._exploration_list)
+            app.router.add_get("/api/computer/exploration/{id}", self._exploration_get)
+            app.router.add_put("/api/computer/exploration/{id}/visual", self._exploration_update_visual)
+            app.router.add_delete("/api/computer/exploration/{id}", self._exploration_delete)
             app.router.add_get("/api/usage", self._get_usage)
             app.router.add_get("/favicon.ico", self._serve_favicon)
         return app
@@ -1556,6 +1591,15 @@ async def _run_server(config: Config) -> None:
                 bt = server.agent.tools.get("botport")
                 if bt is not None:
                     bt.set_client(bp_client)
+                # Wrap main agent callbacks to also stream activity to BotPort.
+                s_cb, t_cb, to_cb = bp_client.wrap_callbacks(
+                    server.agent.status_callback,
+                    server.agent.thinking_callback,
+                    server.agent.tool_output_callback,
+                )
+                server.agent.status_callback = s_cb
+                server.agent.thinking_callback = t_cb
+                server.agent.tool_output_callback = to_cb
             print(f"  BotPort client connected to {config.botport.url}")
         except Exception as exc:
             log.warning("BotPort client failed to start", error=str(exc))

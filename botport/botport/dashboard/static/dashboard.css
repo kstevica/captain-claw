@@ -222,6 +222,47 @@ main {
   color: var(--text-dim);
 }
 
+/* Activity section */
+.activity-section {
+  margin-top: 8px;
+  padding: 6px 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--green);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.activity-line {
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.6;
+  transition: opacity 0.3s;
+}
+
+.activity-line.stale {
+  opacity: 0.4;
+}
+
+.activity-icon {
+  margin-right: 4px;
+}
+
+.activity-tool {
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(108, 140, 255, 0.12);
+  color: var(--accent);
+  font-weight: 500;
+  margin-right: 4px;
+}
+
 .load-bar {
   height: 4px;
   background: var(--border);

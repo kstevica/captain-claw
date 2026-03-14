@@ -156,6 +156,25 @@ class ConnectionManager:
     def connected_count(self) -> int:
         return sum(1 for i in self._instances.values() if i.status == "connected")
 
+    def update_activity(self, instance_id: str, step_type: str, data: dict) -> None:
+        """Update live activity for an instance. Each step_type replaces the previous."""
+        info = self._instances.get(instance_id)
+        if info:
+            if step_type == "thinking" and data.get("phase") == "done":
+                # Clear thinking slot when agent signals done.
+                info.activity.pop("thinking", None)
+            else:
+                info.activity[step_type] = {
+                    **data,
+                    "updated_at": _utcnow_iso(),
+                }
+
+    def clear_activity(self, instance_id: str) -> None:
+        """Clear all activity for an instance (e.g. on disconnect)."""
+        info = self._instances.get(instance_id)
+        if info:
+            info.activity.clear()
+
     def increment_active(self, instance_id: str) -> None:
         info = self._instances.get(instance_id)
         if info:

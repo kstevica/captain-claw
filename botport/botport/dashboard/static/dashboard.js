@@ -1,6 +1,6 @@
 /* BotPort Dashboard - vanilla JS, no build step. */
 
-const POLL_INTERVAL = 5000;
+const POLL_INTERVAL = 2000;
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
@@ -49,6 +49,29 @@ function renderPersona(p) {
     </div>`;
 }
 
+function renderActivity(activity) {
+  if (!activity || Object.keys(activity).length === 0) return "";
+  // Render activity slots in priority order: status, thinking, tool_output.
+  const order = ["status", "thinking", "tool_output"];
+  const lines = [];
+  for (const key of order) {
+    const slot = activity[key];
+    if (!slot) continue;
+    const stale = slot.updated_at && (Date.now() - new Date(slot.updated_at).getTime()) > 30000;
+    const cls = stale ? "activity-line stale" : "activity-line";
+    if (key === "status") {
+      lines.push(`<div class="${cls}"><span class="activity-icon">&#x27F3;</span> ${esc(slot.text || "")}</div>`);
+    } else if (key === "thinking") {
+      const toolLabel = slot.tool ? `<span class="activity-tool">${esc(slot.tool)}</span> ` : "";
+      lines.push(`<div class="${cls}"><span class="activity-icon">&#x1F9E0;</span> ${toolLabel}${esc(truncate(slot.text || "", 120))}</div>`);
+    } else if (key === "tool_output") {
+      lines.push(`<div class="${cls}"><span class="activity-icon">&#x2699;</span> <span class="activity-tool">${esc(slot.tool_name || "")}</span> ${esc(truncate(slot.output || "", 80))}</div>`);
+    }
+  }
+  if (lines.length === 0) return "";
+  return `<div class="activity-section">${lines.join("")}</div>`;
+}
+
 function renderInstances(instances) {
   const el = $("#instances-list");
   if (!instances || instances.length === 0) {
@@ -61,6 +84,7 @@ function renderInstances(instances) {
       : 0;
     const loadColor = loadPct > 80 ? "var(--red)" : loadPct > 50 ? "var(--yellow)" : "var(--green)";
     const personaCards = (inst.personas || []).map(renderPersona).join("");
+    const activityHtml = renderActivity(inst.activity);
     return `
       <div class="instance-card">
         <div class="instance-header">
@@ -73,6 +97,7 @@ function renderInstances(instances) {
           <span>${(inst.models || []).length} models</span>
           <span>${timeAgo(inst.last_heartbeat)}</span>
         </div>
+        ${activityHtml}
         ${personaCards ? `<div class="persona-list">${personaCards}</div>` : ""}
         <div class="load-bar"><div class="load-bar-fill" style="width:${loadPct}%;background:${loadColor}"></div></div>
       </div>`;

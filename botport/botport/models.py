@@ -52,6 +52,8 @@ class InstanceInfo:
     connected_at: str = field(default_factory=_utcnow_iso)
     last_heartbeat: str = field(default_factory=_utcnow_iso)
     disconnected_at: str = ""
+    # Live activity: step_type -> {data dict, updated_at}.  Ephemeral, not persisted.
+    activity: dict[str, dict] = field(default_factory=dict)
 
     @property
     def has_capacity(self) -> bool:
@@ -75,6 +77,7 @@ class InstanceInfo:
             "status": self.status,
             "connected_at": self.connected_at,
             "last_heartbeat": self.last_heartbeat,
+            "activity": dict(self.activity),
         }
 
     @classmethod

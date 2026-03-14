@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Computer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Space+Mono:wght@400;700&family=Silkscreen:wght@400;700&display=swap">
+  <link rel="stylesheet" href="/static/computer.css">
+  <link rel="icon" href="/static/favicon.svg">
+</head>
+<body class="theme-amiga" data-theme="amiga">
+
+  <!-- ── Boot screen (shown on load, fades out) ── -->
+  <div id="boot-screen">
+    <div id="boot-content"></div>
+  </div>
+
+  <!-- ── Title bar (theme-aware chrome) ── -->
+  <header id="titlebar">
+    <div id="titlebar-left">
+      <a href="/" id="home-link" title="Back to Captain Claw">⌂</a>
+      <span id="system-name">Computer</span>
+      <span id="session-badge" title="Current session"></span>
+    </div>
+    <div id="titlebar-center">
+      <span id="connection-status" class="status-dot"></span>
+    </div>
+    <div id="titlebar-right">
+      <select id="model-selector" title="Visual generation model">
+        <option value="">(default model)</option>
+      </select>
+      <select id="tier-selector" title="Visual token budget">
+        <option value="micro">Micro (4k)</option>
+        <option value="minimal">Minimal (8k)</option>
+        <option value="standard" selected>Standard (16k)</option>
+        <option value="generous">Generous (32k)</option>
+      </select>
+      <select id="theme-selector" title="Theme">
+        <option value="amiga">Amiga Workbench</option>
+        <option value="atarist">Atari ST GEM</option>
+        <option value="c64">C64 GEOS</option>
+        <option value="mac">Classic Mac</option>
+        <option value="win31">Windows 3.1</option>
+        <option value="hacker">Hacker</option>
+        <option value="modern">Modern</option>
+      </select>
+    </div>
+  </header>
+
+  <!-- ── Main workspace (three panels) ── -->
+  <main id="workspace">
+
+    <!-- ── LEFT COLUMN ── -->
+    <div id="left-column">
+
+      <!-- ── TOP-LEFT: Input + Decomposition ── -->
+      <section id="input-panel" class="panel window">
+        <div class="window-title">
+          <span class="window-title-text">Input</span>
+          <div class="window-controls">
+            <button class="win-btn win-depth" title="Toggle decomposition"></button>
+          </div>
+        </div>
+        <div class="window-body">
+          <div id="input-area">
+            <textarea id="input-box" placeholder="Type your message..." rows="3" spellcheck="false"></textarea>
+            <div id="input-actions">
+              <button id="send-btn" title="Send (Enter)">Send</button>
+            </div>
+          </div>
+          <div id="decomposition-area">
+            <div id="decomposition-content" class="decomp-empty">
+              <span class="decomp-placeholder">Input decomposition will appear here...</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── BOTTOM-LEFT: Activity Log ── -->
+      <section id="log-panel" class="panel window">
+        <div class="window-title">
+          <span class="window-title-text">Activity</span>
+          <div class="window-controls">
+            <button class="win-btn win-clear" title="Clear log"></button>
+          </div>
+        </div>
+        <div class="window-body">
+          <div id="log-content"></div>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- ── Resize handle (horizontal) ── -->
+    <div id="h-resize" class="resize-handle"></div>
+
+    <!-- ── RIGHT COLUMN: Output ── -->
+    <section id="output-panel" class="panel window">
+      <div class="window-title">
+        <span class="window-title-text">Output</span>
+        <div class="window-controls">
+          <div id="output-tabs">
+            <button class="tab-btn active" data-tab="answer">Answer</button>
+            <button class="tab-btn" data-tab="blueprint">Blueprint</button>
+            <button class="tab-btn" data-tab="files">Files</button>
+            <button class="tab-btn" data-tab="visual">Visual</button>
+            <button class="tab-btn" data-tab="map">Map</button>
+          </div>
+          <button id="rerun-visual-btn" class="tab-btn" title="Re-run visual generation" style="display:none;">↻</button>
+          <button id="fullscreen-btn" class="tab-btn" title="Toggle fullscreen (Visual tab)" style="display:none;">⛶</button>
+        </div>
+      </div>
+      <div class="window-body">
+        <div id="output-answer" class="output-tab active">
+          <div id="answer-content" class="output-empty">
+            <span class="output-placeholder">Responses will appear here...</span>
+          </div>
+        </div>
+        <div id="output-blueprint" class="output-tab">
+          <div id="blueprint-content" class="output-empty">
+            <span class="output-placeholder">Blueprint will appear here...</span>
+          </div>
+        </div>
+        <div id="output-files" class="output-tab">
+          <div id="files-toolbar">
+            <button id="files-refresh-btn" class="tab-btn" title="Refresh files">↻ Refresh</button>
+            <span id="files-count"></span>
+          </div>
+          <div id="files-content" class="output-empty">
+            <span class="output-placeholder">Files created during this session will appear here...</span>
+          </div>
+        </div>
+        <div id="output-visual" class="output-tab">
+          <div id="visual-content" class="output-empty">
+            <span class="output-placeholder">Visual rendering will appear here...</span>
+          </div>
+          <iframe id="visual-frame" sandbox="allow-scripts allow-same-origin" style="display:none;"></iframe>
+        </div>
+        <div id="output-map" class="output-tab">
+          <div id="map-container">
+            <svg id="map-svg"></svg>
+          </div>
+          <div id="map-controls">
+            <button id="map-zoom-in" class="tab-btn" title="Zoom in">+</button>
+            <button id="map-zoom-out" class="tab-btn" title="Zoom out">−</button>
+            <button id="map-fit" class="tab-btn" title="Fit to view">⊡</button>
+          </div>
+          <div id="map-tooltip" style="display:none;"></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ── File preview modal ── -->
+  <div id="file-preview-modal" class="modal hidden">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content window">
+      <div class="window-title">
+        <span class="window-title-text" id="preview-title">File Preview</span>
+        <div class="window-controls">
+          <button class="win-btn modal-close" title="Close">✕</button>
+        </div>
+      </div>
+      <div class="window-body" id="preview-body"></div>
+    </div>
+  </div>
+
+  <!-- ── Floppy disk LED (theme decoration) ── -->
+  <div id="drive-led" class="off" title="Agent activity"></div>
+
+  <script src="/static/computer.js"></script>
+</body>
+</html>

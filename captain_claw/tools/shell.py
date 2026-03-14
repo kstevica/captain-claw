@@ -149,6 +149,39 @@ class ShellTool(Tool):
                 return False
         return True
 
+    @staticmethod
+    def _is_not_a_command(command: str) -> str | None:
+        """Return a reason string if *command* is clearly not a shell command.
+
+        Catches cases where the LLM puts prose, directory-tree diagrams,
+        formatted text, or other non-shell content into a ``shell`` tool call.
+        Returns ``None`` when the input looks plausibly like a real command.
+        """
+        stripped = command.strip()
+        if not stripped:
+            return None  # handled elsewhere as empty
+
+        # Tree-drawing characters (└── ├── │ etc.) — never valid shell.
+        if re.search(r"[└├│─┌┐┘┤┬┴┼╔╗╚╝║═]", stripped):
+            return "Input contains tree-drawing characters — not a shell command"
+
+        # Multi-line input where the majority of lines don't start with a
+        # plausible command token — likely prose or formatted output.
+        lines = [l.strip() for l in stripped.splitlines() if l.strip()]
+        if len(lines) >= 3:
+            non_cmd = 0
+            for line in lines:
+                # Lines starting with common prose/formatting indicators.
+                if re.match(
+                    r"^([-*•·▸▹►▻→⇒]|#{1,6}\s|\d+[.)]\s|>|```|$)",
+                    line,
+                ):
+                    non_cmd += 1
+            if non_cmd > len(lines) * 0.5:
+                return "Input looks like prose or formatted text — not a shell command"
+
+        return None
+
     def _is_command_safe(self, command: str) -> tuple[bool, str]:
         """Check if command is safe to execute.
 
@@ -158,6 +191,11 @@ class ShellTool(Tool):
         Returns:
             Tuple of (is_safe, reason)
         """
+        # Reject obvious non-commands (tree diagrams, prose, etc.).
+        not_cmd_reason = self._is_not_a_command(command)
+        if not_cmd_reason:
+            return False, not_cmd_reason
+
         # Block curl/wget targeting Google Drive when gws is available.
         if _GDRIVE_DOWNLOAD_RE.search(command) and shutil.which("gws"):
             return False, _GDRIVE_SHELL_BLOCK_MSG

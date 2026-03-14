@@ -165,7 +165,47 @@ async def list_session_files(server: WebServer, request: web.Request) -> web.Res
 
     seen: dict[str, dict[str, Any]] = {}  # physical → entry
 
-    # 1. Registry entries for this session.
+    # Resolve session-scoped directories — only files physically inside these
+    # directories are returned.  Registry entries pointing elsewhere are skipped.
+    try:
+        from captain_claw.config import get_config
+        cfg = get_config()
+        workspace = cfg.resolved_workspace_path()
+        saved_root = (workspace / "saved").resolve()
+        output_root = (workspace / "output").resolve()
+
+        # Normalise session_id the same way write.py does.
+        safe_id = "".join(
+            c if c.isalnum() or c in "._-" else "-" for c in session_id
+        ).strip("-") or "default"
+    except Exception:
+        return web.json_response([], content_type="application/json")
+
+    # Build set of allowed session directories.
+    _CATEGORIES = (
+        "downloads", "media", "output", "scripts",
+        "showcase", "skills", "summaries", "tmp", "tools",
+    )
+    allowed_dirs: list[Path] = []
+    for cat in _CATEGORIES:
+        allowed_dirs.append((saved_root / cat / safe_id).resolve())
+    allowed_dirs.append((output_root / safe_id).resolve())
+
+    def _is_session_scoped(physical: str) -> bool:
+        """Return True only if *physical* is under a session-scoped directory."""
+        try:
+            resolved = Path(physical).resolve()
+            for d in allowed_dirs:
+                try:
+                    resolved.relative_to(d)
+                    return True
+                except ValueError:
+                    pass
+        except Exception:
+            pass
+        return False
+
+    # 1. Registry entries for this session — only keep session-scoped paths.
     try:
         from captain_claw.session import get_session_manager
         sm = get_session_manager()
@@ -186,29 +226,13 @@ async def list_session_files(server: WebServer, request: web.Request) -> web.Res
             physical = d.get("physical_path", "")
             logical = d.get("logical_path", "")
             source = d.get("source", "persisted")
-            if physical and physical not in seen:
+            if physical and physical not in seen and _is_session_scoped(physical):
                 seen[physical] = _enrich(logical, physical, source)
     except Exception:
         pass
 
     # 2. Filesystem scan — pick up files that may not be in the registry.
     try:
-        from captain_claw.config import get_config
-        cfg = get_config()
-        workspace = cfg.resolved_workspace_path()
-        saved_root = (workspace / "saved").resolve()
-        output_root = (workspace / "output").resolve()
-
-        # Normalise session_id the same way write.py does.
-        safe_id = "".join(
-            c if c.isalnum() or c in "._-" else "-" for c in session_id
-        ).strip("-") or "default"
-
-        # Scan workspace/saved/<category>/<session_id>/
-        _CATEGORIES = (
-            "downloads", "media", "output", "scripts",
-            "showcase", "skills", "summaries", "tmp", "tools",
-        )
         for cat in _CATEGORIES:
             cat_dir = saved_root / cat / safe_id
             if not cat_dir.is_dir():

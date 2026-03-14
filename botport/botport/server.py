@@ -20,6 +20,7 @@ from botport.config import BotPortConfig, get_config, set_config
 from botport.connection_manager import ConnectionManager
 from botport.models import _utcnow_iso
 from botport.protocol import (
+    ActivityMessage,
     BaseMessage,
     ConcernAckMessage,
     ConcernClosedMessage,
@@ -163,6 +164,7 @@ class BotPortServer:
 
     async def _handle_disconnect(self, instance_id: str) -> None:
         """Handle instance disconnection."""
+        self.connections.clear_activity(instance_id)
         info = await self.connections.unregister(instance_id)
         name = info.name if info else instance_id[:8]
 
@@ -195,6 +197,8 @@ class BotPortServer:
     async def _handle_message(self, instance_id: str, msg: BaseMessage) -> None:
         if isinstance(msg, HeartbeatMessage):
             await self._handle_heartbeat(instance_id, msg)
+        elif isinstance(msg, ActivityMessage):
+            self._handle_activity(instance_id, msg)
         elif isinstance(msg, ConcernSubmitMessage):
             await self._handle_concern(instance_id, msg)
         elif isinstance(msg, ResultMessage):
@@ -209,6 +213,12 @@ class BotPortServer:
             await self._handle_close_concern(instance_id, msg)
         else:
             log.warning("Unhandled message type from %s: %s", instance_id[:8], msg.type)
+
+    # ── Activity ─────────────────────────────────────────────────
+
+    def _handle_activity(self, instance_id: str, msg: ActivityMessage) -> None:
+        """Handle live activity update from an agent. Ephemeral, in-memory only."""
+        self.connections.update_activity(instance_id, msg.step_type, dict(msg.data))
 
     # ── Heartbeat ────────────────────────────────────────────────
 
