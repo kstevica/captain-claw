@@ -1508,6 +1508,32 @@ body {
   white-space: nowrap;
 }
 
+.history-drawer.branching .history-bar {
+  border-bottom-color: var(--accent);
+}
+
+.history-branch-badge {
+  display: inline-block;
+  background: var(--accent);
+  color: var(--text-inv, #fff);
+  font-size: 9px;
+  padding: 0 5px;
+  border-radius: var(--radius);
+  margin-right: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 700;
+}
+
+.history-entry.pruned {
+  opacity: 0.35;
+  text-decoration: line-through;
+}
+
+.history-entry.pruned:hover {
+  opacity: 0.5;
+}
+
 /* ── Drive LED ───────────────────────────────────────────────── */
 
 #drive-led {

@@ -124,6 +124,7 @@ async def handle_ws_message(
         content = str(data.get("content", "")).strip()
         image_path = str(data.get("image_path", "")).strip() or None
         file_path = str(data.get("file_path", "")).strip() or None
+        rewind_to = str(data.get("rewind_to", "")).strip() or None
         if not content and not image_path and not file_path:
             return
         if content.startswith("/"):
@@ -131,7 +132,11 @@ async def handle_ws_message(
             await handle_command(server, ws, content)
         else:
             from captain_claw.web.chat_handler import handle_chat
-            await handle_chat(server, ws, content, image_path=image_path, file_path=file_path)
+            await handle_chat(
+                server, ws, content,
+                image_path=image_path, file_path=file_path,
+                rewind_to=rewind_to,
+            )
 
     elif msg_type == "command":
         command = str(data.get("command", "")).strip()

@@ -47,6 +47,7 @@ let currentNodeId = null;
 let pendingExploration = null;     // { parentId, edgeLabel, source }
 let sessionId = null;              // set on welcome
 let exploreDebounceTimer = null;
+let historyBranchNodeId = null;    // set when user navigates to an old node
 
 // postMessage bridge script injected into visual iframe HTML.
 const EXPLORE_BRIDGE = `<script>
@@ -242,12 +243,24 @@ function renderHistoryDrawer() {
   const nodes = Array.from(explorationNodes.values())
     .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
 
+  const isBranching = !!historyBranchNodeId;
+
   for (const tab of ['answer', 'blueprint']) {
     const drawer = $(`#${tab}-history`);
     if (!drawer) continue;
     const countEl = drawer.querySelector('.history-bar-count');
     const listEl = drawer.querySelector('.history-list');
+    const labelEl = drawer.querySelector('.history-bar-label');
     countEl.textContent = nodes.length;
+
+    // Show branch indicator in the bar.
+    if (isBranching) {
+      drawer.classList.add('branching');
+      labelEl.innerHTML = `<span class="history-branch-badge">&#9095; fork</span> History (<span class="history-bar-count">${nodes.length}</span>)`;
+    } else {
+      drawer.classList.remove('branching');
+      labelEl.innerHTML = `History (<span class="history-bar-count">${nodes.length}</span>)`;
+    }
 
     if (nodes.length === 0) {
       drawer.style.display = 'none';
@@ -260,7 +273,15 @@ function renderHistoryDrawer() {
       const time = t ? t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
       const prompt = (n.prompt || '').slice(0, 55) + ((n.prompt || '').length > 55 ? '\u2026' : '');
       const active = n.id === currentNodeId ? ' active' : '';
-      return `<div class="history-entry${active}" data-node-id="${n.id}" onclick="historySelect('${n.id}')">
+      // Dim entries that will be pruned on next send (newer than branch point).
+      let pruned = '';
+      if (isBranching && historyBranchNodeId) {
+        const branchNode = explorationNodes.get(historyBranchNodeId);
+        if (branchNode && (n.created_at || '') > (branchNode.created_at || '')) {
+          pruned = ' pruned';
+        }
+      }
+      return `<div class="history-entry${active}${pruned}" data-node-id="${n.id}" onclick="historySelect('${n.id}')">
         <span class="history-entry-bullet">${n.id === currentNodeId ? '\u25CF' : '\u25CB'}</span>
         <span class="history-entry-time">${esc(time)}</span>
         <span class="history-entry-prompt">${esc(prompt)}</span>
@@ -419,6 +440,12 @@ function navigateToNode(nodeId) {
   lastPrompt = node.prompt;
   lastResult = node.answer;
 
+  // Detect if this is a branch point (navigating to a non-latest node).
+  const sorted = Array.from(explorationNodes.values())
+    .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+  const latestId = sorted.length > 0 ? sorted[sorted.length - 1].id : null;
+  historyBranchNodeId = (nodeId !== latestId) ? nodeId : null;
+
   // Render answer without creating a new node.
   const el = $("#answer-content");
   el.innerHTML = markdownToHtml(node.answer);
@@ -443,7 +470,11 @@ function navigateToNode(nodeId) {
   renderMap();
   renderHistoryDrawer();
 
-  logEntry("system", `Navigated to: ${node.prompt.slice(0, 60)}${node.prompt.length > 60 ? '…' : ''}`);
+  if (historyBranchNodeId) {
+    logEntry("system", `Branched to: ${node.prompt.slice(0, 50)}${node.prompt.length > 50 ? '…' : ''} — next message will fork from here`);
+  } else {
+    logEntry("system", `Navigated to: ${node.prompt.slice(0, 60)}${node.prompt.length > 60 ? '…' : ''}`);
+  }
 }
 
 /* ── Boot sequences per theme ────────────────────────────────── */
@@ -1214,6 +1245,29 @@ function handleSend() {
   // Render input decomposition.
   if (text) renderInputDecomposition(text);
 
+  // ── History branching: rewind session context if forking from an old node ──
+  let rewindTimestamp = null;
+  if (historyBranchNodeId) {
+    const branchNode = explorationNodes.get(historyBranchNodeId);
+    if (branchNode) {
+      rewindTimestamp = branchNode.created_at;
+      // Prune exploration nodes newer than the branch point.
+      const branchTime = branchNode.created_at || '';
+      const toDelete = [];
+      for (const [id, n] of explorationNodes) {
+        if ((n.created_at || '') > branchTime) toDelete.push(id);
+      }
+      for (const id of toDelete) {
+        explorationNodes.delete(id);
+        // Fire-and-forget backend cleanup.
+        fetch(`/api/computer/exploration/${id}`, { method: 'DELETE' }).catch(() => {});
+      }
+      currentNodeId = historyBranchNodeId;
+      logEntry("system", `Forking from: ${branchNode.prompt.slice(0, 50)}${branchNode.prompt.length > 50 ? '…' : ''}`);
+    }
+    historyBranchNodeId = null;
+  }
+
   // Send to agent.
   if (text.startsWith("/")) {
     send({ type: "command", command: text });
@@ -1221,6 +1275,7 @@ function handleSend() {
     const msg = { type: "chat", content: text || "" };
     if (pendingImagePath) msg.image_path = pendingImagePath;
     if (pendingFilePath) msg.file_path = pendingFilePath;
+    if (rewindTimestamp) msg.rewind_to = rewindTimestamp;
     send(msg);
   }
 
@@ -1811,48 +1866,38 @@ function renderMap() {
   const svg = $("#map-svg");
   if (!svg) return;
 
-  const nodes = Array.from(explorationNodes.values());
+  // Only show main nodes (user-initiated queries), skip explore sub-steps.
+  const allNodes = Array.from(explorationNodes.values());
+  const nodes = allNodes.filter(n => n.source !== 'click');
   if (nodes.length === 0) {
     svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" fill="var(--text-dim)" font-size="13" font-family="var(--font)">No exploration history yet. Ask a question to begin.</text>`;
     return;
   }
 
-  // Sort nodes chronologically for orphan-linking.
+  // Sort chronologically.
   const sorted = [...nodes].sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
 
-  // Auto-link orphan click-nodes to the nearest prior manual node.
-  // This fixes explore-clicks that lost their parent linkage.
-  let lastManualId = null;
-  for (const n of sorted) {
-    const isClick = n.source === 'click';
-    if (!isClick) {
-      lastManualId = n.id;
-    } else if (!n.parent_id || !explorationNodes.has(n.parent_id)) {
-      // Orphan click node — attach to nearest prior manual node.
-      if (lastManualId) {
-        n.parent_id = lastManualId;
-      }
-    }
-  }
-
-  // Classify nodes: "main" (manual) vs "sub" (click / explore).
-  const isSubNode = (n) => n.source === 'click';
-
-  // Build tree structure.
+  // Build parent→children map (only among main nodes).
+  const mainIds = new Set(sorted.map(n => n.id));
   const childrenMap = new Map();
   const rootIds = [];
 
   for (const n of sorted) {
-    if (!n.parent_id || !explorationNodes.has(n.parent_id)) {
+    // Walk up parent chain to find nearest main-node ancestor.
+    let pid = n.parent_id;
+    while (pid && !mainIds.has(pid)) {
+      const pn = explorationNodes.get(pid);
+      pid = pn ? pn.parent_id : null;
+    }
+    if (!pid || !mainIds.has(pid)) {
       rootIds.push(n.id);
     } else {
-      if (!childrenMap.has(n.parent_id)) childrenMap.set(n.parent_id, []);
-      childrenMap.get(n.parent_id).push(n.id);
+      if (!childrenMap.has(pid)) childrenMap.set(pid, []);
+      childrenMap.get(pid).push(n.id);
     }
   }
 
-  // Layout: assign (x, y) to each node using recursive tree layout.
-  // Sub-nodes use tighter vertical spacing.
+  // Layout: assign grid (x, y) per node.
   const positions = new Map();
   let nextX = 0;
 
@@ -1866,163 +1911,99 @@ function renderMap() {
     for (const cid of children) {
       layoutNode(cid, depth + 1);
     }
-    // Center parent above children.
     const firstChild = positions.get(children[0]);
     const lastChild = positions.get(children[children.length - 1]);
-    const cx = (firstChild.x + lastChild.x) / 2;
-    positions.set(id, { x: cx, y: depth });
+    positions.set(id, { x: (firstChild.x + lastChild.x) / 2, y: depth });
   }
 
   for (const rid of rootIds) {
     layoutNode(rid, 0);
   }
 
-  // Convert grid positions to pixel coordinates.
-  // Use cumulative Y to account for mixed main/sub row heights.
+  // Convert to pixel coordinates.
   const padding = 40;
+  const nodeW = MAP_MAIN_W;
+  const nodeH = MAP_MAIN_H + 14;  // taller to fit answer snippet
   const pixelPositions = new Map();
 
-  // Determine max depth.
   let maxDepth = 0;
-  for (const pos of positions.values()) {
-    maxDepth = Math.max(maxDepth, pos.y);
-  }
+  for (const pos of positions.values()) maxDepth = Math.max(maxDepth, pos.y);
 
-  // Compute Y offsets per depth row.
   const rowY = [padding];
   for (let d = 1; d <= maxDepth; d++) {
-    // Check if all nodes at depth d-1 are sub-nodes.
-    let prevRowHeight = MAP_MAIN_H;
-    let gap = MAP_V_GAP;
-    // Check if nodes at this depth are sub-nodes — use tighter spacing.
-    let allSub = true;
-    for (const [id, pos] of positions) {
-      if (pos.y === d) {
-        const node = explorationNodes.get(id);
-        if (node && !isSubNode(node)) { allSub = false; break; }
-      }
-    }
-    if (allSub) gap = MAP_SUB_V_GAP;
-
-    // Check prev row for height.
-    for (const [id, pos] of positions) {
-      if (pos.y === d - 1) {
-        const node = explorationNodes.get(id);
-        if (node && isSubNode(node)) prevRowHeight = Math.min(prevRowHeight, MAP_SUB_H);
-      }
-    }
-    rowY.push(rowY[d - 1] + prevRowHeight + gap);
+    rowY.push(rowY[d - 1] + nodeH + MAP_V_GAP);
   }
 
   for (const [id, pos] of positions) {
-    const node = explorationNodes.get(id);
-    const w = (node && isSubNode(node)) ? MAP_SUB_W : MAP_MAIN_W;
     pixelPositions.set(id, {
-      px: padding + pos.x * (MAP_MAIN_W + MAP_H_GAP) + (MAP_MAIN_W - w) / 2,
+      px: padding + pos.x * (nodeW + MAP_H_GAP),
       py: rowY[pos.y] || padding,
     });
   }
 
-  // Calculate SVG viewBox dimensions.
   let maxPx = 0, maxPy = 0;
-  for (const [id, p] of pixelPositions) {
-    const node = explorationNodes.get(id);
-    const w = (node && isSubNode(node)) ? MAP_SUB_W : MAP_MAIN_W;
-    const h = (node && isSubNode(node)) ? MAP_SUB_H : MAP_MAIN_H;
-    maxPx = Math.max(maxPx, p.px + w);
-    maxPy = Math.max(maxPy, p.py + h);
+  for (const p of pixelPositions.values()) {
+    maxPx = Math.max(maxPx, p.px + nodeW);
+    maxPy = Math.max(maxPy, p.py + nodeH);
   }
   const svgW = maxPx + padding;
   const svgH = maxPy + padding;
 
-  // Build SVG content.
   let svgContent = '';
 
   // Edges.
   for (const n of sorted) {
-    if (n.parent_id && pixelPositions.has(n.parent_id) && pixelPositions.has(n.id)) {
-      const parentNode = explorationNodes.get(n.parent_id);
-      const parentW = (parentNode && isSubNode(parentNode)) ? MAP_SUB_W : MAP_MAIN_W;
-      const parentH = (parentNode && isSubNode(parentNode)) ? MAP_SUB_H : MAP_MAIN_H;
-      const childW = isSubNode(n) ? MAP_SUB_W : MAP_MAIN_W;
-
-      const parent = pixelPositions.get(n.parent_id);
-      const child = pixelPositions.get(n.id);
-      const x1 = parent.px + parentW / 2;
-      const y1 = parent.py + parentH;
-      const x2 = child.px + childW / 2;
-      const y2 = child.py;
+    // Find effective parent among main nodes.
+    let pid = n.parent_id;
+    while (pid && !mainIds.has(pid)) {
+      const pn = explorationNodes.get(pid);
+      pid = pn ? pn.parent_id : null;
+    }
+    if (pid && pixelPositions.has(pid) && pixelPositions.has(n.id)) {
+      const ppos = pixelPositions.get(pid);
+      const cpos = pixelPositions.get(n.id);
+      const x1 = ppos.px + nodeW / 2;
+      const y1 = ppos.py + nodeH;
+      const x2 = cpos.px + nodeW / 2;
+      const y2 = cpos.py;
       const midY = (y1 + y2) / 2;
 
-      // Sub-node edges: dashed, thinner, dimmer.
-      const isSub = isSubNode(n);
-      const dashAttr = isSub ? ' stroke-dasharray="4,3"' : '';
-      const edgeWidth = isSub ? 1.5 : 2;
-      const edgeOpacity = isSub ? 0.4 : 0.6;
-
       svgContent += `<path d="M${x1},${y1} C${x1},${midY} ${x2},${midY} ${x2},${y2}"
-        fill="none" stroke="var(--accent)" stroke-width="${edgeWidth}" opacity="${edgeOpacity}"${dashAttr}/>`;
-
-      // Edge label.
-      if (n.edge_label) {
-        const labelX = (x1 + x2) / 2;
-        const labelY = midY - 4;
-        const label = n.edge_label.length > 25 ? n.edge_label.slice(0, 25) + '…' : n.edge_label;
-        svgContent += `<text x="${labelX}" y="${labelY}" text-anchor="middle"
-          fill="var(--text-dim)" font-size="9" font-family="var(--font)">${escSvg(label)}</text>`;
-      }
+        fill="none" stroke="var(--accent)" stroke-width="2" opacity="0.5"/>`;
     }
   }
 
-  // Nodes.
+  // Nodes — show user prompt + answer snippet.
   for (const n of sorted) {
     if (!pixelPositions.has(n.id)) continue;
     const pos = pixelPositions.get(n.id);
     const isCurrent = n.id === currentNodeId;
-    const isSub = isSubNode(n);
 
-    const w = isSub ? MAP_SUB_W : MAP_MAIN_W;
-    const h = isSub ? MAP_SUB_H : MAP_MAIN_H;
     const strokeColor = isCurrent ? 'var(--accent)' : 'var(--chrome-lo)';
     const strokeWidth = isCurrent ? 3 : 1;
     const fillColor = isCurrent ? 'var(--surface-alt)' : 'var(--surface)';
-    const dashAttr = isSub ? ' stroke-dasharray="3,2"' : '';
-    const opacity = isSub ? ' opacity="0.7"' : '';
 
-    svgContent += `<g class="map-node" data-id="${n.id}" style="cursor:pointer"${opacity}>`;
-    svgContent += `<rect x="${pos.px}" y="${pos.py}" width="${w}" height="${h}"
-      rx="${isSub ? 12 : 4}" ry="${isSub ? 12 : 4}" fill="${fillColor}" stroke="${strokeColor}" stroke-width="${strokeWidth}"${dashAttr}/>`;
+    svgContent += `<g class="map-node" data-id="${n.id}" style="cursor:pointer">`;
+    svgContent += `<rect x="${pos.px}" y="${pos.py}" width="${nodeW}" height="${nodeH}"
+      rx="4" ry="4" fill="${fillColor}" stroke="${strokeColor}" stroke-width="${strokeWidth}"/>`;
 
-    if (isSub) {
-      // Compact sub-node: icon + short prompt only.
-      svgContent += `<text x="${pos.px + 8}" y="${pos.py + 14}" font-size="10"
-        fill="var(--text-dim)">🔗</text>`;
+    // User prompt (bold).
+    const prompt = n.prompt.length > 28 ? n.prompt.slice(0, 28) + '…' : n.prompt;
+    svgContent += `<text x="${pos.px + 8}" y="${pos.py + 16}" font-size="11" font-weight="700"
+      fill="var(--text)" font-family="var(--font)">▸ ${escSvg(prompt)}</text>`;
 
-      const preview = n.prompt.length > 18 ? n.prompt.slice(0, 18) + '…' : n.prompt;
-      svgContent += `<text x="${pos.px + 22}" y="${pos.py + 14}" font-size="10"
-        fill="var(--text)" font-family="var(--font)">${escSvg(preview)}</text>`;
+    // Answer snippet (dimmed, italic — first meaningful line).
+    const answerSnippet = _mapAnswerSnippet(n.answer, 30);
+    svgContent += `<text x="${pos.px + 8}" y="${pos.py + 34}" font-size="10" font-style="italic"
+      fill="var(--text-dim)" font-family="var(--font)">${escSvg(answerSnippet)}</text>`;
 
-      // Tiny answer size.
-      const ansLen = n.answer ? humanSize(n.answer.length) : '';
-      svgContent += `<text x="${pos.px + 8}" y="${pos.py + 28}" font-size="8"
-        fill="var(--text-dim)" font-family="var(--font)">${ansLen}${n.visual_html ? ' · 🖼' : ''}</text>`;
-    } else {
-      // Full main node.
-      svgContent += `<text x="${pos.px + 8}" y="${pos.py + 16}" font-size="11"
-        fill="var(--text-dim)">✎</text>`;
-
-      const preview = n.prompt.length > 24 ? n.prompt.slice(0, 24) + '…' : n.prompt;
-      svgContent += `<text x="${pos.px + 24}" y="${pos.py + 16}" font-size="11" font-weight="700"
-        fill="var(--text)" font-family="var(--font)">${escSvg(preview)}</text>`;
-
-      const ts = new Date(n.created_at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-      svgContent += `<text x="${pos.px + 8}" y="${pos.py + 34}" font-size="10"
-        fill="var(--text-dim)" font-family="var(--font)">${ts} · ${n.theme}</text>`;
-
-      const ansLen = n.answer ? humanSize(n.answer.length) : '';
-      svgContent += `<text x="${pos.px + 8}" y="${pos.py + 50}" font-size="9"
-        fill="var(--text-dim)" font-family="var(--font)">${ansLen}${n.visual_html ? ' · 🖼' : ''}</text>`;
-    }
+    // Metadata line: time + indicators.
+    const ts = new Date(n.created_at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+    const indicators = [ts];
+    if (n.answer) indicators.push(humanSize(n.answer.length));
+    if (n.visual_html) indicators.push('🖼');
+    svgContent += `<text x="${pos.px + 8}" y="${pos.py + 50}" font-size="9"
+      fill="var(--text-dim)" font-family="var(--font)">${escSvg(indicators.join(' · '))}</text>`;
 
     svgContent += `</g>`;
   }
@@ -2034,18 +2015,29 @@ function renderMap() {
   svg.style.width = '100%';
   svg.style.height = '100%';
 
-  // Attach click handlers to nodes.
+  // Attach click handlers.
   for (const g of svg.querySelectorAll('.map-node')) {
     g.addEventListener('click', () => {
       const nodeId = g.dataset.id;
       if (nodeId) {
         navigateToNode(nodeId);
-        // Switch to Answer tab.
         const answerBtn = $(".tab-btn[data-tab='answer']");
         if (answerBtn) answerBtn.click();
       }
     });
   }
+}
+
+/** Extract a short snippet from the answer for the map node. */
+function _mapAnswerSnippet(answer, maxLen) {
+  if (!answer) return '—';
+  // Strip markdown heading markers, bullet points, code fences.
+  const lines = answer.split('\n').map(l => l.trim()).filter(l =>
+    l && !l.startsWith('#') && !l.startsWith('```') && !l.startsWith('---')
+  );
+  const text = (lines[0] || '').replace(/^\*+\s*/, '').replace(/\*+/g, '');
+  if (text.length > maxLen) return text.slice(0, maxLen) + '…';
+  return text || '—';
 }
 
 function escSvg(s) {

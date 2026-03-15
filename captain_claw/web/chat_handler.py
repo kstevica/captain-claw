@@ -118,12 +118,19 @@ async def handle_chat(
     *,
     image_path: str | None = None,
     file_path: str | None = None,
+    rewind_to: str | None = None,
 ) -> None:
     """Process a chat message through the agent.
 
     The actual work is launched as a background asyncio task so that the
     WebSocket read-loop stays free to process incoming messages (most
     importantly ``cancel`` signals) while the agent is running.
+
+    If *rewind_to* is an ISO-8601 timestamp string (from Computer history
+    branching), the session's message list is truncated to only include
+    messages whose timestamp is ≤ that value before the new message is
+    processed.  This lets the user "fork" from an earlier point in the
+    conversation.
     """
     if not server.agent:
         await server._send(ws, {"type": "error", "message": "Agent not initialized"})
@@ -135,6 +142,28 @@ async def handle_chat(
             "message": "Agent is busy processing another request. Please wait.",
         })
         return
+
+    # ── History branching: rewind session to a prior point ──
+    if rewind_to and server.agent.session:
+        session = server.agent.session
+        before = len(session.messages)
+        session.messages = [
+            m for m in session.messages
+            if (m.get("timestamp") or "") <= rewind_to
+        ]
+        after = len(session.messages)
+        if before != after:
+            log.info(
+                "Session rewound for history branch",
+                before=before, after=after, rewind_to=rewind_to,
+            )
+            # Persist the truncated session.
+            try:
+                from captain_claw.session import get_session_manager
+                sm = get_session_manager()
+                await sm.save_session(session)
+            except Exception as e:
+                log.warning("Failed to persist rewound session", error=str(e))
 
     # When an image is attached, prepend the path context so the agent
     # knows a file is available for tools like image_ocr.
