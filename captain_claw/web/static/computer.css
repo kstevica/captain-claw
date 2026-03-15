@@ -1295,6 +1295,56 @@ body {
   color: var(--text-dim);
 }
 
+/* Answer action bar (copy + feedback) */
+.answer-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--chrome-lo);
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+#output-answer:hover .answer-actions,
+.answer-actions:has(.active) {
+  opacity: 1;
+}
+.answer-action-btn {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 6px;
+  opacity: 0.5;
+  transition: opacity 0.15s, border-color 0.15s;
+  line-height: 1;
+}
+.answer-action-btn:hover {
+  opacity: 0.9;
+}
+.answer-action-btn.active {
+  opacity: 1;
+  border-color: var(--accent);
+}
+.answer-fb-saved {
+  font-size: 11px;
+  color: var(--accent);
+  opacity: 0;
+  margin-left: 4px;
+  transition: opacity 0.3s;
+}
+.answer-fb-saved.show {
+  animation: answerFbFlash 1.5s ease forwards;
+}
+@keyframes answerFbFlash {
+  0%   { opacity: 0; }
+  15%  { opacity: 1; }
+  70%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+
 #answer-content table,
 .md-preview table {
   width: 100%;

@@ -17,6 +17,7 @@ let ledTimer = null;
 // Store last prompt/result for Visual tab re-generation.
 let lastPrompt = "";
 let lastResult = "";
+let lastAnswerTimestamp = "";
 let visualGenerating = false;
 
 // Track HTML files created by agent during the current turn.
@@ -450,6 +451,7 @@ function navigateToNode(nodeId) {
   const el = $("#answer-content");
   el.innerHTML = markdownToHtml(node.answer);
   el.classList.remove("output-empty");
+  _renderAnswerActions(el, node.answer);
 
   // Restore visual if available.
   const frame = $("#visual-frame");
@@ -1170,7 +1172,7 @@ function handleWelcome(data) {
   if (data.history && data.history.length > 0) {
     for (const msg of data.history) {
       if (msg.role === "assistant" && msg.content) {
-        renderAnswer(msg.content, true);
+        renderAnswer(msg.content, true, msg.timestamp || "");
       }
     }
   }
@@ -1179,7 +1181,7 @@ function handleWelcome(data) {
 function handleChatMessage(data) {
   if (data.role === "assistant") {
     setProcessing(false);
-    renderAnswer(data.content || "", false);
+    renderAnswer(data.content || "", false, data.timestamp || "");
   }
   // Track HTML files created by the agent (broadcast by backend).
   if (data.role === "html_file" && data.content) {
@@ -1390,13 +1392,17 @@ function clearVisual() {
   if (bar) bar.style.display = "none";
 }
 
-function renderAnswer(content, isReplay) {
+function renderAnswer(content, isReplay, timestamp) {
   const el = $("#answer-content");
   el.innerHTML = markdownToHtml(content);
   el.classList.remove("output-empty");
 
   // Store for Visual tab.
   lastResult = content;
+  if (timestamp) lastAnswerTimestamp = timestamp;
+
+  // Add answer action bar (copy + feedback).
+  _renderAnswerActions(el, content);
 
   // Auto-generate blueprint from the answer.
   generateBlueprint(content);
@@ -1423,6 +1429,74 @@ function renderAnswer(content, isReplay) {
       generateVisual();
     }
   }
+}
+
+function _renderAnswerActions(container, content) {
+  // Remove existing bar if any.
+  const old = container.parentElement.querySelector(".answer-actions");
+  if (old) old.remove();
+
+  const bar = document.createElement("div");
+  bar.className = "answer-actions";
+
+  // Copy button.
+  const copyBtn = document.createElement("button");
+  copyBtn.className = "answer-action-btn";
+  copyBtn.title = "Copy to clipboard";
+  copyBtn.innerHTML = "&#x1F4CB;";
+  copyBtn.addEventListener("click", function () {
+    const text = container.innerText || container.textContent || "";
+    navigator.clipboard.writeText(text).then(function () {
+      copyBtn.innerHTML = "&#x2705;";
+      setTimeout(function () { copyBtn.innerHTML = "&#x1F4CB;"; }, 1500);
+    });
+  });
+  bar.appendChild(copyBtn);
+
+  // Like button.
+  const likeBtn = document.createElement("button");
+  likeBtn.className = "answer-action-btn";
+  likeBtn.title = "Good response";
+  likeBtn.innerHTML = "&#x1F44D;";
+
+  // Dislike button.
+  const dislikeBtn = document.createElement("button");
+  dislikeBtn.className = "answer-action-btn";
+  dislikeBtn.title = "Bad response";
+  dislikeBtn.innerHTML = "&#x1F44E;";
+
+  // Saved flash.
+  const saved = document.createElement("span");
+  saved.className = "answer-fb-saved";
+  saved.textContent = "Saved";
+
+  let currentFb = "";
+
+  function sendFb(value) {
+    const newVal = currentFb === value ? "" : value;
+    currentFb = newVal;
+    likeBtn.classList.toggle("active", newVal === "good");
+    dislikeBtn.classList.toggle("active", newVal === "bad");
+    if (ws && ws.readyState === WebSocket.OPEN && lastAnswerTimestamp) {
+      ws.send(JSON.stringify({
+        type: "message_feedback",
+        timestamp: lastAnswerTimestamp,
+        feedback: newVal || null,
+      }));
+    }
+    saved.classList.remove("show");
+    void saved.offsetWidth;
+    saved.classList.add("show");
+  }
+
+  likeBtn.addEventListener("click", function () { sendFb("good"); });
+  dislikeBtn.addEventListener("click", function () { sendFb("bad"); });
+
+  bar.appendChild(likeBtn);
+  bar.appendChild(dislikeBtn);
+  bar.appendChild(saved);
+
+  container.parentElement.appendChild(bar);
 }
 
 /* ── Blueprint tab (structural decomposition) ────────────────── */
