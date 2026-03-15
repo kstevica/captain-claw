@@ -443,11 +443,50 @@ class AgentToolLoopMixin:
             )
             friendly = (response.content or "").strip()
             if friendly:
+                friendly = self._validate_rewrite_claims(friendly, raw)
                 return friendly
         except Exception as e:
             log.warning("Friendly tool rewrite failed", error=str(e))
 
         return f"Tool executed:\n{raw}"
+
+    # ------------------------------------------------------------------
+    # Post-rewrite validation
+    # ------------------------------------------------------------------
+
+    _FILE_CREATION_PHRASES = re.compile(
+        r"(?:created|generated|wrote|written|saved|produced|built)\s+"
+        r"(?:a\s+|the\s+|an\s+)?(?:file|page|document|app|game|script|program)",
+        re.IGNORECASE,
+    )
+    _WRITE_TOOL_INDICATORS = re.compile(
+        r"(?:file_write|write_file|save_file|create_file|WriteFile|tool_name['\"]?\s*[:=]\s*['\"]?(?:file_write|write_file|save|create))",
+        re.IGNORECASE,
+    )
+
+    def _validate_rewrite_claims(self, rewrite: str, raw_output: str) -> str:
+        """Strip false file-creation claims from a rewrite.
+
+        If the rewrite mentions creating/saving files but the raw tool
+        output contains no write-tool evidence, append a correction.
+        """
+        claims_creation = bool(self._FILE_CREATION_PHRASES.search(rewrite))
+        if not claims_creation:
+            return rewrite
+
+        has_write_evidence = bool(self._WRITE_TOOL_INDICATORS.search(raw_output))
+        if has_write_evidence:
+            return rewrite
+
+        log.warning(
+            "Rewrite claims file creation but raw output has no write actions — correcting",
+            rewrite_preview=rewrite[:200],
+        )
+        return (
+            rewrite
+            + "\n\n⚠️ **Note:** No file was actually created or saved during this step. "
+            "The above description is what *could* be built — ask me to create it if you'd like."
+        )
 
     # ------------------------------------------------------------------
     # Embedded tool call extraction

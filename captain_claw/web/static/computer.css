@@ -2298,9 +2298,9 @@ body.visual-fullscreen #visual-frame {
 
 .modal-content {
   position: relative;
-  width: 80%;
-  max-width: 900px;
-  height: 75vh;
+  width: 90%;
+  max-width: none;
+  height: 90vh;
   display: flex;
   flex-direction: column;
   z-index: 1;
