@@ -252,6 +252,24 @@ async def _handle_telegram_message(server: WebServer, message: TelegramMessage) 
             text = command_word if len(parts) == 1 else f"{command_word} {parts[1]}"
 
         lowered = text.lower()
+
+        # ── /btw: inject live instructions without waiting for the lock ──
+        import re as _re
+        _btw_m = _re.match(r"^/btw\s+([\s\S]+)", text, _re.IGNORECASE) or _re.match(r"^btw\s+([\s\S]+)", text, _re.IGNORECASE)
+        if _btw_m:
+            _btw_text = _btw_m.group(1).strip()
+            if _btw_text:
+                if not hasattr(user_agent, "_btw_instructions"):
+                    user_agent._btw_instructions = []
+                user_agent._btw_instructions.append(_btw_text)
+                log.info("BTW instruction added (Telegram)", user_id=user_id_key, count=len(user_agent._btw_instructions))
+                await _tg_send(
+                    server, message.chat_id,
+                    f"Noted for remaining steps: _{_btw_text}_",
+                    reply_to_message_id=message.message_id,
+                )
+            return
+
         if lowered == "/start" or lowered.startswith("/start "):
             session_name = user_agent.session.name if user_agent.session else "none"
             await _tg_send(
@@ -914,6 +932,9 @@ async def _tg_process_with_typing(
         finally:
             stop_typing.set()
             heartbeat.cancel()
+            # Clear any /btw instructions accumulated during this task.
+            if hasattr(user_agent, "_btw_instructions"):
+                user_agent._btw_instructions = []
             try:
                 await heartbeat
             except asyncio.CancelledError:

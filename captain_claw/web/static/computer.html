@@ -28,9 +28,7 @@
       <span id="connection-status" class="status-dot"></span>
     </div>
     <div id="titlebar-right">
-      <select id="model-selector" title="Visual generation model">
-        <option value="">(default model)</option>
-      </select>
+      <button id="model-btn" title="Choose model">🧠 <span id="model-btn-label">Default</span></button>
       <select id="tier-selector" title="Visual token budget">
         <option value="micro">Micro (4k)</option>
         <option value="minimal">Minimal (8k)</option>
@@ -56,9 +54,15 @@
           </div>
         </div>
         <div class="window-body">
+          <div id="attachment-bar" class="hidden">
+            <div id="attachment-chip"></div>
+          </div>
           <div id="input-area">
             <textarea id="input-box" placeholder="Type your message..." rows="3" spellcheck="false"></textarea>
             <div id="input-actions">
+              <button id="attach-btn" title="Attach image or file">📎</button>
+              <button id="folder-btn" title="Read folders">📁</button>
+              <input type="file" id="file-input" accept="image/png,image/jpeg,image/jpg,image/webp,image/gif,image/bmp,.csv,.xlsx" style="display:none">
               <button id="send-btn" title="Send (Enter)">Send</button>
             </div>
           </div>
@@ -188,6 +192,69 @@
           <div class="theme-card-empty" id="custom-theme-empty">
             <span>No custom themes yet.</span>
             <span>Download the template, customize it, and upload!</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Model selector modal ── -->
+  <div id="model-modal">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content window">
+      <div class="window-title">
+        <span class="window-title-text">Choose Model</span>
+        <div class="window-controls">
+          <button class="win-btn modal-close" title="Close">✕</button>
+        </div>
+      </div>
+      <div class="window-body">
+        <div class="model-grid" id="model-grid">
+          <div class="model-loading">Loading models...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Folder browser modal ── -->
+  <div id="folder-modal">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content window">
+      <div class="window-title">
+        <span class="window-title-text">Read Folders</span>
+        <div class="window-controls">
+          <button class="win-btn modal-close" title="Close">✕</button>
+        </div>
+      </div>
+      <div class="window-body">
+        <!-- Tab bar -->
+        <div class="folder-modal-tabs">
+          <button class="folder-modal-tab active" data-tab="local">Local Folders</button>
+          <button class="folder-modal-tab" data-tab="gdrive" id="folder-tab-gdrive-btn" style="display:none">Google Drive</button>
+        </div>
+        <!-- Local tab -->
+        <div class="folder-modal-pane" id="folder-tab-local">
+          <div class="folder-section-label">Active folders</div>
+          <div id="folder-list" class="folder-entries"></div>
+          <div class="folder-section-label">Browse &amp; add folder</div>
+          <div id="folder-drive-bar" class="folder-drive-bar hidden"></div>
+          <div class="folder-breadcrumb" id="folder-breadcrumb"></div>
+          <div class="folder-dirs" id="folder-dirs"><div class="folder-empty">Loading...</div></div>
+          <div class="folder-actions">
+            <span class="folder-selected-path" id="folder-selected-path">-</span>
+            <button class="tab-btn" id="folder-add-btn" disabled>Add this folder</button>
+          </div>
+        </div>
+        <!-- Google Drive tab -->
+        <div class="folder-modal-pane hidden" id="folder-tab-gdrive">
+          <div class="folder-section-label">Active Google Drive folders</div>
+          <div id="gdrive-list" class="folder-entries"></div>
+          <div class="folder-section-label">Browse &amp; add folder</div>
+          <div class="folder-breadcrumb" id="gdrive-breadcrumb"></div>
+          <div class="folder-dirs" id="gdrive-dirs"><div class="folder-empty">Loading...</div></div>
+          <div class="folder-actions">
+            <span class="folder-selected-path" id="gdrive-selected-name">My Drive</span>
+            <button class="tab-btn" id="gdrive-add-btn" disabled>Add this folder</button>
           </div>
         </div>
       </div>

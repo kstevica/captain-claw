@@ -1189,6 +1189,11 @@ body {
   color: #ff5555;
 }
 
+.log-btw {
+  color: #f0c040;
+  font-style: italic;
+}
+
 /* ── Output panel ────────────────────────────────────────────── */
 
 #output-panel .window-title {
@@ -2224,7 +2229,28 @@ body.visual-fullscreen #visual-frame {
 
 /* ── Model & tier selectors ──────────────────────────────────── */
 
-#model-selector,
+#model-btn {
+  font-family: var(--font);
+  font-size: 11px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--chrome-lo);
+  border-radius: var(--radius);
+  padding: 2px 8px;
+  cursor: pointer;
+  max-width: 200px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#model-btn:hover {
+  background: var(--accent);
+  color: var(--bg);
+}
+#model-btn-label {
+  font-size: inherit;
+}
+
 #tier-selector {
   font-family: var(--font);
   font-size: 11px;
@@ -2235,6 +2261,120 @@ body.visual-fullscreen #visual-frame {
   padding: 2px 4px;
   cursor: pointer;
   max-width: 150px;
+}
+
+/* ── Model modal ────────────────────────────────────────────── */
+
+#model-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+}
+#model-modal.active {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#model-modal .modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,.55);
+}
+#model-modal .modal-content {
+  position: relative;
+  width: min(620px, 90vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+#model-modal .window-body {
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.model-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.model-loading {
+  text-align: center;
+  padding: 24px;
+  font-size: 0.85rem;
+  opacity: 0.6;
+}
+
+.model-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 2px solid var(--win-border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.model-card:hover {
+  border-color: var(--accent);
+  background: var(--bg);
+}
+.model-card.selected {
+  border-color: var(--accent);
+  background: var(--bg);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.model-card-icon {
+  font-size: 1.3rem;
+  flex-shrink: 0;
+  width: 32px;
+  text-align: center;
+}
+
+.model-card-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.model-card-name {
+  font-size: 0.88rem;
+  font-weight: bold;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.model-card-detail {
+  font-size: 0.72rem;
+  color: var(--text);
+  opacity: 0.6;
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.model-card-badges {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.model-badge {
+  font-size: 0.65rem;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--win-border);
+  color: var(--text);
+  white-space: nowrap;
+}
+.model-badge.active {
+  background: var(--accent);
+  color: var(--bg);
 }
 
 /* ── Map tab (exploration mind-map) ───────────────────────────── */
@@ -2726,6 +2866,241 @@ body.visual-fullscreen #visual-frame {
   background: #cc3333;
   color: #fff;
   border-color: #cc3333;
+}
+
+/* ── Attachment bar ──────────────────────────────────────────── */
+
+#attachment-bar {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--win-border);
+  background: var(--surface);
+}
+#attachment-bar.hidden { display: none; }
+
+#attachment-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  background: var(--accent);
+  color: var(--bg);
+  border-radius: 4px;
+  font-size: 0.78rem;
+  font-family: var(--font);
+}
+
+.attachment-name {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-remove {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0 2px;
+  opacity: 0.7;
+}
+.attachment-remove:hover { opacity: 1; }
+
+#attach-btn, #folder-btn {
+  background: var(--btn-bg);
+  color: var(--text);
+  border: 1px solid var(--win-border);
+  font-size: 0.85rem;
+  padding: 2px 6px;
+  cursor: pointer;
+  font-family: var(--font);
+  border-radius: 2px;
+}
+#attach-btn:hover, #folder-btn:hover {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+/* ── Folder modal ───────────────────────────────────────────── */
+
+#folder-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+}
+#folder-modal.active { display: flex; align-items: center; justify-content: center; }
+#folder-modal .modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,.55);
+}
+#folder-modal .modal-content {
+  position: relative;
+  width: min(600px, 90vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+#folder-modal .window-body {
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.folder-modal-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.folder-modal-tab {
+  background: var(--btn-bg);
+  color: var(--text);
+  border: 1px solid var(--win-border);
+  padding: 4px 12px;
+  font-family: var(--font);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.folder-modal-tab.active {
+  background: var(--accent);
+  color: var(--bg);
+}
+.folder-modal-pane.hidden { display: none; }
+
+.folder-section-label {
+  font-size: 0.78rem;
+  font-weight: bold;
+  color: var(--text);
+  opacity: 0.7;
+  margin: 8px 0 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.folder-section-lbl {
+  font-size: 0.75rem;
+  color: var(--text);
+  opacity: 0.5;
+  margin: 6px 0 2px;
+  padding-left: 4px;
+}
+
+.folder-entries {
+  max-height: 120px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+
+.folder-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 6px;
+  font-size: 0.8rem;
+  border-bottom: 1px solid var(--win-border);
+}
+.folder-entry.missing { opacity: 0.5; }
+.folder-entry-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.folder-entry-warn { color: #c80; margin: 0 4px; }
+.folder-entry-remove {
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  opacity: 0.5;
+  font-size: 0.9rem;
+}
+.folder-entry-remove:hover { opacity: 1; color: #c33; }
+
+.folder-drive-bar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+.folder-drive-bar.hidden { display: none; }
+.folder-drive-btn {
+  background: var(--btn-bg);
+  color: var(--text);
+  border: 1px solid var(--win-border);
+  padding: 2px 8px;
+  font-family: var(--font);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.folder-drive-btn:hover {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.folder-breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 6px;
+  background: var(--surface);
+  border: 1px solid var(--win-border);
+  margin-bottom: 4px;
+  font-size: 0.78rem;
+  min-height: 24px;
+}
+.folder-bc-item {
+  cursor: pointer;
+  color: var(--accent);
+}
+.folder-bc-item:hover { text-decoration: underline; }
+.folder-bc-sep { color: var(--text); opacity: 0.4; }
+
+.folder-dirs {
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--win-border);
+  background: var(--surface);
+  margin-bottom: 6px;
+}
+.folder-dir-item {
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 0.82rem;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.folder-dir-item:hover { background: var(--accent); color: var(--bg); }
+.folder-dir-icon { flex-shrink: 0; }
+
+.folder-empty {
+  padding: 8px;
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--text);
+  opacity: 0.5;
+}
+
+.folder-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.folder-selected-path {
+  flex: 1;
+  font-size: 0.78rem;
+  color: var(--text);
+  opacity: 0.7;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── Responsive ──────────────────────────────────────────────── */

@@ -300,4 +300,7 @@ async def _run_agent(
     finally:
         server._busy = False
         server._active_task = None
+        # Clear any /btw instructions accumulated during this task.
+        if server.agent and hasattr(server.agent, "_btw_instructions"):
+            server.agent._btw_instructions = []
         server._broadcast({"type": "status", "status": "ready"})

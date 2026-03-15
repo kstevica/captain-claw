@@ -5,6 +5,7 @@ Endpoints
 GET    /api/reflections            – list reflections (newest first)
 GET    /api/reflections/latest     – get the active (latest) reflection
 POST   /api/reflections/generate   – trigger a new reflection
+PUT    /api/reflections/{timestamp} – update a reflection's summary/topics
 DELETE /api/reflections/{timestamp} – delete a reflection
 """
 
@@ -55,6 +56,48 @@ async def trigger_reflection(server: WebServer, request: web.Request) -> web.Res
         return web.json_response(
             {"error": f"Reflection generation failed: {exc}"}, status=500
         )
+
+    return web.json_response(reflection_to_dict(r))
+
+
+async def update_reflection_api(server: WebServer, request: web.Request) -> web.Response:
+    """Update a reflection's summary and/or topics."""
+    from captain_claw.reflections import (
+        REFLECTIONS_DIR,
+        markdown_to_reflection,
+        reflection_to_dict,
+        reflection_to_markdown,
+    )
+
+    timestamp = request.match_info["timestamp"]
+    filename = timestamp.replace(":", "-").replace(" ", "_") + ".md"
+    path = REFLECTIONS_DIR / filename
+
+    if not path.is_file():
+        return web.json_response({"error": "Reflection not found"}, status=404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    # Load existing reflection.
+    text = path.read_text(encoding="utf-8")
+    r = markdown_to_reflection(text)
+
+    # Apply updates.
+    if "summary" in body:
+        r.summary = body["summary"]
+    if "topics_reviewed" in body:
+        r.topics_reviewed = body["topics_reviewed"]
+
+    # Persist.
+    path.write_text(reflection_to_markdown(r), encoding="utf-8")
+
+    # Invalidate cache so latest reflection picks up changes.
+    import captain_claw.reflections as _ref_mod
+    _ref_mod._cached_reflection = None
+    _ref_mod._cached_mtime = 0.0
 
     return web.json_response(reflection_to_dict(r))
 

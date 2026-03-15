@@ -159,6 +159,82 @@
             color: #c9d1d9;
             padding-top: 14px;
         }
+        .ref-card-edit-area {
+            display: none;
+            padding-top: 14px;
+        }
+        .ref-card.editing .ref-card-summary { display: none; }
+        .ref-card.editing .ref-card-edit-area { display: block; }
+        .ref-edit-textarea {
+            width: 100%;
+            min-height: 200px;
+            background: #0d1117;
+            color: #c9d1d9;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 10px;
+            font-family: inherit;
+            font-size: 0.88rem;
+            line-height: 1.6;
+            resize: vertical;
+        }
+        .ref-edit-textarea:focus { outline: none; border-color: #58a6ff; }
+        .ref-edit-topics {
+            width: 100%;
+            background: #0d1117;
+            color: #c9d1d9;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 8px 10px;
+            font-family: inherit;
+            font-size: 0.82rem;
+            margin-top: 8px;
+        }
+        .ref-edit-topics:focus { outline: none; border-color: #58a6ff; }
+        .ref-edit-label {
+            font-size: 0.75rem;
+            color: #8b949e;
+            margin-top: 8px;
+            margin-bottom: 2px;
+        }
+        .ref-edit-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .ref-edit-save {
+            background: #238636;
+            color: #fff;
+            border: none;
+            padding: 6px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.82rem;
+        }
+        .ref-edit-save:hover { background: #2ea043; }
+        .ref-edit-cancel {
+            background: transparent;
+            color: #8b949e;
+            border: 1px solid #30363d;
+            padding: 6px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.82rem;
+        }
+        .ref-edit-cancel:hover { color: #c9d1d9; border-color: #8b949e; }
+        .ref-edit-btn {
+            background: none;
+            border: none;
+            color: #58a6ff;
+            cursor: pointer;
+            font-size: 0.85rem;
+            padding: 4px 8px;
+            border-radius: 4px;
+            opacity: 0.5;
+            transition: opacity 0.15s;
+        }
+        .ref-card-header:hover .ref-edit-btn { opacity: 1; }
+        .ref-edit-btn:hover { background: rgba(88, 166, 255, 0.1); }
         .ref-card-usage {
             margin-top: 12px;
             font-size: 0.78rem;
@@ -266,12 +342,23 @@
             html += '<div class="ref-card-topics">' + escapeHtml(topics) + '</div>';
             html += '</div>';
             html += '<div class="ref-card-actions">';
+            html += '<button class="ref-edit-btn" onclick="event.stopPropagation(); editReflection(\'' + escapeAttr(r.timestamp) + '\')" title="Edit">&#x270F;&#xFE0F;</button>';
             html += '<button class="ref-delete-btn" onclick="event.stopPropagation(); deleteReflection(\'' + escapeAttr(r.timestamp) + '\')" title="Delete">&#x1F5D1;&#xFE0F;</button>';
             html += '<span class="ref-card-toggle">&#x25B6;</span>';
             html += '</div>';
             html += '</div>';
             html += '<div class="ref-card-body">';
             html += '<div class="ref-card-summary">' + escapeHtml(r.summary || '(empty)') + '</div>';
+            html += '<div class="ref-card-edit-area">';
+            html += '<div class="ref-edit-label">Summary</div>';
+            html += '<textarea class="ref-edit-textarea" data-field="summary">' + escapeHtml(r.summary || '') + '</textarea>';
+            html += '<div class="ref-edit-label">Topics (comma-separated)</div>';
+            html += '<input class="ref-edit-topics" data-field="topics" value="' + escapeAttr((r.topics_reviewed || []).join(', ')) + '">';
+            html += '<div class="ref-edit-actions">';
+            html += '<button class="ref-edit-save" onclick="saveReflection(\'' + escapeAttr(r.timestamp) + '\', this)">Save</button>';
+            html += '<button class="ref-edit-cancel" onclick="cancelEditReflection(\'' + escapeAttr(r.timestamp) + '\')">Cancel</button>';
+            html += '</div>';
+            html += '</div>';
             if (usageText) {
                 html += '<div class="ref-card-usage">' + escapeHtml(usageText) + '</div>';
             }
@@ -303,6 +390,53 @@
                 console.error(err);
             });
     }
+
+    window.editReflection = function (timestamp) {
+        var card = document.querySelector('.ref-card[data-timestamp="' + timestamp + '"]');
+        if (!card) return;
+        card.classList.add('expanded');
+        card.classList.add('editing');
+    };
+
+    window.cancelEditReflection = function (timestamp) {
+        var card = document.querySelector('.ref-card[data-timestamp="' + timestamp + '"]');
+        if (!card) return;
+        card.classList.remove('editing');
+    };
+
+    window.saveReflection = function (timestamp, btn) {
+        var card = document.querySelector('.ref-card[data-timestamp="' + timestamp + '"]');
+        if (!card) return;
+        var summaryEl = card.querySelector('.ref-edit-textarea[data-field="summary"]');
+        var topicsEl = card.querySelector('.ref-edit-topics[data-field="topics"]');
+        var summary = summaryEl ? summaryEl.value : '';
+        var topics = topicsEl ? topicsEl.value.split(',').map(function(t) { return t.trim(); }).filter(function(t) { return t.length > 0; }) : [];
+
+        btn.disabled = true;
+        btn.textContent = 'Saving...';
+
+        fetch('/api/reflections/' + encodeURIComponent(timestamp), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ summary: summary, topics_reviewed: topics })
+        })
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+            if (data.error) {
+                showStatus(data.error, 'error');
+            } else {
+                showStatus('Reflection updated.', 'success');
+                loadReflections();
+            }
+        })
+        .catch(function (err) {
+            showStatus('Save failed: ' + err.message, 'error');
+        })
+        .finally(function () {
+            btn.disabled = false;
+            btn.textContent = 'Save';
+        });
+    };
 
     window.deleteReflection = function (timestamp) {
         if (!confirm('Delete this reflection?')) return;

@@ -965,6 +965,10 @@ class WebServer:
         from captain_claw.web.static_pages import serve_computer
         return await serve_computer(self, request)
 
+    async def _serve_personality(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_personality
+        return await serve_personality(self, request)
+
     async def _computer_visualize(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_computer import computer_visualize
         return await computer_visualize(self, request)
@@ -1000,6 +1004,10 @@ class WebServer:
     async def _generate_reflection(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_reflections import trigger_reflection
         return await trigger_reflection(self, request)
+
+    async def _update_reflection(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_reflections import update_reflection_api
+        return await update_reflection_api(self, request)
 
     async def _delete_reflection(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_reflections import delete_reflection_api
@@ -1439,6 +1447,7 @@ class WebServer:
         app.router.add_get("/api/reflections", self._list_reflections)
         app.router.add_get("/api/reflections/latest", self._get_latest_reflection)
         app.router.add_post("/api/reflections/generate", self._generate_reflection)
+        app.router.add_put("/api/reflections/{timestamp}", self._update_reflection)
         app.router.add_delete("/api/reflections/{timestamp}", self._delete_reflection)
         app.router.add_get("/api/workflow-browser", self._list_workflow_outputs)
         app.router.add_get("/api/workflow-browser/output/{filename}", self._get_workflow_output)
@@ -1534,6 +1543,7 @@ class WebServer:
             app.router.add_get("/usage", self._serve_usage)
             app.router.add_get("/reflections", self._serve_reflections)
             app.router.add_get("/computer", self._serve_computer)
+            app.router.add_get("/personality", self._serve_personality)
             app.router.add_post("/api/computer/visualize", self._computer_visualize)
             app.router.add_post("/api/computer/exploration", self._exploration_save)
             app.router.add_get("/api/computer/exploration", self._exploration_list)

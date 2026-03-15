@@ -1640,6 +1640,19 @@
 
         hideSuggestions();
 
+        // ── /btw command: inject additional instructions while task is running ──
+        var btwMatch = text.match(/^\/btw\s+([\s\S]+)/i) || text.match(/^btw\s+([\s\S]+)/i);
+        if (btwMatch) {
+            var btwText = btwMatch[1].trim();
+            if (btwText) {
+                send({ type: 'btw', content: btwText });
+                appendMessage('user', 'btw: ' + btwText);
+            }
+            messageInput.value = '';
+            autoResizeInput();
+            return;
+        }
+
         if (text.startsWith('/')) {
             send({ type: 'command', command: text });
         } else {

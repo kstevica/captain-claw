@@ -2272,6 +2272,25 @@ class AgentContextMixin:
                 "token_count": self._count_tokens(workspace_note),
             })
 
+        # "BTW" live instructions — injected by the user while a task is
+        # running.  Each one becomes a user message so the model treats
+        # them as direct instructions.
+        _btw_list: list[str] = getattr(self, "_btw_instructions", None) or []
+        if _btw_list:
+            _btw_block = "\n".join(
+                f"- {inst}" for inst in _btw_list
+            )
+            _btw_note = (
+                "[IMPORTANT — Additional instructions from the user (added while this task is running). "
+                "Take these into account for ALL remaining work.]\n\n"
+                + _btw_block
+            )
+            candidate_messages.append({
+                "role": "user",
+                "content": _btw_note,
+                "token_count": self._count_tokens(_btw_note),
+            })
+
         selected_reversed: list[dict[str, Any]] = []
         used_tokens = 0
         dropped_messages = 0

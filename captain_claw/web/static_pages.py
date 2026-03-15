@@ -114,3 +114,7 @@ async def serve_reflections(server: WebServer, request: web.Request) -> web.File
 
 async def serve_computer(server: WebServer, request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "computer.html")
+
+
+async def serve_personality(server: WebServer, request: web.Request) -> web.FileResponse:
+    return web.FileResponse(STATIC_DIR / "personality.html")

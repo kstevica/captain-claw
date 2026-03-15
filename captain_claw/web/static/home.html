@@ -26,6 +26,16 @@
                 <div class="home-card-title">Computer</div>
                 <div class="home-card-desc">Retro-themed workspace with themed visual rendering. Chat with the agent in classic computer styles.</div>
             </a>
+            <a href="/personality" class="home-card">
+                <div class="home-card-icon">🤖</div>
+                <div class="home-card-title">Personality</div>
+                <div class="home-card-desc">Define the agent's identity and how it interacts with each user. Manage personas and profiles.</div>
+            </a>
+            <a href="/reflections" class="home-card">
+                <div class="home-card-icon">&#x1FA9E;</div>
+                <div class="home-card-title">Reflections</div>
+                <div class="home-card-desc">Self-improvement insights and performance analysis from periodic self-assessments.</div>
+            </a>
             <a href="/sessions" class="home-card">
                 <div class="home-card-icon">&#x1F4CB;</div>
                 <div class="home-card-title">Sessions</div>
@@ -100,11 +110,6 @@
                 <div class="home-card-icon">&#x1F4C8;</div>
                 <div class="home-card-title">Usage</div>
                 <div class="home-card-desc">Track LLM token usage, costs, and performance. View per-call details with date filtering.</div>
-            </a>
-            <a href="/reflections" class="home-card">
-                <div class="home-card-icon">&#x1FA9E;</div>
-                <div class="home-card-title">Reflections</div>
-                <div class="home-card-desc">Self-improvement insights and performance analysis from periodic self-assessments.</div>
             </a>
             <a href="/settings" class="home-card">
                 <div class="home-card-icon">&#x2699;&#xFE0F;</div>
@@ -183,6 +188,7 @@
         await fetch('/auth/google/logout', { method: 'POST' });
         location.reload();
     }
+
     </script>
 </body>
 </html>

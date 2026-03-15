@@ -27,6 +27,17 @@ let selectedTokenTier = localStorage.getItem("computer-token-tier") || "standard
 let selectedModel = localStorage.getItem("computer-model") || "";
 let availableModels = [];
 
+// Attachment state.
+let pendingImagePath = null;
+let pendingFilePath = null;
+const _IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
+
+// Folder browser state.
+let folderCurrentPath = null;
+let _gwsAvailable = false;
+let _gdriveCurrent = { id: "root", name: "My Drive" };
+let _gdriveBcStack = [{ id: "root", name: "My Drive" }];
+
 /* ── Exploration state ───────────────────────────────────────── */
 
 const MAX_EXPLORATION_NODES = 200;
@@ -982,6 +993,14 @@ function handleMessage(data) {
       }
       break;
 
+    case "command_result":
+      if (data.command === "/btw") {
+        logEntry("btw", data.content || "Noted.");
+      } else {
+        logEntry("system", data.content || "");
+      }
+      break;
+
     case "approval_request":
       // Auto-approve in Computer mode (can be refined later).
       send({ type: "approval_response", approved: true, request_id: data.request_id });
@@ -999,6 +1018,12 @@ function handleWelcome(data) {
   // Capture session id for exploration persistence and file scoping.
   sessionId = sess.id || data.session_id || data.id || null;
   logEntry("system", `Session ready${sessionId ? ' (' + sessionId.slice(0, 8) + '\u2026)' : ''}`);
+
+  // Apply the saved model selection to the session.
+  if (selectedModel && connected) {
+    send({ type: "set_model", selector: selectedModel });
+    logEntry("system", `Applying saved model: ${selectedModel}`);
+  }
 
   // Load exploration history.
   if (sessionId) {
@@ -1073,7 +1098,21 @@ function handleToolStream(data) {
 function handleSend() {
   const input = $("#input-box");
   const text = input.value.trim();
-  if (!text || !connected) return;
+  if (!text && !pendingImagePath && !pendingFilePath) return;
+  if (!connected) return;
+
+  // ── /btw command: inject additional instructions while task is running ──
+  const btwMatch = text.match(/^\/btw\s+([\s\S]+)/i) || text.match(/^btw\s+([\s\S]+)/i);
+  if (btwMatch && isProcessing) {
+    const btwText = btwMatch[1].trim();
+    if (btwText) {
+      send({ type: "btw", content: btwText });
+      logEntry("btw", btwText);
+      input.value = "";
+      input.style.height = "auto";
+    }
+    return;
+  }
 
   // If the explore confirmation bar is active, treat this as an exploration send.
   const bar = $("#explore-confirm-bar");
@@ -1100,22 +1139,26 @@ function handleSend() {
   agentCreatedHtmlFiles = [];
 
   // Show user input in log.
-  logEntry("user", text);
+  logEntry("user", text || "(attachment)");
 
   // Clear previous answer for fresh response.
   clearAnswer();
   clearVisual();
 
   // Render input decomposition.
-  renderInputDecomposition(text);
+  if (text) renderInputDecomposition(text);
 
   // Send to agent.
   if (text.startsWith("/")) {
     send({ type: "command", command: text });
   } else {
-    send({ type: "chat", content: text });
+    const msg = { type: "chat", content: text || "" };
+    if (pendingImagePath) msg.image_path = pendingImagePath;
+    if (pendingFilePath) msg.file_path = pendingFilePath;
+    send(msg);
   }
 
+  clearAttachment();
   setProcessing(true);
 }
 
@@ -1537,6 +1580,7 @@ function logEntry(type, text, toolName) {
   const icons = {
     system: "●",
     user: "▶",
+    btw: "💡",
     status: "◎",
     tool: "⚙",
     thinking: "◇",
@@ -2327,37 +2371,127 @@ async function loadModels() {
     if (!res.ok) return;
     const data = await res.json();
     availableModels = data.models || [];
-
-    const sel = $("#model-selector");
-    // Keep the default option, add available models.
-    sel.innerHTML = '<option value="">(default model)</option>';
-    for (const m of availableModels) {
-      const label = m.description
-        ? `${m.id} — ${m.description}`
-        : `${m.id} (${m.provider}/${m.model})`;
-      const opt = document.createElement("option");
-      opt.value = m.id;
-      opt.textContent = label;
-      if (m.id === selectedModel) opt.selected = true;
-      sel.appendChild(opt);
-    }
-
+    renderModelGrid();
+    updateModelBtnLabel();
     console.log(`[Computer] Loaded ${availableModels.length} available models`);
   } catch (e) {
     console.warn("Failed to load models:", e);
   }
 }
 
-function initSelectors() {
-  // Model selector.
-  const modelSel = $("#model-selector");
-  if (modelSel) {
-    modelSel.addEventListener("change", (e) => {
-      selectedModel = e.target.value;
-      localStorage.setItem("computer-model", selectedModel);
-      logEntry("system", `Visual model: ${selectedModel || '(default)'}`);
-    });
+function providerIcon(provider) {
+  const p = (provider || "").toLowerCase();
+  if (p.includes("anthropic") || p.includes("claude")) return "🟣";
+  if (p.includes("openai") || p.includes("gpt")) return "🟢";
+  if (p.includes("google") || p.includes("gemini") || p.includes("vertex")) return "🔵";
+  if (p.includes("groq")) return "🟠";
+  if (p.includes("mistral")) return "🔴";
+  if (p.includes("ollama") || p.includes("local")) return "⚪";
+  if (p.includes("openrouter")) return "🟡";
+  return "⬜";
+}
+
+function renderModelGrid() {
+  const grid = $("#model-grid");
+  grid.innerHTML = "";
+
+  // Default option
+  const defCard = document.createElement("div");
+  defCard.className = "model-card" + (!selectedModel ? " selected" : "");
+  defCard.dataset.modelId = "";
+  defCard.innerHTML =
+    '<div class="model-card-icon">⚙️</div>' +
+    '<div class="model-card-info">' +
+      '<div class="model-card-name">Default Model</div>' +
+      '<div class="model-card-detail">Use the session\'s default model for all operations</div>' +
+    '</div>' +
+    (!selectedModel ? '<div class="model-card-badges"><span class="model-badge active">Active</span></div>' : '');
+  defCard.addEventListener("click", () => selectModel(""));
+  grid.appendChild(defCard);
+
+  for (const m of availableModels) {
+    if (m.id === "default" && availableModels.length === 1) continue; // skip if it's the only fallback
+    const card = document.createElement("div");
+    card.className = "model-card" + (m.id === selectedModel ? " selected" : "");
+    card.dataset.modelId = m.id;
+
+    const name = m.description || m.id;
+    const detail = `${m.provider} / ${m.model}`;
+    const badges = [];
+    if (m.reasoning_level) badges.push(m.reasoning_level);
+    if (m.model_type && m.model_type !== "llm") badges.push(m.model_type);
+    if (m.id === selectedModel) badges.push("Active");
+
+    card.innerHTML =
+      '<div class="model-card-icon">' + providerIcon(m.provider) + '</div>' +
+      '<div class="model-card-info">' +
+        '<div class="model-card-name">' + esc(name) + '</div>' +
+        '<div class="model-card-detail">' + esc(detail) + '</div>' +
+      '</div>' +
+      (badges.length
+        ? '<div class="model-card-badges">' +
+          badges.map(b => '<span class="model-badge' + (b === "Active" ? " active" : "") + '">' + esc(b) + '</span>').join("") +
+          '</div>'
+        : '');
+
+    card.addEventListener("click", () => selectModel(m.id));
+    grid.appendChild(card);
   }
+}
+
+function selectModel(modelId) {
+  selectedModel = modelId;
+  localStorage.setItem("computer-model", selectedModel);
+
+  // Update visuals.
+  renderModelGrid();
+  updateModelBtnLabel();
+
+  // Also set the model for the chat/agent session via WebSocket.
+  if (modelId && connected) {
+    send({ type: "set_model", selector: modelId });
+  } else if (!modelId && connected) {
+    // Reset to default — send the default model id.
+    send({ type: "set_model", selector: "default" });
+  }
+
+  logEntry("system", `Model: ${selectedModel || '(default)'}`);
+  closeModelModal();
+}
+
+function updateModelBtnLabel() {
+  const label = $("#model-btn-label");
+  if (!selectedModel) {
+    label.textContent = "Default";
+    return;
+  }
+  const m = availableModels.find(m => m.id === selectedModel);
+  label.textContent = m ? (m.description || m.id) : selectedModel;
+}
+
+function openModelModal() {
+  renderModelGrid();
+  $("#model-modal").classList.add("active");
+}
+
+function closeModelModal() {
+  $("#model-modal").classList.remove("active");
+}
+
+function initModelModal() {
+  $("#model-btn").addEventListener("click", openModelModal);
+  $("#model-modal .modal-close").addEventListener("click", closeModelModal);
+  $("#model-modal .modal-backdrop").addEventListener("click", closeModelModal);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && $("#model-modal").classList.contains("active")) {
+      closeModelModal();
+    }
+  });
+}
+
+function initSelectors() {
+  // Model modal (replaces old <select>).
+  initModelModal();
 
   // Tier selector.
   const tierSel = $("#tier-selector");
@@ -2499,6 +2633,8 @@ function initTextarea() {
       handleSend();
     }
   });
+
+  $("#send-btn").addEventListener("click", () => handleSend());
 }
 
 /* ── Clear log button ────────────────────────────────────────── */
@@ -2528,6 +2664,458 @@ function initSpinner() {
   }, 100);
 }
 
+/* ── Attachment / paste / drag-drop ──────────────────────────── */
+
+function resizeImageFile(file, maxSide) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const w = img.width, h = img.height;
+      const scale = (w > maxSide || h > maxSide) ? maxSide / Math.max(w, h) : 1;
+      const nw = Math.round(w * scale), nh = Math.round(h * scale);
+      const canvas = document.createElement("canvas");
+      canvas.width = nw; canvas.height = nh;
+      canvas.getContext("2d").drawImage(img, 0, 0, nw, nh);
+      canvas.toBlob((blob) => {
+        if (!blob) { resolve(file); return; }
+        const outName = file.name.replace(/\.[^.]+$/, ".jpg");
+        resolve(new File([blob], outName, { type: "image/jpeg" }));
+      }, "image/jpeg", 0.85);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("load")); };
+    img.src = url;
+  });
+}
+
+async function uploadFile(file) {
+  if (!file) return;
+  const ext = file.name.split(".").pop().toLowerCase();
+  const isImage = _IMAGE_EXTS.indexOf(ext) !== -1;
+  const isData = (ext === "csv" || ext === "xlsx");
+
+  if (!isImage && !isData) {
+    logEntry("error", "Supported files: images (.png, .jpg, .jpeg, .webp, .gif, .bmp) and data (.csv, .xlsx).");
+    return;
+  }
+
+  const attachBtn = $("#attach-btn");
+
+  if (isImage) {
+    attachBtn.disabled = true;
+    attachBtn.textContent = "⏳";
+    try { file = await resizeImageFile(file, 1024); } catch (_) {}
+    const formData = new FormData();
+    formData.append("file", file);
+    try {
+      const res = await fetch("/api/image/upload", { method: "POST", body: formData });
+      const data = await res.json();
+      if (!res.ok) {
+        logEntry("error", "Upload failed: " + (data.error || "Unknown error"));
+      } else {
+        showAttachmentChip(file.name, data.path, false);
+      }
+    } catch (err) {
+      logEntry("error", "Upload failed: " + err.message);
+    } finally {
+      attachBtn.disabled = false;
+      attachBtn.textContent = "📎";
+      $("#file-input").value = "";
+    }
+    return;
+  }
+
+  // Data file
+  attachBtn.disabled = true;
+  attachBtn.textContent = "⏳";
+  const formData = new FormData();
+  formData.append("file", file);
+  try {
+    const res = await fetch("/api/file/upload", { method: "POST", body: formData });
+    const data = await res.json();
+    if (!res.ok) {
+      logEntry("error", "Upload failed: " + (data.error || "Unknown error"));
+    } else {
+      showAttachmentChip(file.name, data.path, true);
+    }
+  } catch (err) {
+    logEntry("error", "Upload failed: " + err.message);
+  } finally {
+    attachBtn.disabled = false;
+    attachBtn.textContent = "📎";
+    $("#file-input").value = "";
+  }
+}
+
+function showAttachmentChip(filename, path, isFile) {
+  if (isFile) { pendingFilePath = path; } else { pendingImagePath = path; }
+  const bar = $("#attachment-bar");
+  const chip = $("#attachment-chip");
+  chip.innerHTML = "";
+  const span = document.createElement("span");
+  span.className = "attachment-name";
+  span.textContent = (isFile ? "📄 " : "🖼️ ") + filename;
+  chip.appendChild(span);
+  const removeBtn = document.createElement("button");
+  removeBtn.className = "attachment-remove";
+  removeBtn.textContent = "✕";
+  removeBtn.title = "Remove attachment";
+  removeBtn.addEventListener("click", clearAttachment);
+  chip.appendChild(removeBtn);
+  bar.classList.remove("hidden");
+}
+
+function clearAttachment() {
+  pendingImagePath = null;
+  pendingFilePath = null;
+  const bar = $("#attachment-bar");
+  if (bar) bar.classList.add("hidden");
+  const chip = $("#attachment-chip");
+  if (chip) chip.innerHTML = "";
+  const fi = $("#file-input");
+  if (fi) fi.value = "";
+}
+
+function initAttachments() {
+  const attachBtn = $("#attach-btn");
+  const fileInput = $("#file-input");
+  const inputBox = $("#input-box");
+  const workspace = $("#workspace");
+
+  attachBtn.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", () => {
+    if (fileInput.files && fileInput.files[0]) uploadFile(fileInput.files[0]);
+  });
+
+  // Paste image from clipboard.
+  inputBox.addEventListener("paste", (e) => {
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf("image/") === 0) {
+        e.preventDefault();
+        let file = items[i].getAsFile();
+        if (file) {
+          if (!file.name || file.name === "image.png") {
+            const ext = (file.type.split("/")[1] || "png") === "jpeg" ? "jpg" : (file.type.split("/")[1] || "png");
+            const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+            file = new File([file], "pasted-" + ts + "." + ext, { type: file.type });
+          }
+          uploadFile(file);
+        }
+        return;
+      }
+    }
+  });
+
+  // Drag & drop on workspace.
+  let dragCounter = 0;
+  workspace.addEventListener("dragenter", (e) => { e.preventDefault(); dragCounter++; });
+  workspace.addEventListener("dragover", (e) => { e.preventDefault(); });
+  workspace.addEventListener("dragleave", (e) => { e.preventDefault(); dragCounter--; });
+  workspace.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dragCounter = 0;
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {
+      uploadFile(e.dataTransfer.files[0]);
+    }
+  });
+}
+
+/* ── Folder browser ─────────────────────────────────────────── */
+
+function openFolderModal() {
+  $("#folder-modal").classList.add("active");
+  loadFolderList();
+  browseFolderDir("");
+  initFolderTabs();
+}
+
+function closeFolderModal() {
+  $("#folder-modal").classList.remove("active");
+}
+
+async function initFolderTabs() {
+  // Check for Windows drives.
+  try {
+    const res = await fetch("/api/drives");
+    const data = await res.json();
+    const bar = $("#folder-drive-bar");
+    if (data.drives && data.drives.length > 0) {
+      bar.classList.remove("hidden");
+      bar.innerHTML = data.drives.map(d =>
+        '<button class="folder-drive-btn" data-drive="' + esc(d) + '">' + esc(d) + '</button>'
+      ).join("");
+      bar.querySelectorAll(".folder-drive-btn").forEach(btn => {
+        btn.addEventListener("click", () => browseFolderDir(btn.dataset.drive + "\\"));
+      });
+    } else {
+      bar.classList.add("hidden");
+    }
+  } catch (_) {
+    $("#folder-drive-bar").classList.add("hidden");
+  }
+
+  // Check for GDrive availability.
+  try {
+    const res = await fetch("/api/gws-status");
+    const data = await res.json();
+    _gwsAvailable = !!data.available;
+    $("#folder-tab-gdrive-btn").style.display = _gwsAvailable ? "" : "none";
+  } catch (_) {
+    _gwsAvailable = false;
+    $("#folder-tab-gdrive-btn").style.display = "none";
+  }
+
+  // Tab switching.
+  for (const tab of $$(".folder-modal-tab")) {
+    tab.onclick = () => {
+      for (const t of $$(".folder-modal-tab")) t.classList.remove("active");
+      tab.classList.add("active");
+      const target = tab.dataset.tab;
+      $("#folder-tab-local").classList.toggle("hidden", target !== "local");
+      $("#folder-tab-gdrive").classList.toggle("hidden", target !== "gdrive");
+      if (target === "gdrive") loadGdriveTab();
+    };
+  }
+}
+
+async function loadFolderList() {
+  const list = $("#folder-list");
+  try {
+    const res = await fetch("/api/read-folders");
+    const data = await res.json();
+    const dirs = data.dirs || [];
+    if (!dirs.length) {
+      list.innerHTML = '<div class="folder-empty">No extra folders configured</div>';
+      return;
+    }
+    list.innerHTML = dirs.map(d => {
+      const cls = d.exists ? "" : " missing";
+      return '<div class="folder-entry' + cls + '">' +
+        '<span class="folder-entry-path" title="' + esc(d.resolved) + '">' + esc(d.resolved) + '</span>' +
+        (!d.exists ? '<span class="folder-entry-warn" title="Directory does not exist">⚠</span>' : '') +
+        '<button class="folder-entry-remove" data-path="' + esc(d.resolved) + '" title="Remove">✕</button>' +
+        '</div>';
+    }).join("");
+    list.querySelectorAll(".folder-entry-remove").forEach(btn => {
+      btn.addEventListener("click", () => removeFolderDir(btn.dataset.path));
+    });
+  } catch (_) {
+    list.innerHTML = '<div class="folder-empty">Failed to load</div>';
+  }
+}
+
+async function browseFolderDir(path) {
+  const dirsEl = $("#folder-dirs");
+  dirsEl.innerHTML = '<div class="folder-empty">Loading...</div>';
+  try {
+    const url = "/api/browse" + (path ? "?path=" + encodeURIComponent(path) : "");
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.error) { dirsEl.innerHTML = '<div class="folder-empty">' + esc(data.error) + '</div>'; return; }
+    folderCurrentPath = data.path;
+    $("#folder-selected-path").textContent = data.path;
+    const addBtn = $("#folder-add-btn");
+    addBtn.disabled = !!data.blocked;
+
+    renderFolderBreadcrumb(data.path);
+
+    let html = "";
+    if (data.parent) {
+      html += '<div class="folder-dir-item parent" data-path="' + esc(data.parent) + '"><span class="folder-dir-icon">⬆</span> ..</div>';
+    }
+    if (!data.dirs.length && !data.parent) {
+      html += '<div class="folder-empty">No subdirectories</div>';
+    }
+    data.dirs.forEach(name => {
+      const sep = data.path.includes("\\") ? "\\" : "/";
+      const full = data.path + (data.path.endsWith(sep) ? "" : sep) + name;
+      html += '<div class="folder-dir-item" data-path="' + esc(full) + '"><span class="folder-dir-icon">📁</span> ' + esc(name) + '</div>';
+    });
+    dirsEl.innerHTML = html;
+    dirsEl.querySelectorAll(".folder-dir-item").forEach(el => {
+      el.addEventListener("click", () => browseFolderDir(el.dataset.path));
+    });
+  } catch (e) {
+    dirsEl.innerHTML = '<div class="folder-empty">Error: ' + esc(e.message) + '</div>';
+  }
+}
+
+function renderFolderBreadcrumb(fullPath) {
+  const bc = $("#folder-breadcrumb");
+  const sep = fullPath.includes("\\") ? "\\" : "/";
+  const parts = fullPath.split(sep).filter(Boolean);
+  let html = "", built = "";
+  if (fullPath.startsWith("/")) {
+    html += '<span class="folder-bc-item" data-path="/">/</span>';
+    built = "/";
+  }
+  parts.forEach((p, i) => {
+    if (i === 0 && !fullPath.startsWith("/")) { built = p + sep; }
+    else { built += (built.endsWith(sep) ? "" : sep) + p; }
+    if (i > 0 || fullPath.startsWith("/")) html += '<span class="folder-bc-sep">' + sep + '</span>';
+    html += '<span class="folder-bc-item" data-path="' + esc(built) + '">' + esc(p) + '</span>';
+  });
+  bc.innerHTML = html;
+  bc.querySelectorAll(".folder-bc-item").forEach(el => {
+    el.addEventListener("click", () => browseFolderDir(el.dataset.path));
+  });
+}
+
+async function addCurrentFolder() {
+  if (!folderCurrentPath) return;
+  const btn = $("#folder-add-btn");
+  btn.disabled = true; btn.textContent = "Adding...";
+  try {
+    const res = await fetch("/api/read-folders", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: folderCurrentPath }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) { logEntry("error", "Add folder failed: " + (data.error || "Unknown")); }
+    else { logEntry("system", "Read folder added: " + data.path); loadFolderList(); }
+  } catch (e) { logEntry("error", "Add folder failed: " + e.message); }
+  finally { btn.disabled = false; btn.textContent = "Add this folder"; }
+}
+
+async function removeFolderDir(path) {
+  try {
+    const res = await fetch("/api/read-folders", {
+      method: "DELETE", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) { logEntry("error", "Remove folder failed: " + (data.error || "Unknown")); }
+    else { logEntry("system", "Read folder removed: " + data.path); loadFolderList(); }
+  } catch (e) { logEntry("error", "Remove folder failed: " + e.message); }
+}
+
+// ── Google Drive folder browser ──
+
+async function loadGdriveTab() {
+  loadGdriveFolderList();
+  browseGdrive("root", "My Drive");
+}
+
+async function loadGdriveFolderList() {
+  const list = $("#gdrive-list");
+  try {
+    const res = await fetch("/api/read-folders/gdrive");
+    const data = await res.json();
+    const folders = data.folders || [];
+    if (!folders.length) { list.innerHTML = '<div class="folder-empty">No Google Drive folders configured</div>'; return; }
+    list.innerHTML = folders.map(f =>
+      '<div class="folder-entry"><span class="folder-entry-path" title="ID: ' + esc(f.id) + '">' +
+      esc(f.name) + '</span><button class="folder-entry-remove" data-id="' + esc(f.id) + '" title="Remove">✕</button></div>'
+    ).join("");
+    list.querySelectorAll(".folder-entry-remove").forEach(btn => {
+      btn.addEventListener("click", () => removeGdriveFolder(btn.dataset.id));
+    });
+  } catch (_) { list.innerHTML = '<div class="folder-empty">Failed to load</div>'; }
+}
+
+async function browseGdrive(folderId, folderName) {
+  const dirsEl = $("#gdrive-dirs");
+  dirsEl.innerHTML = '<div class="folder-empty">Loading...</div>';
+  _gdriveCurrent = { id: folderId, name: folderName };
+  $("#gdrive-selected-name").textContent = folderName;
+  $("#gdrive-add-btn").disabled = (folderId === "root");
+
+  if (folderId === "root") { _gdriveBcStack = [{ id: "root", name: "My Drive" }]; }
+  else {
+    const idx = _gdriveBcStack.findIndex(b => b.id === folderId);
+    if (idx >= 0) _gdriveBcStack = _gdriveBcStack.slice(0, idx + 1);
+    else _gdriveBcStack.push({ id: folderId, name: folderName });
+  }
+  renderGdriveBreadcrumb();
+
+  try {
+    const res = await fetch("/api/read-folders/gdrive/browse?folder_id=" + encodeURIComponent(folderId));
+    const data = await res.json();
+    if (data.error) { dirsEl.innerHTML = '<div class="folder-empty">' + esc(data.error) + '</div>'; return; }
+    const folders = data.folders || [];
+    const sharedDrives = data.shared_drives || [];
+    let html = "";
+    if (_gdriveBcStack.length > 1) {
+      const parent = _gdriveBcStack[_gdriveBcStack.length - 2];
+      html += '<div class="folder-dir-item parent" data-gid="' + esc(parent.id) + '" data-gname="' + esc(parent.name) + '"><span class="folder-dir-icon">⬆</span> ..</div>';
+    }
+    if (sharedDrives.length) {
+      html += '<div class="folder-section-lbl">Shared Drives</div>';
+      sharedDrives.forEach(d => {
+        html += '<div class="folder-dir-item" data-gid="' + esc(d.id) + '" data-gname="' + esc(d.name) + '"><span class="folder-dir-icon">📤</span> ' + esc(d.name) + '</div>';
+      });
+      if (folders.length) html += '<div class="folder-section-lbl">My Drive</div>';
+    }
+    if (!folders.length && !sharedDrives.length && _gdriveBcStack.length <= 1) {
+      html += '<div class="folder-empty">No subfolders</div>';
+    }
+    folders.forEach(f => {
+      html += '<div class="folder-dir-item" data-gid="' + esc(f.id) + '" data-gname="' + esc(f.name) + '"><span class="folder-dir-icon">📁</span> ' + esc(f.name) + '</div>';
+    });
+    dirsEl.innerHTML = html;
+    dirsEl.querySelectorAll(".folder-dir-item").forEach(el => {
+      el.addEventListener("click", () => browseGdrive(el.dataset.gid, el.dataset.gname));
+    });
+  } catch (e) { dirsEl.innerHTML = '<div class="folder-empty">Error: ' + esc(e.message) + '</div>'; }
+}
+
+function renderGdriveBreadcrumb() {
+  const bc = $("#gdrive-breadcrumb");
+  let html = "";
+  _gdriveBcStack.forEach((item, i) => {
+    if (i > 0) html += '<span class="folder-bc-sep">/</span>';
+    html += '<span class="folder-bc-item" data-gid="' + esc(item.id) + '" data-gname="' + esc(item.name) + '">' + esc(item.name) + '</span>';
+  });
+  bc.innerHTML = html;
+  bc.querySelectorAll(".folder-bc-item").forEach(el => {
+    el.addEventListener("click", () => browseGdrive(el.dataset.gid, el.dataset.gname));
+  });
+}
+
+async function addGdriveFolder() {
+  if (_gdriveCurrent.id === "root") return;
+  const btn = $("#gdrive-add-btn");
+  btn.disabled = true; btn.textContent = "Adding...";
+  try {
+    const res = await fetch("/api/read-folders/gdrive", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: _gdriveCurrent.id, name: _gdriveCurrent.name }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) { logEntry("error", "Add GDrive folder failed: " + (data.error || "Unknown")); }
+    else { logEntry("system", "Google Drive folder added: " + data.name); loadGdriveFolderList(); }
+  } catch (e) { logEntry("error", "Add GDrive folder failed: " + e.message); }
+  finally { btn.disabled = false; btn.textContent = "Add this folder"; }
+}
+
+async function removeGdriveFolder(id) {
+  try {
+    const res = await fetch("/api/read-folders/gdrive", {
+      method: "DELETE", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) { logEntry("error", "Remove GDrive folder failed: " + (data.error || "Unknown")); }
+    else { logEntry("system", "Google Drive folder removed"); loadGdriveFolderList(); }
+  } catch (e) { logEntry("error", "Remove GDrive folder failed: " + e.message); }
+}
+
+function initFolderModal() {
+  const folderBtn = $("#folder-btn");
+  folderBtn.addEventListener("click", openFolderModal);
+
+  // Close handlers.
+  $("#folder-modal .modal-close").addEventListener("click", closeFolderModal);
+  $("#folder-modal .modal-backdrop").addEventListener("click", closeFolderModal);
+
+  // Add buttons.
+  $("#folder-add-btn").addEventListener("click", addCurrentFolder);
+  $("#gdrive-add-btn").addEventListener("click", addGdriveFolder);
+}
+
 /* ═══════════════════════════════════════════════════════════════
    INIT
    ═══════════════════════════════════════════════════════════════ */
@@ -2553,6 +3141,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   initFiles();
   initFilePreview();
   initSelectors();
+  initAttachments();
+  initFolderModal();
 
   // Load available models for the model selector.
   loadModels();

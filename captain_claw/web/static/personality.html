@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Personality & Personas — Captain Claw</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <style>
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --bg-hover: #30363d;
+    --border: #30363d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --accent: #58a6ff;
+    --accent-hover: #79c0ff;
+    --gold: #f0c040;
+    --radius: 8px;
+    --radius-lg: 16px;
+    --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+    height: 100%;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 15px;
+    line-height: 1.5;
+}
+
+/* ─── Header ─────────────────────────────────────────── */
+
+.pp-header {
+    display: flex;
+    align-items: center;
+    height: 48px;
+    padding: 0 16px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    gap: 16px;
+    flex-shrink: 0;
+}
+
+.pp-header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+}
+
+.pp-logo-link {
+    display: flex;
+    align-items: center;
+    border-radius: 6px;
+}
+.pp-logo-link img { border-radius: 5px; }
+
+.pp-header-left h1 {
+    font-size: 16px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.pp-header-center {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+}
+
+.pp-header-subtitle {
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+.pp-header-right { flex-shrink: 0; }
+
+.pp-nav-link {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 13px;
+    padding: 4px 10px;
+    border-radius: var(--radius);
+    transition: color 0.2s, background 0.2s;
+}
+.pp-nav-link:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+/* ─── Layout ─────────────────────────────────────────── */
+
+.pp-page {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-10px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Split Pane ─────────────────────────────────────── */
+
+.pp-split {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.pp-left {
+    width: 280px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    background: var(--bg-secondary);
+    padding: 16px 0;
+    overflow-y: auto;
+}
+
+.pp-right {
+    flex: 1;
+    padding: 32px 40px;
+    overflow-y: auto;
+}
+
+.pp-loading {
+    padding: 24px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 1rem;
+}
+
+.pp-section-label {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    padding: 10px 16px 4px;
+}
+
+.pp-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    cursor: pointer;
+    transition: background 0.12s;
+    font-size: 0.95rem;
+    color: var(--text-primary);
+}
+.pp-item:hover { background: var(--bg-hover); }
+.pp-item.active {
+    background: var(--bg-tertiary);
+    border-left: 3px solid var(--accent);
+    padding-left: 13px;
+}
+.pp-item.unconfigured { opacity: 0.5; }
+.pp-item.unconfigured:hover { opacity: 0.8; }
+.pp-item-icon { font-size: 1.2rem; }
+.pp-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pp-badge-none {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    background: var(--bg-tertiary);
+    padding: 2px 8px;
+    border-radius: 10px;
+}
+
+.pp-add-btn {
+    display: block;
+    margin: 12px 16px 0;
+    background: transparent;
+    border: 1px dashed var(--border);
+    color: var(--text-secondary);
+    padding: 8px 12px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-size: 0.9rem;
+    font-family: var(--font);
+    width: calc(100% - 32px);
+    text-align: center;
+    transition: border-color 0.15s, color 0.15s;
+}
+.pp-add-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+/* ─── Editor ─────────────────────────────────────────── */
+
+.pp-editor-header {
+    margin-bottom: 20px;
+}
+.pp-editor-title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.pp-editor-subtitle {
+    font-size: 0.9rem;
+    color: var(--text-muted);
+    margin-top: 4px;
+    display: block;
+}
+
+.pp-field {
+    margin-bottom: 14px;
+}
+.pp-field-label {
+    display: block;
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    margin-bottom: 5px;
+}
+.pp-input {
+    width: 100%;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    font-family: var(--font);
+    font-size: 0.95rem;
+}
+.pp-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+textarea.pp-input {
+    resize: vertical;
+    min-height: 60px;
+}
+
+.pp-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 20px;
+}
+.pp-btn {
+    padding: 10px 20px;
+    border: none;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-family: var(--font);
+    font-size: 0.95rem;
+    font-weight: 500;
+}
+.pp-btn.primary {
+    background: #238636;
+    color: #fff;
+}
+.pp-btn.primary:hover { background: #2ea043; }
+.pp-btn.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.pp-btn.danger {
+    background: transparent;
+    border: 1px solid #f85149;
+    color: #f85149;
+}
+.pp-btn.danger:hover { background: rgba(248, 81, 73, 0.1); }
+
+.pp-rephrase-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    margin-top: 4px;
+}
+.pp-rephrase-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    padding: 4px 12px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-size: 0.82rem;
+    font-family: var(--font);
+    transition: border-color 0.15s, color 0.15s;
+}
+.pp-rephrase-btn:hover { border-color: var(--accent); color: var(--accent); }
+.pp-rephrase-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.pp-toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 12px 24px;
+    border-radius: var(--radius);
+    font-size: 0.95rem;
+    z-index: 1000;
+    animation: fadeIn 0.3s ease-out;
+    pointer-events: none;
+}
+.pp-toast.success { background: #238636; color: #fff; }
+.pp-toast.error { background: #da3633; color: #fff; }
+
+/* ─── Responsive ─────────────────────────────────────── */
+
+@media (max-width: 700px) {
+    .pp-split {
+        flex-direction: column;
+    }
+    .pp-left {
+        width: 100%;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        max-height: 220px;
+    }
+    .pp-right {
+        padding: 20px;
+    }
+    .pp-header-center { display: none; }
+}
+    </style>
+</head>
+<body>
+    <div class="pp-page">
+        <header class="pp-header">
+            <div class="pp-header-left">
+                <a href="/" class="pp-logo-link"><img src="/static/logo.svg" width="28" height="28"></a>
+                <h1>Personality &amp; Personas</h1>
+            </div>
+            <div class="pp-header-center">
+                <span class="pp-header-subtitle">Define the agent's identity and how it interacts with each user</span>
+            </div>
+            <div class="pp-header-right">
+                <a href="/" class="pp-nav-link">&larr; Home</a>
+            </div>
+        </header>
+
+        <div class="pp-split" id="pp-split">
+            <div class="pp-left" id="pp-left">
+                <div class="pp-loading">Loading...</div>
+            </div>
+            <div class="pp-right" id="pp-right">
+                <div class="pp-loading">Select a persona</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    (function() {
+        var ppState = {
+            agentData: null,
+            userPersonalities: [],
+            telegramUsers: [],
+            selectedId: '__agent__'
+        };
+
+        function ppEsc(s) {
+            if (!s) return '';
+            var d = document.createElement('div');
+            d.textContent = s;
+            return d.innerHTML;
+        }
+
+        function ppToast(msg, type) {
+            var el = document.createElement('div');
+            el.className = 'pp-toast ' + type;
+            el.textContent = msg;
+            document.body.appendChild(el);
+            setTimeout(function() { el.remove(); }, 3000);
+        }
+
+        function userLabel(u) {
+            return u.name || u.first_name || u.username || ('User ' + u.user_id);
+        }
+
+        function ppInit() {
+            Promise.all([
+                fetch('/api/personality').then(function(r) { return r.json(); }),
+                fetch('/api/user-personalities').then(function(r) { return r.json(); }),
+                fetch('/api/telegram-users').then(function(r) { return r.json(); })
+            ])
+            .then(function(results) {
+                ppState.agentData = results[0];
+                ppState.userPersonalities = results[1];
+                ppState.telegramUsers = results[2];
+                ppState.selectedId = '__agent__';
+                ppRenderLeft();
+                ppRenderRight();
+            })
+            .catch(function(err) {
+                document.getElementById('pp-left').innerHTML = '<div class="pp-loading" style="color:#f85149">Failed: ' + ppEsc(err.message) + '</div>';
+            });
+        }
+
+        function ppRefresh(selectId) {
+            Promise.all([
+                fetch('/api/personality').then(function(r) { return r.json(); }),
+                fetch('/api/user-personalities').then(function(r) { return r.json(); }),
+                fetch('/api/telegram-users').then(function(r) { return r.json(); })
+            ])
+            .then(function(results) {
+                ppState.agentData = results[0];
+                ppState.userPersonalities = results[1];
+                ppState.telegramUsers = results[2];
+                if (selectId !== undefined) ppState.selectedId = selectId;
+                ppRenderLeft();
+                ppRenderRight();
+            });
+        }
+
+        function ppRenderLeft() {
+            var left = document.getElementById('pp-left');
+            left.innerHTML = '';
+
+            // Agent section
+            var lbl = document.createElement('div');
+            lbl.className = 'pp-section-label'; lbl.textContent = 'Agent';
+            left.appendChild(lbl);
+
+            var agentItem = document.createElement('div');
+            agentItem.className = 'pp-item' + (ppState.selectedId === '__agent__' ? ' active' : '');
+            agentItem.innerHTML = '<span class="pp-item-icon">🤖</span><span class="pp-item-name">' + ppEsc(ppState.agentData.name || 'Agent') + '</span>';
+            agentItem.addEventListener('click', function() {
+                ppState.selectedId = '__agent__';
+                ppRenderLeft(); ppRenderRight();
+            });
+            left.appendChild(agentItem);
+
+            // User personas
+            var ulbl = document.createElement('div');
+            ulbl.className = 'pp-section-label'; ulbl.textContent = 'User Personas';
+            left.appendChild(ulbl);
+
+            var pMap = {};
+            ppState.userPersonalities.forEach(function(p) { pMap[p.user_id] = p; });
+            var tMap = {};
+            ppState.telegramUsers.forEach(function(u) { tMap[u.user_id] = u; });
+
+            // Configured telegram users
+            ppState.telegramUsers.forEach(function(u) {
+                if (pMap[u.user_id]) {
+                    var p = pMap[u.user_id];
+                    p.username = p.username || u.username;
+                    p.first_name = p.first_name || u.first_name;
+                    left.appendChild(ppPersonaItem(p));
+                }
+            });
+
+            // Non-telegram
+            ppState.userPersonalities.forEach(function(p) {
+                if (!tMap[p.user_id]) left.appendChild(ppPersonaItem(p));
+            });
+
+            // Unconfigured telegram users
+            ppState.telegramUsers.forEach(function(u) {
+                if (!pMap[u.user_id]) {
+                    var item = document.createElement('div');
+                    item.className = 'pp-item unconfigured';
+                    item.innerHTML = '<span class="pp-item-icon">👤</span><span class="pp-item-name">' + ppEsc(userLabel(u)) + '</span><span class="pp-badge-none">No profile</span>';
+                    item.addEventListener('click', function() { ppSetupUser(u); });
+                    left.appendChild(item);
+                }
+            });
+
+            // Add button
+            var addBtn = document.createElement('button');
+            addBtn.className = 'pp-add-btn';
+            addBtn.textContent = '+ Add by User ID';
+            addBtn.addEventListener('click', function() {
+                var userId = prompt('Enter user ID:');
+                if (!userId || !userId.trim()) return;
+                userId = userId.trim();
+                if (pMap[userId]) { ppToast('Already exists', 'error'); return; }
+                fetch('/api/user-personalities/' + userId, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: 'New User', description: '', background: '', expertise: [], instructions: '' })
+                })
+                .then(function(r) { return r.json(); })
+                .then(function(result) {
+                    if (result.error) { ppToast(result.error, 'error'); return; }
+                    ppToast('User personality created', 'success');
+                    ppRefresh(userId);
+                })
+                .catch(function(err) { ppToast('Failed: ' + err.message, 'error'); });
+            });
+            left.appendChild(addBtn);
+        }
+
+        function ppPersonaItem(p) {
+            var item = document.createElement('div');
+            item.className = 'pp-item' + (ppState.selectedId === p.user_id ? ' active' : '');
+            item.innerHTML = '<span class="pp-item-icon">👤</span><span class="pp-item-name">' + ppEsc(p.name || userLabel(p)) + '</span>';
+            item.addEventListener('click', function() {
+                ppState.selectedId = p.user_id;
+                ppRenderLeft(); ppRenderRight();
+            });
+            return item;
+        }
+
+        function ppSetupUser(u) {
+            fetch('/api/user-personalities/' + u.user_id, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: u.first_name || u.username || 'User ' + u.user_id, description: '', background: '', expertise: [], instructions: '' })
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(result) {
+                if (result.error) { ppToast(result.error, 'error'); return; }
+                ppToast('Profile created for ' + userLabel(u), 'success');
+                ppRefresh(u.user_id);
+            })
+            .catch(function(err) { ppToast('Failed: ' + err.message, 'error'); });
+        }
+
+        function ppRenderRight() {
+            var right = document.getElementById('pp-right');
+            right.innerHTML = '';
+            if (ppState.selectedId === '__agent__') {
+                ppRenderAgentEditor(right);
+            } else {
+                var p = null;
+                ppState.userPersonalities.forEach(function(up) { if (up.user_id === ppState.selectedId) p = up; });
+                if (p) ppRenderUserEditor(right, p);
+                else right.innerHTML = '<div class="pp-loading">Persona not found</div>';
+            }
+        }
+
+        function ppFormField(container, label, type, value, placeholder, rows) {
+            var row = document.createElement('div');
+            row.className = 'pp-field';
+            var lbl = document.createElement('label');
+            lbl.className = 'pp-field-label'; lbl.textContent = label;
+            row.appendChild(lbl);
+
+            var el;
+            if (type === 'textarea') {
+                el = document.createElement('textarea');
+                el.className = 'pp-input';
+                el.rows = rows || 3;
+            } else {
+                el = document.createElement('input');
+                el.className = 'pp-input';
+                el.type = type || 'text';
+            }
+            el.value = value;
+            if (placeholder) el.placeholder = placeholder;
+            row.appendChild(el);
+
+            // Rephrase button for textareas
+            if (type === 'textarea') {
+                var wrap = document.createElement('div');
+                wrap.className = 'pp-rephrase-wrap';
+                var repBtn = document.createElement('button');
+                repBtn.className = 'pp-rephrase-btn';
+                repBtn.textContent = '✨ Rephrase & Enrich';
+                repBtn.addEventListener('click', function() {
+                    var text = el.value.trim();
+                    if (!text) { ppToast('Nothing to rephrase', 'error'); return; }
+                    var formEl = row.closest('.pp-right') || document.getElementById('pp-right');
+                    var nameInput = formEl ? formEl.querySelector('input.pp-input') : null;
+                    var personaName = nameInput ? nameInput.value.trim() : '';
+                    repBtn.disabled = true; repBtn.textContent = '⏳ Rephrasing...';
+                    fetch('/api/personality/rephrase', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ field: label.toLowerCase(), text: text, name: personaName })
+                    })
+                    .then(function(r) { return r.json(); })
+                    .then(function(result) {
+                        if (result.error) ppToast(result.error, 'error');
+                        else if (result.text) el.value = result.text;
+                    })
+                    .catch(function(err) { ppToast('Rephrase failed: ' + err.message, 'error'); })
+                    .finally(function() { repBtn.disabled = false; repBtn.textContent = '✨ Rephrase & Enrich'; });
+                });
+                wrap.appendChild(repBtn);
+                row.appendChild(wrap);
+            }
+
+            container.appendChild(row);
+            return el;
+        }
+
+        function ppRenderAgentEditor(container) {
+            var data = ppState.agentData;
+            var header = document.createElement('div');
+            header.className = 'pp-editor-header';
+            header.innerHTML = '<span class="pp-editor-title">Agent Personality</span><span class="pp-editor-subtitle">Define the agent\'s default identity, background, and expertise areas.</span>';
+            container.appendChild(header);
+
+            var nameInp = ppFormField(container, 'Name', 'text', data.name || '', 'e.g. Captain Claw');
+            var descInp = ppFormField(container, 'Description', 'textarea', data.description || '', '', 3);
+            var bgInp = ppFormField(container, 'Background', 'textarea', data.background || '', '', 5);
+            var expInp = ppFormField(container, 'Expertise', 'textarea', (data.expertise || []).join('\n'), 'One expertise per line', 8);
+            var instrInp = ppFormField(container, 'Instructions', 'textarea', data.instructions || '', 'Additional freeform instructions injected into the system prompt', 5);
+
+            var actions = document.createElement('div');
+            actions.className = 'pp-actions';
+            var saveBtn = document.createElement('button');
+            saveBtn.className = 'pp-btn primary';
+            saveBtn.textContent = 'Save Personality';
+            saveBtn.addEventListener('click', function() {
+                var name = nameInp.value.trim();
+                if (!name) { ppToast('Name is required', 'error'); return; }
+                saveBtn.disabled = true; saveBtn.textContent = 'Saving...';
+                fetch('/api/personality', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        name: name,
+                        description: descInp.value.trim(),
+                        background: bgInp.value.trim(),
+                        expertise: expInp.value.split('\n').map(function(e) { return e.trim(); }).filter(function(e) { return e.length > 0; }),
+                        instructions: instrInp.value.trim()
+                    })
+                })
+                .then(function(r) { return r.json(); })
+                .then(function(result) {
+                    if (result.error) ppToast(result.error, 'error');
+                    else { ppToast('Personality saved', 'success'); ppState.agentData = result; ppRenderLeft(); }
+                })
+                .catch(function(err) { ppToast('Failed: ' + err.message, 'error'); })
+                .finally(function() { saveBtn.disabled = false; saveBtn.textContent = 'Save Personality'; });
+            });
+            actions.appendChild(saveBtn);
+            container.appendChild(actions);
+        }
+
+        function ppRenderUserEditor(container, p) {
+            var header = document.createElement('div');
+            header.className = 'pp-editor-header';
+            var titleEl = document.createElement('span');
+            titleEl.className = 'pp-editor-title';
+            titleEl.textContent = userLabel(p);
+            var delBtn = document.createElement('button');
+            delBtn.className = 'pp-btn danger';
+            delBtn.textContent = 'Delete';
+            delBtn.addEventListener('click', function() {
+                if (!confirm('Remove personality for ' + userLabel(p) + '?')) return;
+                fetch('/api/user-personalities/' + p.user_id, { method: 'DELETE' })
+                .then(function() { ppToast('User personality removed', 'success'); ppRefresh('__agent__'); })
+                .catch(function(err) { ppToast('Failed: ' + err.message, 'error'); });
+            });
+            titleEl.appendChild(delBtn);
+            header.appendChild(titleEl);
+            header.innerHTML += '<span class="pp-editor-subtitle">User profile — tells the agent who it is talking to.</span>';
+            container.appendChild(header);
+
+            var nameInp = ppFormField(container, 'Name', 'text', p.name || '', 'e.g. Toby McDev');
+            var descInp = ppFormField(container, 'Description', 'textarea', p.description || '', '', 3);
+            var bgInp = ppFormField(container, 'Background', 'textarea', p.background || '', '', 5);
+            var expInp = ppFormField(container, 'Expertise', 'textarea', (p.expertise || []).join('\n'), 'One expertise per line', 8);
+            var instrInp = ppFormField(container, 'Instructions', 'textarea', p.instructions || '', 'Additional freeform instructions', 5);
+
+            var actions = document.createElement('div');
+            actions.className = 'pp-actions';
+            var saveBtn = document.createElement('button');
+            saveBtn.className = 'pp-btn primary';
+            saveBtn.textContent = 'Save';
+            saveBtn.addEventListener('click', function() {
+                var payload = {
+                    name: nameInp.value.trim(),
+                    description: descInp.value.trim(),
+                    background: bgInp.value.trim(),
+                    expertise: expInp.value.split('\n').map(function(e) { return e.trim(); }).filter(function(e) { return e.length > 0; }),
+                    instructions: instrInp.value.trim()
+                };
+                if (!payload.name) { ppToast('Name is required', 'error'); return; }
+                saveBtn.disabled = true; saveBtn.textContent = 'Saving...';
+                fetch('/api/user-personalities/' + p.user_id, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                })
+                .then(function(r) { return r.json(); })
+                .then(function(result) {
+                    if (result.error) ppToast(result.error, 'error');
+                    else { ppToast('Saved', 'success'); ppRefresh(); }
+                })
+                .catch(function(err) { ppToast('Failed: ' + err.message, 'error'); })
+                .finally(function() { saveBtn.disabled = false; saveBtn.textContent = 'Save'; });
+            });
+            actions.appendChild(saveBtn);
+            container.appendChild(actions);
+        }
+
+        ppInit();
+    })();
+    </script>
+</body>
+</html>

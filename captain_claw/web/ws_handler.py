@@ -139,6 +139,20 @@ async def handle_ws_message(
             from captain_claw.web.slash_commands import handle_command
             await handle_command(server, ws, command)
 
+    elif msg_type == "btw":
+        # Inject additional instructions while a task is running.
+        btw_content = str(data.get("content", "")).strip()
+        if btw_content and server.agent:
+            if not hasattr(server.agent, "_btw_instructions"):
+                server.agent._btw_instructions = []
+            server.agent._btw_instructions.append(btw_content)
+            log.info("BTW instruction added", count=len(server.agent._btw_instructions))
+            await server._send(ws, {
+                "type": "command_result",
+                "command": "/btw",
+                "content": f"Got it — noted for the remaining steps: *{btw_content}*",
+            })
+
     elif msg_type == "set_model":
         # Switch model for the current session via direct WebSocket message.
         selector = str(data.get("selector", "")).strip()
