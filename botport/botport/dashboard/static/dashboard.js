@@ -5,6 +5,58 @@ const POLL_INTERVAL = 2000;
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
+/* ---- Router ---- */
+
+let currentPage = null;
+let pollTimer = null;
+
+function navigate(page) {
+  if (currentPage === page) return;
+
+  // Teardown previous page.
+  if (currentPage === "swarm" && typeof teardownSwarmPage === "function") {
+    teardownSwarmPage();
+  }
+
+  currentPage = page;
+
+  // Hide all pages.
+  $$(".page").forEach((el) => el.classList.add("hidden"));
+
+  // Stop polling when leaving activity page.
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+
+  const target = $(`#page-${page}`);
+  if (target) {
+    target.classList.remove("hidden");
+  }
+
+  if (page === "home") {
+    refreshStats();
+  } else if (page === "activity") {
+    refresh();
+    pollTimer = setInterval(refresh, POLL_INTERVAL);
+  } else if (page === "swarm") {
+    if (typeof initSwarmPage === "function") initSwarmPage();
+  }
+}
+
+function handleRoute() {
+  const hash = location.hash.replace(/^#\/?/, "") || "";
+  if (hash === "" || hash === "/") {
+    navigate("home");
+  } else if (hash === "activity") {
+    navigate("activity");
+  } else if (hash === "swarm") {
+    navigate("swarm");
+  } else {
+    navigate("home");
+  }
+}
+
 /* ---- API helpers ---- */
 
 async function fetchJSON(url) {
@@ -21,7 +73,7 @@ async function fetchJSON(url) {
 /* ---- Rendering ---- */
 
 function shortId(id) {
-  if (!id) return "—";
+  if (!id) return "\u2014";
   return id.length > 12 ? id.slice(0, 8) + "..." : id;
 }
 
@@ -172,16 +224,26 @@ function renderTags(tags) {
 
 function renderStats(stats) {
   if (!stats) return;
-  $("#stat-instances").textContent = `${stats.connected_instances || 0} instances`;
+  const instanceCount = stats.connected_instances || 0;
   const active = (stats.by_status || {}).assigned || 0;
   const inProgress = (stats.by_status || {}).in_progress || 0;
   const pending = (stats.by_status || {}).pending || 0;
-  $("#stat-active").textContent = `${pending + active + inProgress} active`;
+  const activeCount = pending + active + inProgress;
   const rate = stats.success_rate != null ? Math.round(stats.success_rate) : "--";
+
+  // Header stats.
+  $("#stat-instances").textContent = `${instanceCount} instances`;
+  $("#stat-active").textContent = `${activeCount} active`;
   $("#stat-success").textContent = `${rate}% success`;
   if (stats.botport_version) {
     $("#stat-version").textContent = stats.botport_version;
   }
+
+  // Home page stats (may not exist if on different page).
+  const homeInstEl = $("#home-stat-instances");
+  const homeActiveEl = $("#home-stat-active");
+  if (homeInstEl) homeInstEl.textContent = `${instanceCount} instances`;
+  if (homeActiveEl) homeActiveEl.textContent = `${activeCount} active`;
 }
 
 /* ---- Concern detail modal ---- */
@@ -196,8 +258,8 @@ async function showConcern(id) {
     : data.from_instance;
   const toLabel = data.assigned_instance_name
     ? `${data.assigned_instance_name} (${shortId(data.assigned_instance)})`
-    : (data.assigned_instance || "—");
-  const personaName = (data.metadata && data.metadata.persona_name) || "—";
+    : (data.assigned_instance || "\u2014");
+  const personaName = (data.metadata && data.metadata.persona_name) || "\u2014";
   const fields = [
     { label: "ID", value: data.id },
     { label: "Status", value: data.status },
@@ -207,7 +269,7 @@ async function showConcern(id) {
     { label: "Persona", value: personaName },
     { label: "Created", value: data.created_at },
     { label: "Updated", value: data.updated_at },
-    { label: "Expertise", value: (data.expertise_tags || []).join(", ") || "—" },
+    { label: "Expertise", value: (data.expertise_tags || []).join(", ") || "\u2014" },
   ];
 
   let html = fields.map((f) => `
@@ -261,7 +323,25 @@ function truncate(s, max) {
   return s.length > max ? s.slice(0, max) + "..." : s;
 }
 
-/* ---- Polling loop ---- */
+/* ---- Data refresh ---- */
+
+async function refreshStats() {
+  const [stats, projects] = await Promise.all([
+    fetchJSON("/api/stats"),
+    fetchJSON("/api/swarm/projects"),
+  ]);
+  renderStats(stats);
+
+  // Update swarm home card stats.
+  const projEl = document.getElementById("home-stat-projects");
+  const swarmEl = document.getElementById("home-stat-swarms");
+  if (projEl && projects) projEl.textContent = `${projects.length} projects`;
+  if (swarmEl && projects) {
+    // Fetch total swarm count.
+    const swarms = await fetchJSON("/api/swarm/swarms");
+    if (swarms) swarmEl.textContent = `${swarms.length} swarms`;
+  }
+}
 
 async function refresh() {
   const [instances, stats, activeConcerns, allConcerns] = await Promise.all([
@@ -287,7 +367,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (e.key === "Escape") closeModal();
   });
 
-  // Initial load + polling.
-  refresh();
-  setInterval(refresh, POLL_INTERVAL);
+  // Hash-based routing.
+  window.addEventListener("hashchange", handleRoute);
+  handleRoute();
 });

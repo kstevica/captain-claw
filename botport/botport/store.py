@@ -35,6 +35,7 @@ class BotPortStore:
         assert self._db is not None
         await self._db.executescript("""
             CREATE TABLE IF NOT EXISTS concerns (
+
                 id           TEXT PRIMARY KEY,
                 from_instance TEXT NOT NULL,
                 from_instance_name TEXT DEFAULT '',
@@ -77,6 +78,16 @@ class BotPortStore:
             except Exception:
                 pass  # Column already exists.
         await self._db.commit()
+
+        # Create swarm tables.
+        from botport.swarm.store import SwarmStore
+        self._swarm_store = SwarmStore(self._db)
+        await self._swarm_store.create_tables()
+
+    @property
+    def swarm(self) -> "SwarmStore":
+        """Access the swarm store (available after DB init)."""
+        return self._swarm_store
 
     async def save_concern(self, concern: Concern) -> None:
         """Upsert a concern and its messages."""

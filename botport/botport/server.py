@@ -57,6 +57,9 @@ class BotPortServer:
         self.registry = Registry(self.connections)
         self.router = Router(self.registry)
         self.concerns = ConcernManager(self.store)
+        self._swarm_store_initialized = False
+        self.swarm_engine: "SwarmEngine | None" = None
+        self.swarm_scheduler: "SwarmScheduler | None" = None
 
     def create_app(self) -> web.Application:
         app = web.Application()
@@ -67,9 +70,16 @@ class BotPortServer:
         # Dashboard.
         if self.config.server.dashboard_enabled:
             from botport.dashboard.routes import setup_dashboard_routes
+            from botport.dashboard.swarm_routes import setup_swarm_routes
             setup_dashboard_routes(app, self)
+            setup_swarm_routes(app, self)
 
         return app
+
+    @property
+    def swarm_store(self):
+        """Lazy accessor for the swarm store (initialized with DB)."""
+        return self.store.swarm
 
     # ── WebSocket handler ────────────────────────────────────────
 
@@ -436,6 +446,12 @@ class BotPortServer:
 
     async def shutdown(self) -> None:
         """Graceful shutdown."""
+        if self.swarm_scheduler:
+            self.swarm_scheduler.stop()
+            await self.swarm_scheduler.wait_stopped()
+        if self.swarm_engine:
+            self.swarm_engine.stop()
+            await self.swarm_engine.wait_stopped()
         self.concerns.stop_timeout_checker()
         # Close all WebSocket connections so the runner can exit quickly.
         for instance_id in list(self.connections._connections):
@@ -571,6 +587,15 @@ async def _run_server(config: BotPortConfig) -> None:
 
     # Start background tasks.
     server.concerns.start_timeout_checker()
+
+    # Start swarm engine and scheduler (ensure DB is initialized first).
+    await server.store._ensure_db()
+    from botport.swarm.engine import SwarmEngine
+    from botport.swarm.scheduler import SwarmScheduler
+    server.swarm_engine = SwarmEngine(server)
+    server.swarm_engine.start()
+    server.swarm_scheduler = SwarmScheduler(server)
+    server.swarm_scheduler.start()
 
     # Periodic store cleanup.
     async def _cleanup_loop() -> None:

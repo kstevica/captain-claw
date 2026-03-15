@@ -34,6 +34,12 @@ def setup_dashboard_routes(app: web.Application, server: BotPortServer) -> None:
             return web.FileResponse(js_path, headers={"Content-Type": "application/javascript"})
         return web.Response(text="", content_type="application/javascript")
 
+    async def swarm_js(request: web.Request) -> web.Response:
+        js_path = STATIC_DIR / "swarm.js"
+        if js_path.is_file():
+            return web.FileResponse(js_path, headers={"Content-Type": "application/javascript"})
+        return web.Response(text="", content_type="application/javascript")
+
     async def api_instances(request: web.Request) -> web.Response:
         instances = server.connections.list_instances()
         return web.json_response([i.to_dict() for i in instances])
@@ -67,6 +73,7 @@ def setup_dashboard_routes(app: web.Application, server: BotPortServer) -> None:
     app.router.add_get("/", index)
     app.router.add_get("/dashboard.css", dashboard_css)
     app.router.add_get("/dashboard.js", dashboard_js)
+    app.router.add_get("/swarm.js", swarm_js)
     app.router.add_get("/api/instances", api_instances)
     app.router.add_get("/api/concerns", api_concerns)
     app.router.add_get("/api/concerns/{id}", api_concern_detail)

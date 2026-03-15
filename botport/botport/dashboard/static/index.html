@@ -3,12 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BotPort Dashboard</title>
+  <title>BotPort</title>
   <link rel="stylesheet" href="/dashboard.css">
 </head>
 <body>
   <header>
-    <h1>BotPort</h1>
+    <h1><a href="#/" class="header-link">BotPort</a></h1>
     <div id="header-stats">
       <span id="stat-instances" class="stat-badge" title="Connected instances">0 instances</span>
       <span id="stat-active" class="stat-badge" title="Active concerns">0 active</span>
@@ -17,28 +17,80 @@
     </div>
   </header>
 
-  <main>
-    <section id="instances-panel" class="panel">
-      <h2>Connected Instances</h2>
-      <div id="instances-list" class="card-list">
-        <p class="empty-state">No instances connected</p>
-      </div>
-    </section>
+  <!-- Homepage -->
+  <div id="page-home" class="page hidden">
+    <div class="home-grid">
+      <a href="#/activity" class="home-card">
+        <div class="home-card-icon">&#x26A1;</div>
+        <div class="home-card-title">Activity</div>
+        <div class="home-card-desc">Monitor connected instances, active concerns, and task routing in real time.</div>
+        <div class="home-card-stats">
+          <span id="home-stat-instances">0 instances</span>
+          <span id="home-stat-active">0 active</span>
+        </div>
+      </a>
+      <a href="#/swarm" class="home-card">
+        <div class="home-card-icon">&#x1F41D;</div>
+        <div class="home-card-title">Swarm</div>
+        <div class="home-card-desc">Orchestrate multi-agent workflows and coordinate swarm intelligence across instances.</div>
+        <div class="home-card-stats">
+          <span id="home-stat-projects">0 projects</span>
+          <span id="home-stat-swarms">0 swarms</span>
+        </div>
+      </a>
+    </div>
+  </div>
 
-    <section id="concerns-panel" class="panel">
-      <h2>Active Concerns</h2>
-      <div id="concerns-list" class="card-list">
-        <p class="empty-state">No active concerns</p>
-      </div>
-    </section>
+  <!-- Activity page (current dashboard) -->
+  <div id="page-activity" class="page hidden">
+    <main>
+      <section id="instances-panel" class="panel">
+        <h2>Connected Instances</h2>
+        <div id="instances-list" class="card-list">
+          <p class="empty-state">No instances connected</p>
+        </div>
+      </section>
 
-    <section id="history-panel" class="panel">
-      <h2>Recent History</h2>
-      <div id="history-list" class="card-list">
-        <p class="empty-state">No concerns yet</p>
+      <section id="concerns-panel" class="panel">
+        <h2>Active Concerns</h2>
+        <div id="concerns-list" class="card-list">
+          <p class="empty-state">No active concerns</p>
+        </div>
+      </section>
+
+      <section id="history-panel" class="panel">
+        <h2>Recent History</h2>
+        <div id="history-list" class="card-list">
+          <p class="empty-state">No concerns yet</p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Swarm page -->
+  <div id="page-swarm" class="page hidden">
+    <div class="swarm-layout">
+      <aside id="swarm-sidebar">
+        <div id="swarm-project-list"></div>
+        <div id="swarm-swarm-list"></div>
+      </aside>
+      <div id="swarm-main">
+        <div class="swarm-empty-main">
+          <p class="empty-state">Select or create a project to get started</p>
+        </div>
       </div>
-    </section>
-  </main>
+    </div>
+
+    <!-- Swarm modal (create project/swarm/task) -->
+    <div id="swarm-modal" class="modal hidden">
+      <div class="modal-backdrop" onclick="closeSwarmModal()"></div>
+      <div class="modal-content">
+        <button class="modal-close" onclick="closeSwarmModal()">&times;</button>
+        <h3 id="swarm-modal-title"></h3>
+        <div id="swarm-modal-body"></div>
+      </div>
+    </div>
+  </div>
 
   <div id="concern-modal" class="modal hidden">
     <div class="modal-backdrop"></div>
@@ -50,5 +102,6 @@
   </div>
 
   <script src="/dashboard.js"></script>
+  <script src="/swarm.js"></script>
 </body>
 </html>
