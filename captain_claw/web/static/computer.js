@@ -230,8 +230,73 @@ async function loadExplorationHistory(sid) {
     if (nodes.length > 0) {
       logEntry("system", `Loaded ${nodes.length} exploration nodes`);
     }
+    renderHistoryDrawer();
   } catch (e) {
     console.warn('Failed to load exploration history:', e);
+  }
+}
+
+/* ── History drawer ──────────────────────────────────────────── */
+
+function renderHistoryDrawer() {
+  const nodes = Array.from(explorationNodes.values())
+    .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+
+  for (const tab of ['answer', 'blueprint']) {
+    const drawer = $(`#${tab}-history`);
+    if (!drawer) continue;
+    const countEl = drawer.querySelector('.history-bar-count');
+    const listEl = drawer.querySelector('.history-list');
+    countEl.textContent = nodes.length;
+
+    if (nodes.length === 0) {
+      drawer.style.display = 'none';
+      continue;
+    }
+    drawer.style.display = '';
+
+    listEl.innerHTML = nodes.map(n => {
+      const t = n.created_at ? new Date(n.created_at) : null;
+      const time = t ? t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+      const prompt = (n.prompt || '').slice(0, 55) + ((n.prompt || '').length > 55 ? '\u2026' : '');
+      const active = n.id === currentNodeId ? ' active' : '';
+      return `<div class="history-entry${active}" data-node-id="${n.id}" onclick="historySelect('${n.id}')">
+        <span class="history-entry-bullet">${n.id === currentNodeId ? '\u25CF' : '\u25CB'}</span>
+        <span class="history-entry-time">${esc(time)}</span>
+        <span class="history-entry-prompt">${esc(prompt)}</span>
+      </div>`;
+    }).join('');
+  }
+}
+
+function toggleHistoryDrawer(tab) {
+  const drawer = $(`#${tab}-history`);
+  if (!drawer) return;
+  drawer.classList.toggle('open');
+}
+
+function historySelect(nodeId) {
+  navigateToNode(nodeId);
+  renderHistoryDrawer();
+}
+
+function historyPrev(tab) {
+  const nodes = Array.from(explorationNodes.values())
+    .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+  if (nodes.length === 0) return;
+  const idx = nodes.findIndex(n => n.id === currentNodeId);
+  if (idx > 0) {
+    historySelect(nodes[idx - 1].id);
+  }
+}
+
+function historyNext(tab) {
+  const nodes = Array.from(explorationNodes.values())
+    .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+  if (nodes.length === 0) return;
+  const idx = nodes.findIndex(n => n.id === currentNodeId);
+  if (idx < nodes.length - 1) {
+    historySelect(nodes[idx + 1].id);
   }
 }
 
@@ -374,8 +439,9 @@ function navigateToNode(nodeId) {
   // Rebuild blueprint.
   generateBlueprint(node.answer);
 
-  // Update map highlighting.
+  // Update map highlighting & history drawer.
   renderMap();
+  renderHistoryDrawer();
 
   logEntry("system", `Navigated to: ${node.prompt.slice(0, 60)}${node.prompt.length > 60 ? '…' : ''}`);
 }
@@ -1248,8 +1314,9 @@ function renderAnswer(content, isReplay) {
     saveExplorationNode(node);
     pendingExploration = null;
 
-    // Update map.
+    // Update map & history drawer.
     renderMap();
+    renderHistoryDrawer();
   }
 
   // Auto-trigger Visual generation if the Visual tab is active.

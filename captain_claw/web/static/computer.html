@@ -110,11 +110,33 @@
       </div>
       <div class="window-body">
         <div id="output-answer" class="output-tab active">
+          <div id="answer-history" class="history-drawer">
+            <div class="history-bar" onclick="toggleHistoryDrawer('answer')">
+              <span class="history-bar-toggle">&#9656;</span>
+              <span class="history-bar-label">History (<span class="history-bar-count">0</span>)</span>
+              <span class="history-bar-nav">
+                <button class="history-nav-btn" onclick="event.stopPropagation();historyPrev('answer')" title="Previous">&#9664;</button>
+                <button class="history-nav-btn" onclick="event.stopPropagation();historyNext('answer')" title="Next">&#9654;</button>
+              </span>
+            </div>
+            <div class="history-list"></div>
+          </div>
           <div id="answer-content" class="output-empty">
             <span class="output-placeholder">Responses will appear here...</span>
           </div>
         </div>
         <div id="output-blueprint" class="output-tab">
+          <div id="blueprint-history" class="history-drawer">
+            <div class="history-bar" onclick="toggleHistoryDrawer('blueprint')">
+              <span class="history-bar-toggle">&#9656;</span>
+              <span class="history-bar-label">History (<span class="history-bar-count">0</span>)</span>
+              <span class="history-bar-nav">
+                <button class="history-nav-btn" onclick="event.stopPropagation();historyPrev('blueprint')" title="Previous">&#9664;</button>
+                <button class="history-nav-btn" onclick="event.stopPropagation();historyNext('blueprint')" title="Next">&#9654;</button>
+              </span>
+            </div>
+            <div class="history-list"></div>
+          </div>
           <div id="blueprint-content" class="output-empty">
             <span class="output-placeholder">Blueprint will appear here...</span>
           </div>

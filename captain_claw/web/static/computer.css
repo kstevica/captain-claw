@@ -1371,6 +1371,143 @@ body {
   border-radius: 2px;
 }
 
+/* ── History drawer ──────────────────────────────────────────── */
+
+.history-drawer {
+  flex-shrink: 0;
+}
+
+.history-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  background: var(--chrome);
+  border-bottom: var(--bevel, 1px) solid var(--chrome-lo);
+  cursor: pointer;
+  user-select: none;
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--titlebar-fg);
+}
+
+.history-bar-toggle {
+  font-size: 9px;
+  transition: transform 0.15s;
+  display: inline-block;
+}
+
+.history-drawer.open .history-bar-toggle {
+  transform: rotate(90deg);
+}
+
+.history-bar-label {
+  flex: 1;
+  letter-spacing: 0.3px;
+}
+
+.history-bar-nav {
+  display: flex;
+  gap: 2px;
+}
+
+.history-nav-btn {
+  font-family: var(--font);
+  font-size: 10px;
+  width: 20px;
+  height: 18px;
+  padding: 0;
+  background: var(--btn-bg, var(--chrome-lo));
+  color: var(--btn-fg, var(--titlebar-fg));
+  border: var(--bevel, 1px) solid var(--chrome-dark);
+  border-radius: var(--radius);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.history-nav-btn:hover {
+  background: var(--chrome-hi);
+}
+
+.history-nav-btn:active {
+  background: var(--btn-active, var(--accent));
+}
+
+.history-list {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.2s ease;
+  background: var(--surface-alt, var(--surface));
+}
+
+.history-drawer.open .history-list {
+  max-height: 35vh;
+  overflow-y: auto;
+  border-bottom: var(--bevel, 1px) solid var(--chrome-lo);
+}
+
+.history-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.history-list::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+.history-list::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: var(--radius);
+}
+
+.history-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--text-dim);
+  border-left: 3px solid transparent;
+  transition: background 0.1s;
+}
+
+.history-entry:hover {
+  background: var(--chrome-lo);
+}
+
+.history-entry.active {
+  color: var(--text);
+  border-left-color: var(--accent);
+  background: var(--surface);
+}
+
+.history-entry-bullet {
+  font-size: 8px;
+  flex-shrink: 0;
+  color: var(--text-dim);
+}
+
+.history-entry.active .history-entry-bullet {
+  color: var(--accent);
+}
+
+.history-entry-time {
+  flex-shrink: 0;
+  font-size: 10px;
+  opacity: 0.7;
+  min-width: 38px;
+}
+
+.history-entry-prompt {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ── Drive LED ───────────────────────────────────────────────── */
 
 #drive-led {
