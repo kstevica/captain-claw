@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from aiohttp import web
@@ -921,6 +922,45 @@ def setup_swarm_routes(app: web.Application, server: BotPortServer) -> None:
         entries = await store.list_audit_log(swarm_id)
         return web.json_response([e.to_dict() for e in entries])
 
+    # ── Swarm files ────────────────────────────────────────────
+
+    async def swarm_list_files(request: web.Request) -> web.Response:
+        """List all files in a swarm workspace."""
+        swarm_id = request.match_info["id"]
+        fm = server.file_manager
+        files = fm.list_files(swarm_id)
+        # Strip internal float modified_at for JSON.
+        for f in files:
+            f.pop("modified_at", None)
+        total_size = fm.workspace_size(swarm_id)
+        return web.json_response({
+            "swarm_id": swarm_id,
+            "files": files,
+            "total_size": total_size,
+        })
+
+    async def swarm_download_file(request: web.Request) -> web.Response:
+        """Download a file from the swarm workspace."""
+        swarm_id = request.match_info["id"]
+        file_path = request.match_info["file_path"]
+        fm = server.file_manager
+        data = fm.get_file(swarm_id, file_path)
+        if data is None:
+            return web.json_response({"error": "File not found"}, status=404)
+
+        from botport.swarm.file_manager import guess_mime_type
+        mime = guess_mime_type(file_path)
+        filename = Path(file_path).name
+
+        return web.Response(
+            body=data,
+            content_type=mime,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(len(data)),
+            },
+        )
+
     # ── LLM config ────────────────────────────────────────────
 
     async def llm_config(request: web.Request) -> web.Response:
@@ -1236,3 +1276,7 @@ def setup_swarm_routes(app: web.Application, server: BotPortServer) -> None:
     app.router.add_get("/api/swarm/swarms/{id}/costs", swarm_costs)
     app.router.add_get("/api/swarm/swarms/{id}/cost-details", swarm_cost_details)
     app.router.add_get("/api/swarm/swarms/{id}/audit", swarm_audit)
+
+    # Files.
+    app.router.add_get("/api/swarm/swarms/{id}/files", swarm_list_files)
+    app.router.add_get("/api/swarm/swarms/{id}/files/{file_path:.*}", swarm_download_file)

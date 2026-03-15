@@ -354,7 +354,12 @@ def _build_instructions_context() -> str:
         "9. Agents can browse interactive web apps via the `browser` tool (login, forms, "
         "dynamic content). Use this when web_fetch is insufficient.\n"
         "10. NEVER ask the agent to return HTML in its response. All markup must be "
-        "written to files using the `write` tool."
+        "written to files using the `write` tool.\n"
+        "11. This is an AUTOMATED workflow — agents execute autonomously without human "
+        "interaction. Task descriptions must NOT require the agent to ask questions, "
+        "present options (Option A / Option B), or seek confirmation. Each task must "
+        "be self-contained with enough detail for the agent to make all decisions "
+        "independently and deliver a complete result."
     )
 
 

@@ -30,6 +30,12 @@ from botport.protocol import (
     ContextReplyMessage,
     ContextRequestMessage,
     DispatchMessage,
+    FileListMessage,
+    FileListResponseMessage,
+    FileRequestMessage,
+    FileResponseMessage,
+    FileUploadAckMessage,
+    FileUploadMessage,
     FollowUpMessage,
     HeartbeatAckMessage,
     HeartbeatMessage,
@@ -40,6 +46,7 @@ from botport.protocol import (
     parse_raw,
     serialize_message,
 )
+from botport.swarm.file_manager import FileManager, decode_file, encode_file
 from botport.registry import Registry
 from botport.router import RouteResult, Router
 from botport.store import BotPortStore
@@ -57,6 +64,7 @@ class BotPortServer:
         self.registry = Registry(self.connections)
         self.router = Router(self.registry)
         self.concerns = ConcernManager(self.store)
+        self.file_manager = FileManager()
         self._swarm_store_initialized = False
         self.swarm_engine: "SwarmEngine | None" = None
         self.swarm_scheduler: "SwarmScheduler | None" = None
@@ -86,7 +94,7 @@ class BotPortServer:
     async def _ws_handler(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(
             heartbeat=60.0,
-            max_msg_size=4 * 1024 * 1024,
+            max_msg_size=16 * 1024 * 1024,  # 16 MB for file transfers
         )
         await ws.prepare(request)
 
@@ -221,6 +229,12 @@ class BotPortServer:
             await self._handle_context_reply(instance_id, msg)
         elif isinstance(msg, CloseConcernMessage):
             await self._handle_close_concern(instance_id, msg)
+        elif isinstance(msg, FileUploadMessage):
+            await self._handle_file_upload(instance_id, msg)
+        elif isinstance(msg, FileListMessage):
+            await self._handle_file_list(instance_id, msg)
+        elif isinstance(msg, FileRequestMessage):
+            await self._handle_file_request(instance_id, msg)
         else:
             log.warning("Unhandled message type from %s: %s", instance_id[:8], msg.type)
 
@@ -443,6 +457,131 @@ class BotPortServer:
                 concern_id=concern.id,
                 reason="closed_by_originator",
             ))
+
+    # ── File transfer ──────────────────────────────────────────
+
+    async def _handle_file_upload(
+        self, instance_id: str, msg: FileUploadMessage,
+    ) -> None:
+        """Handle file upload from an agent."""
+        info = self.connections.get_instance(instance_id)
+        agent_name = info.name if info else instance_id[:8]
+
+        if not msg.swarm_id or not msg.filename or not msg.data:
+            await self.connections.send_to(instance_id, FileUploadAckMessage(
+                ok=False, error="Missing swarm_id, filename, or data",
+            ))
+            return
+
+        try:
+            file_data = decode_file(msg.data, msg.compressed)
+            meta = self.file_manager.store_file(
+                swarm_id=msg.swarm_id,
+                agent_name=agent_name,
+                filename=msg.filename,
+                data=file_data,
+                subfolder=msg.subfolder,
+            )
+
+            await self.connections.send_to(instance_id, FileUploadAckMessage(
+                file_id=meta["file_id"],
+                filename=meta["filename"],
+                path=meta["path"],
+                size=meta["size"],
+                ok=True,
+            ))
+
+            log.info(
+                "File uploaded: %s (%d bytes) from %s for swarm %s",
+                meta["filename"], meta["size"], agent_name, msg.swarm_id[:8],
+            )
+
+        except Exception as exc:
+            log.error("File upload failed: %s", exc)
+            await self.connections.send_to(instance_id, FileUploadAckMessage(
+                ok=False, error=str(exc),
+            ))
+
+    async def _handle_file_list(
+        self, instance_id: str, msg: FileListMessage,
+    ) -> None:
+        """Handle file list request."""
+        if not msg.swarm_id:
+            await self.connections.send_to(instance_id, FileListResponseMessage(
+                swarm_id="", files=[],
+            ))
+            return
+
+        files = self.file_manager.list_files(
+            msg.swarm_id, agent_name=msg.agent_filter,
+        )
+
+        # Strip modified_at (float) for JSON serialization — not needed by client.
+        for f in files:
+            f.pop("modified_at", None)
+
+        await self.connections.send_to(instance_id, FileListResponseMessage(
+            swarm_id=msg.swarm_id,
+            files=files,
+        ))
+
+    async def _handle_file_request(
+        self, instance_id: str, msg: FileRequestMessage,
+    ) -> None:
+        """Handle file download request."""
+        if not msg.swarm_id:
+            await self.connections.send_to(instance_id, FileResponseMessage(
+                ok=False, error="Missing swarm_id",
+            ))
+            return
+
+        file_data: bytes | None = None
+        filename = ""
+        rel_path = ""
+        mime = ""
+
+        if msg.file_path:
+            file_data = self.file_manager.get_file(msg.swarm_id, msg.file_path)
+            rel_path = msg.file_path
+            filename = Path(msg.file_path).name
+        elif msg.file_id:
+            file_data, meta = self.file_manager.get_file_by_id(
+                msg.swarm_id, msg.file_id,
+            )
+            if meta:
+                filename = meta.get("filename", "")
+                rel_path = meta.get("path", "")
+                mime = meta.get("mime_type", "")
+
+        if file_data is None:
+            await self.connections.send_to(instance_id, FileResponseMessage(
+                swarm_id=msg.swarm_id,
+                ok=False,
+                error="File not found",
+            ))
+            return
+
+        from botport.swarm.file_manager import guess_mime_type
+        if not mime:
+            mime = guess_mime_type(filename)
+
+        b64_data, compressed = encode_file(file_data, filename)
+
+        await self.connections.send_to(instance_id, FileResponseMessage(
+            swarm_id=msg.swarm_id,
+            filename=filename,
+            path=rel_path,
+            data=b64_data,
+            compressed=compressed,
+            mime_type=mime,
+            size=len(file_data),
+            ok=True,
+        ))
+
+        log.info(
+            "File served: %s (%d bytes, compressed=%s) for swarm %s",
+            filename, len(file_data), compressed, msg.swarm_id[:8],
+        )
 
     async def shutdown(self) -> None:
         """Graceful shutdown."""

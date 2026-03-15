@@ -297,6 +297,25 @@ class SwarmEngine:
         # Build the task prompt.
         prompt = self._build_task_prompt(task, input_data)
 
+        # Build file manifest for agent context.
+        file_manifest = []
+        try:
+            fm = self._server.file_manager
+            file_manifest = fm.list_files(swarm.id)
+            # Strip internal fields, keep what agents need.
+            file_manifest = [
+                {
+                    "filename": f["filename"],
+                    "path": f["path"],
+                    "size": f["size"],
+                    "mime_type": f["mime_type"],
+                    "agent": f.get("agent", ""),
+                }
+                for f in file_manifest
+            ]
+        except Exception as exc:
+            log.debug("Could not build file manifest: %s", exc)
+
         # Create concern through the concern manager.
         concern = await self._server.concerns.create_concern(
             from_instance="__swarm__",
@@ -305,6 +324,7 @@ class SwarmEngine:
                 "swarm_id": swarm.id,
                 "swarm_task_id": task.id,
                 "swarm_task_name": task.name,
+                "swarm_files": file_manifest,
             },
             expertise_tags=[],
             from_session="",
@@ -519,12 +539,26 @@ class SwarmEngine:
                 response_text = msg.content
                 break
 
+        # Collect file list produced by this task's agent.
+        task_files = []
+        try:
+            fm = self._server.file_manager
+            agent_name = task.assigned_instance or ""
+            if agent_name:
+                task_files = [
+                    {"filename": f["filename"], "path": f["path"], "size": f["size"]}
+                    for f in fm.list_files(task.swarm_id, agent_name=agent_name)
+                ]
+        except Exception:
+            pass
+
         task.status = "completed"
         task.completed_at = _utcnow_iso()
         task.output_data = {
             "response": response_text,
             "concern_id": concern.id,
             "persona": concern.metadata.get("persona_name", ""),
+            "files": task_files,
         }
         task.touch()
         await store.save_task(task)

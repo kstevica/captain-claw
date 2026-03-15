@@ -1551,6 +1551,83 @@ main {
   background: rgba(255,255,255,0.02);
 }
 
+/* ---- Swarm files ---- */
+
+.files-dashboard {
+  padding: 12px 0;
+}
+
+.files-summary {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.files-agent-group {
+  margin-bottom: 16px;
+}
+
+.files-agent-name {
+  color: var(--accent);
+  font-size: 13px;
+  margin: 0 0 8px 0;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.files-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  transition: border-color 0.15s;
+}
+
+.file-item:hover {
+  border-color: var(--accent);
+}
+
+.file-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+}
+
+.file-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.file-name {
+  color: var(--text);
+  text-decoration: none;
+  font-weight: 500;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-name:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.file-meta {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
 /* ---- Template list ---- */
 
 .template-list {

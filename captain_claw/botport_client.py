@@ -10,8 +10,13 @@ When this CC instance is CC-B (handler): receives dispatches, runs agents, sends
 from __future__ import annotations
 
 import asyncio
+import base64
+import gzip
 import json
+import os
+import tempfile
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 import aiohttp
@@ -28,12 +33,29 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
+# Formats that are already compressed — skip gzip for these.
+_PRECOMPRESSED_EXTS = frozenset({
+    ".zip", ".gz", ".bz2", ".xz", ".7z", ".rar",
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif",
+    ".mp3", ".mp4", ".m4a", ".m4v", ".avi", ".mov", ".mkv", ".webm",
+    ".woff", ".woff2", ".pdf",
+})
+
 # System prompt fragment injected into dispatched agent sessions.
 _DISPATCH_SYSTEM_PROMPT = (
     "You are handling a request from another agent instance named \"{from_instance}\".\n"
     "You are communicating agent-to-agent, not agent-to-human.\n"
     "Be precise, structured, and direct in your responses.\n"
     "The requesting agent will interpret your response and relay it to its user.\n\n"
+    "CRITICAL — AUTONOMOUS EXECUTION RULES:\n"
+    "This is part of an automated multi-agent workflow. You MUST:\n"
+    "- Execute the task completely and autonomously. Make all decisions yourself.\n"
+    "- NEVER ask questions, request clarification, or seek confirmation.\n"
+    "- NEVER present options (e.g. \"Option A vs Option B\") and ask which to choose.\n"
+    "- NEVER say \"Should I proceed?\", \"Would you like me to...\", or similar.\n"
+    "- If the task is ambiguous, use your best judgment and proceed.\n"
+    "- If multiple approaches exist, pick the best one and execute it.\n"
+    "- Deliver a complete, finished result — not a proposal or draft for approval.\n\n"
     "Requesting instance: {from_instance}\n"
     "Task: {task}"
 )
@@ -79,6 +101,12 @@ class BotPortClient:
         self._dispatch_agents: dict[str, Any] = {}  # concern_id -> Agent
         self._dispatch_sessions: dict[str, str] = {}  # concern_id -> session_id
         self._dispatch_personas: dict[str, str] = {}  # concern_id -> persona name
+
+        # File transfer state.
+        self._dispatch_swarm_ids: dict[str, str] = {}  # concern_id -> swarm_id
+        self._dispatch_created_files: dict[str, list[str]] = {}  # concern_id -> [file_paths]
+        self._file_upload_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._file_response_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
 
     @property
     def connected(self) -> bool:
@@ -144,7 +172,7 @@ class BotPortClient:
             assert self._session is not None
             self._ws = await self._session.ws_connect(
                 url,
-                max_msg_size=4 * 1024 * 1024,
+                max_msg_size=16 * 1024 * 1024,  # 16 MB for file transfers
                 heartbeat=60.0,
             )
         except Exception as exc:
@@ -283,6 +311,15 @@ class BotPortClient:
 
         elif msg_type == "timeout_notice":
             await self._handle_timeout_notice(data)
+
+        elif msg_type == "file_upload_ack":
+            self._handle_file_upload_ack(data)
+
+        elif msg_type == "file_response":
+            self._handle_file_response(data)
+
+        elif msg_type == "file_list_response":
+            self._handle_file_list_response(data)
 
         else:
             log.debug("Unknown BotPort message type: %s", msg_type)
@@ -482,9 +519,16 @@ class BotPortClient:
         context = data.get("context", {})
         persona_hint = data.get("persona_hint", "")
 
+        # Track swarm context for file transfers.
+        swarm_id = context.get("swarm_id", "")
+        if swarm_id:
+            self._dispatch_swarm_ids[concern_id] = swarm_id
+            self._dispatch_created_files[concern_id] = []
+
         log.info(
-            "Dispatch received: concern=%s from=%s task_len=%d",
+            "Dispatch received: concern=%s from=%s task_len=%d swarm=%s",
             concern_id[:8], from_instance, len(task),
+            swarm_id[:8] if swarm_id else "none",
         )
 
         try:
@@ -495,15 +539,44 @@ class BotPortClient:
             self._dispatch_personas[concern_id] = persona_hint or self._config.instance_name
 
             # Build effective input with context.
+            # Include file manifest if available.
             effective_input = task
-            if context:
-                context_str = json.dumps(context, indent=2, default=str)
-                effective_input = f"{task}\n\nContext:\n{context_str}"
+            filtered_context = {
+                k: v for k, v in context.items()
+                if k not in ("swarm_files",)
+            }
+            swarm_files = context.get("swarm_files", [])
+            if swarm_files:
+                file_list = "\n".join(
+                    f"  - {f['filename']} ({f['size']} bytes, {f['mime_type']}) path={f['path']}"
+                    for f in swarm_files
+                )
+                effective_input += (
+                    f"\n\n--- Available Files in Swarm Workspace ---\n"
+                    f"The following files are available from previous tasks. "
+                    f"If you need any of them, mention the file path and the "
+                    f"orchestrator will provide them.\n{file_list}"
+                )
+            if filtered_context:
+                context_str = json.dumps(filtered_context, indent=2, default=str)
+                effective_input = f"{effective_input}\n\nContext:\n{context_str}"
 
             # Run the agent.
             response = await agent.complete(effective_input)
 
+            # Upload any files created during execution.
+            uploaded_files = []
+            if swarm_id:
+                uploaded_files = await self._upload_created_files(concern_id)
+
             # Send result back, including persona name that handled it.
+            result_metadata: dict[str, Any] = {
+                "model_used": getattr(agent, "_last_model_used", ""),
+                "tokens": getattr(agent, "last_usage", {}).get("total_tokens", 0),
+            }
+            if uploaded_files:
+                result_metadata["uploaded_files"] = uploaded_files
+
             if self._ws and not self._ws.closed:
                 await self._ws.send_str(json.dumps({
                     "type": "result",
@@ -511,13 +584,13 @@ class BotPortClient:
                     "response": response or "",
                     "persona_name": persona_hint or self._config.instance_name,
                     "ok": True,
-                    "metadata": {
-                        "model_used": getattr(agent, "_last_model_used", ""),
-                        "tokens": getattr(agent, "last_usage", {}).get("total_tokens", 0),
-                    },
+                    "metadata": result_metadata,
                 }))
 
-            log.info("Dispatch completed: concern=%s response_len=%d", concern_id[:8], len(response or ""))
+            log.info(
+                "Dispatch completed: concern=%s response_len=%d files_uploaded=%d",
+                concern_id[:8], len(response or ""), len(uploaded_files),
+            )
 
         except Exception as exc:
             log.error("Dispatch execution failed: concern=%s error=%s", concern_id[:8], exc)
@@ -528,6 +601,10 @@ class BotPortClient:
                     "ok": False,
                     "error": str(exc),
                 }))
+        finally:
+            # Clean up file tracking state.
+            self._dispatch_swarm_ids.pop(concern_id, None)
+            self._dispatch_created_files.pop(concern_id, None)
 
     async def _handle_incoming_follow_up(self, data: dict[str, Any]) -> None:
         """Handle a follow-up message for a concern we're handling (CC-B)."""
@@ -569,6 +646,8 @@ class BotPortClient:
         self._dispatch_agents.pop(concern_id, None)
         self._dispatch_sessions.pop(concern_id, None)
         self._dispatch_personas.pop(concern_id, None)
+        self._dispatch_swarm_ids.pop(concern_id, None)
+        self._dispatch_created_files.pop(concern_id, None)
         log.info("Dispatch concern %s closed, agent cleaned up", concern_id[:8])
 
     async def _handle_context_reply(self, data: dict[str, Any]) -> None:
@@ -606,10 +685,16 @@ class BotPortClient:
         )
         session.add_message("system", dispatch_context)
 
+        # Build tool output callback that also tracks file creation.
+        file_tracking_cb = self._make_file_tracking_tool_callback(
+            concern_id,
+            self._make_activity_tool_output_callback(self._tool_output_callback),
+        )
+
         agent = AgentCls(
             provider=self._provider,
             status_callback=self._make_activity_status_callback(self._status_callback),
-            tool_output_callback=self._make_activity_tool_output_callback(self._tool_output_callback),
+            tool_output_callback=file_tracking_cb,
             thinking_callback=self._make_activity_thinking_callback(self._thinking_callback),
         )
         agent.session = session
@@ -702,6 +787,17 @@ class BotPortClient:
             self._send_activity("thinking", {"text": text, "tool": tool, "phase": phase})
         return callback
 
+    def _make_file_tracking_tool_callback(
+        self,
+        concern_id: str,
+        wrapped: Callable[[str, dict[str, Any], str], None],
+    ) -> Callable[[str, dict[str, Any], str], None]:
+        """Wrap a tool_output callback to also track file creation for swarm uploads."""
+        def callback(tool_name: str, arguments: dict[str, Any], output: str) -> None:
+            wrapped(tool_name, arguments, output)
+            self._track_file_creation(concern_id, tool_name, arguments, output)
+        return callback
+
     def _make_activity_tool_output_callback(
         self, original: Callable[[str, dict[str, Any], str], None] | None,
     ) -> Callable[[str, dict[str, Any], str], None]:
@@ -715,6 +811,266 @@ class BotPortClient:
                 "output": output[:500],  # Truncate to avoid huge messages.
             })
         return callback
+
+    # ── File transfer ─────────────────────────────────────────────
+
+    def _encode_file_for_transfer(
+        self, data: bytes, filename: str,
+    ) -> tuple[str, bool]:
+        """Encode file data: optionally gzip, then base64."""
+        ext = Path(filename).suffix.lower()
+        compressed = False
+        payload = data
+
+        if ext not in _PRECOMPRESSED_EXTS and len(data) > 256:
+            try:
+                gz = gzip.compress(data, compresslevel=6)
+                if len(gz) < len(data):
+                    payload = gz
+                    compressed = True
+            except Exception:
+                pass
+
+        return base64.b64encode(payload).decode("ascii"), compressed
+
+    def _decode_file_from_transfer(
+        self, b64_data: str, compressed: bool,
+    ) -> bytes:
+        """Decode file data from base64, optionally gunzip."""
+        raw = base64.b64decode(b64_data)
+        if compressed:
+            raw = gzip.decompress(raw)
+        return raw
+
+    async def upload_file(
+        self,
+        swarm_id: str,
+        concern_id: str,
+        filepath: str,
+        subfolder: str = "",
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """Upload a file to the BotPort swarm workspace."""
+        if not self._connected or not self._ws:
+            return {"ok": False, "error": "Not connected"}
+
+        path = Path(filepath)
+        if not path.is_file():
+            return {"ok": False, "error": f"File not found: {filepath}"}
+
+        data = path.read_bytes()
+        if len(data) > 50 * 1024 * 1024:
+            return {"ok": False, "error": "File too large (max 50 MB)"}
+
+        b64_data, compressed = self._encode_file_for_transfer(data, path.name)
+
+        # Create a future for the upload ack.
+        upload_id = uuid.uuid4().hex
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._file_upload_futures[upload_id] = future
+
+        try:
+            await self._ws.send_str(json.dumps({
+                "type": "file_upload",
+                "swarm_id": swarm_id,
+                "concern_id": concern_id,
+                "filename": path.name,
+                "data": b64_data,
+                "compressed": compressed,
+                "mime_type": "",
+                "subfolder": subfolder,
+            }))
+
+            result = await asyncio.wait_for(future, timeout=timeout)
+            return result
+
+        except (TimeoutError, asyncio.TimeoutError):
+            return {"ok": False, "error": "Upload timed out"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        finally:
+            self._file_upload_futures.pop(upload_id, None)
+
+    async def request_file(
+        self,
+        swarm_id: str,
+        file_path: str = "",
+        file_id: str = "",
+        timeout: float = 30.0,
+    ) -> tuple[bytes | None, dict[str, Any]]:
+        """Request a file from the BotPort swarm workspace.
+
+        Returns (file_data, metadata) or (None, error_dict).
+        """
+        if not self._connected or not self._ws:
+            return None, {"ok": False, "error": "Not connected"}
+
+        req_id = uuid.uuid4().hex
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._file_response_futures[req_id] = future
+
+        try:
+            await self._ws.send_str(json.dumps({
+                "type": "file_request",
+                "swarm_id": swarm_id,
+                "file_path": file_path,
+                "file_id": file_id,
+            }))
+
+            result = await asyncio.wait_for(future, timeout=timeout)
+            if not result.get("ok"):
+                return None, result
+
+            file_data = self._decode_file_from_transfer(
+                result.get("data", ""), result.get("compressed", False),
+            )
+            return file_data, result
+
+        except (TimeoutError, asyncio.TimeoutError):
+            return None, {"ok": False, "error": "File request timed out"}
+        except Exception as exc:
+            return None, {"ok": False, "error": str(exc)}
+        finally:
+            self._file_response_futures.pop(req_id, None)
+
+    async def list_swarm_files(
+        self,
+        swarm_id: str,
+        agent_filter: str = "",
+        timeout: float = 10.0,
+    ) -> list[dict[str, Any]]:
+        """List available files in a swarm workspace."""
+        if not self._connected or not self._ws:
+            return []
+
+        req_id = uuid.uuid4().hex
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._file_response_futures[req_id] = future
+
+        try:
+            await self._ws.send_str(json.dumps({
+                "type": "file_list",
+                "swarm_id": swarm_id,
+                "agent_filter": agent_filter,
+            }))
+
+            result = await asyncio.wait_for(future, timeout=timeout)
+            return result.get("files", [])
+
+        except (TimeoutError, asyncio.TimeoutError):
+            return []
+        except Exception:
+            return []
+        finally:
+            self._file_response_futures.pop(req_id, None)
+
+    def _handle_file_upload_ack(self, data: dict[str, Any]) -> None:
+        """Handle file upload acknowledgment from BotPort."""
+        # Resolve the oldest pending upload future.
+        if self._file_upload_futures:
+            key = next(iter(self._file_upload_futures))
+            future = self._file_upload_futures.pop(key, None)
+            if future and not future.done():
+                future.set_result(data)
+
+    def _handle_file_response(self, data: dict[str, Any]) -> None:
+        """Handle file response (download) from BotPort."""
+        if self._file_response_futures:
+            key = next(iter(self._file_response_futures))
+            future = self._file_response_futures.pop(key, None)
+            if future and not future.done():
+                future.set_result(data)
+
+    def _handle_file_list_response(self, data: dict[str, Any]) -> None:
+        """Handle file list response from BotPort."""
+        if self._file_response_futures:
+            key = next(iter(self._file_response_futures))
+            future = self._file_response_futures.pop(key, None)
+            if future and not future.done():
+                future.set_result(data)
+
+    async def _upload_created_files(self, concern_id: str) -> list[dict[str, Any]]:
+        """Upload all files created during a dispatch to the swarm workspace."""
+        swarm_id = self._dispatch_swarm_ids.get(concern_id, "")
+        created = self._dispatch_created_files.get(concern_id, [])
+
+        if not swarm_id or not created:
+            return []
+
+        uploaded = []
+        for filepath in created:
+            path = Path(filepath)
+            if not path.is_file():
+                continue
+
+            # Skip very large files.
+            if path.stat().st_size > 50 * 1024 * 1024:
+                log.warning("Skipping large file: %s (%d bytes)", path.name, path.stat().st_size)
+                continue
+
+            try:
+                result = await self.upload_file(
+                    swarm_id=swarm_id,
+                    concern_id=concern_id,
+                    filepath=str(path),
+                    timeout=60.0,
+                )
+                if result.get("ok"):
+                    uploaded.append({
+                        "filename": result.get("filename", path.name),
+                        "path": result.get("path", ""),
+                        "size": result.get("size", 0),
+                    })
+                    log.info("Uploaded file: %s for swarm %s", path.name, swarm_id[:8])
+                else:
+                    log.warning(
+                        "Failed to upload %s: %s", path.name, result.get("error", ""),
+                    )
+            except Exception as exc:
+                log.error("Error uploading %s: %s", path.name, exc)
+
+        return uploaded
+
+    def _track_file_creation(
+        self, concern_id: str, tool_name: str, arguments: dict[str, Any], output: str,
+    ) -> None:
+        """Detect file creation from tool outputs and track for upload."""
+        if concern_id not in self._dispatch_created_files:
+            return
+
+        # Detect Write tool creating files.
+        if tool_name.lower() in ("write", "write_file", "file_write"):
+            filepath = arguments.get("file_path", "") or arguments.get("path", "")
+            if filepath and Path(filepath).is_file():
+                self._dispatch_created_files[concern_id].append(filepath)
+                log.debug("Tracked file creation: %s", filepath)
+
+        # Detect Edit tool (file might be new or modified).
+        elif tool_name.lower() in ("edit", "edit_file", "file_edit"):
+            filepath = arguments.get("file_path", "") or arguments.get("path", "")
+            if filepath and Path(filepath).is_file():
+                # Only track if not already tracked.
+                if filepath not in self._dispatch_created_files[concern_id]:
+                    self._dispatch_created_files[concern_id].append(filepath)
+
+        # Detect bash commands that might create files.
+        elif tool_name.lower() in ("bash", "shell", "execute"):
+            # Look for common file creation patterns in the command.
+            cmd = arguments.get("command", "") or arguments.get("cmd", "")
+            # Check for redirect operators creating files.
+            if ">" in cmd or "tee " in cmd:
+                # Try to extract the output file path from the command.
+                # This is heuristic — won't catch everything, but covers common cases.
+                for part in cmd.split(">"):
+                    if part == cmd.split(">")[0]:
+                        continue
+                    filepath = part.strip().split()[0] if part.strip() else ""
+                    if filepath and Path(filepath).is_file():
+                        if filepath not in self._dispatch_created_files[concern_id]:
+                            self._dispatch_created_files[concern_id].append(filepath)
 
     # ── Capabilities ─────────────────────────────────────────────
 

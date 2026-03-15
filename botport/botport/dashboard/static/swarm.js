@@ -706,6 +706,7 @@ function renderSwarmDetail(swarm) {
         <button class="swarm-tab" data-tab="gantt" onclick="switchSwarmTab(this, 'gantt')">Timeline</button>
         <button class="swarm-tab" data-tab="costs" onclick="switchSwarmTab(this, 'costs')">Costs</button>
         <button class="swarm-tab" data-tab="checkpoints" onclick="switchSwarmTab(this, 'checkpoints')">Checkpoints</button>
+        <button class="swarm-tab" data-tab="files" onclick="switchSwarmTab(this, 'files')">Files</button>
         <button class="swarm-tab" data-tab="audit" onclick="switchSwarmTab(this, 'audit')">Audit</button>
       </div>
 
@@ -734,6 +735,10 @@ function renderSwarmDetail(swarm) {
           <button class="btn btn-sm" onclick="createCheckpoint()">+ Create Checkpoint</button>
         </div>
         <div id="checkpoint-list-content"><p class="empty-state">Loading...</p></div>
+      </div>
+
+      <div id="swarm-tab-files" class="swarm-tab-content">
+        <div id="files-content"><p class="empty-state">Loading files...</p></div>
       </div>
 
       <div id="swarm-tab-audit" class="swarm-tab-content">
@@ -885,6 +890,7 @@ function switchSwarmTab(btn, tabName) {
   if (tabName === "checkpoints") loadCheckpoints();
   if (tabName === "gantt") loadGanttTimeline();
   if (tabName === "costs") loadCostDashboard();
+  if (tabName === "files") loadSwarmFiles();
 }
 
 async function loadAuditLog() {
@@ -1478,6 +1484,23 @@ async function showTaskDetail(taskId) {
         ${outputHtml}
       </div>
 
+      ${(task.output_data?.files && task.output_data.files.length > 0) ? `
+      <div class="task-detail-section">
+        <strong>Files Produced</strong>
+        <div class="files-list">
+          ${task.output_data.files.map(f => `
+            <div class="file-item">
+              <span class="file-icon">${_fileIcon(f.mime_type || "")}</span>
+              <div class="file-info">
+                <a class="file-name" href="/api/swarm/swarms/${esc(currentSwarm)}/files/${esc(f.path)}"
+                   target="_blank" download="${esc(f.filename)}">${esc(f.filename)}</a>
+                <span class="file-meta">${_formatFileSize(f.size)}</span>
+              </div>
+            </div>
+          `).join("")}
+        </div>
+      </div>` : ""}
+
       ${actions ? `<div class="task-detail-actions">${actions}</div>` : ""}
     </div>
   `;
@@ -1657,6 +1680,81 @@ async function loadCostDashboard() {
 
   html += '</div>';
   el.innerHTML = html;
+}
+
+/* ---- Swarm files ---- */
+
+function _formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+async function loadSwarmFiles() {
+  if (!currentSwarm) return;
+  const data = await swarmAPI("GET", `/swarms/${currentSwarm}/files`);
+  const el = document.getElementById("files-content");
+  if (!el) return;
+
+  if (!data || data._error) {
+    el.innerHTML = '<p class="empty-state">Unable to load files</p>';
+    return;
+  }
+
+  const files = data.files || [];
+
+  if (files.length === 0) {
+    el.innerHTML = '<p class="empty-state">No files yet. Files created by agents during task execution will appear here.</p>';
+    return;
+  }
+
+  let html = '<div class="files-dashboard">';
+  html += `<div class="files-summary"><span class="stat-pill">${files.length} files</span>`;
+  html += `<span class="stat-pill">${_formatFileSize(data.total_size || 0)} total</span></div>`;
+
+  // Group by agent.
+  const byAgent = {};
+  for (const f of files) {
+    const agent = f.agent || "unknown";
+    if (!byAgent[agent]) byAgent[agent] = [];
+    byAgent[agent].push(f);
+  }
+
+  for (const [agent, agentFiles] of Object.entries(byAgent)) {
+    html += `<div class="files-agent-group">`;
+    html += `<h4 class="files-agent-name">${esc(agent)}</h4>`;
+    html += '<div class="files-list">';
+
+    for (const f of agentFiles) {
+      const icon = _fileIcon(f.mime_type || "");
+      html += `
+        <div class="file-item">
+          <span class="file-icon">${icon}</span>
+          <div class="file-info">
+            <a class="file-name" href="/api/swarm/swarms/${esc(currentSwarm)}/files/${esc(f.path)}"
+               target="_blank" download="${esc(f.filename)}">${esc(f.filename)}</a>
+            <span class="file-meta">${_formatFileSize(f.size)} &middot; ${esc(f.mime_type || 'unknown')}</span>
+          </div>
+        </div>
+      `;
+    }
+    html += '</div></div>';
+  }
+
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+function _fileIcon(mime) {
+  if (mime.startsWith("image/")) return "🖼️";
+  if (mime.includes("pdf")) return "📄";
+  if (mime.includes("spreadsheet") || mime.includes("xlsx") || mime.includes("csv")) return "📊";
+  if (mime.includes("presentation") || mime.includes("pptx")) return "📽️";
+  if (mime.includes("word") || mime.includes("docx")) return "📝";
+  if (mime.includes("zip") || mime.includes("compress") || mime.includes("archive")) return "📦";
+  if (mime.includes("json") || mime.includes("xml") || mime.includes("yaml")) return "📋";
+  if (mime.includes("text")) return "📃";
+  return "📎";
 }
 
 /* ---- Templates ---- */
