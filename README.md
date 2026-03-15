@@ -28,7 +28,9 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Skills system | OpenClaw-compatible skills with auto-discovery and GitHub install |
 | Orchestrator / DAG mode | Decompose complex tasks into parallel multi-session execution |
 | Memory / RAG | Hybrid vector + text retrieval across workspace and sessions |
-| Web UI | Chat, monitor pane, instruction editor, command palette, persona selector, datastore browser, deep memory dashboard, reflections dashboard, LLM usage analytics |
+| Computer | Retro-themed research workspace — themed visual generation, exploration trees, multi-model selector, folder browser (local + Google Drive), file attachments, 14 built-in themes + custom theme engine |
+| Web UI | Chat, Computer, monitor pane, instruction editor, command palette, persona selector, datastore browser, deep memory dashboard, reflections dashboard, personality editor, LLM usage analytics |
+| Live instructions (`/btw`) | Inject additional instructions while a task is running — works in Chat, Computer, and Telegram |
 | Prompt caching | Anthropic prompt caching with automatic cache breakpoints — reduces token costs by up to 90% on cache hits |
 | BotPort (agent-to-agent) | Route tasks to specialist agents across a network of Captain Claw instances |
 | Remote integrations | Telegram (per-user sessions), Slack, Discord with secure pairing |
@@ -317,6 +319,8 @@ For the full configuration reference (23 sections, every field), see [USAGE.md](
 
 Each of these is documented in detail in [USAGE.md](USAGE.md).
 
+- **[Computer](USAGE.md#computer)** — A retro-themed research workspace at `/computer`. Three-panel layout with input area, activity log, and tabbed output (Answer, Blueprint, Files, Visual, Map). Features themed HTML visual generation via LLM, interactive exploration trees for multi-turn research, model selector modal, token tier control, folder browser (local filesystem + Google Drive), image/file attachments (paste, drag-drop, file picker), and 14 built-in themes (Amiga Workbench, Atari ST, C64, Classic Mac, Windows 3.1, Hacker Terminal, and more) plus a custom theme engine. Each theme includes unique boot sequences and CSS variable styling.
+
 - **[Orchestrator / DAG mode](USAGE.md#orchestrator--dag-mode)** — `/orchestrate` decomposes a complex request into a task DAG and runs tasks in parallel across separate sessions with real-time progress monitoring. Also available headless via `captain-claw-orchestrate`.
 
 - **[Skills system](USAGE.md#skills-system)** — OpenClaw-compatible `SKILL.md` files. Auto-discovered from workspace, managed, and plugin directories. Install from GitHub with `/skill install <url>`.
@@ -370,6 +374,8 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 - **[Prompt caching](USAGE.md#prompt-caching)** — Automatic Anthropic prompt caching with two cache breakpoints (static system prompt + last conversation message). Cache reads are ~90% cheaper. The static-first prompt layout also benefits OpenAI's automatic prefix caching. All other providers are unaffected.
 
 - **[LLM Usage Dashboard](USAGE.md#llm-usage-dashboard)** — Token usage analytics at `/usage` with period selection, provider/model dropdown filters, summary cards (tokens, cache read/created, latency, errors), and a per-call detail table.
+
+- **[Live instructions (`/btw`)](USAGE.md#btw-command)** — Inject additional context or course corrections while the agent is working on a task. Send `/btw <instruction>` or `btw <instruction>` in Chat, Computer, or Telegram. Instructions accumulate and are applied to all remaining subtasks, then cleared when the task completes.
 
 - **[Session export](USAGE.md#session-commands)** — Export chat, monitor, pipeline trace, or pipeline summary to files.
 

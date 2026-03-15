@@ -73,6 +73,15 @@ For a quick overview and installation guide, see [README.md](README.md).
 - [Execution Queue](#execution-queue-1)
 - [Orchestrator / DAG Mode](#orchestrator--dag-mode)
 - [BotPort (Agent-to-Agent)](#botport)
+- [Computer](#computer)
+  - [Layout](#layout-1)
+  - [Theme System](#theme-system)
+  - [Model Selector](#model-selector)
+  - [Visual Generation](#visual-generation)
+  - [Exploration Tree](#exploration-tree)
+  - [Folder Browser](#folder-browser)
+  - [Attachments](#attachments)
+  - [/btw Command](#btw-command)
 - [Web UI](#web-ui)
 - [Remote Integrations](#remote-integrations)
   - [Telegram: Per-User Sessions](#telegram-per-user-sessions)
@@ -2724,6 +2733,173 @@ Control what is advertised via `botport_client.advertise_personas`, `advertise_t
 
 ---
 
+## Computer
+
+The Computer is a retro-themed research workspace accessible at `/computer`. It provides a three-panel layout designed for extended research sessions, visual output generation, and interactive exploration trees.
+
+### Layout
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  🖥 Computer │ 🎨 Theme │ 🧠 Model │ Tier ▾ │              │
+├────────────────────────┬─────────────────────────────────────┤
+│  📝 Input              │  📊 Output                          │
+│  [textarea]            │  [Answer] [Blueprint] [Files]       │
+│                        │  [Visual] [Map]                     │
+│  📎 Attach │ 📁 Folder │                                     │
+│  [Send]                │  Rendered markdown, themed HTML,     │
+├────────────────────────┤  exploration tree visualization     │
+│  📋 Activity Log       │                                     │
+│  [timestamped entries] │                                     │
+└────────────────────────┴─────────────────────────────────────┘
+```
+
+**Left column** (resizable, width persisted to localStorage):
+- **Input panel** — Textarea with auto-resize, attachment bar, action buttons (📎 Attach, 📁 Folder, Send)
+- **Activity log** — Real-time timestamped entries with type icons (system, user, /btw, tool, thinking, error). Max 200 entries with auto-trim.
+
+**Right column** — Tabbed output:
+- **Answer** — Rendered markdown response from the agent
+- **Blueprint** — Step decomposition of the agent's task execution
+- **Files** — Session-created files grouped by folder, with search
+- **Visual** — LLM-generated themed HTML rendered in a sandboxed iframe
+- **Map** — Exploration tree visualization with zoom controls
+
+The resize handle between columns is draggable. The left panel width is stored in `localStorage` and restored on page load.
+
+### Theme System
+
+Computer ships with 14 built-in themes, each with unique colors, typography, window decorations, and boot sequences:
+
+| Theme | Style |
+|---|---|
+| Amiga Workbench | Blue/orange/grey, beveled 3D borders, Topaz font |
+| Atari ST GEM | Green desktop, drop-shadow windows, system font |
+| C64 GEOS | Blue/white, Commodore-style UI elements |
+| Classic Mac | Black & white, Chicago font, 1-bit aesthetic |
+| Windows 3.1 | Teal/grey, Program Manager style |
+| Hacker Terminal | Black/green, monospaced, scanline glow effect |
+| Modern | Dark slate, blue accent, rounded corners, clean sans-serif |
+| Windows 11 | Fluent design, Segoe UI, acrylic feel |
+| macOS | SF Pro, vibrancy, rounded window corners |
+| iPhone | iOS-style, compact, touch-friendly |
+| Android | Material Design, Roboto, elevation shadows |
+| Nokia 7110 | Monochrome LCD, tiny pixel font |
+| Nokia Communicator | Dual-screen business phone aesthetic |
+
+Each theme defines CSS custom properties (39 variables) covering backgrounds, text, accents, chrome, bevels, title bars, scrollbars, fonts, and layout dimensions.
+
+**Custom themes:**
+1. Click 🎨 Theme → Download Template to get a JSON template
+2. Edit colors, fonts, and optionally add a boot sequence
+3. Upload the JSON file — it's saved to `localStorage` and immediately applied
+4. Custom themes appear alongside built-in themes in the selector
+
+**Boot sequences:** Each theme plays a unique startup animation on load (e.g., Amiga's "Insert disk → Loading Kickstart → Workbench 1.3", Hacker's Matrix-style "Wake up, Neo...").
+
+### Model Selector
+
+Click the 🧠 button to open a modal grid showing all available models from `config.yaml`'s `model.allowed` list. Each card displays:
+- Provider icon (emoji by provider: OpenAI, Anthropic, Google, Ollama, etc.)
+- Model name and description
+- Pricing info and capability badges
+
+Selecting a model sends a `set_model` WebSocket message to switch the entire session's model — affecting all LLM operations (chat, visual generation, exploration). The selection is persisted to `localStorage` and re-applied on reconnect.
+
+### Visual Generation
+
+After the agent responds, the Visual tab generates themed HTML output:
+
+1. The agent's answer is sent to `POST /api/computer/visualize` along with the current theme and token tier
+2. The LLM generates standalone HTML styled to match the active theme (e.g., Amiga colors and beveled borders, hacker terminal green-on-black)
+3. The HTML is rendered in a sandboxed iframe with an explore bridge injected
+
+**Token tiers** control the visual generation budget:
+
+| Tier | Max Tokens |
+|---|---|
+| Micro | 4,096 |
+| Minimal | 8,192 |
+| Standard | 16,384 (default) |
+| Generous | 32,768 |
+
+If the agent created HTML files during its task, a choice bar appears: **Use File** (render the agent's file) or **Generate New** (create themed visual via LLM).
+
+### Exploration Tree
+
+The exploration tree enables multi-turn research within the Visual tab:
+
+1. Elements with `class="explore-link"` in generated HTML become clickable
+2. Clicking one shows a confirmation bar with the topic
+3. The user can edit the prompt before sending
+4. Each exploration creates a tree node linked to its parent
+5. The **Map** tab visualizes the full tree with zoom controls
+
+Nodes are persisted to SQLite (`exploration_nodes` table) and loaded on page load. Each node stores: prompt, answer, visual HTML, theme, source (click or manual), and parent linkage.
+
+**REST API:**
+- `POST /api/computer/exploration` — Save a new node
+- `GET /api/computer/exploration` — List nodes for current session
+- `GET /api/computer/exploration/{id}` — Get a single node
+- `PUT /api/computer/exploration/{id}/visual` — Update visual HTML
+- `DELETE /api/computer/exploration/{id}` — Delete a node
+
+### Folder Browser
+
+Click 📁 to open the folder browser modal with two tabs:
+
+**Local tab:**
+- Lists currently active folders with remove buttons
+- Drive selector buttons for Windows machines (C:\, D:\, etc.)
+- Directory browser with breadcrumb navigation
+- "Add this folder" button to register a folder for agent file access
+
+**Google Drive tab** (shown when GWS is available):
+- Browse My Drive and Shared Drives
+- Breadcrumb navigation through folder hierarchy
+- Add/remove Google Drive folders for agent access
+
+Active folders (both local and Google Drive) are used by the agent when searching for files outside the workspace.
+
+### Attachments
+
+Attach images and data files to messages:
+
+**Supported formats:**
+- Images: PNG, JPG, JPEG, WEBP, GIF, BMP
+- Data: CSV, XLSX
+
+**Attachment methods:**
+- Click 📎 to open a file picker
+- Paste from clipboard (auto-detects images)
+- Drag and drop onto the workspace
+
+Images are automatically resized to 1024px max dimension before upload. Files are uploaded to the server and sent as `image_path` or `file_path` in the chat message payload.
+
+### /btw Command
+
+Inject live instructions while a task is running without interrupting the agent:
+
+```
+/btw use bullet points for the summary
+btw also check the error handling
+```
+
+**How it works:**
+1. Send `/btw <instruction>` or `btw <instruction>` while the agent is processing
+2. The instruction is added to the agent's `_btw_instructions` list
+3. The agent incorporates accumulated instructions into remaining subtasks
+4. Instructions are cleared when the task completes
+
+**Available in:**
+- **Chat** (`/chat`) — detected in the frontend, sent as a WebSocket `btw` message
+- **Computer** (`/computer`) — same detection and WebSocket mechanism
+- **Telegram** — detected before the per-user lock, so it works even while the agent is busy processing
+
+Multiple `/btw` messages can be sent during a single task — they accumulate and all apply to remaining work.
+
+---
+
 ## Web UI
 
 Captain Claw includes a browser-based interface with the same capabilities as the terminal.
@@ -2790,6 +2966,7 @@ The homepage at `/` provides card-based navigation to all dashboard pages:
 | Page | Path | Description |
 |---|---|---|
 | Chat | `/chat` | Interactive conversation with the agent |
+| Computer | `/computer` | Retro-themed research workspace with visual generation, exploration trees, and 14+ themes |
 | Sessions | `/sessions` | Browse and manage all conversation sessions |
 | Orchestrator | `/orchestrator` | Parallel DAG task execution with real-time monitoring |
 | Instructions | `/instructions` | Browse and edit instruction templates |
@@ -2799,9 +2976,11 @@ The homepage at `/` provides card-based navigation to all dashboard pages:
 | Memory | `/memory` | Browse to-dos, contacts, scripts, and API registrations |
 | Deep Memory | `/deep-memory` | Browse and search Typesense-backed long-term archive |
 | Datastore | `/datastore` | Browse and manage structured data tables |
+| Personality | `/personality` | Edit agent personality and per-user profiles |
+| Reflections | `/reflections` | Browse and manage self-reflection entries |
 | Files | `/files` | Browse agent-created files and download outputs |
 | LLM Usage | `/usage` | Token usage analytics with provider/model filters and cost breakdown |
-| Settings | `/settings` | Configure models, tools, agent personality, user profiles, and system options |
+| Settings | `/settings` | Configure models, tools, and system options |
 
 ### Configuration
 

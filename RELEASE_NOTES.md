@@ -1,78 +1,121 @@
-# Captain Claw v0.3.5 Release Notes
+# Captain Claw v0.4.0 Release Notes
 
-**Release title:** Self-Reflection System, Desktop Automation, Chat UX Improvements
+**Release title:** Computer — Retro-Themed Research Workspace, Live Instructions, Personality Editor
 
-**Release date:** 2026-03-13
+**Release date:** 2026-03-15
 
 ## Highlights
 
-This release introduces a self-reflection system that enables the agent to periodically assess its own performance and inject improvement directives into the system prompt. A new desktop automation tool (`desktop_action`) adds cross-platform GUI control via `pyautogui`, pairing with the existing screen capture tool for coordinate-based interaction. The chat UI gains message feedback (like/dislike) and a copy-to-clipboard button on every message.
+This release introduces **Computer**, a retro-themed research workspace at `/computer` with visual generation, exploration trees, 14 built-in themes, and a custom theme engine. A new `/btw` command lets you inject live instructions while tasks are running across Chat, Computer, and Telegram. The personality and personas editor moves to its own dedicated page, and reflections become editable.
 
 ## New Features
 
-### Self-Reflection System
-- New `reflections.py` module following the personality.py pattern: dataclass → markdown file → mtime caching → prompt block injection
-- Gathers context from recent session messages (last 20), memory facts (up to 30), completed tasks/cron since the last reflection, and the previous reflection summary
-- LLM generates actionable, generalized self-improvement instructions — never references specific tasks or sessions
-- Latest reflection injected into the system prompt via `{reflection_block}` placeholder (both full and micro prompts)
-- Auto-trigger fires after agent turns when both cooldown (4 hours) and minimum activity (10 messages) thresholds are met
-- Auto-trigger runs as fire-and-forget `asyncio.create_task()` — non-blocking, failures are non-fatal
-- Reflections stored as timestamped Markdown files in `~/.captain-claw/reflections/`
-- Mtime-based caching ensures the file is only re-read when modified
-- Token usage logged to the LLM usage table (`interaction="reflection"`)
-- Slash commands: `/reflection` (show latest), `/reflection generate` (trigger new), `/reflection list` (list recent)
-- Web UI dashboard at `/reflections` — expandable cards with timestamps, topics, active badge, delete button, and generate button
-- REST API: `GET /api/reflections`, `GET /api/reflections/latest`, `POST /api/reflections/generate`, `DELETE /api/reflections/{timestamp}`
-- Homepage card added (🪞 Reflections)
+### Computer — Research Workspace (`/computer`)
 
-### Desktop Automation Tool
-- New `desktop_action` tool: cross-platform desktop GUI automation via `pyautogui`
-- Actions: `click`, `double_click`, `right_click`, `move`, `type`, `press`, `hotkey`, `scroll`, `drag`, `open`, `mouse_position`, `screenshot_click`
-- The `screenshot_click` action combines vision-based element detection with automated clicking — describe what to click and the agent finds and clicks it
-- Platform-specific app/URL launchers: macOS `open -a`, Linux `xdg-open`, Windows `os.startfile`
-- `pyautogui.FAILSAFE` enabled — move mouse to top-left corner to abort runaway automation
-- Pairs naturally with `screen_capture` for a see-then-act workflow
-- Requires `pip install pyautogui`
+A three-panel workspace designed for extended research sessions and visual exploration:
 
-### Chat UI: Message Feedback
-- Like/dislike buttons on every assistant message in the chat UI
-- Feedback stored per-message in the session via WebSocket (`message_feedback` event)
-- Visual toggle: click to set, click again to clear
-- Thumbs-up (good) and thumbs-down (bad) with hover states
+- **Three-panel layout** — Resizable input area + activity log (left) and tabbed output (right: Answer, Blueprint, Files, Visual, Map)
+- **14 built-in themes** — Amiga Workbench, Atari ST GEM, C64 GEOS, Classic Mac, Windows 3.1, Hacker Terminal, Modern, Windows 11, macOS, iPhone, Android, Nokia 7110, Nokia Communicator, plus a default theme. Each has unique boot sequences and CSS variable styling (39 custom properties)
+- **Custom theme engine** — Download JSON template, edit colors/fonts/boot sequence, upload to create your own theme
+- **Visual generation** — LLM generates themed HTML output matching the active theme (Amiga bevels, hacker terminal glow, etc.). Token tier selector controls generation budget (4K–32K tokens)
+- **Exploration tree** — Click explore links in generated visuals to branch into multi-turn research. Nodes persist to SQLite, visualized in the Map tab with zoom controls
+- **Model selector modal** — Grid of available models with provider icons, descriptions, and pricing. Selected model applies to all LLM operations (chat, visual generation, exploration), not just visual generation
+- **Folder browser** — Modal with Local and Google Drive tabs. Browse directories, add folders for agent file access, drive selector for Windows
+- **Image/file attachments** — Paste, drag-drop, or file picker. Images auto-resize to 1024px. Supports PNG, JPG, WEBP, GIF, BMP, CSV, XLSX
+- **Panel resize persistence** — Left panel width saved to localStorage and restored on load
+- **Activity log** — Real-time timestamped entries with type icons (system, user, /btw, tool, thinking, error). Max 200 entries with auto-trim
+- **Input decomposition** — Automatic analysis showing identified actions, targets, and complexity
 
-### Chat UI: Copy Button
-- Copy-to-clipboard button on every message bubble (chat and assistant)
-- One-click copy of the full message text
-- Brief checkmark confirmation after copying
+### Live Instructions (`/btw` Command)
 
-## Bug Fixes
+Inject additional context or course corrections while the agent is working on a task:
 
-### Reflection Parser: Empty Summary
-- Fixed a bug where LLM-generated markdown headers inside the reflection summary were treated as section delimiters, causing the summary to appear empty despite successful token generation
-- Parser now only recognizes known section headers (`Timestamp`, `Summary`, `Topics Reviewed`, `Token Usage`) as delimiters — all other `##` headers in the LLM response are preserved as content
+```
+/btw use bullet points for the summary
+btw also include error counts
+```
 
-### Reflection Quality
-- Updated the reflection system prompt with explicit rules: generalize insights into reusable principles, never reference specific tasks/sessions/turns, output flat bullet lists only (no markdown headers)
+- Works in **Chat**, **Computer**, and **Telegram**
+- Multiple `/btw` messages accumulate during a task
+- Instructions are applied to all remaining subtasks
+- Cleared automatically when the task completes
+- In Telegram, processed before the per-user lock so it works even while the agent is busy
 
-## Configuration Changes
+### Personality Editor Page (`/personality`)
 
-### New Tool
-- `desktop_action` added to the default enabled tools list in config
+- Dedicated full-screen page for editing agent personality and per-user profiles
+- Extracted from the home page into a standalone route
+- Split-pane layout: persona list (left) and editor form (right)
+- Full CRUD for agent personality and user personas
+- Rephrase & Enrich buttons on textarea fields
+- Home page card added after Computer card for navigation
 
-### New System Prompt Variables
-- `{reflection_block}` — injected into both `system_prompt.md` and `micro_system_prompt.md` after `{visualization_style_block}`
+### Editable Reflections
+
+- Reflections on the `/reflections` page are now editable
+- Edit button on each reflection card opens inline editor with textarea for summary and input for topics
+- Save persists changes to the markdown file and invalidates cache
+- New `PUT /api/reflections/{timestamp}` REST endpoint
+
+## Improvements
+
+### Model Selection Scope
+- Selected model in Computer now applies to **all** LLM operations (chat, visual generation, exploration), not just visual generation
+- Model is re-applied on WebSocket reconnect via `set_model` message
+- Provider is correctly logged in LLM usage records from Computer operations
+
+### Computer Activity Log
+- Type-specific icons: ● system, ▶ user, 💡 /btw, ⚙ tool, 💭 thinking, ✖ error
+- Timestamps in locale-aware HH:MM:SS format
+- Auto-trim at 200 entries
+
+## REST API Changes
+
+### New Endpoints
+- `PUT /api/reflections/{timestamp}` — Update a reflection's summary and/or topics
+- `POST /api/computer/visualize` — Generate themed HTML from prompt + result
+- `POST /api/computer/exploration` — Save exploration tree node
+- `GET /api/computer/exploration` — List exploration nodes for session
+- `GET /api/computer/exploration/{id}` — Get single exploration node
+- `PUT /api/computer/exploration/{id}/visual` — Update visual HTML for node
+- `DELETE /api/computer/exploration/{id}` — Delete exploration node
+
+### New Routes
+- `GET /computer` — Computer workspace page
+- `GET /personality` — Personality editor page
 
 ## Web UI Changes
 
-- New `/reflections` page with dark-themed card layout, expandable summaries, and active reflection indicator
-- 🪞 Reflections card added to the homepage navigation grid
-- Like/dislike feedback buttons on assistant messages
-- Copy-to-clipboard button on all message bubbles
-- Delete button on reflection cards (visible at 50% opacity, full opacity on hover)
+- New `/computer` page — full retro-themed research workspace
+- New `/personality` page — dedicated personality and personas editor
+- Home page: Computer card added, Personality card added after Computer, Reflections card moved after Personality
+- Reflections page: edit button with inline editor for summary and topics
+- Dashboard pages table updated with Computer, Personality, and Reflections entries
+
+## Configuration Changes
+
+No new configuration keys. Computer uses existing `model.allowed` for the model selector and existing folder/GDrive APIs for the folder browser.
 
 ## Internal
 
-- New files: `captain_claw/reflections.py`, `captain_claw/web/rest_reflections.py`, `captain_claw/web/static/reflections.html`, `captain_claw/instructions/reflection_system_prompt.md`, `captain_claw/instructions/reflection_user_prompt.md`, `captain_claw/tools/desktop_action.py`
-- Modified: `agent_context_mixin.py` (reflection block loading + render), `web_server.py` (routes + commands), `slash_commands.py` (`/reflection` handler), `chat_handler.py` (auto-reflection trigger), `static_pages.py` (serve reflections), `home.html` (reflections card), `system_prompt.md` and `micro_system_prompt.md` (`{reflection_block}`), `app.js` (feedback + copy buttons), `ws_handler.py` (feedback event), `style.css` (feedback + copy styling)
-- PyInstaller `captain_claw.spec` updated with new hidden imports
-- Version bumped from 0.3.4.1 to 0.3.5
+### New Files
+- `captain_claw/web/static/computer.html` — Computer workspace HTML
+- `captain_claw/web/static/computer.js` — Computer client-side logic (~3,100 lines)
+- `captain_claw/web/static/computer.css` — Theme engine and Computer styling (~2,950 lines)
+- `captain_claw/web/static/personality.html` — Standalone personality editor page
+- `captain_claw/web/rest_computer.py` — Visual generation and exploration REST handlers
+- `captain_claw/instructions/computer_visualize_system_prompt.md` — Visual generation system prompt
+- `captain_claw/instructions/computer_visualize_user_prompt.md` — Visual generation user prompt
+
+### Modified Files
+- `web_server.py` — Computer routes, personality route, reflection update route, `/btw` WebSocket handler
+- `ws_handler.py` — `btw` message type handler
+- `static_pages.py` — `serve_computer()`, `serve_personality()`
+- `rest_reflections.py` — `update_reflection_api()` function
+- `telegram.py` — `/btw` command handler (pre-lock), btw cleanup in finally block
+- `home.html` — Computer and Personality navigation cards, personality editor removed
+- `home.css` — Personality section styles removed (moved to personality.html)
+- `reflections.html` — Edit UI with textarea, topic input, save/cancel buttons
+- `app.js` — `/btw` detection and WebSocket send
+- `pyproject.toml` — Version 0.3.5 → 0.4.0
+- `captain_claw/__init__.py` — Version 0.3.5 → 0.4.0
