@@ -406,12 +406,15 @@ class SessionOrchestrator:
             provider_name = str(resolved.get("provider", cfg.model.provider)).strip()
             norm_key = self._main_agent._normalize_provider_key(provider_name)
             extra_headers = cfg.provider_keys.headers_for(norm_key) or None
+            _NO_KEY_PROVIDERS = {"ollama"}
             if extra_headers:
                 api_key = None  # auth is carried in headers
+            elif norm_key in _NO_KEY_PROVIDERS:
+                api_key = None
             else:
                 api_key = (
                     self._main_agent._resolve_provider_api_key(norm_key)
-                    or cfg.model.api_key or None
+                    or None
                 )
             base_url = str(resolved.get("base_url", "") or "").strip() or cfg.model.base_url or None
             temperature = resolved.get("temperature")

@@ -201,6 +201,10 @@ async def handle_chat(
 
     # Use the same provider/model/key/base_url the agent is configured with.
     _naming_model = getattr(server.agent.provider, "model", "")
+    _naming_provider = getattr(server.agent.provider, "provider", "")
+    # Ensure model includes the provider prefix for litellm (e.g. "openai/gpt-4").
+    if _naming_model and "/" not in _naming_model and _naming_provider:
+        _naming_model = f"{_naming_provider}/{_naming_model}"
     _naming_api_key = getattr(server.agent.provider, "api_key", None)
     _naming_base_url = getattr(server.agent.provider, "base_url", None)
     _naming_extra_headers = getattr(server.agent.provider, "extra_headers", None)

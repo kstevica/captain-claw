@@ -98,7 +98,7 @@ async def computer_visualize(
     # Resolve provider — optionally override model.
     provider = _resolve_provider(server, model_override)
 
-    provider_name = str(getattr(provider, "provider_name", "") or "")
+    provider_name = str(getattr(provider, "provider", "") or getattr(provider, "provider_name", "") or "")
     model_hint = str(getattr(provider, "model", "") or "")
     log.info(
         "Calling LLM for visual generation",
@@ -196,13 +196,15 @@ def _resolve_provider(server: "WebServer", model_id: str | None):
                     # Normalize the provider key the same way chat/orchestrator do.
                     norm_key = server.agent._normalize_provider_key(provider_name)
                     extra_headers = cfg.provider_keys.headers_for(norm_key) or None
+                    _NO_KEY_PROVIDERS = {"ollama"}
                     if extra_headers:
                         api_key = None  # auth is carried in headers
+                    elif norm_key in _NO_KEY_PROVIDERS:
+                        api_key = None
                     else:
                         api_key = (
                             server.agent._resolve_provider_api_key(norm_key)
                             or m.get("api_key")
-                            or cfg.model.api_key
                             or None
                         )
 
@@ -241,9 +243,10 @@ def _record_visual_usage(
         usage = getattr(response, "usage", {}) or {}
         model_name = str(getattr(response, "model", "") or "")
         # Use the actual provider that was used for this call.
-        provider_name = str(getattr(provider, "provider_name", "") or "") if provider else ""
+        # LiteLLMProvider uses .provider, not .provider_name.
+        provider_name = str(getattr(provider, "provider", "") or getattr(provider, "provider_name", "") or "") if provider else ""
         if not provider_name and server.agent:
-            provider_name = str(getattr(server.agent.provider, "provider_name", "") or "")
+            provider_name = str(getattr(server.agent.provider, "provider", "") or getattr(server.agent.provider, "provider_name", "") or "")
         content = str(getattr(response, "content", "") or "")
         session_id = server.agent.session.id if server.agent and server.agent.session else None
 

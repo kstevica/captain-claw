@@ -393,7 +393,7 @@ async def generate_reflection(agent: Agent) -> Reflection:
         await sm.record_llm_usage(
             session_id=agent.session.id if agent.session else None,
             interaction="reflection",
-            provider=str(getattr(agent.provider, "provider_name", "") or ""),
+            provider=str(getattr(agent.provider, "provider", "") or getattr(agent.provider, "provider_name", "") or ""),
             model=str(getattr(agent.provider, "model", "") or ""),
             prompt_tokens=usage.get("prompt_tokens", 0),
             completion_tokens=usage.get("completion_tokens", 0),

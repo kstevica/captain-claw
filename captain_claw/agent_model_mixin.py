@@ -190,12 +190,16 @@ class AgentModelMixin:
         # for that provider from env vars / .env instead of using the default
         # model key (which may belong to a different provider).
         # When extra_headers carry auth, skip the api_key entirely.
+        # Providers like ollama don't use API keys — never leak a foreign key.
+        _NO_KEY_PROVIDERS = {"ollama"}
         if extra_headers:
+            resolved_api_key = None
+        elif normalized_provider in _NO_KEY_PROVIDERS:
             resolved_api_key = None
         elif normalized_provider == normalized_cfg_provider:
             resolved_api_key = cfg.model.api_key or None
         else:
-            resolved_api_key = self._resolve_provider_api_key(normalized_provider) or cfg.model.api_key or None
+            resolved_api_key = self._resolve_provider_api_key(normalized_provider) or None
 
         # Per-model overrides: tokens_per_minute, max_context, max_output_tokens
         model_tpm = int(option.get("tokens_per_minute", 0) or 0)

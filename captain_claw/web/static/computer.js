@@ -1088,6 +1088,29 @@ function handleMessage(data) {
       if (data.name) {
         $("#session-badge").textContent = data.name;
       }
+      // Update session id and reload exploration history when session changes.
+      var newSid = data.id || data.session_id;
+      if (newSid && newSid !== sessionId) {
+        sessionId = newSid;
+        explorationNodes.clear();
+        currentNodeId = null;
+        historyBranchNodeId = null;
+        pendingExploration = null;
+        lastPrompt = "";
+        lastResult = "";
+        agentCreatedHtmlFiles = [];
+        clearAnswer();
+        clearVisual();
+        renderHistoryDrawer();
+        $("#log-content").innerHTML = "";
+        logEntry("system", "Session switched — " + (data.name || newSid.slice(0, 8)));
+        loadExplorationHistory(sessionId);
+      }
+      break;
+
+    case "session_switched":
+      // Backend signals a full session switch (e.g. /nuke).
+      // session_info broadcast follows, which handles the reload.
       break;
 
     case "command_result":
@@ -1866,9 +1889,9 @@ function renderMap() {
   const svg = $("#map-svg");
   if (!svg) return;
 
-  // Only show main nodes (user-initiated queries), skip explore sub-steps.
+  // Show all exploration nodes including text-selection-initiated ones.
   const allNodes = Array.from(explorationNodes.values());
-  const nodes = allNodes.filter(n => n.source !== 'click');
+  const nodes = allNodes;
   if (nodes.length === 0) {
     svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" fill="var(--text-dim)" font-size="13" font-family="var(--font)">No exploration history yet. Ask a question to begin.</text>`;
     return;
@@ -1897,48 +1920,77 @@ function renderMap() {
     }
   }
 
-  // Layout: assign grid (x, y) per node.
-  const positions = new Map();
-  let nextX = 0;
-
-  function layoutNode(id, depth) {
-    const children = childrenMap.get(id) || [];
-    if (children.length === 0) {
-      positions.set(id, { x: nextX, y: depth });
-      nextX++;
-      return;
-    }
-    for (const cid of children) {
-      layoutNode(cid, depth + 1);
-    }
-    const firstChild = positions.get(children[0]);
-    const lastChild = positions.get(children[children.length - 1]);
-    positions.set(id, { x: (firstChild.x + lastChild.x) / 2, y: depth });
-  }
-
-  for (const rid of rootIds) {
-    layoutNode(rid, 0);
-  }
-
-  // Convert to pixel coordinates.
+  // Layout: scatter nodes across the stage for readability.
+  // Uses a spiral/zigzag pattern so nodes spread in 2D instead of a single column.
   const padding = 40;
   const nodeW = MAP_MAIN_W;
   const nodeH = MAP_MAIN_H + 14;  // taller to fit answer snippet
   const pixelPositions = new Map();
 
-  let maxDepth = 0;
-  for (const pos of positions.values()) maxDepth = Math.max(maxDepth, pos.y);
+  // Determine if the graph is mostly linear (no real branching).
+  const totalBranches = [...childrenMap.values()].filter(c => c.length > 1).length;
+  const isLinear = totalBranches === 0;
 
-  const rowY = [padding];
-  for (let d = 1; d <= maxDepth; d++) {
-    rowY.push(rowY[d - 1] + nodeH + MAP_V_GAP);
-  }
+  if (isLinear && sorted.length > 1) {
+    // Scatter layout: place nodes in a zigzag grid pattern.
+    // Compute grid dimensions to be roughly square.
+    const cols = Math.max(2, Math.ceil(Math.sqrt(sorted.length)));
+    const cellW = nodeW + MAP_H_GAP + 20;
+    const cellH = nodeH + MAP_V_GAP;
 
-  for (const [id, pos] of positions) {
-    pixelPositions.set(id, {
-      px: padding + pos.x * (nodeW + MAP_H_GAP),
-      py: rowY[pos.y] || padding,
+    // Deterministic jitter based on node index for organic feel.
+    function jitter(i, range) {
+      return ((i * 7 + 13) % 17) / 17 * range - range / 2;
+    }
+
+    sorted.forEach((n, i) => {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      // Alternate row direction for a snake/zigzag path.
+      const effCol = row % 2 === 0 ? col : (cols - 1 - col);
+      pixelPositions.set(n.id, {
+        px: padding + effCol * cellW + jitter(i, 30),
+        py: padding + row * cellH + jitter(i + 5, 20),
+      });
     });
+  } else {
+    // Tree layout for branching graphs.
+    const positions = new Map();
+    let nextX = 0;
+
+    function layoutNode(id, depth) {
+      const children = childrenMap.get(id) || [];
+      if (children.length === 0) {
+        positions.set(id, { x: nextX, y: depth });
+        nextX++;
+        return;
+      }
+      for (const cid of children) {
+        layoutNode(cid, depth + 1);
+      }
+      const firstChild = positions.get(children[0]);
+      const lastChild = positions.get(children[children.length - 1]);
+      positions.set(id, { x: (firstChild.x + lastChild.x) / 2, y: depth });
+    }
+
+    for (const rid of rootIds) {
+      layoutNode(rid, 0);
+    }
+
+    let maxDepth = 0;
+    for (const pos of positions.values()) maxDepth = Math.max(maxDepth, pos.y);
+
+    const rowY = [padding];
+    for (let d = 1; d <= maxDepth; d++) {
+      rowY.push(rowY[d - 1] + nodeH + MAP_V_GAP);
+    }
+
+    for (const [id, pos] of positions) {
+      pixelPositions.set(id, {
+        px: padding + pos.x * (nodeW + MAP_H_GAP),
+        py: rowY[pos.y] || padding,
+      });
+    }
   }
 
   let maxPx = 0, maxPy = 0;
