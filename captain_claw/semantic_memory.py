@@ -64,6 +64,8 @@ class SemanticMemoryResult:
     text_score: float
     vector_score: float
     updated_at: str
+    text_l1: str = ""
+    text_l2: str = ""
 
 
 @dataclass
@@ -84,6 +86,8 @@ class _Chunk:
     end_line: int
     text: str
     updated_at: str
+    text_l1: str = ""
+    text_l2: str = ""
 
 
 class _EmbeddingProvider(Protocol):
@@ -320,6 +324,7 @@ class SemanticMemoryIndex:
         temporal_decay_enabled: bool = True,
         temporal_half_life_days: float = 21.0,
         embedding_chain: _EmbeddingProviderChain | None = None,
+        layered_summaries: bool = True,
     ):
         self.db_path = Path(db_path).expanduser()
         self.session_db_path = Path(session_db_path).expanduser()
@@ -336,7 +341,7 @@ class SemanticMemoryIndex:
         }
         self.exclude_dirs = {
             value.strip().lower()
-            for value in (exclude_dirs or [".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv"])
+            for value in (exclude_dirs or [".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv", "logs"])
             if value.strip()
         }
         self.chunk_chars = max(300, int(chunk_chars))
@@ -364,6 +369,8 @@ class SemanticMemoryIndex:
         self._cache: dict[str, tuple[float, list[SemanticMemoryResult]]] = {}
         self._conn: sqlite3.Connection | None = None
         self._closed = False
+        self.layered_summaries = bool(layered_summaries)
+        self._summarizer: Any = None  # callable(text) -> (l1, l2)
         self._ensure_db()
         self.schedule_sync("startup")
 
@@ -374,6 +381,10 @@ class SemanticMemoryIndex:
             return
         self._active_session_reference = normalized
         self._clear_cache()
+
+    def set_summarizer(self, fn: Any) -> None:
+        """Set a callable ``fn(text: str) -> tuple[str, str]`` that returns (L1, L2) summaries."""
+        self._summarizer = fn
 
     def close(self) -> None:
         """Close SQLite resources."""
@@ -503,14 +514,72 @@ class SemanticMemoryIndex:
         )
         return list(self._merge_hybrid(keyword_hits, vector_hits, max_results=effective_max))
 
+    def promote(self, chunk_ids: list[str], layer: str = "l3") -> list[SemanticMemoryResult]:
+        """Fetch specific chunks at the requested detail layer.
+
+        Use after an L1/L2 search to expand interesting hits to full detail.
+        """
+        if not chunk_ids or self._closed:
+            return []
+        conn = self._conn_or_raise()
+        placeholders = ",".join("?" for _ in chunk_ids)
+        rows = conn.execute(
+            f"""
+            SELECT chunk_id, source, reference, path, start_line, end_line,
+                   text, updated_at, text_l1, text_l2
+            FROM memory_chunks
+            WHERE chunk_id IN ({placeholders})
+            """,
+            chunk_ids,
+        ).fetchall()
+        results: list[SemanticMemoryResult] = []
+        for row in rows:
+            snippet = self._pick_layer_text(
+                layer, text=str(row[6]), text_l1=str(row[8]), text_l2=str(row[9]),
+            )
+            results.append(
+                SemanticMemoryResult(
+                    chunk_id=str(row[0]),
+                    source=str(row[1]),
+                    reference=str(row[2]),
+                    path=str(row[3]),
+                    start_line=int(row[4]),
+                    end_line=int(row[5]),
+                    snippet=snippet,
+                    score=1.0,
+                    text_score=0.0,
+                    vector_score=0.0,
+                    updated_at=str(row[7]),
+                    text_l1=str(row[8]),
+                    text_l2=str(row[9]),
+                )
+            )
+        return results
+
+    @staticmethod
+    def _pick_layer_text(
+        layer: str, *, text: str, text_l1: str, text_l2: str,
+    ) -> str:
+        """Return the best available text for the requested layer, falling back to deeper layers."""
+        if layer == "l1":
+            return text_l1 or text_l2 or text
+        if layer == "l2":
+            return text_l2 or text
+        return text  # l3 (default)
+
     def build_context_note(
         self,
         query: str,
         *,
         max_items: int = 3,
         max_snippet_chars: int = 360,
+        layer: str = "l3",
     ) -> tuple[str, str]:
-        """Format top semantic hits as a prompt note + debug block."""
+        """Format top semantic hits as a prompt note + debug block.
+
+        *layer* controls the snippet granularity:
+        ``"l1"`` = one-liner, ``"l2"`` = summary, ``"l3"`` = full text (default).
+        """
         results = self.search(query=query, max_results=max_items)
         if not results:
             return "", "semantic_memory: no results"
@@ -518,9 +587,12 @@ class SemanticMemoryIndex:
             lines = ["Semantic memory matches (all sessions + workspace):"]
         else:
             lines = ["Semantic memory matches (active session + workspace):"]
-        debug = [f"semantic_memory query={query!r}", f"result_count={len(results)}"]
+        debug = [f"semantic_memory query={query!r} layer={layer}", f"result_count={len(results)}"]
         for item in results[:max_items]:
-            snippet = re.sub(r"\s+", " ", item.snippet).strip()
+            raw = self._pick_layer_text(
+                layer, text=item.snippet, text_l1=item.text_l1, text_l2=item.text_l2,
+            )
+            snippet = re.sub(r"\s+", " ", raw).strip()
             if len(snippet) > max_snippet_chars:
                 snippet = snippet[:max_snippet_chars].rstrip() + "... [truncated]"
             citation = f"{item.path}:{item.start_line}"
@@ -590,6 +662,8 @@ class SemanticMemoryIndex:
                     start_line INTEGER NOT NULL,
                     end_line INTEGER NOT NULL,
                     text TEXT NOT NULL,
+                    text_l1 TEXT NOT NULL DEFAULT '',
+                    text_l2 TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL
                 )
                 """
@@ -609,7 +683,7 @@ class SemanticMemoryIndex:
             conn.execute(
                 """
                 CREATE VIRTUAL TABLE IF NOT EXISTS memory_chunks_fts
-                USING fts5(chunk_id, text, path, source, reference)
+                USING fts5(chunk_id, text, text_l1, text_l2, path, source, reference)
                 """
             )
             conn.execute(
@@ -638,6 +712,44 @@ class SemanticMemoryIndex:
                 )
                 """
             )
+            # Migrate: add text_l1/text_l2 columns if missing (existing DBs).
+            try:
+                cols = {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(memory_chunks)").fetchall()
+                }
+                if "text_l1" not in cols:
+                    conn.execute("ALTER TABLE memory_chunks ADD COLUMN text_l1 TEXT NOT NULL DEFAULT ''")
+                if "text_l2" not in cols:
+                    conn.execute("ALTER TABLE memory_chunks ADD COLUMN text_l2 TEXT NOT NULL DEFAULT ''")
+            except Exception:
+                pass  # table may not exist yet on first run
+
+            # Migrate FTS: recreate if it lacks the new columns.
+            try:
+                fts_cols = {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(memory_chunks_fts)").fetchall()
+                }
+                if fts_cols and "text_l1" not in fts_cols:
+                    conn.execute("DROP TABLE IF EXISTS memory_chunks_fts")
+                    conn.execute(
+                        """
+                        CREATE VIRTUAL TABLE IF NOT EXISTS memory_chunks_fts
+                        USING fts5(chunk_id, text, text_l1, text_l2, path, source, reference)
+                        """
+                    )
+                    # Re-populate FTS from existing chunks.
+                    conn.execute(
+                        """
+                        INSERT INTO memory_chunks_fts (chunk_id, text, text_l1, text_l2, path, source, reference)
+                        SELECT chunk_id, text, text_l1, text_l2, path, source, reference
+                        FROM memory_chunks
+                        """
+                    )
+            except Exception:
+                pass
+
             conn.commit()
             self._conn = conn
 
@@ -788,12 +900,15 @@ class SemanticMemoryIndex:
         chunks = self._chunk_document(doc_id=doc_id, text=doc.text, updated_at=doc.updated_at)
         if not chunks:
             return
+        # Generate L1/L2 summaries if a summarizer is available.
+        if self.layered_summaries and self._summarizer is not None:
+            self._generate_summaries_for_chunks(chunks)
         conn.executemany(
             """
             INSERT INTO memory_chunks (
                 chunk_id, doc_id, source, reference, path,
-                chunk_index, start_line, end_line, text, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                chunk_index, start_line, end_line, text, text_l1, text_l2, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -806,6 +921,8 @@ class SemanticMemoryIndex:
                     chunk.start_line,
                     chunk.end_line,
                     chunk.text,
+                    chunk.text_l1,
+                    chunk.text_l2,
                     chunk.updated_at,
                 )
                 for chunk in chunks
@@ -813,13 +930,15 @@ class SemanticMemoryIndex:
         )
         conn.executemany(
             """
-            INSERT INTO memory_chunks_fts (chunk_id, text, path, source, reference)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO memory_chunks_fts (chunk_id, text, text_l1, text_l2, path, source, reference)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
                     chunk.chunk_id,
                     chunk.text,
+                    chunk.text_l1,
+                    chunk.text_l2,
                     doc.path,
                     doc.source,
                     doc.reference,
@@ -828,6 +947,21 @@ class SemanticMemoryIndex:
             ],
         )
         self._upsert_embeddings_for_chunks(chunks)
+
+    def _generate_summaries_for_chunks(self, chunks: list[_Chunk]) -> None:
+        """Call the summarizer to populate text_l1/text_l2 on each chunk."""
+        summarizer = self._summarizer
+        if summarizer is None:
+            return
+        for chunk in chunks:
+            if chunk.text_l1 and chunk.text_l2:
+                continue  # already populated
+            try:
+                l1, l2 = summarizer(chunk.text)
+                chunk.text_l1 = str(l1 or "").strip()
+                chunk.text_l2 = str(l2 or "").strip()
+            except Exception as exc:
+                log.debug("Chunk summarization failed", error=str(exc))
 
     def _delete_document(self, doc_id: str) -> None:
         conn = self._conn_or_raise()
@@ -971,7 +1105,9 @@ class SemanticMemoryIndex:
                     c.end_line,
                     c.text,
                     c.updated_at,
-                    bm25(memory_chunks_fts) AS rank
+                    bm25(memory_chunks_fts) AS rank,
+                    c.text_l1,
+                    c.text_l2
                 FROM memory_chunks_fts
                 JOIN memory_chunks c ON c.chunk_id = memory_chunks_fts.chunk_id
                 WHERE memory_chunks_fts MATCH ?
@@ -997,7 +1133,7 @@ class SemanticMemoryIndex:
                 f"""
                 SELECT
                     chunk_id, source, reference, path, start_line, end_line, text, updated_at,
-                    999.0 AS rank
+                    999.0 AS rank, text_l1, text_l2
                 FROM memory_chunks
                 WHERE text LIKE ?
                 {like_where}
@@ -1020,6 +1156,8 @@ class SemanticMemoryIndex:
                     "snippet": str(row[6]),
                     "updated_at": str(row[7]),
                     "text_score": 1.0 / (1.0 + max(0.0, rank)),
+                    "text_l1": str(row[9]) if len(row) > 9 else "",
+                    "text_l2": str(row[10]) if len(row) > 10 else "",
                 }
             )
         return hits
@@ -1067,7 +1205,9 @@ class SemanticMemoryIndex:
                 c.end_line,
                 c.text,
                 c.updated_at,
-                e.embedding
+                e.embedding,
+                c.text_l1,
+                c.text_l2
             FROM memory_embeddings e
             JOIN memory_chunks c ON c.chunk_id = e.chunk_id
             WHERE e.provider_key = ? AND e.dims = ?
@@ -1102,6 +1242,8 @@ class SemanticMemoryIndex:
                     "snippet": str(row[6]),
                     "updated_at": str(row[7]),
                     "vector_score": max(0.0, score),
+                    "text_l1": str(row[9]) if len(row) > 9 else "",
+                    "text_l2": str(row[10]) if len(row) > 10 else "",
                 }
             )
         scored.sort(key=lambda item: item["vector_score"], reverse=True)
@@ -1162,6 +1304,8 @@ class SemanticMemoryIndex:
                     text_score=text_score,
                     vector_score=vector_score,
                     updated_at=str(payload.get("updated_at", "")),
+                    text_l1=str(payload.get("text_l1", "")),
+                    text_l2=str(payload.get("text_l2", "")),
                 )
             )
         merged.sort(key=lambda item: item.score, reverse=True)
@@ -1271,4 +1415,5 @@ def create_semantic_memory_index(
         temporal_decay_enabled=bool(getattr(search_cfg, "temporal_decay_enabled", True)) if search_cfg else True,
         temporal_half_life_days=float(getattr(search_cfg, "temporal_half_life_days", 21.0)) if search_cfg else 21.0,
         embedding_chain=_build_embedding_chain(memory_cfg),
+        layered_summaries=bool(getattr(memory_cfg, "layered_summaries", True)),
     )

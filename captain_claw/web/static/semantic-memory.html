@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Semantic Memory — Captain Claw</title>
+    <link rel="stylesheet" href="/static/semantic-memory.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+    <div class="sm-layout">
+        <!-- Left sidebar: stats + filters -->
+        <aside class="sm-sidebar">
+            <a href="/" class="sm-back">&larr; Home</a>
+            <h1 class="sm-title">Semantic Memory</h1>
+
+            <div class="sm-stats" id="smStats">
+                <div class="sm-stat">
+                    <span class="sm-stat-label">Documents</span>
+                    <span class="sm-stat-value" id="statDocs">—</span>
+                </div>
+                <div class="sm-stat">
+                    <span class="sm-stat-label">Chunks</span>
+                    <span class="sm-stat-value" id="statChunks">—</span>
+                </div>
+                <div class="sm-stat">
+                    <span class="sm-stat-label">L1 coverage</span>
+                    <span class="sm-stat-value" id="statL1">—</span>
+                </div>
+                <div class="sm-stat">
+                    <span class="sm-stat-label">L2 coverage</span>
+                    <span class="sm-stat-value" id="statL2">—</span>
+                </div>
+            </div>
+
+            <div class="sm-section">
+                <label class="sm-label">Source filter</label>
+                <select id="sourceFilter" class="sm-select">
+                    <option value="">All sources</option>
+                </select>
+            </div>
+
+            <div class="sm-section">
+                <label class="sm-label">Display layer</label>
+                <div class="sm-layer-btns">
+                    <button class="sm-layer-btn" data-layer="l1">L1</button>
+                    <button class="sm-layer-btn active" data-layer="l2">L2</button>
+                    <button class="sm-layer-btn" data-layer="l3">L3</button>
+                </div>
+                <div class="sm-layer-hint" id="layerHint">Summary view</div>
+            </div>
+        </aside>
+
+        <!-- Middle panel: document list or search results -->
+        <section class="sm-list-panel">
+            <div class="sm-search-bar">
+                <input type="text" id="searchInput" class="sm-search" placeholder="Search semantic memory...">
+                <button id="searchBtn" class="sm-search-btn">Search</button>
+            </div>
+
+            <div class="sm-tab-bar">
+                <button class="sm-tab active" data-tab="documents">Documents</button>
+                <button class="sm-tab" data-tab="search">Search Results</button>
+            </div>
+
+            <div id="documentList" class="sm-item-list"></div>
+            <div id="searchResults" class="sm-item-list" style="display:none"></div>
+        </section>
+
+        <!-- Right panel: detail view -->
+        <main class="sm-detail-panel">
+            <div id="detailPlaceholder" class="sm-placeholder">
+                Select a document or search result to view chunks with L1/L2/L3 layers.
+            </div>
+            <div id="detailContent" style="display:none">
+                <div class="sm-detail-header">
+                    <h2 id="detailTitle" class="sm-detail-title"></h2>
+                    <div id="detailMeta" class="sm-detail-meta"></div>
+                </div>
+                <div id="chunkList" class="sm-chunk-list"></div>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/semantic-memory.js"></script>
+</body>
+</html>

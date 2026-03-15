@@ -925,6 +925,32 @@ class WebServer:
         from captain_claw.web.rest_deep_memory import index_document
         return await index_document(self, request)
 
+    # ── Semantic memory browser ────────────────────────────
+
+    async def _serve_semantic_memory(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_semantic_memory
+        return await serve_semantic_memory(self, request)
+
+    async def _sm_status(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_semantic_memory import get_status
+        return await get_status(self, request)
+
+    async def _sm_documents(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_semantic_memory import list_documents
+        return await list_documents(self, request)
+
+    async def _sm_document_detail(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_semantic_memory import get_document_chunks
+        return await get_document_chunks(self, request)
+
+    async def _sm_search(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_semantic_memory import search
+        return await search(self, request)
+
+    async def _sm_promote(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_semantic_memory import promote
+        return await promote(self, request)
+
     async def _serve_settings(self, request: web.Request) -> web.FileResponse:
         from captain_claw.web.static_pages import serve_settings
         return await serve_settings(self, request)
@@ -1509,6 +1535,12 @@ class WebServer:
         app.router.add_get("/api/deep-memory/documents/{doc_id}", self._dm_document_detail)
         app.router.add_delete("/api/deep-memory/documents/{doc_id}", self._dm_document_delete)
         app.router.add_post("/api/deep-memory/index", self._dm_index)
+        # Semantic memory (SQLite) browser API
+        app.router.add_get("/api/semantic-memory/status", self._sm_status)
+        app.router.add_get("/api/semantic-memory/documents", self._sm_documents)
+        app.router.add_get("/api/semantic-memory/documents/{doc_id}", self._sm_document_detail)
+        app.router.add_get("/api/semantic-memory/search", self._sm_search)
+        app.router.add_get("/api/semantic-memory/promote", self._sm_promote)
         if self.config.web.api_enabled and self._api_pool:
             app.router.add_post("/v1/chat/completions", self._api_chat_completions)
             app.router.add_get("/v1/models", self._api_list_models)
@@ -1544,6 +1576,7 @@ class WebServer:
             app.router.add_get("/reflections", self._serve_reflections)
             app.router.add_get("/computer", self._serve_computer)
             app.router.add_get("/personality", self._serve_personality)
+            app.router.add_get("/semantic-memory", self._serve_semantic_memory)
             app.router.add_post("/api/computer/visualize", self._computer_visualize)
             app.router.add_post("/api/computer/exploration", self._exploration_save)
             app.router.add_get("/api/computer/exploration", self._exploration_list)

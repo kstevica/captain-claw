@@ -145,6 +145,8 @@ class MemoryConfig(BaseModel):
             "venv",
         ]
     )
+    layered_summaries: bool = True
+    summary_batch_size: int = 10
     embeddings: MemoryEmbeddingsConfig = Field(default_factory=MemoryEmbeddingsConfig)
     search: MemorySearchConfig = Field(default_factory=MemorySearchConfig)
 
@@ -675,6 +677,7 @@ class DeepMemoryConfig(BaseModel):
     collection_name: str = "captain_claw_deep_memory"
     embedding_dims: int = 1536
     auto_embed: bool = True
+    layered_summaries: bool = True
 
 
 class DatastoreConfig(BaseModel):

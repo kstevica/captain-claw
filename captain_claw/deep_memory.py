@@ -50,6 +50,8 @@ class DeepMemoryResult:
     text_score: float
     vector_score: float
     updated_at: int  # unix timestamp
+    text_l1: str = ""
+    text_l2: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +65,8 @@ _COLLECTION_SCHEMA_TEMPLATE: dict[str, Any] = {
         {"name": "reference", "type": "string", "facet": True},
         {"name": "path", "type": "string"},
         {"name": "text", "type": "string"},
+        {"name": "text_l1", "type": "string", "optional": True},
+        {"name": "text_l2", "type": "string", "optional": True},
         {"name": "chunk_index", "type": "int32"},
         {"name": "start_line", "type": "int32", "optional": True},
         {"name": "end_line", "type": "int32", "optional": True},
@@ -160,6 +164,7 @@ class DeepMemoryIndex:
         chunk_chars: int = 1_400,
         chunk_overlap_chars: int = 200,
         embedding_chain: Any | None = None,
+        layered_summaries: bool = True,
     ) -> None:
         self._base_url = f"{protocol}://{host}:{port}"
         self._api_key = api_key
@@ -169,6 +174,8 @@ class DeepMemoryIndex:
         self._chunk_chars = chunk_chars
         self._chunk_overlap_chars = chunk_overlap_chars
         self._embedding_chain = embedding_chain
+        self._layered_summaries = bool(layered_summaries)
+        self._summarizer: Any = None  # callable(text) -> (l1, l2)
         self._client: httpx.Client | None = None
         self._collection_ensured = False
 
@@ -176,6 +183,10 @@ class DeepMemoryIndex:
     def collection_name(self) -> str:
         """The Typesense collection name used for deep memory."""
         return self._collection_name
+
+    def set_summarizer(self, fn: Any) -> None:
+        """Set a callable ``fn(text: str) -> tuple[str, str]`` returning (L1, L2) summaries."""
+        self._summarizer = fn
 
     # ------------------------------------------------------------------
     # HTTP client (lazy)
@@ -286,6 +297,14 @@ class DeepMemoryIndex:
                 "end_line": chunk["end_line"],
                 "updated_at": now,
             }
+            # Generate L1/L2 summaries if available.
+            if self._layered_summaries and self._summarizer is not None:
+                try:
+                    l1, l2 = self._summarizer(chunk["text"])
+                    doc["text_l1"] = str(l1 or "").strip()
+                    doc["text_l2"] = str(l2 or "").strip()
+                except Exception:
+                    pass
             if tags:
                 doc["tags"] = tags
             docs.append(doc)
@@ -454,6 +473,8 @@ class DeepMemoryIndex:
                     text_score=text_score,
                     vector_score=vector_score,
                     updated_at=int(doc.get("updated_at", 0)),
+                    text_l1=doc.get("text_l1", ""),
+                    text_l2=doc.get("text_l2", ""),
                 )
             )
         return results
@@ -462,14 +483,29 @@ class DeepMemoryIndex:
     # Context note (for LLM injection)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _pick_layer_text(
+        layer: str, *, text: str, text_l1: str, text_l2: str,
+    ) -> str:
+        """Return the best available text for the requested layer, falling back to deeper layers."""
+        if layer == "l1":
+            return text_l1 or text_l2 or text
+        if layer == "l2":
+            return text_l2 or text
+        return text  # l3 (default)
+
     def build_context_note(
         self,
         query: str,
         *,
         max_items: int = 5,
         max_snippet_chars: int = 400,
+        layer: str = "l3",
     ) -> tuple[str, str]:
         """Build a context note for LLM prompt injection.
+
+        *layer* controls the snippet granularity:
+        ``"l1"`` = one-liner, ``"l2"`` = summary, ``"l3"`` = full text (default).
 
         Returns ``(note, debug_block)`` — same contract as
         ``SemanticMemoryIndex.build_context_note()``.
@@ -488,7 +524,9 @@ class DeepMemoryIndex:
         lines: list[str] = ["Deep memory matches (long-term archive):"]
         debug_lines: list[str] = ["[deep_memory_context]"]
         for r in results[:max_items]:
-            snippet = r.snippet
+            snippet = self._pick_layer_text(
+                layer, text=r.snippet, text_l1=r.text_l1, text_l2=r.text_l2,
+            )
             if len(snippet) > max_snippet_chars:
                 snippet = snippet[:max_snippet_chars] + "..."
             loc = r.path or r.reference or r.doc_id
@@ -531,6 +569,26 @@ class DeepMemoryIndex:
         )
         resp.raise_for_status()
         return int(resp.json().get("num_deleted", 0))
+
+    def clear_all(self) -> int:
+        """Drop and recreate the Typesense collection, removing all documents.
+
+        Returns the number of documents that were in the collection.
+        """
+        client = self._get_client()
+        count = 0
+        try:
+            resp = client.delete(
+                f"{self._base_url}/collections/{self._collection_name}",
+            )
+            if resp.status_code == 200:
+                count = int(resp.json().get("num_documents", 0))
+            elif resp.status_code != 404:
+                resp.raise_for_status()
+        except Exception as exc:
+            log.warning("Deep memory collection drop failed", error=str(exc))
+        self._collection_ensured = False
+        return count
 
     # ------------------------------------------------------------------
     # Lifecycle

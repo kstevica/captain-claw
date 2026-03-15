@@ -344,6 +344,114 @@ class AgentContextMixin:
                 log.warning("Failed to initialize deep memory", error=str(e))
                 self._deep_memory = None
 
+        # Link deep memory into LayeredMemory so clear_all/close cover all layers.
+        if self.memory is not None and self._deep_memory is not None:
+            self.memory.deep = self._deep_memory
+
+        # Wire up the L1/L2 summarizer for layered memory.
+        self._wire_memory_summarizer()
+
+    def _wire_memory_summarizer(self) -> None:
+        """Attach an LLM-based summarizer to semantic and deep memory.
+
+        The summarizer uses the agent's configured LLM provider (respecting
+        API key, model, base_url, etc.) and tracks all token usage through
+        the standard ``_accumulate_usage`` / ``_record_usage_to_db`` pipeline.
+        """
+        provider = getattr(self, "provider", None)
+        if provider is None:
+            return
+        # Capture ``self`` (the agent) for usage tracking inside the closure.
+        agent = self
+
+        def _summarize_chunk(text: str) -> tuple[str, str]:
+            """Generate (L1 one-liner, L2 summary) from chunk text using the agent's LLM."""
+            if not text or len(text.strip()) < 20:
+                return text.strip(), text.strip()
+            import asyncio
+            import time as _time
+
+            from captain_claw.llm import LLMResponse, Message
+
+            prompt = (
+                "You are a memory indexer. Given the following text, produce exactly two lines:\n"
+                "Line 1: A one-liner headline (max 100 chars) capturing the core idea.\n"
+                "Line 2: A 1-2 sentence summary (max 300 chars) with enough context to assess relevance.\n\n"
+                "Rules:\n"
+                "- Output ONLY the two lines, nothing else.\n"
+                "- No labels, prefixes, or numbering.\n\n"
+                f"Text:\n{text[:2000]}"
+            )
+            messages = [Message(role="user", content=prompt)]
+            t0 = _time.monotonic()
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        resp: LLMResponse = pool.submit(
+                            asyncio.run,
+                            provider.complete(messages, temperature=0.0, max_tokens=200),
+                        ).result(timeout=15)
+                else:
+                    resp = asyncio.run(
+                        provider.complete(messages, temperature=0.0, max_tokens=200)
+                    )
+                latency_ms = int((_time.monotonic() - t0) * 1000)
+
+                # --- Track usage ---
+                if resp.usage:
+                    agent._accumulate_usage(agent.total_usage, resp.usage)
+                try:
+                    agent._record_usage_to_db(
+                        interaction_label="memory_summarize_chunk",
+                        messages=messages,
+                        response=resp,
+                        tools_enabled=False,
+                        max_tokens=200,
+                        latency_ms=latency_ms,
+                        error=False,
+                    )
+                except Exception:
+                    pass  # never fail the indexing flow
+                # --- Monitor trace & session log ---
+                try:
+                    agent._emit_llm_trace(
+                        interaction_label="memory_summarize_chunk",
+                        response=resp,
+                        messages=messages,
+                        tools=None,
+                        max_tokens=200,
+                    )
+                except Exception:
+                    pass
+                try:
+                    agent._log_llm_call(
+                        interaction_label="memory_summarize_chunk",
+                        messages=messages,
+                        response=resp,
+                        tools_enabled=False,
+                        max_tokens=200,
+                    )
+                except Exception:
+                    pass
+
+                output = (resp.content or "").strip()
+                parts = output.split("\n", 1)
+                l1 = parts[0].strip()[:120]
+                l2 = parts[1].strip()[:400] if len(parts) > 1 else l1
+                return l1, l2
+            except Exception as exc:
+                log.debug("Chunk summarization via LLM failed", error=str(exc))
+                # Fallback: use first line as L1, first 300 chars as L2.
+                first_line = text.strip().split("\n", 1)[0][:120]
+                return first_line, text.strip()[:300]
+
+        if self.memory and getattr(self.memory, "semantic", None):
+            self.memory.semantic.set_summarizer(_summarize_chunk)
+        if self._deep_memory is not None:
+            self._deep_memory.set_summarizer(_summarize_chunk)
+
     def _build_todo_context_note(self) -> str:
         """Build compact context note from pending to-do items."""
         cfg = get_config()
@@ -878,8 +986,13 @@ class AgentContextMixin:
         query: str | None,
         max_items: int = 3,
         max_snippet_chars: int = 360,
+        layer: str = "l2",
     ) -> tuple[str, str]:
-        """Build semantic memory context note from persisted sessions + workspace files."""
+        """Build semantic memory context note from persisted sessions + workspace files.
+
+        *layer* controls snippet granularity: ``"l1"`` (one-liner), ``"l2"`` (summary),
+        ``"l3"`` (full text). Defaults to ``"l2"`` for a good density/context balance.
+        """
         cleaned = str(query or "").strip()
         if not cleaned:
             return "", ""
@@ -891,6 +1004,7 @@ class AgentContextMixin:
                 cleaned,
                 max_items=max_items,
                 max_snippet_chars=max_snippet_chars,
+                layer=layer,
             )
         except Exception as e:
             log.debug("Semantic memory note generation failed", error=str(e))
@@ -1077,8 +1191,12 @@ class AgentContextMixin:
         query: str | None,
         max_items: int = 5,
         max_snippet_chars: int = 400,
+        layer: str = "l2",
     ) -> tuple[str, str]:
         """Build deep memory context note from the Typesense archive.
+
+        *layer* controls snippet granularity: ``"l1"`` (one-liner), ``"l2"`` (summary),
+        ``"l3"`` (full text). Defaults to ``"l2"`` for context notes.
 
         Always searches when deep memory is available — relevance scoring
         in Typesense already filters out low-quality matches.
@@ -1094,6 +1212,7 @@ class AgentContextMixin:
                 cleaned,
                 max_items=max_items,
                 max_snippet_chars=max_snippet_chars,
+                layer=layer,
             )
         except Exception as e:
             log.debug("Deep memory note generation failed", error=str(e))

@@ -114,9 +114,11 @@ class LayeredMemory:
         *,
         working_memory: WorkingMemory,
         semantic_memory: SemanticMemoryIndex | None = None,
+        deep_memory: Any = None,
     ):
         self.working = working_memory
         self.semantic = semantic_memory
+        self.deep = deep_memory
         self.active_session_id: str | None = None
 
     def set_active_session(self, session_id: str | None) -> None:
@@ -162,6 +164,7 @@ class LayeredMemory:
         *,
         max_items: int = 3,
         max_snippet_chars: int = 360,
+        layer: str = "l3",
     ) -> tuple[str, str]:
         if self.semantic is None:
             return "", ""
@@ -169,18 +172,36 @@ class LayeredMemory:
             query=query,
             max_items=max_items,
             max_snippet_chars=max_snippet_chars,
+            layer=layer,
         )
 
+    def promote(self, chunk_ids: list[str], layer: str = "l3"):
+        """Fetch specific chunks at the requested detail layer."""
+        if self.semantic is None:
+            return []
+        return self.semantic.promote(chunk_ids=chunk_ids, layer=layer)
+
     def clear_all(self) -> int:
-        """Clear all semantic memory data. Returns count of deleted docs."""
+        """Clear all memory layers (working + semantic + deep). Returns count of deleted semantic docs."""
         self.working.clear()
+        count = 0
         if self.semantic is not None:
-            return self.semantic.clear_all()
-        return 0
+            count = self.semantic.clear_all()
+        if self.deep is not None:
+            try:
+                self.deep.clear_all()
+            except Exception as exc:
+                log.warning("Deep memory clear failed during clear_all", error=str(exc))
+        return count
 
     def close(self) -> None:
         if self.semantic is not None:
             self.semantic.close()
+        if self.deep is not None:
+            try:
+                self.deep.close()
+            except Exception:
+                pass
 
 
 # Backward-compatible alias:
