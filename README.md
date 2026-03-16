@@ -3,7 +3,7 @@
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Interface](https://img.shields.io/badge/interface-terminal%20%7C%20web%20UI-black)](#quick-start)
-[![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20Ollama-orange)](#feature-snapshot)
+[![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20Ollama%20%7C%20OpenRouter-orange)](#feature-snapshot)
 [![Guardrails](https://img.shields.io/badge/guardrails-input%20%7C%20output%20%7C%20script%2Ftool-red)](#guards)
 
 ![Captain Claw](docs/screenshot.png)
@@ -18,7 +18,7 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 
 | Capability | What it does |
 |---|---|
-| Multi-model routing | Mix GPT, Claude, Gemini, and Ollama in one CLI |
+| Multi-model routing | Mix GPT, Claude, Gemini, Ollama, and OpenRouter in one CLI |
 | Per-session model selection | Keep one session on Claude, another on GPT, another on Ollama |
 | Persistent multi-session workflows | Resume any session exactly where you left off |
 | Built-in safety guards | Input, output, and script/tool checks before anything runs |
@@ -72,9 +72,10 @@ export OPENAI_API_KEY="your-openai-key"
 export ANTHROPIC_API_KEY="your-anthropic-key"
 export GOOGLE_API_KEY="your-google-key"
 export GEMINI_API_KEY="your-gemini-key"
+export OPENROUTER_API_KEY="your-openrouter-key"
 ```
 
-Use only the keys you need. For Ollama, no key is required — just set `provider: ollama` in `config.yaml`.
+Use only the keys you need. For Ollama, no key is required — just set `provider: ollama` in `config.yaml`. For OpenRouter, set `provider: openrouter` and provide your OpenRouter API key.
 
 ### 3. Launch
 

@@ -1,130 +1,139 @@
-# Captain Claw v0.4.1 Release Notes
+# Captain Claw v0.4.2 Release Notes
 
-**Release title:** BotPort Swarm, PDF Export, Persona Selector, Extended File Attachments
+**Release title:** Public Computer Mode, OpenRouter Provider, Suggested Next Steps
 
 **Release date:** 2026-03-16
 
 ## Highlights
 
-This release introduces **BotPort Swarm** — DAG-based multi-agent orchestration through BotPort. Decompose complex goals into task graphs with dependencies, route tasks to specialist agents, and execute with approval gates, retry policies, checkpoints, and file transfer. The Computer workspace gains **PDF export** via WeasyPrint (preserving full CSS styling), a **persona selector**, and support for **additional file attachments** (PDF, DOCX, XLSX, PPTX, MD, TXT, CSV alongside images). Theme consistency improvements ensure all input action buttons match the active theme.
+This release introduces **Public Computer Mode** — a secure, session-isolated deployment mode that exposes only the Computer research workspace to anonymous visitors while locking down all other pages and APIs. Each public user gets a unique 6-character access code, and all files, uploads, and exploration trees are fully isolated per session. Also new: **OpenRouter** as a first-class LLM provider (access 200+ models through a single API key), and **suggested next-step buttons** that appear after each agent response in Computer for one-click follow-up actions.
 
 ## New Features
 
-### BotPort Swarm
+### Public Computer Mode
 
-DAG-based multi-agent orchestration built on top of BotPort's routing layer:
+Deploy Captain Claw's Computer workspace as a public-facing research tool with built-in session isolation and route lockdown:
 
-- **Task decomposition** — LLM-powered decomposer breaks goals into task graphs with dependencies
-- **Agent designer** — LLM analyzes each task and assigns optimal persona + model tier (fast/mid/premium)
-- **Swarm engine** — Advances DAG, launches tasks whose dependencies are satisfied, routes via BotPort concerns
-- **Error policies** — `fail_fast`, `continue_on_error`, `manual_review`
-- **Approval gates** — Require human approval before executing selected tasks
-- **Retry with backoff** — Configurable retry count, backoff duration, and fallback persona
-- **Timeout escalation** — Three-stage system: warning at 80%, extension at 100% (+50%), failure after extension
-- **Checkpointing** — Save and restore swarm state for re-execution or rollback
-- **File transfer** — Inter-agent file transfer over WebSocket (gzip + base64, up to 50 MB per file), with SHA-256 hashes
-- **Cron scheduling** — Recurring swarms via cron expressions (standard 5-field format)
-- **Audit logging** — Complete event trail for every swarm action
-- **Projects** — Organize swarms into named projects
-- **Visual dashboard** — DAG canvas with status colors and dependency arrows, task monitoring, file manager, approval UI
+- **Session management** — Landing page with "New Session" (generates 6-character access code) and "Resume Session" (enter existing code) tabs
+- **Per-session file isolation** — All file operations (list, view, download, upload, media) are scoped to the user's session directory
+- **Route lockdown** — Only Computer-related routes are accessible; all other pages and APIs return 403 Forbidden
+- **Admin bypass** — Users authenticated via `auth_token` have unrestricted access to the full UI
+- **HMAC-signed session cookies** — Secure, tamper-proof session identification for all REST endpoints
+- **Landing page** — Branded Captain Claw landing with public mode notice and GitHub link
 
-New files: `botport/swarm/` (engine, store, dag, decomposer, agent_designer, scheduler, file_manager, models), `botport/dashboard/swarm_routes.py`, `botport/dashboard/static/swarm.js`
+**Configuration:**
+```yaml
+web:
+  auth_token: "your-admin-password"
+  public_run: "computer"
+```
 
-### Computer — PDF Export
+New files: `captain_claw/web/public_auth.py`, `captain_claw/web/public_session.py`, `captain_claw/web/static/public_landing.html`
 
-- **Visual tab PDF button** — Export the generated visual HTML to PDF via WeasyPrint, preserving all CSS styling (backgrounds, fonts, colors, tables, code blocks, emojis)
-- **File preview PDF button** — HTML files previewed in the file modal now have a PDF export button in the title bar
-- Print-friendly CSS injected automatically: A4 page size, color-adjust, page-break avoidance, overflow prevention
-- PDF filename derived from the task prompt (e.g., `analyze-quarterly-results.pdf`) or HTML filename
-- Replaces previous fpdf2 implementation — no more font/Unicode/layout issues
+### OpenRouter Provider
 
-### Computer — Persona Selector
+OpenRouter is now a first-class LLM provider, enabling access to 200+ models from multiple providers through a single API key:
 
-- New 👤 persona button in the Computer title bar (alongside Theme, Model, Tier)
-- Modal grid showing all available personas (agent personality + per-user profiles)
-- Persona selection persisted to localStorage
+- Provider name: `openrouter`
+- Automatic LiteLLM routing with `openrouter/` prefix handling
+- Model IDs with slashes (e.g., `nvidia/llama-3.1-nemotron-ultra-253b-v1`) handled correctly
+- Added to onboarding flow alongside OpenAI, Anthropic, Gemini, and Ollama
+- Environment variable: `OPENROUTER_API_KEY`
 
-### Computer — Extended File Attachments
+**Configuration:**
+```yaml
+model:
+  provider: openrouter
+  model: nvidia/llama-3.1-nemotron-ultra-253b-v1
+```
 
-- File picker now accepts PDF, DOCX, XLSX, PPTX, MD, TXT, CSV files in addition to images
-- All supported file types can be attached to prompts via the 📎 button, drag-drop, or paste
+### Suggested Next Steps (Computer)
+
+After each agent response, Computer automatically extracts suggested next steps and presents them as clickable buttons:
+
+- Lightweight follow-up LLM call analyzes the response for explicit suggestions
+- Heuristic pre-filter avoids unnecessary LLM calls on responses without bullet/numbered lists
+- Buttons appear below the Answer tab content with the suggestion label
+- Clicking a button populates the input and sends the action automatically
+- Maximum 6 suggestions per response, with 30-character button labels
+
+New file: `captain_claw/next_steps.py`
 
 ## Improvements
 
-### Theme-Consistent Input Buttons
+### Computer UI Enhancements
 
-- 📎 Attach and 📁 Folder buttons now match `#send-btn` styling across all themes
-- Base style updated to use theme variables (`--bevel`, `--chrome-hi`, `--chrome-lo`, `--radius`) matching Send button
-- Per-theme overrides added for: Hacker Terminal (green glow + border), Modern (rounded, no border, scale effect), Windows 11 (rounded, no border), macOS (rounded, font-weight 500), iPhone (pill shape, border-radius 18px), Android (pill shape, border-radius 20px)
+- **Inline explore buttons** — Explore and Cancel buttons now appear inline in the input actions row (alongside 📎, 📁, Send) instead of a separate full-width bar, improving mobile usability
+- **Image rendering fix** — Raw `<img>` HTML tags in LLM responses are pre-processed to markdown before escaping, preventing broken image rendering
+- **Classic Mac theme fix** — Active tab labels are now visible (z-index fix for title bar stripe overlay)
+- **Mobile layout** — Input panel scrollable on small screens, explore buttons compact on narrow viewports
 
-### Agent & BotPort Optimizations
+### Chat Handler Improvements
 
-- Agent and BotPort performance optimizations and bug fixes
-- Swarm file transfer protocol for inter-agent file sharing
-
-## Dependencies
-
-- Added `weasyprint>=60.0` (replaces `fpdf2>=2.8.0`)
-- WeasyPrint requires system libraries: `pango`, `cairo`, `gdk-pixbuf` (install via `brew install pango` on macOS)
+- Refactored WebSocket chat handler for public session support
+- Session-aware message routing for public vs admin users
 
 ## REST API Changes
 
-### New Endpoints (BotPort)
+### New Endpoints
 
-- `GET /api/swarm/projects` — List all projects
-- `POST /api/swarm/projects` — Create a project
-- `GET/PUT/DELETE /api/swarm/projects/{id}` — Project CRUD
-- `GET /api/swarm/swarms` — List swarms
-- `POST /api/swarm/swarms` — Create a swarm
-- `GET/PUT/DELETE /api/swarm/swarms/{id}` — Swarm CRUD
-- `POST /api/swarm/swarms/{id}/start` — Start a swarm
-- `POST /api/swarm/swarms/{id}/pause` — Pause a swarm
-- `POST /api/swarm/swarms/{id}/resume` — Resume a swarm
-- `POST /api/swarm/swarms/{id}/cancel` — Cancel a swarm
-- `POST /api/swarm/swarms/{id}/decompose` — Decompose goal into tasks
-- `POST /api/swarm/swarms/{id}/design-agents` — Design agent specs
-- `POST /api/swarm/swarms/{id}/checkpoints` — Create checkpoint
-- `POST /api/swarm/swarms/{id}/checkpoints/{cp}/restore` — Restore checkpoint
-- `POST /api/swarm/tasks/{id}/approve` — Approve pending task
-- `POST /api/swarm/tasks/{id}/reject` — Reject pending task
-- `GET /api/swarm/swarms/{id}/files` — List swarm files
-- `POST /api/swarm/swarms/{id}/files` — Upload file
-- `GET /api/swarm/swarms/{id}/files/{name}` — Download file
-- `GET /api/swarm/swarms/{id}/audit` — Get audit log
+- `POST /api/public/session/new` — Create a new public session (returns access code)
+- `GET /api/public/session/enter?code=XXXXXX` — Enter a session (sets cookie, redirects to `/computer`)
+- `GET /api/public/session/info` — Get current public session info
 
-### Existing Endpoints
+### Modified Endpoints
 
-- `POST /api/computer/export-pdf` — Now uses WeasyPrint instead of fpdf2
+- `GET /api/files`, `GET /api/files/{session_id}` — Now enforce session isolation for public users
+- `GET /api/files/content`, `GET /api/files/download/{path}`, `GET /api/files/view/{path}` — Session ownership check for public users
+- `POST /api/file/upload`, `POST /api/image/upload` — Uploads scoped to public session directory
+- `GET /api/media/{path}` — Session ownership check for public users
+
+## Configuration Changes
+
+New `web` config fields:
+
+| Field | Default | Description |
+|---|---|---|
+| `auth_token` | `""` | Set to enable authentication; empty = auth disabled |
+| `auth_cookie_max_age` | `90` | Days until auth cookie expires |
+| `public_run` | `""` | Set to `"computer"` to expose only Computer to anonymous visitors |
 
 ## Version Changes
 
-- `captain_claw` — 0.4.0.1 → 0.4.1
-- `botport` — 0.3.4.1 → 0.4.1 (synced with captain_claw)
-- `desktop` — 0.3.41 → 0.4.1
+- `captain_claw` — 0.4.1 → 0.4.2
+- `botport` — 0.3.4 → 0.4.2 (synced with captain_claw)
+- `desktop` — 0.4.1 → 0.4.2
 
 ## Internal
 
-### New Files (BotPort Swarm)
-- `botport/botport/swarm/__init__.py` — Swarm module
-- `botport/botport/swarm/models.py` — Data models (Swarm, SwarmTask, SwarmEdge, SwarmProject, etc.)
-- `botport/botport/swarm/engine.py` — Swarm orchestration engine
-- `botport/botport/swarm/store.py` — Async SQLite persistence
-- `botport/botport/swarm/dag.py` — DAG validation, cycle detection, topological sort
-- `botport/botport/swarm/decomposer.py` — LLM-based task decomposition
-- `botport/botport/swarm/agent_designer.py` — LLM-based agent spec generation
-- `botport/botport/swarm/scheduler.py` — Cron-based swarm scheduler
-- `botport/botport/swarm/file_manager.py` — File storage and transfer
-- `botport/botport/dashboard/swarm_routes.py` — Swarm REST API routes
-- `botport/botport/dashboard/static/swarm.js` — Swarm dashboard UI
+### New Files
+- `captain_claw/web/public_auth.py` — Route lockdown middleware and session identification for public mode
+- `captain_claw/web/public_session.py` — Public session management (access codes, HMAC-signed cookies)
+- `captain_claw/web/static/public_landing.html` — Public Computer landing page with session management UI
+- `captain_claw/next_steps.py` — Extract suggested next steps from LLM responses
 
 ### Modified Files
-- `pyproject.toml` — Version 0.4.0.1 → 0.4.1, weasyprint replaces fpdf2
+- `pyproject.toml` — Version 0.4.1 → 0.4.2
 - `captain_claw/__init__.py` — Version bump
-- `botport/botport/__init__.py` — Version bump (synced to 0.4.1)
+- `botport/pyproject.toml` — Version 0.3.4 → 0.4.2 (synced)
+- `botport/botport/__init__.py` — Version bump
 - `desktop/package.json` — Version bump
-- `captain_claw/web/rest_computer.py` — PDF export rewritten with WeasyPrint
-- `captain_claw/web/static/computer.html` — PDF button in file preview modal, persona selector
-- `captain_claw/web/static/computer.js` — File preview PDF export, persona selector, extended file types
-- `captain_claw/web/static/computer.css` — Theme-consistent attach/folder buttons across all themes
-- `botport/botport/server.py` — Swarm engine and scheduler integration
-- `botport/botport/protocol.py` — File transfer message types
+- `captain_claw/llm/__init__.py` — OpenRouter provider support, model ID handling
+- `captain_claw/config.py` — `auth_token`, `auth_cookie_max_age`, `public_run` fields
+- `captain_claw/main.py` — OpenRouter in CLI onboarding
+- `captain_claw/web_server.py` — Public mode middleware, session routes, public landing page serving
+- `captain_claw/web/static_pages.py` — Public landing page redirect logic
+- `captain_claw/web/chat_handler.py` — Public session-aware message routing
+- `captain_claw/web/ws_handler.py` — Public session WebSocket handling
+- `captain_claw/web/rest_files.py` — Session isolation for all file endpoints
+- `captain_claw/web/rest_file_upload.py` — Public session upload scoping
+- `captain_claw/web/rest_image_upload.py` — Public session upload scoping
+- `captain_claw/web/rest_computer.py` — Next steps extraction endpoint
+- `captain_claw/web/rest_settings.py` — Public mode config exposure
+- `captain_claw/web/static/computer.js` — Next steps buttons, inline explore buttons, image rendering fix
+- `captain_claw/web/static/computer.css` — Inline explore button styles, Classic Mac z-index fix, mobile layout improvements
+- `captain_claw/web/static/computer.html` — Hamburger menu button
+- `captain_claw/web/static/onboarding.js` — OpenRouter in onboarding flow
+- `captain_claw/web/static/app.js` — Public mode UI adjustments
+- `README.md` — OpenRouter in badges, feature table, API keys, Computer feature descriptions
+- `USAGE.md` — Public mode docs, next steps docs, web config fields, ToC updates
