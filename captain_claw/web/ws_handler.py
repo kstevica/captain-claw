@@ -20,6 +20,29 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
     """Handle WebSocket connections."""
     ws = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024)
     await ws.prepare(request)
+
+    from captain_claw.config import get_config
+    cfg = get_config()
+    public_mode = bool(cfg.web.public_run)
+
+    # ── Public-mode authentication & session binding ──────────────
+    public_session_id: str | None = None
+    if public_mode:
+        from captain_claw.web.public_auth import _is_admin
+        if _is_admin(request, cfg.web):
+            ws._is_admin = True  # type: ignore[attr-defined]
+        else:
+            from captain_claw.web.public_session import read_public_cookie
+            identity = read_public_cookie(request, cfg.web.auth_token)
+            if identity is None:
+                await ws.close(code=4001, message=b"No valid public session")
+                return ws
+            public_session_id = identity[0]
+            ws._is_admin = False  # type: ignore[attr-defined]
+            ws._public_session_id = public_session_id  # type: ignore[attr-defined]
+    else:
+        ws._is_admin = True  # type: ignore[attr-defined]
+
     server.clients.add(ws)
 
     # Send welcome payload
@@ -28,7 +51,6 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
     models = server.agent.get_allowed_models() if server.agent else []
 
     # Available user profiles for the persona selector.
-    # These describe who the agent is talking to (not the agent's identity).
     from captain_claw.personality import list_user_personalities
     user_personalities = list_user_personalities()
     approved = getattr(server, "_approved_telegram_users", {})
@@ -48,18 +70,34 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
         for p in _pb_entries
     ]
 
+    # For public users, build session info from their specific session.
+    if public_session_id:
+        pub_session = await _sm.load_session(public_session_id)
+        session_info = {
+            "id": public_session_id,
+            "name": pub_session.name if pub_session else "Public",
+        }
+    else:
+        session_info = server._session_info()
+
     await server._send(ws, {
         "type": "welcome",
-        "session": server._session_info(),
+        "session": session_info,
         "models": models,
-        "commands": COMMANDS,
+        "commands": COMMANDS if not public_session_id else [],
         "personalities": personalities,
-        "playbooks": _playbook_list,
+        "playbooks": _playbook_list if not public_session_id else [],
     })
 
-    # Replay existing session messages for the connecting client
-    if server.agent and server.agent.session:
-        for msg in server.agent.session.messages:
+    # Replay existing session messages for the connecting client.
+    replay_session = None
+    if public_session_id:
+        replay_session = await _sm.load_session(public_session_id)
+    elif server.agent and server.agent.session:
+        replay_session = server.agent.session
+
+    if replay_session:
+        for msg in replay_session.messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
             tool_name = msg.get("tool_name", "")
@@ -78,7 +116,6 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
                     payload["feedback"] = msg["feedback"]
                 await server._send(ws, payload)
             elif role == "tool" and tool_name == "task_rephrase":
-                # Replay task rephrase as a visible chat panel.
                 await server._send(ws, {
                     "type": "chat_message",
                     "role": "rephrase",
@@ -147,11 +184,13 @@ async def handle_ws_message(
     elif msg_type == "btw":
         # Inject additional instructions while a task is running.
         btw_content = str(data.get("content", "")).strip()
-        if btw_content and server.agent:
-            if not hasattr(server.agent, "_btw_instructions"):
-                server.agent._btw_instructions = []
-            server.agent._btw_instructions.append(btw_content)
-            log.info("BTW instruction added", count=len(server.agent._btw_instructions))
+        _pub_sid = getattr(ws, "_public_session_id", None)
+        _target_agent = server._public_agents.get(_pub_sid) if _pub_sid else server.agent
+        if btw_content and _target_agent:
+            if not hasattr(_target_agent, "_btw_instructions"):
+                _target_agent._btw_instructions = []
+            _target_agent._btw_instructions.append(btw_content)
+            log.info("BTW instruction added", count=len(_target_agent._btw_instructions))
             await server._send(ws, {
                 "type": "command_result",
                 "command": "/btw",
@@ -160,73 +199,100 @@ async def handle_ws_message(
 
     elif msg_type == "set_model":
         # Switch model for the current session via direct WebSocket message.
-        selector = str(data.get("selector", "")).strip()
-        if selector and server.agent:
-            ok, msg = await server.agent.set_session_model(selector, persist=True)
-            if ok:
-                server._broadcast({"type": "session_info", **server._session_info()})
+        # Public users cannot change the model — it affects the shared agent.
+        _is_pub = getattr(ws, "_public_session_id", None)
+        if _is_pub:
             await server._send(ws, {
                 "type": "command_result",
                 "command": "/session model",
-                "content": msg,
+                "content": "Model selection is not available in public mode.",
             })
+        else:
+            selector = str(data.get("selector", "")).strip()
+            if selector and server.agent:
+                ok, msg = await server.agent.set_session_model(selector, persist=True)
+                if ok:
+                    server._broadcast({"type": "session_info", **server._session_info()})
+                await server._send(ws, {
+                    "type": "command_result",
+                    "command": "/session model",
+                    "content": msg,
+                })
 
     elif msg_type == "set_personality":
         # Switch the active user profile for the web chat session.
-        # This does NOT change the agent's identity — it sets context
-        # about who the agent is talking to (user's expertise/background).
-        personality_id = str(data.get("personality_id", "")).strip() or None
-        if server.agent:
-            server.agent._active_personality_id = personality_id
-            # Clear instruction caches so the prompt rebuilds with new user context.
-            if hasattr(server.agent, "instructions") and hasattr(server.agent.instructions, "_cache"):
-                server.agent.instructions._cache.pop("system_prompt.md", None)
-                server.agent.instructions._cache.pop("micro_system_prompt.md", None)
-            server._broadcast({"type": "session_info", **server._session_info()})
-            # Report the change.
-            if personality_id:
-                from captain_claw.personality import load_user_personality
-                up = load_user_personality(personality_id)
-                label = up.name if up else personality_id
-                msg_text = f"User profile set to **{label}**. Responses will be tailored to this user's perspective."
-            else:
-                msg_text = "User profile cleared. Using default context."
+        # Public users cannot change personality — it affects the shared agent.
+        _is_pub = getattr(ws, "_public_session_id", None)
+        if _is_pub:
             await server._send(ws, {
                 "type": "command_result",
                 "command": "/user-profile",
-                "content": msg_text,
+                "content": "User profile selection is not available in public mode.",
             })
+        else:
+            personality_id = str(data.get("personality_id", "")).strip() or None
+            if server.agent:
+                server.agent._active_personality_id = personality_id
+                # Clear instruction caches so the prompt rebuilds with new user context.
+                if hasattr(server.agent, "instructions") and hasattr(server.agent.instructions, "_cache"):
+                    server.agent.instructions._cache.pop("system_prompt.md", None)
+                    server.agent.instructions._cache.pop("micro_system_prompt.md", None)
+                server._broadcast({"type": "session_info", **server._session_info()})
+                # Report the change.
+                if personality_id:
+                    from captain_claw.personality import load_user_personality
+                    up = load_user_personality(personality_id)
+                    label = up.name if up else personality_id
+                    msg_text = f"User profile set to **{label}**. Responses will be tailored to this user's perspective."
+                else:
+                    msg_text = "User profile cleared. Using default context."
+                await server._send(ws, {
+                    "type": "command_result",
+                    "command": "/user-profile",
+                    "content": msg_text,
+                })
 
     elif msg_type == "set_playbook":
         # Override which playbook the agent uses for retrieval.
-        # '' = auto (default), '__none__' = disabled, or a specific playbook ID.
-        playbook_id = str(data.get("playbook_id", "")).strip()
-        if server.agent:
-            server.agent._playbook_override = playbook_id or None
-            # Report the change.
-            if not playbook_id:
-                server.agent._playbook_override_name = "Auto"
-                msg_text = "Playbook mode set to **Auto**. The system will automatically select relevant playbooks."
-            elif playbook_id == "__none__":
-                server.agent._playbook_override_name = "None"
-                msg_text = "Playbook mode set to **None**. No playbook guidance will be injected."
-            else:
-                from captain_claw.session import get_session_manager as _get_sm
-                _sm = _get_sm()
-                pb = await _sm.load_playbook(playbook_id)
-                label = pb.name if pb else playbook_id
-                server.agent._playbook_override_name = label
-                msg_text = f"Playbook override set to **{label}**. This playbook will be used for all tasks."
-            server._broadcast({"type": "session_info", **server._session_info()})
+        # Public users cannot change playbook — it affects the shared agent.
+        _is_pub = getattr(ws, "_public_session_id", None)
+        if _is_pub:
             await server._send(ws, {
                 "type": "command_result",
                 "command": "/playbook",
-                "content": msg_text,
+                "content": "Playbook selection is not available in public mode.",
             })
+        else:
+            playbook_id = str(data.get("playbook_id", "")).strip()
+            if server.agent:
+                server.agent._playbook_override = playbook_id or None
+                # Report the change.
+                if not playbook_id:
+                    server.agent._playbook_override_name = "Auto"
+                    msg_text = "Playbook mode set to **Auto**. The system will automatically select relevant playbooks."
+                elif playbook_id == "__none__":
+                    server.agent._playbook_override_name = "None"
+                    msg_text = "Playbook mode set to **None**. No playbook guidance will be injected."
+                else:
+                    from captain_claw.session import get_session_manager as _get_sm
+                    _sm = _get_sm()
+                    pb = await _sm.load_playbook(playbook_id)
+                    label = pb.name if pb else playbook_id
+                    server.agent._playbook_override_name = label
+                    msg_text = f"Playbook override set to **{label}**. This playbook will be used for all tasks."
+                server._broadcast({"type": "session_info", **server._session_info()})
+                await server._send(ws, {
+                    "type": "command_result",
+                    "command": "/playbook",
+                    "content": msg_text,
+                })
 
     elif msg_type == "set_force_script":
         enabled = bool(data.get("enabled", False))
-        if server.agent:
+        _is_pub = getattr(ws, "_public_session_id", None)
+        if _is_pub:
+            pass  # Public users cannot toggle force-script mode.
+        elif server.agent:
             server.agent._force_script_mode = enabled
             server._broadcast({"type": "session_info", **server._session_info()})
             log.info("Force script mode toggled", enabled=enabled)
@@ -235,9 +301,11 @@ async def handle_ws_message(
         # Store like/dislike feedback on a session message.
         ts = str(data.get("timestamp", "")).strip()
         fb = data.get("feedback")  # "good", "bad", or null to clear
-        if ts and server.agent and server.agent.session:
+        _pub_sid = getattr(ws, "_public_session_id", None)
+        _fb_agent = server._public_agents.get(_pub_sid) if _pub_sid else server.agent
+        if ts and _fb_agent and _fb_agent.session:
             from captain_claw.session import get_session_manager
-            session = server.agent.session
+            session = _fb_agent.session
             for msg in session.messages:
                 if msg.get("timestamp") == ts and msg.get("role") == "assistant":
                     if fb:
@@ -249,9 +317,11 @@ async def handle_ws_message(
             await sm.save_session(session)
 
     elif msg_type == "cancel":
-        if server.agent and hasattr(server.agent, "cancel_event"):
-            server.agent.cancel_event.set()
-            log.info("Cancel signal received via WebSocket")
+        _pub_sid = getattr(ws, "_public_session_id", None)
+        _cancel_agent = server._public_agents.get(_pub_sid) if _pub_sid else server.agent
+        if _cancel_agent and hasattr(_cancel_agent, "cancel_event"):
+            _cancel_agent.cancel_event.set()
+            log.info("Cancel signal received via WebSocket", public=bool(_pub_sid))
 
     elif msg_type == "approval_response":
         pass

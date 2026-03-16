@@ -99,6 +99,45 @@ def _is_allowed_path(physical: str) -> bool:
     return False
 
 
+def _path_belongs_to_session(physical: str, session_id: str) -> bool:
+    """Return True if *physical* is inside one of *session_id*'s directories.
+
+    Session files live under ``workspace/saved/<category>/<session_id>/``
+    or ``workspace/output/<session_id>/``.
+    """
+    try:
+        from captain_claw.config import get_config
+        cfg = get_config()
+        workspace = cfg.resolved_workspace_path()
+        resolved = Path(physical).resolve()
+        saved_root = (workspace / "saved").resolve()
+        output_root = (workspace / "output").resolve()
+
+        safe_id = "".join(
+            c if c.isalnum() or c in "._-" else "-" for c in session_id
+        ).strip("-") or "default"
+
+        # Check workspace/saved/<any-category>/<session_id>/
+        try:
+            rel = resolved.relative_to(saved_root)
+            parts = rel.parts  # e.g. ("downloads", "<session_id>", "file.csv")
+            if len(parts) >= 2 and parts[1] == safe_id:
+                return True
+        except ValueError:
+            pass
+
+        # Check workspace/output/<session_id>/
+        try:
+            rel = resolved.relative_to(output_root)
+            if len(rel.parts) >= 1 and rel.parts[0] == safe_id:
+                return True
+        except ValueError:
+            pass
+    except Exception:
+        pass
+    return False
+
+
 async def _collect_files(server: WebServer) -> list[dict[str, Any]]:
     """Merge files from in-memory registries and persisted SQLite table."""
     seen: dict[str, dict[str, Any]] = {}  # physical_path → entry
@@ -146,27 +185,35 @@ async def _collect_files(server: WebServer) -> list[dict[str, Any]]:
 
 
 async def list_files(server: WebServer, request: web.Request) -> web.Response:
-    """GET /api/files — list all registered files with metadata."""
+    """GET /api/files — list all registered files with metadata.
+
+    Public users are transparently scoped to their own session.
+    """
+    from captain_claw.web.public_auth import get_request_session_id
+    is_public, pub_session_id = get_request_session_id(request)
+    if is_public:
+        if not pub_session_id:
+            return web.json_response([])
+        return web.json_response(
+            await _collect_session_files(server, pub_session_id)
+        )
+
     files = await _collect_files(server)
     return web.json_response(files)
 
 
-async def list_session_files(server: WebServer, request: web.Request) -> web.Response:
-    """GET /api/files/session/{session_id} — list files for a specific session.
+_SESSION_FILE_CATEGORIES = (
+    "downloads", "media", "output", "scripts",
+    "showcase", "skills", "summaries", "tmp", "tools",
+)
 
-    Merges two sources:
-    1. Persisted file_registry rows for this session.
-    2. Filesystem scan of workspace/saved/<category>/<session_id>/ folders
-       and workspace/output/<session_id>/.
-    """
-    session_id = request.match_info.get("session_id", "").strip()
-    if not session_id:
-        return web.json_response({"error": "Missing session_id"}, status=400)
 
-    seen: dict[str, dict[str, Any]] = {}  # physical → entry
+async def _collect_session_files(
+    server: WebServer, session_id: str,
+) -> list[dict[str, Any]]:
+    """Collect files for a single session from registry + filesystem."""
+    seen: dict[str, dict[str, Any]] = {}
 
-    # Resolve session-scoped directories — only files physically inside these
-    # directories are returned.  Registry entries pointing elsewhere are skipped.
     try:
         from captain_claw.config import get_config
         cfg = get_config()
@@ -174,25 +221,18 @@ async def list_session_files(server: WebServer, request: web.Request) -> web.Res
         saved_root = (workspace / "saved").resolve()
         output_root = (workspace / "output").resolve()
 
-        # Normalise session_id the same way write.py does.
         safe_id = "".join(
             c if c.isalnum() or c in "._-" else "-" for c in session_id
         ).strip("-") or "default"
     except Exception:
-        return web.json_response([], content_type="application/json")
+        return []
 
-    # Build set of allowed session directories.
-    _CATEGORIES = (
-        "downloads", "media", "output", "scripts",
-        "showcase", "skills", "summaries", "tmp", "tools",
-    )
     allowed_dirs: list[Path] = []
-    for cat in _CATEGORIES:
+    for cat in _SESSION_FILE_CATEGORIES:
         allowed_dirs.append((saved_root / cat / safe_id).resolve())
     allowed_dirs.append((output_root / safe_id).resolve())
 
     def _is_session_scoped(physical: str) -> bool:
-        """Return True only if *physical* is under a session-scoped directory."""
         try:
             resolved = Path(physical).resolve()
             for d in allowed_dirs:
@@ -205,7 +245,7 @@ async def list_session_files(server: WebServer, request: web.Request) -> web.Res
             pass
         return False
 
-    # 1. Registry entries for this session — only keep session-scoped paths.
+    # 1. Registry entries for this session.
     try:
         from captain_claw.session import get_session_manager
         sm = get_session_manager()
@@ -231,9 +271,9 @@ async def list_session_files(server: WebServer, request: web.Request) -> web.Res
     except Exception:
         pass
 
-    # 2. Filesystem scan — pick up files that may not be in the registry.
+    # 2. Filesystem scan.
     try:
-        for cat in _CATEGORIES:
+        for cat in _SESSION_FILE_CATEGORIES:
             cat_dir = saved_root / cat / safe_id
             if not cat_dir.is_dir():
                 continue
@@ -243,12 +283,10 @@ async def list_session_files(server: WebServer, request: web.Request) -> web.Res
                 phys = str(child.resolve())
                 if phys in seen:
                     continue
-                # Build a logical path like "scripts/my_file.py"
                 rel = child.relative_to(cat_dir)
                 logical = f"{cat}/{rel}"
                 seen[phys] = _enrich(logical, phys, "filesystem")
 
-        # Scan workspace/output/<session_id>/
         out_dir = output_root / safe_id
         if out_dir.is_dir():
             for child in out_dir.rglob("*"):
@@ -263,7 +301,25 @@ async def list_session_files(server: WebServer, request: web.Request) -> web.Res
     except Exception:
         pass
 
-    files = sorted(seen.values(), key=lambda f: f["logical"].lower())
+    return sorted(seen.values(), key=lambda f: f["logical"].lower())
+
+
+async def list_session_files(server: WebServer, request: web.Request) -> web.Response:
+    """GET /api/files/session/{session_id} — list files for a specific session."""
+    session_id = request.match_info.get("session_id", "").strip()
+    if not session_id:
+        return web.json_response({"error": "Missing session_id"}, status=400)
+
+    # Public users can only list their own session's files.
+    from captain_claw.web.public_auth import get_request_session_id
+    is_public, pub_session_id = get_request_session_id(request)
+    if is_public:
+        if not pub_session_id or pub_session_id != session_id:
+            return web.json_response(
+                {"error": "Access denied: not your session"}, status=403,
+            )
+
+    files = await _collect_session_files(server, session_id)
     return web.json_response(files)
 
 
@@ -272,6 +328,13 @@ async def get_file_content(server: WebServer, request: web.Request) -> web.Respo
     physical = request.query.get("path", "").strip()
     if not physical:
         return web.json_response({"error": "Missing 'path' parameter"}, status=400)
+
+    # Public users can only access files from their own session.
+    from captain_claw.web.public_auth import get_request_session_id
+    is_public, pub_session_id = get_request_session_id(request)
+    if is_public:
+        if not pub_session_id or not _path_belongs_to_session(physical, pub_session_id):
+            return web.json_response({"error": "Access denied"}, status=403)
 
     # Security: verify path is in registry OR under workspace saved/output dirs.
     if not _is_allowed_path(physical):
@@ -314,6 +377,13 @@ async def download_file(server: WebServer, request: web.Request) -> web.Response
     if not physical:
         return web.json_response({"error": "Missing 'path' parameter"}, status=400)
 
+    # Public users can only download files from their own session.
+    from captain_claw.web.public_auth import get_request_session_id
+    is_public, pub_session_id = get_request_session_id(request)
+    if is_public:
+        if not pub_session_id or not _path_belongs_to_session(physical, pub_session_id):
+            return web.json_response({"error": "Access denied"}, status=403)
+
     # Security: verify path is in registry OR under workspace saved/output dirs.
     if not _is_allowed_path(physical):
         known_physicals = {f["physical"] for f in await _collect_files(server)}
@@ -337,6 +407,13 @@ async def view_file(server: WebServer, request: web.Request) -> web.Response:
     physical = request.query.get("path", "").strip()
     if not physical:
         return web.json_response({"error": "Missing 'path' parameter"}, status=400)
+
+    # Public users can only view files from their own session.
+    from captain_claw.web.public_auth import get_request_session_id
+    is_public, pub_session_id = get_request_session_id(request)
+    if is_public:
+        if not pub_session_id or not _path_belongs_to_session(physical, pub_session_id):
+            return web.json_response({"error": "Access denied"}, status=403)
 
     if not _is_allowed_path(physical):
         known_physicals = {f["physical"] for f in await _collect_files(server)}
@@ -383,6 +460,13 @@ async def serve_media(server: WebServer, request: web.Request) -> web.Response:
         p = raw.resolve()
     else:
         p = (workspace / raw).resolve()
+
+    # Public users can only access media from their own session.
+    from captain_claw.web.public_auth import get_request_session_id
+    is_public, pub_session_id = get_request_session_id(request)
+    if is_public:
+        if not pub_session_id or not _path_belongs_to_session(str(p), pub_session_id):
+            return web.json_response({"error": "Access denied"}, status=403)
 
     # Security: path must be under saved/ or output/.
     try:

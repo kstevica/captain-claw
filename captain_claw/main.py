@@ -37,6 +37,12 @@ def _build_runtime_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="store_true", help="Show version information and exit")
     parser.add_argument("--port", type=int, default=0, help="Override web server port")
     parser.add_argument("--tui", action="store_true", help="Start the terminal UI instead of the web UI")
+    parser.add_argument(
+        "--public-run",
+        default="",
+        metavar="SECTION",
+        help="Run in public mode exposing only SECTION (e.g. 'computer')",
+    )
     parser.add_argument("-h", "--help", action="store_true", help="Show this help message and exit")
 
     # Orchestrate subcommand (headless workflow execution for cron/scripts).
@@ -82,6 +88,7 @@ def main(
     onboarding: bool = False,
     port: int = 0,
     tui: bool = False,
+    public_run: str = "",
 ) -> None:
     """Start Captain Claw interactive session."""
     if _should_parse_runtime_cli_from_argv(
@@ -157,6 +164,7 @@ def main(
         onboarding = bool(parsed.onboarding)
         port = int(parsed.port or 0)
         tui = bool(parsed.tui)
+        public_run = str(getattr(parsed, "public_run", "") or "")
         if unknown:
             print(f"Warning: ignoring unsupported arguments: {' '.join(unknown)}")
 
@@ -206,6 +214,8 @@ def main(
         cfg.ui.streaming = False
     if port:
         cfg.web.port = port
+    if public_run:
+        cfg.web.public_run = public_run
 
     # Set global config
     set_config(cfg)

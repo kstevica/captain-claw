@@ -202,6 +202,11 @@ class WebServer:
         # Hotkey daemon state
         self._hotkey_listener: Any = None
         self._hotkey_state: Any = None
+        # Public-run mode: per-session agent isolation.
+        self._public_agents: dict[str, Agent] = {}
+        self._public_agent_locks: dict[str, asyncio.Lock] = {}
+        # Tracks which WS each public agent is currently sending to.
+        self._public_active_ws: dict[str, web.WebSocketResponse] = {}
 
     async def _init_agent(self) -> None:
         """Initialize the agent with web callbacks."""
@@ -246,6 +251,117 @@ class WebServer:
         # Prime GDrive tree cache for context injection (non-blocking).
         if hasattr(self.agent, "_refresh_gdrive_trees"):
             asyncio.ensure_future(self.agent._refresh_gdrive_trees())
+
+    # ── Public-mode per-session agents ──────────────────────────────
+
+    async def _get_public_agent(self, session_id: str) -> Agent:
+        """Return (or lazily create) an Agent for a public session.
+
+        Each public session gets its own Agent instance so that multiple
+        users can chat concurrently without interference.  The agents
+        share the same LLM provider as the main agent but maintain
+        independent sessions, tool registries, and instruction caches.
+        """
+        agent = self._public_agents.get(session_id)
+        if agent is not None:
+            return agent
+
+        # Serialise creation per session_id to avoid double-init.
+        lock = self._public_agent_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            # Re-check after acquiring the lock.
+            agent = self._public_agents.get(session_id)
+            if agent is not None:
+                return agent
+
+            from captain_claw.session import get_session_manager
+
+            sm = get_session_manager()
+            session = await sm.load_session(session_id)
+            if session is None:
+                raise ValueError(f"Public session {session_id} not found")
+
+            # Build WS-scoped callbacks that send only to the active WS
+            # for this session (stored in _public_active_ws[session_id]).
+            def _make_send(sid: str):
+                """Create a sender closure bound to a session id."""
+                def _send_msg(msg: dict) -> None:
+                    ws = self._public_active_ws.get(sid)
+                    if ws and not ws.closed:
+                        asyncio.ensure_future(ws.send_str(json.dumps(msg, default=str)))
+                return _send_msg
+
+            send = _make_send(session_id)
+
+            def status_cb(status: str) -> None:
+                send({"type": "status", "status": status})
+
+            def thinking_cb(text: str, tool: str = "", phase: str = "tool") -> None:
+                send({"type": "thinking", "text": text, "tool": tool, "phase": phase})
+
+            def tool_stream_cb(chunk: str) -> None:
+                send({"type": "tool_stream", "chunk": chunk})
+
+            def response_stream_cb(text: str) -> None:
+                send({"type": "response_stream", "text": text})
+
+            def tool_output_cb(tool_name: str, arguments: dict, output: str) -> None:
+                send({
+                    "type": "monitor",
+                    "tool_name": tool_name,
+                    "arguments": arguments,
+                    "output": output,
+                })
+                normalized = str(tool_name or "").strip().lower()
+                if normalized == "task_rephrase":
+                    send({
+                        "type": "chat_message",
+                        "role": "rephrase",
+                        "content": str(output or ""),
+                    })
+                if normalized in ("image_gen", "termux", "browser") and output and not str(output).strip().lower().startswith("error"):
+                    from captain_claw.platform_adapter import extract_image_paths_from_tool_output
+                    for img_path in extract_image_paths_from_tool_output(str(output)):
+                        send({"type": "chat_message", "role": "image", "content": str(img_path)})
+                if normalized == "write" and output and not str(output).strip().lower().startswith("error"):
+                    import re as _re
+                    html_match = _re.search(r"to\s+(\S+\.(?:html|htm|svg))", str(output))
+                    if html_match:
+                        send({"type": "chat_message", "role": "html_file", "content": html_match.group(1).strip()})
+                if normalized not in self._THINKING_SILENT_TOOLS:
+                    from captain_claw.agent_tool_loop_mixin import AgentToolLoopMixin
+                    summary = AgentToolLoopMixin._tool_thinking_summary(tool_name, arguments or {})
+                    raw = str(output or "")
+                    truncated = raw[:3000]
+                    if len(raw) > 3000:
+                        truncated += f"\n... [{len(raw)} total chars]"
+                    send({"type": "tool_output_inline", "tool": tool_name, "summary": summary, "output": truncated})
+
+            def approval_cb(message: str) -> bool:
+                send({"type": "approval_notice", "message": message})
+                return True
+
+            agent = Agent(
+                provider=self.agent.provider if self.agent else None,
+                status_callback=status_cb,
+                tool_output_callback=tool_output_cb,
+                approval_callback=approval_cb,
+                thinking_callback=thinking_cb,
+                tool_stream_callback=tool_stream_cb,
+            )
+            agent.response_stream_callback = response_stream_cb
+
+            # Bind to the public session (skip default session loading).
+            agent.session = session
+            agent.session_manager = sm
+            agent._sync_runtime_flags_from_session()
+            agent._register_default_tools()
+            agent.instructions = self.agent.instructions if self.agent else agent.instructions
+            agent._initialized = True
+
+            self._public_agents[session_id] = agent
+            log.info("Created public agent", session_id=session_id, session_name=session.name)
+            return agent
 
     # ── Callbacks ─────────────────────────────────────────────────────
 
@@ -347,12 +463,24 @@ class WebServer:
     # ── Broadcast / Send ──────────────────────────────────────────────
 
     def _broadcast(self, msg: dict[str, Any]) -> None:
-        """Send a message to all connected WebSocket clients."""
+        """Send a message to all connected *admin* WebSocket clients.
+
+        In public-run mode, public agents use their own per-session
+        callbacks that send directly to the user's WebSocket — so this
+        method only needs to reach admin connections.
+        """
         data = json.dumps(msg, default=str)
         stale: list[web.WebSocketResponse] = []
+
+        from captain_claw.config import get_config
+        public_mode = bool(get_config().web.public_run)
+
         for ws in self.clients:
             if ws.closed:
                 stale.append(ws)
+                continue
+            # In public mode, only broadcast to admin connections.
+            if public_mode and not getattr(ws, "_is_admin", False):
                 continue
             try:
                 asyncio.ensure_future(ws.send_str(data))
@@ -867,6 +995,9 @@ class WebServer:
 
     # Static pages
     async def _serve_home(self, request: web.Request) -> web.Response:
+        if self.config.web.public_run:
+            section = self.config.web.public_run.strip().lower()
+            raise web.HTTPFound(location=f"/{section}")
         from captain_claw.web.static_pages import serve_home
         return await serve_home(self, request)
 
@@ -992,13 +1123,60 @@ class WebServer:
         from captain_claw.web.static_pages import serve_reflections
         return await serve_reflections(self, request)
 
-    async def _serve_computer(self, request: web.Request) -> web.FileResponse:
+    async def _serve_computer(self, request: web.Request) -> web.StreamResponse:
         from captain_claw.web.static_pages import serve_computer
         return await serve_computer(self, request)
 
     async def _serve_personality(self, request: web.Request) -> web.FileResponse:
         from captain_claw.web.static_pages import serve_personality
         return await serve_personality(self, request)
+
+    # ── Public session API ──────────────────────────────────────────
+
+    async def _public_session_new(self, request: web.Request) -> web.Response:
+        from captain_claw.web.public_session import create_public_session, set_public_cookie
+        from captain_claw.web.auth import _is_behind_tls
+        session, code = await create_public_session(self)
+        resp = web.json_response({"ok": True, "session_id": session.id, "code": code})
+        set_public_cookie(resp, session.id, code, self.config.web.auth_token, secure=_is_behind_tls(request))
+        return resp
+
+    async def _public_session_resume(self, request: web.Request) -> web.Response:
+        from captain_claw.web.public_session import load_session_by_code, set_public_cookie
+        from captain_claw.web.auth import _is_behind_tls
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad_request", "message": "Invalid JSON"}, status=400)
+        code = str(body.get("code", "")).strip().upper()
+        if len(code) != 6:
+            return web.json_response({"error": "invalid_code", "message": "Code must be exactly 6 characters."}, status=400)
+        session = await load_session_by_code(code)
+        if session is None:
+            return web.json_response({"error": "not_found", "message": "No session found for this code."}, status=404)
+        resp = web.json_response({"ok": True, "session_id": session.id})
+        set_public_cookie(resp, session.id, code, self.config.web.auth_token, secure=_is_behind_tls(request))
+        return resp
+
+    async def _public_session_enter(self, request: web.Request) -> web.Response:
+        """GET /api/public/session/enter?code=XXXXXX — validate code, set cookie, redirect."""
+        from captain_claw.web.public_session import load_session_by_code, set_public_cookie
+        from captain_claw.web.auth import _is_behind_tls
+        code = request.query.get("code", "").strip().upper()
+        if len(code) != 6:
+            raise web.HTTPFound(location="/computer")
+        session = await load_session_by_code(code)
+        if session is None:
+            raise web.HTTPFound(location="/computer")
+        resp = web.HTTPFound(location="/computer")
+        set_public_cookie(resp, session.id, code, self.config.web.auth_token, secure=_is_behind_tls(request))
+        return resp
+
+    async def _public_session_logout(self, request: web.Request) -> web.Response:
+        from captain_claw.web.public_session import COOKIE_NAME
+        resp = web.json_response({"ok": True})
+        resp.del_cookie(COOKIE_NAME, path="/")
+        return resp
 
     async def _computer_visualize(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_computer import computer_visualize
@@ -1385,7 +1563,12 @@ class WebServer:
 
     def create_app(self) -> web.Application:
         app = web.Application(client_max_size=50 * 1024 * 1024)  # 50 MB for file uploads
-        if self.config.web.auth_token:
+        if self.config.web.public_run:
+            # Public mode: lock down routes to the allowed section.
+            # Admin bypass via auth_token is handled inside the middleware.
+            from captain_claw.web.public_auth import create_public_middleware
+            app.middlewares.append(create_public_middleware(self.config.web))
+        elif self.config.web.auth_token:
             from captain_claw.web.auth import create_auth_middleware
             app.middlewares.append(create_auth_middleware(self.config.web))
         app.router.add_get("/ws", self.ws_handler)
@@ -1600,6 +1783,11 @@ class WebServer:
             app.router.add_post("/api/computer/export-pdf", self._export_visual_pdf)
             app.router.add_get("/api/usage", self._get_usage)
             app.router.add_get("/favicon.ico", self._serve_favicon)
+        # Public session endpoints (always registered; middleware controls access).
+        app.router.add_post("/api/public/session/new", self._public_session_new)
+        app.router.add_post("/api/public/session/resume", self._public_session_resume)
+        app.router.add_get("/api/public/session/enter", self._public_session_enter)
+        app.router.add_post("/api/public/session/logout", self._public_session_logout)
         return app
 
 
@@ -1683,7 +1871,12 @@ async def _run_server(config: Config) -> None:
                 raise
 
     print(f"\n  Captain Claw Web UI running at http://{host}:{port}")
-    if config.web.auth_token:
+    if config.web.public_run:
+        section = config.web.public_run.strip().lower()
+        print(f"  PUBLIC MODE: only /{section} is accessible to anonymous visitors")
+        if config.web.auth_token:
+            print(f"  Admin access via: http://{host}:{port}/?token=<your-token>")
+    elif config.web.auth_token:
         print(f"  Authentication enabled. Access via: http://{host}:{port}/?token=<your-token>")
     if config.web.api_enabled and server._api_pool:
         print(f"  OpenAI-compatible API at http://{host}:{port}/v1")
@@ -1762,9 +1955,20 @@ def run_web_server(config: Config) -> None:
 
 def main() -> None:
     """Standalone entry point for captain-claw-web."""
+    import argparse as _ap
+    parser = _ap.ArgumentParser(prog="captain-claw-web", description="Captain Claw Web Server")
+    parser.add_argument("--public-run", default="", metavar="SECTION",
+                        help="Run in public mode exposing only SECTION (e.g. 'computer')")
+    parser.add_argument("--port", type=int, default=0, help="Override web server port")
+    args, _ = parser.parse_known_args()
+
     configure_logging()
 
     cfg = Config.load()
+    if args.public_run:
+        cfg.web.public_run = args.public_run
+    if args.port:
+        cfg.web.port = args.port
     set_config(cfg)
 
     session_path = Path(cfg.session.path).expanduser()

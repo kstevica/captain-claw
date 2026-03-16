@@ -112,7 +112,24 @@ async def serve_reflections(server: WebServer, request: web.Request) -> web.File
     return web.FileResponse(STATIC_DIR / "reflections.html")
 
 
-async def serve_computer(server: WebServer, request: web.Request) -> web.FileResponse:
+async def serve_computer(server: WebServer, request: web.Request) -> web.FileResponse | web.Response:
+    from captain_claw.config import get_config
+    cfg = get_config()
+    if cfg.web.public_run:
+        # In public mode, require a valid public session cookie.
+        from captain_claw.web.public_auth import _is_admin
+        if not _is_admin(request, cfg.web):
+            from captain_claw.web.public_session import read_public_cookie
+            identity = read_public_cookie(request, cfg.web.auth_token)
+            if identity is None:
+                # Return landing page with no-cache so that redirects
+                # from the enter endpoint always re-check the cookie.
+                landing = STATIC_DIR / "public_landing.html"
+                return web.Response(
+                    body=landing.read_bytes(),
+                    content_type="text/html",
+                    headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+                )
     return web.FileResponse(STATIC_DIR / "computer.html")
 
 

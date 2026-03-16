@@ -358,41 +358,39 @@ function showExploreConfirm(topic, context) {
   input.style.height = "auto";
   input.style.height = Math.min(input.scrollHeight, 120) + "px";
 
-  // Show the explore confirmation bar.
-  let bar = $("#explore-confirm-bar");
-  if (!bar) {
-    bar = document.createElement("div");
-    bar.id = "explore-confirm-bar";
-    bar.innerHTML = `
-      <div class="explore-confirm-topic"></div>
-      <div class="explore-confirm-hint">Add context or edit the prompt above, then send — or cancel.</div>
-      <div class="explore-confirm-actions">
-        <button id="explore-send-btn" class="tab-btn" title="Send exploration prompt">▶ Explore</button>
-        <button id="explore-cancel-btn" class="tab-btn" title="Cancel exploration">✕ Cancel</button>
-      </div>
-    `;
-    // Insert after the input-actions div.
+  // Show explore / cancel buttons inline in the input-actions row.
+  let exploreBtn = $("#explore-send-btn");
+  let cancelBtn = $("#explore-cancel-btn");
+  if (!exploreBtn) {
     const inputActions = $("#input-actions");
-    inputActions.parentNode.insertBefore(bar, inputActions.nextSibling);
+    exploreBtn = document.createElement("button");
+    exploreBtn.id = "explore-send-btn";
+    exploreBtn.className = "explore-inline-btn";
+    exploreBtn.title = "Send exploration prompt";
+    exploreBtn.addEventListener("click", () => confirmExploration());
+    inputActions.appendChild(exploreBtn);
 
-    // Wire buttons.
-    bar.querySelector("#explore-send-btn").addEventListener("click", () => {
-      confirmExploration();
-    });
-    bar.querySelector("#explore-cancel-btn").addEventListener("click", () => {
-      cancelExploration();
-    });
+    cancelBtn = document.createElement("button");
+    cancelBtn.id = "explore-cancel-btn";
+    cancelBtn.className = "explore-inline-btn explore-cancel";
+    cancelBtn.textContent = "✕";
+    cancelBtn.title = "Cancel exploration";
+    cancelBtn.addEventListener("click", () => cancelExploration());
+    inputActions.appendChild(cancelBtn);
   }
 
-  // Store exploration metadata on the bar for later use.
-  bar._exploreTopic = topic;
-  bar._exploreContext = context;
+  // Store exploration metadata on the buttons for later use.
+  exploreBtn._exploreTopic = topic;
+  exploreBtn._exploreContext = context;
 
-  bar.querySelector(".explore-confirm-topic").textContent = `🔗 ${topic}`;
-  bar.classList.add("active");
-  bar.style.display = "flex";
+  // Truncate long topic labels.
+  const shortTopic = topic.length > 20 ? topic.slice(0, 20) + "…" : topic;
+  exploreBtn.innerHTML = `▶ <span class="explore-btn-label">${esc(shortTopic)}</span>`;
 
-  // Hide the Send button — Explore button replaces it.
+  exploreBtn.style.display = "inline-flex";
+  cancelBtn.style.display = "inline-flex";
+
+  // Hide the Send button — Explore replaces it.
   $("#send-btn").style.display = "none";
 
   // Focus the input so the user can immediately type additions.
@@ -404,10 +402,10 @@ function showExploreConfirm(topic, context) {
 }
 
 function confirmExploration() {
-  const bar = $("#explore-confirm-bar");
-  if (!bar) return;
+  const btn = $("#explore-send-btn");
+  if (!btn) return;
 
-  const topic = bar._exploreTopic || "";
+  const topic = btn._exploreTopic || "";
 
   // Store the parent linkage before sending.
   pendingExploration = {
@@ -416,24 +414,25 @@ function confirmExploration() {
     source: 'click',
   };
 
-  // Hide the bar and restore Send button.
-  bar.classList.remove("active");
-  bar.style.display = "none";
-  $("#send-btn").style.display = "";
+  // Hide explore buttons and restore Send button.
+  _hideExploreButtons();
 
   // Send whatever is in the input box (user may have edited it).
   handleSend();
 }
 
 function cancelExploration() {
-  const bar = $("#explore-confirm-bar");
-  if (bar) {
-    bar.classList.remove("active");
-    bar.style.display = "none";
-  }
-  $("#send-btn").style.display = "";
+  _hideExploreButtons();
   $("#input-box").value = "";
   logEntry("system", "Exploration cancelled");
+}
+
+function _hideExploreButtons() {
+  const eb = $("#explore-send-btn");
+  const cb = $("#explore-cancel-btn");
+  if (eb) eb.style.display = "none";
+  if (cb) cb.style.display = "none";
+  $("#send-btn").style.display = "";
 }
 
 /* ── Exploration: navigate to historical node ────────────────── */
@@ -1153,6 +1152,10 @@ function handleMessage(data) {
       }
       break;
 
+    case "next_steps":
+      renderNextSteps(data.options);
+      break;
+
     case "approval_request":
       // Auto-approve in Computer mode (can be refined later).
       send({ type: "approval_response", approved: true, request_id: data.request_id });
@@ -1210,6 +1213,13 @@ function handleChatMessage(data) {
     // Finish the stream panel for the answer flow.
     if (streamPanelActive && streamPanelSource === "answer") {
       finishStreamPanel("Agent response complete");
+      // Auto-close stream panel after answer arrives.
+      setTimeout(() => {
+        closeStreamPanel();
+        if (_isMobile()) {
+          document.body.classList.remove("mobile-streaming");
+        }
+      }, 600);
     }
     renderAnswer(data.content || "", false, data.timestamp || "");
   }
@@ -1321,18 +1331,16 @@ function handleSend() {
     return;
   }
 
-  // If the explore confirmation bar is active, treat this as an exploration send.
-  const bar = $("#explore-confirm-bar");
-  if (bar && bar.classList.contains("active")) {
-    const topic = bar._exploreTopic || "";
+  // If the explore inline button is visible, treat this as an exploration send.
+  const exploreBtn = $("#explore-send-btn");
+  if (exploreBtn && exploreBtn.style.display !== "none") {
+    const topic = exploreBtn._exploreTopic || "";
     pendingExploration = {
       parentId: currentNodeId,
       edgeLabel: topic,
       source: 'click',
     };
-    bar.classList.remove("active");
-    bar.style.display = "none";
-    $("#send-btn").style.display = "";
+    _hideExploreButtons();
   }
 
   input.value = "";
@@ -1394,6 +1402,11 @@ function handleSend() {
 
   // Open stream panel to show agent thinking during answer generation.
   openStreamPanel("answer");
+
+  // On mobile, flag that we're streaming so CSS can compact the layout.
+  if (_isMobile()) {
+    document.body.classList.add("mobile-streaming");
+  }
 }
 
 /* ── Input decomposition ─────────────────────────────────────── */
@@ -1445,6 +1458,7 @@ function renderInputDecomposition(text) {
 /* ── Answer rendering ────────────────────────────────────────── */
 
 function clearAnswer() {
+  removeNextSteps();
   const el = $("#answer-content");
   el.innerHTML = '<div class="output-processing"><span class="processing-dots">⣾</span> Processing...</div>';
   el.classList.remove("output-empty");
@@ -1569,6 +1583,50 @@ function _renderAnswerActions(container, content) {
   bar.appendChild(saved);
 
   container.parentElement.appendChild(bar);
+}
+
+/* ── Next-step suggestion buttons ────────────────────────────── */
+
+function removeNextSteps() {
+  document.querySelectorAll(".next-steps-bar").forEach(el => el.remove());
+}
+
+function renderNextSteps(options) {
+  if (!options || !options.length) return;
+  removeNextSteps();
+
+  const wrapper = document.getElementById("output-answer");
+  if (!wrapper) return;
+
+  const bar = document.createElement("div");
+  bar.className = "next-steps-bar";
+
+  const label = document.createElement("div");
+  label.className = "next-steps-label";
+  label.textContent = "Suggested next steps";
+  bar.appendChild(label);
+
+  const row = document.createElement("div");
+  row.className = "next-steps-row";
+
+  options.forEach(function (opt) {
+    const btn = document.createElement("button");
+    btn.className = "next-step-btn";
+    btn.title = opt.description || opt.action;
+    btn.textContent = opt.label;
+    btn.addEventListener("click", function () {
+      removeNextSteps();
+      // Put the action into the input and trigger send so the full
+      // handleSend flow runs (stream panel, exploration node, etc.).
+      const input = $("#input-box");
+      input.value = opt.action;
+      handleSend();
+    });
+    row.appendChild(btn);
+  });
+
+  bar.appendChild(row);
+  wrapper.appendChild(bar);
 }
 
 /* ── Blueprint tab (structural decomposition) ────────────────── */
@@ -1732,6 +1790,8 @@ async function generateVisual() {
     console.groupEnd();
 
     finishStreamPanel(`Visual generation complete (${humanTime(elapsed)}, ${humanSize(html.length)})`);
+    // Auto-close stream panel after visual generation completes.
+    setTimeout(() => closeStreamPanel(), 600);
 
     if (!html) {
       el.innerHTML = '<span class="output-placeholder">No visual generated</span>';
@@ -1768,6 +1828,7 @@ async function generateVisual() {
     el.classList.add("output-empty");
     logEntry("error", `Visual generation failed: ${err.message}`);
     finishStreamPanel(`Failed: ${err.message}`);
+    setTimeout(() => closeStreamPanel(), 600);
   } finally {
     visualGenerating = false;
   }
@@ -3071,6 +3132,15 @@ function markdownToHtml(md) {
     }
   );
 
+  // Pre-process: convert raw <img> HTML tags to markdown image syntax
+  // so they survive the esc() call.  Handles both <img src="..." alt="...">
+  // and <img src="..." alt="..." ...other attrs...> patterns.
+  md = md.replace(/<img\s+[^>]*src\s*=\s*["']([^"']+)["'][^>]*>/gi, function(match, src) {
+    var altMatch = match.match(/alt\s*=\s*["']([^"']*)["']/i);
+    var alt = altMatch ? altMatch[1] : "Image";
+    return "![" + alt + "](" + src + ")";
+  });
+
   let html = esc(md);
 
   // Code blocks (``` ... ```) — must run before inline replacements.
@@ -3232,6 +3302,19 @@ function esc(s) {
   const d = document.createElement("div");
   d.textContent = s;
   return d.innerHTML;
+}
+
+/* ── Mobile helpers ──────────────────────────────────────────── */
+
+function _isMobile() {
+  return window.innerWidth <= 800;
+}
+
+function _scrollToOutput() {
+  const el = document.getElementById("output-panel");
+  if (el) {
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 }
 
 /* ── Stream panel (bottom slide-up) ──────────────────────────── */
@@ -3819,6 +3902,29 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Listen for postMessage from visual iframe.
   window.addEventListener("message", handleIframeMessage);
+
+  // Mobile titlebar toggle.
+  const _tbToggle = document.getElementById("titlebar-toggle");
+  const _tbRight = document.getElementById("titlebar-right");
+  if (_tbToggle && _tbRight) {
+    _tbToggle.addEventListener("click", (e) => {
+      e.stopPropagation();
+      _tbRight.classList.toggle("open");
+    });
+    // Close menu when clicking outside.
+    document.addEventListener("click", (e) => {
+      if (!_tbRight.contains(e.target) && e.target !== _tbToggle) {
+        _tbRight.classList.remove("open");
+      }
+    });
+    // Close menu after selecting an item.
+    _tbRight.addEventListener("click", () => {
+      setTimeout(() => _tbRight.classList.remove("open"), 150);
+    });
+    _tbRight.addEventListener("change", () => {
+      setTimeout(() => _tbRight.classList.remove("open"), 150);
+    });
+  }
 
   // Boot sequence.
   await runBoot();

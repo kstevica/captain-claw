@@ -750,6 +750,10 @@ class WebConfig(BaseModel):
     # Authentication – set auth_token to enable; empty string = auth disabled
     auth_token: str = ""
     auth_cookie_max_age: int = 90  # days
+    # Public run mode – expose a single section to anonymous users.
+    # Set to a section name (e.g. "computer") to lock down all other routes.
+    # Admin access via auth_token still works when set alongside public_run.
+    public_run: str = ""
 
 
 class ProviderKeysConfig(BaseModel):

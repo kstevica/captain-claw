@@ -71,9 +71,16 @@ async def upload_file(server: WebServer, request: web.Request) -> web.Response:
         # Determine save location: workspace/saved/downloads/<session-id>/
         cfg = get_config()
         workspace = cfg.resolved_workspace_path()
-        session_id = ""
-        if server.agent and server.agent.session:
-            session_id = server.agent.session.id or ""
+
+        # For public users, scope uploads to their session.
+        from captain_claw.web.public_auth import get_request_session_id
+        is_public, pub_session_id = get_request_session_id(request)
+        if is_public and pub_session_id:
+            session_id = pub_session_id
+        else:
+            session_id = ""
+            if server.agent and server.agent.session:
+                session_id = server.agent.session.id or ""
         if not session_id:
             session_id = "uploads"
 

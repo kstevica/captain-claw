@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Computer — Access</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Silkscreen:wght@400;700&display=swap">
+  <link rel="icon" href="/static/favicon.svg">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Share Tech Mono', monospace;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 24px 16px;
+    }
+
+    .container {
+      width: 460px;
+      max-width: 100%;
+    }
+
+    /* Landscape / short viewports: allow scroll, don't force vertical center */
+    @media (max-height: 700px) {
+      body {
+        align-items: flex-start;
+      }
+    }
+
+    .window {
+      border: 2px solid #555;
+      background: #222;
+      box-shadow: 4px 4px 0 rgba(0,0,0,.5);
+    }
+
+    .window-title {
+      background: linear-gradient(90deg, #335, #557);
+      padding: 6px 10px;
+      font-family: 'Silkscreen', monospace;
+      font-size: 13px;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      user-select: none;
+    }
+
+    .window-title .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+    .dot-red { background: #e55; }
+    .dot-yellow { background: #eb5; }
+    .dot-green { background: #5b5; }
+
+    .window-body {
+      padding: 24px 20px;
+    }
+
+    h2 {
+      font-family: 'Silkscreen', monospace;
+      font-size: 15px;
+      margin-bottom: 16px;
+      color: #7af;
+      text-align: center;
+    }
+
+    .tab-row {
+      display: flex;
+      gap: 0;
+      margin-bottom: 20px;
+    }
+    .tab-row button {
+      flex: 1;
+      padding: 10px;
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 14px;
+      border: 1px solid #555;
+      background: #1a1a2e;
+      color: #999;
+      cursor: pointer;
+      transition: all .15s;
+    }
+    .tab-row button:first-child { border-radius: 4px 0 0 4px; }
+    .tab-row button:last-child  { border-radius: 0 4px 4px 0; }
+    .tab-row button.active {
+      background: #335;
+      color: #fff;
+      border-color: #7af;
+    }
+
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    label {
+      display: block;
+      font-size: 12px;
+      color: #999;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    input[type="text"] {
+      width: 100%;
+      padding: 12px 14px;
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 22px;
+      letter-spacing: 6px;
+      text-align: center;
+      text-transform: uppercase;
+      background: #111;
+      border: 1px solid #555;
+      color: #7af;
+      border-radius: 4px;
+      outline: none;
+    }
+    input[type="text"]:focus {
+      border-color: #7af;
+      box-shadow: 0 0 8px rgba(119,170,255,.3);
+    }
+    input[type="text"]::placeholder {
+      color: #444;
+      letter-spacing: 4px;
+      font-size: 16px;
+    }
+
+    .btn {
+      display: block;
+      width: 100%;
+      margin-top: 16px;
+      padding: 12px;
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 14px;
+      border: 1px solid #7af;
+      background: #335;
+      color: #fff;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all .15s;
+    }
+    .btn:hover { background: #447; }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+
+    .btn-new {
+      border-color: #5b5;
+      background: #253;
+    }
+    .btn-new:hover { background: #364; }
+
+    .error {
+      margin-top: 12px;
+      padding: 8px 12px;
+      background: rgba(255,80,80,.15);
+      border: 1px solid #e55;
+      border-radius: 4px;
+      color: #f88;
+      font-size: 13px;
+      display: none;
+    }
+
+    .code-display {
+      display: none;
+      margin-top: 16px;
+      padding: 16px;
+      background: #111;
+      border: 1px solid #5b5;
+      border-radius: 4px;
+      text-align: center;
+    }
+    .code-display .code-value {
+      font-size: 28px;
+      letter-spacing: 8px;
+      color: #5b5;
+      font-weight: bold;
+      margin: 8px 0;
+      user-select: all;
+    }
+    .code-display .code-hint {
+      font-size: 11px;
+      color: #888;
+    }
+
+    .info-text {
+      margin-top: 14px;
+      font-size: 12px;
+      color: #666;
+      text-align: center;
+      line-height: 1.5;
+    }
+
+    .hero {
+      text-align: center;
+      margin-bottom: 22px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid #333;
+    }
+
+    .hero-logo {
+      font-family: 'Silkscreen', monospace;
+      font-size: 22px;
+      color: #7af;
+      margin-bottom: 6px;
+      letter-spacing: 1px;
+    }
+    .hero-logo .claw { color: #f8c; }
+
+    .hero-tagline {
+      font-size: 13px;
+      color: #999;
+      margin-bottom: 14px;
+    }
+
+    .notice {
+      background: rgba(119,170,255,.07);
+      border: 1px solid #335;
+      border-radius: 4px;
+      padding: 12px 14px;
+      font-size: 12px;
+      color: #aab;
+      line-height: 1.6;
+      text-align: left;
+    }
+
+    .notice strong {
+      color: #eb5;
+    }
+
+    .notice a {
+      color: #7af;
+      text-decoration: none;
+    }
+    .notice a:hover {
+      text-decoration: underline;
+    }
+
+    .gh-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      margin-top: 10px;
+      font-size: 12px;
+    }
+
+    .gh-link svg {
+      width: 14px;
+      height: 14px;
+      fill: #999;
+      vertical-align: middle;
+    }
+
+    .author {
+      margin-top: 10px;
+      font-size: 11px;
+      color: #777;
+    }
+    .author a {
+      color: #99b;
+      text-decoration: none;
+    }
+    .author a:hover {
+      text-decoration: underline;
+      color: #7af;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="window">
+    <div class="window-title">
+      <span class="dot dot-red"></span>
+      <span class="dot dot-yellow"></span>
+      <span class="dot dot-green"></span>
+      Computer
+    </div>
+    <div class="window-body">
+      <div class="hero">
+        <div class="hero-logo">Captain <span class="claw">Claw</span></div>
+        <div class="hero-tagline">AI-Powered Research Workspace</div>
+        <div class="notice">
+          <strong>Public Mode</strong> — This instance is running in public
+          Computer mode with restricted access. Resources are shared and LLM
+          usage and web search may be limited by speed or availability.<br>
+          For unrestricted access and full features, visit the project on GitHub
+          and run Captain Claw yourself.
+          <div class="gh-link">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+            <a href="https://github.com/kstevica/captain-claw" target="_blank" rel="noopener">github.com/kstevica/captain-claw</a>
+          </div>
+          <div class="author">A project by Stevica Kuharski · <a href="https://github.com/kstevica" target="_blank" rel="noopener">@kstevica</a></div>
+        </div>
+      </div>
+
+      <div class="tab-row">
+        <button id="tab-resume" class="active" onclick="switchTab('resume')">Resume Session</button>
+        <button id="tab-new" onclick="switchTab('new')">New Session</button>
+      </div>
+
+      <!-- Resume panel -->
+      <div id="panel-resume" class="panel active">
+        <label for="code-input">Enter your access code</label>
+        <input type="text" id="code-input" maxlength="6" placeholder="------" autocomplete="off" spellcheck="false">
+        <button class="btn" id="resume-btn" onclick="resumeSession()">Resume</button>
+        <div class="error" id="resume-error"></div>
+      </div>
+
+      <!-- New session panel -->
+      <div id="panel-new" class="panel">
+        <p class="info-text" style="margin-top:0; margin-bottom:16px;">
+          Start a fresh research session. You'll receive a unique access code
+          to resume your work later.
+        </p>
+        <button class="btn btn-new" id="new-btn" onclick="newSession()">Start New Session</button>
+        <div class="code-display" id="new-code-display">
+          <div class="code-hint">Your access code — save it!</div>
+          <div class="code-value" id="new-code-value"></div>
+          <div class="code-hint">You need this code to return to your session.</div>
+          <button class="btn" style="margin-top:14px" onclick="enterSession()">Enter Workspace</button>
+        </div>
+        <div class="error" id="new-error"></div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+function switchTab(tab) {
+  document.querySelectorAll('.tab-row button').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('tab-' + tab).classList.add('active');
+  document.getElementById('panel-' + tab).classList.add('active');
+  // Clear errors
+  document.querySelectorAll('.error').forEach(e => { e.style.display = 'none'; e.textContent = ''; });
+}
+
+// Auto-uppercase and focus management for code input
+const codeInput = document.getElementById('code-input');
+codeInput.addEventListener('input', function() {
+  this.value = this.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+});
+codeInput.addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && this.value.length === 6) resumeSession();
+});
+
+function resumeSession() {
+  const code = codeInput.value.trim();
+  if (code.length !== 6) {
+    showError('resume-error', 'Code must be exactly 6 characters.');
+    return;
+  }
+  const btn = document.getElementById('resume-btn');
+  btn.disabled = true;
+  btn.textContent = 'Connecting...';
+  // Navigate to the enter endpoint — it validates the code, sets the
+  // cookie via Set-Cookie on a redirect response (reliable across browsers).
+  window.location.href = '/api/public/session/enter?code=' + encodeURIComponent(code);
+}
+
+let _newCode = null;
+
+async function newSession() {
+  const btn = document.getElementById('new-btn');
+  btn.disabled = true;
+  btn.textContent = 'Creating...';
+  try {
+    const resp = await fetch('/api/public/session/new', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      credentials: 'same-origin',
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      showError('new-error', data.message || 'Failed to create session.');
+      btn.disabled = false;
+      btn.textContent = 'Start New Session';
+      return;
+    }
+    _newCode = data.code;
+    // Show the code
+    document.getElementById('new-code-value').textContent = data.code;
+    document.getElementById('new-code-display').style.display = 'block';
+    btn.style.display = 'none';
+  } catch (err) {
+    showError('new-error', 'Connection error. Please try again.');
+    btn.disabled = false;
+    btn.textContent = 'Start New Session';
+  }
+}
+
+function enterSession() {
+  // Use the enter endpoint to set the cookie via redirect (bulletproof).
+  if (_newCode) {
+    window.location.href = '/api/public/session/enter?code=' + encodeURIComponent(_newCode);
+  }
+}
+
+function showError(id, msg) {
+  const el = document.getElementById(id);
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+</script>
+
+</body>
+</html>

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
@@ -136,16 +136,41 @@ async def handle_chat(
         await server._send(ws, {"type": "error", "message": "Agent not initialized"})
         return
 
-    if server._busy:
-        await server._send(ws, {
-            "type": "error",
-            "message": "Agent is busy processing another request. Please wait.",
-        })
-        return
+    # ── Resolve the agent to use ─────────────────────────────────
+    public_session_id: str | None = getattr(ws, "_public_session_id", None)
+    is_public = bool(public_session_id)
+
+    if is_public:
+        # Per-session agent for public users — no global busy check.
+        # Each public session has its own agent so multiple users can
+        # chat concurrently.
+        try:
+            agent = await server._get_public_agent(public_session_id)
+        except Exception as e:
+            await server._send(ws, {"type": "error", "message": f"Session error: {e}"})
+            return
+        # Check if this specific agent is busy.
+        if getattr(agent, "_public_busy", False):
+            await server._send(ws, {
+                "type": "error",
+                "message": "Your session is busy processing. Please wait.",
+            })
+            return
+        # Register the WS for this session so callbacks can reach it.
+        server._public_active_ws[public_session_id] = ws
+    else:
+        # Admin / normal mode — use the main shared agent.
+        if server._busy:
+            await server._send(ws, {
+                "type": "error",
+                "message": "Agent is busy processing another request. Please wait.",
+            })
+            return
+        agent = server.agent
 
     # ── History branching: rewind session to a prior point ──
-    if rewind_to and server.agent.session:
-        session = server.agent.session
+    if rewind_to and agent.session:
+        session = agent.session
         before = len(session.messages)
         session.messages = [
             m for m in session.messages
@@ -157,7 +182,6 @@ async def handle_chat(
                 "Session rewound for history branch",
                 before=before, after=after, rewind_to=rewind_to,
             )
-            # Persist the truncated session.
             try:
                 from captain_claw.session import get_session_manager
                 sm = get_session_manager()
@@ -179,35 +203,43 @@ async def handle_chat(
         prefix = f"[Attached file: {file_path}]\n"
         effective_content = prefix + (content or "I've attached a file.")
 
-    # Mark busy *before* spawning the task so that a second chat message
-    # arriving immediately is rejected.
-    server._busy = True
-    server._broadcast({"type": "status", "status": "thinking"})
-    server._thinking_callback("Thinking\u2026", phase="reasoning")
-
-    # Echo user message to all clients
-    server._broadcast({
-        "type": "chat_message",
-        "role": "user",
-        "content": effective_content,
-        "timestamp": datetime.now(UTC).isoformat(),
-    })
+    # ── Send to the right targets ────────────────────────────────
+    # For public users we send directly to their WS; for admin we
+    # broadcast to all admin connections.
+    if is_public:
+        import json as _json_mod
+        def _send_msg(msg: dict) -> None:
+            if not ws.closed:
+                asyncio.ensure_future(ws.send_str(
+                    _json_mod.dumps(msg, default=str)
+                ))
+        _send_msg({"type": "status", "status": "thinking"})
+        _send_msg({
+            "type": "chat_message", "role": "user",
+            "content": effective_content,
+            "timestamp": datetime.now(UTC).isoformat(),
+        })
+    else:
+        server._busy = True
+        server._broadcast({"type": "status", "status": "thinking"})
+        server._thinking_callback("Thinking\u2026", phase="reasoning")
+        server._broadcast({
+            "type": "chat_message", "role": "user",
+            "content": effective_content,
+            "timestamp": datetime.now(UTC).isoformat(),
+        })
 
     # ── Task naming (runs concurrently with the agent) ────────────
-    # Maintain a short history of user prompts so continuations can
-    # be named in context.
     if not hasattr(server, "_recent_prompts"):
         server._recent_prompts: list[str] = []
 
-    # Use the same provider/model/key/base_url the agent is configured with.
-    _naming_model = getattr(server.agent.provider, "model", "")
-    _naming_provider = getattr(server.agent.provider, "provider", "")
-    # Ensure model includes the provider prefix for litellm (e.g. "openai/gpt-4").
+    _naming_model = getattr(agent.provider, "model", "")
+    _naming_provider = getattr(agent.provider, "provider", "")
     if _naming_model and "/" not in _naming_model and _naming_provider:
         _naming_model = f"{_naming_provider}/{_naming_model}"
-    _naming_api_key = getattr(server.agent.provider, "api_key", None)
-    _naming_base_url = getattr(server.agent.provider, "base_url", None)
-    _naming_extra_headers = getattr(server.agent.provider, "extra_headers", None)
+    _naming_api_key = getattr(agent.provider, "api_key", None)
+    _naming_base_url = getattr(agent.provider, "base_url", None)
+    _naming_extra_headers = getattr(agent.provider, "extra_headers", None)
 
     log.info(
         "Task naming: setup",
@@ -216,65 +248,77 @@ async def handle_chat(
         key_prefix=(_naming_api_key[:8] + "...") if _naming_api_key else "none",
     )
 
-    # Kick off the naming coroutine as a fire-and-forget task.
-    # It writes the result to server.agent._current_task_name which
-    # _record_usage_to_db reads when persisting.
     async def _name_and_store() -> None:
         name = await _generate_task_name(
             content, server._recent_prompts, _naming_model, _naming_api_key,
             _naming_base_url, _naming_extra_headers,
         )
-        if server.agent:
-            server.agent._current_task_name = name
+        agent._current_task_name = name
 
     naming_task = asyncio.create_task(_name_and_store())
 
-    # Update prompt history (only keep the non-continuation ones as
-    # meaningful context; always append the raw text for detection).
     if not _is_continuation(content):
         server._recent_prompts.append(content[:500])
         if len(server._recent_prompts) > _MAX_RECENT_PROMPTS:
             server._recent_prompts.pop(0)
 
-    # Launch the heavy work as a background task — do NOT await it here
-    # so the caller (the WebSocket read-loop) can keep processing
-    # incoming messages such as cancel/stop.
-    task = asyncio.create_task(_run_agent(server, effective_content, naming_task))
+    # Launch the heavy work as a background task.
+    task = asyncio.create_task(_run_agent(
+        server, ws, agent, effective_content, naming_task,
+        is_public=is_public,
+        public_session_id=public_session_id,
+    ))
 
-    # Store a reference so it isn't garbage-collected.
-    server._active_task = task
+    if is_public:
+        # Store per-session so it isn't garbage-collected.
+        agent._public_task = task  # type: ignore[attr-defined]
+    else:
+        server._active_task = task
 
 
 async def _run_agent(
     server: WebServer,
+    ws: web.WebSocketResponse,
+    agent: Any,
     content: str,
     naming_task: asyncio.Task | None = None,
+    *,
+    is_public: bool = False,
+    public_session_id: str | None = None,
 ) -> None:
     """Background coroutine that drives the agent and finalises the turn."""
+    import json as _json
+
+    def _send_to_ws(msg: dict) -> None:
+        """Send directly to this user's WebSocket."""
+        if not ws.closed:
+            asyncio.ensure_future(ws.send_str(_json.dumps(msg, default=str)))
+
+    # Choose the right send function.
+    send = _send_to_ws if is_public else (lambda msg: server._broadcast(msg))
+
+    if is_public:
+        agent._public_busy = True  # type: ignore[attr-defined]
+
     try:
-        # Wait for the task naming micro-call to finish (should be fast).
         if naming_task is not None:
             try:
                 await asyncio.wait_for(naming_task, timeout=5.0)
             except (asyncio.TimeoutError, Exception):
-                pass  # naming is best-effort
+                pass
 
-        # Capture model details before running the agent.
-        model_details = server.agent.get_runtime_model_details() if server.agent else {}
+        model_details = agent.get_runtime_model_details() if agent else {}
         model_label = f"{model_details.get('provider', '')}:{model_details.get('model', '')}" if model_details else ""
 
-        # Route /orchestrate requests to the orchestrator.
+        # Route /orchestrate requests to the orchestrator (admin only).
         stripped = content.strip()
-        if stripped.lower().startswith("/orchestrate ") and server._orchestrator:
+        if not is_public and stripped.lower().startswith("/orchestrate ") and server._orchestrator:
             orchestrate_input = stripped[len("/orchestrate "):].strip()
             if not orchestrate_input:
-                server._broadcast({
-                    "type": "error",
-                    "message": "Usage: /orchestrate <request>",
-                })
+                send({"type": "error", "message": "Usage: /orchestrate <request>"})
             else:
                 response = await server._orchestrator.orchestrate(orchestrate_input)
-                server._broadcast({
+                send({
                     "type": "chat_message",
                     "role": "assistant",
                     "content": response,
@@ -282,10 +326,16 @@ async def _run_agent(
                     "model": model_label,
                 })
         else:
-            # Use complete() which handles tool calls and guards
-            response = await server.agent.complete(content)
+            response = await agent.complete(content)
 
-            server._broadcast({
+            log.info(
+                "Agent complete() returned",
+                response_len=len(response) if response else 0,
+                response_preview=(response[:200] if response else "<empty>"),
+                public=is_public,
+            )
+
+            send({
                 "type": "chat_message",
                 "role": "assistant",
                 "content": response,
@@ -295,45 +345,48 @@ async def _run_agent(
 
             # Extract and broadcast suggested next steps.
             try:
-                steps = await extract_next_steps(server.agent.provider, response)
+                steps = await extract_next_steps(agent.provider, response)
                 if steps:
-                    server._broadcast({
+                    send({
                         "type": "next_steps",
                         "options": next_steps_to_dicts(steps),
                     })
             except Exception as ns_err:
                 log.debug("Next steps extraction error", error=str(ns_err))
 
-        # Send updated usage/session info
-        server._broadcast({
+        # Send updated usage/session info.
+        send({
             "type": "usage",
-            "last": server.agent.last_usage,
-            "total": server.agent.total_usage,
-            "context_window": server.agent.last_context_window,
-        })
-        server._broadcast({
-            "type": "session_info",
-            **server._session_info(),
+            "last": agent.last_usage,
+            "total": agent.total_usage,
+            "context_window": agent.last_context_window,
         })
 
-        # Auto-reflection: fire-and-forget after agent turns.
-        try:
-            import asyncio as _asyncio
-            from captain_claw.reflections import maybe_auto_reflect
-            _asyncio.create_task(maybe_auto_reflect(server.agent))
-        except Exception:
-            pass
+        if not is_public:
+            server._broadcast({
+                "type": "session_info",
+                **server._session_info(),
+            })
+
+        # Auto-reflection (admin only).
+        if not is_public:
+            try:
+                import asyncio as _asyncio
+                from captain_claw.reflections import maybe_auto_reflect
+                _asyncio.create_task(maybe_auto_reflect(agent))
+            except Exception:
+                pass
 
     except Exception as e:
-        log.error("Chat error", error=str(e))
-        server._broadcast({
-            "type": "error",
-            "message": f"Error: {str(e)}",
-        })
+        log.error("Chat error", error=str(e), public=is_public)
+        send({"type": "error", "message": f"Error: {str(e)}"})
     finally:
-        server._busy = False
-        server._active_task = None
+        if is_public:
+            agent._public_busy = False  # type: ignore[attr-defined]
+        else:
+            server._busy = False
+            server._active_task = None
         # Clear any /btw instructions accumulated during this task.
-        if server.agent and hasattr(server.agent, "_btw_instructions"):
-            server.agent._btw_instructions = []
-        server._broadcast({"type": "status", "status": "ready"})
+        if hasattr(agent, "_btw_instructions"):
+            agent._btw_instructions = []
+        send({"type": "status", "status": "ready"})
