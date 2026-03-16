@@ -14,6 +14,7 @@ import base64
 import gzip
 import json
 import os
+import re
 import tempfile
 import uuid
 from pathlib import Path
@@ -56,6 +57,14 @@ _DISPATCH_SYSTEM_PROMPT = (
     "- If the task is ambiguous, use your best judgment and proceed.\n"
     "- If multiple approaches exist, pick the best one and execute it.\n"
     "- Deliver a complete, finished result — not a proposal or draft for approval.\n\n"
+    "CRITICAL — FILE WRITING RULES:\n"
+    "- Write each file EXACTLY ONCE. After a successful write, the file is DONE.\n"
+    "- NEVER rewrite, update, or overwrite a file you have already written.\n"
+    "- After writing a file, the system may compact the content in your history to "
+    "\"[written to disk: ...]\". This is NORMAL — the file IS saved correctly. "
+    "Do NOT interpret this as the file being lost or needing to be rewritten.\n"
+    "- After completing all tool calls, provide a brief text summary of what you did "
+    "and the file(s) you created, then STOP.\n\n"
     "Requesting instance: {from_instance}\n"
     "Task: {task}"
 )
@@ -564,6 +573,11 @@ class BotPortClient:
             # Run the agent.
             response = await agent.complete(effective_input)
 
+            # Scan agent response for file paths that exist on disk
+            # (files from previous runs that weren't created in this session).
+            if swarm_id and response:
+                self._extract_files_from_response(concern_id, response)
+
             # Upload any files created during execution.
             uploaded_files = []
             if swarm_id:
@@ -1000,8 +1014,17 @@ class BotPortClient:
         if not swarm_id or not created:
             return []
 
+        # Deduplicate: resolve to absolute paths and keep first occurrence.
+        seen: set[str] = set()
+        unique_paths: list[str] = []
+        for fp in created:
+            resolved = str(Path(fp).resolve())
+            if resolved not in seen:
+                seen.add(resolved)
+                unique_paths.append(fp)
+
         uploaded = []
-        for filepath in created:
+        for filepath in unique_paths:
             path = Path(filepath)
             if not path.is_file():
                 continue
@@ -1037,40 +1060,137 @@ class BotPortClient:
     def _track_file_creation(
         self, concern_id: str, tool_name: str, arguments: dict[str, Any], output: str,
     ) -> None:
-        """Detect file creation from tool outputs and track for upload."""
+        """Detect file creation from tool outputs and track for upload.
+
+        The Write tool resolves relative paths internally (e.g. ``saved/showcase/...``
+        becomes ``/abs/workspace/saved/showcase/...``).  The original ``arguments``
+        dict contains the LLM-provided *relative* path which won't resolve from CWD.
+        Instead we parse the tool **output** which always contains the resolved
+        absolute path in the form ``Written N chars (...) to /absolute/path``.
+        """
         if concern_id not in self._dispatch_created_files:
             return
 
-        # Detect Write tool creating files.
-        if tool_name.lower() in ("write", "write_file", "file_write"):
-            filepath = arguments.get("file_path", "") or arguments.get("path", "")
-            if filepath and Path(filepath).is_file():
-                self._dispatch_created_files[concern_id].append(filepath)
-                log.debug("Tracked file creation: %s", filepath)
+        tracked = self._dispatch_created_files[concern_id]
 
-        # Detect Edit tool (file might be new or modified).
-        elif tool_name.lower() in ("edit", "edit_file", "file_edit"):
-            filepath = arguments.get("file_path", "") or arguments.get("path", "")
+        def _add(fp: str) -> None:
+            resolved = str(Path(fp).resolve())
+            if not any(str(Path(p).resolve()) == resolved for p in tracked):
+                tracked.append(fp)
+                log.debug("Tracked file creation: %s", fp)
+
+        # Detect Write / Edit tool — extract resolved path from output.
+        if tool_name.lower() in ("write", "write_file", "file_write",
+                                   "edit", "edit_file", "file_edit"):
+            # Primary: parse the absolute path from tool output.
+            # Write output: "Written N chars (M lines) to /absolute/path"
+            # Edit output may vary, but often contains the path.
+            filepath = self._extract_path_from_tool_output(output)
             if filepath and Path(filepath).is_file():
-                # Only track if not already tracked.
-                if filepath not in self._dispatch_created_files[concern_id]:
-                    self._dispatch_created_files[concern_id].append(filepath)
+                _add(filepath)
+                return
+
+            # Fallback: try the argument path directly.
+            filepath = arguments.get("file_path", "") or arguments.get("path", "")
+            if filepath:
+                p = Path(filepath)
+                if p.is_file():
+                    _add(str(p.resolve()))
 
         # Detect bash commands that might create files.
         elif tool_name.lower() in ("bash", "shell", "execute"):
-            # Look for common file creation patterns in the command.
             cmd = arguments.get("command", "") or arguments.get("cmd", "")
-            # Check for redirect operators creating files.
             if ">" in cmd or "tee " in cmd:
-                # Try to extract the output file path from the command.
-                # This is heuristic — won't catch everything, but covers common cases.
                 for part in cmd.split(">"):
                     if part == cmd.split(">")[0]:
                         continue
                     filepath = part.strip().split()[0] if part.strip() else ""
-                    if filepath and Path(filepath).is_file():
-                        if filepath not in self._dispatch_created_files[concern_id]:
-                            self._dispatch_created_files[concern_id].append(filepath)
+                    if filepath:
+                        p = Path(filepath)
+                        if p.is_file():
+                            _add(str(p.resolve()))
+
+    @staticmethod
+    def _extract_path_from_tool_output(output: str) -> str:
+        """Extract the resolved file path from a Write/Edit tool output string.
+
+        Handles patterns like:
+          "Written 9587 chars (150 lines) to /abs/path/file.md"
+          "Written 9587 chars (150 lines) to /abs/path/file.md (requested: saved/...)"
+        """
+        if not output:
+            return ""
+        # Match "to <path>" — path is everything after "to " until end,
+        # optional parens, or newline.
+        m = re.search(r'\bto\s+(/[^\s()\n]+)', output)
+        if m:
+            return m.group(1).rstrip(".,;:!?")
+        return ""
+
+    def _extract_files_from_response(self, concern_id: str, response: str) -> None:
+        """Scan agent response text for file paths that exist on disk.
+
+        Agents may reference files created in previous sessions that already
+        exist in their workspace.  These won't be caught by tool-output
+        tracking, so we parse the response for path-like strings and check
+        if they point to real files.
+        """
+        if concern_id not in self._dispatch_created_files:
+            return
+
+        # Build dedup set using resolved absolute paths so relative vs
+        # absolute variants of the same file are recognized as duplicates.
+        already = set(str(Path(p).resolve()) for p in self._dispatch_created_files[concern_id])
+
+        # Match path-like strings: sequences with at least one "/" and a file
+        # extension, or absolute paths.  Covers patterns like:
+        #   saved/showcase/abc123/report.md
+        #   /home/user/output.pdf
+        #   ./results/chart.html
+        path_pattern = re.compile(
+            r'(?:^|[\s`\'"(])('                   # preceded by whitespace/quote/tick/paren
+            r'(?:[./~]|[a-zA-Z]:[\\/])'           # starts with . / ~ or drive letter
+            r'[^\s`\'"<>|*?\n]+'                   # path characters (no spaces/special)
+            r')',
+            re.MULTILINE,
+        )
+
+        for match in path_pattern.finditer(response):
+            candidate = match.group(1).rstrip(".,;:!?)]}'\"")
+            if not candidate:
+                continue
+
+            path = Path(candidate).expanduser()
+
+            # Try multiple base directories for relative paths:
+            # 1. As-is (if absolute)
+            # 2. Relative to CWD
+            # 3. Relative to workspace root (CWD/workspace)
+            candidates: list[Path] = []
+            if path.is_absolute():
+                candidates.append(path)
+            else:
+                candidates.append(Path.cwd() / path)
+                candidates.append(Path.cwd() / "workspace" / path)
+                # Also try workspace config path if available.
+                try:
+                    from captain_claw.config import get_config
+                    ws = get_config().resolved_workspace_path()
+                    candidates.append(ws / path)
+                except Exception:
+                    pass
+
+            for cand in candidates:
+                try:
+                    resolved = str(cand.resolve())
+                    if cand.is_file() and resolved not in already:
+                        if cand.stat().st_size <= 50 * 1024 * 1024:
+                            self._dispatch_created_files[concern_id].append(str(cand.resolve()))
+                            already.add(resolved)
+                            log.debug("Extracted file from response: %s", cand)
+                        break
+                except (OSError, ValueError):
+                    continue
 
     # ── Capabilities ─────────────────────────────────────────────
 

@@ -494,57 +494,48 @@ function renderSwarmEmpty() {
   el.innerHTML = '<div class="swarm-empty-main"><p class="empty-state">Select or create a swarm to get started</p></div>';
 }
 
+function _updateActionsPanel(swarm, tasks) {
+  /* Re-render the actions panel (e.g. after rephrase reveals the Decompose button). */
+  const panel = document.querySelector(".swarm-actions-panel");
+  if (panel) panel.innerHTML = _buildActionsPanel(swarm, tasks);
+}
+
 function _updateSwarmDetailInPlace(swarm) {
   /* Incremental update — refresh dynamic content without rebuilding toolbar/tabs. */
   const tasks = swarm.tasks || [];
   const edges = swarm.edges || [];
 
-  // Update rephrased text (appears after rephrase while still in draft).
-  const rephrasedEl = document.querySelector(".swarm-detail-rephrased");
-  if (swarm.rephrased_task && !rephrasedEl) {
-    // Insert rephrased div after task div.
-    const taskEl = document.querySelector(".swarm-detail-task");
-    if (taskEl) {
-      const div = document.createElement("div");
-      div.className = "swarm-detail-rephrased";
-      div.innerHTML = `<div class="md-label">Rephrased:</div>${renderMd(swarm.rephrased_task)}`;
-      taskEl.after(div);
-    }
+  // Update rephrased text in the new prompt panel.
+  const rephrasedEl = document.getElementById("swarm-rephrased-content");
+  const promptPanel = document.querySelector(".swarm-prompt-panel");
+  if (swarm.rephrased_task && !rephrasedEl && promptPanel) {
+    const div = document.createElement("div");
+    div.className = "swarm-prompt-rephrased";
+    div.id = "swarm-rephrased-content";
+    div.innerHTML = `<div class="prompt-label">Rephrased</div>${renderMd(swarm.rephrased_task)}`;
+    promptPanel.appendChild(div);
+    // Show decompose button if it was hidden.
+    _updateActionsPanel(swarm, tasks);
   } else if (swarm.rephrased_task && rephrasedEl) {
-    rephrasedEl.innerHTML = `<div class="md-label">Rephrased:</div>${renderMd(swarm.rephrased_task)}`;
+    rephrasedEl.innerHTML = `<div class="prompt-label">Rephrased</div>${renderMd(swarm.rephrased_task)}`;
   }
 
   // Update decomposition reasoning.
   const reasoningEl = document.querySelector(".swarm-detail-reasoning");
   const reasoning = swarm.metadata?.decomposition_reasoning;
-  if (reasoning && !reasoningEl) {
-    const anchor = document.querySelector(".swarm-detail-rephrased") || document.querySelector(".swarm-detail-task");
-    if (anchor) {
-      const div = document.createElement("div");
-      div.className = "swarm-detail-reasoning";
-      div.innerHTML = `<strong>Decomposition strategy:</strong> ${esc(reasoning)}`;
-      anchor.after(div);
-    }
+  if (reasoning && !reasoningEl && promptPanel) {
+    const div = document.createElement("div");
+    div.className = "swarm-detail-reasoning";
+    div.innerHTML = `<strong>Strategy:</strong> ${esc(reasoning)}`;
+    promptPanel.appendChild(div);
   } else if (reasoning && reasoningEl) {
-    reasoningEl.innerHTML = `<strong>Decomposition strategy:</strong> ${esc(reasoning)}`;
+    reasoningEl.innerHTML = `<strong>Strategy:</strong> ${esc(reasoning)}`;
   }
 
   // Update pipeline steps.
   const pipelineEl = document.querySelector(".pipeline-steps");
   if (pipelineEl) {
-    const steps = [
-      { label: "Task", done: !!swarm.original_task },
-      { label: "Rephrase", done: !!swarm.rephrased_task },
-      { label: "Decompose", done: tasks.length > 0 },
-      { label: "Agents", done: tasks.some(t => t.assigned_persona) },
-      { label: "Execute", done: swarm.status === "running" || swarm.status === "completed" },
-    ];
-    pipelineEl.innerHTML = steps.map((s, i) =>
-      `<div class="pipeline-step ${s.done ? 'done' : ''}">
-        <span class="pipeline-step-num">${i + 1}</span>
-        <span class="pipeline-step-label">${s.label}</span>
-      </div>`
-    ).join('<div class="pipeline-arrow">&#x2192;</div>');
+    pipelineEl.outerHTML = _buildPipelineSteps(swarm, tasks);
   }
 
   const taskStats = {
@@ -605,6 +596,111 @@ function _updateSwarmDetailInPlace(swarm) {
   }
 }
 
+function _buildActionsPanel(swarm, tasks) {
+  const hasRephrased = !!swarm.rephrased_task;
+  const hasTasks = tasks.length > 0;
+  const modelSel = `<div class="model-select-row">
+    <div class="action-group-label">Model</div>
+    ${buildModelSelector()}
+  </div>`;
+
+  if (swarm.status === "draft") {
+    return `
+      <div class="action-group-label">Workflow</div>
+      <button class="action-btn" onclick="rephraseTask()" id="btn-rephrase">
+        <span class="action-icon">✏️</span>
+        <span class="action-label">Rephrase<small>Refine task description</small></span>
+      </button>
+      ${hasRephrased ? `
+      <button class="action-btn action-btn-primary" onclick="decomposeTask()" id="btn-decompose">
+        <span class="action-icon">🔀</span>
+        <span class="action-label">Decompose<small>Split into subtasks</small></span>
+      </button>` : ''}
+      <button class="action-btn action-btn-danger" onclick="swarmAction('cancel')">
+        <span class="action-icon">✕</span>
+        <span class="action-label">Cancel</span>
+      </button>
+      ${modelSel}`;
+  }
+  if (swarm.status === "decomposing") {
+    return `
+      <div class="action-group-label">Status</div>
+      <button class="action-btn" disabled>
+        <span class="action-icon">⏳</span>
+        <span class="action-label">Decomposing...<small>Please wait</small></span>
+      </button>`;
+  }
+  if (swarm.status === "ready") {
+    return `
+      <div class="action-group-label">Actions</div>
+      <button class="action-btn action-btn-success" onclick="swarmAction('start')" id="btn-start">
+        <span class="action-icon">▶</span>
+        <span class="action-label">Execute<small>Start the swarm</small></span>
+      </button>
+      <button class="action-btn" onclick="decomposeTask()" id="btn-decompose">
+        <span class="action-icon">🔀</span>
+        <span class="action-label">Re-decompose<small>Regenerate subtasks</small></span>
+      </button>
+      <button class="action-btn" onclick="selectAgents()">
+        <span class="action-icon">🤖</span>
+        <span class="action-label">Select Agents<small>Assign personas</small></span>
+      </button>
+      <button class="action-btn" onclick="saveAsTemplate()">
+        <span class="action-icon">💾</span>
+        <span class="action-label">Save Template</span>
+      </button>
+      <button class="action-btn action-btn-danger" onclick="swarmAction('cancel')">
+        <span class="action-icon">✕</span>
+        <span class="action-label">Cancel</span>
+      </button>
+      ${modelSel}`;
+  }
+  if (swarm.status === "running") {
+    return `
+      <div class="action-group-label">Control</div>
+      <button class="action-btn action-btn-warning" onclick="swarmAction('pause')">
+        <span class="action-icon">⏸</span>
+        <span class="action-label">Pause<small>Suspend execution</small></span>
+      </button>
+      <button class="action-btn action-btn-danger" onclick="swarmAction('cancel')">
+        <span class="action-icon">✕</span>
+        <span class="action-label">Cancel</span>
+      </button>`;
+  }
+  if (swarm.status === "paused") {
+    return `
+      <div class="action-group-label">Control</div>
+      <button class="action-btn action-btn-success" onclick="swarmAction('resume')">
+        <span class="action-icon">▶</span>
+        <span class="action-label">Resume<small>Continue execution</small></span>
+      </button>
+      <button class="action-btn action-btn-danger" onclick="swarmAction('cancel')">
+        <span class="action-icon">✕</span>
+        <span class="action-label">Cancel</span>
+      </button>`;
+  }
+  return "";
+}
+
+function _buildPipelineSteps(swarm, tasks) {
+  const steps = [
+    { label: "Task",      done: !!swarm.original_task },
+    { label: "Rephrase",  done: !!swarm.rephrased_task },
+    { label: "Decompose", done: tasks.length > 0 },
+    { label: "Agents",    done: tasks.some(t => t.assigned_persona) },
+    { label: "Execute",   done: swarm.status === "running" || swarm.status === "completed" },
+  ];
+  // Determine active step (first not-done).
+  const activeIdx = steps.findIndex(s => !s.done);
+  return `<div class="pipeline-steps">${steps.map((s, i) => {
+    const cls = s.done ? 'done' : (i === activeIdx ? 'active' : '');
+    return `<div class="pipeline-step ${cls}">
+      <span class="pipeline-step-num">${s.done ? '✓' : i + 1}</span>
+      <span class="pipeline-step-label">${s.label}</span>
+    </div>`;
+  }).join('<div class="pipeline-arrow">→</div>')}</div>`;
+}
+
 function renderSwarmDetail(swarm) {
   const el = $("#swarm-main");
   if (!el) return;
@@ -623,67 +719,45 @@ function renderSwarmDetail(swarm) {
     pending_approval: tasks.filter(t => t.status === "pending_approval").length,
   };
 
-  // Action buttons based on state.
-  let actions = "";
-  // Model selector for LLM operations.
-  const modelSelector = buildModelSelector();
-
-  if (swarm.status === "draft") {
-    actions = `${modelSelector}
-               <button class="btn btn-sm" onclick="rephraseTask()" id="btn-rephrase">Rephrase</button>
-               <button class="btn btn-sm btn-primary" onclick="decomposeTask()" id="btn-decompose">Decompose</button>
-               <button class="btn btn-danger btn-sm" onclick="swarmAction('cancel')">Cancel</button>`;
-  } else if (swarm.status === "decomposing") {
-    actions = `<span class="swarm-status-badge status-swarm-decomposing">Decomposing...</span>`;
-  } else if (swarm.status === "ready") {
-    actions = `${modelSelector}
-               <button class="btn btn-sm" onclick="decomposeTask()">Re-decompose</button>
-               <button class="btn btn-sm" onclick="selectAgents()">Select Agents</button>
-               <button class="btn btn-sm" onclick="saveAsTemplate()">Save Template</button>
-               <button class="btn btn-sm btn-primary" onclick="swarmAction('start')">Start</button>
-               <button class="btn btn-danger btn-sm" onclick="swarmAction('cancel')">Cancel</button>`;
-  } else if (swarm.status === "running") {
-    actions = `<button class="btn btn-warning btn-sm" onclick="swarmAction('pause')">Pause</button>
-               <button class="btn btn-danger btn-sm" onclick="swarmAction('cancel')">Cancel</button>`;
-  } else if (swarm.status === "paused") {
-    actions = `<button class="btn btn-primary btn-sm" onclick="swarmAction('resume')">Resume</button>
-               <button class="btn btn-danger btn-sm" onclick="swarmAction('cancel')">Cancel</button>`;
-  }
-
   const canAddTasks = !swarm.status || swarm.status === "draft" || swarm.status === "ready" || swarm.status === "paused";
-  const isDraft = swarm.status === "draft";
 
-  // Pipeline steps indicator.
-  const steps = [
-    { label: "Task", done: !!swarm.original_task },
-    { label: "Rephrase", done: !!swarm.rephrased_task },
-    { label: "Decompose", done: tasks.length > 0 },
-    { label: "Agents", done: tasks.some(t => t.assigned_persona) },
-    { label: "Execute", done: swarm.status === "running" || swarm.status === "completed" },
-  ];
-  const pipelineHtml = `<div class="pipeline-steps">${steps.map((s, i) =>
-    `<div class="pipeline-step ${s.done ? 'done' : ''}">
-      <span class="pipeline-step-num">${i + 1}</span>
-      <span class="pipeline-step-label">${s.label}</span>
-    </div>`
-  ).join('<div class="pipeline-arrow">&#x2192;</div>')}</div>`;
+  // Build prompt panel content.
+  let promptContent = `
+    <div class="swarm-prompt-original">
+      <div class="prompt-label">Original Task</div>
+      ${renderMd(swarm.original_task)}
+    </div>`;
+  if (swarm.rephrased_task) {
+    promptContent += `
+    <div class="swarm-prompt-rephrased" id="swarm-rephrased-content">
+      <div class="prompt-label">Rephrased</div>
+      ${renderMd(swarm.rephrased_task)}
+    </div>`;
+  }
+  if (swarm.metadata?.decomposition_reasoning) {
+    promptContent += `<div class="swarm-detail-reasoning"><strong>Strategy:</strong> ${esc(swarm.metadata.decomposition_reasoning)}</div>`;
+  }
 
   el.innerHTML = `
     <div class="swarm-detail">
-      <div class="swarm-detail-toolbar">
+      <div class="swarm-detail-header">
         <div class="swarm-detail-info">
           <h2>${esc(swarm.name || 'Untitled Swarm')}</h2>
           <span class="swarm-status-badge status-swarm-${swarm.status}">${swarm.status}</span>
           <span class="error-policy-badge policy-${swarm.error_policy || 'fail_fast'}">${(swarm.error_policy || 'fail_fast').replace(/_/g, ' ')}</span>
         </div>
-        <div class="swarm-detail-actions">${actions}</div>
       </div>
 
-      ${pipelineHtml}
+      ${_buildPipelineSteps(swarm, tasks)}
 
-      <div class="swarm-detail-task">${renderMd(swarm.original_task)}</div>
-      ${swarm.rephrased_task ? `<div class="swarm-detail-rephrased"><div class="md-label">Rephrased:</div>${renderMd(swarm.rephrased_task)}</div>` : ""}
-      ${swarm.metadata?.decomposition_reasoning ? `<div class="swarm-detail-reasoning"><strong>Decomposition strategy:</strong> ${esc(swarm.metadata.decomposition_reasoning)}</div>` : ""}
+      <div class="swarm-command-centre">
+        <div class="swarm-actions-panel">
+          ${_buildActionsPanel(swarm, tasks)}
+        </div>
+        <div class="swarm-prompt-panel">
+          ${promptContent}
+        </div>
+      </div>
 
       <div class="swarm-detail-stats">
         <span class="stat-pill">${taskStats.total} tasks</span>
@@ -929,29 +1003,44 @@ async function swarmAction(action) {
 
 /* ---- Decompose workflow ---- */
 
+function _setActionBtnState(btn, loading, loadingText) {
+  if (!btn) return;
+  const labelEl = btn.querySelector(".action-label");
+  if (loading) {
+    btn.disabled = true;
+    btn._origLabel = labelEl ? labelEl.innerHTML : btn.textContent;
+    if (labelEl) labelEl.innerHTML = `${loadingText}<small>Please wait...</small>`;
+    else btn.textContent = loadingText;
+  } else {
+    btn.disabled = false;
+    if (labelEl && btn._origLabel) labelEl.innerHTML = btn._origLabel;
+  }
+}
+
 async function rephraseTask() {
   if (!currentSwarm) return;
   const btn = document.getElementById("btn-rephrase");
-  if (btn) { btn.disabled = true; btn.textContent = "Rephrasing..."; }
+  _setActionBtnState(btn, true, "Rephrasing...");
 
   const result = await swarmAPI("POST", `/swarms/${currentSwarm}/rephrase`, { model: getSelectedModel() });
   if (result._error) {
     alert("Rephrase failed: " + (result.error || "Unknown error"));
   }
-  if (btn) { btn.disabled = false; btn.textContent = "Rephrase"; }
+  _setActionBtnState(btn, false);
+  _lastSwarmStatus = "";  // Force full re-render to show Decompose button.
   await refreshSwarmDetail();
 }
 
 async function decomposeTask() {
   if (!currentSwarm) return;
   const btn = document.getElementById("btn-decompose");
-  if (btn) { btn.disabled = true; btn.textContent = "Decomposing..."; }
+  _setActionBtnState(btn, true, "Decomposing...");
 
   const result = await swarmAPI("POST", `/swarms/${currentSwarm}/decompose`, { model: getSelectedModel() });
   if (result._error) {
     alert("Decomposition failed: " + (result.error || "Unknown error"));
   }
-  if (btn) { btn.disabled = false; btn.textContent = "Decompose"; }
+  _setActionBtnState(btn, false);
   await refreshSwarmDetail();
 }
 

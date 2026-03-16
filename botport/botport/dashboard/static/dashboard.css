@@ -620,11 +620,13 @@ main {
   padding: 20px 24px;
 }
 
-.swarm-detail-toolbar {
+/* ---- Swarm header row ---- */
+
+.swarm-detail-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: 16px;
 }
 
 .swarm-detail-info {
@@ -634,50 +636,247 @@ main {
 }
 
 .swarm-detail-info h2 {
-  font-size: 18px;
-  font-weight: 600;
+  font-size: 20px;
+  font-weight: 700;
+  margin: 0;
 }
 
-.swarm-detail-actions {
-  display: flex;
-  gap: 8px;
-}
+/* ---- Command centre (actions + prompt side by side) ---- */
 
-/* ---- Pipeline steps ---- */
-
-.pipeline-steps {
+.swarm-command-centre {
   display: flex;
-  align-items: center;
-  gap: 0;
+  gap: 16px;
   margin-bottom: 16px;
-  padding: 12px 16px;
+  min-height: 120px;
+  max-height: 45vh;
+}
+
+/* Left panel: actions/buttons — 30% width */
+.swarm-actions-panel {
+  flex: 0 0 30%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
 }
 
+.swarm-actions-panel .action-group-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  margin: 0 0 2px 0;
+}
+
+.swarm-actions-panel .action-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+  width: 100%;
+  text-align: left;
+}
+
+.swarm-actions-panel .action-btn:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--accent-dim);
+  transform: translateY(-1px);
+}
+
+.swarm-actions-panel .action-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.swarm-actions-panel .action-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.swarm-actions-panel .action-btn .action-icon {
+  font-size: 20px;
+  width: 28px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.swarm-actions-panel .action-btn .action-label {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.swarm-actions-panel .action-btn .action-label small {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+
+.swarm-actions-panel .action-btn-primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.swarm-actions-panel .action-btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover, #3b82f6);
+  border-color: var(--accent-hover, #3b82f6);
+}
+
+.swarm-actions-panel .action-btn-danger {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.swarm-actions-panel .action-btn-danger:hover:not(:disabled) {
+  background: var(--red);
+  color: #fff;
+}
+
+.swarm-actions-panel .action-btn-success {
+  background: var(--green);
+  color: #fff;
+  border-color: var(--green);
+}
+
+.swarm-actions-panel .action-btn-success:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.swarm-actions-panel .action-btn-warning {
+  border-color: var(--yellow, #eab308);
+  color: var(--yellow, #eab308);
+}
+
+.swarm-actions-panel .action-btn-warning:hover:not(:disabled) {
+  background: var(--yellow, #eab308);
+  color: #000;
+}
+
+.swarm-actions-panel .model-select-row {
+  margin-top: auto;
+}
+
+.swarm-actions-panel .model-select-row select {
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+/* Right panel: prompt + rephrased — 70% width */
+.swarm-prompt-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.swarm-prompt-original {
+  font-size: 14px;
+  color: var(--text);
+  line-height: 1.6;
+  padding: 14px 16px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.swarm-prompt-original .prompt-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.swarm-prompt-rephrased {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.6;
+  padding: 14px 16px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  border-left: 3px solid var(--accent);
+  flex: 1;
+  overflow-y: auto;
+}
+
+.swarm-prompt-rephrased .prompt-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+
+.swarm-detail-reasoning {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 10px 14px;
+  background: var(--bg);
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent-dim);
+}
+
+/* ---- Pipeline steps (compact horizontal) ---- */
+
+.pipeline-steps {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin-bottom: 12px;
+}
+
 .pipeline-step {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
 }
 
 .pipeline-step-num {
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
   background: var(--border);
   color: var(--text-dim);
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 700;
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: background 0.3s, color 0.3s;
 }
 
 .pipeline-step.done .pipeline-step-num {
   background: var(--green);
   color: #fff;
+}
+
+.pipeline-step.active .pipeline-step-num {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.25);
 }
 
 .pipeline-step-label {
@@ -690,38 +889,25 @@ main {
   color: var(--text);
 }
 
+.pipeline-step.active .pipeline-step-label {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .pipeline-arrow {
   color: var(--text-dim);
   font-size: 14px;
-  margin: 0 8px;
+  margin: 0 6px;
+  opacity: 0.5;
 }
 
-.swarm-detail-reasoning {
-  font-size: 13px;
-  color: var(--text-dim);
-  margin-bottom: 12px;
-  padding: 8px 12px;
-  background: var(--bg);
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--accent-dim);
-}
-
+/* Legacy classes kept for backward compat */
 .swarm-detail-task {
-  font-size: 14px;
-  color: var(--text);
-  margin-bottom: 8px;
-  line-height: 1.5;
+  display: none;
 }
 
 .swarm-detail-rephrased {
-  font-size: 13px;
-  color: var(--text-dim);
-  margin-bottom: 12px;
-  padding: 8px 12px;
-  background: var(--bg);
-  border-radius: 6px;
-  border: 1px solid var(--border);
+  display: none;
 }
 
 .swarm-detail-stats {
@@ -1732,22 +1918,22 @@ h6.md-h { font-size: 11px; }
   margin-bottom: 4px;
 }
 
-.swarm-detail-task ul,
-.swarm-detail-rephrased ul,
-.swarm-detail-task ol,
-.swarm-detail-rephrased ol {
+.swarm-detail-task ul, .swarm-detail-rephrased ul,
+.swarm-prompt-original ul, .swarm-prompt-rephrased ul,
+.swarm-detail-task ol, .swarm-detail-rephrased ol,
+.swarm-prompt-original ol, .swarm-prompt-rephrased ol {
   padding-left: 20px;
   margin: 4px 0;
 }
 
-.swarm-detail-task li,
-.swarm-detail-rephrased li {
+.swarm-detail-task li, .swarm-detail-rephrased li,
+.swarm-prompt-original li, .swarm-prompt-rephrased li {
   margin: 2px 0;
   font-size: 13px;
 }
 
-.swarm-detail-task hr,
-.swarm-detail-rephrased hr {
+.swarm-detail-task hr, .swarm-detail-rephrased hr,
+.swarm-prompt-original hr, .swarm-prompt-rephrased hr {
   border: none;
   border-top: 1px solid var(--border);
   margin: 8px 0;
@@ -1794,6 +1980,13 @@ h6.md-h { font-size: 11px; }
   color: var(--text);
   cursor: pointer;
   appearance: auto;
+}
+
+.swarm-actions-panel .model-select-input {
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 12px;
+  border-radius: 6px;
 }
 
 .model-select-input:focus {

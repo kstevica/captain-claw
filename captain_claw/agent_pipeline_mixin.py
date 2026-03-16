@@ -1493,6 +1493,7 @@ class AgentPipelineMixin:
         """Capture compact progress snapshot for stuck/progress detection."""
         successful_tool_count = 0
         write_success_count = 0
+        write_paths: set[str] = set()  # unique file paths written
         tool_signatures: set[str] = set()
         assistant_signatures: set[str] = set()
         if self.session:
@@ -1512,17 +1513,25 @@ class AgentPipelineMixin:
                 is_error = content.strip().lower().startswith("error:")
                 if not is_error:
                     successful_tool_count += 1
-                    if tool_name == "write":
-                        write_success_count += 1
-                    # Only count successful tool calls as progress;
-                    # failed calls with unique signatures should not
-                    # reset the stagnation counter.
                     args = msg.get("tool_arguments")
-                    try:
-                        args_text = json.dumps(args, sort_keys=True, ensure_ascii=True) if isinstance(args, dict) else "{}"
-                    except Exception:
-                        args_text = "{}"
-                    tool_signatures.add(f"{tool_name}|{args_text}")
+                    if tool_name in ("write", "edit", "file_write", "file_edit"):
+                        # For write/edit: track unique paths, not call count.
+                        # Rewriting the same file is not new progress.
+                        write_path = ""
+                        if isinstance(args, dict):
+                            write_path = str(args.get("path", "") or args.get("file_path", ""))
+                        write_paths.add(write_path)
+                        write_success_count += 1
+                        # Use only tool+path as signature — different content
+                        # to the same path should NOT count as unique progress.
+                        tool_signatures.add(f"{tool_name}|{write_path}")
+                    else:
+                        # For non-write tools, use full args as signature.
+                        try:
+                            args_text = json.dumps(args, sort_keys=True, ensure_ascii=True) if isinstance(args, dict) else "{}"
+                        except Exception:
+                            args_text = "{}"
+                        tool_signatures.add(f"{tool_name}|{args_text}")
 
         pipeline_index = -1
         pipeline_task_id = ""
@@ -1533,6 +1542,7 @@ class AgentPipelineMixin:
         return {
             "successful_tools": successful_tool_count,
             "write_success": write_success_count,
+            "unique_write_paths": len(write_paths),
             "unique_tool_signatures": len(tool_signatures),
             "unique_assistant_signatures": len(assistant_signatures),
             "pipeline_index": pipeline_index,
@@ -1542,12 +1552,16 @@ class AgentPipelineMixin:
     @staticmethod
     def _has_turn_progress(previous: dict[str, Any], current: dict[str, Any]) -> bool:
         """Whether turn made meaningful progress between snapshots."""
-        if int(current.get("write_success", 0)) > int(previous.get("write_success", 0)):
+        # Use unique write paths — rewriting the same file is NOT progress.
+        if int(current.get("unique_write_paths", 0)) > int(previous.get("unique_write_paths", 0)):
             return True
         if int(current.get("unique_tool_signatures", 0)) > int(previous.get("unique_tool_signatures", 0)):
             return True
-        if int(current.get("unique_assistant_signatures", 0)) > int(previous.get("unique_assistant_signatures", 0)):
-            return True
+        # Assistant text variation alone is NOT progress — the LLM always
+        # produces slightly different text.  Only count it when accompanied
+        # by at least one new tool action (new write path or tool signature).
+        # This prevents write-loop false-progress where the agent rewrites
+        # the same file with different content each iteration.
         prev_task = str(previous.get("pipeline_task_id", "")).strip()
         curr_task = str(current.get("pipeline_task_id", "")).strip()
         if curr_task and curr_task != prev_task:

@@ -706,6 +706,9 @@ class AgentOrchestrationMixin:
         progress_window: list[bool] = []
         previous_progress_snapshot: dict[str, Any] | None = None
         last_completion_feedback_signature = ""
+        # Write-loop detection: track how many times each file path is written.
+        _write_path_counts: dict[str, int] = {}
+        _write_loop_nudged = False
         if planned_turn_iterations != base_turn_iterations:
             self._emit_tool_output(
                 "completion_gate",
@@ -1059,6 +1062,50 @@ class AgentOrchestrationMixin:
                     task_policy=active_task_tool_policy,
                     abort_event=turn_abort_event,
                 )
+
+                # ── Write-loop detection ───────────────────────────
+                # If the agent keeps rewriting the same file(s), it's
+                # stuck in a loop.  Inject a nudge to finalize.
+                if _tool_results and not _write_loop_nudged:
+                    _write_tools_this_iter = []
+                    for _tc_orig in response.tool_calls:
+                        _tn = str(_tc_orig.name).lower()
+                        if _tn in ("write", "edit", "file_write", "file_edit"):
+                            _tc_args = _tc_orig.arguments
+                            if isinstance(_tc_args, str):
+                                try:
+                                    _tc_args = json.loads(_tc_args)
+                                except (json.JSONDecodeError, TypeError):
+                                    _tc_args = {}
+                            if isinstance(_tc_args, dict):
+                                _wp = str(_tc_args.get("path", "") or _tc_args.get("file_path", ""))
+                                if _wp:
+                                    _write_tools_this_iter.append(_wp)
+                    for _wp in _write_tools_this_iter:
+                        _write_path_counts[_wp] = _write_path_counts.get(_wp, 0) + 1
+                    # If ALL tool calls this iteration are rewrites of
+                    # already-written files (2+ times), break the loop.
+                    if (
+                        _write_tools_this_iter
+                        and len(_write_tools_this_iter) == len(response.tool_calls)
+                        and all(_write_path_counts.get(p, 0) >= 2 for p in _write_tools_this_iter)
+                    ):
+                        _write_loop_nudged = True
+                        log.info(
+                            "Write-loop detected: agent rewrote same file(s)",
+                            paths=list(set(_write_tools_this_iter)),
+                            counts={p: _write_path_counts[p] for p in set(_write_tools_this_iter)},
+                        )
+                        self._add_session_message(
+                            role="user",
+                            content=(
+                                "[system] STOP — you have already written this file. "
+                                "The file is saved and complete. "
+                                "Do NOT rewrite it again. Provide your final text "
+                                "response now summarizing what you did and referencing "
+                                "the file(s) you created. Do NOT call any more tools."
+                            ),
+                        )
 
                 # ── Free iteration for successful glob ────────────
                 # When glob finds files, the iteration was purely
