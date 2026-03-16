@@ -9,7 +9,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 import httpx
 
@@ -151,6 +151,30 @@ class LLMProvider(ABC):
     ) -> AsyncIterator[str]:
         pass
 
+    async def complete_with_callback(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> LLMResponse:
+        """Complete with optional streaming callback.
+
+        Streams text chunks to *on_chunk* in real time while still returning
+        the full ``LLMResponse`` (including tool_calls and usage).
+        Default implementation delegates to ``complete()`` and sends the
+        full content as one chunk.  Subclasses may override with true
+        token-level streaming.
+        """
+        response = await self.complete(messages, tools, temperature, max_tokens)
+        if on_chunk and response.content:
+            try:
+                on_chunk(response.content)
+            except Exception:
+                pass
+        return response
+
     @abstractmethod
     def count_tokens(self, text: str) -> int:
         pass
@@ -205,6 +229,7 @@ def _normalize_provider_name(provider: str) -> str:
         "grok": "xai",
         "xai": "xai",
         "ollama": "ollama",
+        "openrouter": "openrouter",
     }
     return aliases.get(key, key)
 
@@ -214,6 +239,12 @@ def _provider_model_name(provider: str, model: str) -> str:
     cleaned = (model or "").strip()
     if not cleaned:
         return cleaned
+    # OpenRouter model IDs already contain a slash (e.g. nvidia/model-name),
+    # but LiteLLM still needs the openrouter/ prefix to route correctly.
+    if provider == "openrouter":
+        if cleaned.startswith("openrouter/"):
+            return cleaned
+        return f"openrouter/{cleaned}"
     if "/" in cleaned:
         return cleaned
     return f"{provider}/{cleaned}"
@@ -266,11 +297,15 @@ def _resolve_api_key(provider: str, explicit_api_key: str | None) -> str | None:
         val = os.getenv("XAI_API_KEY") or None
         if val:
             return val
+    elif provider == "openrouter":
+        val = os.getenv("OPENROUTER_API_KEY") or None
+        if val:
+            return val
     # Fallback: provider_keys from config (settings UI).
     try:
         from captain_claw.config import get_config
         pk = get_config().provider_keys
-        pk_map = {"openai": pk.openai, "anthropic": pk.anthropic, "gemini": pk.gemini, "xai": pk.xai}
+        pk_map = {"openai": pk.openai, "anthropic": pk.anthropic, "gemini": pk.gemini, "xai": pk.xai, "openrouter": pk.openrouter}
         pk_val = str(pk_map.get(provider, "") or "").strip()
         if pk_val:
             return pk_val
@@ -1205,13 +1240,20 @@ class LiteLLMProvider(LLMProvider):
             kwargs["extra_headers"] = self.extra_headers
         return kwargs
 
-    async def _collect_streaming_response(self, stream: Any) -> dict[str, Any]:
+    async def _collect_streaming_response(
+        self,
+        stream: Any,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
         """Collect an async streaming response into a unified response dict.
 
         Some providers (notably Gemini via LiteLLM) may return a streaming
         object even when ``stream=False``.  This helper iterates the stream
         and reassembles the chunks into the standard non-streaming format
         expected by :meth:`complete`.
+
+        When *on_chunk* is provided, each text delta is forwarded to the
+        callback in real time (for UI streaming).
         """
         content_parts: list[str] = []
         collected_tool_calls: dict[int, dict[str, Any]] = {}
@@ -1233,13 +1275,28 @@ class LiteLLMProvider(LLMProvider):
                 if c:
                     if isinstance(c, str):
                         content_parts.append(c)
+                        if on_chunk:
+                            try:
+                                on_chunk(c)
+                            except Exception:
+                                pass
                     elif isinstance(c, list):
                         for part in c:
                             text = _obj_get(part, "text", "")
                             if text:
                                 content_parts.append(str(text))
+                                if on_chunk:
+                                    try:
+                                        on_chunk(str(text))
+                                    except Exception:
+                                        pass
                     else:
                         content_parts.append(str(c))
+                        if on_chunk:
+                            try:
+                                on_chunk(str(c))
+                            except Exception:
+                                pass
 
                 # Finish reason (last chunk wins)
                 fr = _obj_get(first, "finish_reason", "")
@@ -1262,6 +1319,15 @@ class LiteLLMProvider(LLMProvider):
                     args = str(_obj_get(fn, "arguments", "") or "")
                     if args:
                         collected_tool_calls[idx]["function"]["arguments"] += args
+                        # Stream tool call argument deltas too — this
+                        # covers long write/code-generation tool calls
+                        # where the model spends most of its tokens on
+                        # the tool arguments rather than text content.
+                        if on_chunk:
+                            try:
+                                on_chunk(args)
+                            except Exception:
+                                pass
 
                 # Usage (typically on the final chunk)
                 u = _obj_get(chunk, "usage", None)
@@ -1466,6 +1532,100 @@ class LiteLLMProvider(LLMProvider):
                 raise LLMAPIError(message, status_code=int(status_code))
             raise LLMError(message)
 
+    async def complete_with_callback(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        on_chunk: Callable[[str], None] | None = None,
+    ) -> LLMResponse:
+        """Stream completion with real-time text callback.
+
+        Uses ``stream=True`` so text chunks are forwarded to *on_chunk*
+        as they arrive, while still returning the full ``LLMResponse``
+        with tool_calls, usage, and finish_reason.
+        """
+        if not on_chunk:
+            return await self.complete(messages, tools, temperature, max_tokens)
+
+        try:
+            from litellm import acompletion
+        except Exception as e:
+            raise LLMError(f"LiteLLM is required for provider '{self.provider}': {e}")
+
+        estimated = 0
+        if self.rate_limiter:
+            estimated = self._estimate_request_tokens(messages, max_tokens or self.max_tokens)
+            await self.rate_limiter.acquire(estimated)
+
+        try:
+            kwargs = self._request_kwargs(
+                messages=messages,
+                tools=tools,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            )
+            # Request usage in the final stream chunk.
+            kwargs["stream_options"] = {"include_usage": True}
+
+            stream = await acompletion(**kwargs)
+            collected = await self._collect_streaming_response(stream, on_chunk=on_chunk)
+
+            # Parse the collected dict into an LLMResponse (same as complete()).
+            choices = _obj_get(collected, "choices", [{}])
+            if not choices:
+                raise LLMError(f"{self.provider} returned empty choices (streaming)")
+            first_choice = choices[0]
+            choice = _obj_get(first_choice, "message", {})
+            raw_content = _obj_get(choice, "content", "") or ""
+            if isinstance(raw_content, list):
+                text_parts = []
+                for part in raw_content:
+                    t = _obj_get(part, "text", "")
+                    if t:
+                        text_parts.append(str(t))
+                content = "".join(text_parts)
+            else:
+                content = str(raw_content) if raw_content else ""
+            finish_reason = str(_obj_get(first_choice, "finish_reason", "") or "")
+
+            tool_calls: list[ToolCall] = []
+            raw_calls = _obj_get(choice, "tool_calls", []) or []
+            for idx, raw_call in enumerate(raw_calls, start=1):
+                function = _obj_get(raw_call, "function", {}) or {}
+                name = str(_obj_get(function, "name", "") or "")
+                raw_args = _obj_get(function, "arguments", {})
+                if isinstance(raw_args, str):
+                    arguments = _safe_json_loads(raw_args)
+                elif isinstance(raw_args, dict):
+                    arguments = raw_args
+                else:
+                    arguments = {}
+                tool_calls.append(ToolCall(
+                    id=str(_obj_get(raw_call, "id", f"call_{idx}") or f"call_{idx}"),
+                    name=name,
+                    arguments=arguments,
+                ))
+
+            usage = _extract_usage(_obj_get(collected, "usage", None))
+            if self.rate_limiter:
+                self.rate_limiter.record_actual(usage.get("total_tokens", 0), estimated)
+            return LLMResponse(
+                content=str(content),
+                tool_calls=tool_calls,
+                model=str(_obj_get(collected, "model", self.model) or self.model),
+                usage=usage,
+                finish_reason=finish_reason,
+            )
+        except Exception as e:
+            status_code = _obj_get(e, "status_code", None)
+            message = f"{self.provider} streaming callback failed: {e}"
+            if status_code is not None:
+                raise LLMAPIError(message, status_code=int(status_code))
+            raise LLMError(message)
+
     def count_tokens(self, text: str) -> int:
         if not text:
             return 0
@@ -1496,6 +1656,7 @@ def create_provider(
     - `anthropic` / `claude`
     - `gemini` / `google`
     - `grok` / `xai`
+    - `openrouter`
     """
     normalized = _normalize_provider_name(provider)
 
@@ -1521,7 +1682,7 @@ def create_provider(
             tokens_per_minute=tokens_per_minute,
         )
 
-    if normalized in {"openai", "anthropic", "gemini", "xai"}:
+    if normalized in {"openai", "anthropic", "gemini", "xai", "openrouter"}:
         return LiteLLMProvider(
             provider=normalized,
             model=model,
@@ -1535,7 +1696,7 @@ def create_provider(
 
     raise ValueError(
         f"Provider '{provider}' not supported. "
-        "Use one of: ollama, openai/chatgpt, anthropic/claude, gemini/google, grok/xai."
+        "Use one of: ollama, openai/chatgpt, anthropic/claude, gemini/google, grok/xai, openrouter."
     )
 
 

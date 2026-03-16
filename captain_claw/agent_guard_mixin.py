@@ -352,11 +352,13 @@ class AgentGuardMixin:
         import time as _time
         _t0 = _time.monotonic()
         _error_occurred = False
+        _stream_cb = getattr(self, "response_stream_callback", None)
         try:
-            response = await self.provider.complete(
+            response = await self.provider.complete_with_callback(
                 messages=messages,
                 tools=tools,
                 max_tokens=max_tokens,
+                on_chunk=_stream_cb,
             )
         except Exception:
             _error_occurred = True

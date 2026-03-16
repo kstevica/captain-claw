@@ -763,6 +763,8 @@ class ProviderKeysConfig(BaseModel):
     gemini_headers: list[str] = Field(default_factory=list)
     xai: str = ""
     xai_headers: list[str] = Field(default_factory=list)
+    openrouter: str = ""
+    openrouter_headers: list[str] = Field(default_factory=list)
     brave: str = ""
 
     def headers_for(self, provider: str) -> dict[str, str]:

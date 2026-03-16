@@ -1100,11 +1100,20 @@ function handleMessage(data) {
       break;
 
     case "tool_output_inline":
+    case "tool_stream":
       handleToolStream(data);
+      break;
+
+    case "response_stream":
+      handleResponseStream(data);
       break;
 
     case "error":
       logEntry("error", data.message || data.error || "Unknown error");
+      if (streamPanelActive && streamPanelSource === "answer") {
+        appendStreamText("\n⚠ " + (data.message || data.error || "Error") + "\n");
+        finishStreamPanel("Error");
+      }
       break;
 
     case "session_info":
@@ -1185,6 +1194,12 @@ function handleWelcome(data) {
       if (msg.role === "assistant" && msg.content) {
         renderAnswer(msg.content, true, msg.timestamp || "");
       }
+      // Replay media messages.
+      if (msg.content) {
+        if (msg.role === "html_file" || msg.role === "image" || msg.role === "audio") {
+          handleChatMessage(msg);
+        }
+      }
     }
   }
 }
@@ -1192,12 +1207,48 @@ function handleWelcome(data) {
 function handleChatMessage(data) {
   if (data.role === "assistant") {
     setProcessing(false);
+    // Finish the stream panel for the answer flow.
+    if (streamPanelActive && streamPanelSource === "answer") {
+      finishStreamPanel("Agent response complete");
+    }
     renderAnswer(data.content || "", false, data.timestamp || "");
   }
   // Track HTML files created by the agent (broadcast by backend).
   if (data.role === "html_file" && data.content) {
     agentCreatedHtmlFiles.push(data.content);
     console.log('[Computer] Agent created HTML file:', data.content);
+    // Append a view card to the answer area.
+    const el = $("#answer-content");
+    const filePath = data.content;
+    const fileName = filePath.split('/').pop();
+    const viewUrl = '/api/files/view?path=' + encodeURIComponent(filePath);
+    const card = document.createElement('div');
+    card.className = 'html-view-card';
+    card.style.cssText = 'margin:8px 0;padding:8px 12px;border:1px solid var(--border);border-radius:8px;display:inline-flex;align-items:center;gap:8px;';
+    card.innerHTML = '<span style="opacity:.7;">HTML</span> <span>' + esc(fileName) + '</span> ' +
+      '<a href="' + viewUrl + '" target="_blank" style="padding:3px 10px;border-radius:4px;background:var(--accent);color:#fff;text-decoration:none;font-size:.85em;">View</a>';
+    el.appendChild(card);
+  }
+  // Show image files inline in the answer area.
+  if (data.role === "image" && data.content) {
+    const el = $("#answer-content");
+    const imgUrl = '/api/media?path=' + encodeURIComponent(data.content);
+    const img = document.createElement('img');
+    img.src = imgUrl;
+    img.alt = 'Generated image';
+    img.style.cssText = 'max-width:100%;border-radius:8px;cursor:pointer;display:block;margin:8px 0;';
+    img.onclick = function() { window.open(this.src, '_blank'); };
+    el.appendChild(img);
+  }
+  // Show audio files inline in the answer area.
+  if (data.role === "audio" && data.content) {
+    const el = $("#answer-content");
+    const audioUrl = '/api/media?path=' + encodeURIComponent(data.content);
+    const wrapper = document.createElement('div');
+    wrapper.style.cssText = 'margin:8px 0;';
+    wrapper.innerHTML = '<audio controls style="display:block;width:100%;border-radius:8px;">' +
+      '<source src="' + audioUrl + '">Your browser does not support audio.</audio>';
+    el.appendChild(wrapper);
   }
 }
 
@@ -1239,6 +1290,13 @@ function handleToolStream(data) {
   const chunk = data.chunk || data.text || "";
   if (chunk.trim()) {
     logEntry("stream", chunk);
+  }
+}
+
+function handleResponseStream(data) {
+  const text = data.text || "";
+  if (text && streamPanelActive && streamPanelSource === "answer") {
+    appendStreamText(text);
   }
 }
 
@@ -1333,6 +1391,9 @@ function handleSend() {
 
   clearAttachment();
   setProcessing(true);
+
+  // Open stream panel to show agent thinking during answer generation.
+  openStreamPanel("answer");
 }
 
 /* ── Input decomposition ─────────────────────────────────────── */
@@ -1596,6 +1657,9 @@ async function generateVisual() {
   logEntry("system", "Generating visual rendering...");
   blinkLed();
 
+  // Open stream panel to show live LLM output.
+  openStreamPanel("visual");
+
   const payload = {
     prompt: lastPrompt,
     result: lastResult,
@@ -1606,37 +1670,68 @@ async function generateVisual() {
   };
 
   const t0 = performance.now();
-  console.group("%c[Computer] Visual Generation", "color:#6c8cff;font-weight:bold");
+  console.group("%c[Computer] Visual Generation (streaming)", "color:#6c8cff;font-weight:bold");
   console.log("Theme:", currentTheme);
   console.log("Tier:", selectedTokenTier, "| Model:", selectedModel || "(default)");
   console.log("Prompt:", lastPrompt.length > 120 ? lastPrompt.slice(0, 120) + "…" : lastPrompt);
   console.log("Result length:", lastResult.length, "chars");
-  console.log("Request payload:", payload);
 
   try {
-    const res = await fetch("/api/computer/visualize", {
+    const res = await fetch("/api/computer/visualize/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
 
-    const elapsed = Math.round(performance.now() - t0);
-
     if (!res.ok) {
       const errBody = await res.text();
       console.error("Response:", res.status, errBody);
-      console.log("Elapsed:", elapsed, "ms");
       console.groupEnd();
       throw new Error(`HTTP ${res.status}`);
     }
 
-    const data = await res.json();
-    const html = data.html || "";
+    // Read SSE stream.
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let html = "";
+    let sseBuffer = "";
 
-    console.log("Response status:", res.status);
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      sseBuffer += decoder.decode(value, { stream: true });
+
+      // Parse SSE lines.
+      const lines = sseBuffer.split("\n");
+      sseBuffer = lines.pop(); // keep incomplete line in buffer
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        try {
+          const evt = JSON.parse(line.slice(6));
+          if (evt.type === "start") {
+            appendStreamText("● Streaming from " + (evt.model || "LLM") + "...\n\n");
+          } else if (evt.type === "chunk") {
+            appendStreamText(evt.text);
+            blinkLed();
+          } else if (evt.type === "done") {
+            html = evt.html || "";
+          } else if (evt.type === "error") {
+            throw new Error(evt.error || "Stream error");
+          }
+        } catch (parseErr) {
+          if (parseErr.message && !parseErr.message.includes("JSON")) throw parseErr;
+        }
+      }
+    }
+
+    const elapsed = Math.round(performance.now() - t0);
     console.log("HTML size:", html.length, "chars");
     console.log("Elapsed:", elapsed, "ms");
     console.groupEnd();
+
+    finishStreamPanel(`Visual generation complete (${humanTime(elapsed)}, ${humanSize(html.length)})`);
 
     if (!html) {
       el.innerHTML = '<span class="output-placeholder">No visual generated</span>';
@@ -1672,6 +1767,7 @@ async function generateVisual() {
     el.innerHTML = `<span class="output-placeholder">Visual generation failed: ${esc(err.message)}</span>`;
     el.classList.add("output-empty");
     logEntry("error", `Visual generation failed: ${err.message}`);
+    finishStreamPanel(`Failed: ${err.message}`);
   } finally {
     visualGenerating = false;
   }
@@ -2977,14 +3073,82 @@ function markdownToHtml(md) {
 
   let html = esc(md);
 
+  // Code blocks (``` ... ```) — must run before inline replacements.
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, "<pre><code>$2</code></pre>");
+
+  // Images: ![alt](path) — route local paths through /api/media
+  html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, function(_, alt, src) {
+    var url = src;
+    // file:/// URLs → strip scheme and route through /api/media
+    if (/^file:\/\/\//i.test(src)) {
+      url = '/api/media?path=' + encodeURIComponent(src.replace(/^file:\/\/\//i, '/'));
+    } else if (/^saved\/|^output\/|^\//.test(src)) {
+      url = '/api/media?path=' + encodeURIComponent(src);
+    }
+    return '<img src="' + url + '" alt="' + alt +
+      '" style="max-width:100%;border-radius:8px;cursor:pointer;" ' +
+      'onclick="window.open(this.src,\'_blank\')">';
+  });
+
+  // Attached image: [Attached image: /path/to/file.jpg]
+  html = html.replace(/\[Attached image: ([^\]]+)\]/g, function(_, path) {
+    var p = path.trim().replace(/^file:\/\/\//i, '/');
+    var url = '/api/media?path=' + encodeURIComponent(p);
+    return '<img src="' + url + '" alt="Attached image" ' +
+      'style="max-width:100%;max-height:300px;border-radius:8px;cursor:pointer;display:block;margin:6px 0;" ' +
+      'onclick="window.open(this.src,\'_blank\')">';
+  });
+
+  // Audio: [Audio: /path/to/file.mp3]
+  html = html.replace(/\[Audio: ([^\]]+)\]/gi, function(_, path) {
+    var p = path.trim();
+    var url = /^https?:\/\//.test(p) ? p : '/api/media?path=' + encodeURIComponent(p);
+    return '<audio controls style="display:block;width:100%;margin:6px 0;border-radius:8px;">' +
+      '<source src="' + url + '">Your browser does not support audio.</audio>';
+  });
+
+  // Links to audio files: [text](path.mp3) → inline <audio> player
+  html = html.replace(/\[([^\]]+)\]\(([^)]+\.(?:mp3|wav|ogg|flac|m4a|aac))\)/gi, function(_, label, src) {
+    var url = /^https?:\/\//.test(src) ? src : '/api/media?path=' + encodeURIComponent(src);
+    return '<div style="margin:6px 0;"><strong>' + label + '</strong>' +
+      '<audio controls style="display:block;width:100%;margin:4px 0;border-radius:8px;">' +
+      '<source src="' + url + '">Your browser does not support audio.</audio></div>';
+  });
+
+  // Auto-detect bare audio file paths → inline <audio> player.
+  html = html.replace(/`?((?:\/|saved\/|output\/)[^\s<>&quot;&#39;`]+\.(?:mp3|wav|ogg|flac|m4a|aac))`?/gi, function(_, path) {
+    var url = '/api/media?path=' + encodeURIComponent(path);
+    return '<audio controls style="display:block;width:100%;margin:6px 0;border-radius:8px;">' +
+      '<source src="' + url + '">Your browser does not support audio.</audio>';
+  });
+
+  // Auto-detect bare image file paths → inline <img>.
+  // Matches paths like /path/to/image.jpg, saved/media/image.png, file:///path/image.webp
+  // Consumes optional surrounding ** (bold) or ` (code) markers.
+  html = html.replace(/(?:\*\*|`)?(?:file:\/\/\/)?((?:\/|saved\/|output\/)[^\s<>&"'`*]+\.(?:png|jpe?g|gif|webp|bmp|svg))(?:\*\*|`)?/gi, function(_, path) {
+    var url = '/api/media?path=' + encodeURIComponent(path);
+    return '<img src="' + url + '" alt="Image" ' +
+      'style="max-width:100%;border-radius:8px;cursor:pointer;display:block;margin:8px 0;" ' +
+      'onclick="window.open(this.src,\'_blank\')">';
+  });
+
+  // HTML file view buttons: [View: /path/to/file.html] or bare .html paths
+  html = html.replace(/\[View: ([^\]]+\.html?)\]/gi, function(_, path) {
+    var url = '/api/files/view?path=' + encodeURIComponent(path.trim());
+    return '<div class="html-view-card" style="margin:8px 0;padding:8px 12px;border:1px solid var(--border);border-radius:8px;display:inline-flex;align-items:center;gap:8px;">' +
+      '<span style="opacity:.7;">HTML</span> <span>' + esc(path.trim().split('/').pop()) + '</span> ' +
+      '<a href="' + url + '" target="_blank" style="padding:3px 10px;border-radius:4px;background:var(--accent);color:#fff;text-decoration:none;font-size:.85em;">View</a></div>';
+  });
+
+  // Links: [text](url) — after images/audio so those aren't caught here.
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+
   html = html.replace(/^### (.+)$/gm, "<h3>$1</h3>");
   html = html.replace(/^## (.+)$/gm, "<h2>$1</h2>");
   html = html.replace(/^# (.+)$/gm, "<h1>$1</h1>");
 
   html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
   html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
-
-  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, "<pre><code>$2</code></pre>");
 
   html = html.replace(/`(.+?)`/g, "<code>$1</code>");
 
@@ -3068,6 +3232,57 @@ function esc(s) {
   const d = document.createElement("div");
   d.textContent = s;
   return d.innerHTML;
+}
+
+/* ── Stream panel (bottom slide-up) ──────────────────────────── */
+
+let streamPanelActive = false;
+let streamPanelSource = "";  // "answer" | "visual"
+
+function openStreamPanel(source) {
+  const panel = $("#stream-panel");
+  const content = $("#stream-panel-content");
+  const meta = $("#stream-panel-meta");
+  const body = $("#stream-panel-body");
+
+  content.textContent = "";
+  meta.textContent = source === "visual" ? "Visual generation" : "Agent thinking";
+  streamPanelSource = source;
+  streamPanelActive = true;
+
+  panel.classList.remove("hidden");
+  body.classList.add("streaming");
+  document.body.classList.add("stream-panel-open");
+}
+
+function closeStreamPanel() {
+  const panel = $("#stream-panel");
+  const body = $("#stream-panel-body");
+  streamPanelActive = false;
+  streamPanelSource = "";
+  body.classList.remove("streaming");
+  panel.classList.add("hidden");
+  document.body.classList.remove("stream-panel-open");
+}
+
+function appendStreamText(text) {
+  if (!streamPanelActive) return;
+  const content = $("#stream-panel-content");
+  content.textContent += text;
+  // Auto-scroll to bottom.
+  const body = $("#stream-panel-body");
+  body.scrollTop = body.scrollHeight;
+}
+
+function finishStreamPanel(label) {
+  const body = $("#stream-panel-body");
+  const meta = $("#stream-panel-meta");
+  body.classList.remove("streaming");
+  if (label) meta.textContent = label;
+}
+
+function initStreamPanel() {
+  $("#stream-panel-close").addEventListener("click", closeStreamPanel);
 }
 
 /* ── Auto-resize textarea ────────────────────────────────────── */
@@ -3590,6 +3805,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   initClearLog();
   initSpinner();
   initFullscreen();
+  initStreamPanel();
   initMap();
   initFiles();
   initFilePreview();

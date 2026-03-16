@@ -31,6 +31,7 @@ class AgentModelMixin:
             "anthropic": ["ANTHROPIC_API_KEY"],
             "gemini": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
             "xai": ["XAI_API_KEY"],
+            "openrouter": ["OPENROUTER_API_KEY"],
         }
         keys = env_keys.get(normalized_provider, [])
         if keys:
@@ -42,7 +43,7 @@ class AgentModelMixin:
         # Fallback to provider_keys from settings.
         cfg = get_config()
         pk = cfg.provider_keys
-        pk_map = {"openai": pk.openai, "anthropic": pk.anthropic, "gemini": pk.gemini, "xai": pk.xai}
+        pk_map = {"openai": pk.openai, "anthropic": pk.anthropic, "gemini": pk.gemini, "xai": pk.xai, "openrouter": pk.openrouter}
         val = str(pk_map.get(normalized_provider, "") or "").strip()
         if val:
             return val

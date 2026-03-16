@@ -212,6 +212,7 @@ class WebServer:
             thinking_callback=self._thinking_callback,
             tool_stream_callback=self._tool_stream_callback,
         )
+        self.agent.response_stream_callback = self._response_stream_callback
         await self.agent.initialize()
 
         # Initialize orchestrator (shares provider and callbacks with main agent).
@@ -259,6 +260,10 @@ class WebServer:
     def _tool_stream_callback(self, chunk: str) -> None:
         """Broadcast a live tool output chunk to the thinking console."""
         self._broadcast({"type": "tool_stream", "chunk": chunk})
+
+    def _response_stream_callback(self, text: str) -> None:
+        """Broadcast LLM response content to the stream panel."""
+        self._broadcast({"type": "response_stream", "text": text})
 
     _THINKING_SILENT_TOOLS: set[str] = {
         "llm_trace", "pipeline_trace", "memory_select", "memory_semantic_select",
@@ -999,6 +1004,10 @@ class WebServer:
         from captain_claw.web.rest_computer import computer_visualize
         return await computer_visualize(self, request)
 
+    async def _computer_visualize_stream(self, request: web.Request) -> web.StreamResponse:
+        from captain_claw.web.rest_computer import computer_visualize_stream
+        return await computer_visualize_stream(self, request)
+
     async def _exploration_save(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_computer import exploration_save
         return await exploration_save(self, request)
@@ -1582,6 +1591,7 @@ class WebServer:
             app.router.add_get("/personality", self._serve_personality)
             app.router.add_get("/semantic-memory", self._serve_semantic_memory)
             app.router.add_post("/api/computer/visualize", self._computer_visualize)
+            app.router.add_post("/api/computer/visualize/stream", self._computer_visualize_stream)
             app.router.add_post("/api/computer/exploration", self._exploration_save)
             app.router.add_get("/api/computer/exploration", self._exploration_list)
             app.router.add_get("/api/computer/exploration/{id}", self._exploration_get)

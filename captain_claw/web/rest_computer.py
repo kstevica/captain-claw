@@ -172,6 +172,116 @@ async def computer_visualize(
         )
 
 
+async def computer_visualize_stream(
+    server: "WebServer", request: web.Request,
+) -> web.StreamResponse:
+    """POST /api/computer/visualize/stream — SSE streaming visual generation."""
+    from captain_claw.llm import Message
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    prompt = str(body.get("prompt", "")).strip()
+    result = str(body.get("result", "")).strip()
+    theme_instructions = str(body.get("theme_instructions", "")).strip()
+    theme = str(body.get("theme", "")).strip()
+
+    tier = str(body.get("token_tier", _DEFAULT_TIER)).strip().lower()
+    if tier not in VISUAL_TOKEN_TIERS:
+        tier = _DEFAULT_TIER
+    max_tokens = VISUAL_TOKEN_TIERS[tier]
+
+    model_override = str(body.get("model", "")).strip() or None
+
+    if not prompt and not result:
+        return web.json_response(
+            {"error": "Both prompt and result are empty"}, status=400,
+        )
+
+    # Truncate very long results.
+    max_result_len = max_tokens
+    if len(result) > max_result_len:
+        result = result[:max_result_len] + "\n\n[...truncated for visual generation]"
+
+    instructions = server.agent.instructions if server.agent else None
+    if instructions is None:
+        from captain_claw.instructions import InstructionLoader
+        instructions = InstructionLoader()
+
+    system_content = instructions.load("computer_visualize_system_prompt.md")
+    user_content = instructions.render(
+        "computer_visualize_user_prompt.md",
+        prompt=prompt,
+        result=result,
+        theme_instructions=theme_instructions or "Use a clean, modern dark theme.",
+    )
+
+    provider = _resolve_provider(server, model_override)
+
+    messages = [
+        Message(role="system", content=system_content),
+        Message(role="user", content=user_content),
+    ]
+
+    # ── SSE streaming response ──
+    resp = web.StreamResponse(
+        status=200,
+        reason="OK",
+        headers={
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+    await resp.prepare(request)
+
+    async def _sse(event_data: dict) -> None:
+        line = f"data: {json.dumps(event_data, default=str)}\n\n"
+        await resp.write(line.encode("utf-8"))
+
+    t0 = time.monotonic()
+    collected: list[str] = []
+
+    provider_name = str(getattr(provider, "provider", "") or getattr(provider, "provider_name", "") or "")
+    model_hint = str(getattr(provider, "model", "") or "")
+    log.info("Starting SSE visual stream", provider=provider_name, model=model_hint)
+    await _sse({"type": "start", "model": model_hint})
+
+    try:
+        async for chunk in provider.complete_streaming(
+            messages=messages, tools=None, max_tokens=max_tokens,
+        ):
+            if chunk:
+                collected.append(chunk)
+                await _sse({"type": "chunk", "text": chunk})
+
+        raw = "".join(collected).strip()
+        latency_ms = int((time.monotonic() - t0) * 1000)
+
+        # Strip markdown code fences.
+        html = re.sub(r"^```(?:html)?\s*\n?", "", raw)
+        html = re.sub(r"\n?```\s*$", "", html)
+
+        await _sse({"type": "done", "html": html})
+
+        log.info(
+            "Visual generation streamed",
+            html_len=len(html),
+            latency_ms=latency_ms,
+            theme=theme,
+        )
+    except Exception as exc:
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        log.error("Streaming visual generation failed", error=str(exc), latency_ms=latency_ms)
+        await _sse({"type": "error", "error": str(exc)})
+
+    await resp.write_eof()
+    return resp
+
+
 def _resolve_provider(server: "WebServer", model_id: str | None):
     """Return an LLM provider, optionally overriding the model.
 

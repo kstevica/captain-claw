@@ -2543,10 +2543,12 @@
             `<pre><code>${code}</code></pre>`
         );
 
-        // Images: ![alt](path) — route saved/ and output/ paths through /api/media
+        // Images: ![alt](path) — route local paths through /api/media
         html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, function(_, alt, src) {
             var url = src;
-            if (/^saved\/|^output\//.test(src)) {
+            if (/^file:\/\/\//i.test(src)) {
+                url = '/api/media?path=' + encodeURIComponent(src.replace(/^file:\/\/\//i, '/'));
+            } else if (/^saved\/|^output\/|^\//.test(src)) {
                 url = '/api/media?path=' + encodeURIComponent(src);
             }
             return '<img src="' + url + '" alt="' + alt +
@@ -2585,6 +2587,14 @@
             var url = '/api/media?path=' + encodeURIComponent(path);
             return '<audio controls style="display:block;width:100%;margin:6px 0;border-radius:8px;">' +
                 '<source src="' + url + '">Your browser does not support audio.</audio>';
+        });
+
+        // Auto-detect bare image file paths → inline <img>.
+        html = html.replace(/(?:\*\*|`)?(?:file:\/\/\/)?((?:\/|saved\/|output\/)[^\s<>&"'`*]+\.(?:png|jpe?g|gif|webp|bmp|svg))(?:\*\*|`)?/gi, function(_, path) {
+            var url = '/api/media?path=' + encodeURIComponent(path);
+            return '<img src="' + url + '" alt="Image" ' +
+                'style="max-width:100%;border-radius:8px;cursor:pointer;display:block;margin:8px 0;" ' +
+                'onclick="window.open(this.src,\'_blank\')">';
         });
 
         // Links: [text](url)

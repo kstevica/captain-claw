@@ -1295,6 +1295,20 @@ body {
   color: var(--text-dim);
 }
 
+#answer-content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius);
+}
+
+#answer-content audio {
+  filter: invert(0.85) hue-rotate(180deg);
+}
+
+#answer-content .html-view-card a {
+  text-decoration: none;
+}
+
 /* Answer action bar (copy + feedback) */
 .answer-actions {
   display: flex;
@@ -3374,6 +3388,108 @@ body.visual-fullscreen #visual-frame {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ── Stream panel (bottom slide-up) ──────────────────────────── */
+
+.stream-panel {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 30vh;
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface, #1a1a2e);
+  border-top: 2px solid var(--chrome-hi, #444);
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.4);
+  transition: transform 0.25s ease-out, opacity 0.2s ease-out;
+  transform: translateY(0);
+  opacity: 1;
+}
+
+.stream-panel.hidden {
+  transform: translateY(100%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.stream-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  background: var(--titlebar-bg, #0055aa);
+  color: var(--titlebar-fg, #fff);
+  font-size: 0.78rem;
+  font-family: var(--font-ui, "Share Tech Mono", monospace);
+  min-height: 24px;
+  flex-shrink: 0;
+}
+
+.stream-panel-title {
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.stream-panel-meta {
+  flex: 1;
+  text-align: right;
+  opacity: 0.7;
+  font-size: 0.72rem;
+}
+
+.stream-panel-close {
+  background: none;
+  border: none;
+  color: var(--titlebar-fg, #fff);
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 0 4px;
+  opacity: 0.7;
+  transition: opacity 0.15s;
+}
+.stream-panel-close:hover {
+  opacity: 1;
+}
+
+.stream-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px 12px;
+  background: var(--input-bg, #0d0d1a);
+  color: var(--text, #ccc);
+}
+
+#stream-panel-content {
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-mono, "Share Tech Mono", monospace);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text, #ccc);
+}
+
+/* Blinking cursor at the end of streaming content */
+.stream-panel-body.streaming #stream-panel-content::after {
+  content: "▋";
+  animation: stream-cursor-blink 0.6s step-end infinite;
+  color: var(--accent, #ff8800);
+}
+
+@keyframes stream-cursor-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* When the stream panel is visible, push workspace up */
+body.stream-panel-open #workspace {
+  height: calc(100vh - var(--titlebar-h) - 30vh);
 }
 
 /* ── Responsive ──────────────────────────────────────────────── */

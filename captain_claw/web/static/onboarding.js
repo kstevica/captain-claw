@@ -8,6 +8,7 @@
         { id: 'anthropic', name: 'Anthropic / Claude',          model: 'claude-sonnet-4-20250514',       env: 'ANTHROPIC_API_KEY' },
         { id: 'gemini',    name: 'Google / Gemini',             model: 'gemini-3-flash-preview',         env: 'GOOGLE_API_KEY' },
         { id: 'xai',       name: 'xAI / Grok',                 model: 'grok-3-mini',                    env: 'XAI_API_KEY' },
+        { id: 'openrouter', name: 'OpenRouter',                 model: 'openrouter/auto',                env: 'OPENROUTER_API_KEY' },
         { id: 'ollama',    name: 'Ollama (local/self-hosted)',   model: 'llama3.2',                       env: '' }
     ];
 
@@ -17,6 +18,7 @@
         anthropic: '#d4a574',
         gemini:    '#4285f4',
         xai:       '#e44d26',
+        openrouter: '#6366f1',
         brave:     '#fb542b'
     };
 
@@ -35,7 +37,7 @@
         telegram_token: '',
         telegram_use_env: false,
         // New: per-provider keys
-        provider_keys: { openai: '', anthropic: '', gemini: '', xai: '', brave: '' },
+        provider_keys: { openai: '', anthropic: '', gemini: '', xai: '', openrouter: '', brave: '' },
         openai_headers: [],     // ['Authorization: Bearer ...', 'chatgpt-account-id: ...']
         codex_imported: false
     };
@@ -130,6 +132,13 @@
             name: 'xAI (Grok)',
             placeholder: 'xai-...',
             hint: 'Env var: XAI_API_KEY',
+            extra: null
+        },
+        {
+            id: 'openrouter',
+            name: 'OpenRouter',
+            placeholder: 'sk-or-...',
+            hint: 'Env var: OPENROUTER_API_KEY',
             extra: null
         },
         {
