@@ -82,6 +82,8 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [Folder Browser](#folder-browser)
   - [Attachments](#attachments)
   - [/btw Command](#btw-command)
+  - [Suggested Next Steps](#suggested-next-steps)
+  - [Public Mode](#public-mode)
 - [Web UI](#web-ui)
 - [Remote Integrations](#remote-integrations)
   - [Telegram: Per-User Sessions](#telegram-per-user-sessions)
@@ -1462,6 +1464,9 @@ web:
   enabled: false
   host: "127.0.0.1"
   port: 23080
+  auth_token: ""                  # set to enable authentication; empty = auth disabled
+  auth_cookie_max_age: 90         # days until auth cookie expires
+  public_run: ""                  # set to "computer" to expose only Computer to anonymous visitors
   api_enabled: true               # OpenAI-compatible API proxy
   api_pool_max_agents: 50
   api_pool_idle_seconds: 600.0
@@ -3027,6 +3032,61 @@ btw also check the error handling
 
 Multiple `/btw` messages can be sent during a single task — they accumulate and all apply to remaining work.
 
+### Suggested Next Steps
+
+After each agent response, Computer automatically extracts suggested next steps and presents them as clickable buttons below the answer.
+
+**How it works:**
+
+1. When the agent finishes responding, a lightweight follow-up LLM call analyzes the response for explicit suggestions or options
+2. If suggestions are found, they appear as interactive buttons below the Answer tab content
+3. Clicking a button populates the input box with the corresponding action and sends it automatically
+4. Buttons are cleared when a new message is sent
+
+The extraction uses a heuristic pre-filter (looks for bullet/numbered lists in the response) to avoid unnecessary LLM calls on responses that don't contain suggestions.
+
+### Public Mode
+
+Computer supports a public-facing deployment mode where anonymous visitors can use the research workspace through session-isolated access codes, while the rest of the web UI remains locked down.
+
+**Enable public mode:**
+
+```yaml
+web:
+  auth_token: "your-admin-password"    # required — protects admin access
+  public_run: "computer"               # expose only the Computer section
+```
+
+**How it works:**
+
+1. Visitors arrive at `/computer` and see a landing page with session management
+2. They can **create a new session** (generates a 6-character access code) or **resume an existing session** by entering their code
+3. Each session is fully isolated — files, uploads, media, and exploration trees are scoped to the session
+4. Only Computer-related routes are accessible; all other pages and APIs return 403 Forbidden
+5. Admin users authenticated via `auth_token` bypass all restrictions and see the full UI
+
+**Session isolation:**
+
+- **Files:** Each public session's files are stored in `workspace/saved/<category>/<session_id>/` and `workspace/output/<session_id>/`
+- **Uploads:** Image and file uploads are scoped to the session directory
+- **File browsing:** Public users can only list and access files belonging to their session
+- **Exploration trees:** Scoped to the session via the standard session mechanism
+
+**Allowed routes in public mode:**
+
+| Category | Routes |
+|---|---|
+| Pages | `/computer`, `/computer/*` |
+| API | `/api/computer/*`, `/api/public/*`, `/api/config`, `/api/orchestrator/models`, `/api/user-personalities`, `/api/file/upload`, `/api/image/upload`, `/api/files/*`, `/api/media/*` |
+| WebSocket | `/ws` |
+| Static | `/static/*`, `/favicon.ico` |
+
+All other routes (Chat, Sessions, Orchestrator, Settings, Datastore, etc.) are blocked for public users.
+
+**Admin access:**
+
+Set `auth_token` in config and navigate to `/?token=your-admin-password` to authenticate as admin. Admin users have unrestricted access to all pages and APIs regardless of public mode settings.
+
 ---
 
 ## Web UI
@@ -3118,6 +3178,9 @@ web:
   enabled: false
   host: "127.0.0.1"
   port: 23080
+  auth_token: ""                  # set to enable authentication
+  auth_cookie_max_age: 90         # days
+  public_run: ""                  # "computer" to expose Computer to anonymous visitors
   api_enabled: true               # OpenAI-compatible API proxy
   api_pool_max_agents: 50
   api_pool_idle_seconds: 600.0
