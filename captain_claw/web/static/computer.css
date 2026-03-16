@@ -1866,12 +1866,16 @@ body {
   color: #00ff41;
 }
 
-.theme-hacker #send-btn {
+.theme-hacker #send-btn,
+.theme-hacker #attach-btn,
+.theme-hacker #folder-btn {
   border-color: #00ff41;
   text-shadow: 0 0 4px #00ff41;
 }
 
-.theme-hacker #send-btn:hover {
+.theme-hacker #send-btn:hover,
+.theme-hacker #attach-btn:hover,
+.theme-hacker #folder-btn:hover {
   background: #00ff41;
   color: #000000;
   text-shadow: none;
@@ -1947,7 +1951,9 @@ body {
   color: var(--text-dim);
 }
 
-.theme-modern #send-btn {
+.theme-modern #send-btn,
+.theme-modern #attach-btn,
+.theme-modern #folder-btn {
   border: none;
   border-radius: 6px;
   padding: 6px 20px;
@@ -1955,11 +1961,15 @@ body {
   transition: background 0.15s, transform 0.1s;
 }
 
-.theme-modern #send-btn:hover {
+.theme-modern #send-btn:hover,
+.theme-modern #attach-btn:hover,
+.theme-modern #folder-btn:hover {
   background: #5070dd;
 }
 
-.theme-modern #send-btn:active {
+.theme-modern #send-btn:active,
+.theme-modern #attach-btn:active,
+.theme-modern #folder-btn:active {
   transform: scale(0.97);
   padding: 6px 20px;
 }
@@ -2440,9 +2450,10 @@ body.visual-fullscreen #visual-frame {
 #preview-body .md-preview strong { font-weight: 700; }
 #preview-body .md-preview em { font-style: italic; }
 
-/* ── Model & tier selectors ──────────────────────────────────── */
+/* ── Model, persona & tier selectors ─────────────────────────── */
 
-#model-btn {
+#model-btn,
+#persona-btn {
   font-family: var(--font);
   font-size: 11px;
   background: var(--surface);
@@ -2456,11 +2467,13 @@ body.visual-fullscreen #visual-frame {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-#model-btn:hover {
+#model-btn:hover,
+#persona-btn:hover {
   background: var(--accent);
   color: var(--bg);
 }
-#model-btn-label {
+#model-btn-label,
+#persona-btn-label {
   font-size: inherit;
 }
 
@@ -2590,6 +2603,36 @@ body.visual-fullscreen #visual-frame {
   color: var(--bg);
 }
 
+/* ── Persona modal (mirrors model modal) ─────────────────────── */
+
+#persona-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+}
+#persona-modal.active {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#persona-modal .modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,.55);
+}
+#persona-modal .modal-content {
+  position: relative;
+  width: min(620px, 90vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+#persona-modal .window-body {
+  overflow-y: auto;
+  padding: 12px;
+}
+
 /* ── Map tab (exploration mind-map) ───────────────────────────── */
 
 #output-map {
@@ -2684,7 +2727,9 @@ body.visual-fullscreen #visual-frame {
   box-shadow: 0 0 0 1px #0078d4;
 }
 
-.theme-win11 #send-btn {
+.theme-win11 #send-btn,
+.theme-win11 #attach-btn,
+.theme-win11 #folder-btn {
   border: none;
   border-radius: 6px;
   padding: 6px 20px;
@@ -2743,7 +2788,9 @@ body.visual-fullscreen #visual-frame {
   box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.2);
 }
 
-.theme-macos #send-btn {
+.theme-macos #send-btn,
+.theme-macos #attach-btn,
+.theme-macos #folder-btn {
   border: none;
   border-radius: 6px;
   padding: 6px 20px;
@@ -2796,7 +2843,9 @@ body.visual-fullscreen #visual-frame {
   border-color: #0a84ff;
 }
 
-.theme-iphone #send-btn {
+.theme-iphone #send-btn,
+.theme-iphone #attach-btn,
+.theme-iphone #folder-btn {
   border: none;
   border-radius: 18px;
   padding: 6px 20px;
@@ -2850,7 +2899,9 @@ body.visual-fullscreen #visual-frame {
   box-shadow: 0 0 0 2px rgba(138, 180, 248, 0.2);
 }
 
-.theme-android #send-btn {
+.theme-android #send-btn,
+.theme-android #attach-btn,
+.theme-android #folder-btn {
   border: none;
   border-radius: 20px;
   padding: 6px 20px;
@@ -3125,16 +3176,25 @@ body.visual-fullscreen #visual-frame {
 #attach-btn, #folder-btn {
   background: var(--btn-bg);
   color: var(--text);
-  border: 1px solid var(--win-border);
-  font-size: 0.85rem;
-  padding: 2px 6px;
+  border: var(--bevel) solid var(--chrome-dark);
+  border-top-color: var(--chrome-hi);
+  border-left-color: var(--chrome-hi);
+  font-size: 12px;
+  padding: 3px 10px;
   cursor: pointer;
   font-family: var(--font);
-  border-radius: 2px;
+  border-radius: var(--radius);
+  user-select: none;
 }
 #attach-btn:hover, #folder-btn:hover {
   background: var(--accent);
   color: var(--bg);
+}
+#attach-btn:active, #folder-btn:active {
+  border-top-color: var(--chrome-lo);
+  border-left-color: var(--chrome-lo);
+  border-bottom-color: var(--chrome-hi);
+  border-right-color: var(--chrome-hi);
 }
 
 /* ── Folder modal ───────────────────────────────────────────── */

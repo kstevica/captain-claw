@@ -395,6 +395,13 @@ function showCreateSwarm() {
         <option value="manual_review">Manual Review — pause for human review</option>
       </select>
     </div>
+    <div class="form-group">
+      <label>Agent Selection</label>
+      <select id="input-swarm-agent-mode" class="form-input">
+        <option value="connected">BotPort Agents — route to connected personas</option>
+        <option value="designed">Swarm Agents — AI designs task-optimized personas &amp; models</option>
+      </select>
+    </div>
     <div class="form-actions">
       <button class="btn btn-primary" onclick="createSwarm()">Create</button>
       <button class="btn" onclick="closeSwarmModal()">Cancel</button>
@@ -413,6 +420,7 @@ async function createSwarm() {
   if (!task) return;
 
   const errorPolicy = document.getElementById("input-swarm-error-policy")?.value || "fail_fast";
+  const agentMode = document.getElementById("input-swarm-agent-mode")?.value || "connected";
 
   const result = await swarmAPI("POST", "/swarms", {
     project_id: currentProject,
@@ -421,6 +429,7 @@ async function createSwarm() {
     concurrency_limit: concurrency,
     priority,
     error_policy: errorPolicy,
+    agent_mode: agentMode,
   });
   if (result._error) return;
 
@@ -596,6 +605,21 @@ function _updateSwarmDetailInPlace(swarm) {
   }
 }
 
+function _buildAgentModeToggle(swarm) {
+  const mode = swarm.agent_mode || "connected";
+  return `<div class="agent-mode-toggle-row">
+    <div class="action-group-label">Agent Selection</div>
+    <div class="agent-mode-toggle">
+      <button class="agent-mode-opt ${mode === 'connected' ? 'active' : ''}" onclick="setAgentMode('connected')" title="Route tasks to your connected BotPort agents">
+        🔗 BotPort Agents
+      </button>
+      <button class="agent-mode-opt ${mode === 'designed' ? 'active' : ''}" onclick="setAgentMode('designed')" title="AI generates temporary task-optimized agents">
+        🧠 Swarm Agents
+      </button>
+    </div>
+  </div>`;
+}
+
 function _buildActionsPanel(swarm, tasks) {
   const hasRephrased = !!swarm.rephrased_task;
   const hasTasks = tasks.length > 0;
@@ -603,6 +627,7 @@ function _buildActionsPanel(swarm, tasks) {
     <div class="action-group-label">Model</div>
     ${buildModelSelector()}
   </div>`;
+  const agentToggle = _buildAgentModeToggle(swarm);
 
   if (swarm.status === "draft") {
     return `
@@ -620,6 +645,7 @@ function _buildActionsPanel(swarm, tasks) {
         <span class="action-icon">✕</span>
         <span class="action-label">Cancel</span>
       </button>
+      ${agentToggle}
       ${modelSel}`;
   }
   if (swarm.status === "decomposing") {
@@ -631,6 +657,16 @@ function _buildActionsPanel(swarm, tasks) {
       </button>`;
   }
   if (swarm.status === "ready") {
+    const isDesigned = swarm.agent_mode === "designed";
+    const agentBtn = isDesigned
+      ? `<button class="action-btn" onclick="designAgents()" id="btn-design-agents">
+           <span class="action-icon">🧠</span>
+           <span class="action-label">Design Agents<small>AI generates personas &amp; models</small></span>
+         </button>`
+      : `<button class="action-btn" onclick="selectAgents()">
+           <span class="action-icon">🤖</span>
+           <span class="action-label">Select Agents<small>Assign connected personas</small></span>
+         </button>`;
     return `
       <div class="action-group-label">Actions</div>
       <button class="action-btn action-btn-success" onclick="swarmAction('start')" id="btn-start">
@@ -641,10 +677,7 @@ function _buildActionsPanel(swarm, tasks) {
         <span class="action-icon">🔀</span>
         <span class="action-label">Re-decompose<small>Regenerate subtasks</small></span>
       </button>
-      <button class="action-btn" onclick="selectAgents()">
-        <span class="action-icon">🤖</span>
-        <span class="action-label">Select Agents<small>Assign personas</small></span>
-      </button>
+      ${agentBtn}
       <button class="action-btn" onclick="saveAsTemplate()">
         <span class="action-icon">💾</span>
         <span class="action-label">Save Template</span>
@@ -653,6 +686,7 @@ function _buildActionsPanel(swarm, tasks) {
         <span class="action-icon">✕</span>
         <span class="action-label">Cancel</span>
       </button>
+      ${agentToggle}
       ${modelSel}`;
   }
   if (swarm.status === "running") {
@@ -745,6 +779,7 @@ function renderSwarmDetail(swarm) {
           <h2>${esc(swarm.name || 'Untitled Swarm')}</h2>
           <span class="swarm-status-badge status-swarm-${swarm.status}">${swarm.status}</span>
           <span class="error-policy-badge policy-${swarm.error_policy || 'fail_fast'}">${(swarm.error_policy || 'fail_fast').replace(/_/g, ' ')}</span>
+          <span class="agent-mode-badge mode-${swarm.agent_mode || 'connected'}">${swarm.agent_mode === 'designed' ? '🧠 Swarm Agents' : '🔗 BotPort Agents'}</span>
         </div>
       </div>
 
@@ -1001,6 +1036,17 @@ async function swarmAction(action) {
   await refreshSwarmDetail();
 }
 
+async function setAgentMode(mode) {
+  if (!currentSwarm) return;
+  const result = await swarmAPI("PUT", `/swarms/${currentSwarm}`, { agent_mode: mode });
+  if (result._error) {
+    alert(`Failed to update agent mode: ${result.error || "Unknown error"}`);
+    return;
+  }
+  _lastSwarmStatus = "";  // Force full re-render to update badge + toggle.
+  await refreshSwarmDetail();
+}
+
 /* ---- Decompose workflow ---- */
 
 function _setActionBtnState(btn, loading, loadingText) {
@@ -1051,6 +1097,19 @@ async function selectAgents() {
     alert("Agent selection failed: " + (result.error || "Unknown error"));
     return;
   }
+  await refreshSwarmDetail();
+}
+
+async function designAgents() {
+  if (!currentSwarm) return;
+  const btn = document.getElementById("btn-design-agents");
+  _setActionBtnState(btn, true, "Designing...");
+
+  const result = await swarmAPI("POST", `/swarms/${currentSwarm}/design-agents`, { model: getSelectedModel() });
+  if (result._error) {
+    alert("Agent design failed: " + (result.error || "Unknown error"));
+  }
+  _setActionBtnState(btn, false);
   await refreshSwarmDetail();
 }
 
@@ -1549,6 +1608,20 @@ async function showTaskDetail(taskId) {
         <strong>Description</strong>
         <div class="task-detail-desc">${renderMd(task.description)}</div>
       </div>
+
+      ${task.metadata?.agent_spec ? `
+      <div class="task-detail-section">
+        <strong>Designed Agent</strong>
+        <div class="agent-spec-card">
+          <div class="agent-spec-name">${esc(task.metadata.agent_spec.persona_name || '')}</div>
+          <div class="agent-spec-desc">${esc(task.metadata.agent_spec.persona_description || '')}</div>
+          ${(task.metadata.agent_spec.persona_expertise || []).length > 0
+            ? `<div class="agent-spec-tags">${task.metadata.agent_spec.persona_expertise.map(t => `<span class="agent-spec-tag">${esc(t)}</span>`).join('')}</div>`
+            : ''}
+          ${task.metadata.agent_spec.model_id ? `<div class="agent-spec-model">Model: <code>${esc(task.metadata.agent_spec.model_id)}</code></div>` : ''}
+          ${task.metadata.agent_spec.persona_instructions ? `<div class="agent-spec-instructions">${esc(task.metadata.agent_spec.persona_instructions)}</div>` : ''}
+        </div>
+      </div>` : ""}
 
       ${depNames ? `<div class="task-detail-section"><strong>Depends on:</strong> ${depNames}</div>` : ""}
       ${successorNames ? `<div class="task-detail-section"><strong>Feeds into:</strong> ${successorNames}</div>` : ""}

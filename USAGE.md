@@ -2731,6 +2731,127 @@ Control what is advertised via `botport_client.advertise_personas`, `advertise_t
 | `CLAW_BOTPORT_CLIENT__KEY` | Auth key |
 | `CLAW_BOTPORT_CLIENT__SECRET` | Auth secret |
 
+### BotPort Swarm
+
+BotPort Swarm adds DAG-based multi-agent orchestration on top of BotPort's routing layer. Decompose complex goals into task graphs with dependencies, route each task to specialist agents, and execute with configurable concurrency — all managed from the BotPort dashboard.
+
+#### How It Works
+
+```
+┌─────────────┐
+│  Decompose  │  Goal → DAG of tasks with dependencies
+└──────┬──────┘
+       ▼
+┌─────────────┐
+│  Design     │  LLM picks optimal agent persona + model per task
+└──────┬──────┘
+       ▼
+┌─────────────┐
+│  Execute    │  Engine advances DAG, routes tasks to CC instances
+└──────┬──────┘
+       ▼
+┌─────────────┐
+│  Collect    │  Results, artifacts, and files gathered per task
+└─────────────┘
+```
+
+1. **Decompose** — Submit a goal. The decomposer (LLM-powered) breaks it into tasks with dependencies, forming a DAG.
+2. **Design agents** — The agent designer analyzes each task and assigns an optimal persona and model tier (fast/mid/premium).
+3. **Execute** — The swarm engine advances the DAG, launching tasks whose dependencies are satisfied. Tasks are routed to connected Captain Claw instances via BotPort concerns.
+4. **Monitor** — Track progress in real-time on the dashboard with a visual DAG canvas, task status cards, and audit log.
+
+#### Task Configuration
+
+Each task in a swarm supports:
+
+| Field | Description |
+|---|---|
+| `title` | Short task name |
+| `prompt` | Full instructions sent to the agent |
+| `persona` | Preferred agent persona for routing |
+| `model_hint` | Preferred model (e.g. `claude-sonnet`, `gpt-4o`) |
+| `timeout_sec` | Per-task timeout (default: inherited from swarm) |
+| `retry_count` | Max retries on failure (default: 0) |
+| `retry_backoff_sec` | Backoff between retries |
+| `fallback_persona` | Alternative persona for retries |
+| `needs_approval` | Require human approval before execution |
+| `priority` | Task priority (higher = scheduled first) |
+
+#### Error Policies
+
+| Policy | Behavior |
+|---|---|
+| `fail_fast` | Stop the entire swarm on first task failure |
+| `continue_on_error` | Mark failed tasks, continue with independent tasks |
+| `manual_review` | Pause on failure, wait for human decision |
+
+#### Timeout Escalation
+
+Swarm uses a three-stage timeout system:
+
+1. **Warning** — At 80% of timeout, logs a warning
+2. **Extension** — At 100%, extends by 50% (one extension allowed)
+3. **Failure** — After extension, task fails with timeout error
+
+#### Checkpointing
+
+Save and restore swarm state at any point:
+
+- **Create checkpoint** — Snapshots all task states and results
+- **Restore checkpoint** — Rolls back to a previous state for re-execution
+
+#### File Transfer
+
+Agents can produce and consume files during swarm execution:
+
+- Files stored in `workspace-botport/swarm/<swarm_id>/<agent>/`
+- Transfer over WebSocket using gzip compression + base64 encoding
+- Max file size: 50 MB
+- File manifest with SHA-256 hashes
+
+#### Swarm Scheduling
+
+Recurring swarms via cron expressions:
+
+```yaml
+schedule: "0 9 * * 1"    # Every Monday at 9 AM
+```
+
+Supports standard cron format: `minute hour day month weekday`. Wildcard (`*`), step (`*/N`), range (`N-M`), and list (`N,M,O`) syntax.
+
+#### Swarm Dashboard
+
+Access the swarm UI from the BotPort dashboard. Features:
+
+- **Project management** — Organize swarms into projects
+- **DAG canvas** — Visual task graph with status colors and dependency arrows
+- **Task monitoring** — Real-time status updates with polling
+- **Approval gates** — Approve or reject pending tasks from the UI
+- **File manager** — Upload, download, and browse swarm files
+- **Audit log** — Complete event history for each swarm
+
+#### Swarm API Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/swarm/projects` | List all projects |
+| `POST` | `/api/swarm/projects` | Create a project |
+| `GET` | `/api/swarm/swarms` | List swarms (optionally by project) |
+| `POST` | `/api/swarm/swarms` | Create a swarm |
+| `POST` | `/api/swarm/swarms/{id}/start` | Start a swarm |
+| `POST` | `/api/swarm/swarms/{id}/pause` | Pause a running swarm |
+| `POST` | `/api/swarm/swarms/{id}/resume` | Resume a paused swarm |
+| `POST` | `/api/swarm/swarms/{id}/cancel` | Cancel a swarm |
+| `POST` | `/api/swarm/swarms/{id}/decompose` | Decompose goal into tasks |
+| `POST` | `/api/swarm/swarms/{id}/design-agents` | Design agent specs for tasks |
+| `POST` | `/api/swarm/swarms/{id}/checkpoints` | Create a checkpoint |
+| `POST` | `/api/swarm/swarms/{id}/checkpoints/{cp}/restore` | Restore a checkpoint |
+| `POST` | `/api/swarm/tasks/{id}/approve` | Approve a pending task |
+| `POST` | `/api/swarm/tasks/{id}/reject` | Reject a pending task |
+| `GET` | `/api/swarm/swarms/{id}/files` | List swarm files |
+| `POST` | `/api/swarm/swarms/{id}/files` | Upload a file |
+| `GET` | `/api/swarm/swarms/{id}/files/{name}` | Download a file |
+
 ---
 
 ## Computer
@@ -2741,7 +2862,7 @@ The Computer is a retro-themed research workspace accessible at `/computer`. It 
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  🖥 Computer │ 🎨 Theme │ 🧠 Model │ Tier ▾ │              │
+│  🖥 Computer │ 🎨 Theme │ 🧠 Model │ 👤 Persona │ Tier ▾ │  │
 ├────────────────────────┬─────────────────────────────────────┤
 │  📝 Input              │  📊 Output                          │
 │  [textarea]            │  [Answer] [Blueprint] [Files]       │
@@ -2755,14 +2876,14 @@ The Computer is a retro-themed research workspace accessible at `/computer`. It 
 ```
 
 **Left column** (resizable, width persisted to localStorage):
-- **Input panel** — Textarea with auto-resize, attachment bar, action buttons (📎 Attach, 📁 Folder, Send)
+- **Input panel** — Textarea with auto-resize, attachment bar (images, PDF, DOCX, XLSX, PPTX, MD, TXT, CSV), action buttons (📎 Attach, 📁 Folder, Send)
 - **Activity log** — Real-time timestamped entries with type icons (system, user, /btw, tool, thinking, error). Max 200 entries with auto-trim.
 
 **Right column** — Tabbed output:
 - **Answer** — Rendered markdown response from the agent
 - **Blueprint** — Step decomposition of the agent's task execution
 - **Files** — Session-created files grouped by folder, with search
-- **Visual** — LLM-generated themed HTML rendered in a sandboxed iframe
+- **Visual** — LLM-generated themed HTML rendered in a sandboxed iframe, with PDF export via WeasyPrint
 - **Map** — Exploration tree visualization with zoom controls
 
 The resize handle between columns is draggable. The left panel width is stored in `localStorage` and restored on page load.
@@ -2805,6 +2926,14 @@ Click the 🧠 button to open a modal grid showing all available models from `co
 - Pricing info and capability badges
 
 Selecting a model sends a `set_model` WebSocket message to switch the entire session's model — affecting all LLM operations (chat, visual generation, exploration). The selection is persisted to `localStorage` and re-applied on reconnect.
+
+### Persona Selector
+
+Click the 👤 button to open a modal grid showing all available personas (agent personality + per-user profiles). Each card displays the persona name. Selecting a persona switches the active persona for the session. The selection is persisted to `localStorage`.
+
+### PDF Export
+
+The Visual tab and HTML file preview include a PDF export button. Clicking it sends the full HTML to the backend where WeasyPrint renders it to PDF, preserving all CSS styling (backgrounds, fonts, colors, layouts). The PDF filename is derived from the task prompt or HTML filename.
 
 ### Visual Generation
 

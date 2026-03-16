@@ -472,3 +472,90 @@ async def exploration_delete(
     log.info("Exploration node deleted", node_id=node_id)
 
     return web.json_response({"ok": True})
+
+
+# ── PDF export ──────────────────────────────────────────────────────────
+
+
+async def export_visual_pdf(
+    server: WebServer, request: web.Request,
+) -> web.Response:
+    """POST /api/computer/export-pdf — render visual HTML to PDF via WeasyPrint.
+
+    Expects JSON body: { "html": "<full HTML>", "prompt": "optional task name" }
+    Returns the PDF as application/pdf.
+    """
+    try:
+        data = await request.json()
+        html = data.get("html", "")
+        if not html:
+            return web.json_response({"error": "No HTML provided"}, status=400)
+
+        prompt = data.get("prompt", "").strip()
+        filename = _prompt_to_filename(prompt)
+
+        pdf_bytes = await asyncio.to_thread(_html_to_pdf, html)
+
+        return web.Response(
+            body=pdf_bytes,
+            content_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as exc:
+        log.error("PDF export failed", error=str(exc))
+        return web.json_response({"error": f"PDF export failed: {exc}"}, status=500)
+
+
+def _prompt_to_filename(prompt: str) -> str:
+    """Turn a prompt string into a safe, human-readable PDF filename."""
+    if not prompt:
+        return "visual.pdf"
+    slug = prompt.split("\n")[0].strip()[:60]
+    slug = re.sub(r"[^\w\s\-]", "", slug).strip()
+    slug = re.sub(r"\s+", "-", slug).lower()
+    if not slug:
+        return "visual.pdf"
+    return f"{slug}.pdf"
+
+
+# Extra CSS injected before rendering to make the visual print-friendly.
+_PRINT_CSS = """
+<style>
+@page {
+    size: A4;
+    margin: 12mm;
+}
+/* Ensure backgrounds print. */
+* {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    color-adjust: exact !important;
+}
+/* Prevent huge elements from overflowing the page. */
+body {
+    width: 100% !important;
+    max-width: 100% !important;
+    overflow-x: hidden !important;
+}
+img, svg, table, pre, code {
+    max-width: 100% !important;
+    overflow-x: auto !important;
+}
+/* Avoid page breaks inside key blocks. */
+h1, h2, h3, h4, h5, h6 { page-break-after: avoid; }
+table, figure, pre { page-break-inside: avoid; }
+</style>
+"""
+
+
+def _html_to_pdf(html: str) -> bytes:
+    """Render HTML to PDF using WeasyPrint (preserves all CSS styling)."""
+    from weasyprint import HTML
+
+    # Inject print-friendly CSS right before </head> (or at the top).
+    if "</head>" in html:
+        html = html.replace("</head>", _PRINT_CSS + "</head>", 1)
+    else:
+        html = _PRINT_CSS + html
+
+    return HTML(string=html).write_pdf()

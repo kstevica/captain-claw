@@ -44,6 +44,11 @@ ERROR_POLICIES = frozenset({
     "manual_review",     # Pause swarm on failure for human review
 })
 
+AGENT_MODES = frozenset({
+    "connected",  # Route tasks to pre-existing CC personas
+    "designed",   # LLM generates task-optimized agent specs
+})
+
 TASK_TERMINAL_STATES = frozenset({"completed", "failed", "skipped"})
 
 
@@ -95,6 +100,7 @@ class Swarm:
     priority: int = 0
     concurrency_limit: int = 5
     error_policy: str = "fail_fast"  # fail_fast | continue_on_error | manual_review
+    agent_mode: str = "connected"    # connected | designed
     created_at: str = field(default_factory=_utcnow_iso)
     updated_at: str = field(default_factory=_utcnow_iso)
     started_at: str = ""
@@ -120,6 +126,7 @@ class Swarm:
             "priority": self.priority,
             "concurrency_limit": self.concurrency_limit,
             "error_policy": self.error_policy,
+            "agent_mode": self.agent_mode,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "started_at": self.started_at,
@@ -140,6 +147,7 @@ class Swarm:
             priority=int(data.get("priority", 0)),
             concurrency_limit=int(data.get("concurrency_limit", 5)),
             error_policy=str(data.get("error_policy", "fail_fast")),
+            agent_mode=str(data.get("agent_mode", "connected")),
             created_at=str(data.get("created_at", "")),
             updated_at=str(data.get("updated_at", "")),
             started_at=str(data.get("started_at", "")),

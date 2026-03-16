@@ -191,6 +191,7 @@ class SwarmStore:
             ("swarm_tasks", "approved_by", "TEXT DEFAULT ''"),
             ("swarm_audit_log", "actor", "TEXT DEFAULT 'system'"),
             ("swarm_audit_log", "severity", "TEXT DEFAULT 'info'"),
+            ("swarms", "agent_mode", "TEXT DEFAULT 'connected'"),
         ]
         for table, column, col_type in migrations:
             try:
@@ -252,9 +253,10 @@ class SwarmStore:
         await self._db.execute(
             """INSERT INTO swarms
                (id, project_id, name, original_task, rephrased_task, status,
-                priority, concurrency_limit, error_policy, created_at, updated_at,
+                priority, concurrency_limit, error_policy, agent_mode,
+                created_at, updated_at,
                 started_at, completed_at, template_id, metadata)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
                  original_task = excluded.original_task,
@@ -263,6 +265,7 @@ class SwarmStore:
                  priority = excluded.priority,
                  concurrency_limit = excluded.concurrency_limit,
                  error_policy = excluded.error_policy,
+                 agent_mode = excluded.agent_mode,
                  updated_at = excluded.updated_at,
                  started_at = excluded.started_at,
                  completed_at = excluded.completed_at,
@@ -271,9 +274,9 @@ class SwarmStore:
             """,
             (swarm.id, swarm.project_id, swarm.name, swarm.original_task,
              swarm.rephrased_task, swarm.status, swarm.priority,
-             swarm.concurrency_limit, swarm.error_policy, swarm.created_at,
-             swarm.updated_at, swarm.started_at, swarm.completed_at,
-             swarm.template_id, json.dumps(swarm.metadata)),
+             swarm.concurrency_limit, swarm.error_policy, swarm.agent_mode,
+             swarm.created_at, swarm.updated_at, swarm.started_at,
+             swarm.completed_at, swarm.template_id, json.dumps(swarm.metadata)),
         )
         await self._db.commit()
 

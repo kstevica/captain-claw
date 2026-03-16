@@ -316,16 +316,24 @@ class SwarmEngine:
         except Exception as exc:
             log.debug("Could not build file manifest: %s", exc)
 
+        # Build concern context.
+        concern_context: dict[str, Any] = {
+            "swarm_id": swarm.id,
+            "swarm_task_id": task.id,
+            "swarm_task_name": task.name,
+            "swarm_files": file_manifest,
+        }
+
+        # Inject designed agent spec if present (agent_mode == "designed").
+        agent_spec = task.metadata.get("agent_spec")
+        if agent_spec:
+            concern_context["agent_spec"] = agent_spec
+
         # Create concern through the concern manager.
         concern = await self._server.concerns.create_concern(
             from_instance="__swarm__",
             task=prompt,
-            context={
-                "swarm_id": swarm.id,
-                "swarm_task_id": task.id,
-                "swarm_task_name": task.name,
-                "swarm_files": file_manifest,
-            },
+            context=concern_context,
             expertise_tags=[],
             from_session="",
         )

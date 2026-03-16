@@ -1019,6 +1019,10 @@ class WebServer:
         from captain_claw.web.rest_computer import exploration_delete
         return await exploration_delete(self, request)
 
+    async def _export_visual_pdf(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_computer import export_visual_pdf
+        return await export_visual_pdf(self, request)
+
     async def _list_reflections(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_reflections import list_reflections_api
         return await list_reflections_api(self, request)
@@ -1583,6 +1587,7 @@ class WebServer:
             app.router.add_get("/api/computer/exploration/{id}", self._exploration_get)
             app.router.add_put("/api/computer/exploration/{id}/visual", self._exploration_update_visual)
             app.router.add_delete("/api/computer/exploration/{id}", self._exploration_delete)
+            app.router.add_post("/api/computer/export-pdf", self._export_visual_pdf)
             app.router.add_get("/api/usage", self._get_usage)
             app.router.add_get("/favicon.ico", self._serve_favicon)
         return app

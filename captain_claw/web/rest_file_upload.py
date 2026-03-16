@@ -16,7 +16,12 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
-_ALLOWED_EXTENSIONS: set[str] = {".csv", ".xlsx"}
+_ALLOWED_EXTENSIONS: set[str] = {
+    ".csv", ".xlsx", ".xls",
+    ".pdf", ".docx", ".doc",
+    ".pptx", ".ppt",
+    ".md", ".txt",
+}
 
 
 async def upload_file(server: WebServer, request: web.Request) -> web.Response:

@@ -70,6 +70,27 @@ _DISPATCH_SYSTEM_PROMPT = (
 )
 
 
+def _build_persona_prompt(agent_spec: dict[str, Any]) -> str:
+    """Build a persona system prompt from a designed agent spec."""
+    name = agent_spec.get("persona_name", "")
+    if not name:
+        return ""
+
+    desc = agent_spec.get("persona_description", "")
+    expertise = agent_spec.get("persona_expertise", [])
+    instructions = agent_spec.get("persona_instructions", "")
+
+    parts = [f"You are {name}."]
+    if desc:
+        parts.append(desc)
+    if expertise:
+        parts.append(f"Your areas of expertise: {', '.join(expertise)}.")
+    if instructions:
+        parts.append(f"\n{instructions}")
+
+    return "\n".join(parts)
+
+
 class BotPortClient:
     """Persistent WebSocket client connecting a CC instance to BotPort."""
 
@@ -548,14 +569,29 @@ class BotPortClient:
             self._dispatch_personas[concern_id] = persona_hint or self._config.instance_name
 
             # Build effective input with context.
-            # Include file manifest if available.
+            # Pre-fetch swarm files so the agent can read them locally.
             effective_input = task
             filtered_context = {
                 k: v for k, v in context.items()
                 if k not in ("swarm_files",)
             }
             swarm_files = context.get("swarm_files", [])
-            if swarm_files:
+            prefetched: dict[str, str] = {}
+            if swarm_files and swarm_id:
+                prefetched = await self._prefetch_swarm_files(swarm_id, swarm_files)
+            if prefetched:
+                file_list = "\n".join(
+                    f"  - {finfo['filename']} ({finfo['size']} bytes) — read from: {prefetched[finfo['path']]}"
+                    for finfo in swarm_files
+                    if finfo.get("path") in prefetched
+                )
+                effective_input += (
+                    f"\n\n--- Files from Previous Tasks ---\n"
+                    f"The following files have been downloaded to your local disk. "
+                    f"Use the read tool with the exact paths below to access them.\n{file_list}"
+                )
+            elif swarm_files:
+                # Fallback: show manifest even if pre-fetch failed.
                 file_list = "\n".join(
                     f"  - {f['filename']} ({f['size']} bytes, {f['mime_type']}) path={f['path']}"
                     for f in swarm_files
@@ -699,14 +735,27 @@ class BotPortClient:
         )
         session.add_message("system", dispatch_context)
 
+        # Apply designed agent persona if provided via swarm agent_spec.
+        agent_spec = context.get("agent_spec", {}) if context else {}
+        if agent_spec:
+            persona_prompt = _build_persona_prompt(agent_spec)
+            if persona_prompt:
+                session.add_message("system", persona_prompt)
+
         # Build tool output callback that also tracks file creation.
         file_tracking_cb = self._make_file_tracking_tool_callback(
             concern_id,
             self._make_activity_tool_output_callback(self._tool_output_callback),
         )
 
+        # Resolve provider — use model override from agent_spec if present.
+        provider = self._provider
+        spec_model_id = agent_spec.get("model_id", "") if agent_spec else ""
+        if spec_model_id:
+            provider = self._resolve_model_provider(spec_model_id)
+
         agent = AgentCls(
-            provider=self._provider,
+            provider=provider,
             status_callback=self._make_activity_status_callback(self._status_callback),
             tool_output_callback=file_tracking_cb,
             thinking_callback=self._make_activity_thinking_callback(self._thinking_callback),
@@ -726,9 +775,12 @@ class BotPortClient:
         agent._initialized = True
         agent.max_iterations = 10  # Allow more iterations than a basic worker.
 
+        persona_name = agent_spec.get("persona_name", "") if agent_spec else ""
         log.info(
-            "Spawned dispatch agent: concern=%s session=%s persona=%s",
-            concern_id[:8], session.id[:8], persona_hint or "default",
+            "Spawned dispatch agent: concern=%s session=%s persona=%s model=%s",
+            concern_id[:8], session.id[:8],
+            persona_name or persona_hint or "default",
+            spec_model_id or "default",
         )
         return agent
 
@@ -825,6 +877,49 @@ class BotPortClient:
                 "output": output[:500],  # Truncate to avoid huge messages.
             })
         return callback
+
+    # ── Model override ─────────────────────────────────────────────
+
+    def _resolve_model_provider(self, model_id: str) -> Any:
+        """Create an LLM provider for a specific model ID.
+
+        Used when a designed agent spec requests a different model than
+        the CC instance's default.  Falls back to self._provider on error.
+        """
+        try:
+            from captain_claw.llm import LLMProvider, get_config
+
+            cfg = get_config()
+            # Find matching model in allowed list.
+            for m in cfg.model.allowed:
+                mid = m.id or f"{m.provider}/{m.model}"
+                if mid == model_id or m.model == model_id:
+                    return LLMProvider(
+                        provider=m.provider,
+                        model=m.model,
+                        api_key=m.api_key if hasattr(m, 'api_key') else "",
+                        base_url=m.base_url,
+                        temperature=m.temperature if m.temperature is not None else cfg.model.temperature,
+                        max_tokens=m.max_tokens if m.max_tokens is not None else cfg.model.max_tokens,
+                    )
+
+            # Try parsing as provider/model string.
+            if "/" in model_id:
+                provider, model = model_id.split("/", 1)
+                return LLMProvider(
+                    provider=provider,
+                    model=model,
+                    temperature=cfg.model.temperature,
+                    max_tokens=cfg.model.max_tokens,
+                )
+
+        except Exception as exc:
+            log.warning(
+                "Failed to create provider for model %s, using default: %s",
+                model_id, exc,
+            )
+
+        return self._provider
 
     # ── File transfer ─────────────────────────────────────────────
 
@@ -1006,6 +1101,61 @@ class BotPortClient:
             if future and not future.done():
                 future.set_result(data)
 
+    async def _prefetch_swarm_files(
+        self,
+        swarm_id: str,
+        swarm_files: list[dict[str, Any]],
+    ) -> dict[str, str]:
+        """Download swarm files from BotPort and write them to local disk.
+
+        Returns ``{swarm_rel_path: local_abs_path}`` for successfully fetched files.
+        The files are placed under ``<workspace>/swarm_files/<rel_path>`` so the
+        agent can read them with the normal ``read`` tool.
+        """
+        if not swarm_files or not swarm_id:
+            return {}
+
+        # Determine local root for swarm files.
+        try:
+            from captain_claw.config import get_config
+            ws_root = Path(get_config().resolved_workspace_path())
+        except Exception:
+            ws_root = Path.cwd() / "workspace"
+        swarm_dir = ws_root / "swarm_files"
+
+        fetched: dict[str, str] = {}
+        for finfo in swarm_files:
+            rel_path = finfo.get("path", "")
+            if not rel_path:
+                continue
+
+            local_path = swarm_dir / rel_path
+            # Skip if already fetched (from a prior task in the same run).
+            if local_path.is_file():
+                fetched[rel_path] = str(local_path)
+                continue
+
+            try:
+                file_data, meta = await self.request_file(
+                    swarm_id=swarm_id,
+                    file_path=rel_path,
+                )
+                if file_data is None:
+                    log.warning(
+                        "Failed to fetch swarm file %s: %s",
+                        rel_path, meta.get("error", "unknown"),
+                    )
+                    continue
+
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                local_path.write_bytes(file_data)
+                fetched[rel_path] = str(local_path)
+                log.info("Pre-fetched swarm file: %s -> %s", rel_path, local_path)
+            except Exception as exc:
+                log.warning("Error fetching swarm file %s: %s", rel_path, exc)
+
+        return fetched
+
     async def _upload_created_files(self, concern_id: str) -> list[dict[str, Any]]:
         """Upload all files created during a dispatch to the swarm workspace."""
         swarm_id = self._dispatch_swarm_ids.get(concern_id, "")
@@ -1075,6 +1225,9 @@ class BotPortClient:
 
         def _add(fp: str) -> None:
             resolved = str(Path(fp).resolve())
+            # Skip pre-fetched swarm files — already on the server.
+            if "/swarm_files/" in resolved:
+                return
             if not any(str(Path(p).resolve()) == resolved for p in tracked):
                 tracked.append(fp)
                 log.debug("Tracked file creation: %s", fp)
@@ -1183,6 +1336,9 @@ class BotPortClient:
             for cand in candidates:
                 try:
                     resolved = str(cand.resolve())
+                    # Skip pre-fetched swarm files — they're already on the server.
+                    if "/swarm_files/" in resolved:
+                        break
                     if cand.is_file() and resolved not in already:
                         if cand.stat().st_size <= 50 * 1024 * 1024:
                             self._dispatch_created_files[concern_id].append(str(cand.resolve()))

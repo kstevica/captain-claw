@@ -28,10 +28,15 @@ let selectedTokenTier = localStorage.getItem("computer-token-tier") || "standard
 let selectedModel = localStorage.getItem("computer-model") || "";
 let availableModels = [];
 
+// Persona state.
+let availablePersonas = [];
+let selectedPersona = localStorage.getItem("computer-persona") || "";
+
 // Attachment state.
 let pendingImagePath = null;
 let pendingFilePath = null;
 const _IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
+const _DATA_EXTS = ["csv", "xlsx", "xls", "pdf", "docx", "doc", "pptx", "ppt", "md", "txt"];
 
 // Folder browser state.
 let folderCurrentPath = null;
@@ -1163,6 +1168,12 @@ function handleWelcome(data) {
     logEntry("system", `Applying saved model: ${selectedModel}`);
   }
 
+  // Apply the saved persona selection to the session.
+  if (selectedPersona && connected) {
+    send({ type: "set_personality", personality_id: selectedPersona });
+    logEntry("system", `Applying saved persona: ${selectedPersona}`);
+  }
+
   // Load exploration history.
   if (sessionId) {
     loadExplorationHistory(sessionId);
@@ -1776,6 +1787,56 @@ function toggleFullscreen() {
   $("#fullscreen-btn").title = isFullscreen ? "Exit fullscreen" : "Fullscreen";
 }
 
+async function exportVisualPdf() {
+  const frame = $("#visual-frame");
+  const html = frame.srcdoc || "";
+  if (!html) {
+    logEntry("error", "No visual to export — generate one first");
+    return;
+  }
+
+  const pdfBtn = $("#export-pdf-btn");
+  pdfBtn.disabled = true;
+  pdfBtn.textContent = "...";
+  logEntry("system", "Exporting visual to PDF...");
+  blinkLed();
+
+  try {
+    const res = await fetch("/api/computer/export-pdf", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ html, prompt: lastPrompt || "" }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+
+    // Extract filename from Content-Disposition header.
+    const cd = res.headers.get("Content-Disposition") || "";
+    const fnMatch = cd.match(/filename="([^"]+)"/);
+    const filename = fnMatch ? fnMatch[1] : "visual.pdf";
+
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    logEntry("system", `PDF exported (${humanSize(blob.size)})`);
+  } catch (err) {
+    logEntry("error", `PDF export failed: ${err.message}`);
+  } finally {
+    pdfBtn.disabled = false;
+    pdfBtn.textContent = "PDF";
+  }
+}
+
 function initFullscreen() {
   const btn = $("#fullscreen-btn");
   btn.addEventListener("click", toggleFullscreen);
@@ -1794,6 +1855,10 @@ function initFullscreen() {
     visualGenerating = false;
     generateVisual();
   });
+
+  // Export PDF button.
+  const pdfBtn = $("#export-pdf-btn");
+  pdfBtn.addEventListener("click", exportVisualPdf);
 
   // Escape key exits fullscreen.
   document.addEventListener("keydown", (e) => {
@@ -1925,9 +1990,11 @@ function initTabs() {
       // Show/hide Visual-only buttons.
       const fsBtn = $("#fullscreen-btn");
       const rerunBtn = $("#rerun-visual-btn");
+      const pdfBtn = $("#export-pdf-btn");
       if (tab === "visual") {
         fsBtn.style.display = "inline-block";
         rerunBtn.style.display = "inline-block";
+        pdfBtn.style.display = "inline-block";
         // Auto-generate visual if we have content and haven't generated yet.
         const frame = $("#visual-frame");
         if (lastResult && (!frame.srcdoc || frame.srcdoc === "")) {
@@ -1940,6 +2007,7 @@ function initTabs() {
       } else {
         fsBtn.style.display = "none";
         rerunBtn.style.display = "none";
+        pdfBtn.style.display = "none";
         // Exit fullscreen if leaving visual tab.
         if (isFullscreen) {
           toggleFullscreen();
@@ -2507,11 +2575,16 @@ async function openFilePreview(path, ext, isText) {
   const modal = $("#file-preview-modal");
   const title = $("#preview-title");
   const body = $("#preview-body");
+  const pdfBtn = $("#preview-pdf-btn");
   const filename = path.split('/').pop();
 
   title.textContent = filename;
   body.innerHTML = '<div class="output-processing"><span class="processing-dots">⣾</span> Loading preview...</div>';
   modal.classList.remove("hidden");
+  pdfBtn.style.display = "none";
+  // Clear previous listener.
+  pdfBtn.replaceWith(pdfBtn.cloneNode(true));
+  const pdfBtnNew = $("#preview-pdf-btn");
 
   const MD_EXTS = new Set(['.md', '.markdown', '.mdown', '.mkd']);
 
@@ -2520,8 +2593,22 @@ async function openFilePreview(path, ext, isText) {
       // Image: render inline.
       body.innerHTML = `<img src="/api/files/view?path=${encodeURIComponent(path)}" alt="${esc(filename)}">`;
     } else if (HTML_EXTS.has(ext)) {
-      // HTML: render in sandboxed iframe.
-      body.innerHTML = `<iframe src="/api/files/view?path=${encodeURIComponent(path)}" sandbox="allow-scripts"></iframe>`;
+      // HTML: render in sandboxed iframe + show PDF button.
+      const contentRes = await fetch(`/api/files/content?path=${encodeURIComponent(path)}`);
+      let htmlContent = "";
+      if (contentRes.ok) {
+        const data = await contentRes.json();
+        htmlContent = data.content || "";
+      }
+      if (htmlContent) {
+        body.innerHTML = `<iframe sandbox="allow-scripts"></iframe>`;
+        body.querySelector("iframe").srcdoc = htmlContent;
+      } else {
+        body.innerHTML = `<iframe src="/api/files/view?path=${encodeURIComponent(path)}" sandbox="allow-scripts"></iframe>`;
+      }
+      // Show PDF export button.
+      pdfBtnNew.style.display = "";
+      pdfBtnNew.addEventListener("click", () => exportPreviewPdf(htmlContent || null, path, filename));
     } else if (MD_EXTS.has(ext)) {
       // Markdown: fetch content and render as formatted HTML.
       const res = await fetch(`/api/files/content?path=${encodeURIComponent(path)}`);
@@ -2539,6 +2626,57 @@ async function openFilePreview(path, ext, isText) {
     }
   } catch (err) {
     body.innerHTML = `<span class="output-placeholder">Preview failed: ${esc(err.message)}</span>`;
+  }
+}
+
+async function exportPreviewPdf(html, path, filename) {
+  const pdfBtn = $("#preview-pdf-btn");
+  pdfBtn.disabled = true;
+  pdfBtn.textContent = "...";
+
+  try {
+    // If we don't have inline HTML, fetch it.
+    if (!html) {
+      const res = await fetch(`/api/files/content?path=${encodeURIComponent(path)}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      html = data.content || "";
+    }
+    if (!html) throw new Error("No HTML content to export");
+
+    const pdfName = filename.replace(/\.html?$/i, "") || "file";
+
+    const res = await fetch("/api/computer/export-pdf", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ html, prompt: pdfName }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+
+    const cd = res.headers.get("Content-Disposition") || "";
+    const fnMatch = cd.match(/filename="([^"]+)"/);
+    const outFilename = fnMatch ? fnMatch[1] : `${pdfName}.pdf`;
+
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = outFilename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    logEntry("system", `PDF exported: ${outFilename} (${humanSize(blob.size)})`);
+  } catch (err) {
+    logEntry("error", `PDF export failed: ${err.message}`);
+  } finally {
+    pdfBtn.disabled = false;
+    pdfBtn.textContent = "PDF";
   }
 }
 
@@ -2690,9 +2828,123 @@ function initModelModal() {
   });
 }
 
+/* ═══════════════════════════════════════════════════════════════
+   PERSONA SELECTOR
+   ═══════════════════════════════════════════════════════════════ */
+
+async function loadPersonas() {
+  try {
+    const res = await fetch("/api/user-personalities");
+    if (!res.ok) return;
+    const data = await res.json();
+    availablePersonas = (Array.isArray(data) ? data : data.personalities || []).map(p => {
+      p.id = String(p.user_id || p.id || "").trim();
+      return p;
+    });
+    renderPersonaGrid();
+    updatePersonaBtnLabel();
+    console.log(`[Computer] Loaded ${availablePersonas.length} personas`);
+  } catch (e) {
+    console.warn("Failed to load personas:", e);
+  }
+}
+
+function renderPersonaGrid() {
+  const grid = $("#persona-grid");
+  grid.innerHTML = "";
+
+  // "No profile" option.
+  const noneCard = document.createElement("div");
+  noneCard.className = "model-card" + (!selectedPersona ? " selected" : "");
+  noneCard.innerHTML =
+    '<div class="model-card-icon">🚫</div>' +
+    '<div class="model-card-info">' +
+      '<div class="model-card-name">No profile</div>' +
+      '<div class="model-card-detail">Generic context — no user profile applied</div>' +
+    '</div>' +
+    (!selectedPersona ? '<div class="model-card-badges"><span class="model-badge active">Active</span></div>' : '');
+  noneCard.addEventListener("click", () => selectPersona(""));
+  grid.appendChild(noneCard);
+
+  for (const p of availablePersonas) {
+    if (!p.id) continue;
+    const card = document.createElement("div");
+    card.className = "model-card" + (p.id === selectedPersona ? " selected" : "");
+
+    const name = p.name || p.id;
+    const detail = p.description || "";
+    const badges = [];
+    if (p.is_telegram) badges.push("Telegram");
+    if (p.id === selectedPersona) badges.push("Active");
+
+    card.innerHTML =
+      '<div class="model-card-icon">👤</div>' +
+      '<div class="model-card-info">' +
+        '<div class="model-card-name">' + esc(name) + '</div>' +
+        (detail ? '<div class="model-card-detail">' + esc(detail) + '</div>' : '') +
+      '</div>' +
+      (badges.length
+        ? '<div class="model-card-badges">' +
+          badges.map(b => '<span class="model-badge' + (b === "Active" ? " active" : "") + '">' + esc(b) + '</span>').join("") +
+          '</div>'
+        : '');
+
+    card.addEventListener("click", () => selectPersona(p.id));
+    grid.appendChild(card);
+  }
+}
+
+function selectPersona(personaId) {
+  selectedPersona = personaId;
+  localStorage.setItem("computer-persona", selectedPersona);
+
+  renderPersonaGrid();
+  updatePersonaBtnLabel();
+
+  if (connected) {
+    send({ type: "set_personality", personality_id: personaId });
+  }
+
+  logEntry("system", `Persona: ${selectedPersona || '(none)'}`);
+  closePersonaModal();
+}
+
+function updatePersonaBtnLabel() {
+  const label = $("#persona-btn-label");
+  if (!selectedPersona) {
+    label.textContent = "No profile";
+    return;
+  }
+  const p = availablePersonas.find(p => p.id === selectedPersona);
+  label.textContent = p ? (p.name || p.id) : selectedPersona;
+}
+
+function openPersonaModal() {
+  renderPersonaGrid();
+  $("#persona-modal").classList.add("active");
+}
+
+function closePersonaModal() {
+  $("#persona-modal").classList.remove("active");
+}
+
+function initPersonaModal() {
+  $("#persona-btn").addEventListener("click", openPersonaModal);
+  $("#persona-modal .modal-close").addEventListener("click", closePersonaModal);
+  $("#persona-modal .modal-backdrop").addEventListener("click", closePersonaModal);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && $("#persona-modal").classList.contains("active")) {
+      closePersonaModal();
+    }
+  });
+}
+
 function initSelectors() {
-  // Model modal (replaces old <select>).
+  // Model modal.
   initModelModal();
+
+  // Persona modal.
+  initPersonaModal();
 
   // Tier selector.
   const tierSel = $("#tier-selector");
@@ -2894,10 +3146,10 @@ async function uploadFile(file) {
   if (!file) return;
   const ext = file.name.split(".").pop().toLowerCase();
   const isImage = _IMAGE_EXTS.indexOf(ext) !== -1;
-  const isData = (ext === "csv" || ext === "xlsx");
+  const isData = _DATA_EXTS.indexOf(ext) !== -1;
 
   if (!isImage && !isData) {
-    logEntry("error", "Supported files: images (.png, .jpg, .jpeg, .webp, .gif, .bmp) and data (.csv, .xlsx).");
+    logEntry("error", "Supported: images (.png, .jpg, .jpeg, .webp, .gif, .bmp), documents (.pdf, .docx, .pptx, .md, .txt), and data (.csv, .xlsx).");
     return;
   }
 
@@ -3345,8 +3597,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   initAttachments();
   initFolderModal();
 
-  // Load available models for the model selector.
+  // Load available models and personas for selectors.
   loadModels();
+  loadPersonas();
 
   // Listen for postMessage from visual iframe.
   window.addEventListener("message", handleIframeMessage);

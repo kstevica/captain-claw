@@ -28,6 +28,7 @@
       <span id="connection-status" class="status-dot"></span>
     </div>
     <div id="titlebar-right">
+      <button id="persona-btn" title="Choose persona">👤 <span id="persona-btn-label">No profile</span></button>
       <button id="model-btn" title="Choose model">🧠 <span id="model-btn-label">Default</span></button>
       <select id="tier-selector" title="Visual token budget">
         <option value="micro">Micro (4k)</option>
@@ -62,7 +63,7 @@
             <div id="input-actions">
               <button id="attach-btn" title="Attach image or file">📎</button>
               <button id="folder-btn" title="Read folders">📁</button>
-              <input type="file" id="file-input" accept="image/png,image/jpeg,image/jpg,image/webp,image/gif,image/bmp,.csv,.xlsx" style="display:none">
+              <input type="file" id="file-input" accept="image/png,image/jpeg,image/jpg,image/webp,image/gif,image/bmp,.csv,.xlsx,.xls,.pdf,.docx,.doc,.pptx,.ppt,.md,.txt" style="display:none">
               <button id="send-btn" title="Send (Enter)">Send</button>
             </div>
           </div>
@@ -105,6 +106,7 @@
             <button class="tab-btn" data-tab="map" style="display:none;">Map</button>
           </div>
           <button id="rerun-visual-btn" class="tab-btn" title="Re-run visual generation" style="display:none;">↻</button>
+          <button id="export-pdf-btn" class="tab-btn" title="Export visual to PDF" style="display:none;">PDF</button>
           <button id="fullscreen-btn" class="tab-btn" title="Toggle fullscreen (Visual tab)" style="display:none;">⛶</button>
         </div>
       </div>
@@ -180,6 +182,7 @@
       <div class="window-title">
         <span class="window-title-text" id="preview-title">File Preview</span>
         <div class="window-controls">
+          <button class="win-btn" id="preview-pdf-btn" title="Export to PDF" style="display:none">PDF</button>
           <button class="win-btn modal-close" title="Close">✕</button>
         </div>
       </div>
@@ -233,6 +236,24 @@
       <div class="window-body">
         <div class="model-grid" id="model-grid">
           <div class="model-loading">Loading models...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Persona selector modal ── -->
+  <div id="persona-modal">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content window">
+      <div class="window-title">
+        <span class="window-title-text">Choose Persona</span>
+        <div class="window-controls">
+          <button class="win-btn modal-close" title="Close">✕</button>
+        </div>
+      </div>
+      <div class="window-body">
+        <div class="model-grid" id="persona-grid">
+          <div class="model-loading">Loading personas...</div>
         </div>
       </div>
     </div>

@@ -1180,6 +1180,134 @@ main {
   color: var(--accent);
 }
 
+.agent-mode-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.mode-connected {
+  background: rgba(100, 160, 100, 0.15);
+  color: var(--green);
+}
+
+.mode-designed {
+  background: rgba(168, 108, 255, 0.15);
+  color: #a86cff;
+}
+
+/* Agent mode toggle in actions panel */
+.agent-mode-toggle-row {
+  margin-top: 4px;
+}
+
+.agent-mode-toggle {
+  display: flex;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.agent-mode-opt {
+  flex: 1;
+  padding: 7px 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.agent-mode-opt:first-child {
+  border-right: 1px solid var(--border);
+}
+
+.agent-mode-opt:hover:not(.active) {
+  background: rgba(255,255,255,0.04);
+  color: var(--text-primary);
+}
+
+.agent-mode-opt.active {
+  background: rgba(108, 140, 255, 0.15);
+  color: var(--accent);
+  cursor: default;
+}
+
+.agent-mode-opt:first-child.active {
+  background: rgba(100, 160, 100, 0.15);
+  color: var(--green);
+}
+
+.agent-mode-opt:last-child.active {
+  background: rgba(168, 108, 255, 0.15);
+  color: #a86cff;
+}
+
+/* ---- Agent spec card (task detail) ---- */
+
+.agent-spec-card {
+  padding: 10px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid #a86cff;
+  border-radius: 6px;
+  margin-top: 6px;
+}
+
+.agent-spec-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: #a86cff;
+  margin-bottom: 4px;
+}
+
+.agent-spec-desc {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.agent-spec-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.agent-spec-tag {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: rgba(168, 108, 255, 0.12);
+  color: #a86cff;
+}
+
+.agent-spec-model {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
+.agent-spec-model code {
+  background: var(--surface);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+.agent-spec-instructions {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-style: italic;
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
 /* ---- Pending approval ---- */
 
 .status-task-pending_approval {

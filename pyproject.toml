@@ -1,6 +1,6 @@
 [project]
 name = "captain-claw"
-version = "0.4.0.1"
+version = "0.4.1"
 description = "A powerful AI agentic system"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -36,6 +36,7 @@ dependencies = [
     "tenacity>=8.0.0",
     "aiohttp>=3.9.0",
     "playwright>=1.40.0",
+    "weasyprint>=60.0",
 ]
 
 [project.optional-dependencies]

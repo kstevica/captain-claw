@@ -1,121 +1,130 @@
-# Captain Claw v0.4.0 Release Notes
+# Captain Claw v0.4.1 Release Notes
 
-**Release title:** Computer — Retro-Themed Research Workspace, Live Instructions, Personality Editor
+**Release title:** BotPort Swarm, PDF Export, Persona Selector, Extended File Attachments
 
-**Release date:** 2026-03-15
+**Release date:** 2026-03-16
 
 ## Highlights
 
-This release introduces **Computer**, a retro-themed research workspace at `/computer` with visual generation, exploration trees, 14 built-in themes, and a custom theme engine. A new `/btw` command lets you inject live instructions while tasks are running across Chat, Computer, and Telegram. The personality and personas editor moves to its own dedicated page, and reflections become editable.
+This release introduces **BotPort Swarm** — DAG-based multi-agent orchestration through BotPort. Decompose complex goals into task graphs with dependencies, route tasks to specialist agents, and execute with approval gates, retry policies, checkpoints, and file transfer. The Computer workspace gains **PDF export** via WeasyPrint (preserving full CSS styling), a **persona selector**, and support for **additional file attachments** (PDF, DOCX, XLSX, PPTX, MD, TXT, CSV alongside images). Theme consistency improvements ensure all input action buttons match the active theme.
 
 ## New Features
 
-### Computer — Research Workspace (`/computer`)
+### BotPort Swarm
 
-A three-panel workspace designed for extended research sessions and visual exploration:
+DAG-based multi-agent orchestration built on top of BotPort's routing layer:
 
-- **Three-panel layout** — Resizable input area + activity log (left) and tabbed output (right: Answer, Blueprint, Files, Visual, Map)
-- **14 built-in themes** — Amiga Workbench, Atari ST GEM, C64 GEOS, Classic Mac, Windows 3.1, Hacker Terminal, Modern, Windows 11, macOS, iPhone, Android, Nokia 7110, Nokia Communicator, plus a default theme. Each has unique boot sequences and CSS variable styling (39 custom properties)
-- **Custom theme engine** — Download JSON template, edit colors/fonts/boot sequence, upload to create your own theme
-- **Visual generation** — LLM generates themed HTML output matching the active theme (Amiga bevels, hacker terminal glow, etc.). Token tier selector controls generation budget (4K–32K tokens)
-- **Exploration tree** — Click explore links in generated visuals to branch into multi-turn research. Nodes persist to SQLite, visualized in the Map tab with zoom controls
-- **Model selector modal** — Grid of available models with provider icons, descriptions, and pricing. Selected model applies to all LLM operations (chat, visual generation, exploration), not just visual generation
-- **Folder browser** — Modal with Local and Google Drive tabs. Browse directories, add folders for agent file access, drive selector for Windows
-- **Image/file attachments** — Paste, drag-drop, or file picker. Images auto-resize to 1024px. Supports PNG, JPG, WEBP, GIF, BMP, CSV, XLSX
-- **Panel resize persistence** — Left panel width saved to localStorage and restored on load
-- **Activity log** — Real-time timestamped entries with type icons (system, user, /btw, tool, thinking, error). Max 200 entries with auto-trim
-- **Input decomposition** — Automatic analysis showing identified actions, targets, and complexity
+- **Task decomposition** — LLM-powered decomposer breaks goals into task graphs with dependencies
+- **Agent designer** — LLM analyzes each task and assigns optimal persona + model tier (fast/mid/premium)
+- **Swarm engine** — Advances DAG, launches tasks whose dependencies are satisfied, routes via BotPort concerns
+- **Error policies** — `fail_fast`, `continue_on_error`, `manual_review`
+- **Approval gates** — Require human approval before executing selected tasks
+- **Retry with backoff** — Configurable retry count, backoff duration, and fallback persona
+- **Timeout escalation** — Three-stage system: warning at 80%, extension at 100% (+50%), failure after extension
+- **Checkpointing** — Save and restore swarm state for re-execution or rollback
+- **File transfer** — Inter-agent file transfer over WebSocket (gzip + base64, up to 50 MB per file), with SHA-256 hashes
+- **Cron scheduling** — Recurring swarms via cron expressions (standard 5-field format)
+- **Audit logging** — Complete event trail for every swarm action
+- **Projects** — Organize swarms into named projects
+- **Visual dashboard** — DAG canvas with status colors and dependency arrows, task monitoring, file manager, approval UI
 
-### Live Instructions (`/btw` Command)
+New files: `botport/swarm/` (engine, store, dag, decomposer, agent_designer, scheduler, file_manager, models), `botport/dashboard/swarm_routes.py`, `botport/dashboard/static/swarm.js`
 
-Inject additional context or course corrections while the agent is working on a task:
+### Computer — PDF Export
 
-```
-/btw use bullet points for the summary
-btw also include error counts
-```
+- **Visual tab PDF button** — Export the generated visual HTML to PDF via WeasyPrint, preserving all CSS styling (backgrounds, fonts, colors, tables, code blocks, emojis)
+- **File preview PDF button** — HTML files previewed in the file modal now have a PDF export button in the title bar
+- Print-friendly CSS injected automatically: A4 page size, color-adjust, page-break avoidance, overflow prevention
+- PDF filename derived from the task prompt (e.g., `analyze-quarterly-results.pdf`) or HTML filename
+- Replaces previous fpdf2 implementation — no more font/Unicode/layout issues
 
-- Works in **Chat**, **Computer**, and **Telegram**
-- Multiple `/btw` messages accumulate during a task
-- Instructions are applied to all remaining subtasks
-- Cleared automatically when the task completes
-- In Telegram, processed before the per-user lock so it works even while the agent is busy
+### Computer — Persona Selector
 
-### Personality Editor Page (`/personality`)
+- New 👤 persona button in the Computer title bar (alongside Theme, Model, Tier)
+- Modal grid showing all available personas (agent personality + per-user profiles)
+- Persona selection persisted to localStorage
 
-- Dedicated full-screen page for editing agent personality and per-user profiles
-- Extracted from the home page into a standalone route
-- Split-pane layout: persona list (left) and editor form (right)
-- Full CRUD for agent personality and user personas
-- Rephrase & Enrich buttons on textarea fields
-- Home page card added after Computer card for navigation
+### Computer — Extended File Attachments
 
-### Editable Reflections
-
-- Reflections on the `/reflections` page are now editable
-- Edit button on each reflection card opens inline editor with textarea for summary and input for topics
-- Save persists changes to the markdown file and invalidates cache
-- New `PUT /api/reflections/{timestamp}` REST endpoint
+- File picker now accepts PDF, DOCX, XLSX, PPTX, MD, TXT, CSV files in addition to images
+- All supported file types can be attached to prompts via the 📎 button, drag-drop, or paste
 
 ## Improvements
 
-### Model Selection Scope
-- Selected model in Computer now applies to **all** LLM operations (chat, visual generation, exploration), not just visual generation
-- Model is re-applied on WebSocket reconnect via `set_model` message
-- Provider is correctly logged in LLM usage records from Computer operations
+### Theme-Consistent Input Buttons
 
-### Computer Activity Log
-- Type-specific icons: ● system, ▶ user, 💡 /btw, ⚙ tool, 💭 thinking, ✖ error
-- Timestamps in locale-aware HH:MM:SS format
-- Auto-trim at 200 entries
+- 📎 Attach and 📁 Folder buttons now match `#send-btn` styling across all themes
+- Base style updated to use theme variables (`--bevel`, `--chrome-hi`, `--chrome-lo`, `--radius`) matching Send button
+- Per-theme overrides added for: Hacker Terminal (green glow + border), Modern (rounded, no border, scale effect), Windows 11 (rounded, no border), macOS (rounded, font-weight 500), iPhone (pill shape, border-radius 18px), Android (pill shape, border-radius 20px)
+
+### Agent & BotPort Optimizations
+
+- Agent and BotPort performance optimizations and bug fixes
+- Swarm file transfer protocol for inter-agent file sharing
+
+## Dependencies
+
+- Added `weasyprint>=60.0` (replaces `fpdf2>=2.8.0`)
+- WeasyPrint requires system libraries: `pango`, `cairo`, `gdk-pixbuf` (install via `brew install pango` on macOS)
 
 ## REST API Changes
 
-### New Endpoints
-- `PUT /api/reflections/{timestamp}` — Update a reflection's summary and/or topics
-- `POST /api/computer/visualize` — Generate themed HTML from prompt + result
-- `POST /api/computer/exploration` — Save exploration tree node
-- `GET /api/computer/exploration` — List exploration nodes for session
-- `GET /api/computer/exploration/{id}` — Get single exploration node
-- `PUT /api/computer/exploration/{id}/visual` — Update visual HTML for node
-- `DELETE /api/computer/exploration/{id}` — Delete exploration node
+### New Endpoints (BotPort)
 
-### New Routes
-- `GET /computer` — Computer workspace page
-- `GET /personality` — Personality editor page
+- `GET /api/swarm/projects` — List all projects
+- `POST /api/swarm/projects` — Create a project
+- `GET/PUT/DELETE /api/swarm/projects/{id}` — Project CRUD
+- `GET /api/swarm/swarms` — List swarms
+- `POST /api/swarm/swarms` — Create a swarm
+- `GET/PUT/DELETE /api/swarm/swarms/{id}` — Swarm CRUD
+- `POST /api/swarm/swarms/{id}/start` — Start a swarm
+- `POST /api/swarm/swarms/{id}/pause` — Pause a swarm
+- `POST /api/swarm/swarms/{id}/resume` — Resume a swarm
+- `POST /api/swarm/swarms/{id}/cancel` — Cancel a swarm
+- `POST /api/swarm/swarms/{id}/decompose` — Decompose goal into tasks
+- `POST /api/swarm/swarms/{id}/design-agents` — Design agent specs
+- `POST /api/swarm/swarms/{id}/checkpoints` — Create checkpoint
+- `POST /api/swarm/swarms/{id}/checkpoints/{cp}/restore` — Restore checkpoint
+- `POST /api/swarm/tasks/{id}/approve` — Approve pending task
+- `POST /api/swarm/tasks/{id}/reject` — Reject pending task
+- `GET /api/swarm/swarms/{id}/files` — List swarm files
+- `POST /api/swarm/swarms/{id}/files` — Upload file
+- `GET /api/swarm/swarms/{id}/files/{name}` — Download file
+- `GET /api/swarm/swarms/{id}/audit` — Get audit log
 
-## Web UI Changes
+### Existing Endpoints
 
-- New `/computer` page — full retro-themed research workspace
-- New `/personality` page — dedicated personality and personas editor
-- Home page: Computer card added, Personality card added after Computer, Reflections card moved after Personality
-- Reflections page: edit button with inline editor for summary and topics
-- Dashboard pages table updated with Computer, Personality, and Reflections entries
+- `POST /api/computer/export-pdf` — Now uses WeasyPrint instead of fpdf2
 
-## Configuration Changes
+## Version Changes
 
-No new configuration keys. Computer uses existing `model.allowed` for the model selector and existing folder/GDrive APIs for the folder browser.
+- `captain_claw` — 0.4.0.1 → 0.4.1
+- `botport` — 0.3.4.1 → 0.4.1 (synced with captain_claw)
+- `desktop` — 0.3.41 → 0.4.1
 
 ## Internal
 
-### New Files
-- `captain_claw/web/static/computer.html` — Computer workspace HTML
-- `captain_claw/web/static/computer.js` — Computer client-side logic (~3,100 lines)
-- `captain_claw/web/static/computer.css` — Theme engine and Computer styling (~2,950 lines)
-- `captain_claw/web/static/personality.html` — Standalone personality editor page
-- `captain_claw/web/rest_computer.py` — Visual generation and exploration REST handlers
-- `captain_claw/instructions/computer_visualize_system_prompt.md` — Visual generation system prompt
-- `captain_claw/instructions/computer_visualize_user_prompt.md` — Visual generation user prompt
+### New Files (BotPort Swarm)
+- `botport/botport/swarm/__init__.py` — Swarm module
+- `botport/botport/swarm/models.py` — Data models (Swarm, SwarmTask, SwarmEdge, SwarmProject, etc.)
+- `botport/botport/swarm/engine.py` — Swarm orchestration engine
+- `botport/botport/swarm/store.py` — Async SQLite persistence
+- `botport/botport/swarm/dag.py` — DAG validation, cycle detection, topological sort
+- `botport/botport/swarm/decomposer.py` — LLM-based task decomposition
+- `botport/botport/swarm/agent_designer.py` — LLM-based agent spec generation
+- `botport/botport/swarm/scheduler.py` — Cron-based swarm scheduler
+- `botport/botport/swarm/file_manager.py` — File storage and transfer
+- `botport/botport/dashboard/swarm_routes.py` — Swarm REST API routes
+- `botport/botport/dashboard/static/swarm.js` — Swarm dashboard UI
 
 ### Modified Files
-- `web_server.py` — Computer routes, personality route, reflection update route, `/btw` WebSocket handler
-- `ws_handler.py` — `btw` message type handler
-- `static_pages.py` — `serve_computer()`, `serve_personality()`
-- `rest_reflections.py` — `update_reflection_api()` function
-- `telegram.py` — `/btw` command handler (pre-lock), btw cleanup in finally block
-- `home.html` — Computer and Personality navigation cards, personality editor removed
-- `home.css` — Personality section styles removed (moved to personality.html)
-- `reflections.html` — Edit UI with textarea, topic input, save/cancel buttons
-- `app.js` — `/btw` detection and WebSocket send
-- `pyproject.toml` — Version 0.3.5 → 0.4.0
-- `captain_claw/__init__.py` — Version 0.3.5 → 0.4.0
+- `pyproject.toml` — Version 0.4.0.1 → 0.4.1, weasyprint replaces fpdf2
+- `captain_claw/__init__.py` — Version bump
+- `botport/botport/__init__.py` — Version bump (synced to 0.4.1)
+- `desktop/package.json` — Version bump
+- `captain_claw/web/rest_computer.py` — PDF export rewritten with WeasyPrint
+- `captain_claw/web/static/computer.html` — PDF button in file preview modal, persona selector
+- `captain_claw/web/static/computer.js` — File preview PDF export, persona selector, extended file types
+- `captain_claw/web/static/computer.css` — Theme-consistent attach/folder buttons across all themes
+- `botport/botport/server.py` — Swarm engine and scheduler integration
+- `botport/botport/protocol.py` — File transfer message types

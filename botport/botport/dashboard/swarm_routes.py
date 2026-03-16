@@ -128,6 +128,8 @@ def setup_swarm_routes(app: web.Application, server: BotPortServer) -> None:
             swarm.priority = int(data["priority"])
         if "error_policy" in data:
             swarm.error_policy = str(data["error_policy"])
+        if "agent_mode" in data:
+            swarm.agent_mode = str(data["agent_mode"])
 
         await store.save_swarm(swarm)
 
@@ -174,6 +176,8 @@ def setup_swarm_routes(app: web.Application, server: BotPortServer) -> None:
             swarm.priority = int(data["priority"])
         if "error_policy" in data:
             swarm.error_policy = str(data["error_policy"])
+        if "agent_mode" in data:
+            swarm.agent_mode = str(data["agent_mode"])
         swarm.touch()
 
         await store.save_swarm(swarm)
@@ -466,6 +470,52 @@ def setup_swarm_routes(app: web.Application, server: BotPortServer) -> None:
             swarm_id=swarm.id,
             event_type="agents_selected",
             details={"assignments": assignments},
+            created_at=_utcnow_iso(),
+        ))
+
+        tasks = await store.list_tasks(swarm_id)
+        return web.json_response([t.to_dict() for t in tasks])
+
+    async def swarm_design_agents(request: web.Request) -> web.Response:
+        """Generate task-optimized agent specs (persona + model) via LLM."""
+        swarm_id = request.match_info["id"]
+        store = await _swarm_store()
+        swarm = await store.get_swarm(swarm_id)
+        if not swarm:
+            return web.json_response({"error": "Not found"}, status=404)
+
+        data = await request.json() if request.can_read_body else {}
+        model = str(data.get("model", ""))
+
+        tasks = await store.list_tasks(swarm_id)
+        if not tasks:
+            return web.json_response({"error": "No tasks to design agents for"}, status=400)
+
+        from botport.swarm.agent_designer import AgentDesigner
+        designer = AgentDesigner()
+
+        try:
+            specs = await designer.design_agents(tasks, model=model)
+        except Exception as e:
+            return web.json_response({"error": f"Agent design failed: {e}"}, status=500)
+
+        # Apply specs to tasks.
+        for task in tasks:
+            if task.id in specs:
+                task.metadata["agent_spec"] = specs[task.id]
+                task.assigned_persona = specs[task.id].get("persona_name", "")
+                task.touch()
+                await store.save_task(task)
+
+        await store.add_audit_entry(SwarmAuditEntry(
+            swarm_id=swarm.id,
+            event_type="agents_designed",
+            details={
+                "task_count": len(tasks),
+                "specs_generated": len(specs),
+                "unique_personas": len({s["persona_name"] for s in specs.values()}),
+            },
+            actor="user",
             created_at=_utcnow_iso(),
         ))
 
@@ -1233,6 +1283,7 @@ def setup_swarm_routes(app: web.Application, server: BotPortServer) -> None:
     app.router.add_post("/api/swarm/swarms/{id}/rephrase", swarm_rephrase)
     app.router.add_post("/api/swarm/swarms/{id}/decompose", swarm_decompose)
     app.router.add_post("/api/swarm/swarms/{id}/select-agents", swarm_select_agents)
+    app.router.add_post("/api/swarm/swarms/{id}/design-agents", swarm_design_agents)
 
     # Tasks.
     app.router.add_get("/api/swarm/swarms/{id}/tasks", list_tasks)

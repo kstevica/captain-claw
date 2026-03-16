@@ -28,11 +28,12 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Skills system | OpenClaw-compatible skills with auto-discovery and GitHub install |
 | Orchestrator / DAG mode | Decompose complex tasks into parallel multi-session execution |
 | Memory / RAG | Hybrid vector + text retrieval across workspace and sessions |
-| Computer | Retro-themed research workspace — themed visual generation, exploration trees, multi-model selector, folder browser (local + Google Drive), file attachments, 14 built-in themes + custom theme engine |
+| Computer | Retro-themed research workspace — themed visual generation, exploration trees, multi-model selector, folder browser (local + Google Drive), file attachments (images, PDF, DOCX, XLSX, PPTX, MD, TXT, CSV), PDF export via WeasyPrint, persona selector, 14 built-in themes + custom theme engine |
 | Web UI | Chat, Computer, monitor pane, instruction editor, command palette, persona selector, datastore browser, deep memory dashboard, reflections dashboard, personality editor, LLM usage analytics |
 | Live instructions (`/btw`) | Inject additional instructions while a task is running — works in Chat, Computer, and Telegram |
 | Prompt caching | Anthropic prompt caching with automatic cache breakpoints — reduces token costs by up to 90% on cache hits |
 | BotPort (agent-to-agent) | Route tasks to specialist agents across a network of Captain Claw instances |
+| BotPort Swarm | DAG-based multi-agent orchestration — decompose complex tasks, route to specialist agents, approval gates, retry policies, checkpoints, file transfer, cron scheduling, and a visual dashboard |
 | Remote integrations | Telegram (per-user sessions), Slack, Discord with secure pairing |
 | Cross-session to-do memory | Persistent task list shared across sessions with auto-capture |
 | Cross-session script memory | Persistent script/file tracking with auto-capture from write tool |
@@ -319,7 +320,7 @@ For the full configuration reference (23 sections, every field), see [USAGE.md](
 
 Each of these is documented in detail in [USAGE.md](USAGE.md).
 
-- **[Computer](USAGE.md#computer)** — A retro-themed research workspace at `/computer`. Three-panel layout with input area, activity log, and tabbed output (Answer, Blueprint, Files, Visual, Map). Features themed HTML visual generation via LLM, interactive exploration trees for multi-turn research, model selector modal, token tier control, folder browser (local filesystem + Google Drive), image/file attachments (paste, drag-drop, file picker), and 14 built-in themes (Amiga Workbench, Atari ST, C64, Classic Mac, Windows 3.1, Hacker Terminal, and more) plus a custom theme engine. Each theme includes unique boot sequences and CSS variable styling.
+- **[Computer](USAGE.md#computer)** — A retro-themed research workspace at `/computer`. Three-panel layout with input area, activity log, and tabbed output (Answer, Blueprint, Files, Visual, Map). Features themed HTML visual generation via LLM, interactive exploration trees for multi-turn research, model selector modal, persona selector, token tier control, folder browser (local filesystem + Google Drive), file attachments (images, PDF, DOCX, XLSX, PPTX, MD, TXT, CSV), PDF export via WeasyPrint (preserves full CSS styling), and 14 built-in themes (Amiga Workbench, Atari ST, C64, Classic Mac, Windows 3.1, Hacker Terminal, and more) plus a custom theme engine. Each theme includes unique boot sequences and CSS variable styling.
 
 - **[Orchestrator / DAG mode](USAGE.md#orchestrator--dag-mode)** — `/orchestrate` decomposes a complex request into a task DAG and runs tasks in parallel across separate sessions with real-time progress monitoring. Also available headless via `captain-claw-orchestrate`.
 
@@ -340,6 +341,8 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 - **[Execution queue](USAGE.md#execution-queue-1)** — Five queue modes (steer, followup, collect, interrupt, queue) control how follow-up messages are handled during agent execution.
 
 - **[BotPort (agent-to-agent)](USAGE.md#botport)** — Connect multiple Captain Claw instances through the BotPort routing hub. Agents can delegate tasks to specialist instances based on expertise tags, persona matching, or LLM-powered routing. Supports bidirectional follow-ups, context negotiation, and concern lifecycle management. Included with `pip install captain-claw` — run `botport` to start a hub, then connect instances via WebSocket (e.g. `wss://botport.kstevica.com/ws`).
+
+- **[BotPort Swarm](USAGE.md#botport-swarm)** — DAG-based multi-agent orchestration through BotPort. Decompose complex goals into task graphs with dependencies, route each task to specialist agents (connected or LLM-designed), and execute with configurable concurrency. Features approval gates, retry with backoff and fallback personas, multi-level timeouts (warn → extend → fail), checkpointing with save/restore, inter-agent file transfer (gzip + base64 over WebSocket, up to 50 MB), cron scheduling for recurring swarms, full audit logging, and a visual dashboard with DAG canvas, task monitoring, and file manager. Error policies: fail_fast, continue_on_error, manual_review.
 
 - **[Remote integrations](USAGE.md#remote-integrations)** — Connect Telegram, Slack, or Discord bots. Telegram users get isolated per-user sessions with concurrent agent execution. Unknown users get a pairing token; the operator approves locally with `/approve user`.
 
