@@ -1014,56 +1014,67 @@ class OllamaProvider(LLMProvider):
             estimated = self._estimate_request_tokens(messages, max_tokens or self.max_tokens)
             await self.rate_limiter.acquire(estimated)
 
-        try:
-            response = await self.client.post(url, json=body, headers=headers)
-            if not response.is_success:
-                raise LLMAPIError(
-                    f"Ollama API error {response.status_code}: {response.text}",
-                    status_code=response.status_code,
+        max_retries = 2
+        last_exc: Exception | None = None
+        for attempt in range(1, max_retries + 2):
+            try:
+                response = await self.client.post(url, json=body, headers=headers)
+                if not response.is_success:
+                    raise LLMAPIError(
+                        f"Ollama API error {response.status_code}: {response.text}",
+                        status_code=response.status_code,
+                    )
+                data = response.json()
+                content = _obj_get(_obj_get(data, "message", {}), "content", "") or ""
+
+                tool_calls: list[ToolCall] = []
+                raw_calls = _obj_get(_obj_get(data, "message", {}), "tool_calls", []) or []
+                for idx, raw_call in enumerate(raw_calls, start=1):
+                    function = _obj_get(raw_call, "function", {}) or {}
+                    call_name = str(_obj_get(function, "name", "") or "")
+                    args = _obj_get(function, "arguments", {})
+                    if isinstance(args, str):
+                        args = _safe_json_loads(args)
+                    if not isinstance(args, dict):
+                        args = {}
+                    tool_calls.append(ToolCall(
+                        id=str(_obj_get(raw_call, "id", f"ollama_call_{idx}") or f"ollama_call_{idx}"),
+                        name=call_name,
+                        arguments=args,
+                    ))
+
+                usage = {
+                    "prompt_tokens": int(_obj_get(data, "prompt_eval_count", 0) or 0),
+                    "completion_tokens": int(_obj_get(data, "eval_count", 0) or 0),
+                    "total_tokens": int(_obj_get(data, "prompt_eval_count", 0) or 0)
+                    + int(_obj_get(data, "eval_count", 0) or 0),
+                }
+                if self.rate_limiter:
+                    self.rate_limiter.record_actual(usage.get("total_tokens", 0), estimated)
+                finish_reason = str(_obj_get(data, "done_reason", "") or "")
+                return LLMResponse(
+                    content=str(content),
+                    tool_calls=tool_calls,
+                    model=str(_obj_get(data, "model", self.model) or self.model),
+                    usage=usage,
+                    finish_reason=finish_reason,
                 )
-            data = response.json()
-            content = _obj_get(_obj_get(data, "message", {}), "content", "") or ""
-
-            tool_calls: list[ToolCall] = []
-            raw_calls = _obj_get(_obj_get(data, "message", {}), "tool_calls", []) or []
-            for idx, raw_call in enumerate(raw_calls, start=1):
-                function = _obj_get(raw_call, "function", {}) or {}
-                call_name = str(_obj_get(function, "name", "") or "")
-                args = _obj_get(function, "arguments", {})
-                if isinstance(args, str):
-                    args = _safe_json_loads(args)
-                if not isinstance(args, dict):
-                    args = {}
-                tool_calls.append(ToolCall(
-                    id=str(_obj_get(raw_call, "id", f"ollama_call_{idx}") or f"ollama_call_{idx}"),
-                    name=call_name,
-                    arguments=args,
-                ))
-
-            usage = {
-                "prompt_tokens": int(_obj_get(data, "prompt_eval_count", 0) or 0),
-                "completion_tokens": int(_obj_get(data, "eval_count", 0) or 0),
-                "total_tokens": int(_obj_get(data, "prompt_eval_count", 0) or 0)
-                + int(_obj_get(data, "eval_count", 0) or 0),
-            }
-            if self.rate_limiter:
-                self.rate_limiter.record_actual(usage.get("total_tokens", 0), estimated)
-            finish_reason = str(_obj_get(data, "done_reason", "") or "")
-            return LLMResponse(
-                content=str(content),
-                tool_calls=tool_calls,
-                model=str(_obj_get(data, "model", self.model) or self.model),
-                usage=usage,
-                finish_reason=finish_reason,
-            )
-        except LLMAPIError:
-            raise
-        except httpx.HTTPError as e:
-            raise LLMAPIError(f"Ollama HTTP error: {e}")
-        except json.JSONDecodeError as e:
-            raise LLMError(f"Ollama response decode error: {e}")
-        except Exception as e:
-            raise LLMError(f"Ollama call failed: {e}")
+            except LLMAPIError:
+                raise
+            except httpx.HTTPError as e:
+                last_exc = e
+                if attempt <= max_retries:
+                    await asyncio.sleep(1.0 * attempt)
+                    continue
+                err_detail = str(e) or type(e).__name__
+                raise LLMAPIError(f"Ollama HTTP error: {err_detail}")
+            except json.JSONDecodeError as e:
+                raise LLMError(f"Ollama response decode error: {e}")
+            except Exception as e:
+                raise LLMError(f"Ollama call failed: {e}")
+        # Should not reach here, but just in case:
+        err_detail = str(last_exc) or type(last_exc).__name__ if last_exc else "unknown"
+        raise LLMAPIError(f"Ollama HTTP error after retries: {err_detail}")
 
     async def complete_streaming(
         self,
@@ -1100,32 +1111,39 @@ class OllamaProvider(LLMProvider):
             estimated = self._estimate_request_tokens(messages, max_tokens or self.max_tokens)
             await self.rate_limiter.acquire(estimated)
 
-        try:
-            async with self.client.stream("POST", url, json=body, headers=headers) as response:
-                if not response.is_success:
-                    error_text = await response.atext()
-                    raise LLMAPIError(
-                        f"Ollama API error {response.status_code}: {error_text}",
-                        status_code=response.status_code,
-                    )
-                async for line in response.aiter_lines():
-                    if not line.strip():
-                        continue
-                    try:
-                        chunk = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    content = _obj_get(_obj_get(chunk, "message", {}), "content", "") or ""
-                    if content:
-                        yield str(content)
-                    if _obj_get(chunk, "done", False):
-                        break
-        except LLMAPIError:
-            raise
-        except httpx.HTTPError as e:
-            raise LLMAPIError(f"Ollama streaming error: {e}")
-        except Exception as e:
-            raise LLMError(f"Ollama stream failed: {e}")
+        max_retries = 2
+        for attempt in range(1, max_retries + 2):
+            try:
+                async with self.client.stream("POST", url, json=body, headers=headers) as response:
+                    if not response.is_success:
+                        error_text = await response.atext()
+                        raise LLMAPIError(
+                            f"Ollama API error {response.status_code}: {error_text}",
+                            status_code=response.status_code,
+                        )
+                    async for line in response.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            chunk = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        content = _obj_get(_obj_get(chunk, "message", {}), "content", "") or ""
+                        if content:
+                            yield str(content)
+                        if _obj_get(chunk, "done", False):
+                            break
+                return  # successful stream completed
+            except LLMAPIError:
+                raise
+            except httpx.HTTPError as e:
+                if attempt <= max_retries:
+                    await asyncio.sleep(1.0 * attempt)
+                    continue
+                err_detail = str(e) or type(e).__name__
+                raise LLMAPIError(f"Ollama streaming error: {err_detail}")
+            except Exception as e:
+                raise LLMError(f"Ollama stream failed: {e}")
 
     def count_tokens(self, text: str) -> int:
         return len(text) // 4
