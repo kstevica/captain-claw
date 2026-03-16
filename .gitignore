@@ -54,4 +54,5 @@ docker-data/
 .captain-claw/
 sessions.db
 workspace/
+#workspace-botport/
 logs/
