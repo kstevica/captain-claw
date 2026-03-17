@@ -182,7 +182,7 @@ async def toggle_skill(server: WebServer, request: web.Request) -> web.Response:
         return web.json_response({"ok": False, "error": "Missing enabled"}, status=400)
     enabled = bool(enabled)
 
-    config_path = DEFAULT_CONFIG_PATH
+    config_path = DEFAULT_CONFIG_PATH.expanduser()
     if config_path.exists():
         data: dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
@@ -295,7 +295,7 @@ async def add_read_folder(server: WebServer, request: web.Request) -> web.Respon
     if not target.is_dir():
         return web.json_response({"ok": False, "error": "Path is not a directory"}, status=400)
 
-    config_path = DEFAULT_CONFIG_PATH
+    config_path = DEFAULT_CONFIG_PATH.expanduser()
     if config_path.exists():
         data: dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
@@ -335,7 +335,7 @@ async def remove_read_folder(server: WebServer, request: web.Request) -> web.Res
 
     target = Path(raw).expanduser().resolve()
 
-    config_path = DEFAULT_CONFIG_PATH
+    config_path = DEFAULT_CONFIG_PATH.expanduser()
     if config_path.exists():
         data: dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
@@ -425,7 +425,7 @@ async def add_gdrive_folder(server: WebServer, request: web.Request) -> web.Resp
     if not folder_id or not folder_name:
         return web.json_response({"ok": False, "error": "Missing id or name"}, status=400)
 
-    config_path = DEFAULT_CONFIG_PATH
+    config_path = DEFAULT_CONFIG_PATH.expanduser()
     if config_path.exists():
         data: dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:
@@ -463,7 +463,7 @@ async def remove_gdrive_folder(server: WebServer, request: web.Request) -> web.R
     if not folder_id:
         return web.json_response({"ok": False, "error": "Missing id"}, status=400)
 
-    config_path = DEFAULT_CONFIG_PATH
+    config_path = DEFAULT_CONFIG_PATH.expanduser()
     if config_path.exists():
         data: dict = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     else:

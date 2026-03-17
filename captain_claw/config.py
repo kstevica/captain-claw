@@ -11,8 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Paths
-DEFAULT_CONFIG_PATH = Path("~/.captain-claw/config.yaml").expanduser()
-DEFAULT_DB_PATH = Path("~/.captain-claw/sessions.db").expanduser()
+DEFAULT_CONFIG_PATH = Path("~/.captain-claw/config.yaml")
+DEFAULT_DB_PATH = Path("~/.captain-claw/sessions.db")
 LOCAL_CONFIG_FILENAME = "config.yaml"
 
 
@@ -886,7 +886,7 @@ class Config(BaseSettings):
         local_path = Path.cwd() / LOCAL_CONFIG_FILENAME
         if local_path.exists():
             return local_path
-        return DEFAULT_CONFIG_PATH
+        return DEFAULT_CONFIG_PATH.expanduser()
 
     @staticmethod
     def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -949,7 +949,7 @@ class Config(BaseSettings):
 
         # ── Merge: local (base) + home (overlay) ──────────
         local_path = Path.cwd() / LOCAL_CONFIG_FILENAME
-        home_path = DEFAULT_CONFIG_PATH
+        home_path = DEFAULT_CONFIG_PATH.expanduser()
 
         base_data = cls._read_yaml_data(local_path)
         home_data = cls._read_yaml_data(home_path)
@@ -1196,7 +1196,7 @@ class Config(BaseSettings):
 
     def save(self, path: Path | str | None = None) -> None:
         """Save configuration to YAML file."""
-        config_path = Path(path) if path else DEFAULT_CONFIG_PATH
+        config_path = Path(path) if path else DEFAULT_CONFIG_PATH.expanduser()
 
         # Ensure directory exists
         config_path.parent.mkdir(parents=True, exist_ok=True)

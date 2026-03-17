@@ -312,7 +312,7 @@ def save_onboarding_config(
 
     Returns the config file path.
     """
-    target = Path(config_path).expanduser() if config_path else DEFAULT_CONFIG_PATH
+    target = Path(config_path).expanduser() if config_path else DEFAULT_CONFIG_PATH.expanduser()
     cfg = Config.from_yaml(target)
 
     cfg.model.provider = values.get("provider", cfg.model.provider)

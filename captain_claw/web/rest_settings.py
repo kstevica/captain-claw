@@ -993,7 +993,7 @@ async def put_settings(server: WebServer, request: web.Request) -> web.Response:
         return web.json_response({"error": "No changes provided"}, status=400)
 
     # ── Read existing YAML (or start empty) ───────────────
-    config_path = DEFAULT_CONFIG_PATH
+    config_path = DEFAULT_CONFIG_PATH.expanduser()
     if config_path.exists():
         raw = config_path.read_text(encoding="utf-8")
         data = yaml.safe_load(raw) or {}

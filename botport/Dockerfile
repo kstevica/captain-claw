@@ -11,6 +11,6 @@ RUN mkdir -p /data
 
 VOLUME ["/data"]
 
-EXPOSE 33080
+EXPOSE 23180
 
 CMD ["botport"]

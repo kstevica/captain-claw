@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir .
 
 RUN playwright install --with-deps chromium
 
-RUN pip install --no-cache-dir pocket-tts
+# RUN pip install --no-cache-dir pocket-tts
 
 # Create non-root user
 RUN groupadd -r claw && useradd -r -g claw -m -d /home/claw claw
