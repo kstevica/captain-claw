@@ -7,7 +7,7 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - ./.env:/app/.env:ro
       - ./docker-data/home-config:/root/.captain-claw
-      - ./docker-data/workspace:/data/workspace
+      - ./workspace:/data/workspace
       - ./docker-data/sessions:/data/sessions
       - ./docker-data/skills:/data/skills
     restart: unless-stopped
