@@ -884,6 +884,28 @@ body {
   background: var(--chrome-lo);
 }
 
+/* Stream-show button: override theme's display:none on .win-btn */
+.win-btn.win-stream-show {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  padding: 0 6px;
+  font-size: 0.65rem;
+  opacity: 0.7;
+  cursor: pointer;
+  border: 1px solid var(--chrome-hi, #555);
+  border-radius: 3px;
+  color: var(--titlebar-fg, #fff);
+  background: none;
+}
+.win-btn.win-stream-show:hover {
+  opacity: 1;
+}
+.win-btn.win-stream-show.hidden {
+  display: none !important;
+}
+
 .window-body {
   flex: 1;
   overflow: hidden;
@@ -2537,7 +2559,8 @@ body.visual-fullscreen #visual-frame {
   font-size: inherit;
 }
 
-#tier-selector {
+#tier-selector,
+#sound-selector {
   font-family: var(--font);
   font-size: 11px;
   background: var(--surface);
@@ -3661,5 +3684,10 @@ body.stream-panel-open #workspace {
     max-width: 120px;
     font-size: 12px;
     padding: 3px 8px;
+  }
+
+  /* Stream panel: full width on mobile */
+  .stream-panel {
+    left: 0;
   }
 }

@@ -1213,13 +1213,19 @@ function handleChatMessage(data) {
     // Finish the stream panel for the answer flow.
     if (streamPanelActive && streamPanelSource === "answer") {
       finishStreamPanel("Agent response complete");
-      // Auto-close stream panel after answer arrives.
-      setTimeout(() => {
-        closeStreamPanel();
-        if (_isMobile()) {
-          document.body.classList.remove("mobile-streaming");
-        }
-      }, 600);
+      // Auto-close stream panel after answer arrives — unless Visual tab
+      // is active, because visual generation will start next and reuse it.
+      const visualTabActive = $(".tab-btn[data-tab='visual']").classList.contains("active");
+      if (visualTabActive) {
+        // Keep panel open — visual generation will take over.
+      } else {
+        setTimeout(() => {
+          closeStreamPanel();
+          if (_isMobile()) {
+            document.body.classList.remove("mobile-streaming");
+          }
+        }, 600);
+      }
     }
     renderAnswer(data.content || "", false, data.timestamp || "");
   }
@@ -1700,6 +1706,48 @@ function generateBlueprint(content) {
 
 /* ── Visual tab (LLM-generated HTML) ─────────────────────────── */
 
+/* Strip <script>…</script> tags from a chunk so partial JS never executes
+   during the progressive render.  Handles partial tags across chunks via
+   the _scriptStrip* state variables. */
+let _scriptStripInTag = false;  // true when we're inside a <script> block
+
+function _stripScriptsProgressive(chunk) {
+  let out = "";
+  let i = 0;
+  while (i < chunk.length) {
+    if (_scriptStripInTag) {
+      // Look for </script>
+      const closeIdx = chunk.toLowerCase().indexOf("</script", i);
+      if (closeIdx === -1) {
+        // Entire remainder is inside <script> — discard.
+        break;
+      }
+      // Skip past the closing tag.
+      const gtIdx = chunk.indexOf(">", closeIdx + 8);
+      if (gtIdx === -1) break; // incomplete closing tag — wait for next chunk
+      i = gtIdx + 1;
+      _scriptStripInTag = false;
+    } else {
+      const openIdx = chunk.toLowerCase().indexOf("<script", i);
+      if (openIdx === -1) {
+        out += chunk.slice(i);
+        break;
+      }
+      out += chunk.slice(i, openIdx);
+      // Check if tag is self-closing or has a closing >
+      const gtIdx = chunk.indexOf(">", openIdx + 7);
+      if (gtIdx === -1) {
+        // Incomplete open tag — assume script starts, wait for next chunk.
+        _scriptStripInTag = true;
+        break;
+      }
+      _scriptStripInTag = true;
+      i = gtIdx + 1;
+    }
+  }
+  return out;
+}
+
 async function generateVisual() {
   if (!lastPrompt || !lastResult) return;
   if (visualGenerating) return;
@@ -1708,9 +1756,14 @@ async function generateVisual() {
   const el = $("#visual-content");
   const frame = $("#visual-frame");
 
-  el.innerHTML = '<div class="output-processing"><span class="processing-dots">⣾</span> Generating visual...</div>';
+  el.innerHTML = "";
   el.classList.remove("output-empty");
-  frame.style.display = "none";
+
+  // Show iframe immediately for progressive rendering.
+  frame.style.display = "block";
+  // Reset to about:blank so contentDocument is immediately writable.
+  frame.removeAttribute("srcdoc");
+  frame.src = "about:blank";
 
   logEntry("system", "Generating visual rendering...");
   blinkLed();
@@ -1733,6 +1786,36 @@ async function generateVisual() {
   console.log("Tier:", selectedTokenTier, "| Model:", selectedModel || "(default)");
   console.log("Prompt:", lastPrompt.length > 120 ? lastPrompt.slice(0, 120) + "…" : lastPrompt);
   console.log("Result length:", lastResult.length, "chars");
+
+  // Reset progressive script-strip state.
+  _scriptStripInTag = false;
+  let liveDocReady = false;
+  let liveDoc = null;
+
+  function _initLiveDoc() {
+    if (liveDocReady) return;
+    try {
+      liveDoc = frame.contentDocument || frame.contentWindow.document;
+      liveDoc.open();
+      liveDocReady = true;
+    } catch (e) {
+      console.warn("[Computer] Cannot access iframe document for progressive render:", e);
+    }
+  }
+
+  function _writeLiveChunk(chunk) {
+    const safe = _stripScriptsProgressive(chunk);
+    if (!safe) return;
+    _initLiveDoc();
+    if (liveDoc) {
+      try {
+        liveDoc.write(safe);
+        // Scroll iframe to bottom so newly rendered content is visible.
+        const win = frame.contentWindow;
+        if (win) win.scrollTo(0, liveDoc.body ? liveDoc.body.scrollHeight : 0);
+      } catch (_) { /* ignore write errors */ }
+    }
+  }
 
   try {
     const res = await fetch("/api/computer/visualize/stream", {
@@ -1772,6 +1855,7 @@ async function generateVisual() {
             appendStreamText("● Streaming from " + (evt.model || "LLM") + "...\n\n");
           } else if (evt.type === "chunk") {
             appendStreamText(evt.text);
+            _writeLiveChunk(evt.text);
             blinkLed();
           } else if (evt.type === "done") {
             html = evt.html || "";
@@ -1782,6 +1866,11 @@ async function generateVisual() {
           if (parseErr.message && !parseErr.message.includes("JSON")) throw parseErr;
         }
       }
+    }
+
+    // Close the progressive document.
+    if (liveDoc) {
+      try { liveDoc.close(); } catch (_) {}
     }
 
     const elapsed = Math.round(performance.now() - t0);
@@ -1796,6 +1885,7 @@ async function generateVisual() {
     if (!html) {
       el.innerHTML = '<span class="output-placeholder">No visual generated</span>';
       el.classList.add("output-empty");
+      frame.style.display = "none";
       return;
     }
 
@@ -1805,12 +1895,9 @@ async function generateVisual() {
       console.log(`[Computer] Found ${linkCount} explore-link elements`);
     }
 
-    // Inject postMessage bridge and render in sandboxed iframe.
+    // Final render: inject explore bridge and scripts, replace progressive content.
     const enrichedHtml = injectExploreBridge(html);
-    el.innerHTML = "";
-    el.classList.remove("output-empty");
     frame.srcdoc = enrichedHtml;
-    frame.style.display = "block";
 
     // Store visual HTML on the current exploration node.
     if (currentNodeId && explorationNodes.has(currentNodeId)) {
@@ -1824,8 +1911,10 @@ async function generateVisual() {
   } catch (err) {
     console.error("Visual generation failed:", err);
     console.groupEnd();
+    if (liveDoc) { try { liveDoc.close(); } catch (_) {} }
     el.innerHTML = `<span class="output-placeholder">Visual generation failed: ${esc(err.message)}</span>`;
     el.classList.add("output-empty");
+    frame.style.display = "none";
     logEntry("error", `Visual generation failed: ${err.message}`);
     finishStreamPanel(`Failed: ${err.message}`);
     setTimeout(() => closeStreamPanel(), 600);
@@ -2058,6 +2147,7 @@ function logEntry(type, text, toolName) {
   `;
 
   container.appendChild(entry);
+  playActivitySound();
 
   while (container.children.length > MAX_LOG_ENTRIES) {
     container.removeChild(container.firstChild);
@@ -2123,7 +2213,13 @@ function initResize() {
       // Persist the panel width.
       const pct = (left.getBoundingClientRect().width / workspace.getBoundingClientRect().width) * 100;
       localStorage.setItem("panel-width", pct.toFixed(2));
+      // Re-align the stream panel after resize.
+      if (!$("#stream-panel").classList.contains("hidden")) _alignStreamPanel();
     }
+  });
+
+  window.addEventListener("resize", () => {
+    if (!$("#stream-panel").classList.contains("hidden")) _alignStreamPanel();
   });
 }
 
@@ -3322,6 +3418,20 @@ function _scrollToOutput() {
 let streamPanelActive = false;
 let streamPanelSource = "";  // "answer" | "visual"
 
+function _alignStreamPanel() {
+  // On desktop, align the stream panel with the output panel.
+  const panel = $("#stream-panel");
+  if (_isMobile()) {
+    panel.style.left = "0";
+    return;
+  }
+  const output = $("#output-panel");
+  if (output) {
+    const rect = output.getBoundingClientRect();
+    panel.style.left = rect.left + "px";
+  }
+}
+
 function openStreamPanel(source) {
   const panel = $("#stream-panel");
   const content = $("#stream-panel-content");
@@ -3333,9 +3443,29 @@ function openStreamPanel(source) {
   streamPanelSource = source;
   streamPanelActive = true;
 
+  _alignStreamPanel();
   panel.classList.remove("hidden");
   body.classList.add("streaming");
   document.body.classList.add("stream-panel-open");
+
+  // Hide the re-open button while the panel is visible.
+  const showBtn = $("#btn-show-stream");
+  if (showBtn) showBtn.classList.add("hidden");
+
+  playStreamStartSound();
+}
+
+function reopenStreamPanel() {
+  const panel = $("#stream-panel");
+  _alignStreamPanel();
+  panel.classList.remove("hidden");
+  document.body.classList.add("stream-panel-open");
+  // Hide the re-open button.
+  const showBtn = $("#btn-show-stream");
+  if (showBtn) showBtn.classList.add("hidden");
+  // Scroll to bottom of content.
+  const body = $("#stream-panel-body");
+  body.scrollTop = body.scrollHeight;
 }
 
 function closeStreamPanel() {
@@ -3346,12 +3476,26 @@ function closeStreamPanel() {
   body.classList.remove("streaming");
   panel.classList.add("hidden");
   document.body.classList.remove("stream-panel-open");
+
+  playStreamStopSound();
+
+  // Show the re-open button if there is content to review.
+  const content = $("#stream-panel-content");
+  const showBtn = $("#btn-show-stream");
+  if (showBtn) {
+    if (content && content.textContent.trim()) {
+      showBtn.classList.remove("hidden");
+    } else {
+      showBtn.classList.add("hidden");
+    }
+  }
 }
 
 function appendStreamText(text) {
   if (!streamPanelActive) return;
   const content = $("#stream-panel-content");
   content.textContent += text;
+  playStreamChunkSound();
   // Auto-scroll to bottom.
   const body = $("#stream-panel-body");
   body.scrollTop = body.scrollHeight;
@@ -3362,10 +3506,13 @@ function finishStreamPanel(label) {
   const meta = $("#stream-panel-meta");
   body.classList.remove("streaming");
   if (label) meta.textContent = label;
+  playStreamStopSound();
 }
 
 function initStreamPanel() {
   $("#stream-panel-close").addEventListener("click", closeStreamPanel);
+  const showBtn = $("#btn-show-stream");
+  if (showBtn) showBtn.addEventListener("click", reopenStreamPanel);
 }
 
 /* ── Auto-resize textarea ────────────────────────────────────── */
@@ -3867,6 +4014,534 @@ function initFolderModal() {
   $("#gdrive-add-btn").addEventListener("click", addGdriveFolder);
 }
 
+/* ── Sound effects (Web Audio API) ────────────────────────────── */
+
+let soundMode = "typewriter";  // "off" | "typewriter" | "modem"
+let _audioCtx = null;
+
+function _getAudioCtx() {
+  if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (_audioCtx.state === "suspended") _audioCtx.resume();
+  return _audioCtx;
+}
+
+/* ── Typewriter ──────────────────────────────────────────────── */
+
+function _playTypewriterKey() {
+  if (soundMode !== "typewriter") return;
+  const ctx = _getAudioCtx();
+  const now = ctx.currentTime;
+  const variant = Math.floor(Math.random() * 3);
+
+  const bufLen = Math.floor(ctx.sampleRate * 0.05);
+  const buf = ctx.createBuffer(1, bufLen, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < bufLen; i++) {
+    data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufLen, 2.5);
+  }
+
+  const noise = ctx.createBufferSource();
+  noise.buffer = buf;
+
+  const filter = ctx.createBiquadFilter();
+  filter.type = "bandpass";
+  const freqs = [1200, 900, 1500];
+  const qs = [1.8, 1.4, 2.0];
+  filter.frequency.value = freqs[variant];
+  filter.Q.value = qs[variant];
+
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0.35, now);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+
+  noise.connect(filter);
+  filter.connect(gain);
+  gain.connect(ctx.destination);
+
+  noise.start(now);
+  noise.stop(now + 0.05);
+}
+
+let _lastTypewriterTime = 0;
+const _typewriterMinInterval = 40;
+
+function playTypewriterSound() {
+  const now = performance.now();
+  if (now - _lastTypewriterTime < _typewriterMinInterval) return;
+  _lastTypewriterTime = now;
+  _playTypewriterKey();
+}
+
+/* ── Modem ───────────────────────────────────────────────────── */
+
+/* Modem dial-up handshake: plays the classic sequence of tones and noise
+   that continues looping until stopModemSound() is called. */
+let _modemNodes = null;  // { oscs, gains, noise, master, ctx } — active modem session
+
+function startModemSound() {
+  if (soundMode !== "modem") return;
+  stopModemSound();
+
+  const ctx = _getAudioCtx();
+  const now = ctx.currentTime;
+  const master = ctx.createGain();
+  master.gain.setValueAtTime(0.3, now);
+  master.connect(ctx.destination);
+
+  // Helper: schedule an oscillator with gain envelope.
+  function _osc(type, freqEvents, gainEvents, startT, stopT) {
+    const o = ctx.createOscillator();
+    o.type = type;
+    for (const [method, val, t] of freqEvents) {
+      if (method === "set") o.frequency.setValueAtTime(val, now + t);
+      else o.frequency.linearRampToValueAtTime(val, now + t);
+    }
+    const g = ctx.createGain();
+    for (const [method, val, t] of gainEvents) {
+      if (method === "set") g.gain.setValueAtTime(val, now + t);
+      else g.gain.linearRampToValueAtTime(val, now + t);
+    }
+    o.connect(g); g.connect(master);
+    o.start(now + startT); o.stop(now + stopT);
+  }
+
+  /* ── Phase 1 (0–2.4s): Dial tone ─────────────────────────────
+     Classic US dial tone: 350 Hz + 440 Hz continuous. */
+  _osc("sine",
+    [["set", 350, 0]],
+    [["set", 0.5, 0], ["set", 0.5, 2.2], ["ramp", 0, 2.4]],
+    0, 2.4);
+  _osc("sine",
+    [["set", 440, 0]],
+    [["set", 0.5, 0], ["set", 0.5, 2.2], ["ramp", 0, 2.4]],
+    0, 2.4);
+
+  /* ── Phase 2 (2.5–7s): DTMF dialing — "phone number" touch tones
+     Real DTMF uses two simultaneous freqs per digit. */
+  const dtmfPairs = [
+    [941, 1336], // 0-row tones
+    [697, 1209], [697, 1336], [697, 1477],
+    [770, 1209], [770, 1336], [770, 1477],
+    [852, 1209],
+  ];
+  const digitDur = 0.12;
+  const digitGap = 0.08;
+  let dt = 2.6;
+  // Dial 10 digits.
+  for (let d = 0; d < 10; d++) {
+    const pair = dtmfPairs[Math.floor(Math.random() * dtmfPairs.length)];
+    _osc("sine",
+      [["set", pair[0], dt]],
+      [["set", 0.4, dt], ["set", 0.4, dt + digitDur - 0.01], ["ramp", 0, dt + digitDur]],
+      dt, dt + digitDur);
+    _osc("sine",
+      [["set", pair[1], dt]],
+      [["set", 0.4, dt], ["set", 0.4, dt + digitDur - 0.01], ["ramp", 0, dt + digitDur]],
+      dt, dt + digitDur);
+    dt += digitDur + digitGap;
+  }
+
+  /* ── Phase 3 (5.2–7s): Ringing — US ringback (440+480 Hz, 2s on 4s off,
+     we just do one partial ring) */
+  const ringStart = dt + 0.3;
+  _osc("sine",
+    [["set", 440, ringStart]],
+    [["set", 0.3, ringStart], ["set", 0.3, ringStart + 1.8], ["ramp", 0, ringStart + 2.0]],
+    ringStart, ringStart + 2.0);
+  _osc("sine",
+    [["set", 480, ringStart]],
+    [["set", 0.3, ringStart], ["set", 0.3, ringStart + 1.8], ["ramp", 0, ringStart + 2.0]],
+    ringStart, ringStart + 2.0);
+
+  /* ── Phase 4 (ring+2.2 – +5.5s): CNG tone (calling fax/modem) →
+     answering CED tone. The classic 1100 Hz "beeeee" then 2100 Hz "EEEEE". */
+  const p4 = ringStart + 2.2;
+  // CNG: 1100 Hz, pulsed 0.5s on / 0.5s off × 3
+  for (let i = 0; i < 3; i++) {
+    const t = p4 + i * 1.0;
+    _osc("sine",
+      [["set", 1100, t]],
+      [["set", 0.45, t], ["set", 0.45, t + 0.45], ["ramp", 0, t + 0.5]],
+      t, t + 0.5);
+  }
+  // CED: 2100 Hz continuous answer tone.
+  const cedStart = p4 + 3.2;
+  _osc("sine",
+    [["set", 2100, cedStart]],
+    [["set", 0, cedStart], ["ramp", 0.5, cedStart + 0.1],
+     ["set", 0.5, cedStart + 2.5], ["ramp", 0, cedStart + 2.8]],
+    cedStart, cedStart + 2.8);
+
+  /* ── Phase 5 (ced+3 – +7s): V.32 handshake — the iconic screech.
+     Multiple carriers probing, alternating tones, scrambled training. */
+  const p5 = cedStart + 3.0;
+
+  // Carrier 1: sweeping 1800→900→2400→1200 Hz (sawtooth for gritty harmonics).
+  _osc("sawtooth",
+    [["set", 1800, p5], ["ramp", 900, p5 + 1.0],
+     ["ramp", 2400, p5 + 2.0], ["ramp", 1200, p5 + 3.0],
+     ["ramp", 1800, p5 + 4.0]],
+    [["set", 0, p5], ["ramp", 0.12, p5 + 0.2],
+     ["set", 0.12, p5 + 3.8], ["ramp", 0, p5 + 4.0]],
+    p5, p5 + 4.0);
+
+  // Carrier 2: counter-sweep.
+  _osc("sawtooth",
+    [["set", 2400, p5 + 0.1], ["ramp", 1650, p5 + 1.5],
+     ["ramp", 980, p5 + 2.5], ["ramp", 2100, p5 + 3.5]],
+    [["set", 0, p5], ["ramp", 0.10, p5 + 0.3],
+     ["set", 0.10, p5 + 3.5], ["ramp", 0, p5 + 4.0]],
+    p5 + 0.1, p5 + 4.0);
+
+  // Carrier 3: rapid alternating tones simulating scrambler training.
+  const scrStart = p5 + 1.0;
+  const scrEnd = p5 + 3.5;
+  const scrOsc = ctx.createOscillator();
+  scrOsc.type = "square";
+  // Rapid frequency stepping.
+  const scrFreqs = [1200, 2400, 1800, 600, 2100, 980, 1650, 2400, 1200, 1800,
+                    2100, 600, 1650, 980, 2400, 1200, 1800, 2100, 980, 1650];
+  const scrStep = (scrEnd - scrStart) / scrFreqs.length;
+  for (let i = 0; i < scrFreqs.length; i++) {
+    scrOsc.frequency.setValueAtTime(scrFreqs[i], now + scrStart + i * scrStep);
+  }
+  const scrGain = ctx.createGain();
+  scrGain.gain.setValueAtTime(0, now);
+  scrGain.gain.setValueAtTime(0.06, now + scrStart);
+  scrGain.gain.setValueAtTime(0.06, now + scrEnd - 0.1);
+  scrGain.gain.linearRampToValueAtTime(0, now + scrEnd);
+  scrOsc.connect(scrGain); scrGain.connect(master);
+  scrOsc.start(now + scrStart); scrOsc.stop(now + scrEnd);
+
+  /* ── Phase 6 (ongoing): Data transfer noise ──────────────────
+     Multi-layered: FSK-like tone modulation + shaped noise + warble.
+     This is the sustained "shhhhkrkrkrkr" of an active connection. */
+  const p6 = p5 + 4.2;
+
+  // Layer 1: FSK data carrier — two tones rapidly switching (like V.21).
+  const fskBufDur = 6;
+  const fskBufLen = Math.floor(ctx.sampleRate * fskBufDur);
+  const fskBuf = ctx.createBuffer(1, fskBufLen, ctx.sampleRate);
+  const fd = fskBuf.getChannelData(0);
+  for (let i = 0; i < fskBufLen; i++) {
+    const t = i / ctx.sampleRate;
+    // Pseudo-random bit switching between mark (1200Hz) and space (2200Hz).
+    const bit = Math.sin(t * 2 * Math.PI * 37.5) > 0 ? 1 : 0;  // ~37.5 baud switching
+    const freq = bit ? 1200 : 2200;
+    fd[i] = Math.sin(t * 2 * Math.PI * freq) * 0.5;
+  }
+  const fskNode = ctx.createBufferSource();
+  fskNode.buffer = fskBuf;
+  fskNode.loop = true;
+  const fskGain = ctx.createGain();
+  fskGain.gain.setValueAtTime(0, now);
+  fskGain.gain.setValueAtTime(0, now + p6 - 0.1);
+  fskGain.gain.linearRampToValueAtTime(0.22, now + p6 + 0.5);
+  fskNode.connect(fskGain); fskGain.connect(master);
+  fskNode.start(now + p6 - 0.1);
+
+  // Layer 2: Broadband data noise — filtered, with amplitude modulation
+  // simulating bursty data packets.
+  const noiseDur = 6;
+  const noiseBufLen = Math.floor(ctx.sampleRate * noiseDur);
+  const noiseBuf = ctx.createBuffer(1, noiseBufLen, ctx.sampleRate);
+  const nd = noiseBuf.getChannelData(0);
+  for (let i = 0; i < noiseBufLen; i++) {
+    const t = i / ctx.sampleRate;
+    // Irregular amplitude envelope: mix of several modulation rates.
+    const mod = 0.3
+      + 0.25 * Math.sin(t * 2 * Math.PI * 5.3)
+      + 0.20 * Math.sin(t * 2 * Math.PI * 13.7)
+      + 0.15 * Math.sin(t * 2 * Math.PI * 31.1)
+      + 0.10 * Math.sin(t * 2 * Math.PI * 67.3);
+    nd[i] = (Math.random() * 2 - 1) * Math.max(0, mod);
+  }
+  const noiseNode = ctx.createBufferSource();
+  noiseNode.buffer = noiseBuf;
+  noiseNode.loop = true;
+
+  // Dual bandpass: telephone band 300–3400 Hz.
+  const noiseBP1 = ctx.createBiquadFilter();
+  noiseBP1.type = "bandpass";
+  noiseBP1.frequency.value = 1700;
+  noiseBP1.Q.value = 0.6;
+
+  // Second narrower peak around the carrier.
+  const noiseBP2 = ctx.createBiquadFilter();
+  noiseBP2.type = "peaking";
+  noiseBP2.frequency.value = 1800;
+  noiseBP2.gain.value = 8;
+  noiseBP2.Q.value = 2.0;
+
+  const noiseGain = ctx.createGain();
+  noiseGain.gain.setValueAtTime(0, now);
+  noiseGain.gain.setValueAtTime(0, now + p6 - 0.1);
+  noiseGain.gain.linearRampToValueAtTime(0.3, now + p6 + 0.5);
+
+  noiseNode.connect(noiseBP1);
+  noiseBP1.connect(noiseBP2);
+  noiseBP2.connect(noiseGain);
+  noiseGain.connect(master);
+  noiseNode.start(now + p6 - 0.1);
+
+  // Layer 3: Slow warbling carrier — gives the characteristic
+  // "woooo-woooo" pitch drift of a real connection.
+  const warble = ctx.createOscillator();
+  warble.type = "sine";
+  warble.frequency.setValueAtTime(1800, now + p6);
+  // Slow LFO-driven pitch modulation.
+  const lfo = ctx.createOscillator();
+  lfo.type = "sine";
+  lfo.frequency.value = 0.4;  // slow wobble
+  const lfoGain = ctx.createGain();
+  lfoGain.gain.value = 80;  // ±80 Hz deviation
+  lfo.connect(lfoGain);
+  lfoGain.connect(warble.frequency);
+
+  const warbleGain = ctx.createGain();
+  warbleGain.gain.setValueAtTime(0, now);
+  warbleGain.gain.setValueAtTime(0, now + p6);
+  warbleGain.gain.linearRampToValueAtTime(0.08, now + p6 + 1.0);
+
+  warble.connect(warbleGain); warbleGain.connect(master);
+  lfo.start(now + p6); warble.start(now + p6);
+
+  _modemNodes = {
+    sources: [fskNode, noiseNode, warble, lfo],
+    gains: [fskGain, noiseGain, warbleGain],
+    master, ctx
+  };
+}
+
+function stopModemSound() {
+  if (!_modemNodes) return;
+  const { sources, gains, master, ctx } = _modemNodes;
+  const now = ctx.currentTime;
+  try {
+    // Fade all layers out over 400ms.
+    for (const g of gains) {
+      g.gain.cancelScheduledValues(now);
+      g.gain.setValueAtTime(g.gain.value, now);
+      g.gain.linearRampToValueAtTime(0, now + 0.4);
+    }
+    for (const s of sources) {
+      try { s.stop(now + 0.5); } catch (_) {}
+    }
+  } catch (_) {}
+  _modemNodes = null;
+}
+
+/* ── Activity sounds (7 types, randomly selected per task) ──── */
+
+let _activeActivitySound = null; // name of current sound for this task
+
+const _activitySounds = {
+
+  /* 1. Soft click / Geiger counter tick */
+  softClick() {
+    const ctx = _getAudioCtx();
+    const now = ctx.currentTime;
+    const buf = ctx.createBuffer(1, ctx.sampleRate * 0.025, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) {
+      d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (d.length * 0.08));
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.frequency.value = 2800 + Math.random() * 800;
+    bp.Q.value = 3;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.45, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.025);
+    src.connect(bp); bp.connect(g); g.connect(ctx.destination);
+    src.start(now);
+  },
+
+  /* 2. Dot matrix printer — short burst of pin impacts */
+  dotMatrix() {
+    const ctx = _getAudioCtx();
+    const now = ctx.currentTime;
+    const pins = 3 + Math.floor(Math.random() * 4); // 3-6 pin strikes
+    for (let i = 0; i < pins; i++) {
+      const t = now + i * 0.012;
+      const buf = ctx.createBuffer(1, ctx.sampleRate * 0.008, ctx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let j = 0; j < d.length; j++) {
+        d[j] = (Math.random() * 2 - 1) * Math.exp(-j / (d.length * 0.15));
+      }
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      const hp = ctx.createBiquadFilter();
+      hp.type = "highpass";
+      hp.frequency.value = 1800 + Math.random() * 600;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.35, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.008);
+      src.connect(hp); hp.connect(g); g.connect(ctx.destination);
+      src.start(t);
+    }
+  },
+
+  /* 3. Terminal bell — classic \a beep */
+  terminalBell() {
+    const ctx = _getAudioCtx();
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    osc.type = "square";
+    osc.frequency.setValueAtTime(1760, now);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.18, now);
+    g.gain.setValueAtTime(0.18, now + 0.04);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.value = 3000;
+    osc.connect(lp); lp.connect(g); g.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.1);
+  },
+
+  /* 4. Bubble / pop — chat message arrival */
+  bubblePop() {
+    const ctx = _getAudioCtx();
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(420, now);
+    osc.frequency.exponentialRampToValueAtTime(820, now + 0.03);
+    osc.frequency.exponentialRampToValueAtTime(580, now + 0.08);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.4, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+    osc.connect(g); g.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.12);
+  },
+
+  /* 5. Morse code dit — very short tone pip */
+  morseDit() {
+    const ctx = _getAudioCtx();
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    osc.type = "sine";
+    osc.frequency.value = 700 + Math.random() * 100;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, now);
+    g.gain.linearRampToValueAtTime(0.35, now + 0.005);
+    g.gain.setValueAtTime(0.35, now + 0.04);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
+    osc.connect(g); g.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.07);
+  },
+
+  /* 6. Hard drive seek — mechanical head movement chatter */
+  hardDriveSeek() {
+    const ctx = _getAudioCtx();
+    const now = ctx.currentTime;
+    const steps = 2 + Math.floor(Math.random() * 3); // 2-4 seek steps
+    for (let i = 0; i < steps; i++) {
+      const t = now + i * 0.035;
+      // Click from head movement
+      const buf = ctx.createBuffer(1, ctx.sampleRate * 0.015, ctx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let j = 0; j < d.length; j++) {
+        const env = Math.exp(-j / (d.length * 0.06));
+        d[j] = (Math.random() * 2 - 1) * env;
+        // Add a sharp transient at the start
+        if (j < 8) d[j] += (Math.random() * 2 - 1) * 0.8;
+      }
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      const bp = ctx.createBiquadFilter();
+      bp.type = "bandpass";
+      bp.frequency.value = 800 + Math.random() * 400;
+      bp.Q.value = 1.5;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.5, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.015);
+      src.connect(bp); bp.connect(g); g.connect(ctx.destination);
+      src.start(t);
+    }
+  },
+
+  /* 7. CRT scan line — tiny electrical zap/crackle */
+  crtScanLine() {
+    const ctx = _getAudioCtx();
+    const now = ctx.currentTime;
+    const dur = 0.03 + Math.random() * 0.02;
+    const buf = ctx.createBuffer(1, ctx.sampleRate * dur, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) {
+      const env = Math.exp(-i / (d.length * 0.12));
+      // Crackling: sparse random impulses
+      d[i] = (Math.random() < 0.3 ? (Math.random() * 2 - 1) : 0) * env;
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const hp = ctx.createBiquadFilter();
+    hp.type = "highpass";
+    hp.frequency.value = 3500;
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.value = 8000;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.45, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + dur);
+    src.connect(hp); hp.connect(lp); lp.connect(g); g.connect(ctx.destination);
+    src.start(now);
+  },
+};
+
+const _activitySoundNames = Object.keys(_activitySounds);
+
+/** Pick activity sound for the current task/session — hardcoded to softClick */
+function pickActivitySound() {
+  _activeActivitySound = "softClick";
+}
+
+/** Play the current activity sound (replaces old sonar bleep) */
+function playActivitySound() {
+  if (soundMode === "off") return;
+  if (!_activeActivitySound) pickActivitySound();
+  try { _activitySounds[_activeActivitySound](); } catch (_) {}
+}
+
+/* ── Public API called by streaming code ─────────────────────── */
+
+function playStreamChunkSound() {
+  if (soundMode === "typewriter") playTypewriterSound();
+  // Modem: continuous sound already running, nothing per-chunk.
+}
+
+function playStreamStartSound() {
+  pickActivitySound(); // new random activity sound each task
+  if (soundMode === "modem") startModemSound();
+}
+
+function playStreamStopSound() {
+  if (soundMode === "modem") stopModemSound();
+}
+
+/* ── Init ────────────────────────────────────────────────────── */
+
+function initSound() {
+  const sel = $("#sound-selector");
+  const saved = localStorage.getItem("computer-sound");
+  if (saved && ["off", "typewriter", "modem"].includes(saved)) {
+    soundMode = saved;
+    sel.value = saved;
+  }
+  sel.addEventListener("change", () => {
+    soundMode = sel.value;
+    localStorage.setItem("computer-sound", soundMode);
+    // Stop modem if switching away while it's playing.
+    if (soundMode !== "modem") stopModemSound();
+  });
+}
+
 /* ═══════════════════════════════════════════════════════════════
    INIT
    ═══════════════════════════════════════════════════════════════ */
@@ -3895,6 +4570,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   initSelectors();
   initAttachments();
   initFolderModal();
+  initSound();
 
   // Load available models and personas for selectors.
   loadModels();

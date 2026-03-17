@@ -38,6 +38,11 @@
         <option value="generous">Generous (32k)</option>
       </select>
       <button id="theme-btn" title="Choose theme">🎨 Theme</button>
+      <select id="sound-selector" title="Sound effects">
+        <option value="off">🔇 Off</option>
+        <option value="typewriter" selected>🔊 Typewriter</option>
+        <option value="modem">🔊 Modem</option>
+      </select>
     </div>
   </header>
 
@@ -81,6 +86,7 @@
         <div class="window-title">
           <span class="window-title-text">Activity</span>
           <div class="window-controls">
+            <button class="win-btn win-stream-show hidden" id="btn-show-stream" title="Show LLM stream">&#x25b2;</button>
             <button class="win-btn win-clear" title="Clear log"></button>
           </div>
         </div>
