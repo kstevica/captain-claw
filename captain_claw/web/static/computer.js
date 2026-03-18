@@ -329,6 +329,9 @@ function historyNext(tab) {
 
 /* ── Exploration: click-to-prompt ────────────────────────────── */
 
+let _exploreCountdownTimer = null;
+let _exploreCountdownSecs = 0;
+
 function handleIframeMessage(event) {
   if (!event.data || event.data.type !== 'explore-click') return;
   const { topic, context } = event.data;
@@ -340,6 +343,62 @@ function handleIframeMessage(event) {
 
   console.log('%c[Computer] Explore click', 'color:#ff8800;font-weight:bold', { topic, context });
   showExploreConfirm(topic, context);
+}
+
+/** Play a tick/click sound for the countdown timer (themed) */
+function _playTickSound() {
+  if (soundMode === "off") return;
+  try {
+    const p = _snd().tick;
+    const ctx = _getAudioCtx();
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = p.wave;
+    osc.frequency.setValueAtTime(p.freq, now);
+    osc.frequency.exponentialRampToValueAtTime(p.freqEnd, now + p.dur / 2);
+    gain.gain.setValueAtTime(p.vol, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + p.dur);
+    osc.start(now);
+    osc.stop(now + p.dur);
+  } catch (_) {}
+}
+
+function _startExploreCountdown() {
+  _stopExploreCountdown();
+  _exploreCountdownSecs = 4;
+  _updateCountdownDisplay();
+  _playTickSound();
+
+  _exploreCountdownTimer = setInterval(() => {
+    _exploreCountdownSecs--;
+    if (_exploreCountdownSecs <= 0) {
+      _stopExploreCountdown();
+      confirmExploration();
+    } else {
+      _updateCountdownDisplay();
+      _playTickSound();
+    }
+  }, 1000);
+}
+
+function _stopExploreCountdown() {
+  if (_exploreCountdownTimer) {
+    clearInterval(_exploreCountdownTimer);
+    _exploreCountdownTimer = null;
+  }
+  _exploreCountdownSecs = 0;
+}
+
+function _updateCountdownDisplay() {
+  const btn = $("#explore-send-btn");
+  if (!btn || !btn._exploreTopic) return;
+  const shortTopic = btn._exploreTopic.length > 20
+    ? btn._exploreTopic.slice(0, 20) + "…"
+    : btn._exploreTopic;
+  btn.innerHTML = `▶ <span class="explore-btn-label">${esc(shortTopic)}</span> <span class="explore-countdown">${_exploreCountdownSecs}</span>`;
 }
 
 function showExploreConfirm(topic, context) {
@@ -399,9 +458,27 @@ function showExploreConfirm(topic, context) {
   input.setSelectionRange(input.value.length, input.value.length);
 
   logEntry("system", `Explore: "${topic}" — edit prompt or press Explore to send`);
+
+  // Start auto-exploration countdown (4 seconds).
+  _startExploreCountdown();
+
+  // Cancel countdown if user starts editing the input.
+  input._exploreInputHandler = () => {
+    if (_exploreCountdownTimer) {
+      _stopExploreCountdown();
+      // Restore button text without countdown.
+      const st = exploreBtn._exploreTopic.length > 20
+        ? exploreBtn._exploreTopic.slice(0, 20) + "…"
+        : exploreBtn._exploreTopic;
+      exploreBtn.innerHTML = `▶ <span class="explore-btn-label">${esc(st)}</span>`;
+      logEntry("system", "Auto-explore paused — input edited");
+    }
+  };
+  input.addEventListener("input", input._exploreInputHandler);
 }
 
 function confirmExploration() {
+  _stopExploreCountdown();
   const btn = $("#explore-send-btn");
   if (!btn) return;
 
@@ -422,17 +499,25 @@ function confirmExploration() {
 }
 
 function cancelExploration() {
+  _stopExploreCountdown();
   _hideExploreButtons();
   $("#input-box").value = "";
   logEntry("system", "Exploration cancelled");
 }
 
 function _hideExploreButtons() {
+  _stopExploreCountdown();
   const eb = $("#explore-send-btn");
   const cb = $("#explore-cancel-btn");
   if (eb) eb.style.display = "none";
   if (cb) cb.style.display = "none";
   $("#send-btn").style.display = "";
+  // Remove input listener.
+  const input = $("#input-box");
+  if (input && input._exploreInputHandler) {
+    input.removeEventListener("input", input._exploreInputHandler);
+    input._exploreInputHandler = null;
+  }
 }
 
 /* ── Exploration: navigate to historical node ────────────────── */
@@ -1043,6 +1128,7 @@ function connect() {
 
   ws.onopen = () => {
     connected = true;
+    _errorSoundPlayed = false; // reset so next error can sound again
     $(".status-dot").classList.add("connected");
     logEntry("system", "Connected to Captain Claw");
   };
@@ -2117,6 +2203,7 @@ function initFullscreen() {
 /* ── Activity log ────────────────────────────────────────────── */
 
 const MAX_LOG_ENTRIES = 200;
+let _errorSoundPlayed = false; // true = suppress until reset on reconnect
 
 function logEntry(type, text, toolName) {
   const container = $("#log-content");
@@ -2147,7 +2234,22 @@ function logEntry(type, text, toolName) {
   `;
 
   container.appendChild(entry);
-  playActivitySound();
+  // Play notification sounds: warning for blocked/denied, error for other errors, activity for the rest.
+  // Error/warning sounds play once, then suppress until reconnect resets the flag.
+  if (type === "error") {
+    if (!_errorSoundPlayed) {
+      _errorSoundPlayed = true;
+      const lower = (text || "").toLowerCase();
+      if (lower.includes("blocked") || lower.includes("forbidden") || lower.includes("denied")
+          || lower.includes("not allowed") || lower.includes("duplicate")) {
+        playWarningSound();
+      } else {
+        playErrorSound();
+      }
+    }
+  } else {
+    playActivitySound(type);
+  }
 
   while (container.children.length > MAX_LOG_ENTRIES) {
     container.removeChild(container.firstChild);
@@ -2166,14 +2268,47 @@ function blinkLed() {
 }
 
 function setProcessing(active) {
+  const wasProcessing = isProcessing;
   isProcessing = active;
   const led = $("#drive-led");
   if (active) {
     led.classList.add("on");
+    _acquireWakeLock();
   } else {
     led.classList.remove("on");
+    _releaseWakeLock();
+    // Play completion sound when a task finishes.
+    if (wasProcessing) playCompletionSound();
   }
 }
+
+/* ── Screen Wake Lock (keep mobile screen on during tasks) ──── */
+
+let _wakeLock = null;
+
+async function _acquireWakeLock() {
+  if (_wakeLock) return; // already held
+  if (!("wakeLock" in navigator)) return; // not supported
+  try {
+    _wakeLock = await navigator.wakeLock.request("screen");
+    _wakeLock.addEventListener("release", () => { _wakeLock = null; });
+  } catch (_) {}
+}
+
+function _releaseWakeLock() {
+  if (_wakeLock) {
+    _wakeLock.release().catch(() => {});
+    _wakeLock = null;
+  }
+}
+
+// Re-acquire wake lock when page becomes visible again (e.g. tab switch back)
+// while a task is still processing.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && isProcessing) {
+    _acquireWakeLock();
+  }
+});
 
 /* ── Panel resizing ──────────────────────────────────────────── */
 
@@ -3547,6 +3682,69 @@ function initClearLog() {
   }
 }
 
+/* ── Clear session button ────────────────────────────────────── */
+
+function initClearSession() {
+  const btn = $("#clear-session-btn");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    showConfirmDialog("Clear the current session? All context will be lost.", () => {
+      // Send /clear command to backend.
+      send({ type: "command", command: "/clear" });
+      // Reset local UI state.
+      explorationNodes.clear();
+      currentNodeId = null;
+      historyBranchNodeId = null;
+      pendingExploration = null;
+      lastPrompt = "";
+      lastResult = "";
+      agentCreatedHtmlFiles = [];
+      setProcessing(false);
+      // Reset answer to empty placeholder (not "Processing...").
+      removeNextSteps();
+      const ansEl = $("#answer-content");
+      ansEl.innerHTML = '<span class="output-placeholder">Responses will appear here...</span>';
+      ansEl.classList.add("output-empty");
+      clearVisual();
+      renderHistoryDrawer();
+      $("#log-content").innerHTML = "";
+      logEntry("system", "Session cleared");
+    });
+  });
+}
+
+function showConfirmDialog(message, onYes) {
+  const overlay = document.createElement("div");
+  overlay.className = "confirm-overlay";
+  overlay.innerHTML = `
+    <div class="confirm-box">
+      <p>${esc(message)}</p>
+      <div class="confirm-actions">
+        <button class="confirm-yes">Yes, clear</button>
+        <button class="confirm-no">Cancel</button>
+      </div>
+    </div>`;
+
+  const close = () => overlay.remove();
+  overlay.querySelector(".confirm-no").addEventListener("click", close);
+  overlay.querySelector(".confirm-yes").addEventListener("click", () => {
+    close();
+    onYes();
+  });
+  // Click outside the box to cancel.
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
+  // Escape key cancels.
+  const escHandler = (e) => {
+    if (e.key === "Escape") { close(); document.removeEventListener("keydown", escHandler); }
+  };
+  document.addEventListener("keydown", escHandler);
+
+  document.body.appendChild(overlay);
+  overlay.querySelector(".confirm-no").focus();
+}
+
 /* ── Processing animation ────────────────────────────────────── */
 
 const SPINNER_FRAMES = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
@@ -4025,41 +4223,209 @@ function _getAudioCtx() {
   return _audioCtx;
 }
 
+/* ═══════════════════════════════════════════════════════════════
+   THEME SOUND PROFILES
+   Each theme defines parameters that shape all sound generators.
+   Win11 is the baseline; other themes diverge in character.
+   ═══════════════════════════════════════════════════════════════ */
+
+const _themeSoundProfiles = {
+  /* ── Win 11 — clean, modern, minimal (BASELINE) ─────────────── */
+  win11: {
+    key: { freqs: [1200, 900, 1500], qs: [1.8, 1.4, 2.0], dur: 0.05, vol: 0.35, decay: 2.5, filter: "bandpass" },
+    tick: { freq: 800, freqEnd: 400, dur: 0.08, vol: 0.25, wave: "sine" },
+    tool: { pins: [3, 6], pinDur: 0.008, gap: 0.012, hpFreq: [1800, 600], vol: 0.35 },
+    llm:  { freq: 420, freqMid: 820, freqEnd: 580, dur: 0.12, vol: 0.4, wave: "sine" },
+    misc: { dur: [0.03, 0.02], sparse: 0.3, hpFreq: 3500, lpFreq: 8000, vol: 0.45 },
+    done: { notes: [523, 659, 784, 1047], gap: 0.2, sustain: 0.8, vol: 0.45, wave: "sine", harmonic: "triangle", harmVol: 0.15 },
+    err:  { f1: 250, f1End: 80, f2: 200, f2End: 70, sub: 60, subEnd: 35, dur: 0.9, vol: 0.45, w1: "sawtooth", w2: "square", lp1: 800, lp2: 600 },
+    warn: { freqs: [880, 740, 620], gap: 0.22, dur: 0.18, vol: 0.45, wave: "square", subDiv: 4, subVol: 0.3, lp: 2500 },
+  },
+
+  /* ── Amiga — Paula chip: bright 8-bit, punchy, warm lo-fi ──── */
+  amiga: {
+    key: { freqs: [800, 650, 1000], qs: [2.5, 2.0, 3.0], dur: 0.04, vol: 0.4, decay: 3.5, filter: "bandpass" },
+    tick: { freq: 600, freqEnd: 300, dur: 0.06, vol: 0.3, wave: "square" },
+    tool: { pins: [4, 7], pinDur: 0.006, gap: 0.01, hpFreq: [1200, 400], vol: 0.4 },
+    llm:  { freq: 330, freqMid: 660, freqEnd: 440, dur: 0.15, vol: 0.4, wave: "square" },
+    misc: { dur: [0.025, 0.015], sparse: 0.4, hpFreq: 2000, lpFreq: 5500, vol: 0.45 },
+    done: { notes: [440, 554, 659, 880], gap: 0.18, sustain: 0.7, vol: 0.5, wave: "square", harmonic: "sawtooth", harmVol: 0.1 },
+    err:  { f1: 200, f1End: 60, f2: 170, f2End: 50, sub: 50, subEnd: 25, dur: 0.8, vol: 0.5, w1: "square", w2: "sawtooth", lp1: 600, lp2: 400 },
+    warn: { freqs: [800, 660, 520], gap: 0.2, dur: 0.15, vol: 0.5, wave: "square", subDiv: 4, subVol: 0.35, lp: 2000 },
+  },
+
+  /* ── Atari ST — Yamaha YM2149: sharp, tinny, chiptune ─────── */
+  atarist: {
+    key: { freqs: [1400, 1100, 1700], qs: [3.0, 2.5, 3.5], dur: 0.035, vol: 0.35, decay: 4.0, filter: "bandpass" },
+    tick: { freq: 1000, freqEnd: 500, dur: 0.05, vol: 0.3, wave: "square" },
+    tool: { pins: [3, 5], pinDur: 0.005, gap: 0.008, hpFreq: [2200, 700], vol: 0.35 },
+    llm:  { freq: 500, freqMid: 1000, freqEnd: 700, dur: 0.1, vol: 0.35, wave: "square" },
+    misc: { dur: [0.02, 0.01], sparse: 0.25, hpFreq: 4000, lpFreq: 9000, vol: 0.4 },
+    done: { notes: [587, 740, 880, 1175], gap: 0.15, sustain: 0.5, vol: 0.4, wave: "square", harmonic: "square", harmVol: 0.08 },
+    err:  { f1: 280, f1End: 90, f2: 230, f2End: 80, sub: 70, subEnd: 40, dur: 0.7, vol: 0.4, w1: "square", w2: "square", lp1: 900, lp2: 700 },
+    warn: { freqs: [1000, 840, 700], gap: 0.18, dur: 0.14, vol: 0.4, wave: "square", subDiv: 4, subVol: 0.2, lp: 3000 },
+  },
+
+  /* ── C64 — SID chip: gritty, warm, resonant bass ──────────── */
+  c64: {
+    key: { freqs: [600, 500, 750], qs: [3.5, 3.0, 4.0], dur: 0.045, vol: 0.45, decay: 3.0, filter: "bandpass" },
+    tick: { freq: 500, freqEnd: 250, dur: 0.07, vol: 0.35, wave: "sawtooth" },
+    tool: { pins: [5, 8], pinDur: 0.007, gap: 0.015, hpFreq: [900, 300], vol: 0.45 },
+    llm:  { freq: 260, freqMid: 520, freqEnd: 350, dur: 0.18, vol: 0.45, wave: "sawtooth" },
+    misc: { dur: [0.035, 0.02], sparse: 0.45, hpFreq: 1500, lpFreq: 4500, vol: 0.5 },
+    done: { notes: [392, 494, 587, 784], gap: 0.22, sustain: 0.9, vol: 0.5, wave: "sawtooth", harmonic: "square", harmVol: 0.12 },
+    err:  { f1: 180, f1End: 50, f2: 150, f2End: 40, sub: 45, subEnd: 20, dur: 1.0, vol: 0.5, w1: "sawtooth", w2: "square", lp1: 500, lp2: 350 },
+    warn: { freqs: [700, 580, 460], gap: 0.25, dur: 0.2, vol: 0.5, wave: "sawtooth", subDiv: 3, subVol: 0.4, lp: 1800 },
+  },
+
+  /* ── Classic Mac — soft, warm, friendly beeps ─────────────── */
+  mac: {
+    key: { freqs: [1000, 800, 1200], qs: [1.5, 1.2, 1.8], dur: 0.04, vol: 0.3, decay: 2.0, filter: "bandpass" },
+    tick: { freq: 700, freqEnd: 450, dur: 0.06, vol: 0.2, wave: "sine" },
+    tool: { pins: [2, 4], pinDur: 0.008, gap: 0.015, hpFreq: [1500, 500], vol: 0.3 },
+    llm:  { freq: 380, freqMid: 700, freqEnd: 500, dur: 0.1, vol: 0.35, wave: "sine" },
+    misc: { dur: [0.025, 0.015], sparse: 0.2, hpFreq: 3000, lpFreq: 7000, vol: 0.35 },
+    done: { notes: [494, 622, 740, 988], gap: 0.22, sustain: 0.9, vol: 0.4, wave: "sine", harmonic: "sine", harmVol: 0.1 },
+    err:  { f1: 220, f1End: 100, f2: 190, f2End: 80, sub: 55, subEnd: 30, dur: 0.7, vol: 0.35, w1: "sine", w2: "triangle", lp1: 700, lp2: 500 },
+    warn: { freqs: [740, 622, 520], gap: 0.2, dur: 0.16, vol: 0.35, wave: "sine", subDiv: 4, subVol: 0.2, lp: 2200 },
+  },
+
+  /* ── Windows 3.1 — MIDI-like, bright, plasticky ──────────── */
+  win31: {
+    key: { freqs: [1100, 850, 1350], qs: [2.2, 1.8, 2.5], dur: 0.045, vol: 0.35, decay: 2.8, filter: "bandpass" },
+    tick: { freq: 900, freqEnd: 450, dur: 0.07, vol: 0.28, wave: "square" },
+    tool: { pins: [3, 6], pinDur: 0.007, gap: 0.011, hpFreq: [1600, 500], vol: 0.38 },
+    llm:  { freq: 400, freqMid: 750, freqEnd: 540, dur: 0.13, vol: 0.38, wave: "triangle" },
+    misc: { dur: [0.028, 0.018], sparse: 0.3, hpFreq: 3200, lpFreq: 7500, vol: 0.4 },
+    done: { notes: [523, 659, 784, 1047], gap: 0.2, sustain: 0.7, vol: 0.42, wave: "triangle", harmonic: "square", harmVol: 0.08 },
+    err:  { f1: 240, f1End: 85, f2: 200, f2End: 70, sub: 55, subEnd: 30, dur: 0.8, vol: 0.42, w1: "triangle", w2: "square", lp1: 750, lp2: 550 },
+    warn: { freqs: [900, 760, 640], gap: 0.2, dur: 0.16, vol: 0.42, wave: "triangle", subDiv: 4, subVol: 0.25, lp: 2400 },
+  },
+
+  /* ── Hacker — dark, glitchy, matrix-like ──────────────────── */
+  hacker: {
+    key: { freqs: [1600, 1300, 2000], qs: [4.0, 3.5, 4.5], dur: 0.03, vol: 0.3, decay: 5.0, filter: "highpass" },
+    tick: { freq: 1200, freqEnd: 600, dur: 0.04, vol: 0.25, wave: "sawtooth" },
+    tool: { pins: [4, 8], pinDur: 0.004, gap: 0.006, hpFreq: [2800, 800], vol: 0.3 },
+    llm:  { freq: 600, freqMid: 1200, freqEnd: 800, dur: 0.08, vol: 0.3, wave: "sawtooth" },
+    misc: { dur: [0.02, 0.015], sparse: 0.5, hpFreq: 5000, lpFreq: 12000, vol: 0.35 },
+    done: { notes: [440, 554, 659, 880], gap: 0.12, sustain: 0.4, vol: 0.35, wave: "sawtooth", harmonic: "sawtooth", harmVol: 0.06 },
+    err:  { f1: 300, f1End: 60, f2: 260, f2End: 50, sub: 40, subEnd: 20, dur: 1.0, vol: 0.4, w1: "sawtooth", w2: "sawtooth", lp1: 1000, lp2: 800 },
+    warn: { freqs: [1100, 900, 750], gap: 0.15, dur: 0.12, vol: 0.38, wave: "sawtooth", subDiv: 5, subVol: 0.2, lp: 3500 },
+  },
+
+  /* ── Modern — polished, subtle, UI-grade ──────────────────── */
+  modern: {
+    key: { freqs: [1300, 1000, 1600], qs: [1.2, 1.0, 1.5], dur: 0.035, vol: 0.25, decay: 2.0, filter: "bandpass" },
+    tick: { freq: 900, freqEnd: 500, dur: 0.06, vol: 0.2, wave: "sine" },
+    tool: { pins: [2, 4], pinDur: 0.006, gap: 0.01, hpFreq: [2000, 600], vol: 0.25 },
+    llm:  { freq: 450, freqMid: 850, freqEnd: 620, dur: 0.1, vol: 0.3, wave: "sine" },
+    misc: { dur: [0.02, 0.01], sparse: 0.2, hpFreq: 4000, lpFreq: 10000, vol: 0.3 },
+    done: { notes: [554, 698, 831, 1109], gap: 0.22, sustain: 1.0, vol: 0.35, wave: "sine", harmonic: "sine", harmVol: 0.12 },
+    err:  { f1: 230, f1End: 90, f2: 195, f2End: 75, sub: 55, subEnd: 30, dur: 0.7, vol: 0.35, w1: "sine", w2: "triangle", lp1: 700, lp2: 500 },
+    warn: { freqs: [830, 700, 590], gap: 0.22, dur: 0.16, vol: 0.35, wave: "sine", subDiv: 4, subVol: 0.2, lp: 2200 },
+  },
+
+  /* ── macOS — refined, airy, Aqua-era glass tones ──────────── */
+  macos: {
+    key: { freqs: [1100, 900, 1400], qs: [1.3, 1.1, 1.6], dur: 0.04, vol: 0.28, decay: 2.0, filter: "bandpass" },
+    tick: { freq: 750, freqEnd: 420, dur: 0.07, vol: 0.22, wave: "sine" },
+    tool: { pins: [2, 4], pinDur: 0.007, gap: 0.012, hpFreq: [1800, 550], vol: 0.28 },
+    llm:  { freq: 440, freqMid: 820, freqEnd: 600, dur: 0.12, vol: 0.32, wave: "sine" },
+    misc: { dur: [0.022, 0.012], sparse: 0.2, hpFreq: 3800, lpFreq: 9500, vol: 0.32 },
+    done: { notes: [587, 740, 880, 1175], gap: 0.24, sustain: 1.1, vol: 0.38, wave: "sine", harmonic: "triangle", harmVol: 0.15 },
+    err:  { f1: 210, f1End: 95, f2: 180, f2End: 80, sub: 50, subEnd: 28, dur: 0.75, vol: 0.35, w1: "sine", w2: "sine", lp1: 650, lp2: 480 },
+    warn: { freqs: [780, 660, 560], gap: 0.22, dur: 0.17, vol: 0.35, wave: "sine", subDiv: 4, subVol: 0.2, lp: 2100 },
+  },
+
+  /* ── iPhone — iOS haptic-paired, taps and plinks ──────────── */
+  iphone: {
+    key: { freqs: [1500, 1200, 1800], qs: [1.0, 0.8, 1.2], dur: 0.025, vol: 0.25, decay: 1.8, filter: "bandpass" },
+    tick: { freq: 1000, freqEnd: 600, dur: 0.04, vol: 0.2, wave: "sine" },
+    tool: { pins: [2, 3], pinDur: 0.005, gap: 0.008, hpFreq: [2200, 700], vol: 0.22 },
+    llm:  { freq: 500, freqMid: 900, freqEnd: 680, dur: 0.08, vol: 0.28, wave: "sine" },
+    misc: { dur: [0.015, 0.01], sparse: 0.15, hpFreq: 4500, lpFreq: 11000, vol: 0.28 },
+    done: { notes: [659, 831, 988, 1319], gap: 0.18, sustain: 0.6, vol: 0.32, wave: "sine", harmonic: "sine", harmVol: 0.1 },
+    err:  { f1: 260, f1End: 110, f2: 220, f2End: 90, sub: 65, subEnd: 35, dur: 0.6, vol: 0.3, w1: "sine", w2: "triangle", lp1: 750, lp2: 550 },
+    warn: { freqs: [950, 800, 670], gap: 0.18, dur: 0.13, vol: 0.32, wave: "sine", subDiv: 5, subVol: 0.15, lp: 2800 },
+  },
+
+  /* ── Android — Material You: rounder, deeper, tactile ─────── */
+  android: {
+    key: { freqs: [950, 750, 1150], qs: [1.5, 1.2, 1.8], dur: 0.04, vol: 0.3, decay: 2.2, filter: "bandpass" },
+    tick: { freq: 650, freqEnd: 350, dur: 0.07, vol: 0.25, wave: "triangle" },
+    tool: { pins: [3, 5], pinDur: 0.007, gap: 0.012, hpFreq: [1400, 450], vol: 0.32 },
+    llm:  { freq: 350, freqMid: 700, freqEnd: 500, dur: 0.13, vol: 0.35, wave: "triangle" },
+    misc: { dur: [0.028, 0.015], sparse: 0.25, hpFreq: 2800, lpFreq: 7500, vol: 0.38 },
+    done: { notes: [466, 587, 698, 932], gap: 0.22, sustain: 0.9, vol: 0.4, wave: "triangle", harmonic: "sine", harmVol: 0.12 },
+    err:  { f1: 200, f1End: 75, f2: 170, f2End: 60, sub: 50, subEnd: 25, dur: 0.85, vol: 0.4, w1: "triangle", w2: "square", lp1: 650, lp2: 450 },
+    warn: { freqs: [750, 630, 530], gap: 0.22, dur: 0.18, vol: 0.4, wave: "triangle", subDiv: 4, subVol: 0.25, lp: 2000 },
+  },
+
+  /* ── Nokia 7110 — tiny speaker: buzzy, thin, monophonic ───── */
+  nokia7110: {
+    key: { freqs: [2000, 1700, 2400], qs: [5.0, 4.5, 5.5], dur: 0.025, vol: 0.35, decay: 6.0, filter: "highpass" },
+    tick: { freq: 1400, freqEnd: 800, dur: 0.035, vol: 0.3, wave: "square" },
+    tool: { pins: [2, 4], pinDur: 0.004, gap: 0.005, hpFreq: [3000, 1000], vol: 0.35 },
+    llm:  { freq: 700, freqMid: 1400, freqEnd: 1000, dur: 0.07, vol: 0.35, wave: "square" },
+    misc: { dur: [0.015, 0.01], sparse: 0.35, hpFreq: 6000, lpFreq: 14000, vol: 0.38 },
+    done: { notes: [784, 988, 1175, 1568], gap: 0.12, sustain: 0.35, vol: 0.4, wave: "square", harmonic: "square", harmVol: 0.05 },
+    err:  { f1: 350, f1End: 120, f2: 300, f2End: 100, sub: 80, subEnd: 50, dur: 0.5, vol: 0.4, w1: "square", w2: "square", lp1: 1200, lp2: 900 },
+    warn: { freqs: [1200, 1000, 840], gap: 0.14, dur: 0.1, vol: 0.42, wave: "square", subDiv: 6, subVol: 0.15, lp: 4000 },
+  },
+
+  /* ── Nokia Communicator — richer than 7110, dual-speaker feel */
+  nokiacomm: {
+    key: { freqs: [1600, 1300, 1900], qs: [3.5, 3.0, 4.0], dur: 0.035, vol: 0.35, decay: 4.0, filter: "bandpass" },
+    tick: { freq: 1100, freqEnd: 600, dur: 0.05, vol: 0.28, wave: "square" },
+    tool: { pins: [3, 5], pinDur: 0.005, gap: 0.008, hpFreq: [2400, 700], vol: 0.35 },
+    llm:  { freq: 550, freqMid: 1100, freqEnd: 780, dur: 0.1, vol: 0.35, wave: "triangle" },
+    misc: { dur: [0.02, 0.012], sparse: 0.3, hpFreq: 4500, lpFreq: 10000, vol: 0.38 },
+    done: { notes: [659, 831, 988, 1319], gap: 0.16, sustain: 0.5, vol: 0.4, wave: "triangle", harmonic: "square", harmVol: 0.08 },
+    err:  { f1: 300, f1End: 100, f2: 250, f2End: 85, sub: 70, subEnd: 40, dur: 0.65, vol: 0.4, w1: "square", w2: "triangle", lp1: 1000, lp2: 750 },
+    warn: { freqs: [1000, 840, 700], gap: 0.17, dur: 0.14, vol: 0.4, wave: "square", subDiv: 5, subVol: 0.2, lp: 3200 },
+  },
+};
+
+/** Get sound profile for current theme, falling back to win11 */
+function _snd() {
+  return _themeSoundProfiles[currentTheme] || _themeSoundProfiles.win11;
+}
+
 /* ── Typewriter ──────────────────────────────────────────────── */
 
 function _playTypewriterKey() {
   if (soundMode !== "typewriter") return;
   const ctx = _getAudioCtx();
   const now = ctx.currentTime;
+  const p = _snd().key;
   const variant = Math.floor(Math.random() * 3);
 
-  const bufLen = Math.floor(ctx.sampleRate * 0.05);
+  const bufLen = Math.floor(ctx.sampleRate * p.dur);
   const buf = ctx.createBuffer(1, bufLen, ctx.sampleRate);
   const data = buf.getChannelData(0);
   for (let i = 0; i < bufLen; i++) {
-    data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufLen, 2.5);
+    data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufLen, p.decay);
   }
 
   const noise = ctx.createBufferSource();
   noise.buffer = buf;
 
   const filter = ctx.createBiquadFilter();
-  filter.type = "bandpass";
-  const freqs = [1200, 900, 1500];
-  const qs = [1.8, 1.4, 2.0];
-  filter.frequency.value = freqs[variant];
-  filter.Q.value = qs[variant];
+  filter.type = p.filter;
+  filter.frequency.value = p.freqs[variant];
+  filter.Q.value = p.qs[variant];
 
   const gain = ctx.createGain();
-  gain.gain.setValueAtTime(0.35, now);
-  gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+  gain.gain.setValueAtTime(p.vol, now);
+  gain.gain.exponentialRampToValueAtTime(0.001, now + p.dur);
 
   noise.connect(filter);
   filter.connect(gain);
   gain.connect(ctx.destination);
 
   noise.start(now);
-  noise.stop(now + 0.05);
+  noise.stop(now + p.dur);
 }
 
 let _lastTypewriterTime = 0;
@@ -4497,16 +4863,95 @@ const _activitySounds = {
 
 const _activitySoundNames = Object.keys(_activitySounds);
 
-/** Pick activity sound for the current task/session — hardcoded to softClick */
+/** Pick activity sound — no longer needed but kept for modem start */
 function pickActivitySound() {
-  _activeActivitySound = "softClick";
+  _activeActivitySound = "crtScanLine";
 }
 
-/** Play the current activity sound (replaces old sonar bleep) */
-function playActivitySound() {
+/** Play themed activity sound based on log entry type:
+ *  tool → dot-matrix style (themed)
+ *  thinking/stream → bubble/pop (themed)
+ *  everything else → crackle/zap (themed) */
+function playActivitySound(logType) {
   if (soundMode === "off") return;
-  if (!_activeActivitySound) pickActivitySound();
-  try { _activitySounds[_activeActivitySound](); } catch (_) {}
+  try {
+    const s = _snd();
+    if (logType === "tool") {
+      _playThemedTool(s.tool);
+    } else if (logType === "thinking" || logType === "stream") {
+      _playThemedLlm(s.llm);
+    } else {
+      _playThemedMisc(s.misc);
+    }
+  } catch (_) {}
+}
+
+/** Themed tool sound — pin-strike burst */
+function _playThemedTool(p) {
+  const ctx = _getAudioCtx();
+  const now = ctx.currentTime;
+  const pins = p.pins[0] + Math.floor(Math.random() * (p.pins[1] - p.pins[0] + 1));
+  for (let i = 0; i < pins; i++) {
+    const t = now + i * p.gap;
+    const buf = ctx.createBuffer(1, ctx.sampleRate * p.pinDur, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let j = 0; j < d.length; j++) {
+      d[j] = (Math.random() * 2 - 1) * Math.exp(-j / (d.length * 0.15));
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const hp = ctx.createBiquadFilter();
+    hp.type = "highpass";
+    hp.frequency.value = p.hpFreq[0] + Math.random() * p.hpFreq[1];
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(p.vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + p.pinDur);
+    src.connect(hp); hp.connect(g); g.connect(ctx.destination);
+    src.start(t);
+  }
+}
+
+/** Themed LLM sound — bubble/pop tone sweep */
+function _playThemedLlm(p) {
+  const ctx = _getAudioCtx();
+  const now = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  osc.type = p.wave;
+  osc.frequency.setValueAtTime(p.freq, now);
+  osc.frequency.exponentialRampToValueAtTime(p.freqMid, now + p.dur * 0.25);
+  osc.frequency.exponentialRampToValueAtTime(p.freqEnd, now + p.dur * 0.67);
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(p.vol, now);
+  g.gain.exponentialRampToValueAtTime(0.001, now + p.dur);
+  osc.connect(g); g.connect(ctx.destination);
+  osc.start(now);
+  osc.stop(now + p.dur);
+}
+
+/** Themed misc sound — crackle/zap */
+function _playThemedMisc(p) {
+  const ctx = _getAudioCtx();
+  const now = ctx.currentTime;
+  const dur = p.dur[0] + Math.random() * p.dur[1];
+  const buf = ctx.createBuffer(1, ctx.sampleRate * dur, ctx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) {
+    const env = Math.exp(-i / (d.length * 0.12));
+    d[i] = (Math.random() < p.sparse ? (Math.random() * 2 - 1) : 0) * env;
+  }
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  const hp = ctx.createBiquadFilter();
+  hp.type = "highpass";
+  hp.frequency.value = p.hpFreq;
+  const lp = ctx.createBiquadFilter();
+  lp.type = "lowpass";
+  lp.frequency.value = p.lpFreq;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(p.vol, now);
+  g.gain.exponentialRampToValueAtTime(0.001, now + dur);
+  src.connect(hp); hp.connect(lp); lp.connect(g); g.connect(ctx.destination);
+  src.start(now);
 }
 
 /* ── Public API called by streaming code ─────────────────────── */
@@ -4525,7 +4970,148 @@ function playStreamStopSound() {
   if (soundMode === "modem") stopModemSound();
 }
 
+/* ── Notification sounds (completion / error / warning) ──────── */
+
+/** Task completion: rising arpeggio chime (themed) */
+function playCompletionSound() {
+  if (soundMode === "off") return;
+  try {
+    const p = _snd().done;
+    const ctx = _getAudioCtx();
+    const now = ctx.currentTime;
+    for (let i = 0; i < p.notes.length; i++) {
+      const freq = p.notes[i];
+      const t = now + i * p.gap;
+      const vol = p.vol * (0.85 + i * 0.05); // slight crescendo
+      // Main tone
+      const osc = ctx.createOscillator();
+      osc.type = p.wave;
+      osc.frequency.setValueAtTime(freq, t);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, now);
+      g.gain.setValueAtTime(vol, t);
+      g.gain.exponentialRampToValueAtTime(vol * 0.5, t + p.sustain * 0.35);
+      g.gain.exponentialRampToValueAtTime(0.001, t + p.sustain);
+      osc.connect(g); g.connect(ctx.destination);
+      osc.start(t); osc.stop(t + p.sustain);
+      // Harmonic overtone
+      const h = ctx.createOscillator();
+      h.type = p.harmonic;
+      h.frequency.setValueAtTime(freq * 2, t);
+      const gh = ctx.createGain();
+      gh.gain.setValueAtTime(0, now);
+      gh.gain.setValueAtTime(p.harmVol, t);
+      gh.gain.exponentialRampToValueAtTime(0.001, t + p.sustain * 0.7);
+      h.connect(gh); gh.connect(ctx.destination);
+      h.start(t); h.stop(t + p.sustain * 0.7);
+    }
+  } catch (_) {}
+}
+
+/** Error: descending dissonant buzz (themed) */
+function playErrorSound() {
+  if (soundMode === "off") return;
+  try {
+    const p = _snd().err;
+    const ctx = _getAudioCtx();
+    const now = ctx.currentTime;
+    // Primary descending tone
+    const o1 = ctx.createOscillator();
+    o1.type = p.w1;
+    o1.frequency.setValueAtTime(p.f1, now);
+    o1.frequency.exponentialRampToValueAtTime(p.f1End, now + p.dur * 0.9);
+    const g1 = ctx.createGain();
+    g1.gain.setValueAtTime(p.vol, now);
+    g1.gain.exponentialRampToValueAtTime(p.vol * 0.33, now + p.dur * 0.55);
+    g1.gain.exponentialRampToValueAtTime(0.001, now + p.dur);
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass"; lp.frequency.value = p.lp1;
+    o1.connect(lp); lp.connect(g1); g1.connect(ctx.destination);
+    o1.start(now); o1.stop(now + p.dur);
+    // Dissonant second tone
+    const o2 = ctx.createOscillator();
+    o2.type = p.w2;
+    o2.frequency.setValueAtTime(p.f2, now);
+    o2.frequency.exponentialRampToValueAtTime(p.f2End, now + p.dur * 0.78);
+    const g2 = ctx.createGain();
+    g2.gain.setValueAtTime(p.vol * 0.55, now + 0.05);
+    g2.gain.exponentialRampToValueAtTime(p.vol * 0.18, now + p.dur * 0.55);
+    g2.gain.exponentialRampToValueAtTime(0.001, now + p.dur * 0.9);
+    const lp2 = ctx.createBiquadFilter();
+    lp2.type = "lowpass"; lp2.frequency.value = p.lp2;
+    o2.connect(lp2); lp2.connect(g2); g2.connect(ctx.destination);
+    o2.start(now + 0.05); o2.stop(now + p.dur * 0.9);
+    // Sub-bass rumble
+    const sub = ctx.createOscillator();
+    sub.type = "sine";
+    sub.frequency.setValueAtTime(p.sub, now);
+    sub.frequency.exponentialRampToValueAtTime(p.subEnd, now + p.dur * 0.9);
+    const gs = ctx.createGain();
+    gs.gain.setValueAtTime(p.vol * 0.78, now);
+    gs.gain.exponentialRampToValueAtTime(0.001, now + p.dur);
+    sub.connect(gs); gs.connect(ctx.destination);
+    sub.start(now); sub.stop(now + p.dur);
+  } catch (_) {}
+}
+
+/** Warning/blocked: descending beep sequence (themed) */
+function playWarningSound() {
+  if (soundMode === "off") return;
+  try {
+    const p = _snd().warn;
+    const ctx = _getAudioCtx();
+    const now = ctx.currentTime;
+    for (let i = 0; i < p.freqs.length; i++) {
+      const t = now + i * p.gap;
+      const freq = p.freqs[i];
+      // Main tone
+      const osc = ctx.createOscillator();
+      osc.type = p.wave;
+      osc.frequency.setValueAtTime(freq, t);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(p.vol, t);
+      g.gain.setValueAtTime(p.vol, t + p.dur * 0.55);
+      g.gain.exponentialRampToValueAtTime(0.001, t + p.dur);
+      const lp = ctx.createBiquadFilter();
+      lp.type = "lowpass"; lp.frequency.value = p.lp;
+      osc.connect(lp); lp.connect(g); g.connect(ctx.destination);
+      osc.start(t); osc.stop(t + p.dur);
+      // Sub-bass layer
+      const sub = ctx.createOscillator();
+      sub.type = "sine";
+      sub.frequency.setValueAtTime(freq / p.subDiv, t);
+      const gs = ctx.createGain();
+      gs.gain.setValueAtTime(p.subVol, t);
+      gs.gain.exponentialRampToValueAtTime(0.001, t + p.dur);
+      sub.connect(gs); gs.connect(ctx.destination);
+      sub.start(t); sub.stop(t + p.dur);
+    }
+  } catch (_) {}
+}
+
 /* ── Init ────────────────────────────────────────────────────── */
+
+/* ── Text size ───────────────────────────────────────────────── */
+
+function initTextSize() {
+  const sel = $("#textsize-selector");
+  const saved = localStorage.getItem("computer-textsize");
+  if (saved && ["standard", "large", "larger", "laaaarger"].includes(saved)) {
+    setTextSize(saved);
+    sel.value = saved;
+  }
+  sel.addEventListener("change", () => {
+    setTextSize(sel.value);
+    localStorage.setItem("computer-textsize", sel.value);
+  });
+}
+
+function setTextSize(size) {
+  document.body.classList.remove("textsize-large", "textsize-larger", "textsize-laaaarger");
+  if (size === "large") document.body.classList.add("textsize-large");
+  else if (size === "larger") document.body.classList.add("textsize-larger");
+  else if (size === "laaaarger") document.body.classList.add("textsize-laaaarger");
+}
 
 function initSound() {
   const sel = $("#sound-selector");
@@ -4561,6 +5147,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   initTabs();
   initResize();
   initClearLog();
+  initClearSession();
   initSpinner();
   initFullscreen();
   initStreamPanel();
@@ -4571,6 +5158,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   initAttachments();
   initFolderModal();
   initSound();
+  initTextSize();
 
   // Load available models and personas for selectors.
   loadModels();

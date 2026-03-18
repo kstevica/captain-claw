@@ -658,6 +658,14 @@ body {
   flex-direction: column;
 }
 
+/* ── Text size scaling ───────────────────────────────────────── */
+/* CSS zoom on #workspace scales ALL child elements uniformly —
+   fonts, borders, padding, icons — without touching individual rules.
+   Titlebar is a sibling, so it stays at original size. */
+body.textsize-large #workspace    { zoom: 1.2; }
+body.textsize-larger #workspace   { zoom: 1.45; }
+body.textsize-laaaarger #workspace { zoom: 1.8; }
+
 /* ── Title Bar ───────────────────────────────────────────────── */
 
 #titlebar {
@@ -758,6 +766,59 @@ body {
 #theme-btn:hover {
   border-color: var(--accent);
 }
+
+/* Confirm dialog overlay */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90000;
+  background: rgba(0,0,0,0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn 0.15s ease;
+}
+.confirm-box {
+  background: var(--surface, #222);
+  border: 2px solid var(--chrome-lo, #555);
+  border-radius: 6px;
+  padding: 20px 28px;
+  min-width: 260px;
+  max-width: 90vw;
+  text-align: center;
+  font-family: var(--font);
+  color: var(--text, #eee);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+.confirm-box p {
+  margin: 0 0 16px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.confirm-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+.confirm-actions button {
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 6px 18px;
+  border-radius: 3px;
+  cursor: pointer;
+  border: 1px solid var(--chrome-lo, #555);
+}
+.confirm-yes {
+  background: #c44;
+  color: #fff;
+  border-color: #c44 !important;
+}
+.confirm-yes:hover { background: #e55; }
+.confirm-no {
+  background: var(--btn-bg, #333);
+  color: var(--btn-fg, #eee);
+}
+.confirm-no:hover { background: var(--accent); color: var(--bg); }
 
 /* ── Workspace (three-panel grid) ────────────────────────────── */
 
@@ -1016,6 +1077,20 @@ body {
 .explore-btn-label {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.explore-countdown {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.2);
+  font-size: 11px;
+  font-weight: 700;
+  margin-left: 4px;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ── Visual choice bar (agent HTML vs generate new) ──────────── */
@@ -2570,6 +2645,35 @@ body.visual-fullscreen #visual-frame {
   padding: 2px 4px;
   cursor: pointer;
   max-width: 150px;
+}
+
+#textsize-selector {
+  font-family: var(--font);
+  font-size: 11px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--chrome-lo);
+  border-radius: var(--radius);
+  padding: 2px 4px;
+  cursor: pointer;
+  max-width: 120px;
+}
+
+#clear-session-btn {
+  font-family: var(--font);
+  font-size: 11px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--chrome-lo);
+  border-radius: var(--radius);
+  padding: 2px 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+#clear-session-btn:hover {
+  background: #c44;
+  color: #fff;
+  border-color: #c44;
 }
 
 /* ── Model modal ────────────────────────────────────────────── */
