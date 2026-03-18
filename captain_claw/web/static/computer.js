@@ -32,9 +32,9 @@ let availableModels = [];
 let availablePersonas = [];
 let selectedPersona = localStorage.getItem("computer-persona") || "";
 
-// Attachment state.
-let pendingImagePath = null;
-let pendingFilePath = null;
+// Attachment state — arrays for multi-file support.
+let pendingImages = [];   // [{path, name}, ...]
+let pendingFiles = [];    // [{path, name}, ...]
 const _IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 const _DATA_EXTS = ["csv", "xlsx", "xls", "pdf", "docx", "doc", "pptx", "ppt", "md", "txt"];
 
@@ -224,7 +224,9 @@ async function loadExplorationHistory(sid) {
     const res = await fetch(`/api/computer/exploration?session_id=${encodeURIComponent(sid)}`);
     if (!res.ok) return;
     const data = await res.json();
-    const nodes = data.nodes || [];
+    const allNodes = data.nodes || [];
+    // Cap to last 200 nodes to keep the UI responsive.
+    const nodes = allNodes.length > 200 ? allNodes.slice(-200) : allNodes;
     explorationNodes.clear();
     for (const n of nodes) {
       explorationNodes.set(n.id, n);
@@ -233,10 +235,7 @@ async function loadExplorationHistory(sid) {
     if (nodes.length > 0) {
       currentNodeId = nodes[nodes.length - 1].id;
     }
-    console.log(`[Computer] Loaded ${nodes.length} exploration nodes`);
-    if (nodes.length > 0) {
-      logEntry("system", `Loaded ${nodes.length} exploration nodes`);
-    }
+    console.log(`[Computer] Loaded ${nodes.length} exploration nodes (of ${allNodes.length} total)`);
     renderHistoryDrawer();
   } catch (e) {
     console.warn('Failed to load exploration history:', e);
@@ -1407,7 +1406,7 @@ function handleResponseStream(data) {
 function handleSend() {
   const input = $("#input-box");
   const text = input.value.trim();
-  if (!text && !pendingImagePath && !pendingFilePath) return;
+  if (!text && !pendingImages.length && !pendingFiles.length) return;
   if (!connected) return;
 
   // ── /btw command: inject additional instructions while task is running ──
@@ -1483,8 +1482,11 @@ function handleSend() {
     send({ type: "command", command: text });
   } else {
     const msg = { type: "chat", content: text || "" };
-    if (pendingImagePath) msg.image_path = pendingImagePath;
-    if (pendingFilePath) msg.file_path = pendingFilePath;
+    // Multi-file: send arrays; single-file: send scalar for backward compat.
+    if (pendingImages.length === 1) msg.image_path = pendingImages[0].path;
+    else if (pendingImages.length > 1) msg.image_paths = pendingImages.map(i => i.path);
+    if (pendingFiles.length === 1) msg.file_path = pendingFiles[0].path;
+    else if (pendingFiles.length > 1) msg.file_paths = pendingFiles.map(f => f.path);
     if (rewindTimestamp) msg.rewind_to = rewindTimestamp;
     send(msg);
   }
@@ -2756,16 +2758,48 @@ function extractFolder(file) {
   return file.source || 'other';
 }
 
+const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
+
+function _fileTimeLabel(mtime) {
+  if (!mtime) return '';
+  const d = new Date(mtime * 1000);
+  const now = Date.now();
+  const diff = now - d.getTime();
+  const pad = (n) => String(n).padStart(2, '0');
+  // Today: just time
+  const today = new Date();
+  if (d.toDateString() === today.toDateString()) {
+    return `Today ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+  // Yesterday
+  const yesterday = new Date(now - 86400000);
+  if (d.toDateString() === yesterday.toDateString()) {
+    return `Yesterday ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+  // Older: date + time
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function _isOldFile(mtime) {
+  if (!mtime) return false;
+  return (Date.now() - mtime * 1000) > TWO_DAYS_MS;
+}
+
+let _filesSortMode = 'date'; // 'date' | 'name' | 'type'
+
 function renderFileCard(f) {
   const icon = getFileIcon(f.extension || '');
   const size = f.size ? humanFileSize(f.size) : '';
   const previewable = f.is_text || IMAGE_EXTS.has(f.extension) || HTML_EXTS.has(f.extension);
+  const timeLabel = _fileTimeLabel(f.modified);
+  const isOld = _isOldFile(f.modified);
+  const oldBadge = isOld ? '<span class="file-old-badge">OLD</span>' : '';
   return `
-    <div class="file-card" data-path="${esc(f.physical)}" data-ext="${esc(f.extension || '')}" data-text="${f.is_text ? '1' : '0'}">
+    <div class="file-card${isOld ? ' file-old' : ''}" data-path="${esc(f.physical)}" data-ext="${esc(f.extension || '')}" data-text="${f.is_text ? '1' : '0'}">
       <span class="file-icon">${icon}</span>
       <div class="file-info">
-        <div class="file-name">${esc(f.filename)}</div>
-        <div class="file-meta">${esc(size)}${f.logical ? ' · ' + esc(f.logical) : ''}</div>
+        <div class="file-name">${esc(f.filename)}${oldBadge}</div>
+        <div class="file-meta">${esc(size)}${timeLabel ? ' · ' + esc(timeLabel) : ''}${f.logical ? ' · ' + esc(f.logical) : ''}</div>
       </div>
       <div class="file-actions">
         ${previewable ? '<button class="file-action-btn file-preview-btn" title="Preview file"><span class="file-action-icon">👁</span><span class="file-action-label">Preview</span></button>' : ''}
@@ -2774,6 +2808,28 @@ function renderFileCard(f) {
       </div>
     </div>
   `;
+}
+
+function _sortFiles(files) {
+  const sorted = [...files];
+  switch (_filesSortMode) {
+    case 'name':
+      sorted.sort((a, b) => (a.filename || '').localeCompare(b.filename || ''));
+      break;
+    case 'type':
+      sorted.sort((a, b) => {
+        const ea = (a.extension || '').toLowerCase();
+        const eb = (b.extension || '').toLowerCase();
+        if (ea !== eb) return ea.localeCompare(eb);
+        return (a.filename || '').localeCompare(b.filename || '');
+      });
+      break;
+    case 'date':
+    default:
+      sorted.sort((a, b) => (b.modified || 0) - (a.modified || 0)); // newest first
+      break;
+  }
+  return sorted;
 }
 
 async function loadFiles() {
@@ -2810,9 +2866,10 @@ async function loadFiles() {
     countEl.textContent = `${files.length} file${files.length !== 1 ? 's' : ''}`;
     el.classList.remove("output-empty");
 
-    // Group files by folder category.
+    // Sort then group files by folder category.
+    const sortedFiles = _sortFiles(files);
     const groups = new Map();
-    for (const f of files) {
+    for (const f of sortedFiles) {
       const folder = extractFolder(f);
       if (!groups.has(folder)) groups.set(folder, []);
       groups.get(folder).push(f);
@@ -2896,9 +2953,10 @@ function filterFiles(query) {
 
   el.classList.remove("output-empty");
 
-  // Group filtered files by folder.
+  // Sort then group filtered files by folder.
+  const sortedFiltered = _sortFiles(filtered);
   const groups = new Map();
-  for (const f of filtered) {
+  for (const f of sortedFiltered) {
     const folder = extractFolder(f);
     if (!groups.has(folder)) groups.set(folder, []);
     groups.get(folder).push(f);
@@ -2955,6 +3013,24 @@ function initFiles() {
       debounceTimer = setTimeout(() => filterFiles(searchInput.value), 150);
     });
   }
+  // Sort buttons.
+  const sortBtns = document.querySelectorAll(".files-sort-btn");
+  sortBtns.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const mode = btn.dataset.sort;
+      if (mode === _filesSortMode) return;
+      _filesSortMode = mode;
+      sortBtns.forEach((b) => b.classList.toggle("active", b.dataset.sort === mode));
+      // Re-render with current search filter.
+      const q = searchInput ? searchInput.value.trim() : '';
+      if (q) {
+        filterFiles(q);
+      } else if (_filesCache.length) {
+        // Re-trigger full render from cache.
+        loadFiles();
+      }
+    });
+  });
 }
 
 /* ── File preview modal ──────────────────────────────────────── */
@@ -3837,26 +3913,48 @@ async function uploadFile(file) {
 }
 
 function showAttachmentChip(filename, path, isFile) {
-  if (isFile) { pendingFilePath = path; } else { pendingImagePath = path; }
+  const entry = { path, name: filename };
+  if (isFile) { pendingFiles.push(entry); } else { pendingImages.push(entry); }
+  _renderAttachmentBar();
+}
+
+function _renderAttachmentBar() {
   const bar = $("#attachment-bar");
   const chip = $("#attachment-chip");
   chip.innerHTML = "";
-  const span = document.createElement("span");
-  span.className = "attachment-name";
-  span.textContent = (isFile ? "📄 " : "🖼️ ") + filename;
-  chip.appendChild(span);
-  const removeBtn = document.createElement("button");
-  removeBtn.className = "attachment-remove";
-  removeBtn.textContent = "✕";
-  removeBtn.title = "Remove attachment";
-  removeBtn.addEventListener("click", clearAttachment);
-  chip.appendChild(removeBtn);
+  const all = [
+    ...pendingImages.map((f, i) => ({ ...f, isFile: false, idx: i })),
+    ...pendingFiles.map((f, i) => ({ ...f, isFile: true, idx: i })),
+  ];
+  if (all.length === 0) {
+    bar.classList.add("hidden");
+    return;
+  }
+  for (const item of all) {
+    const wrap = document.createElement("span");
+    wrap.className = "attachment-item";
+    const span = document.createElement("span");
+    span.className = "attachment-name";
+    span.textContent = (item.isFile ? "📄 " : "🖼️ ") + item.name;
+    wrap.appendChild(span);
+    const removeBtn = document.createElement("button");
+    removeBtn.className = "attachment-remove";
+    removeBtn.textContent = "✕";
+    removeBtn.title = "Remove";
+    removeBtn.addEventListener("click", () => {
+      if (item.isFile) pendingFiles.splice(item.idx, 1);
+      else pendingImages.splice(item.idx, 1);
+      _renderAttachmentBar();
+    });
+    wrap.appendChild(removeBtn);
+    chip.appendChild(wrap);
+  }
   bar.classList.remove("hidden");
 }
 
 function clearAttachment() {
-  pendingImagePath = null;
-  pendingFilePath = null;
+  pendingImages = [];
+  pendingFiles = [];
   const bar = $("#attachment-bar");
   if (bar) bar.classList.add("hidden");
   const chip = $("#attachment-chip");
@@ -3873,31 +3971,37 @@ function initAttachments() {
 
   attachBtn.addEventListener("click", () => fileInput.click());
   fileInput.addEventListener("change", () => {
-    if (fileInput.files && fileInput.files[0]) uploadFile(fileInput.files[0]);
+    if (fileInput.files) {
+      for (const f of fileInput.files) uploadFile(f);
+    }
   });
 
-  // Paste image from clipboard.
+  // Paste from clipboard — handle multiple images/files.
   inputBox.addEventListener("paste", (e) => {
     const items = e.clipboardData && e.clipboardData.items;
     if (!items) return;
+    let handled = false;
     for (let i = 0; i < items.length; i++) {
       if (items[i].type.indexOf("image/") === 0) {
-        e.preventDefault();
         let file = items[i].getAsFile();
         if (file) {
           if (!file.name || file.name === "image.png") {
             const ext = (file.type.split("/")[1] || "png") === "jpeg" ? "jpg" : (file.type.split("/")[1] || "png");
             const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-            file = new File([file], "pasted-" + ts + "." + ext, { type: file.type });
+            file = new File([file], "pasted-" + ts + "-" + i + "." + ext, { type: file.type });
           }
           uploadFile(file);
+          handled = true;
         }
-        return;
+      } else if (items[i].kind === "file") {
+        const file = items[i].getAsFile();
+        if (file) { uploadFile(file); handled = true; }
       }
     }
+    if (handled) e.preventDefault();
   });
 
-  // Drag & drop on workspace.
+  // Drag & drop on workspace — handle multiple files.
   let dragCounter = 0;
   workspace.addEventListener("dragenter", (e) => { e.preventDefault(); dragCounter++; });
   workspace.addEventListener("dragover", (e) => { e.preventDefault(); });
@@ -3905,8 +4009,8 @@ function initAttachments() {
   workspace.addEventListener("drop", (e) => {
     e.preventDefault();
     dragCounter = 0;
-    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {
-      uploadFile(e.dataTransfer.files[0]);
+    if (e.dataTransfer && e.dataTransfer.files) {
+      for (const f of e.dataTransfer.files) uploadFile(f);
     }
   });
 }

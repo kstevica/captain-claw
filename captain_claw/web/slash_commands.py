@@ -39,8 +39,13 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
         elif cmd in ("/clear",):
             if server.agent.session:
                 server.agent.session.messages.clear()
+                # Preserve model selection across clear so the user's
+                # chosen model doesn't reset to the default.
+                saved_model = (server.agent.session.metadata or {}).get("model_selection")
                 # Reset session metadata so planning/pipeline state doesn't leak
                 server.agent.session.metadata = {}
+                if saved_model:
+                    server.agent.session.metadata["model_selection"] = saved_model
                 await server.agent.session_manager.save_session(server.agent.session)
                 # Reset agent runtime state to defaults (pipeline=loop, planning=off)
                 server.agent.refresh_session_runtime_flags()

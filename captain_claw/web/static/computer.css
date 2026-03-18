@@ -662,9 +662,9 @@ body {
 /* CSS zoom on #workspace scales ALL child elements uniformly —
    fonts, borders, padding, icons — without touching individual rules.
    Titlebar is a sibling, so it stays at original size. */
-body.textsize-large #workspace    { zoom: 1.2; }
-body.textsize-larger #workspace   { zoom: 1.45; }
-body.textsize-laaaarger #workspace { zoom: 1.8; }
+body.textsize-large     { zoom: 1.2; }
+body.textsize-larger    { zoom: 1.45; }
+body.textsize-laaaarger { zoom: 1.8; }
 
 /* ── Title Bar ───────────────────────────────────────────────── */
 
@@ -2393,6 +2393,60 @@ body.visual-fullscreen #visual-frame {
   white-space: nowrap;
 }
 
+/* ── Sort buttons ──────────────────────────────────────────── */
+
+#files-sort {
+  display: flex;
+  gap: 2px;
+}
+
+.files-sort-btn {
+  font-size: 12px;
+  padding: 2px 5px;
+  border: 1px solid var(--chrome-lo);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+  line-height: 1;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.files-sort-btn:hover {
+  border-color: var(--accent);
+}
+
+.files-sort-btn.active {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+/* ── OLD badge ─────────────────────────────────────────────── */
+
+.file-old-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 5px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: #fff;
+  background: #c0392b;
+  border-radius: 3px;
+  vertical-align: middle;
+  line-height: 1.4;
+}
+
+.file-card.file-old {
+  opacity: 0.6;
+}
+
+.file-card.file-old:hover {
+  opacity: 0.85;
+}
+
 .file-actions {
   display: flex;
   gap: 4px;
@@ -2522,10 +2576,16 @@ body.visual-fullscreen #visual-frame {
   width: 90%;
   max-width: none;
   height: 90vh;
+  max-height: 90vh;
   display: flex;
   flex-direction: column;
   z-index: 1;
 }
+
+/* Compensate for body zoom so modals stay within viewport */
+body.textsize-large .modal-content    { height: 75vh; max-height: 75vh; }
+body.textsize-larger .modal-content   { height: 62vh; max-height: 62vh; }
+body.textsize-laaaarger .modal-content { height: 50vh; max-height: 50vh; }
 
 .modal-content .window-body {
   flex: 1;
@@ -3376,17 +3436,24 @@ body.visual-fullscreen #visual-frame {
 #attachment-chip {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 3px 8px;
-  background: var(--accent);
-  color: var(--bg);
-  border-radius: 4px;
+  gap: 4px;
+  flex-wrap: wrap;
   font-size: 0.78rem;
   font-family: var(--font);
 }
 
+.attachment-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background: var(--accent);
+  color: var(--bg);
+  border-radius: 4px;
+}
+
 .attachment-name {
-  max-width: 200px;
+  max-width: 160px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

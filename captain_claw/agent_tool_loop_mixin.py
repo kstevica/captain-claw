@@ -182,6 +182,14 @@ class AgentToolLoopMixin:
                     # Reject tree-drawing characters and multi-line prose.
                     if re.search(r'[└├│─┌┐┘┤┬┴┼╔╗╚╝║═]', cmd):
                         continue
+                    # Reject bare file paths (e.g. saved/foo/bar.md, /tmp/file.txt)
+                    # These are not shell commands — just path references.
+                    if re.match(r'^[\w./_~-]+\.\w{1,10}$', cmd):
+                        continue
+                    # Reject paths that look like directory listings or references
+                    # (no spaces, no shell operators, just slashes and names)
+                    if re.match(r'^[\w./_~-]+$', cmd) and '/' in cmd and ' ' not in cmd:
+                        continue
                     return cmd
 
         return None

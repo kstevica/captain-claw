@@ -293,6 +293,16 @@ def _resolve_provider(server: "WebServer", model_id: str | None):
     normalize provider name → check env/dotenv → check provider_keys.
     """
     if model_id and server.agent:
+        # If the requested model matches the current agent provider, reuse it
+        # directly — this preserves any runtime-configured API keys that may
+        # not be in env vars or provider_keys (e.g. set via set_session_model).
+        current_provider = server.agent.provider
+        if current_provider:
+            cur_model = str(getattr(current_provider, "model", "") or "")
+            if model_id == cur_model or model_id == getattr(current_provider, "_original_model", ""):
+                log.info("Visual reusing current agent provider", model=cur_model)
+                return current_provider
+
         try:
             allowed = server.agent.get_allowed_models()
             for m in allowed:
@@ -317,6 +327,22 @@ def _resolve_provider(server: "WebServer", model_id: str | None):
                             or m.get("api_key")
                             or None
                         )
+                        # Last resort: if the current agent provider is the same
+                        # provider type, borrow its API key.
+                        if not api_key and current_provider:
+                            cur_provider_name = str(getattr(current_provider, "provider", "") or "")
+                            if cur_provider_name == norm_key:
+                                api_key = getattr(current_provider, "api_key", None)
+
+                    log.info(
+                        "Visual provider resolved",
+                        provider=provider_name,
+                        norm_key=norm_key,
+                        model=str(m.get("model", "")),
+                        has_api_key=bool(api_key),
+                        key_prefix=api_key[:12] + "..." if api_key else "(none)",
+                        has_extra_headers=bool(extra_headers),
+                    )
 
                     return create_provider(
                         provider=provider_name,

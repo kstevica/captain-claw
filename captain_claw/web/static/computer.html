@@ -79,7 +79,7 @@
             <div id="input-actions">
               <button id="attach-btn" title="Attach image or file">📎</button>
               <button id="folder-btn" title="Read folders">📁</button>
-              <input type="file" id="file-input" accept="image/png,image/jpeg,image/jpg,image/webp,image/gif,image/bmp,.csv,.xlsx,.xls,.pdf,.docx,.doc,.pptx,.ppt,.md,.txt" style="display:none">
+              <input type="file" id="file-input" multiple accept="image/png,image/jpeg,image/jpg,image/webp,image/gif,image/bmp,.csv,.xlsx,.xls,.pdf,.docx,.doc,.pptx,.ppt,.md,.txt" style="display:none">
               <button id="send-btn" title="Send (Enter)">Send</button>
             </div>
           </div>
@@ -164,6 +164,11 @@
           <div id="files-toolbar">
             <button id="files-refresh-btn" class="tab-btn" title="Refresh files">↻ Refresh</button>
             <span id="files-count"></span>
+            <div id="files-sort">
+              <button class="files-sort-btn active" data-sort="date" title="Sort by date">📅</button>
+              <button class="files-sort-btn" data-sort="name" title="Sort by name">🔤</button>
+              <button class="files-sort-btn" data-sort="type" title="Sort by type">📎</button>
+            </div>
             <input id="files-search" type="text" placeholder="Filter files..." spellcheck="false" autocomplete="off">
           </div>
           <div id="files-content" class="output-empty">

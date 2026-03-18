@@ -159,10 +159,29 @@ async def handle_ws_message(
 
     if msg_type == "chat":
         content = str(data.get("content", "")).strip()
-        image_path = str(data.get("image_path", "")).strip() or None
-        file_path = str(data.get("file_path", "")).strip() or None
         rewind_to = str(data.get("rewind_to", "")).strip() or None
-        if not content and not image_path and not file_path:
+
+        # Multi-file support: collect all image/file paths into lists.
+        image_paths: list[str] = []
+        file_paths: list[str] = []
+        # Single-file (backward compat)
+        _ip = str(data.get("image_path", "")).strip()
+        if _ip:
+            image_paths.append(_ip)
+        _fp = str(data.get("file_path", "")).strip()
+        if _fp:
+            file_paths.append(_fp)
+        # Multi-file arrays
+        for p in (data.get("image_paths") or []):
+            v = str(p).strip()
+            if v and v not in image_paths:
+                image_paths.append(v)
+        for p in (data.get("file_paths") or []):
+            v = str(p).strip()
+            if v and v not in file_paths:
+                file_paths.append(v)
+
+        if not content and not image_paths and not file_paths:
             return
         if content.startswith("/"):
             from captain_claw.web.slash_commands import handle_command
@@ -171,7 +190,10 @@ async def handle_ws_message(
             from captain_claw.web.chat_handler import handle_chat
             await handle_chat(
                 server, ws, content,
-                image_path=image_path, file_path=file_path,
+                image_path=image_paths[0] if len(image_paths) == 1 else None,
+                file_path=file_paths[0] if len(file_paths) == 1 else None,
+                image_paths=image_paths if len(image_paths) > 1 else None,
+                file_paths=file_paths if len(file_paths) > 1 else None,
                 rewind_to=rewind_to,
             )
 

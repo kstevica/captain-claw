@@ -118,6 +118,8 @@ async def handle_chat(
     *,
     image_path: str | None = None,
     file_path: str | None = None,
+    image_paths: list[str] | None = None,
+    file_paths: list[str] | None = None,
     rewind_to: str | None = None,
 ) -> None:
     """Process a chat message through the agent.
@@ -189,19 +191,33 @@ async def handle_chat(
             except Exception as e:
                 log.warning("Failed to persist rewound session", error=str(e))
 
-    # When an image is attached, prepend the path context so the agent
-    # knows a file is available for tools like image_ocr.
+    # Build attachment prefix — supports single or multiple files.
     effective_content = content
-    if image_path:
-        prefix = f"[Attached image: {image_path}]\n"
-        effective_content = prefix + (content or "Please analyze this image.")
+    attachment_lines: list[str] = []
 
-    # When a data file is attached, prepend the path context so the agent
-    # knows a file is available. The user's message determines what to do
-    # with it (datastore import, deep memory indexing, extraction, etc.).
+    # Single image (backward compat)
+    if image_path:
+        attachment_lines.append(f"[Attached image: {image_path}]")
+    # Multiple images
+    if image_paths:
+        for p in image_paths:
+            attachment_lines.append(f"[Attached image: {p}]")
+    # Single data file (backward compat)
     if file_path:
-        prefix = f"[Attached file: {file_path}]\n"
-        effective_content = prefix + (content or "I've attached a file.")
+        attachment_lines.append(f"[Attached file: {file_path}]")
+    # Multiple data files
+    if file_paths:
+        for p in file_paths:
+            attachment_lines.append(f"[Attached file: {p}]")
+
+    if attachment_lines:
+        prefix = "\n".join(attachment_lines) + "\n"
+        default_msg = (
+            "Please analyze these files."
+            if len(attachment_lines) > 1
+            else ("Please analyze this image." if (image_path or image_paths) else "I've attached a file.")
+        )
+        effective_content = prefix + (content or default_msg)
 
     # ── Send to the right targets ────────────────────────────────
     # For public users we send directly to their WS; for admin we
