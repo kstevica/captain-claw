@@ -3334,16 +3334,8 @@ function initSelectors() {
   // Persona modal.
   initPersonaModal();
 
-  // Tier selector.
-  const tierSel = $("#tier-selector");
-  if (tierSel) {
-    tierSel.value = selectedTokenTier;
-    tierSel.addEventListener("change", (e) => {
-      selectedTokenTier = e.target.value;
-      localStorage.setItem("computer-token-tier", selectedTokenTier);
-      logEntry("system", `Token tier: ${selectedTokenTier}`);
-    });
-  }
+  // Tier popup.
+  initTierPopup();
 }
 
 /* ── Markdown to HTML (basic) ────────────────────────────────── */
@@ -5091,19 +5083,93 @@ function playWarningSound() {
 
 /* ── Init ────────────────────────────────────────────────────── */
 
+/* ── Generic toolbar popup helper ────────────────────────────── */
+
+/** Close any open toolbar popups */
+function _closeAllPopups() {
+  document.querySelectorAll(".toolbar-popup").forEach((p) => p.classList.add("hidden"));
+}
+
+function _initToolbarPopup(btnId, panelId, optClass, dataAttr, values, {
+  defaultVal, storageKey, onSelect, labelFn
+}) {
+  const btn = $("#" + btnId);
+  const panel = $("#" + panelId);
+  if (!btn || !panel) return;
+  const opts = panel.querySelectorAll("." + optClass);
+  let current = defaultVal;
+
+  const saved = storageKey ? localStorage.getItem(storageKey) : null;
+  if (saved && values.includes(saved)) current = saved;
+
+  _mark(current);
+  if (labelFn) btn.textContent = labelFn(current);
+  if (onSelect) onSelect(current, true); // initial load
+
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = !panel.classList.contains("hidden");
+    _closeAllPopups();
+    if (open) return;
+    const r = btn.getBoundingClientRect();
+    panel.style.top = r.bottom + 2 + "px";
+    panel.style.right = (window.innerWidth - r.right) + "px";
+    panel.classList.remove("hidden");
+  });
+
+  opts.forEach((o) => {
+    o.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const val = o.dataset[dataAttr];
+      current = val;
+      _mark(val);
+      if (labelFn) btn.textContent = labelFn(val);
+      if (storageKey) localStorage.setItem(storageKey, val);
+      if (onSelect) onSelect(val, false);
+      panel.classList.add("hidden");
+    });
+  });
+
+  document.addEventListener("click", () => panel.classList.add("hidden"));
+
+  function _mark(val) {
+    opts.forEach((o) => o.classList.toggle("active", o.dataset[dataAttr] === val));
+  }
+}
+
+/* ── Tier popup ──────────────────────────────────────────────── */
+
+const _tierLabels = { micro: "📐 Micro", minimal: "📐 Minimal", standard: "📐 Standard", generous: "📐 Generous" };
+
+function initTierPopup() {
+  _initToolbarPopup("tier-btn", "tier-panel", "tier-opt", "tier",
+    ["micro", "minimal", "standard", "generous"], {
+      defaultVal: selectedTokenTier,
+      storageKey: "computer-token-tier",
+      labelFn: (v) => _tierLabels[v] || "📐 " + v,
+      onSelect: (v, isInit) => {
+        selectedTokenTier = v;
+        if (!isInit) logEntry("system", `Token tier: ${v}`);
+      }
+    });
+}
+
+/* ── Sound popup ─────────────────────────────────────────────── */
+
+const _soundLabels = { off: "🔇 Off", typewriter: "🔊 Typewriter", modem: "🔊 Modem" };
+
 /* ── Text size ───────────────────────────────────────────────── */
 
+const _textsizeLabels = { standard: "Aa Standard", large: "Aa Large", larger: "Aa Larger", laaaarger: "Aa Laaaarger" };
+
 function initTextSize() {
-  const sel = $("#textsize-selector");
-  const saved = localStorage.getItem("computer-textsize");
-  if (saved && ["standard", "large", "larger", "laaaarger"].includes(saved)) {
-    setTextSize(saved);
-    sel.value = saved;
-  }
-  sel.addEventListener("change", () => {
-    setTextSize(sel.value);
-    localStorage.setItem("computer-textsize", sel.value);
-  });
+  _initToolbarPopup("textsize-btn", "textsize-panel", "textsize-opt", "size",
+    ["standard", "large", "larger", "laaaarger"], {
+      defaultVal: "standard",
+      storageKey: "computer-textsize",
+      labelFn: (v) => _textsizeLabels[v] || "Aa " + v,
+      onSelect: (v) => setTextSize(v)
+    });
 }
 
 function setTextSize(size) {
@@ -5114,18 +5180,17 @@ function setTextSize(size) {
 }
 
 function initSound() {
-  const sel = $("#sound-selector");
-  const saved = localStorage.getItem("computer-sound");
-  if (saved && ["off", "typewriter", "modem"].includes(saved)) {
-    soundMode = saved;
-    sel.value = saved;
-  }
-  sel.addEventListener("change", () => {
-    soundMode = sel.value;
-    localStorage.setItem("computer-sound", soundMode);
-    // Stop modem if switching away while it's playing.
-    if (soundMode !== "modem") stopModemSound();
-  });
+  _initToolbarPopup("sound-btn", "sound-panel", "sound-opt", "sound",
+    ["off", "typewriter", "modem"], {
+      defaultVal: soundMode,
+      storageKey: "computer-sound",
+      labelFn: (v) => _soundLabels[v] || "🔊 " + v,
+      onSelect: (v, isInit) => {
+        soundMode = v;
+        // Stop modem if switching away while it's playing.
+        if (!isInit && v !== "modem") stopModemSound();
+      }
+    });
 }
 
 /* ═══════════════════════════════════════════════════════════════

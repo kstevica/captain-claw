@@ -31,24 +31,27 @@
     <div id="titlebar-right">
       <button id="persona-btn" title="Choose persona">👤 <span id="persona-btn-label">No profile</span></button>
       <button id="model-btn" title="Choose model">🧠 <span id="model-btn-label">Default</span></button>
-      <select id="tier-selector" title="Visual token budget">
-        <option value="micro">Micro (4k)</option>
-        <option value="minimal">Minimal (8k)</option>
-        <option value="standard" selected>Standard (16k)</option>
-        <option value="generous">Generous (32k)</option>
-      </select>
+      <button id="tier-btn" title="Visual token budget">📐 Standard</button>
+      <div id="tier-panel" class="toolbar-popup hidden">
+        <button class="tier-opt" data-tier="micro">Micro (4k)</button>
+        <button class="tier-opt" data-tier="minimal">Minimal (8k)</button>
+        <button class="tier-opt" data-tier="standard">Standard (16k)</button>
+        <button class="tier-opt" data-tier="generous">Generous (32k)</button>
+      </div>
       <button id="theme-btn" title="Choose theme">🎨 Theme</button>
-      <select id="sound-selector" title="Sound effects">
-        <option value="off">🔇 Off</option>
-        <option value="typewriter" selected>🔊 Typewriter</option>
-        <option value="modem">🔊 Modem</option>
-      </select>
-      <select id="textsize-selector" title="Text size">
-        <option value="standard" selected>Aa Standard</option>
-        <option value="large">Aa Large</option>
-        <option value="larger">Aa Larger</option>
-        <option value="laaaarger">Aa Laaaarger</option>
-      </select>
+      <button id="sound-btn" title="Sound effects">🔊 Typewriter</button>
+      <div id="sound-panel" class="toolbar-popup hidden">
+        <button class="sound-opt" data-sound="off">🔇 Off</button>
+        <button class="sound-opt" data-sound="typewriter">🔊 Typewriter</button>
+        <button class="sound-opt" data-sound="modem">🔊 Modem</button>
+      </div>
+      <button id="textsize-btn" title="Text size">Aa Size</button>
+      <div id="textsize-panel" class="toolbar-popup hidden">
+        <button class="textsize-opt" data-size="standard">Aa Standard</button>
+        <button class="textsize-opt" data-size="large">Aa Large</button>
+        <button class="textsize-opt" data-size="larger">Aa Larger</button>
+        <button class="textsize-opt" data-size="laaaarger">Aa Laaaarger</button>
+      </div>
       <button id="clear-session-btn" title="Clear session">🗑 Clear</button>
     </div>
   </header>

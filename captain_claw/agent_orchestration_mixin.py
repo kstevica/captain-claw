@@ -726,6 +726,11 @@ class AgentOrchestrationMixin:
                 ),
             )
 
+        # Accumulate intermediate text the LLM produces alongside
+        # tool calls so the final answer includes the full narrative.
+        _intermediate_texts: list[str] = []
+        _tools_executed_count = 0
+
         for iteration in range(hard_turn_iterations):
             # ── External cancellation check ───────────────────────
             cancel_ev: asyncio.Event | None = getattr(self, "cancel_event", None)
@@ -1050,6 +1055,11 @@ class AgentOrchestrationMixin:
             # ── Explicit tool calls ───────────────────────────────
             if response.tool_calls:
                 log.info("Tool calls detected", count=len(response.tool_calls), calls=response.tool_calls)
+                # Capture intermediate text emitted alongside tool calls.
+                _tc_text = str(response.content or "").strip()
+                if _tc_text:
+                    _intermediate_texts.append(_tc_text)
+                _tools_executed_count += len(response.tool_calls)
                 self._add_session_message(
                     role="assistant",
                     content=str(response.content or ""),
@@ -1389,6 +1399,10 @@ class AgentOrchestrationMixin:
                     calls=[(c.name, list(c.arguments.keys())) for c in embedded_calls],
                     content_preview=str(response.content or "")[:300],
                 )
+                _emb_text = str(response.content or "").strip()
+                if _emb_text:
+                    _intermediate_texts.append(_emb_text)
+                _tools_executed_count += len(embedded_calls)
                 self._add_session_message(
                     role="assistant",
                     content=str(response.content or ""),
@@ -1591,6 +1605,10 @@ class AgentOrchestrationMixin:
             # ── Inline command fallback ────────────────────────────
             command = self._extract_command_from_response(response.content)
             if command:
+                _tools_executed_count += 1
+                _inline_text = str(response.content or "").strip()
+                if _inline_text:
+                    _intermediate_texts.append(_inline_text)
                 log.info("Executing inline command", command=command)
                 self._emit_thinking(f"Running: {command[:60]}", tool="shell", phase="tool")
                 try:
@@ -1690,13 +1708,31 @@ class AgentOrchestrationMixin:
                     continue
 
             # ── No tool calls — final response ────────────────────
+            # When tools were executed in previous iterations, combine
+            # the intermediate narrative with the final response so the
+            # user sees a complete account of what was done rather than
+            # just the last LLM output (which may be a generic guide).
+            _final_output = response.content
+            if _tools_executed_count > 0 and _intermediate_texts:
+                # Build combined output: intermediate narrative + final
+                _combined_parts = list(_intermediate_texts)
+                _final_text_str = str(response.content or "").strip()
+                if _final_text_str:
+                    _combined_parts.append(_final_text_str)
+                _final_output = "\n\n---\n\n".join(_combined_parts)
+                log.info(
+                    "Combined intermediate + final text",
+                    intermediate_count=len(_intermediate_texts),
+                    tools_executed=_tools_executed_count,
+                    combined_len=len(_final_output),
+                )
             log.info(
                 "Text-only response (no tool calls), attempting finalize",
                 iteration=iteration,
-                content_preview=str(response.content or "")[:200],
+                content_preview=str(_final_output or "")[:200],
             )
             finalized, final_text, finish_success = await attempt_finalize(
-                output_text=response.content,
+                output_text=_final_output,
                 iteration=iteration,
                 finish_success=True,
             )

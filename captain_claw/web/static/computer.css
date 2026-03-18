@@ -2261,6 +2261,10 @@ body.visual-fullscreen #output-panel .window-body {
   height: calc(100vh - 32px);
 }
 
+body.visual-fullscreen.stream-panel-open #output-panel .window-body {
+  height: calc(100vh - 32px - 30vh);
+}
+
 body.visual-fullscreen #visual-frame {
   height: 100%;
   flex: 1;
@@ -2634,30 +2638,69 @@ body.visual-fullscreen #visual-frame {
   font-size: inherit;
 }
 
-#tier-selector,
-#sound-selector {
+#tier-btn,
+#sound-btn {
   font-family: var(--font);
   font-size: 11px;
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--chrome-lo);
   border-radius: var(--radius);
-  padding: 2px 4px;
+  padding: 2px 6px;
   cursor: pointer;
-  max-width: 150px;
 }
 
-#textsize-selector {
+#textsize-btn {
   font-family: var(--font);
   font-size: 11px;
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--chrome-lo);
   border-radius: var(--radius);
-  padding: 2px 4px;
+  padding: 2px 6px;
   cursor: pointer;
-  max-width: 120px;
 }
+
+/* Generic toolbar popup panel */
+.toolbar-popup {
+  position: fixed;
+  margin-top: 0;
+  background: var(--surface, #1a1a2e);
+  border: 1px solid var(--chrome-hi, #555);
+  border-radius: var(--radius, 4px);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  z-index: 10000;
+  padding: 4px 0;
+  min-width: 140px;
+}
+.toolbar-popup.hidden {
+  display: none;
+}
+.toolbar-popup button {
+  display: block;
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--text, #ccc);
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 6px 14px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.toolbar-popup button:hover {
+  background: var(--accent, #ff8800);
+  color: #fff;
+}
+.toolbar-popup button.active {
+  font-weight: 700;
+}
+.toolbar-popup button.active::before {
+  content: "✓ ";
+}
+
+/* Toolbar popup panels are positioned by JS */
 
 #clear-session-btn {
   font-family: var(--font);
@@ -3571,7 +3614,7 @@ body.visual-fullscreen #visual-frame {
   left: 0;
   right: 0;
   height: 30vh;
-  z-index: 900;
+  z-index: 9500;
   display: flex;
   flex-direction: column;
   background: var(--surface, #1a1a2e);
@@ -3793,5 +3836,22 @@ body.stream-panel-open #workspace {
   /* Stream panel: full width on mobile */
   .stream-panel {
     left: 0;
+  }
+
+  /* Toolbar popup: full-width on mobile for easy tapping */
+  .toolbar-popup {
+    position: fixed;
+    top: auto !important;
+    bottom: 0;
+    left: 0 !important;
+    right: 0 !important;
+    border-radius: var(--radius, 4px) var(--radius, 4px) 0 0;
+    box-shadow: 0 -4px 20px rgba(0,0,0,0.5);
+    padding: 8px 0;
+    min-width: unset;
+  }
+  .toolbar-popup button {
+    font-size: 15px;
+    padding: 12px 18px;
   }
 }
