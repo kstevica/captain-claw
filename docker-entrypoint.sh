@@ -1,6 +1,11 @@
 #!/bin/sh
 set -e
 
+# Ensure HOME is set (some container runtimes may not set it).
+if [ -z "$HOME" ]; then
+  export HOME="/home/claw"
+fi
+
 CONFIG="$HOME/.captain-claw/config.yaml"
 mkdir -p "$HOME/.captain-claw"
 

@@ -10,9 +10,13 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Paths
-DEFAULT_CONFIG_PATH = Path("~/.captain-claw/config.yaml")
-DEFAULT_DB_PATH = Path("~/.captain-claw/sessions.db")
+# Paths — use expanduser() safely; if HOME is unset fall back to /tmp.
+try:
+    _HOME_DIR = Path("~/.captain-claw").expanduser()
+except RuntimeError:
+    _HOME_DIR = Path("/tmp/.captain-claw")
+DEFAULT_CONFIG_PATH = _HOME_DIR / "config.yaml"
+DEFAULT_DB_PATH = _HOME_DIR / "sessions.db"
 LOCAL_CONFIG_FILENAME = "config.yaml"
 
 

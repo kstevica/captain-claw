@@ -135,7 +135,11 @@ class FileManager:
 
         target_dir = self._agent_dir(swarm_id, agent_name)
         if subfolder:
-            safe_sub = Path(subfolder).name
+            # Sanitize: resolve to prevent path traversal but preserve nesting.
+            safe_sub = Path(subfolder)
+            # Block absolute paths and parent references.
+            if safe_sub.is_absolute() or ".." in safe_sub.parts:
+                safe_sub = Path(safe_sub.name)
             target_dir = target_dir / safe_sub
 
         target_dir.mkdir(parents=True, exist_ok=True)

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from botport.swarm.dag import get_all_dependents, get_predecessors, get_ready_tasks
@@ -25,6 +27,161 @@ log = logging.getLogger(__name__)
 
 ENGINE_POLL_INTERVAL = 2  # seconds
 CHECKPOINT_THROTTLE_SECONDS = 30  # min interval between auto-checkpoints
+
+# ── File context helpers ─────────────────────────────────────────
+
+# Max file size for full-content inclusion (5 KB).
+_FULL_CONTENT_MAX_BYTES = 5 * 1024
+
+# Extensions that get full code content (logic files).
+_CODE_EXTENSIONS = {
+    ".js", ".ts", ".jsx", ".tsx", ".py", ".rb", ".go", ".rs", ".java",
+    ".c", ".cpp", ".h", ".hpp", ".cs", ".php", ".swift", ".kt",
+    ".lua", ".sh", ".bash", ".zsh", ".json", ".yaml", ".yml", ".toml",
+}
+
+# Extensions that only get a summary (markup / style).
+_SKIP_CONTENT_EXTENSIONS = {".css", ".html", ".htm", ".svg", ".xml", ".md"}
+
+# Regex patterns for extracting code signatures.
+# JS: capture exported functions, classes, consts, and all top-level function/class defs.
+_JS_EXPORT_RE = re.compile(
+    r'(?:export\s+(?:default\s+)?(?:(?:async\s+)?function\s+(\w+)|(?:const|let|var)\s+(\w+)\s*=|class\s+(\w+)))'
+    r'|(?:export\s+\{([^}]+)\})'
+    r'|(?:^(?:async\s+)?function\s+(\w+))'
+    r'|(?:^class\s+(\w+))',
+    re.MULTILINE,
+)
+_PY_DEF_RE = re.compile(
+    r'^(?:class|def|async\s+def)\s+(\w+)',
+    re.MULTILINE,
+)
+
+
+def _extract_code_exports(content: str, ext: str) -> list[str]:
+    """Extract exported/defined function/class/variable names from code."""
+    exports: list[str] = []
+    if ext in (".js", ".ts", ".jsx", ".tsx"):
+        for m in _JS_EXPORT_RE.finditer(content):
+            # Groups 1-3: exported function/const/class name
+            # Group 4: export { ... } list
+            # Groups 5-6: top-level (non-exported) function/class
+            name = m.group(1) or m.group(2) or m.group(3) or m.group(5) or m.group(6)
+            if name:
+                exports.append(name)
+            elif m.group(4):
+                # export { foo, bar, baz }
+                exports.extend(
+                    n.strip().split(" as ")[0].strip()
+                    for n in m.group(4).split(",")
+                    if n.strip()
+                )
+    elif ext in (".py",):
+        for m in _PY_DEF_RE.finditer(content):
+            exports.append(m.group(1))
+    else:
+        # Generic: look for function/class definitions.
+        for m in re.finditer(r'(?:function|class|def|fn|func)\s+(\w+)', content):
+            exports.append(m.group(1))
+    # Deduplicate while preserving order.
+    seen: set[str] = set()
+    result: list[str] = []
+    for e in exports:
+        if e not in seen:
+            seen.add(e)
+            result.append(e)
+    return result
+
+
+def _build_file_context(
+    file_manager: Any,
+    swarm_id: str,
+    agent_name: str,
+    task_files: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build rich context for files produced by a task.
+
+    For code files under 5 KB (excluding CSS/HTML): include full content.
+    For all files: extract exports/definitions as a summary.
+    For documents/text: include file description.
+    """
+    context_entries: list[dict[str, Any]] = []
+
+    for finfo in task_files:
+        rel_path = finfo.get("path", "")
+        filename = finfo.get("filename", "")
+        size = finfo.get("size", 0)
+        ext = Path(filename).suffix.lower()
+
+        entry: dict[str, Any] = {
+            "filename": filename,
+            "path": rel_path,
+            "size": size,
+        }
+
+        # Try to read the file content.
+        try:
+            data = file_manager.get_file(swarm_id, rel_path)
+        except Exception:
+            data = None
+
+        if data is None:
+            context_entries.append(entry)
+            continue
+
+        # Determine if this is a code logic file.
+        is_code = ext in _CODE_EXTENSIONS
+        is_skip_content = ext in _SKIP_CONTENT_EXTENSIONS
+
+        if is_code and not is_skip_content:
+            try:
+                text = data.decode("utf-8", errors="replace")
+            except Exception:
+                text = ""
+
+            # Extract exports/definitions always.
+            exports = _extract_code_exports(text, ext)
+            if exports:
+                entry["exports"] = exports
+
+            # Include full content if small enough.
+            if size <= _FULL_CONTENT_MAX_BYTES and text:
+                entry["content"] = text
+            elif text:
+                # For larger code files, include just the signature lines.
+                sig_lines: list[str] = []
+                for line in text.splitlines():
+                    stripped = line.strip()
+                    # Include exports, public declarations, imports.
+                    if re.match(
+                        r'^export\s+(?:default\s+)?(?:async\s+)?(?:function|class|const|let|var|interface|type|enum)\s',
+                        stripped,
+                    ):
+                        sig_lines.append(line.rstrip())
+                    elif re.match(
+                        r'^(?:async\s+)?(?:function|class)\s',
+                        stripped,
+                    ):
+                        sig_lines.append(line.rstrip())
+                    elif re.match(
+                        r'^(?:def|async\s+def|class)\s',
+                        stripped,
+                    ):
+                        sig_lines.append(line.rstrip())
+                    elif re.match(r'^(?:import|from|require|module\.exports)', stripped):
+                        sig_lines.append(line.rstrip())
+                if sig_lines:
+                    entry["signatures"] = "\n".join(sig_lines)
+        elif is_skip_content:
+            # CSS / HTML / MD: just note what the file is.
+            entry["type"] = ext.lstrip(".")
+        else:
+            # Other files (images, binaries, etc.): just metadata.
+            pass
+
+        context_entries.append(entry)
+
+    return context_entries
 
 
 class SwarmEngine:
@@ -324,6 +481,11 @@ class SwarmEngine:
             "swarm_files": file_manifest,
         }
 
+        # Include the model selected in BotPort UI for CC-B to use.
+        selected_model = swarm.metadata.get("selected_model", "")
+        if selected_model:
+            concern_context["model_id"] = selected_model
+
         # Inject designed agent spec if present (agent_mode == "designed").
         agent_spec = task.metadata.get("agent_spec")
         if agent_spec:
@@ -343,16 +505,26 @@ class SwarmEngine:
         route_result = await self._route_task(concern, task)
 
         if route_result is None:
-            # No available instance — mark task as retrying.
+            # No available instance — mark task as retrying with backoff.
             task.status = "retrying"
             task.error_message = "No available instance"
+            no_instance_retries = task.metadata.get("no_instance_retries", 0) + 1
+            task.metadata["no_instance_retries"] = no_instance_retries
+            # Exponential backoff: 10s, 20s, 40s, ... capped at 120s.
+            wait_seconds = min(10 * (2 ** (no_instance_retries - 1)), 120)
+            task.metadata["retry_at"] = (
+                datetime.now(timezone.utc) + timedelta(seconds=wait_seconds)
+            ).isoformat()
             task.touch()
             await store.save_task(task)
             # Clean up the concern.
             await self._server.concerns.fail_concern(
                 concern.id, reason="no_available_instance",
             )
-            log.warning("Swarm task %s: no available instance", task.id[:8])
+            log.warning(
+                "Swarm task %s: no available instance (retry %d, wait %ds)",
+                task.id[:8], no_instance_retries, wait_seconds,
+            )
             return
 
         target = route_result.instance
@@ -439,19 +611,88 @@ class SwarmEngine:
         return inputs
 
     def _build_task_prompt(self, task: SwarmTask, input_data: dict) -> str:
-        """Build the full prompt for an agent from task description + inputs."""
+        """Build the full prompt for an agent from task description + inputs.
+
+        Includes rich file context from predecessor tasks:
+        - Small code files (< 5 KB, non-CSS/HTML): full content included
+        - Larger code files: import/export signatures and definitions
+        - Documents/markup: file listing only
+        """
         prompt = task.description
 
-        if input_data:
-            prompt += "\n\n--- Input from previous tasks ---\n"
-            for key, data in input_data.items():
-                if isinstance(data, dict) and "response" in data:
-                    prompt += f"\n[{key}]:\n{data['response']}\n"
-                elif isinstance(data, str):
+        if not input_data:
+            return prompt
+
+        prompt += "\n\n--- Input from previous tasks ---\n"
+
+        for key, data in input_data.items():
+            if not isinstance(data, dict):
+                if isinstance(data, str):
                     prompt += f"\n[{key}]:\n{data}\n"
                 else:
-                    import json
-                    prompt += f"\n[{key}]:\n{json.dumps(data, indent=2)}\n"
+                    import json as _json
+                    prompt += f"\n[{key}]:\n{_json.dumps(data, indent=2)}\n"
+                continue
+
+            # Summary of what the predecessor did.
+            response = data.get("response", "")
+            if response:
+                # Trim very long responses to key info.
+                if len(response) > 2000:
+                    response = response[:2000] + "\n... (truncated)"
+                prompt += f"\n[{key}] Summary:\n{response}\n"
+
+            # Rich file context.
+            file_ctx = data.get("file_context", [])
+            if not file_ctx:
+                # Fallback: just list files.
+                files = data.get("files", [])
+                if files:
+                    prompt += f"\n[{key}] Files created:\n"
+                    for f in files:
+                        prompt += f"  - {f.get('path', f.get('filename', ''))}\n"
+                continue
+
+            # Separate files into categories.
+            code_with_content: list[dict] = []
+            code_with_sigs: list[dict] = []
+            other_files: list[dict] = []
+
+            for fc in file_ctx:
+                if "content" in fc:
+                    code_with_content.append(fc)
+                elif "signatures" in fc or "exports" in fc:
+                    code_with_sigs.append(fc)
+                else:
+                    other_files.append(fc)
+
+            # Full code files (small logic files — critical for imports).
+            if code_with_content:
+                prompt += f"\n[{key}] Code files (full content for reference):\n"
+                for fc in code_with_content:
+                    prompt += f"\n--- {fc['path']} ---\n"
+                    prompt += fc["content"]
+                    prompt += "\n"
+
+            # Larger code files — signatures and exports.
+            if code_with_sigs:
+                prompt += f"\n[{key}] Code files (signatures/exports):\n"
+                for fc in code_with_sigs:
+                    prompt += f"\n--- {fc['path']} ---\n"
+                    exports = fc.get("exports", [])
+                    if exports:
+                        prompt += f"  Exports: {', '.join(exports)}\n"
+                    sigs = fc.get("signatures", "")
+                    if sigs:
+                        prompt += sigs + "\n"
+
+            # Other files (CSS, HTML, images, etc.).
+            if other_files:
+                prompt += f"\n[{key}] Other files created:\n"
+                for fc in other_files:
+                    ftype = fc.get("type", "")
+                    label = f" ({ftype})" if ftype else ""
+                    prompt += f"  - {fc.get('path', fc.get('filename', ''))}{label}\n"
 
         return prompt
 
@@ -548,7 +789,8 @@ class SwarmEngine:
                 break
 
         # Collect file list produced by this task's agent.
-        task_files = []
+        task_files: list[dict[str, Any]] = []
+        file_context: list[dict[str, Any]] = []
         try:
             fm = self._server.file_manager
             agent_name = task.assigned_instance or ""
@@ -557,8 +799,12 @@ class SwarmEngine:
                     {"filename": f["filename"], "path": f["path"], "size": f["size"]}
                     for f in fm.list_files(task.swarm_id, agent_name=agent_name)
                 ]
-        except Exception:
-            pass
+                # Build rich file context for downstream tasks.
+                file_context = _build_file_context(
+                    fm, task.swarm_id, agent_name, task_files,
+                )
+        except Exception as exc:
+            log.debug("Error building file context: %s", exc)
 
         task.status = "completed"
         task.completed_at = _utcnow_iso()
@@ -567,6 +813,7 @@ class SwarmEngine:
             "concern_id": concern.id,
             "persona": concern.metadata.get("persona_name", ""),
             "files": task_files,
+            "file_context": file_context,
         }
         task.touch()
         await store.save_task(task)
@@ -590,6 +837,20 @@ class SwarmEngine:
         if concern.status == "responded":
             await self._server.concerns.close_concern(
                 concern.id, reason="swarm_task_completed",
+            )
+
+        # Notify CC-B that the concern is closed so it can clean up the
+        # dispatch agent.  Without this, CC-B keeps the agent in memory
+        # and its heartbeat reports an inflated active_concerns count,
+        # eventually blocking new dispatches.
+        if concern.assigned_instance:
+            from botport.protocol import ConcernClosedMessage
+            await self._server.connections.send_to(
+                concern.assigned_instance,
+                ConcernClosedMessage(
+                    concern_id=concern.id,
+                    reason="swarm_task_completed",
+                ),
             )
 
         await store.add_audit_entry(SwarmAuditEntry(

@@ -6,11 +6,27 @@ import json
 from pathlib import Path
 from typing import Any
 
-from captain_claw.datastore import ProtectedError, get_datastore_manager
+from captain_claw.config import get_config
+from captain_claw.datastore import (
+    ProtectedError,
+    get_datastore_manager,
+    get_session_datastore_manager,
+)
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 
 log = get_logger(__name__)
+
+
+def _resolve_datastore_manager(session_id: str | None) -> Any:
+    """Return the appropriate DatastoreManager.
+
+    In public computer mode each session gets its own isolated DB.
+    Otherwise the shared global manager is returned.
+    """
+    if get_config().web.public_run == "computer" and session_id:
+        return get_session_datastore_manager(session_id)
+    return get_datastore_manager()
 
 
 def _parse_json_str(value: Any | None, label: str) -> Any:
@@ -212,7 +228,8 @@ class DatastoreTool(Tool):
     }
 
     async def execute(self, action: str, **kwargs: Any) -> ToolResult:
-        dm = get_datastore_manager()
+        session_id = str(kwargs.get("_session_id", "") or "").strip() or None
+        dm = _resolve_datastore_manager(session_id)
 
         # Log invocation
         _log_args = {k: v for k, v in kwargs.items() if not k.startswith("_") and v is not None}

@@ -603,19 +603,32 @@ function _updateSwarmDetailInPlace(swarm) {
   } else if (activeTab && activeTab.dataset.tab === "checkpoints") {
     loadCheckpoints();
   }
+
+  // Refresh file tree status (created/pending markers).
+  if (swarm.metadata?.file_tree) {
+    _renderFileTreeWithStatus(swarm.id, swarm.metadata.file_tree);
+  }
 }
 
-function _buildAgentModeToggle(swarm) {
+// Agent mode toggle is now part of _buildSettingsBar().
+
+function _buildSettingsBar(swarm) {
   const mode = swarm.agent_mode || "connected";
-  return `<div class="agent-mode-toggle-row">
-    <div class="action-group-label">Agent Selection</div>
-    <div class="agent-mode-toggle">
-      <button class="agent-mode-opt ${mode === 'connected' ? 'active' : ''}" onclick="setAgentMode('connected')" title="Route tasks to your connected BotPort agents">
-        🔗 BotPort Agents
-      </button>
-      <button class="agent-mode-opt ${mode === 'designed' ? 'active' : ''}" onclick="setAgentMode('designed')" title="AI generates temporary task-optimized agents">
-        🧠 Swarm Agents
-      </button>
+  return `<div class="swarm-settings-bar">
+    <div class="settings-bar-group">
+      <span class="settings-bar-label">Model</span>
+      ${buildModelSelector()}
+    </div>
+    <div class="settings-bar-group">
+      <span class="settings-bar-label">Agents</span>
+      <div class="agent-mode-toggle-inline">
+        <button class="agent-mode-opt ${mode === 'connected' ? 'active' : ''}" onclick="setAgentMode('connected')" title="Route tasks to your connected BotPort agents">
+          🔗 BotPort
+        </button>
+        <button class="agent-mode-opt ${mode === 'designed' ? 'active' : ''}" onclick="setAgentMode('designed')" title="AI generates temporary task-optimized agents">
+          🧠 Swarm
+        </button>
+      </div>
     </div>
   </div>`;
 }
@@ -623,11 +636,6 @@ function _buildAgentModeToggle(swarm) {
 function _buildActionsPanel(swarm, tasks) {
   const hasRephrased = !!swarm.rephrased_task;
   const hasTasks = tasks.length > 0;
-  const modelSel = `<div class="model-select-row">
-    <div class="action-group-label">Model</div>
-    ${buildModelSelector()}
-  </div>`;
-  const agentToggle = _buildAgentModeToggle(swarm);
 
   if (swarm.status === "draft") {
     return `
@@ -644,9 +652,7 @@ function _buildActionsPanel(swarm, tasks) {
       <button class="action-btn action-btn-danger" onclick="swarmAction('cancel')">
         <span class="action-icon">✕</span>
         <span class="action-label">Cancel</span>
-      </button>
-      ${agentToggle}
-      ${modelSel}`;
+      </button>`;
   }
   if (swarm.status === "decomposing") {
     return `
@@ -685,9 +691,7 @@ function _buildActionsPanel(swarm, tasks) {
       <button class="action-btn action-btn-danger" onclick="swarmAction('cancel')">
         <span class="action-icon">✕</span>
         <span class="action-label">Cancel</span>
-      </button>
-      ${agentToggle}
-      ${modelSel}`;
+      </button>`;
   }
   if (swarm.status === "running") {
     return `
@@ -712,6 +716,20 @@ function _buildActionsPanel(swarm, tasks) {
         <span class="action-icon">✕</span>
         <span class="action-label">Cancel</span>
       </button>`;
+  }
+  if (swarm.status === "completed" || swarm.status === "failed" || swarm.status === "cancelled") {
+    const hasFailed = tasks.some(t => t.status === "failed" || t.status === "retrying");
+    return `
+      <div class="action-group-label">Rerun</div>
+      <button class="action-btn action-btn-success" onclick="swarmRerun(false)">
+        <span class="action-icon">↻</span>
+        <span class="action-label">Rerun All<small>Reset all tasks and re-execute</small></span>
+      </button>
+      ${hasFailed ? `
+      <button class="action-btn action-btn-warning" onclick="swarmRerun(true)">
+        <span class="action-icon">⟳</span>
+        <span class="action-label">Retry Failed<small>Only re-execute failed tasks</small></span>
+      </button>` : ""}`;
   }
   return "";
 }
@@ -772,6 +790,16 @@ function renderSwarmDetail(swarm) {
     promptContent += `<div class="swarm-detail-reasoning"><strong>Strategy:</strong> ${esc(swarm.metadata.decomposition_reasoning)}</div>`;
   }
 
+  // Build file tree panel if available.
+  let fileTreePanel = "";
+  if (swarm.metadata?.file_tree) {
+    fileTreePanel = `
+      <div class="swarm-file-tree-panel">
+        <div class="file-tree-label">📁 Project Files</div>
+        <div class="file-tree-content" id="file-tree-content"></div>
+      </div>`;
+  }
+
   el.innerHTML = `
     <div class="swarm-detail">
       <div class="swarm-detail-header">
@@ -785,6 +813,8 @@ function renderSwarmDetail(swarm) {
 
       ${_buildPipelineSteps(swarm, tasks)}
 
+      ${_buildSettingsBar(swarm)}
+
       <div class="swarm-command-centre">
         <div class="swarm-actions-panel">
           ${_buildActionsPanel(swarm, tasks)}
@@ -794,64 +824,74 @@ function renderSwarmDetail(swarm) {
         </div>
       </div>
 
-      <div class="swarm-detail-stats">
-        <span class="stat-pill">${taskStats.total} tasks</span>
-        <span class="stat-pill stat-completed">${taskStats.completed} done</span>
-        <span class="stat-pill stat-running">${taskStats.running} running</span>
-        <span class="stat-pill stat-failed">${taskStats.failed} failed</span>
-        <span class="stat-pill stat-queued">${taskStats.queued} queued</span>
-        ${taskStats.pending_approval > 0 ? `<span class="stat-pill stat-pending-approval">${taskStats.pending_approval} awaiting approval</span>` : ""}
-      </div>
-      ${taskStats.total > 0 && (swarm.status === "running" || swarm.status === "completed" || swarm.status === "failed") ? `
-      <div class="swarm-progress-bar">
-        <div class="swarm-progress-fill swarm-progress-completed" style="width: ${(taskStats.completed / taskStats.total * 100).toFixed(1)}%"></div>
-        <div class="swarm-progress-fill swarm-progress-running" style="width: ${(taskStats.running / taskStats.total * 100).toFixed(1)}%"></div>
-        <div class="swarm-progress-fill swarm-progress-failed" style="width: ${(taskStats.failed / taskStats.total * 100).toFixed(1)}%"></div>
-      </div>` : ""}
+      <div class="swarm-body-layout ${swarm.metadata?.file_tree ? 'has-file-tree' : ''}">
+        ${fileTreePanel}
+        <div class="swarm-body-main">
+          <div class="swarm-detail-stats">
+            <span class="stat-pill">${taskStats.total} tasks</span>
+            <span class="stat-pill stat-completed">${taskStats.completed} done</span>
+            <span class="stat-pill stat-running">${taskStats.running} running</span>
+            <span class="stat-pill stat-failed">${taskStats.failed} failed</span>
+            <span class="stat-pill stat-queued">${taskStats.queued} queued</span>
+            ${taskStats.pending_approval > 0 ? `<span class="stat-pill stat-pending-approval">${taskStats.pending_approval} awaiting approval</span>` : ""}
+          </div>
+          ${taskStats.total > 0 && (swarm.status === "running" || swarm.status === "completed" || swarm.status === "failed") ? `
+          <div class="swarm-progress-bar">
+            <div class="swarm-progress-fill swarm-progress-completed" style="width: ${(taskStats.completed / taskStats.total * 100).toFixed(1)}%"></div>
+            <div class="swarm-progress-fill swarm-progress-running" style="width: ${(taskStats.running / taskStats.total * 100).toFixed(1)}%"></div>
+            <div class="swarm-progress-fill swarm-progress-failed" style="width: ${(taskStats.failed / taskStats.total * 100).toFixed(1)}%"></div>
+          </div>` : ""}
 
-      <div class="swarm-tabs">
-        <button class="swarm-tab active" data-tab="dag" onclick="switchSwarmTab(this, 'dag')">DAG</button>
-        <button class="swarm-tab" data-tab="tasks" onclick="switchSwarmTab(this, 'tasks')">Tasks</button>
-        <button class="swarm-tab" data-tab="gantt" onclick="switchSwarmTab(this, 'gantt')">Timeline</button>
-        <button class="swarm-tab" data-tab="costs" onclick="switchSwarmTab(this, 'costs')">Costs</button>
-        <button class="swarm-tab" data-tab="checkpoints" onclick="switchSwarmTab(this, 'checkpoints')">Checkpoints</button>
-        <button class="swarm-tab" data-tab="files" onclick="switchSwarmTab(this, 'files')">Files</button>
-        <button class="swarm-tab" data-tab="audit" onclick="switchSwarmTab(this, 'audit')">Audit</button>
-      </div>
+          <div class="swarm-tabs">
+            <button class="swarm-tab active" data-tab="dag" onclick="switchSwarmTab(this, 'dag')">DAG</button>
+            <button class="swarm-tab" data-tab="tasks" onclick="switchSwarmTab(this, 'tasks')">Tasks</button>
+            <button class="swarm-tab" data-tab="gantt" onclick="switchSwarmTab(this, 'gantt')">Timeline</button>
+            <button class="swarm-tab" data-tab="costs" onclick="switchSwarmTab(this, 'costs')">Costs</button>
+            <button class="swarm-tab" data-tab="checkpoints" onclick="switchSwarmTab(this, 'checkpoints')">Checkpoints</button>
+            <button class="swarm-tab" data-tab="files" onclick="switchSwarmTab(this, 'files')">Files</button>
+            <button class="swarm-tab" data-tab="audit" onclick="switchSwarmTab(this, 'audit')">Audit</button>
+          </div>
 
-      <div id="swarm-tab-dag" class="swarm-tab-content active">
-        <div class="dag-toolbar">
-          ${canAddTasks ? '<button class="btn btn-sm" onclick="showCreateTask()">+ Add Task</button>' : ''}
-          <button class="btn btn-sm" onclick="autoLayoutDAG()">Auto Layout</button>
+          <div id="swarm-tab-dag" class="swarm-tab-content active">
+            <div class="dag-toolbar">
+              ${canAddTasks ? '<button class="btn btn-sm" onclick="showCreateTask()">+ Add Task</button>' : ''}
+              <button class="btn btn-sm" onclick="autoLayoutDAG()">Auto Layout</button>
+              <span class="dag-toolbar-sep"></span>
+              <button class="btn btn-sm btn-icon" onclick="dagZoomIn()" title="Zoom in">+</button>
+              <button class="btn btn-sm btn-icon" onclick="dagZoomOut()" title="Zoom out">−</button>
+              <button class="btn btn-sm" onclick="dagFitToView()" title="Fit all nodes to view">Fit</button>
+              <button class="btn btn-sm" onclick="dagResetView()" title="Reset zoom and pan">1:1</button>
+            </div>
+            <canvas id="dag-canvas" width="800" height="400"></canvas>
+          </div>
+
+          <div id="swarm-tab-tasks" class="swarm-tab-content">
+            ${renderTaskList(tasks, edges, canAddTasks)}
+          </div>
+
+          <div id="swarm-tab-gantt" class="swarm-tab-content">
+            <div id="gantt-content"><p class="empty-state">Loading timeline...</p></div>
+          </div>
+
+          <div id="swarm-tab-costs" class="swarm-tab-content">
+            <div id="costs-content"><p class="empty-state">Loading costs...</p></div>
+          </div>
+
+          <div id="swarm-tab-checkpoints" class="swarm-tab-content">
+            <div class="checkpoint-toolbar">
+              <button class="btn btn-sm" onclick="createCheckpoint()">+ Create Checkpoint</button>
+            </div>
+            <div id="checkpoint-list-content"><p class="empty-state">Loading...</p></div>
+          </div>
+
+          <div id="swarm-tab-files" class="swarm-tab-content">
+            <div id="files-content"><p class="empty-state">Loading files...</p></div>
+          </div>
+
+          <div id="swarm-tab-audit" class="swarm-tab-content">
+            <div id="audit-log-content"><p class="empty-state">Loading...</p></div>
+          </div>
         </div>
-        <canvas id="dag-canvas" width="800" height="400"></canvas>
-      </div>
-
-      <div id="swarm-tab-tasks" class="swarm-tab-content">
-        ${renderTaskList(tasks, edges, canAddTasks)}
-      </div>
-
-      <div id="swarm-tab-gantt" class="swarm-tab-content">
-        <div id="gantt-content"><p class="empty-state">Loading timeline...</p></div>
-      </div>
-
-      <div id="swarm-tab-costs" class="swarm-tab-content">
-        <div id="costs-content"><p class="empty-state">Loading costs...</p></div>
-      </div>
-
-      <div id="swarm-tab-checkpoints" class="swarm-tab-content">
-        <div class="checkpoint-toolbar">
-          <button class="btn btn-sm" onclick="createCheckpoint()">+ Create Checkpoint</button>
-        </div>
-        <div id="checkpoint-list-content"><p class="empty-state">Loading...</p></div>
-      </div>
-
-      <div id="swarm-tab-files" class="swarm-tab-content">
-        <div id="files-content"><p class="empty-state">Loading files...</p></div>
-      </div>
-
-      <div id="swarm-tab-audit" class="swarm-tab-content">
-        <div id="audit-log-content"><p class="empty-state">Loading...</p></div>
       </div>
     </div>
   `;
@@ -863,8 +903,13 @@ function renderSwarmDetail(swarm) {
     resizeDAGCanvas();
     drawDAG(tasks, edges);
 
-    // Drag & click handler for DAG nodes.
+    // Drag, pan & zoom handler for DAG nodes.
     _initDAGDrag(dagCanvas, tasks, edges);
+
+    // Auto-fit on first render if there are tasks.
+    if (tasks.length > 0) {
+      dagFitToView();
+    }
   }
 
   // Load audit/checkpoints if on that tab.
@@ -873,6 +918,11 @@ function renderSwarmDetail(swarm) {
     loadAuditLog();
   } else if (activeTab && activeTab.dataset.tab === "checkpoints") {
     loadCheckpoints();
+  }
+
+  // Render file tree with created/pending status.
+  if (swarm.metadata?.file_tree) {
+    _renderFileTreeWithStatus(swarm.id, swarm.metadata.file_tree);
   }
 }
 
@@ -973,6 +1023,7 @@ function renderTaskList(tasks, edges, canAddTasks) {
           <span class="swarm-status-badge status-task-${t.status}">${t.status}</span>
         </div>
         <div class="task-list-desc">${esc(truncate(t.description, 200))}</div>
+        ${t.metadata?.files?.length ? `<div class="task-files-list">📄 ${t.metadata.files.map(f => esc(f)).join(', ')}</div>` : ""}
         ${depLine}
         ${t.assigned_persona && t.status !== "running" && t.status !== "completed" ? `<div class="task-persona">Persona: ${esc(t.assigned_persona)}</div>` : ""}
         ${execInfo}
@@ -1028,11 +1079,30 @@ async function loadAuditLog() {
 
 async function swarmAction(action) {
   if (!currentSwarm) return;
-  const result = await swarmAPI("POST", `/swarms/${currentSwarm}/${action}`);
+  const body = {};
+  // Send selected model when starting a swarm.
+  if (action === "start") {
+    const model = getSelectedModel();
+    if (model) body.model = model;
+  }
+  const result = await swarmAPI("POST", `/swarms/${currentSwarm}/${action}`, body);
   if (result._error) {
     alert(`Action '${action}' failed: ${result.error || "Unknown error"}`);
   }
   _lastSwarmStatus = "";  // Force full re-render after state change.
+  await refreshSwarmDetail();
+}
+
+async function swarmRerun(failedOnly) {
+  if (!currentSwarm) return;
+  const label = failedOnly ? "Retry failed tasks" : "Rerun all tasks";
+  if (!confirm(`${label}? This will reset ${failedOnly ? "failed" : "all"} tasks to queued.`)) return;
+  const result = await swarmAPI("POST", `/swarms/${currentSwarm}/rerun`, { failed_only: failedOnly });
+  if (result._error) {
+    alert(`Rerun failed: ${result.error || "Unknown error"}`);
+    return;
+  }
+  _lastSwarmStatus = "";
   await refreshSwarmDetail();
 }
 
@@ -1234,6 +1304,8 @@ async function autoLayoutDAG() {
   if (!currentSwarm) return;
   await swarmAPI("POST", `/swarms/${currentSwarm}/auto-layout`);
   await refreshSwarmDetail();
+  // Fit after re-layout.
+  setTimeout(dagFitToView, 100);
 }
 
 /* ---- DAG Canvas Drawing ---- */
@@ -1250,9 +1322,69 @@ const STATUS_COLORS = {
   skipped: "#555570",
 };
 
+/* ---- DAG Zoom & Pan ---- */
+
+let _dagZoom = 1.0;
+let _dagPanX = 0;
+let _dagPanY = 0;
+
+function _screenToWorld(sx, sy) {
+  return {
+    x: (sx - _dagPanX) / _dagZoom,
+    y: (sy - _dagPanY) / _dagZoom,
+  };
+}
+
+function dagZoomIn() {
+  _dagZoom = Math.min(3.0, _dagZoom * 1.25);
+  drawDAG(_dagTasks, _dagEdges);
+}
+
+function dagZoomOut() {
+  _dagZoom = Math.max(0.15, _dagZoom / 1.25);
+  drawDAG(_dagTasks, _dagEdges);
+}
+
+function dagFitToView() {
+  if (!dagCanvas || !_dagTasks || _dagTasks.length === 0) return;
+  const nodeW = 180, nodeH = 60;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const t of _dagTasks) {
+    minX = Math.min(minX, t.position_x);
+    minY = Math.min(minY, t.position_y);
+    maxX = Math.max(maxX, t.position_x + nodeW);
+    maxY = Math.max(maxY, t.position_y + nodeH);
+  }
+  const contentW = maxX - minX;
+  const contentH = maxY - minY;
+  if (contentW <= 0 || contentH <= 0) return;
+
+  const canvasW = dagCanvas.width;
+  const canvasH = dagCanvas.height;
+  const pad = 40;
+
+  _dagZoom = Math.min(
+    (canvasW - pad * 2) / contentW,
+    (canvasH - pad * 2) / contentH,
+    2.0
+  );
+  _dagZoom = Math.max(0.15, _dagZoom);
+  _dagPanX = (canvasW - contentW * _dagZoom) / 2 - minX * _dagZoom;
+  _dagPanY = (canvasH - contentH * _dagZoom) / 2 - minY * _dagZoom;
+  drawDAG(_dagTasks, _dagEdges);
+}
+
+function dagResetView() {
+  _dagZoom = 1.0;
+  _dagPanX = 0;
+  _dagPanY = 0;
+  drawDAG(_dagTasks, _dagEdges);
+}
+
 /* ---- DAG Drag Interaction ---- */
 
 let _dagDragState = null;  // { taskId, startX, startY, origX, origY, moved }
+let _dagPanState = null;   // { startX, startY, origPanX, origPanY }
 let _dagTasks = [];        // Current tasks reference for hit-testing.
 let _dagEdges = [];        // Current edges reference for redraw.
 
@@ -1265,14 +1397,15 @@ function _initDAGDrag(canvas, tasks, edges) {
   canvas.onmousemove = null;
   canvas.onmouseup = null;
   canvas.onmouseleave = null;
+  canvas.onwheel = null;
   canvas.style.cursor = "default";
 
   const nodeW = 180, nodeH = 60;
 
-  function hitTask(mx, my) {
+  function hitTask(wx, wy) {
     for (const t of _dagTasks) {
-      if (mx >= t.position_x && mx <= t.position_x + nodeW
-          && my >= t.position_y && my <= t.position_y + nodeH) {
+      if (wx >= t.position_x && wx <= t.position_x + nodeW
+          && wy >= t.position_y && wy <= t.position_y + nodeH) {
         return t;
       }
     }
@@ -1281,69 +1414,87 @@ function _initDAGDrag(canvas, tasks, edges) {
 
   canvas.onmousedown = function(e) {
     const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    const task = hitTask(mx, my);
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const world = _screenToWorld(sx, sy);
+    const task = hitTask(world.x, world.y);
     if (task) {
+      // Node drag.
       _dagDragState = {
         taskId: task.id,
-        startX: mx, startY: my,
+        startX: sx, startY: sy,
         origX: task.position_x, origY: task.position_y,
         moved: false,
       };
+      _dagPanState = null;
       canvas.style.cursor = "grabbing";
-      e.preventDefault();
+    } else {
+      // Stage pan.
+      _dagPanState = {
+        startX: sx, startY: sy,
+        origPanX: _dagPanX, origPanY: _dagPanY,
+      };
+      _dagDragState = null;
+      canvas.style.cursor = "grabbing";
     }
+    e.preventDefault();
   };
 
   canvas.onmousemove = function(e) {
     const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
 
     if (_dagDragState) {
-      const dx = mx - _dagDragState.startX;
-      const dy = my - _dagDragState.startY;
+      // Node dragging — convert delta to world space.
+      const dx = (sx - _dagDragState.startX) / _dagZoom;
+      const dy = (sy - _dagDragState.startY) / _dagZoom;
       if (Math.abs(dx) > 3 || Math.abs(dy) > 3) _dagDragState.moved = true;
 
-      // Update task position locally for real-time feedback.
       const task = _dagTasks.find(t => t.id === _dagDragState.taskId);
       if (task) {
-        task.position_x = Math.max(0, _dagDragState.origX + dx);
-        task.position_y = Math.max(0, _dagDragState.origY + dy);
+        task.position_x = _dagDragState.origX + dx;
+        task.position_y = _dagDragState.origY + dy;
         drawDAG(_dagTasks, _dagEdges);
       }
+    } else if (_dagPanState) {
+      // Stage panning.
+      _dagPanX = _dagPanState.origPanX + (sx - _dagPanState.startX);
+      _dagPanY = _dagPanState.origPanY + (sy - _dagPanState.startY);
+      drawDAG(_dagTasks, _dagEdges);
     } else {
-      // Show grab cursor on hover over nodes.
-      canvas.style.cursor = hitTask(mx, my) ? "grab" : "default";
+      // Hover cursor.
+      const world = _screenToWorld(sx, sy);
+      canvas.style.cursor = hitTask(world.x, world.y) ? "grab" : "default";
     }
   };
 
   canvas.onmouseup = function(e) {
-    if (!_dagDragState) return;
+    if (_dagDragState) {
+      const state = _dagDragState;
+      _dagDragState = null;
+      canvas.style.cursor = "default";
 
-    const state = _dagDragState;
-    _dagDragState = null;
-    canvas.style.cursor = "default";
-
-    if (state.moved) {
-      // Persist new position to server.
-      const task = _dagTasks.find(t => t.id === state.taskId);
-      if (task) {
-        swarmAPI("PUT", `/tasks/${task.id}`, {
-          position_x: task.position_x,
-          position_y: task.position_y,
-        });
+      if (state.moved) {
+        const task = _dagTasks.find(t => t.id === state.taskId);
+        if (task) {
+          swarmAPI("PUT", `/tasks/${task.id}`, {
+            position_x: task.position_x,
+            position_y: task.position_y,
+          });
+        }
+      } else {
+        showTaskDetail(state.taskId);
       }
-    } else {
-      // Short click — show task detail.
-      showTaskDetail(state.taskId);
+    }
+    if (_dagPanState) {
+      _dagPanState = null;
+      canvas.style.cursor = "default";
     }
   };
 
   canvas.onmouseleave = function() {
     if (_dagDragState) {
-      // Cancel drag — revert position.
       const task = _dagTasks.find(t => t.id === _dagDragState.taskId);
       if (task) {
         task.position_x = _dagDragState.origX;
@@ -1351,8 +1502,32 @@ function _initDAGDrag(canvas, tasks, edges) {
         drawDAG(_dagTasks, _dagEdges);
       }
       _dagDragState = null;
-      canvas.style.cursor = "default";
     }
+    if (_dagPanState) {
+      _dagPanState = null;
+    }
+    canvas.style.cursor = "default";
+  };
+
+  // Mouse wheel zoom — zoom towards cursor position.
+  canvas.onwheel = function(e) {
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+
+    const oldZoom = _dagZoom;
+    if (e.deltaY < 0) {
+      _dagZoom = Math.min(3.0, _dagZoom * 1.12);
+    } else {
+      _dagZoom = Math.max(0.15, _dagZoom / 1.12);
+    }
+
+    // Adjust pan so the point under cursor stays fixed.
+    _dagPanX = sx - (sx - _dagPanX) * (_dagZoom / oldZoom);
+    _dagPanY = sy - (sy - _dagPanY) * (_dagZoom / oldZoom);
+
+    drawDAG(_dagTasks, _dagEdges);
   };
 }
 
@@ -1380,6 +1555,11 @@ function drawDAG(tasks, edges) {
     return;
   }
 
+  // Apply zoom & pan transform.
+  ctx.save();
+  ctx.translate(_dagPanX, _dagPanY);
+  ctx.scale(_dagZoom, _dagZoom);
+
   const nodeW = 180;
   const nodeH = 60;
   const taskMap = {};
@@ -1387,7 +1567,7 @@ function drawDAG(tasks, edges) {
 
   // Draw edges first (behind nodes).
   ctx.strokeStyle = "#2a2e3d";
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 2 / _dagZoom;  // Keep edge thickness consistent.
   for (const edge of edges) {
     const from = taskMap[edge.from_task_id];
     const to = taskMap[edge.to_task_id];
@@ -1471,6 +1651,17 @@ function drawDAG(tasks, edges) {
       ctx.font = "10px -apple-system, sans-serif";
       ctx.fillText(truncate(subLabel, 20), x + 26, y + 50);
     }
+  }
+
+  ctx.restore();
+
+  // Draw zoom level indicator.
+  const zoomPct = Math.round(_dagZoom * 100);
+  if (zoomPct !== 100) {
+    ctx.fillStyle = "#8888a0";
+    ctx.font = "11px -apple-system, sans-serif";
+    ctx.textAlign = "right";
+    ctx.fillText(`${zoomPct}%`, w - 10, h - 10);
   }
 }
 
@@ -1917,6 +2108,80 @@ function _fileIcon(mime) {
   if (mime.includes("json") || mime.includes("xml") || mime.includes("yaml")) return "📋";
   if (mime.includes("text")) return "📃";
   return "📎";
+}
+
+/* ---- File tree with status ---- */
+
+async function _renderFileTreeWithStatus(swarmId, fileTreeText) {
+  const el = document.getElementById("file-tree-content");
+  if (!el) return;
+
+  // Fetch actually created files.
+  let createdFiles = new Set();
+  try {
+    const data = await swarmAPI("GET", `/swarms/${swarmId}/files`);
+    if (data && data.files) {
+      for (const f of data.files) {
+        // Normalize: just the filename for matching.
+        const fname = (f.filename || f.path || "").trim();
+        if (fname) createdFiles.add(fname.toLowerCase());
+        // Also add full relative path if available.
+        const fpath = (f.path || "").trim();
+        if (fpath) createdFiles.add(fpath.toLowerCase());
+      }
+    }
+  } catch (e) {
+    // If files API fails, just show tree without status.
+  }
+
+  // Parse tree lines and mark each file.
+  const lines = fileTreeText.split("\n");
+  let html = '<pre class="file-tree-pre">';
+  for (const line of lines) {
+    // Extract the filename/foldername from a tree line.
+    // Tree lines look like: "├── filename.ext" or "│   └── folder/"
+    const match = line.match(/([^─└├│\s]+\/?)\s*$/);
+    if (!match) {
+      // Not a file/folder line — just render as-is (e.g., blank lines).
+      html += esc(line) + "\n";
+      continue;
+    }
+    const name = match[1];
+    const isFolder = name.endsWith("/");
+    const prefix = line.substring(0, line.length - name.length);
+
+    if (isFolder) {
+      // Folders get a subtle folder icon.
+      html += `${esc(prefix)}<span class="ft-folder">${esc(name)}</span>\n`;
+    } else {
+      // Check if this file has been created.
+      const nameLower = name.toLowerCase();
+      const isCreated = createdFiles.has(nameLower);
+      if (isCreated) {
+        html += `${esc(prefix)}<span class="ft-file ft-created" title="Created">✓ ${esc(name)}</span>\n`;
+      } else {
+        html += `${esc(prefix)}<span class="ft-file ft-pending" title="Not yet created">○ ${esc(name)}</span>\n`;
+      }
+    }
+  }
+  html += '</pre>';
+
+  // Count stats.
+  const totalFiles = lines.filter(l => {
+    const m = l.match(/([^─└├│\s]+)\s*$/);
+    return m && !m[1].endsWith("/");
+  }).length;
+  const createdCount = lines.filter(l => {
+    const m = l.match(/([^─└├│\s]+)\s*$/);
+    if (!m || m[1].endsWith("/")) return false;
+    return createdFiles.has(m[1].toLowerCase());
+  }).length;
+
+  if (totalFiles > 0) {
+    html = `<div class="ft-stats">${createdCount}/${totalFiles} files created</div>` + html;
+  }
+
+  el.innerHTML = html;
 }
 
 /* ---- Templates ---- */

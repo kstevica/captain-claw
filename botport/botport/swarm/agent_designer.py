@@ -162,11 +162,17 @@ class AgentDesigner(TaskDecomposer):
 
         user_msg = f"Design optimal agents for these tasks:\n\n{task_block}"
 
-        raw = await self._call_llm(
-            system_msg, user_msg,
-            max_tokens=2000, model_id=model,
-        )
-        return self._parse_agent_specs(raw, tasks)
+        # Retry with increasing token limits — agent design for many tasks
+        # can exceed 2k tokens easily.
+        for tokens in (4000, 6000):
+            raw = await self._call_llm(
+                system_msg, user_msg,
+                max_tokens=tokens, model_id=model,
+            )
+            result = self._parse_agent_specs(raw, tasks)
+            if result:
+                return result
+        return self._fallback_specs(tasks)
 
     def _parse_agent_specs(
         self, raw: str, tasks: list[SwarmTask],
@@ -174,11 +180,16 @@ class AgentDesigner(TaskDecomposer):
         """Parse LLM output into validated agent specs."""
         text = self._strip_fences(raw)
 
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
+        data = None
+        for attempt_text in (text, self._repair_json(raw)):
+            try:
+                data = json.loads(attempt_text)
+                break
+            except json.JSONDecodeError:
+                continue
+        if data is None:
             log.warning("Agent design returned non-JSON: %s", raw[:300])
-            return self._fallback_specs(tasks)
+            return {}
 
         agents = data.get("agents", data)  # Handle both {agents:{...}} and flat dict
         if not isinstance(agents, dict):

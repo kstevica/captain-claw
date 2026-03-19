@@ -643,6 +643,71 @@ main {
 
 /* ---- Command centre (actions + prompt side by side) ---- */
 
+/* ---- Settings bar (model + agent mode) ---- */
+
+.swarm-settings-bar {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 8px 14px;
+  margin-bottom: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.settings-bar-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-bar-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.settings-bar-group select,
+.settings-bar-group .model-select-input {
+  padding: 5px 8px;
+  font-size: 12px;
+  min-width: 180px;
+}
+
+.agent-mode-toggle-inline {
+  display: flex;
+  gap: 0;
+}
+
+.agent-mode-toggle-inline .agent-mode-opt {
+  padding: 5px 12px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.agent-mode-toggle-inline .agent-mode-opt:first-child {
+  border-radius: 4px 0 0 4px;
+}
+
+.agent-mode-toggle-inline .agent-mode-opt:last-child {
+  border-radius: 0 4px 4px 0;
+  border-left: none;
+}
+
+.agent-mode-toggle-inline .agent-mode-opt.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
 .swarm-command-centre {
   display: flex;
   gap: 16px;
@@ -779,6 +844,87 @@ main {
 }
 
 /* Right panel: prompt + rephrased — 70% width */
+/* ---- File tree sidebar + body layout ---- */
+
+.swarm-body-layout {
+  display: flex;
+  gap: 0;
+}
+
+.swarm-body-layout:not(.has-file-tree) {
+  display: block;
+}
+
+.swarm-body-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.swarm-file-tree-panel {
+  flex: 0 0 220px;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-right: none;
+  border-radius: var(--radius) 0 0 var(--radius);
+  overflow: hidden;
+  max-height: 80vh;
+  position: sticky;
+  top: 0;
+}
+
+.file-tree-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+  flex-shrink: 0;
+}
+
+.file-tree-content {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.file-tree-content pre,
+.file-tree-content .file-tree-pre {
+  font-family: var(--font-mono, 'SF Mono', 'Fira Code', monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+}
+
+.ft-stats {
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ft-folder {
+  color: var(--accent, #60a5fa);
+}
+
+.ft-file.ft-created {
+  color: var(--green, #22c55e);
+}
+
+.ft-file.ft-pending {
+  color: var(--text-dim, #666);
+  opacity: 0.6;
+}
+
 .swarm-prompt-panel {
   flex: 1;
   display: flex;
@@ -972,8 +1118,26 @@ main {
 
 .dag-toolbar {
   display: flex;
-  gap: 8px;
-  margin-bottom: 12px;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.dag-toolbar-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+.btn-icon {
+  width: 28px;
+  padding-left: 0;
+  padding-right: 0;
+  text-align: center;
+  font-size: 16px;
+  font-weight: bold;
+  line-height: 1;
 }
 
 #dag-canvas {
@@ -1009,6 +1173,14 @@ main {
   font-size: 13px;
   color: var(--text);
   margin-bottom: 4px;
+}
+
+.task-files-list {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+  font-family: var(--font-mono, 'SF Mono', 'Fira Code', monospace);
+  word-break: break-all;
 }
 
 .task-deps {

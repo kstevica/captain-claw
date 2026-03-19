@@ -11,7 +11,10 @@ import aiosqlite
 
 from botport.models import Concern, ConcernExchange
 
-DEFAULT_DB_PATH = Path("~/.botport/botport.db").expanduser()
+try:
+    DEFAULT_DB_PATH = Path("~/.botport/botport.db").expanduser()
+except RuntimeError:
+    DEFAULT_DB_PATH = Path("/tmp/.botport/botport.db")
 
 
 class BotPortStore:

@@ -60,9 +60,14 @@ _DISPATCH_SYSTEM_PROMPT = (
     "CRITICAL — FILE WRITING RULES:\n"
     "- Write each file EXACTLY ONCE. After a successful write, the file is DONE.\n"
     "- NEVER rewrite, update, or overwrite a file you have already written.\n"
+    "- Use the EXACT file paths specified in the task description. If the task says "
+    "to create `tetris-game/css/variables.css`, use that FULL relative path — do NOT "
+    "shorten it to `css/variables.css` or `variables.css`.\n"
     "- After writing a file, the system may compact the content in your history to "
     "\"[written to disk: ...]\". This is NORMAL — the file IS saved correctly. "
     "Do NOT interpret this as the file being lost or needing to be rewritten.\n"
+    "- Do NOT create helper scripts, test files, processing scripts, or temporary files. "
+    "Only create the specific deliverable files listed in the task.\n"
     "- After completing all tool calls, provide a brief text summary of what you did "
     "and the file(s) you created, then STOP.\n\n"
     "Requesting instance: {from_instance}\n"
@@ -134,7 +139,8 @@ class BotPortClient:
 
         # File transfer state.
         self._dispatch_swarm_ids: dict[str, str] = {}  # concern_id -> swarm_id
-        self._dispatch_created_files: dict[str, list[str]] = {}  # concern_id -> [file_paths]
+        self._dispatch_created_files: dict[str, list[str]] = {}  # concern_id -> [abs_file_paths]
+        self._dispatch_file_subfolders: dict[str, dict[str, str]] = {}  # concern_id -> {abs_path: subfolder}
         self._file_upload_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._file_response_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
 
@@ -554,6 +560,7 @@ class BotPortClient:
         if swarm_id:
             self._dispatch_swarm_ids[concern_id] = swarm_id
             self._dispatch_created_files[concern_id] = []
+            self._dispatch_file_subfolders[concern_id] = {}
 
         log.info(
             "Dispatch received: concern=%s from=%s task_len=%d swarm=%s",
@@ -698,6 +705,7 @@ class BotPortClient:
         self._dispatch_personas.pop(concern_id, None)
         self._dispatch_swarm_ids.pop(concern_id, None)
         self._dispatch_created_files.pop(concern_id, None)
+        self._dispatch_file_subfolders.pop(concern_id, None)
         log.info("Dispatch concern %s closed, agent cleaned up", concern_id[:8])
 
     async def _handle_context_reply(self, data: dict[str, Any]) -> None:
@@ -748,11 +756,19 @@ class BotPortClient:
             self._make_activity_tool_output_callback(self._tool_output_callback),
         )
 
-        # Resolve provider — use model override from agent_spec if present.
-        provider = self._provider
-        spec_model_id = agent_spec.get("model_id", "") if agent_spec else ""
-        if spec_model_id:
-            provider = self._resolve_model_provider(spec_model_id)
+        # Use the model selected in BotPort UI if provided in the dispatch
+        # context.  Falls back to the CC instance's default provider if the
+        # requested model can't be resolved (missing API key, unknown model, etc.).
+        requested_model = context.get("model_id", "") if context else ""
+        if requested_model:
+            provider = self._resolve_model_provider(requested_model)
+            log.info(
+                "Dispatch using model %s (resolved: %s)",
+                requested_model,
+                getattr(provider, "model", "?") if provider != self._provider else "default-fallback",
+            )
+        else:
+            provider = self._provider
 
         agent = AgentCls(
             provider=provider,
@@ -776,11 +792,13 @@ class BotPortClient:
         agent.max_iterations = 10  # Allow more iterations than a basic worker.
 
         persona_name = agent_spec.get("persona_name", "") if agent_spec else ""
+        resolved_model = getattr(provider, "model", "?")
         log.info(
-            "Spawned dispatch agent: concern=%s session=%s persona=%s model=%s",
+            "Spawned dispatch agent: concern=%s session=%s persona=%s model=%s requested=%s",
             concern_id[:8], session.id[:8],
             persona_name or persona_hint or "default",
-            spec_model_id or "default",
+            resolved_model,
+            requested_model or "default",
         )
         return agent
 
@@ -887,30 +905,42 @@ class BotPortClient:
         the CC instance's default.  Falls back to self._provider on error.
         """
         try:
-            from captain_claw.llm import LLMProvider, get_config
+            from captain_claw.llm import create_provider
+            from captain_claw.config import get_config
+            from captain_claw.agent_model_mixin import AgentModelMixin
 
             cfg = get_config()
             # Find matching model in allowed list.
             for m in cfg.model.allowed:
                 mid = m.id or f"{m.provider}/{m.model}"
                 if mid == model_id or m.model == model_id:
-                    return LLMProvider(
-                        provider=m.provider,
-                        model=m.model,
-                        api_key=m.api_key if hasattr(m, 'api_key') else "",
-                        base_url=m.base_url,
+                    provider_name = str(m.provider).strip()
+                    normalized = AgentModelMixin._normalize_provider_key(provider_name)
+                    api_key = AgentModelMixin._resolve_provider_api_key(normalized)
+                    extra_headers = cfg.provider_keys.headers_for(normalized) or None
+                    return create_provider(
+                        provider=provider_name,
+                        model=str(m.model).strip(),
+                        api_key=None if extra_headers else api_key,
+                        base_url=str(m.base_url or "") or None,
                         temperature=m.temperature if m.temperature is not None else cfg.model.temperature,
                         max_tokens=m.max_tokens if m.max_tokens is not None else cfg.model.max_tokens,
+                        extra_headers=extra_headers,
                     )
 
             # Try parsing as provider/model string.
             if "/" in model_id:
                 provider, model = model_id.split("/", 1)
-                return LLMProvider(
+                normalized = AgentModelMixin._normalize_provider_key(provider)
+                api_key = AgentModelMixin._resolve_provider_api_key(normalized)
+                extra_headers = cfg.provider_keys.headers_for(normalized) or None
+                return create_provider(
                     provider=provider,
                     model=model,
+                    api_key=None if extra_headers else api_key,
                     temperature=cfg.model.temperature,
                     max_tokens=cfg.model.max_tokens,
+                    extra_headers=extra_headers,
                 )
 
         except Exception as exc:
@@ -1156,6 +1186,48 @@ class BotPortClient:
 
         return fetched
 
+    def _resolve_workspace_root(self) -> Path:
+        """Return the workspace root directory for the current CC instance."""
+        try:
+            from captain_claw.config import get_config
+            return Path(get_config().resolved_workspace_path()).resolve()
+        except Exception:
+            return (Path.cwd() / "workspace").resolve()
+
+    def _compute_subfolder(self, concern_id: str, abs_path: str) -> str:
+        """Compute the subfolder for uploading a file based on its workspace-relative path.
+
+        Primary strategy: Use the file's path relative to the workspace root.
+        This is reliable because all agent-created files live under the workspace.
+        Example: workspace=/workspace, file=/workspace/tetris-game/css/vars.css
+                 → subfolder = tetris-game/css
+
+        Fallback: Use the LLM argument-based subfolder tracking (legacy).
+        """
+        resolved = Path(abs_path).resolve()
+        ws_root = self._resolve_workspace_root()
+
+        try:
+            rel = resolved.relative_to(ws_root)
+            # The subfolder is the parent directory of the relative path.
+            # e.g. tetris-game/css/vars.css → tetris-game/css
+            parent = str(rel.parent)
+            if parent and parent != ".":
+                # Filter out session-UUID directory components.
+                # Session dirs look like: 215c51ff-752f-4309-800c-730616110c92
+                import re
+                _UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+                parts = Path(parent).parts
+                clean_parts = [p for p in parts if not _UUID_RE.match(p)]
+                if clean_parts:
+                    return str(Path(*clean_parts))
+                return ""
+        except ValueError:
+            pass
+
+        # Fallback: use the LLM argument-based tracking.
+        return self._get_tracked_subfolder(concern_id, abs_path)
+
     async def _upload_created_files(self, concern_id: str) -> list[dict[str, Any]]:
         """Upload all files created during a dispatch to the swarm workspace."""
         swarm_id = self._dispatch_swarm_ids.get(concern_id, "")
@@ -1173,9 +1245,12 @@ class BotPortClient:
                 seen.add(resolved)
                 unique_paths.append(fp)
 
+        # Determine workspace root for subfolder computation.
+        ws_root = self._resolve_workspace_root()
+
         uploaded = []
         for filepath in unique_paths:
-            path = Path(filepath)
+            path = Path(filepath).resolve()
             if not path.is_file():
                 continue
 
@@ -1184,11 +1259,20 @@ class BotPortClient:
                 log.warning("Skipping large file: %s (%d bytes)", path.name, path.stat().st_size)
                 continue
 
+            # Skip junk files: tool-generated scripts, temporary outputs.
+            if "/tools/" in str(path) or path.name.startswith("generated_script_"):
+                log.debug("Skipping tool-generated file: %s", path.name)
+                continue
+
+            # Compute subfolder from workspace-relative path.
+            subfolder = self._compute_subfolder(concern_id, str(path))
+
             try:
                 result = await self.upload_file(
                     swarm_id=swarm_id,
                     concern_id=concern_id,
                     filepath=str(path),
+                    subfolder=subfolder,
                     timeout=60.0,
                 )
                 if result.get("ok"):
@@ -1197,7 +1281,10 @@ class BotPortClient:
                         "path": result.get("path", ""),
                         "size": result.get("size", 0),
                     })
-                    log.info("Uploaded file: %s for swarm %s", path.name, swarm_id[:8])
+                    log.info(
+                        "Uploaded file: %s -> %s for swarm %s",
+                        path.name, subfolder or "(root)", swarm_id[:8],
+                    )
                 else:
                     log.warning(
                         "Failed to upload %s: %s", path.name, result.get("error", ""),
@@ -1222,33 +1309,50 @@ class BotPortClient:
             return
 
         tracked = self._dispatch_created_files[concern_id]
+        subfolders = self._dispatch_file_subfolders.get(concern_id, {})
 
-        def _add(fp: str) -> None:
+        def _add(fp: str, original_arg: str = "") -> None:
             resolved = str(Path(fp).resolve())
             # Skip pre-fetched swarm files — already on the server.
             if "/swarm_files/" in resolved:
                 return
+            # Skip tool-generated junk files.
+            if "/tools/" in resolved or Path(fp).name.startswith("generated_script_"):
+                return
+            # Skip common junk filenames.
+            _JUNK_NAMES = {
+                "url_processing_results.txt", "PROJECT_STRUCTURE_CONFIRMATION.txt",
+            }
+            if Path(fp).name in _JUNK_NAMES:
+                return
             if not any(str(Path(p).resolve()) == resolved for p in tracked):
                 tracked.append(fp)
-                log.debug("Tracked file creation: %s", fp)
+                # Extract subfolder from the LLM's original argument path.
+                # e.g. "js/input-handler.js" → subfolder "js"
+                # e.g. "css/components/header.css" → subfolder "css/components"
+                if original_arg:
+                    arg_parent = str(Path(original_arg).parent)
+                    if arg_parent and arg_parent != ".":
+                        subfolders[resolved] = arg_parent
+                log.debug("Tracked file creation: %s (subfolder: %s)", fp, subfolders.get(resolved, ""))
 
         # Detect Write / Edit tool — extract resolved path from output.
         if tool_name.lower() in ("write", "write_file", "file_write",
                                    "edit", "edit_file", "file_edit"):
+            # Get the original argument path for subfolder extraction.
+            arg_path = arguments.get("file_path", "") or arguments.get("path", "")
+
             # Primary: parse the absolute path from tool output.
-            # Write output: "Written N chars (M lines) to /absolute/path"
-            # Edit output may vary, but often contains the path.
             filepath = self._extract_path_from_tool_output(output)
             if filepath and Path(filepath).is_file():
-                _add(filepath)
+                _add(filepath, arg_path)
                 return
 
             # Fallback: try the argument path directly.
-            filepath = arguments.get("file_path", "") or arguments.get("path", "")
-            if filepath:
-                p = Path(filepath)
+            if arg_path:
+                p = Path(arg_path)
                 if p.is_file():
-                    _add(str(p.resolve()))
+                    _add(str(p.resolve()), arg_path)
 
         # Detect bash commands that might create files.
         elif tool_name.lower() in ("bash", "shell", "execute"):
@@ -1262,6 +1366,12 @@ class BotPortClient:
                         p = Path(filepath)
                         if p.is_file():
                             _add(str(p.resolve()))
+
+    def _get_tracked_subfolder(self, concern_id: str, abs_path: str) -> str:
+        """Return the subfolder for an uploaded file based on the LLM's original path."""
+        subfolders = self._dispatch_file_subfolders.get(concern_id, {})
+        resolved = str(Path(abs_path).resolve())
+        return subfolders.get(resolved, "")
 
     @staticmethod
     def _extract_path_from_tool_output(output: str) -> str:
@@ -1340,6 +1450,9 @@ class BotPortClient:
                     if "/swarm_files/" in resolved:
                         break
                     if cand.is_file() and resolved not in already:
+                        # Skip junk files.
+                        if "/tools/" in resolved or cand.name.startswith("generated_script_"):
+                            break
                         if cand.stat().st_size <= 50 * 1024 * 1024:
                             self._dispatch_created_files[concern_id].append(str(cand.resolve()))
                             already.add(resolved)

@@ -217,6 +217,15 @@ def setup_swarm_routes(app: web.Application, server: BotPortServer) -> None:
         except DAGError as e:
             return web.json_response({"error": str(e)}, status=400)
 
+        # Store selected model in swarm metadata for dispatch.
+        try:
+            data = await request.json()
+            model_id = str(data.get("model", ""))
+        except Exception:
+            model_id = ""
+        if model_id:
+            swarm.metadata["selected_model"] = model_id
+
         swarm.status = "running"
         swarm.started_at = swarm.started_at or _utcnow_iso()
         swarm.touch()
@@ -294,6 +303,70 @@ def setup_swarm_routes(app: web.Application, server: BotPortServer) -> None:
         await store.add_audit_entry(SwarmAuditEntry(
             swarm_id=swarm.id,
             event_type="swarm_cancelled",
+            created_at=_utcnow_iso(),
+        ))
+
+        return web.json_response(swarm.to_dict())
+
+    async def swarm_rerun(request: web.Request) -> web.Response:
+        """Reset a completed/failed/cancelled swarm so it can be re-executed.
+
+        Optionally accepts ``{"failed_only": true}`` to only reset failed
+        tasks (keeping completed ones as-is).
+        """
+        swarm_id = request.match_info["id"]
+        store = await _swarm_store()
+        swarm = await store.get_swarm(swarm_id)
+        if not swarm:
+            return web.json_response({"error": "Not found"}, status=404)
+        if swarm.status not in ("completed", "failed", "cancelled"):
+            return web.json_response(
+                {"error": f"Cannot rerun swarm in '{swarm.status}' state"}, status=409,
+            )
+
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            pass
+        failed_only = body.get("failed_only", False)
+
+        tasks = await store.list_tasks(swarm_id)
+        reset_count = 0
+        for task in tasks:
+            should_reset = False
+            if failed_only:
+                should_reset = task.status in ("failed", "retrying")
+            else:
+                should_reset = task.status in ("completed", "failed", "skipped", "retrying")
+
+            if should_reset:
+                task.status = "queued"
+                task.concern_id = ""
+                task.started_at = ""
+                task.completed_at = ""
+                task.assigned_instance = ""
+                task.error_message = ""
+                task.retry_count = 0
+                task.output_data = {}
+                task.metadata.pop("timeout_warned", None)
+                task.metadata.pop("retry_at", None)
+                task.metadata.pop("policy_applied", None)
+                task.metadata.pop("no_instance_retries", None)
+                task.touch()
+                await store.save_task(task)
+                reset_count += 1
+
+        swarm.status = "ready"
+        swarm.completed_at = ""
+        swarm.touch()
+        await store.save_swarm(swarm)
+
+        await store.add_audit_entry(SwarmAuditEntry(
+            swarm_id=swarm.id,
+            event_type="swarm_rerun",
+            details={"reset_tasks": reset_count, "failed_only": failed_only},
+            actor="user",
             created_at=_utcnow_iso(),
         ))
 
@@ -403,6 +476,8 @@ def setup_swarm_routes(app: web.Application, server: BotPortServer) -> None:
         # Update swarm status.
         swarm.status = "ready"
         swarm.metadata["decomposition_reasoning"] = result.reasoning
+        if result.file_tree:
+            swarm.metadata["file_tree"] = result.file_tree
         swarm.touch()
         await store.save_swarm(swarm)
 
@@ -1279,6 +1354,7 @@ def setup_swarm_routes(app: web.Application, server: BotPortServer) -> None:
     app.router.add_post("/api/swarm/swarms/{id}/pause", swarm_pause)
     app.router.add_post("/api/swarm/swarms/{id}/resume", swarm_resume)
     app.router.add_post("/api/swarm/swarms/{id}/cancel", swarm_cancel)
+    app.router.add_post("/api/swarm/swarms/{id}/rerun", swarm_rerun)
     app.router.add_post("/api/swarm/swarms/{id}/auto-layout", swarm_auto_layout)
     app.router.add_post("/api/swarm/swarms/{id}/rephrase", swarm_rephrase)
     app.router.add_post("/api/swarm/swarms/{id}/decompose", swarm_decompose)

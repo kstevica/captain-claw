@@ -1496,6 +1496,19 @@ class LiteLLMProvider(LLMProvider):
         except Exception as e:
             status_code = _obj_get(e, "status_code", None)
             message = f"{self.provider} API call failed: {e}"
+            # Log details for debugging vague provider errors.
+            msg_count = len(kwargs.get("messages", []))
+            total_chars = sum(len(str(m.get("content", ""))) for m in kwargs.get("messages", []))
+            tool_count = len(kwargs.get("tools", []) or [])
+            log.error(
+                "LLM call failed",
+                error=str(e),
+                model=kwargs.get("model"),
+                msg_count=msg_count,
+                total_chars=total_chars,
+                tool_count=tool_count,
+                temperature=kwargs.get("temperature"),
+            )
             if status_code is not None:
                 raise LLMAPIError(message, status_code=int(status_code))
             raise LLMError(message)

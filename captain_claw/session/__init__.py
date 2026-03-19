@@ -1550,8 +1550,14 @@ class SessionManager:
         status_filter: str | None = None,
         responsible_filter: str | None = None,
         session_filter: str | None = None,
+        strict_session: bool = False,
     ) -> list[TodoItem]:
-        """List to-do items with optional filters."""
+        """List to-do items with optional filters.
+
+        When *strict_session* is True the filter only matches
+        ``source_session`` exactly — used for public-mode isolation where
+        each session must see only its own todos.
+        """
         await self._ensure_db()
         clauses: list[str] = []
         params: list[Any] = []
@@ -1562,8 +1568,12 @@ class SessionManager:
             clauses.append("responsible = ?")
             params.append(responsible_filter)
         if session_filter:
-            clauses.append("(source_session = ? OR target_session = ?)")
-            params.extend([session_filter, session_filter])
+            if strict_session:
+                clauses.append("source_session = ?")
+                params.append(session_filter)
+            else:
+                clauses.append("(source_session = ? OR target_session = ?)")
+                params.extend([session_filter, session_filter])
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(limit)
         query = f"""

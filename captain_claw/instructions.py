@@ -20,7 +20,10 @@ from pathlib import Path
 from typing import Mapping
 
 
-_PERSONAL_DIR = Path("~/.captain-claw/instructions").expanduser()
+try:
+    _PERSONAL_DIR = Path("~/.captain-claw/instructions").expanduser()
+except RuntimeError:
+    _PERSONAL_DIR = Path("/tmp/.captain-claw/instructions")
 
 
 class _SafeFormatDict(dict[str, str]):

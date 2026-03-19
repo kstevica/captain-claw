@@ -57,7 +57,10 @@ class TerminalUI:
         ]
         self._colors_enabled = False
         self._readline = None
-        self._history_file = Path("~/.captain-claw/history").expanduser()
+        try:
+            self._history_file = Path("~/.captain-claw/history").expanduser()
+        except RuntimeError:
+            self._history_file = Path("/tmp/.captain-claw/history")
         self._sticky_footer = sys.stdout.isatty()
         self._ansi_enabled = self._sticky_footer and not bool(os.environ.get("NO_COLOR"))
         self._system_status_rows = 1

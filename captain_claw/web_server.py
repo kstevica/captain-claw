@@ -6,6 +6,18 @@ import os
 import signal
 import sys
 from pathlib import Path
+
+# Ensure HOME is set — some environments (Docker, systemd, PyInstaller)
+# may not have it, causing Path.expanduser() / Path.home() to fail.
+if "HOME" not in os.environ:
+    try:
+        os.environ["HOME"] = str(Path.home())
+    except RuntimeError:
+        try:
+            import pwd
+            os.environ["HOME"] = pwd.getpwuid(os.getuid()).pw_dir
+        except (KeyError, ImportError):
+            os.environ["HOME"] = "/tmp"
 from typing import Any
 
 from aiohttp import web

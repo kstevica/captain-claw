@@ -25,11 +25,35 @@ _cc_config_cache: dict[str, Any] | None = None
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
-    """Merge override into base (base values win for non-empty leaves)."""
+    """Merge override into base (base values win for non-empty leaves).
+
+    Special handling for ``model.allowed`` lists: entries from both configs
+    are combined (deduplicated by ``id``) so models defined in either the
+    local or home config are all available.
+    """
     result = dict(base)
     for k, v in override.items():
         if k in result and isinstance(result[k], dict) and isinstance(v, dict):
             result[k] = _deep_merge(result[k], v)
+        elif (
+            k == "allowed"
+            and isinstance(result.get(k), list)
+            and isinstance(v, list)
+        ):
+            # Merge allowed model lists — combine entries, dedup by id.
+            seen_ids: set[str] = set()
+            merged_list: list[dict] = []
+            for entry in result[k]:
+                eid = entry.get("id", "") if isinstance(entry, dict) else ""
+                if eid:
+                    seen_ids.add(eid)
+                merged_list.append(entry)
+            for entry in v:
+                eid = entry.get("id", "") if isinstance(entry, dict) else ""
+                if eid and eid not in seen_ids:
+                    merged_list.append(entry)
+                    seen_ids.add(eid)
+            result[k] = merged_list
         elif k not in result or not result[k]:
             # Only fill in keys that are missing or empty in base.
             result[k] = v
@@ -48,7 +72,10 @@ def _load_cc_config() -> dict[str, Any]:
         return _cc_config_cache
 
     local_path = Path("config.yaml")
-    home_path = Path("~/.captain-claw/config.yaml").expanduser()
+    try:
+        home_path = Path("~/.captain-claw/config.yaml").expanduser()
+    except RuntimeError:
+        home_path = Path("/tmp/.captain-claw/config.yaml")
 
     local_data: dict[str, Any] = {}
     home_data: dict[str, Any] = {}
@@ -359,7 +386,16 @@ def _build_instructions_context() -> str:
         "interaction. Task descriptions must NOT require the agent to ask questions, "
         "present options (Option A / Option B), or seek confirmation. Each task must "
         "be self-contained with enough detail for the agent to make all decisions "
-        "independently and deliver a complete result."
+        "independently and deliver a complete result.\n"
+        "12. Do NOT instruct agents to run tests, write unit tests, optimize, refactor, "
+        "or do second/review passes. Focus only on producing the core deliverables.\n"
+        "13. CRITICAL FILE PATHS: When a task specifies files to create, the agent MUST use "
+        "the EXACT relative paths from the project file tree (e.g., `tetris-game/css/variables.css`, "
+        "NOT just `css/variables.css` or `variables.css`). The full path including the project "
+        "root folder is essential for proper file organization. Instruct agents to use the "
+        "`write` tool with the complete relative path.\n"
+        "14. Agents must NOT create helper scripts, test runners, or temporary processing "
+        "files. Focus only on the deliverable files specified in the task."
     )
 
 
@@ -374,10 +410,12 @@ class DecompositionResult:
         tasks: list[SwarmTask],
         edges: list[SwarmEdge],
         reasoning: str = "",
+        file_tree: str = "",
     ) -> None:
         self.tasks = tasks
         self.edges = edges
         self.reasoning = reasoning
+        self.file_tree = file_tree
 
 
 class TaskDecomposer:
@@ -410,13 +448,19 @@ class TaskDecomposer:
         else:
             litellm_model = f"{provider}/{model}"
 
+        # Normalize temperature for model constraints (e.g. GPT-5 only accepts 1).
+        temperature = params["temperature"]
+        base_model = model.split("/")[-1].lower() if "/" in model else model.lower()
+        if provider == "openai" and base_model.startswith("gpt-5"):
+            temperature = 1.0
+
         kwargs: dict[str, Any] = {
             "model": litellm_model,
             "messages": [
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg},
             ],
-            "temperature": params["temperature"],
+            "temperature": temperature,
             "max_tokens": max_tokens,
             "timeout": 120,
         }
@@ -440,12 +484,12 @@ class TaskDecomposer:
 
     def _strip_fences(self, text: str) -> str:
         """Remove markdown code fences from LLM output."""
+        import re
         text = text.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            text = "\n".join(lines).strip()
-        return text
+        # Remove opening ```json / ```JSON / ``` and closing ```.
+        text = re.sub(r"^```\w*\s*\n?", "", text)
+        text = re.sub(r"\n?```\s*$", "", text)
+        return text.strip()
 
     # ── Rephrase ──────────────────────────────────────────────
 
@@ -470,12 +514,34 @@ class TaskDecomposer:
             "5. Aware of which tools the agents should use for each step.\n"
             "6. All agent responses must be plain text/markdown — NEVER request HTML output "
             "in responses. If HTML is needed, instruct the agent to write it to a file.\n\n"
+            "IMPORTANT constraints:\n"
+            "- Do NOT include instructions to run tests, write unit tests, or create test suites.\n"
+            "- Do NOT include optimization passes, performance tuning, or refactoring steps.\n"
+            "- Do NOT include second passes, review passes, or iterative improvement steps.\n"
+            "- Focus ONLY on the core deliverable — producing the requested output files.\n"
+            "- If testing/optimization is needed later, it will be handled separately.\n\n"
+            "CRITICAL — File Planning:\n"
+            "As the LAST section of your rephrased output, include a complete file manifest "
+            "listing ALL files that will need to be created, organized by folder structure. "
+            "Use this exact format:\n\n"
+            "## Files to Create\n"
+            "```\n"
+            "project-root/\n"
+            "├── folder1/\n"
+            "│   ├── file1.ext\n"
+            "│   └── file2.ext\n"
+            "├── folder2/\n"
+            "│   └── file3.ext\n"
+            "└── file4.ext\n"
+            "```\n\n"
+            "This file manifest is critical for downstream task decomposition and agent coordination.\n\n"
             "Rephrase the task into a well-structured description. Keep the same intent "
             "but make it suitable for decomposition into independent subtasks that agents "
-            "can execute using their available tools. Output ONLY the rephrased task text, nothing else."
+            "can execute using their available tools. Output ONLY the rephrased task text "
+            "(including the file manifest), nothing else."
         )
 
-        result = await self._call_llm(system_msg, task, max_tokens=1500, model_id=model)
+        result = await self._call_llm(system_msg, task, max_tokens=8000, model_id=model)
         log.info("Task rephrased (%d chars -> %d chars)", len(task), len(result))
         return result
 
@@ -529,23 +595,31 @@ class TaskDecomposer:
             "1. Each subtask must be self-contained and actionable by a single agent using the tools above.\n"
             "2. Identify dependencies: which tasks must complete before others can start.\n"
             "3. Maximize parallelism: tasks without dependencies should be independent.\n"
-            "4. Each task needs a clear name, a detailed description (instruction for the agent), and expected output.\n"
+            "4. Each task needs a clear name and a concise description (instruction for the agent).\n"
             "5. If a task prepares data for another, mark the dependency explicitly.\n"
-            "6. In task descriptions, specify which tools the agent should use when relevant "
-            "(e.g., 'use web_fetch to retrieve the page', 'use web_search to find sources').\n"
+            "6. In task descriptions, mention which tools the agent should use when relevant.\n"
             "7. NEVER instruct an agent to produce HTML in its response. If HTML output is needed, "
             "tell the agent to write it to a file using the `write` tool.\n"
-            "8. Consider which tasks might need to run periodically.\n"
-            "9. Suggest the best persona for each task based on required expertise.\n"
-            "10. Aim for 3-15 subtasks depending on complexity.\n\n"
-            "Respond ONLY with valid JSON (no markdown fences), in this exact format:\n"
+            "8. Suggest the best persona for each task based on required expertise.\n"
+            "9. Create 3-10 subtasks. Merge related work into single tasks rather than splitting too finely.\n"
+            "10. Keep descriptions SHORT (2-3 sentences max). The agent will figure out details.\n"
+            "11. Do NOT create tasks for running tests, writing unit tests, or creating test suites.\n"
+            "12. Do NOT create optimization, performance tuning, or refactoring tasks.\n"
+            "13. Do NOT create second-pass, review, or iterative improvement tasks.\n"
+            "14. Focus ONLY on tasks that directly produce the requested deliverables.\n\n"
+            "CRITICAL: Respond ONLY with valid JSON. No markdown fences, no ```json wrapper. "
+            "Keep the total response compact.\n\n"
+            "Exact format:\n"
             "{\n"
             '  "reasoning": "Brief explanation of decomposition strategy",\n'
+            '  "file_tree": "Complete folder/file tree of ALL files to be created across all tasks '
+            '(use tree format with ├── └── │ characters, one file per line)",\n'
             '  "tasks": [\n'
             "    {\n"
             '      "id": "t1",\n'
             '      "name": "Short task name",\n'
             '      "description": "Detailed agent instruction — what to do, which tools to use, expected output format",\n'
+            '      "files": ["list of files this task will create (relative paths)"],\n'
             '      "depends_on": [],\n'
             '      "suggested_persona": "persona name or empty",\n'
             '      "priority": 0,\n'
@@ -553,24 +627,60 @@ class TaskDecomposer:
             '      "estimated_complexity": "low|medium|high"\n'
             "    }\n"
             "  ]\n"
-            "}"
+            "}\n\n"
+            "The file_tree MUST list every file that any task will create. Each task's files array "
+            "MUST list the specific files that task is responsible for creating. Include the file_tree "
+            "in every task description so agents know the full project structure."
             + agent_context
         )
 
-        raw = await self._call_llm(system_msg, task, max_tokens=3000, model_id=model)
-        return self._parse_decomposition(raw, swarm_id)
+        # Retry with increasing token limits on JSON parse failure.
+        # Decomposition of complex tasks can exceed 3k tokens easily.
+        last_err: Exception | None = None
+        for attempt, tokens in enumerate((8000, 16000), start=1):
+            raw = await self._call_llm(system_msg, task, max_tokens=tokens, model_id=model)
+            try:
+                return self._parse_decomposition(raw, swarm_id)
+            except ValueError as exc:
+                last_err = exc
+                log.warning("Decomposition parse failed (attempt %d): %s", attempt, exc)
+        raise ValueError(f"Decomposition failed: {last_err}")
+
+    @staticmethod
+    def _repair_json(text: str) -> str:
+        """Best-effort repair of common LLM JSON issues."""
+        import re
+        # Find the outermost JSON object.
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start : end + 1]
+        # Remove trailing commas before } or ].
+        text = re.sub(r",\s*([}\]])", r"\1", text)
+        # Remove control characters (except \n, \t) that break JSON.
+        text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+        return text
 
     def _parse_decomposition(self, raw: str, swarm_id: str) -> DecompositionResult:
         """Parse LLM decomposition JSON into SwarmTasks and SwarmEdges."""
         text = self._strip_fences(raw)
 
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
+        data = None
+        attempts = [("stripped", text), ("repaired", self._repair_json(raw))]
+        for label, attempt_text in attempts:
+            try:
+                data = json.loads(attempt_text)
+                log.info("Decomposition JSON parsed OK via %s", label)
+                break
+            except json.JSONDecodeError as exc:
+                log.warning("JSON parse failed (%s): %s — text starts: %s", label, exc, attempt_text[:120])
+                continue
+        if data is None:
             log.warning("Decomposition returned non-JSON: %s", raw[:300])
             raise ValueError("LLM returned invalid JSON for decomposition")
 
         reasoning = str(data.get("reasoning", ""))
+        file_tree = str(data.get("file_tree", ""))
         raw_tasks = data.get("tasks", [])
 
         if not raw_tasks:
@@ -589,18 +699,41 @@ class TaskDecomposer:
             complexity = str(rt.get("estimated_complexity", "medium")).lower()
             timeout = {"low": 300, "medium": 600, "high": 1200}.get(complexity, 600)
 
+            # Extract per-task files list.
+            task_files = rt.get("files", [])
+            if not isinstance(task_files, list):
+                task_files = []
+            task_files = [str(f).strip() for f in task_files if str(f).strip()]
+
+            # Append file tree context to each task description so agents know the full structure.
+            description = str(rt.get("description", ""))
+            if file_tree:
+                description += f"\n\nFull project file structure:\n{file_tree}"
+            if task_files:
+                description += (
+                    f"\n\nFILES YOU MUST CREATE (use these EXACT paths with the write tool):\n"
+                    + "\n".join(f"  - {f}" for f in task_files)
+                    + "\n\nYou MUST create ALL files listed above. Use the complete relative "
+                    "path exactly as shown (including the project root folder). "
+                    "Do NOT create any other files."
+                )
+
+            meta: dict[str, Any] = {"estimated_complexity": complexity}
+            if task_files:
+                meta["files"] = task_files
+
             task = SwarmTask(
                 id=real_id,
                 swarm_id=swarm_id,
                 name=str(rt.get("name", "")),
-                description=str(rt.get("description", "")),
+                description=description,
                 priority=int(rt.get("priority", 0)),
                 assigned_persona=str(rt.get("suggested_persona", "")),
                 timeout_seconds=timeout,
                 is_periodic=bool(rt.get("is_periodic", False)),
                 created_at=now,
                 updated_at=now,
-                metadata={"estimated_complexity": complexity},
+                metadata=meta,
             )
             tasks.append(task)
 
@@ -628,10 +761,10 @@ class TaskDecomposer:
                     )
 
         log.info(
-            "Decomposition: %d tasks, %d edges, reasoning: %s",
-            len(tasks), len(edges), reasoning[:100],
+            "Decomposition: %d tasks, %d edges, file_tree=%d chars, reasoning: %s",
+            len(tasks), len(edges), len(file_tree), reasoning[:100],
         )
-        return DecompositionResult(tasks=tasks, edges=edges, reasoning=reasoning)
+        return DecompositionResult(tasks=tasks, edges=edges, reasoning=reasoning, file_tree=file_tree)
 
     # ── Agent selection ───────────────────────────────────────
 

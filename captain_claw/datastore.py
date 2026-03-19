@@ -1662,13 +1662,39 @@ def _looks_bool(val: Any) -> bool:
     return str(val).strip().lower() in ("true", "false", "yes", "no", "1", "0")
 
 
-# ── singleton ────────────────────────────────────────────────────────
+# ── singleton / session-scoped managers ──────────────────────────────
 
 _manager: DatastoreManager | None = None
+_session_managers: dict[str, DatastoreManager] = {}
 
 
 def get_datastore_manager() -> DatastoreManager:
+    """Return the global (shared) datastore manager."""
     global _manager
     if _manager is None:
         _manager = DatastoreManager()
     return _manager
+
+
+def get_session_datastore_manager(session_id: str) -> DatastoreManager:
+    """Return a per-session datastore manager (separate DB file).
+
+    Used in public computer mode so that each session's tables are
+    fully isolated from every other session.
+    """
+    key = session_id.strip()
+    if key in _session_managers:
+        return _session_managers[key]
+    cfg = get_config()
+    base = Path(cfg.datastore.path).expanduser().parent  # e.g. ~/.captain-claw/
+    db_path = base / "datastore_sessions" / f"datastore_{key}.db"
+    mgr = DatastoreManager(db_path=db_path)
+    _session_managers[key] = mgr
+    return mgr
+
+
+async def close_session_datastore_managers() -> None:
+    """Close all session-scoped datastore managers."""
+    for mgr in _session_managers.values():
+        await mgr.close()
+    _session_managers.clear()

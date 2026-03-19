@@ -7,6 +7,18 @@ import signal
 import sys
 from pathlib import Path
 
+# Ensure HOME is set — some environments (Docker, systemd, PyInstaller)
+# may not have it, causing Path.expanduser() / Path.home() to fail.
+if "HOME" not in os.environ:
+    try:
+        os.environ["HOME"] = str(Path.home())
+    except RuntimeError:
+        import pwd
+        try:
+            os.environ["HOME"] = pwd.getpwuid(os.getuid()).pw_dir
+        except (KeyError, ImportError):
+            os.environ["HOME"] = "/tmp"
+
 # Add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))

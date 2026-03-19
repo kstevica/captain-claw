@@ -2,11 +2,17 @@
 
 from typing import Any
 
+from captain_claw.config import get_config
 from captain_claw.logging import get_logger
 from captain_claw.session import get_session_manager
 from captain_claw.tools.registry import Tool, ToolResult
 
 log = get_logger(__name__)
+
+
+def _is_public_mode() -> bool:
+    """Return True when running in public computer mode."""
+    return get_config().web.public_run == "computer"
 
 _PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
 
@@ -82,6 +88,7 @@ class TodoTool(Tool):
         **kwargs: Any,
     ) -> ToolResult:
         session_id = str(kwargs.get("_session_id", "") or "").strip() or None
+        public = _is_public_mode()
         sm = get_session_manager()
 
         try:
@@ -93,13 +100,18 @@ class TodoTool(Tool):
             if action == "list":
                 return await self._list(
                     sm, filter_status, filter_responsible, session_id,
+                    strict_session=public,
                 )
             if action == "update":
                 return await self._update(
                     sm, todo_id, status, responsible, priority, content, tags,
+                    session_id=session_id if public else None,
                 )
             if action == "remove":
-                return await self._remove(sm, todo_id)
+                return await self._remove(
+                    sm, todo_id,
+                    session_id=session_id if public else None,
+                )
             return ToolResult(success=False, error=f"Unknown action: {action}")
         except Exception as e:
             log.error("Todo tool error", action=action, error=str(e))
@@ -138,12 +150,15 @@ class TodoTool(Tool):
         filter_status: str | None,
         filter_responsible: str | None,
         session_id: str | None,
+        *,
+        strict_session: bool = False,
     ) -> ToolResult:
         items = await sm.list_todos(
             limit=50,
             status_filter=filter_status or None,
             responsible_filter=filter_responsible or None,
             session_filter=session_id,
+            strict_session=strict_session,
         )
         if not items:
             return ToolResult(success=True, content="No to-do items found.")
@@ -165,11 +180,15 @@ class TodoTool(Tool):
         priority: str | None,
         content: str | None,
         tags: str | None,
+        session_id: str | None = None,
     ) -> ToolResult:
         if not todo_id:
             return ToolResult(success=False, error="'todo_id' is required for update.")
         item = await sm.select_todo(todo_id)
         if not item:
+            return ToolResult(success=False, error=f"Todo not found: {todo_id}")
+        # In public mode, only allow modifying own session's todos.
+        if session_id and item.source_session != session_id:
             return ToolResult(success=False, error=f"Todo not found: {todo_id}")
         ok = await sm.update_todo(
             item.id,
@@ -184,11 +203,14 @@ class TodoTool(Tool):
         return ToolResult(success=True, content=f"Updated todo #{item.id[:8]}.")
 
     @staticmethod
-    async def _remove(sm: Any, todo_id: str | None) -> ToolResult:
+    async def _remove(sm: Any, todo_id: str | None, session_id: str | None = None) -> ToolResult:
         if not todo_id:
             return ToolResult(success=False, error="'todo_id' is required for remove.")
         item = await sm.select_todo(todo_id)
         if not item:
+            return ToolResult(success=False, error=f"Todo not found: {todo_id}")
+        # In public mode, only allow deleting own session's todos.
+        if session_id and item.source_session != session_id:
             return ToolResult(success=False, error=f"Todo not found: {todo_id}")
         ok = await sm.delete_todo(item.id)
         if not ok:

@@ -18,7 +18,10 @@ from pathlib import Path
 from typing import Any
 
 
-_STYLE_DIR = Path("~/.captain-claw").expanduser()
+try:
+    _STYLE_DIR = Path("~/.captain-claw").expanduser()
+except RuntimeError:
+    _STYLE_DIR = Path("/tmp/.captain-claw")
 STYLE_PATH = _STYLE_DIR / "visualization_style.md"
 
 # ── Data model ────────────────────────────────────────────────────────

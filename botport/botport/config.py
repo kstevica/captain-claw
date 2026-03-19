@@ -12,7 +12,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 log = logging.getLogger(__name__)
 
-DEFAULT_CONFIG_PATH = Path("~/.botport/config.yaml").expanduser()
+try:
+    DEFAULT_CONFIG_PATH = Path("~/.botport/config.yaml").expanduser()
+except RuntimeError:
+    DEFAULT_CONFIG_PATH = Path("/tmp/.botport/config.yaml")
 LOCAL_CONFIG_FILENAME = "config.yaml"
 
 
