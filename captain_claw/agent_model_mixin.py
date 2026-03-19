@@ -312,3 +312,51 @@ class AgentModelMixin:
         if persist:
             await self.session_manager.save_session(self.session)
         return True, f"Session model set to {details.get('provider')}/{details.get('model')}"
+
+    # ------------------------------------------------------------------
+    # BYOK (Bring Your Own Key) — per-agent provider from user credentials
+    # ------------------------------------------------------------------
+
+    _BYOK_ALLOWED_PROVIDERS = {"openai", "anthropic", "gemini", "xai", "openrouter"}
+
+    def set_byok_provider(
+        self,
+        provider: str,
+        model: str,
+        api_key: str,
+    ) -> tuple[bool, str]:
+        """Create and activate an LLM provider from user-supplied credentials.
+
+        The provider is set per-agent only (not via the global ``set_provider``).
+        API keys are held in memory and never persisted.
+        """
+        normalized = self._normalize_provider_key(provider)
+        if normalized not in self._BYOK_ALLOWED_PROVIDERS:
+            return False, f"Provider '{provider}' is not supported for BYOK. Allowed: {', '.join(sorted(self._BYOK_ALLOWED_PROVIDERS))}"
+        if not model or not model.strip():
+            return False, "Model name is required."
+        if not api_key or not api_key.strip():
+            return False, "API key is required."
+
+        cfg = get_config()
+        try:
+            new_provider = create_provider(
+                provider=normalized,
+                model=model.strip(),
+                api_key=api_key.strip(),
+                temperature=cfg.model.temperature,
+                max_tokens=cfg.model.max_tokens,
+            )
+        except Exception as e:
+            return False, f"Failed to create provider: {e}"
+
+        self.provider = new_provider
+        self._byok_active = True
+        self._refresh_runtime_model_details(source="byok")
+        return True, f"BYOK provider set to {normalized}/{model.strip()}"
+
+    def clear_byok_provider(self, server_provider) -> None:
+        """Revert to the server's default provider."""
+        self.provider = server_provider
+        self._byok_active = False
+        self._refresh_runtime_model_details(source="config")

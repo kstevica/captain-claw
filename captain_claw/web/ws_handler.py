@@ -87,6 +87,7 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
         "commands": COMMANDS if not public_session_id else [],
         "personalities": personalities,
         "playbooks": _playbook_list if not public_session_id else [],
+        "is_public": bool(public_session_id),
     })
 
     # Replay existing session messages for the connecting client.
@@ -240,6 +241,68 @@ async def handle_ws_message(
                     "command": "/session model",
                     "content": msg,
                 })
+
+    elif msg_type == "set_byok":
+        # BYOK: public user supplies their own LLM provider/model/API key.
+        _pub_sid = getattr(ws, "_public_session_id", None)
+        if not _pub_sid:
+            await server._send(ws, {
+                "type": "byok_status",
+                "active": False,
+                "provider": "",
+                "model": "",
+                "error": "BYOK is only available in public mode.",
+            })
+        else:
+            _byok_provider = str(data.get("provider", "")).strip()
+            _byok_model = str(data.get("model", "")).strip()
+            _byok_key = str(data.get("api_key", "")).strip()
+            try:
+                _pub_agent = await server._get_public_agent(_pub_sid)
+                ok, err = _pub_agent.set_byok_provider(_byok_provider, _byok_model, _byok_key)
+                if ok:
+                    await server._send(ws, {
+                        "type": "byok_status",
+                        "active": True,
+                        "provider": _byok_provider,
+                        "model": _byok_model,
+                        "error": None,
+                    })
+                else:
+                    await server._send(ws, {
+                        "type": "byok_status",
+                        "active": False,
+                        "provider": "",
+                        "model": "",
+                        "error": err,
+                    })
+            except Exception as _byok_exc:
+                await server._send(ws, {
+                    "type": "byok_status",
+                    "active": False,
+                    "provider": "",
+                    "model": "",
+                    "error": str(_byok_exc),
+                })
+
+    elif msg_type == "clear_byok":
+        # Revert public user to server's default LLM provider.
+        _pub_sid = getattr(ws, "_public_session_id", None)
+        if _pub_sid:
+            try:
+                _pub_agent = await server._get_public_agent(_pub_sid)
+                _server_provider = server.agent.provider if server.agent else None
+                if _server_provider:
+                    _pub_agent.clear_byok_provider(_server_provider)
+            except Exception:
+                pass
+        await server._send(ws, {
+            "type": "byok_status",
+            "active": False,
+            "provider": "",
+            "model": "",
+            "error": None,
+        })
 
     elif msg_type == "set_personality":
         # Switch the active user profile for the web chat session.

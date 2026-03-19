@@ -3922,3 +3922,170 @@ body.stream-panel-open #workspace {
     padding: 12px 18px;
   }
 }
+
+/* ── BYOK modal ─────────────────────────────────────────────── */
+
+#byok-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+}
+#byok-modal.active {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#byok-modal .modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,.55);
+}
+#byok-modal .modal-content {
+  position: relative;
+  width: min(380px, 90vw);
+  height: auto;
+  max-height: none;
+}
+#byok-modal .window-body {
+  overflow-y: auto;
+  padding: 12px 14px;
+}
+
+/* ── BYOK toolbar button (themed like other titlebar buttons) ── */
+
+#byok-btn {
+  font-family: var(--font);
+  font-size: 11px;
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  border: 1px solid var(--chrome-lo);
+  border-radius: var(--radius);
+  padding: 2px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+#byok-btn:hover {
+  border-color: var(--accent);
+}
+
+/* ── BYOK form elements ── */
+
+.byok-form label {
+  display: block;
+  font-family: var(--font);
+  font-size: 10px;
+  color: var(--text);
+  opacity: 0.7;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 3px;
+  margin-top: 8px;
+}
+.byok-form label:first-child {
+  margin-top: 0;
+}
+
+.byok-form select,
+.byok-form input[type="text"],
+.byok-form input[type="password"] {
+  width: 100%;
+  padding: 5px 8px;
+  font-family: var(--font);
+  font-size: 12px;
+  background: var(--bg);
+  border: 1px solid var(--chrome-lo);
+  color: var(--text);
+  border-radius: var(--radius);
+  outline: none;
+}
+.byok-form select:focus,
+.byok-form input:focus {
+  border-color: var(--accent);
+}
+/* Override autofill styling so it doesn't clash with theme */
+.byok-form input:-webkit-autofill {
+  -webkit-box-shadow: 0 0 0 100px var(--bg) inset;
+  -webkit-text-fill-color: var(--text);
+}
+
+.byok-key-wrap {
+  display: flex;
+  gap: 6px;
+}
+.byok-key-wrap input {
+  flex: 1;
+}
+.byok-key-wrap button {
+  background: var(--btn-bg);
+  border: 1px solid var(--chrome-lo);
+  color: var(--btn-fg);
+  padding: 4px 8px;
+  cursor: pointer;
+  border-radius: var(--radius);
+  font-size: 14px;
+}
+.byok-key-wrap button:hover {
+  border-color: var(--accent);
+}
+
+.byok-hint {
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--text);
+  opacity: 0.55;
+  line-height: 1.4;
+}
+
+.byok-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.btn-byok-apply,
+.btn-byok-clear {
+  flex: 1;
+  padding: 6px 10px;
+  font-family: var(--font);
+  font-size: 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background .12s, border-color .12s;
+}
+.btn-byok-apply {
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  border: 1px solid var(--accent);
+}
+.btn-byok-apply:hover {
+  background: var(--btn-active);
+  color: var(--titlebar-fg);
+}
+.btn-byok-clear {
+  background: transparent;
+  border: 1px solid var(--chrome-lo);
+  color: var(--text);
+  opacity: 0.8;
+}
+.btn-byok-clear:hover {
+  border-color: var(--accent);
+  opacity: 1;
+}
+
+.byok-status {
+  margin-top: 6px;
+  font-family: var(--font);
+  font-size: 11px;
+  min-height: 16px;
+  color: var(--text);
+  opacity: 0.7;
+}
+.byok-status.byok-ok {
+  color: var(--accent);
+  opacity: 1;
+}
+.byok-status.byok-error {
+  color: #e55;
+  opacity: 1;
+}

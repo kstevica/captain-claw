@@ -95,8 +95,9 @@ async def computer_visualize(
         theme_instructions=theme_instructions or "Use a clean, modern dark theme.",
     )
 
-    # Resolve provider — optionally override model.
-    provider = _resolve_provider(server, model_override)
+    # Resolve provider — optionally override model; check for BYOK.
+    pub_sid = _extract_public_session_id(request, server)
+    provider = _resolve_provider(server, model_override, public_session_id=pub_sid)
 
     provider_name = str(getattr(provider, "provider", "") or getattr(provider, "provider_name", "") or "")
     model_hint = str(getattr(provider, "model", "") or "")
@@ -138,7 +139,8 @@ async def computer_visualize(
         )
 
         # Record LLM usage for cost tracking.
-        _record_visual_usage(server, messages, response, latency_ms, max_tokens, provider)
+        _is_byok = bool(pub_sid and server._public_agents.get(pub_sid) and getattr(server._public_agents[pub_sid], "_byok_active", False))
+        _record_visual_usage(server, messages, response, latency_ms, max_tokens, provider, byok=_is_byok)
 
         # Strip markdown code fences if the LLM wrapped the HTML.
         html = re.sub(r"^```(?:html)?\s*\n?", "", raw)
@@ -218,7 +220,8 @@ async def computer_visualize_stream(
         theme_instructions=theme_instructions or "Use a clean, modern dark theme.",
     )
 
-    provider = _resolve_provider(server, model_override)
+    pub_sid = _extract_public_session_id(request, server)
+    provider = _resolve_provider(server, model_override, public_session_id=pub_sid)
 
     messages = [
         Message(role="system", content=system_content),
@@ -273,6 +276,11 @@ async def computer_visualize_stream(
             latency_ms=latency_ms,
             theme=theme,
         )
+
+        # Record usage for streaming visual generation.
+        _is_byok = bool(pub_sid and server._public_agents.get(pub_sid) and getattr(server._public_agents[pub_sid], "_byok_active", False))
+        _record_visual_usage_streaming(server, messages, raw, latency_ms, max_tokens, provider, byok=_is_byok)
+
     except Exception as exc:
         latency_ms = int((time.monotonic() - t0) * 1000)
         log.error("Streaming visual generation failed", error=str(exc), latency_ms=latency_ms)
@@ -282,8 +290,35 @@ async def computer_visualize_stream(
     return resp
 
 
-def _resolve_provider(server: "WebServer", model_id: str | None):
+def _extract_public_session_id(
+    request: web.Request,
+    server: "WebServer",
+) -> str | None:
+    """Read public session ID from the request cookie, if present."""
+    from captain_claw.config import get_config
+    cfg = get_config()
+    if not cfg.web.public_run:
+        return None
+    try:
+        from captain_claw.web.public_session import read_public_cookie
+        identity = read_public_cookie(request, cfg.web.auth_token)
+        if identity:
+            return identity[0]  # session_id
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_provider(
+    server: "WebServer",
+    model_id: str | None,
+    public_session_id: str | None = None,
+):
     """Return an LLM provider, optionally overriding the model.
+
+    If *public_session_id* is given and that session has a BYOK provider
+    active, it is returned directly (user-supplied credentials take
+    priority over the server's allowlist).
 
     If *model_id* matches an entry in the allowed-models list, a new
     provider is created for that model.  Otherwise the session provider
@@ -292,6 +327,12 @@ def _resolve_provider(server: "WebServer", model_id: str | None):
     Uses the same key-resolution logic as the orchestrator and chat:
     normalize provider name → check env/dotenv → check provider_keys.
     """
+    # BYOK: if the public user has their own provider, use it.
+    if public_session_id:
+        pub_agent = server._public_agents.get(public_session_id)
+        if pub_agent and getattr(pub_agent, "_byok_active", False) and pub_agent.provider:
+            log.info("Visual using BYOK provider", session_id=public_session_id[:8])
+            return pub_agent.provider
     if model_id and server.agent:
         # If the requested model matches the current agent provider, reuse it
         # directly — this preserves any runtime-configured API keys that may
@@ -371,6 +412,7 @@ def _record_visual_usage(
     latency_ms: int,
     max_tokens: int = 16000,
     provider: object = None,
+    byok: bool = False,
 ) -> None:
     """Fire-and-forget: persist LLM usage for the visual generation call."""
     try:
@@ -410,9 +452,56 @@ def _record_visual_usage(
             max_tokens=max_tokens,
             latency_ms=latency_ms,
             task_name="computer_visual",
+            byok=byok,
         ))
     except Exception as exc:
         log.warning("Failed to record visual generation usage", error=str(exc))
+
+
+def _record_visual_usage_streaming(
+    server: "WebServer",
+    messages: list,
+    raw_output: str,
+    latency_ms: int,
+    max_tokens: int = 16000,
+    provider: object = None,
+    byok: bool = False,
+) -> None:
+    """Fire-and-forget: persist LLM usage for a streaming visual generation call.
+
+    Streaming responses don't carry token counts, so we estimate from byte sizes.
+    """
+    try:
+        from captain_claw.session import get_session_manager
+
+        provider_name = str(getattr(provider, "provider", "") or getattr(provider, "provider_name", "") or "") if provider else ""
+        model_name = str(getattr(provider, "model", "") or "") if provider else ""
+        session_id = server.agent.session.id if server.agent and server.agent.session else None
+
+        input_bytes = 0
+        for m in messages:
+            c = getattr(m, "content", None) or ""
+            if isinstance(c, str):
+                input_bytes += len(c.encode("utf-8", errors="replace"))
+        output_bytes = len(raw_output.encode("utf-8", errors="replace"))
+
+        sm = get_session_manager()
+        loop = asyncio.get_event_loop()
+        loop.create_task(sm.record_llm_usage(
+            session_id=session_id,
+            interaction="computer_visualize",
+            provider=provider_name,
+            model=model_name,
+            input_bytes=input_bytes,
+            output_bytes=output_bytes,
+            streaming=True,
+            max_tokens=max_tokens,
+            latency_ms=latency_ms,
+            task_name="computer_visual",
+            byok=byok,
+        ))
+    except Exception as exc:
+        log.warning("Failed to record streaming visual usage", error=str(exc))
 
 
 # ═══════════════════════════════════════════════════════════════

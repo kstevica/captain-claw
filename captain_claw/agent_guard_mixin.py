@@ -456,6 +456,7 @@ class AgentGuardMixin:
                 error=error,
                 latency_ms=latency_ms,
                 task_name=task_name,
+                byok=bool(getattr(self, "_byok_active", False)),
             ))
         except Exception:
             pass  # Never fail the main flow

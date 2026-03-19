@@ -31,6 +31,7 @@
     <div id="titlebar-right">
       <button id="persona-btn" title="Choose persona">👤 <span id="persona-btn-label">No profile</span></button>
       <button id="model-btn" title="Choose model">🧠 <span id="model-btn-label">Default</span></button>
+      <button id="byok-btn" title="Use your own API key" style="display:none">🔑 <span id="byok-btn-label">BYOK</span></button>
       <button id="tier-btn" title="Visual token budget">📐 Standard</button>
       <div id="tier-panel" class="toolbar-popup hidden">
         <button class="tier-opt" data-tier="micro">Micro (4k)</button>
@@ -258,6 +259,44 @@
       <div class="window-body">
         <div class="model-grid" id="model-grid">
           <div class="model-loading">Loading models...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── BYOK (Bring Your Own Key) modal ── -->
+  <div id="byok-modal">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content window">
+      <div class="window-title">
+        <span class="window-title-text">Use Your Own API Key</span>
+        <div class="window-controls">
+          <button class="win-btn modal-close" title="Close">✕</button>
+        </div>
+      </div>
+      <div class="window-body">
+        <div class="byok-form">
+          <label for="byok-provider">Provider</label>
+          <select id="byok-provider">
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="gemini">Gemini (Google)</option>
+            <option value="xai">xAI (Grok)</option>
+            <option value="openrouter">OpenRouter</option>
+          </select>
+          <label for="byok-model">Model</label>
+          <input type="text" id="byok-model" placeholder="e.g. gpt-4o, claude-sonnet-4-20250514" autocomplete="off" spellcheck="false">
+          <label for="byok-apikey">API Key</label>
+          <div class="byok-key-wrap">
+            <input type="password" id="byok-apikey" placeholder="sk-..." autocomplete="off" spellcheck="false">
+            <button type="button" id="byok-key-toggle" title="Show/hide key">👁</button>
+          </div>
+          <div class="byok-hint">Your key is stored only in this browser and sent over the encrypted connection. It is never saved on the server.</div>
+          <div class="byok-actions">
+            <button class="btn-byok-apply" id="byok-apply-btn">Save &amp; Apply</button>
+            <button class="btn-byok-clear" id="byok-clear-btn">Clear &amp; Use Default</button>
+          </div>
+          <div class="byok-status" id="byok-status"></div>
         </div>
       </div>
     </div>

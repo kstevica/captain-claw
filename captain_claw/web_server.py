@@ -358,6 +358,7 @@ class WebServer:
             agent._register_default_tools()
             agent.instructions = self.agent.instructions if self.agent else agent.instructions
             agent._initialized = True
+            agent._byok_active = False
 
             self._public_agents[session_id] = agent
             log.info("Created public agent", session_id=session_id, session_name=session.name)
@@ -1277,6 +1278,13 @@ class WebServer:
             session_id=session_id, provider=provider, model=model,
         )
 
+        # Optional BYOK filter: "1" = BYOK only, "0" = server only.
+        byok_filter = request.query.get("byok", "").strip()
+        if byok_filter == "1":
+            rows = [r for r in rows if r.get("byok")]
+        elif byok_filter == "0":
+            rows = [r for r in rows if not r.get("byok")]
+
         totals = {
             "prompt_tokens": sum(r["prompt_tokens"] for r in rows),
             "completion_tokens": sum(r["completion_tokens"] for r in rows),
@@ -1290,6 +1298,7 @@ class WebServer:
                 sum(r["latency_ms"] for r in rows) // len(rows) if rows else 0
             ),
             "error_count": sum(1 for r in rows if r["error"]),
+            "byok_calls": sum(1 for r in rows if r.get("byok")),
         }
 
         return web.json_response(

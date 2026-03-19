@@ -32,6 +32,13 @@ let availableModels = [];
 let availablePersonas = [];
 let selectedPersona = localStorage.getItem("computer-persona") || "";
 
+// BYOK (Bring Your Own Key) state.
+let isPublicSession = false;
+let byokProvider = localStorage.getItem("computer-byok-provider") || "";
+let byokModel = localStorage.getItem("computer-byok-model") || "";
+let byokApiKey = localStorage.getItem("computer-byok-apikey") || "";
+let byokActive = false;
+
 // Attachment state — arrays for multi-file support.
 let pendingImages = [];   // [{path, name}, ...]
 let pendingFiles = [];    // [{path, name}, ...]
@@ -1246,6 +1253,10 @@ function handleMessage(data) {
       send({ type: "approval_response", approved: true, request_id: data.request_id });
       logEntry("system", `Auto-approved: ${data.tool || "action"}`);
       break;
+
+    case "byok_status":
+      handleByokStatus(data);
+      break;
   }
 }
 
@@ -1259,10 +1270,22 @@ function handleWelcome(data) {
   sessionId = sess.id || data.session_id || data.id || null;
   logEntry("system", `Session ready${sessionId ? ' (' + sessionId.slice(0, 8) + '\u2026)' : ''}`);
 
-  // Apply the saved model selection to the session.
-  if (selectedModel && connected) {
-    send({ type: "set_model", selector: selectedModel });
-    logEntry("system", `Applying saved model: ${selectedModel}`);
+  // BYOK: detect public mode and show/hide BYOK button.
+  isPublicSession = !!data.is_public;
+  if (isPublicSession) {
+    $("#byok-btn").style.display = "";
+    // In public mode, apply BYOK credentials if saved (instead of set_model).
+    if (byokProvider && byokModel && byokApiKey && connected) {
+      send({ type: "set_byok", provider: byokProvider, model: byokModel, api_key: byokApiKey });
+      logEntry("system", `Applying saved BYOK: ${byokProvider}/${byokModel}`);
+    }
+  } else {
+    $("#byok-btn").style.display = "none";
+    // Apply the saved model selection to the session (non-public only).
+    if (selectedModel && connected) {
+      send({ type: "set_model", selector: selectedModel });
+      logEntry("system", `Applying saved model: ${selectedModel}`);
+    }
   }
 
   // Apply the saved persona selection to the session.
@@ -3412,6 +3435,118 @@ function initSelectors() {
 
   // Tier popup.
   initTierPopup();
+
+  // BYOK modal.
+  initByokModal();
+}
+
+/* ── BYOK (Bring Your Own Key) ───────────────────────────────── */
+
+function initByokModal() {
+  $("#byok-btn").addEventListener("click", openByokModal);
+  $("#byok-modal .modal-close").addEventListener("click", closeByokModal);
+  $("#byok-modal .modal-backdrop").addEventListener("click", closeByokModal);
+  $("#byok-apply-btn").addEventListener("click", applyByok);
+  $("#byok-clear-btn").addEventListener("click", clearByok);
+  $("#byok-key-toggle").addEventListener("click", function() {
+    var inp = $("#byok-apikey");
+    inp.type = inp.type === "password" ? "text" : "password";
+  });
+  // Pre-fill from localStorage.
+  if (byokProvider) $("#byok-provider").value = byokProvider;
+  if (byokModel) $("#byok-model").value = byokModel;
+  if (byokApiKey) $("#byok-apikey").value = byokApiKey;
+  updateByokBtnLabel();
+}
+
+function openByokModal() {
+  // Sync fields from localStorage (in case changed elsewhere).
+  if (byokProvider) $("#byok-provider").value = byokProvider;
+  if (byokModel) $("#byok-model").value = byokModel;
+  if (byokApiKey) $("#byok-apikey").value = byokApiKey;
+  $("#byok-status").textContent = "";
+  $("#byok-modal").classList.add("active");
+}
+
+function closeByokModal() {
+  $("#byok-modal").classList.remove("active");
+}
+
+function applyByok() {
+  var provider = $("#byok-provider").value;
+  var model = $("#byok-model").value.trim();
+  var apiKey = $("#byok-apikey").value.trim();
+  if (!model) {
+    $("#byok-status").textContent = "Model name is required.";
+    $("#byok-status").className = "byok-status byok-error";
+    return;
+  }
+  if (!apiKey) {
+    $("#byok-status").textContent = "API key is required.";
+    $("#byok-status").className = "byok-status byok-error";
+    return;
+  }
+  // Save to localStorage.
+  byokProvider = provider;
+  byokModel = model;
+  byokApiKey = apiKey;
+  localStorage.setItem("computer-byok-provider", provider);
+  localStorage.setItem("computer-byok-model", model);
+  localStorage.setItem("computer-byok-apikey", apiKey);
+  // Send to server.
+  if (connected) {
+    send({ type: "set_byok", provider: provider, model: model, api_key: apiKey });
+    $("#byok-status").textContent = "Applying...";
+    $("#byok-status").className = "byok-status";
+  }
+}
+
+function clearByok() {
+  byokProvider = "";
+  byokModel = "";
+  byokApiKey = "";
+  byokActive = false;
+  localStorage.removeItem("computer-byok-provider");
+  localStorage.removeItem("computer-byok-model");
+  localStorage.removeItem("computer-byok-apikey");
+  $("#byok-provider").value = "openai";
+  $("#byok-model").value = "";
+  $("#byok-apikey").value = "";
+  if (connected) {
+    send({ type: "clear_byok" });
+  }
+  updateByokBtnLabel();
+  $("#byok-status").textContent = "Cleared. Using server default.";
+  $("#byok-status").className = "byok-status byok-ok";
+  logEntry("system", "BYOK cleared — using server default provider");
+}
+
+function handleByokStatus(data) {
+  byokActive = !!data.active;
+  updateByokBtnLabel();
+  var statusEl = $("#byok-status");
+  if (data.error) {
+    statusEl.textContent = "Error: " + data.error;
+    statusEl.className = "byok-status byok-error";
+    logEntry("error", "BYOK error: " + data.error);
+  } else if (data.active) {
+    statusEl.textContent = "Active: " + data.provider + "/" + data.model;
+    statusEl.className = "byok-status byok-ok";
+    logEntry("system", "BYOK active: " + data.provider + "/" + data.model);
+    closeByokModal();
+  } else {
+    statusEl.textContent = "Using server default.";
+    statusEl.className = "byok-status";
+  }
+}
+
+function updateByokBtnLabel() {
+  var label = $("#byok-btn-label");
+  if (byokActive && byokProvider) {
+    label.textContent = byokProvider + "/" + (byokModel || "").split("/").pop();
+  } else {
+    label.textContent = "BYOK";
+  }
 }
 
 /* ── Markdown to HTML (basic) ────────────────────────────────── */

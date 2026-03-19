@@ -401,6 +401,7 @@ async def generate_reflection(agent: Agent) -> Reflection:
             max_tokens=max_tokens,
             latency_ms=latency_ms,
             task_name="self_reflection",
+            byok=bool(getattr(agent, "_byok_active", False)),
         )
     except Exception as exc:
         log.warning("Failed to record reflection LLM usage", error=str(exc))
