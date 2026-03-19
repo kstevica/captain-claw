@@ -935,6 +935,10 @@ class WebServer:
         from captain_claw.web.rest_files import view_file
         return await view_file(self, request)
 
+    async def _delete_files(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_files import delete_files
+        return await delete_files(self, request)
+
     async def _export_md(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_files import export_md
         return await export_md(self, request)
@@ -1687,6 +1691,7 @@ class WebServer:
         app.router.add_get("/api/files/content", self._get_file_content)
         app.router.add_get("/api/files/download", self._download_file)
         app.router.add_get("/api/files/view", self._view_file)
+        app.router.add_post("/api/files/delete", self._delete_files)
         app.router.add_post("/api/files/export", self._export_md)
         app.router.add_get("/api/media", self._serve_media)
         app.router.add_post("/api/image/upload", self._image_upload)

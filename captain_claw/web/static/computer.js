@@ -37,7 +37,8 @@ let isPublicSession = false;
 let byokProvider = localStorage.getItem("computer-byok-provider") || "";
 let byokModel = localStorage.getItem("computer-byok-model") || "";
 let byokApiKey = localStorage.getItem("computer-byok-apikey") || "";
-let byokActive = false;
+let byokEnabled = localStorage.getItem("computer-byok-enabled") !== "false"; // default true if credentials exist
+let byokActive = false; // server-confirmed active state
 
 // Attachment state — arrays for multi-file support.
 let pendingImages = [];   // [{path, name}, ...]
@@ -1274,8 +1275,8 @@ function handleWelcome(data) {
   isPublicSession = !!data.is_public;
   if (isPublicSession) {
     $("#byok-btn").style.display = "";
-    // In public mode, apply BYOK credentials if saved (instead of set_model).
-    if (byokProvider && byokModel && byokApiKey && connected) {
+    // In public mode, apply BYOK credentials if saved and enabled.
+    if (byokEnabled && byokProvider && byokModel && byokApiKey && connected) {
       send({ type: "set_byok", provider: byokProvider, model: byokModel, api_key: byokApiKey });
       logEntry("system", `Applying saved BYOK: ${byokProvider}/${byokModel}`);
     }
@@ -1425,6 +1426,18 @@ function handleResponseStream(data) {
 }
 
 /* ── Input handling ──────────────────────────────────────────── */
+
+function handleStop() {
+  if (!connected) return;
+  send({ type: "cancel" });
+  logEntry("system", "Stop requested");
+  // Brief visual feedback on the button.
+  var btn = $("#stop-btn");
+  if (btn) {
+    btn.classList.add("stop-active");
+    setTimeout(function() { btn.classList.remove("stop-active"); }, 500);
+  }
+}
 
 function handleSend() {
   const input = $("#input-box");
@@ -2296,11 +2309,17 @@ function setProcessing(active) {
   const wasProcessing = isProcessing;
   isProcessing = active;
   const led = $("#drive-led");
+  const sendBtn = $("#send-btn");
+  const stopBtn = $("#stop-btn");
   if (active) {
     led.classList.add("on");
+    if (sendBtn) sendBtn.style.display = "none";
+    if (stopBtn) stopBtn.style.display = "";
     _acquireWakeLock();
   } else {
     led.classList.remove("on");
+    if (sendBtn) sendBtn.style.display = "";
+    if (stopBtn) stopBtn.style.display = "none";
     _releaseWakeLock();
     // Play completion sound when a task finishes.
     if (wasProcessing) playCompletionSound();
@@ -2828,7 +2847,9 @@ function renderFileCard(f) {
         ${previewable ? '<button class="file-action-btn file-preview-btn" title="Preview file"><span class="file-action-icon">👁</span><span class="file-action-label">Preview</span></button>' : ''}
         <a class="file-action-btn" href="/api/files/view?path=${encodeURIComponent(f.physical)}" target="_blank" title="Open in new tab"><span class="file-action-icon">↗</span><span class="file-action-label">Open</span></a>
         <a class="file-action-btn" href="/api/files/download?path=${encodeURIComponent(f.physical)}" title="Download file"><span class="file-action-icon">⬇</span><span class="file-action-label">Download</span></a>
+        <button class="file-action-btn file-delete-btn" title="Delete file"><span class="file-action-icon">🗑</span><span class="file-action-label">Delete</span></button>
       </div>
+      <label class="file-select-cb" style="display:none"><input type="checkbox" class="file-select-check"></label>
     </div>
   `;
 }
@@ -2940,6 +2961,16 @@ async function loadFiles() {
       });
     }
 
+    // Attach single-file delete handlers.
+    for (const btn of el.querySelectorAll('.file-delete-btn')) {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const card = btn.closest('.file-card');
+        const fname = card.querySelector('.file-name')?.textContent || 'this file';
+        deleteFileWithConfirm([card.dataset.path], fname);
+      });
+    }
+
   } catch (err) {
     console.warn("Failed to load files:", err);
     el.innerHTML = `<span class="output-placeholder">Failed to load files: ${esc(err.message)}</span>`;
@@ -2948,6 +2979,7 @@ async function loadFiles() {
 }
 
 let _filesCache = [];   // cached file list for search filtering
+let _filesSelectMode = false;
 
 function filterFiles(query) {
   const el = $("#files-content");
@@ -3021,6 +3053,95 @@ function filterFiles(query) {
       openFilePreview(card.dataset.path, card.dataset.ext, card.dataset.text === '1');
     });
   }
+  // Re-attach delete handlers.
+  for (const btn of el.querySelectorAll('.file-delete-btn')) {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const card = btn.closest('.file-card');
+      const fname = card.querySelector('.file-name')?.textContent || 'this file';
+      deleteFileWithConfirm([card.dataset.path], fname);
+    });
+  }
+  // Sync selection mode checkboxes.
+  if (_filesSelectMode) {
+    el.querySelectorAll('.file-select-cb').forEach(cb => cb.style.display = '');
+  }
+}
+
+/* ── File deletion ───────────────────────────────────────────── */
+
+async function deleteFileWithConfirm(paths, label) {
+  if (!paths || !paths.length) return;
+  const msg = paths.length === 1
+    ? `Delete "${label}"?`
+    : `Delete ${paths.length} selected files?`;
+  if (!confirm(msg)) return;
+  await deleteFiles(paths);
+}
+
+async function deleteFiles(paths) {
+  try {
+    const res = await fetch('/api/files/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths }),
+      credentials: 'same-origin',
+    });
+    const data = await res.json();
+    if (data.deleted > 0) {
+      logEntry('system', `Deleted ${data.deleted} file${data.deleted !== 1 ? 's' : ''}`);
+    }
+    if (data.errors && data.errors.length) {
+      for (const err of data.errors) {
+        logEntry('error', err);
+      }
+    }
+    // Exit selection mode and refresh.
+    exitFileSelectMode();
+    loadFiles();
+  } catch (err) {
+    logEntry('error', 'Failed to delete files: ' + err.message);
+  }
+}
+
+function enterFileSelectMode() {
+  _filesSelectMode = true;
+  // Show checkboxes on all file cards.
+  document.querySelectorAll('#files-content .file-select-cb').forEach(cb => cb.style.display = '');
+  // Toggle toolbar buttons.
+  $("#files-select-btn").style.display = 'none';
+  $("#files-delete-selected-btn").style.display = '';
+  $("#files-cancel-select-btn").style.display = '';
+  updateDeleteSelectedCount();
+}
+
+function exitFileSelectMode() {
+  _filesSelectMode = false;
+  // Hide and uncheck all checkboxes.
+  document.querySelectorAll('#files-content .file-select-cb').forEach(cb => {
+    cb.style.display = 'none';
+    cb.querySelector('input').checked = false;
+  });
+  // Toggle toolbar buttons.
+  $("#files-select-btn").style.display = '';
+  $("#files-delete-selected-btn").style.display = 'none';
+  $("#files-cancel-select-btn").style.display = 'none';
+}
+
+function getSelectedFilePaths() {
+  const paths = [];
+  document.querySelectorAll('#files-content .file-select-check:checked').forEach(cb => {
+    const card = cb.closest('.file-card');
+    if (card && card.dataset.path) paths.push(card.dataset.path);
+  });
+  return paths;
+}
+
+function updateDeleteSelectedCount() {
+  const btn = $("#files-delete-selected-btn");
+  const count = document.querySelectorAll('#files-content .file-select-check:checked').length;
+  btn.textContent = count > 0 ? `🗑 Delete (${count})` : '🗑 Delete';
+  btn.disabled = count === 0;
 }
 
 function initFiles() {
@@ -3053,6 +3174,21 @@ function initFiles() {
         loadFiles();
       }
     });
+  });
+
+  // Select / bulk delete buttons.
+  $("#files-select-btn").addEventListener("click", enterFileSelectMode);
+  $("#files-cancel-select-btn").addEventListener("click", exitFileSelectMode);
+  $("#files-delete-selected-btn").addEventListener("click", () => {
+    const paths = getSelectedFilePaths();
+    if (!paths.length) return;
+    deleteFileWithConfirm(paths, paths.length + ' files');
+  });
+  // Update count when checkboxes change (event delegation).
+  $("#files-content").addEventListener("change", (e) => {
+    if (e.target.classList.contains("file-select-check")) {
+      updateDeleteSelectedCount();
+    }
   });
 }
 
@@ -3452,10 +3588,45 @@ function initByokModal() {
     var inp = $("#byok-apikey");
     inp.type = inp.type === "password" ? "text" : "password";
   });
+  $("#byok-toggle").addEventListener("change", toggleByok);
   // Pre-fill from localStorage.
   if (byokProvider) $("#byok-provider").value = byokProvider;
   if (byokModel) $("#byok-model").value = byokModel;
   if (byokApiKey) $("#byok-apikey").value = byokApiKey;
+  syncByokToggleUI();
+  updateByokBtnLabel();
+}
+
+function syncByokToggleUI() {
+  var toggle = $("#byok-toggle");
+  var fields = $("#byok-fields");
+  var hasCreds = !!(byokProvider && byokModel && byokApiKey);
+  toggle.checked = byokEnabled && hasCreds;
+  // Always show fields so user can enter/edit credentials.
+  // Dim them when toggle is off to hint they're inactive.
+  fields.classList.toggle("byok-fields-dimmed", hasCreds && !byokEnabled);
+}
+
+function toggleByok() {
+  var toggle = $("#byok-toggle");
+  byokEnabled = toggle.checked;
+  localStorage.setItem("computer-byok-enabled", byokEnabled ? "true" : "false");
+
+  if (byokEnabled && byokProvider && byokModel && byokApiKey) {
+    // Re-activate saved credentials.
+    if (connected) {
+      send({ type: "set_byok", provider: byokProvider, model: byokModel, api_key: byokApiKey });
+    }
+    logEntry("system", "BYOK enabled: " + byokProvider + "/" + byokModel);
+  } else if (!byokEnabled) {
+    // Switch to server default without clearing saved credentials.
+    if (connected) {
+      send({ type: "clear_byok" });
+    }
+    byokActive = false;
+    logEntry("system", "BYOK disabled — using server default");
+  }
+  syncByokToggleUI();
   updateByokBtnLabel();
 }
 
@@ -3464,6 +3635,7 @@ function openByokModal() {
   if (byokProvider) $("#byok-provider").value = byokProvider;
   if (byokModel) $("#byok-model").value = byokModel;
   if (byokApiKey) $("#byok-apikey").value = byokApiKey;
+  syncByokToggleUI();
   $("#byok-status").textContent = "";
   $("#byok-modal").classList.add("active");
 }
@@ -3490,40 +3662,47 @@ function applyByok() {
   byokProvider = provider;
   byokModel = model;
   byokApiKey = apiKey;
+  byokEnabled = true;
   localStorage.setItem("computer-byok-provider", provider);
   localStorage.setItem("computer-byok-model", model);
   localStorage.setItem("computer-byok-apikey", apiKey);
+  localStorage.setItem("computer-byok-enabled", "true");
   // Send to server.
   if (connected) {
     send({ type: "set_byok", provider: provider, model: model, api_key: apiKey });
     $("#byok-status").textContent = "Applying...";
     $("#byok-status").className = "byok-status";
   }
+  syncByokToggleUI();
 }
 
 function clearByok() {
   byokProvider = "";
   byokModel = "";
   byokApiKey = "";
+  byokEnabled = true;
   byokActive = false;
   localStorage.removeItem("computer-byok-provider");
   localStorage.removeItem("computer-byok-model");
   localStorage.removeItem("computer-byok-apikey");
+  localStorage.removeItem("computer-byok-enabled");
   $("#byok-provider").value = "openai";
   $("#byok-model").value = "";
   $("#byok-apikey").value = "";
   if (connected) {
     send({ type: "clear_byok" });
   }
+  syncByokToggleUI();
   updateByokBtnLabel();
-  $("#byok-status").textContent = "Cleared. Using server default.";
-  $("#byok-status").className = "byok-status byok-ok";
-  logEntry("system", "BYOK cleared — using server default provider");
+  $("#byok-status").textContent = "Credentials cleared.";
+  $("#byok-status").className = "byok-status";
+  logEntry("system", "BYOK credentials cleared");
 }
 
 function handleByokStatus(data) {
   byokActive = !!data.active;
   updateByokBtnLabel();
+  syncByokToggleUI();
   var statusEl = $("#byok-status");
   if (data.error) {
     statusEl.textContent = "Error: " + data.error;
@@ -3544,6 +3723,8 @@ function updateByokBtnLabel() {
   var label = $("#byok-btn-label");
   if (byokActive && byokProvider) {
     label.textContent = byokProvider + "/" + (byokModel || "").split("/").pop();
+  } else if (byokProvider && byokModel && !byokEnabled) {
+    label.textContent = "BYOK (off)";
   } else {
     label.textContent = "BYOK";
   }
@@ -3871,6 +4052,7 @@ function initTextarea() {
   });
 
   $("#send-btn").addEventListener("click", () => handleSend());
+  $("#stop-btn").addEventListener("click", () => handleStop());
 }
 
 /* ── Clear log button ────────────────────────────────────────── */

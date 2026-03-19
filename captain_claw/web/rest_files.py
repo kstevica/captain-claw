@@ -402,6 +402,86 @@ async def download_file(server: WebServer, request: web.Request) -> web.Response
     )
 
 
+async def delete_files(server: WebServer, request: web.Request) -> web.Response:
+    """POST /api/files/delete — delete one or more files by physical path.
+
+    Body: ``{"paths": ["<physical_path>", ...]}``
+
+    Public users can only delete files from their own session.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    paths: list[str] = body.get("paths", [])
+    if not paths or not isinstance(paths, list):
+        return web.json_response({"error": "Missing or empty 'paths' array"}, status=400)
+
+    from captain_claw.web.public_auth import get_request_session_id
+    is_public, pub_session_id = get_request_session_id(request)
+
+    deleted: list[str] = []
+    errors: list[str] = []
+
+    for physical in paths:
+        physical = str(physical).strip()
+        if not physical:
+            continue
+
+        # Public users can only delete files from their own session.
+        if is_public:
+            if not pub_session_id or not _path_belongs_to_session(physical, pub_session_id):
+                errors.append(f"Access denied: {Path(physical).name}")
+                continue
+
+        # Security: verify path is under workspace saved/output dirs.
+        if not _is_allowed_path(physical):
+            errors.append(f"Not allowed: {Path(physical).name}")
+            continue
+
+        p = Path(physical)
+        if not p.is_file():
+            errors.append(f"Not found: {p.name}")
+            continue
+
+        try:
+            p.unlink()
+            deleted.append(physical)
+        except Exception as exc:
+            errors.append(f"Failed to delete {p.name}: {exc}")
+
+    # Remove deleted files from in-memory registries.
+    deleted_set = set(deleted)
+    for registry_source in [
+        getattr(server.agent, "_file_registry", None) if server.agent else None,
+        getattr(getattr(server, "_orchestrator", None), "_file_registry", None),
+    ]:
+        if registry_source:
+            try:
+                registry_source._files = [
+                    f for f in registry_source._files
+                    if f.get("physical", "") not in deleted_set
+                ]
+            except Exception:
+                pass
+
+    # Remove from persisted SQLite registry.
+    if deleted:
+        try:
+            from captain_claw.session import get_session_manager
+            sm = get_session_manager()
+            for phys in deleted:
+                await sm.delete_registered_file(phys)
+        except Exception:
+            pass  # Best-effort cleanup.
+
+    return web.json_response({
+        "deleted": len(deleted),
+        "errors": errors,
+    })
+
+
 async def view_file(server: WebServer, request: web.Request) -> web.Response:
     """GET /api/files/view?path=<physical_path> — serve a file inline (no download)."""
     physical = request.query.get("path", "").strip()

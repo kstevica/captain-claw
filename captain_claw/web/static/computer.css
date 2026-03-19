@@ -1036,6 +1036,40 @@ body.textsize-laaaarger { zoom: 1.8; }
   padding: 4px 15px 2px 17px;
 }
 
+#stop-btn {
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 3px 16px;
+  background: #c33;
+  color: #fff;
+  border: var(--bevel) solid #a22;
+  border-top-color: #e55;
+  border-left-color: #e55;
+  border-radius: var(--radius);
+  cursor: pointer;
+  user-select: none;
+}
+#stop-btn:hover {
+  background: #d44;
+}
+#stop-btn:active,
+#stop-btn.stop-active {
+  background: #a22;
+  border-top-color: #811;
+  border-left-color: #811;
+  border-bottom-color: #e55;
+  border-right-color: #e55;
+}
+/* Keep stop button red across all themes */
+[class*="theme-"] #stop-btn {
+  background: #c33 !important;
+  color: #fff !important;
+  border-color: #a22 !important;
+}
+[class*="theme-"] #stop-btn:hover {
+  background: #d44 !important;
+}
+
 /* ── Explore inline buttons (inside #input-actions row) ──────── */
 
 .explore-inline-btn {
@@ -2024,6 +2058,7 @@ body.textsize-laaaarger { zoom: 1.8; }
 }
 
 .theme-hacker #send-btn,
+.theme-hacker #stop-btn,
 .theme-hacker #attach-btn,
 .theme-hacker #folder-btn {
   border-color: #00ff41;
@@ -2031,6 +2066,7 @@ body.textsize-laaaarger { zoom: 1.8; }
 }
 
 .theme-hacker #send-btn:hover,
+.theme-hacker #stop-btn:hover,
 .theme-hacker #attach-btn:hover,
 .theme-hacker #folder-btn:hover {
   background: #00ff41;
@@ -2109,6 +2145,7 @@ body.textsize-laaaarger { zoom: 1.8; }
 }
 
 .theme-modern #send-btn,
+.theme-modern #stop-btn,
 .theme-modern #attach-btn,
 .theme-modern #folder-btn {
   border: none;
@@ -2119,12 +2156,14 @@ body.textsize-laaaarger { zoom: 1.8; }
 }
 
 .theme-modern #send-btn:hover,
+.theme-modern #stop-btn:hover,
 .theme-modern #attach-btn:hover,
 .theme-modern #folder-btn:hover {
   background: #5070dd;
 }
 
 .theme-modern #send-btn:active,
+.theme-modern #stop-btn:active,
 .theme-modern #attach-btn:active,
 .theme-modern #folder-btn:active {
   transform: scale(0.97);
@@ -2486,6 +2525,40 @@ body.visual-fullscreen #visual-frame {
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.02em;
+}
+
+.file-delete-btn:hover {
+  background: #c33 !important;
+  color: #fff !important;
+  border-color: #c33 !important;
+}
+
+/* Selection mode checkbox */
+.file-select-cb {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+.file-select-check {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--accent, #7af);
+}
+
+/* Bulk delete button */
+.file-delete-bulk-btn {
+  color: #e55 !important;
+  border-color: #c33 !important;
+}
+.file-delete-bulk-btn:hover {
+  background: #c33 !important;
+  color: #fff !important;
+}
+.file-delete-bulk-btn:disabled {
+  opacity: .4;
+  cursor: not-allowed;
 }
 
 /* File groups (folder-based grouping) */
@@ -3018,6 +3091,7 @@ body.textsize-laaaarger .modal-content { height: 50vh; max-height: 50vh; }
 }
 
 .theme-win11 #send-btn,
+.theme-win11 #stop-btn,
 .theme-win11 #attach-btn,
 .theme-win11 #folder-btn {
   border: none;
@@ -3079,6 +3153,7 @@ body.textsize-laaaarger .modal-content { height: 50vh; max-height: 50vh; }
 }
 
 .theme-macos #send-btn,
+.theme-macos #stop-btn,
 .theme-macos #attach-btn,
 .theme-macos #folder-btn {
   border: none;
@@ -3134,6 +3209,7 @@ body.textsize-laaaarger .modal-content { height: 50vh; max-height: 50vh; }
 }
 
 .theme-iphone #send-btn,
+.theme-iphone #stop-btn,
 .theme-iphone #attach-btn,
 .theme-iphone #folder-btn {
   border: none;
@@ -3190,6 +3266,7 @@ body.textsize-laaaarger .modal-content { height: 50vh; max-height: 50vh; }
 }
 
 .theme-android #send-btn,
+.theme-android #stop-btn,
 .theme-android #attach-btn,
 .theme-android #folder-btn {
   border: none;
@@ -3982,8 +4059,65 @@ body.stream-panel-open #workspace {
   margin-bottom: 3px;
   margin-top: 8px;
 }
-.byok-form label:first-child {
+#byok-fields label:first-child {
   margin-top: 0;
+}
+
+/* Toggle row */
+.byok-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--chrome-lo, #444);
+}
+.byok-toggle-label {
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--text, #e0e0e0);
+}
+
+/* Toggle switch */
+.byok-switch {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 18px;
+  margin: 0;
+  flex-shrink: 0;
+}
+.byok-switch input { opacity: 0; width: 0; height: 0; }
+.byok-slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: var(--chrome-lo, #555);
+  border-radius: 18px;
+  transition: background .2s;
+}
+.byok-slider::before {
+  content: "";
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  left: 3px;
+  bottom: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform .2s;
+}
+.byok-switch input:checked + .byok-slider {
+  background: var(--accent, #7af);
+}
+.byok-switch input:checked + .byok-slider::before {
+  transform: translateX(18px);
+}
+
+/* Dim fields when toggle is off but creds exist */
+.byok-fields-dimmed {
+  opacity: .4;
+  pointer-events: none;
 }
 
 .byok-form select,

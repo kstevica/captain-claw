@@ -433,6 +433,18 @@ if __name__ == "__main__":
 
     cli = typer.Typer(help="Captain Claw - A powerful console-based AI agent")
 
+    @cli.callback(invoke_without_command=True)
+    def _cli_root(
+        version_flag: bool = typer.Option(
+            False,
+            "--version",
+            help="Show version information and exit",
+            callback=_version_callback,
+            is_eager=True,
+        ),
+    ) -> None:
+        """Captain Claw - A powerful console-based AI agent."""
+
     @cli.command()
     def run(
         config: str = typer.Option("", "-c", "--config", help="Path to config file"),
@@ -449,13 +461,6 @@ if __name__ == "__main__":
             False,
             "--tui",
             help="Start the terminal UI instead of the web UI",
-        ),
-        version_flag: bool = typer.Option(
-            False,
-            "--version",
-            help="Show version information and exit",
-            callback=_version_callback,
-            is_eager=True,
         ),
     ) -> None:
         main(config, model, provider, no_stream, verbose, onboarding, tui=tui)

@@ -82,6 +82,7 @@
               <button id="folder-btn" title="Read folders">📁</button>
               <input type="file" id="file-input" multiple accept="image/png,image/jpeg,image/jpg,image/webp,image/gif,image/bmp,.csv,.xlsx,.xls,.pdf,.docx,.doc,.pptx,.ppt,.md,.txt" style="display:none">
               <button id="send-btn" title="Send (Enter)">Send</button>
+              <button id="stop-btn" title="Stop generation" style="display:none">Stop</button>
             </div>
           </div>
           <div id="decomposition-area">
@@ -164,6 +165,9 @@
         <div id="output-files" class="output-tab">
           <div id="files-toolbar">
             <button id="files-refresh-btn" class="tab-btn" title="Refresh files">↻ Refresh</button>
+            <button id="files-select-btn" class="tab-btn" title="Select files for deletion">☐ Select</button>
+            <button id="files-delete-selected-btn" class="tab-btn file-delete-bulk-btn" title="Delete selected files" style="display:none">🗑 Delete</button>
+            <button id="files-cancel-select-btn" class="tab-btn" title="Cancel selection" style="display:none">✕ Cancel</button>
             <span id="files-count"></span>
             <div id="files-sort">
               <button class="files-sort-btn active" data-sort="date" title="Sort by date">📅</button>
@@ -276,25 +280,34 @@
       </div>
       <div class="window-body">
         <div class="byok-form">
-          <label for="byok-provider">Provider</label>
-          <select id="byok-provider">
-            <option value="openai">OpenAI</option>
-            <option value="anthropic">Anthropic</option>
-            <option value="gemini">Gemini (Google)</option>
-            <option value="xai">xAI (Grok)</option>
-            <option value="openrouter">OpenRouter</option>
-          </select>
-          <label for="byok-model">Model</label>
-          <input type="text" id="byok-model" placeholder="e.g. gpt-4o, claude-sonnet-4-20250514" autocomplete="off" spellcheck="false">
-          <label for="byok-apikey">API Key</label>
-          <div class="byok-key-wrap">
-            <input type="password" id="byok-apikey" placeholder="sk-..." autocomplete="off" spellcheck="false">
-            <button type="button" id="byok-key-toggle" title="Show/hide key">👁</button>
+          <div class="byok-toggle-row">
+            <span class="byok-toggle-label">Use my own key</span>
+            <label class="byok-switch">
+              <input type="checkbox" id="byok-toggle">
+              <span class="byok-slider"></span>
+            </label>
           </div>
-          <div class="byok-hint">Your key is stored only in this browser and sent over the encrypted connection. It is never saved on the server.</div>
-          <div class="byok-actions">
-            <button class="btn-byok-apply" id="byok-apply-btn">Save &amp; Apply</button>
-            <button class="btn-byok-clear" id="byok-clear-btn">Clear &amp; Use Default</button>
+          <div id="byok-fields">
+            <label for="byok-provider">Provider</label>
+            <select id="byok-provider">
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="gemini">Gemini (Google)</option>
+              <option value="xai">xAI (Grok)</option>
+              <option value="openrouter">OpenRouter</option>
+            </select>
+            <label for="byok-model">Model</label>
+            <input type="text" id="byok-model" placeholder="e.g. gpt-4o, claude-sonnet-4-20250514" autocomplete="off" spellcheck="false">
+            <label for="byok-apikey">API Key</label>
+            <div class="byok-key-wrap">
+              <input type="password" id="byok-apikey" placeholder="sk-..." autocomplete="off" spellcheck="false">
+              <button type="button" id="byok-key-toggle" title="Show/hide key">👁</button>
+            </div>
+            <div class="byok-hint">Your key is stored only in this browser. It is never saved on the server.</div>
+            <div class="byok-actions">
+              <button class="btn-byok-apply" id="byok-apply-btn">Save &amp; Apply</button>
+              <button class="btn-byok-clear" id="byok-clear-btn">Clear credentials</button>
+            </div>
           </div>
           <div class="byok-status" id="byok-status"></div>
         </div>
