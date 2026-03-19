@@ -1,139 +1,78 @@
-# Captain Claw v0.4.2 Release Notes
+# Captain Claw v0.4.3 Release Notes
 
-**Release title:** Public Computer Mode, OpenRouter Provider, Suggested Next Steps
+**Release title:** BYOK (Bring Your Own Key), Visual Generation Usage Tracking
 
-**Release date:** 2026-03-16
+**Release date:** 2026-03-19
 
 ## Highlights
 
-This release introduces **Public Computer Mode** — a secure, session-isolated deployment mode that exposes only the Computer research workspace to anonymous visitors while locking down all other pages and APIs. Each public user gets a unique 6-character access code, and all files, uploads, and exploration trees are fully isolated per session. Also new: **OpenRouter** as a first-class LLM provider (access 200+ models through a single API key), and **suggested next-step buttons** that appear after each agent response in Computer for one-click follow-up actions.
+This release introduces **BYOK (Bring Your Own Key)** for Public Computer Mode — public users can now provide their own LLM API credentials (OpenAI, Anthropic, Gemini, xAI, OpenRouter) directly in the browser, stored only in localStorage and never persisted on the server. Also fixes a gap where **streaming visual generation** was not tracked in LLM usage analytics, and adds a **BYOK filter** to the Usage dashboard.
 
 ## New Features
 
-### Public Computer Mode
+### BYOK (Bring Your Own Key) for Public Computer Mode
 
-Deploy Captain Claw's Computer workspace as a public-facing research tool with built-in session isolation and route lockdown:
+Public users can now use their own LLM API keys instead of relying on the server's shared provider:
 
-- **Session management** — Landing page with "New Session" (generates 6-character access code) and "Resume Session" (enter existing code) tabs
-- **Per-session file isolation** — All file operations (list, view, download, upload, media) are scoped to the user's session directory
-- **Route lockdown** — Only Computer-related routes are accessible; all other pages and APIs return 403 Forbidden
-- **Admin bypass** — Users authenticated via `auth_token` have unrestricted access to the full UI
-- **HMAC-signed session cookies** — Secure, tamper-proof session identification for all REST endpoints
-- **Landing page** — Branded Captain Claw landing with public mode notice and GitHub link
+- **🔑 BYOK toolbar button** — Visible only in public mode, opens a themed modal for credential entry
+- **Provider selection** — OpenAI, Anthropic, Gemini, xAI, OpenRouter (Ollama blocked to prevent SSRF)
+- **Browser-only storage** — API keys stored in localStorage, never sent to the server for persistence
+- **Per-agent provider** — Each public session gets its own LLM provider instance; BYOK does not affect other users or the server's default provider
+- **Auto-reconnect** — Saved credentials are automatically re-applied on WebSocket reconnect
+- **Visual generation support** — BYOK provider is used for both chat and visual HTML generation
+- **Themed UI** — BYOK modal and button follow the active Computer theme (all 14 themes supported)
+- **Security** — Keys transmitted over encrypted WebSocket, held in memory only, never logged; no custom base URLs to prevent SSRF
 
-**Configuration:**
-```yaml
-web:
-  auth_token: "your-admin-password"
-  public_run: "computer"
-```
+**WebSocket protocol:**
+- New message type: `set_byok` (client → server) — sends provider, model, and API key
+- New message type: `clear_byok` (client → server) — reverts to server's default provider
+- New message type: `byok_status` (server → client) — confirms activation or reports errors
+- `welcome` message now includes `is_public: true/false` flag
 
-New files: `captain_claw/web/public_auth.py`, `captain_claw/web/public_session.py`, `captain_claw/web/static/public_landing.html`
+### LLM Usage: BYOK Tracking and Filter
 
-### OpenRouter Provider
+- **BYOK column** — New `byok` column in the `llm_usage` database table tracks whether each call used user-provided credentials
+- **🔑 indicator** — Usage detail table shows a key emoji for BYOK calls
+- **BYOK Calls summary card** — New card in the usage summary showing total BYOK call count
+- **BYOK filter dropdown** — Filter usage records by All / BYOK Only / Server Only
+- **Database migration** — Existing databases automatically gain the `byok` column via ALTER TABLE
 
-OpenRouter is now a first-class LLM provider, enabling access to 200+ models from multiple providers through a single API key:
+## Bug Fixes
 
-- Provider name: `openrouter`
-- Automatic LiteLLM routing with `openrouter/` prefix handling
-- Model IDs with slashes (e.g., `nvidia/llama-3.1-nemotron-ultra-253b-v1`) handled correctly
-- Added to onboarding flow alongside OpenAI, Anthropic, Gemini, and Ollama
-- Environment variable: `OPENROUTER_API_KEY`
+### Streaming Visual Generation Not Tracked
 
-**Configuration:**
-```yaml
-model:
-  provider: openrouter
-  model: nvidia/llama-3.1-nemotron-ultra-253b-v1
-```
-
-### Suggested Next Steps (Computer)
-
-After each agent response, Computer automatically extracts suggested next steps and presents them as clickable buttons:
-
-- Lightweight follow-up LLM call analyzes the response for explicit suggestions
-- Heuristic pre-filter avoids unnecessary LLM calls on responses without bullet/numbered lists
-- Buttons appear below the Answer tab content with the suggestion label
-- Clicking a button populates the input and sends the action automatically
-- Maximum 6 suggestions per response, with 30-character button labels
-
-New file: `captain_claw/next_steps.py`
-
-## Improvements
-
-### Computer UI Enhancements
-
-- **Inline explore buttons** — Explore and Cancel buttons now appear inline in the input actions row (alongside 📎, 📁, Send) instead of a separate full-width bar, improving mobile usability
-- **Image rendering fix** — Raw `<img>` HTML tags in LLM responses are pre-processed to markdown before escaping, preventing broken image rendering
-- **Classic Mac theme fix** — Active tab labels are now visible (z-index fix for title bar stripe overlay)
-- **Mobile layout** — Input panel scrollable on small screens, explore buttons compact on narrow viewports
-
-### Chat Handler Improvements
-
-- Refactored WebSocket chat handler for public session support
-- Session-aware message routing for public vs admin users
-
-## REST API Changes
-
-### New Endpoints
-
-- `POST /api/public/session/new` — Create a new public session (returns access code)
-- `GET /api/public/session/enter?code=XXXXXX` — Enter a session (sets cookie, redirects to `/computer`)
-- `GET /api/public/session/info` — Get current public session info
-
-### Modified Endpoints
-
-- `GET /api/files`, `GET /api/files/{session_id}` — Now enforce session isolation for public users
-- `GET /api/files/content`, `GET /api/files/download/{path}`, `GET /api/files/view/{path}` — Session ownership check for public users
-- `POST /api/file/upload`, `POST /api/image/upload` — Uploads scoped to public session directory
-- `GET /api/media/{path}` — Session ownership check for public users
-
-## Configuration Changes
-
-New `web` config fields:
-
-| Field | Default | Description |
-|---|---|---|
-| `auth_token` | `""` | Set to enable authentication; empty = auth disabled |
-| `auth_cookie_max_age` | `90` | Days until auth cookie expires |
-| `public_run` | `""` | Set to `"computer"` to expose only Computer to anonymous visitors |
+The streaming visual generation endpoint (`POST /api/computer/visualize/stream`) — which is the endpoint actually used by the Computer frontend — was not recording LLM usage. The non-streaming endpoint had tracking, but the streaming one was missing it entirely. Fixed by adding `_record_visual_usage_streaming()` that records input/output byte sizes and latency after successful streaming completion.
 
 ## Version Changes
 
-- `captain_claw` — 0.4.1 → 0.4.2
-- `botport` — 0.3.4 → 0.4.2 (synced with captain_claw)
-- `desktop` — 0.4.1 → 0.4.2
+- `captain_claw` — 0.4.2 → 0.4.3
+- `botport` — 0.4.2 → 0.4.3
+- `desktop` — 0.4.2 → 0.4.3
 
 ## Internal
 
-### New Files
-- `captain_claw/web/public_auth.py` — Route lockdown middleware and session identification for public mode
-- `captain_claw/web/public_session.py` — Public session management (access codes, HMAC-signed cookies)
-- `captain_claw/web/static/public_landing.html` — Public Computer landing page with session management UI
-- `captain_claw/next_steps.py` — Extract suggested next steps from LLM responses
+### New Methods
+- `AgentModelMixin.set_byok_provider()` — Creates per-agent LLM provider from user-supplied credentials
+- `AgentModelMixin.clear_byok_provider()` — Reverts agent to server's default provider
+- `_extract_public_session_id()` — Reads public session ID from request cookies for REST endpoints
+- `_record_visual_usage_streaming()` — Records LLM usage for streaming visual generation calls
 
 ### Modified Files
-- `pyproject.toml` — Version 0.4.1 → 0.4.2
+- `pyproject.toml` — Version 0.4.2 → 0.4.3
 - `captain_claw/__init__.py` — Version bump
-- `botport/pyproject.toml` — Version 0.3.4 → 0.4.2 (synced)
+- `botport/pyproject.toml` — Version bump
 - `botport/botport/__init__.py` — Version bump
 - `desktop/package.json` — Version bump
-- `captain_claw/llm/__init__.py` — OpenRouter provider support, model ID handling
-- `captain_claw/config.py` — `auth_token`, `auth_cookie_max_age`, `public_run` fields
-- `captain_claw/main.py` — OpenRouter in CLI onboarding
-- `captain_claw/web_server.py` — Public mode middleware, session routes, public landing page serving
-- `captain_claw/web/static_pages.py` — Public landing page redirect logic
-- `captain_claw/web/chat_handler.py` — Public session-aware message routing
-- `captain_claw/web/ws_handler.py` — Public session WebSocket handling
-- `captain_claw/web/rest_files.py` — Session isolation for all file endpoints
-- `captain_claw/web/rest_file_upload.py` — Public session upload scoping
-- `captain_claw/web/rest_image_upload.py` — Public session upload scoping
-- `captain_claw/web/rest_computer.py` — Next steps extraction endpoint
-- `captain_claw/web/rest_settings.py` — Public mode config exposure
-- `captain_claw/web/static/computer.js` — Next steps buttons, inline explore buttons, image rendering fix
-- `captain_claw/web/static/computer.css` — Inline explore button styles, Classic Mac z-index fix, mobile layout improvements
-- `captain_claw/web/static/computer.html` — Hamburger menu button
-- `captain_claw/web/static/onboarding.js` — OpenRouter in onboarding flow
-- `captain_claw/web/static/app.js` — Public mode UI adjustments
-- `README.md` — OpenRouter in badges, feature table, API keys, Computer feature descriptions
-- `USAGE.md` — Public mode docs, next steps docs, web config fields, ToC updates
+- `captain_claw/agent_model_mixin.py` — `set_byok_provider()`, `clear_byok_provider()`, `_BYOK_ALLOWED_PROVIDERS`
+- `captain_claw/agent_guard_mixin.py` — Pass `byok` flag to `record_llm_usage()`
+- `captain_claw/web/ws_handler.py` — `is_public` in welcome message, `set_byok` and `clear_byok` handlers
+- `captain_claw/web_server.py` — Init `_byok_active` on public agents, `byok_calls` in usage totals, BYOK filter in `_get_usage()`
+- `captain_claw/web/rest_computer.py` — `_extract_public_session_id()`, BYOK-aware `_resolve_provider()`, `_record_visual_usage_streaming()`, BYOK flag in visual usage tracking
+- `captain_claw/reflections.py` — Pass `byok` flag to `record_llm_usage()`
+- `captain_claw/session/__init__.py` — `byok` column in `llm_usage` table, ALTER TABLE migration, `byok` param in `record_llm_usage()`, `byok` in `query_llm_usage()` results
+- `captain_claw/web/static/computer.html` — BYOK toolbar button, BYOK modal
+- `captain_claw/web/static/computer.js` — BYOK state management, modal logic, WebSocket message handling, auto-reconnect
+- `captain_claw/web/static/computer.css` — BYOK modal and button styles using theme CSS variables
+- `captain_claw/web/static/usage.html` — BYOK column, BYOK summary card, BYOK filter dropdown
+- `README.md` — BYOK in feature table and Computer description, BYOK in Usage Dashboard description
+- `USAGE.md` — BYOK documentation in Public Mode section, BYOK filter in Usage Dashboard section

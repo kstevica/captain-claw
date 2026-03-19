@@ -3087,6 +3087,20 @@ All other routes (Chat, Sessions, Orchestrator, Settings, Datastore, etc.) are b
 
 Set `auth_token` in config and navigate to `/?token=your-admin-password` to authenticate as admin. Admin users have unrestricted access to all pages and APIs regardless of public mode settings.
 
+**BYOK (Bring Your Own Key):**
+
+Public users can provide their own LLM API credentials instead of using the server's shared provider. This lets visitors use their own OpenAI, Anthropic, Gemini, xAI, or OpenRouter keys.
+
+- Click the **🔑 BYOK** button in the toolbar (visible only in public mode)
+- Select a provider, enter a model name and API key
+- Credentials are stored only in the browser (localStorage) and sent over the encrypted WebSocket connection
+- Keys are held in server memory only during the session — never logged, persisted, or written to disk
+- On WebSocket reconnect, saved credentials are automatically re-applied
+- Click **Clear & Use Default** to revert to the server's provider
+- Both chat and visual generation use the BYOK provider when active
+- BYOK calls are tracked separately in the LLM Usage dashboard with a 🔑 indicator
+- The `ollama` provider is blocked for BYOK to prevent SSRF; custom base URLs are not supported
+
 ---
 
 ## Web UI
@@ -3393,8 +3407,9 @@ Navigate to `/usage` in the web UI, or click the **LLM Usage** card on the homep
 - **Period filters** — Last Hour, Today, Yesterday, This Week, Last Week, This Month, Last Month, All Time
 - **Provider filter** — dropdown to filter by LLM provider (OpenAI, Anthropic, Gemini, Ollama)
 - **Model filter** — dropdown to filter by specific model (auto-filtered by selected provider)
-- **Summary cards** — Total Calls, Total Tokens, Prompt Tokens, Completion Tokens, Cache Read, Cache Created, Input Size, Output Size, Average Latency, Errors
-- **Detail table** — per-call breakdown with timestamp, interaction ID, provider, model, token counts, cache read, input/output sizes, latency, and status
+- **BYOK filter** — dropdown to show All, BYOK Only, or Server Only calls
+- **Summary cards** — Total Calls, Total Tokens, Prompt Tokens, Completion Tokens, Cache Read, Cache Created, Input Size, Output Size, Average Latency, Errors, BYOK Calls
+- **Detail table** — per-call breakdown with timestamp, interaction ID, provider, model, token counts, cache read, input/output sizes, latency, status, and BYOK indicator (🔑)
 
 Filters are applied server-side so summary totals accurately reflect the filtered subset.
 
