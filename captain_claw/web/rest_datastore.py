@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
-from captain_claw.datastore import ProtectedError, get_datastore_manager
+from captain_claw.datastore import ProtectedError, get_datastore_manager, get_session_datastore_manager
 from captain_claw.logging import get_logger
 
 if TYPE_CHECKING:
@@ -23,12 +23,24 @@ log = get_logger(__name__)
 _JSON_DUMPS = lambda obj: json.dumps(obj, default=str)
 
 
+def _resolve_manager(request: web.Request) -> Any:
+    """Return the appropriate DatastoreManager for this request.
+
+    In public computer mode, each session gets an isolated DB.
+    """
+    from captain_claw.web.public_auth import get_request_session_id
+    is_public, session_id = get_request_session_id(request)
+    if is_public and session_id:
+        return get_session_datastore_manager(session_id)
+    return get_datastore_manager()
+
+
 # ── Tables ──────────────────────────────────────────────────────────
 
 
 async def list_tables(server: WebServer, request: web.Request) -> web.Response:
     """GET /api/datastore/tables — list all user tables."""
-    mgr = get_datastore_manager()
+    mgr = _resolve_manager(request)
     tables = await mgr.list_tables()
     return web.json_response(
         [
@@ -48,7 +60,7 @@ async def list_tables(server: WebServer, request: web.Request) -> web.Response:
 async def describe_table(server: WebServer, request: web.Request) -> web.Response:
     """GET /api/datastore/tables/{name} — describe a single table."""
     name = request.match_info.get("name", "")
-    mgr = get_datastore_manager()
+    mgr = _resolve_manager(request)
     info = await mgr.describe_table(name)
     if not info:
         return web.json_response({"error": f"Table '{name}' not found"}, status=404)
@@ -78,7 +90,7 @@ async def create_table(server: WebServer, request: web.Request) -> web.Response:
     if not columns or not isinstance(columns, list):
         return web.json_response({"error": "columns array is required"}, status=400)
 
-    mgr = get_datastore_manager()
+    mgr = _resolve_manager(request)
     try:
         info = await mgr.create_table(name, columns)
     except Exception as exc:
@@ -99,7 +111,7 @@ async def create_table(server: WebServer, request: web.Request) -> web.Response:
 async def drop_table(server: WebServer, request: web.Request) -> web.Response:
     """DELETE /api/datastore/tables/{name} — drop a table."""
     name = request.match_info.get("name", "")
-    mgr = get_datastore_manager()
+    mgr = _resolve_manager(request)
     try:
         await mgr.drop_table(name)
     except ProtectedError as exc:
@@ -121,7 +133,7 @@ async def rename_table(server: WebServer, request: web.Request) -> web.Response:
     if not new_name:
         return web.json_response({"error": "new_name is required"}, status=400)
 
-    mgr = get_datastore_manager()
+    mgr = _resolve_manager(request)
     try:
         info = await mgr.rename_table(name, new_name)
     except ProtectedError as exc:
@@ -167,7 +179,7 @@ async def query_rows(server: WebServer, request: web.Request) -> web.Response:
     else:
         order_param = [order_by]
 
-    mgr = get_datastore_manager()
+    mgr = _resolve_manager(request)
     try:
         result = await mgr.query(
             table_name=name,
@@ -204,7 +216,7 @@ async def insert_rows(server: WebServer, request: web.Request) -> web.Response:
     if not rows or not isinstance(rows, list):
         return web.json_response({"error": "rows array is required"}, status=400)
 
-    mgr = get_datastore_manager()
+    mgr = _resolve_manager(request)
     try:
         count = await mgr.insert_rows(name, rows)
     except ProtectedError as exc:
@@ -229,7 +241,7 @@ async def update_rows(server: WebServer, request: web.Request) -> web.Response:
     if not where or not isinstance(where, dict):
         return web.json_response({"error": "where object is required"}, status=400)
 
-    mgr = get_datastore_manager()
+    mgr = _resolve_manager(request)
     try:
         count = await mgr.update_rows(name, set_values, where)
     except ProtectedError as exc:
@@ -251,7 +263,7 @@ async def delete_rows(server: WebServer, request: web.Request) -> web.Response:
     if not where or not isinstance(where, dict):
         return web.json_response({"error": "where object is required"}, status=400)
 
-    mgr = get_datastore_manager()
+    mgr = _resolve_manager(request)
     try:
         count = await mgr.delete_rows(name, where)
     except ProtectedError as exc:
@@ -278,7 +290,7 @@ async def add_column(server: WebServer, request: web.Request) -> web.Response:
     if not col_name:
         return web.json_response({"error": "col_name is required"}, status=400)
 
-    mgr = get_datastore_manager()
+    mgr = _resolve_manager(request)
     try:
         await mgr.add_column(name, col_name, col_type, default)
     except ProtectedError as exc:
@@ -302,7 +314,7 @@ async def drop_column(server: WebServer, request: web.Request) -> web.Response:
     table_name = request.match_info.get("name", "")
     col_name = request.match_info.get("col", "")
 
-    mgr = get_datastore_manager()
+    mgr = _resolve_manager(request)
     try:
         await mgr.drop_column(table_name, col_name)
     except ProtectedError as exc:
@@ -326,7 +338,7 @@ async def run_sql(server: WebServer, request: web.Request) -> web.Response:
     if not sql_query:
         return web.json_response({"error": "sql is required"}, status=400)
 
-    mgr = get_datastore_manager()
+    mgr = _resolve_manager(request)
     try:
         result = await mgr.raw_select(sql_query)
     except Exception as exc:
@@ -340,7 +352,7 @@ async def run_sql(server: WebServer, request: web.Request) -> web.Response:
 async def list_protections(server: WebServer, request: web.Request) -> web.Response:
     """GET /api/datastore/tables/{name}/protections — list protections."""
     name = request.match_info.get("name", "")
-    mgr = get_datastore_manager()
+    mgr = _resolve_manager(request)
     try:
         protections = await mgr.list_protections(name)
     except Exception as exc:
@@ -364,7 +376,7 @@ async def add_protection(server: WebServer, request: web.Request) -> web.Respons
     col_name = body.get("col_name")
     reason = body.get("reason")
 
-    mgr = get_datastore_manager()
+    mgr = _resolve_manager(request)
     try:
         result = await mgr.protect(
             name, level, row_id=row_id, col_name=col_name, reason=reason,
@@ -389,7 +401,7 @@ async def remove_protection(server: WebServer, request: web.Request) -> web.Resp
     row_id = body.get("row_id")
     col_name = body.get("col_name")
 
-    mgr = get_datastore_manager()
+    mgr = _resolve_manager(request)
     try:
         removed = await mgr.unprotect(name, level, row_id=row_id, col_name=col_name)
     except Exception as exc:
@@ -489,7 +501,7 @@ async def upload_and_import(server: WebServer, request: web.Request) -> web.Resp
         tmp_file_path = Path(tmp_path)
         log.info("File uploaded for import", filename=original_name, temp_path=tmp_path, file_type=file_type)
 
-        mgr = get_datastore_manager()
+        mgr = _resolve_manager(request)
 
         # Parse headers
         try:
@@ -586,7 +598,7 @@ async def export_table(server: WebServer, request: web.Request) -> web.Response:
             status=400,
         )
 
-    mgr = get_datastore_manager()
+    mgr = _resolve_manager(request)
     cfg_mod = __import__("captain_claw.config", fromlist=["get_config"])
     cfg = cfg_mod.get_config()
 

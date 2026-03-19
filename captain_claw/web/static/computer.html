@@ -121,6 +121,8 @@
             <button class="tab-btn active" data-tab="answer">Answer</button>
             <button class="tab-btn" data-tab="blueprint">Blueprint</button>
             <button class="tab-btn" data-tab="files">Files</button>
+            <button class="tab-btn" data-tab="todos">Todos</button>
+            <button class="tab-btn" data-tab="data">Data</button>
             <button class="tab-btn" data-tab="visual">Visual</button>
             <button class="tab-btn" data-tab="map" style="display:none;">Map</button>
           </div>
@@ -178,6 +180,60 @@
           </div>
           <div id="files-content" class="output-empty">
             <span class="output-placeholder">Files created during this session will appear here...</span>
+          </div>
+        </div>
+        <div id="output-todos" class="output-tab">
+          <div id="todos-toolbar">
+            <button id="todos-refresh-btn" class="tab-btn" title="Refresh todos">↻ Refresh</button>
+            <div id="todos-filters">
+              <button class="todos-filter-btn active" data-filter="active">Active</button>
+              <button class="todos-filter-btn" data-filter="all">All</button>
+              <button class="todos-filter-btn" data-filter="done">Done</button>
+            </div>
+            <span id="todos-count"></span>
+            <input id="todos-search" type="text" placeholder="Filter todos..." spellcheck="false" autocomplete="off">
+          </div>
+          <div id="todos-add-bar">
+            <input id="todos-add-input" type="text" placeholder="Add a new todo..." spellcheck="false" autocomplete="off">
+            <button id="todos-add-btn" class="tab-btn" title="Add todo">+ Add</button>
+          </div>
+          <div id="todos-content" class="output-empty">
+            <span class="output-placeholder">Your to-do items will appear here...</span>
+          </div>
+        </div>
+        <div id="output-data" class="output-tab">
+          <div id="data-toolbar">
+            <button id="data-refresh-btn" class="tab-btn" title="Refresh tables">↻ Refresh</button>
+            <label id="data-upload-label" class="tab-btn" title="Upload CSV or XLSX">
+              ⬆ Upload
+              <input type="file" id="data-upload-input" accept=".csv,.xlsx,.xls" style="display:none">
+            </label>
+            <span id="data-table-count"></span>
+          </div>
+          <div id="data-split">
+            <div id="data-table-list"></div>
+            <div id="data-table-view">
+              <div id="data-view-empty" class="output-empty">
+                <span class="output-placeholder">Upload a CSV or XLSX to create a table, or select one from the list.</span>
+              </div>
+              <div id="data-view-header" style="display:none">
+                <span id="data-view-name"></span>
+                <span id="data-view-meta"></span>
+                <div id="data-view-actions">
+                  <a id="data-export-csv" class="todo-action-btn" title="Export CSV">CSV</a>
+                  <a id="data-export-xlsx" class="todo-action-btn" title="Export XLSX">XLSX</a>
+                  <button id="data-drop-btn" class="todo-action-btn todo-delete-btn" title="Drop table">Drop</button>
+                </div>
+              </div>
+              <div id="data-grid-wrap" style="display:none">
+                <table id="data-grid"><thead></thead><tbody></tbody></table>
+              </div>
+              <div id="data-paging" style="display:none">
+                <button id="data-prev-btn" class="tab-btn" disabled>◀ Prev</button>
+                <span id="data-paging-info"></span>
+                <button id="data-next-btn" class="tab-btn">Next ▶</button>
+              </div>
+            </div>
           </div>
         </div>
         <div id="output-visual" class="output-tab">

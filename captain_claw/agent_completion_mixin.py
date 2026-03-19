@@ -38,9 +38,14 @@ class AgentCompletionMixin:
         the expected data.  Returns a list of failed verifications,
         each with keys ``action``, ``table``, and ``reason``.
         """
-        from captain_claw.datastore import get_datastore_manager
+        from captain_claw.config import get_config
+        from captain_claw.datastore import get_datastore_manager, get_session_datastore_manager
 
-        dm = get_datastore_manager()
+        cfg = get_config()
+        if cfg.web.public_run == "computer" and self.session:
+            dm = get_session_datastore_manager(str(self.session.id))
+        else:
+            dm = get_datastore_manager()
         failures: list[dict[str, Any]] = []
 
         # Deduplicate: only verify the last save per table.

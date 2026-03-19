@@ -2455,9 +2455,418 @@ function initTabs() {
       if (tab === "files") {
         loadFiles();
       }
+
+      // Load todos when switching to Todos tab.
+      if (tab === "todos") {
+        loadTodos();
+      }
+
+      // Load data tables when switching to Data tab.
+      if (tab === "data") {
+        loadDataTables();
+      }
     });
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   TODOS TAB
+   ═══════════════════════════════════════════════════════════════ */
+
+let _todosCache = [];
+let _todosFilter = "active"; // "active" | "all" | "done"
+let _todosQuery = "";
+
+function _todoRelTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const now = Date.now();
+  const diff = now - d.getTime();
+  if (diff < 60000) return "just now";
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+  if (diff < 604800000) return `${Math.floor(diff / 86400000)}d ago`;
+  return d.toLocaleDateString();
+}
+
+function _renderTodoCard(t) {
+  const isDone = t.status === "done" || t.status === "cancelled";
+  const checked = isDone ? "checked" : "";
+  const doneClass = isDone ? " todo-done" : "";
+  const priorityCls = (t.priority === "urgent" || t.priority === "high") ? ` ${t.priority}` : "";
+  const tags = t.tags ? `<span class="todo-badge todo-badge-tags">${esc(t.tags)}</span>` : "";
+  const time = _todoRelTime(t.updated_at || t.created_at);
+
+  return `
+    <div class="todo-card${doneClass}" data-id="${esc(t.id)}">
+      <input type="checkbox" class="todo-checkbox" ${checked} title="${isDone ? 'Reopen' : 'Mark done'}">
+      <div class="todo-body">
+        <div class="todo-text">${esc(t.content)}</div>
+        <div class="todo-meta">
+          <span class="todo-badge todo-badge-priority${priorityCls}">${esc(t.priority || 'normal')}</span>
+          <span class="todo-badge todo-badge-responsible">${esc(t.responsible || 'bot')}</span>
+          ${tags}
+          <span class="todo-time">${esc(time)}</span>
+        </div>
+      </div>
+      <div class="todo-actions">
+        <button class="todo-action-btn todo-delete-btn" title="Delete">✕</button>
+      </div>
+    </div>
+  `;
+}
+
+function _renderTodos(todos) {
+  const el = $("#todos-content");
+  const countEl = $("#todos-count");
+
+  if (!todos || todos.length === 0) {
+    el.innerHTML = '<span class="output-placeholder">No to-do items.</span>';
+    el.classList.add("output-empty");
+    countEl.textContent = "";
+    return;
+  }
+
+  el.classList.remove("output-empty");
+  countEl.textContent = `${todos.length} item${todos.length !== 1 ? "s" : ""}`;
+  el.innerHTML = todos.map(_renderTodoCard).join("");
+
+  // Wire up checkbox toggles.
+  for (const cb of el.querySelectorAll(".todo-checkbox")) {
+    cb.addEventListener("change", async () => {
+      const card = cb.closest(".todo-card");
+      const id = card.dataset.id;
+      const newStatus = cb.checked ? "done" : "pending";
+      try {
+        await fetch(`/api/todos/${encodeURIComponent(id)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: newStatus }),
+        });
+        loadTodos();
+      } catch (e) {
+        console.error("Todo toggle failed", e);
+      }
+    });
+  }
+
+  // Wire up delete buttons.
+  for (const btn of el.querySelectorAll(".todo-delete-btn")) {
+    btn.addEventListener("click", async () => {
+      const card = btn.closest(".todo-card");
+      const id = card.dataset.id;
+      try {
+        await fetch(`/api/todos/${encodeURIComponent(id)}`, { method: "DELETE" });
+        loadTodos();
+      } catch (e) {
+        console.error("Todo delete failed", e);
+      }
+    });
+  }
+}
+
+function _applyTodosFilters() {
+  let filtered = _todosCache;
+  if (_todosFilter === "active") {
+    filtered = filtered.filter(t => t.status === "pending" || t.status === "in_progress");
+  } else if (_todosFilter === "done") {
+    filtered = filtered.filter(t => t.status === "done" || t.status === "cancelled");
+  }
+  if (_todosQuery) {
+    const q = _todosQuery.toLowerCase();
+    filtered = filtered.filter(t =>
+      (t.content || "").toLowerCase().includes(q) ||
+      (t.tags || "").toLowerCase().includes(q)
+    );
+  }
+  _renderTodos(filtered);
+}
+
+async function loadTodos() {
+  const el = $("#todos-content");
+  try {
+    const params = new URLSearchParams();
+    if (sessionId) params.set("session_id", sessionId);
+    const res = await fetch(`/api/todos?${params}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    _todosCache = await res.json();
+
+    _applyTodosFilters();
+  } catch (e) {
+    console.error("Failed to load todos", e);
+    el.innerHTML = '<span class="output-placeholder">Failed to load todos.</span>';
+    el.classList.add("output-empty");
+  }
+}
+
+async function addTodo(content) {
+  if (!content.trim()) return;
+  try {
+    const body = { content: content.trim(), responsible: "human", priority: "normal" };
+    if (sessionId) body.source_session = sessionId;
+    await fetch("/api/todos", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    loadTodos();
+  } catch (e) {
+    console.error("Failed to add todo", e);
+  }
+}
+
+function initTodoTab() {
+  // Filter buttons.
+  for (const btn of $$("#todos-filters .todos-filter-btn")) {
+    btn.addEventListener("click", () => {
+      _todosFilter = btn.dataset.filter;
+      for (const b of $$("#todos-filters .todos-filter-btn")) {
+        b.classList.toggle("active", b === btn);
+      }
+      _applyTodosFilters();
+    });
+  }
+
+  // Search input.
+  const searchInput = $("#todos-search");
+  searchInput.addEventListener("input", () => {
+    _todosQuery = searchInput.value.trim();
+    _applyTodosFilters();
+  });
+
+  // Refresh button.
+  $("#todos-refresh-btn").addEventListener("click", loadTodos);
+
+  // Add input.
+  const addInput = $("#todos-add-input");
+  const addBtn = $("#todos-add-btn");
+  addBtn.addEventListener("click", () => {
+    addTodo(addInput.value);
+    addInput.value = "";
+  });
+  addInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      addTodo(addInput.value);
+      addInput.value = "";
+    }
+  });
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   DATA TAB — datastore tables with upload
+   ═══════════════════════════════════════════════════════════════ */
+
+let _dsTables = [];
+let _dsSelectedTable = null;
+let _dsPage = 0;
+const _dsPageSize = 50;
+
+function _renderTableList() {
+  const el = $("#data-table-list");
+  const countEl = $("#data-table-count");
+  if (!_dsTables.length) {
+    el.innerHTML = '<div style="padding:12px;color:var(--text-dim);font-size:12px;">No tables yet.</div>';
+    countEl.textContent = "";
+    return;
+  }
+  countEl.textContent = `${_dsTables.length} table${_dsTables.length !== 1 ? "s" : ""}`;
+  el.innerHTML = _dsTables.map(t => {
+    const sel = _dsSelectedTable === t.name ? " selected" : "";
+    return `<div class="ds-table-item${sel}" data-name="${esc(t.name)}">
+      <span class="ds-table-name">${esc(t.name)}</span>
+      <span class="ds-table-rows">${t.row_count}</span>
+    </div>`;
+  }).join("");
+
+  for (const item of el.querySelectorAll(".ds-table-item")) {
+    item.addEventListener("click", () => {
+      _dsSelectedTable = item.dataset.name;
+      _dsPage = 0;
+      _renderTableList();
+      _loadTableData(_dsSelectedTable);
+    });
+  }
+}
+
+function _showTableView(show) {
+  $("#data-view-empty").style.display = show ? "none" : "flex";
+  $("#data-view-header").style.display = show ? "flex" : "none";
+  $("#data-grid-wrap").style.display = show ? "block" : "none";
+  $("#data-paging").style.display = show ? "flex" : "none";
+}
+
+async function _loadTableData(name) {
+  _showTableView(true);
+  const nameEl = $("#data-view-name");
+  const metaEl = $("#data-view-meta");
+  const thead = $("#data-grid thead");
+  const tbody = $("#data-grid tbody");
+
+  nameEl.textContent = name;
+  metaEl.textContent = "Loading...";
+  thead.innerHTML = "";
+  tbody.innerHTML = "";
+
+  try {
+    // Fetch rows with pagination.
+    const params = new URLSearchParams({
+      limit: String(_dsPageSize),
+      offset: String(_dsPage * _dsPageSize),
+    });
+    const res = await fetch(`/api/datastore/tables/${encodeURIComponent(name)}/rows?${params}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    const columns = data.columns || [];
+    const rows = data.rows || [];
+    const total = data.total != null ? data.total : rows.length;
+
+    // Find the table info for column count.
+    const tInfo = _dsTables.find(t => t.name === name);
+    const colCount = tInfo ? tInfo.columns.length : columns.length;
+    metaEl.textContent = `${total} row${total !== 1 ? "s" : ""} · ${colCount} col${colCount !== 1 ? "s" : ""}`;
+
+    // Export links.
+    $("#data-export-csv").href = `/api/datastore/tables/${encodeURIComponent(name)}/export?format=csv`;
+    $("#data-export-csv").download = `${name}.csv`;
+    $("#data-export-xlsx").href = `/api/datastore/tables/${encodeURIComponent(name)}/export?format=xlsx`;
+    $("#data-export-xlsx").download = `${name}.xlsx`;
+
+    // Render header.
+    thead.innerHTML = "<tr>" + columns.map(c => `<th>${esc(c)}</th>`).join("") + "</tr>";
+
+    // Render rows (API returns array of objects keyed by column name).
+    if (rows.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="${columns.length || 1}" style="text-align:center;color:var(--text-dim);padding:20px;">No rows.</td></tr>`;
+    } else {
+      tbody.innerHTML = rows.map(row => {
+        const cells = columns.map(c => {
+          const v = row[c];
+          const s = v != null ? String(v) : "NULL";
+          return `<td title="${esc(s)}">${esc(s)}</td>`;
+        });
+        return "<tr>" + cells.join("") + "</tr>";
+      }).join("");
+    }
+
+    // Paging.
+    const start = _dsPage * _dsPageSize + 1;
+    const end = Math.min(start + rows.length - 1, total);
+    $("#data-paging-info").textContent = rows.length ? `${start}–${end} of ${total}` : `0 of ${total}`;
+    $("#data-prev-btn").disabled = _dsPage === 0;
+    $("#data-next-btn").disabled = end >= total;
+
+  } catch (e) {
+    console.error("Failed to load table data", e);
+    metaEl.textContent = "Error loading data";
+  }
+}
+
+async function loadDataTables() {
+  try {
+    const res = await fetch("/api/datastore/tables");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    _dsTables = await res.json();
+    _renderTableList();
+
+    // If selected table no longer exists, deselect.
+    if (_dsSelectedTable && !_dsTables.find(t => t.name === _dsSelectedTable)) {
+      _dsSelectedTable = null;
+      _showTableView(false);
+    }
+    // Refresh data if a table is selected.
+    if (_dsSelectedTable) {
+      _loadTableData(_dsSelectedTable);
+    }
+  } catch (e) {
+    console.error("Failed to load datastore tables", e);
+  }
+}
+
+async function _uploadDataFile(file) {
+  if (!file) return;
+  const ext = file.name.split(".").pop().toLowerCase();
+  if (!["csv", "xlsx", "xls"].includes(ext)) {
+    alert("Only CSV and XLSX files are supported.");
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("force_new", "true");
+
+  try {
+    const res = await fetch("/api/datastore/upload", { method: "POST", body: formData });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(err.error || `Upload failed: HTTP ${res.status}`);
+      return;
+    }
+    const result = await res.json();
+    _dsSelectedTable = result.table;
+    _dsPage = 0;
+    await loadDataTables();
+  } catch (e) {
+    console.error("Data upload failed", e);
+    alert("Upload failed: " + e.message);
+  }
+}
+
+async function _dropTable(name) {
+  if (!confirm(`Drop table "${name}"? This cannot be undone.`)) return;
+  try {
+    const res = await fetch(`/api/datastore/tables/${encodeURIComponent(name)}`, { method: "DELETE" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    _dsSelectedTable = null;
+    _showTableView(false);
+    await loadDataTables();
+  } catch (e) {
+    console.error("Drop table failed", e);
+  }
+}
+
+function initDataTab() {
+  // Refresh.
+  $("#data-refresh-btn").addEventListener("click", loadDataTables);
+
+  // File upload via button.
+  const uploadInput = $("#data-upload-input");
+  uploadInput.addEventListener("change", () => {
+    if (uploadInput.files.length > 0) {
+      _uploadDataFile(uploadInput.files[0]);
+      uploadInput.value = "";
+    }
+  });
+
+  // Drag & drop onto the data panel.
+  const panel = $("#output-data");
+  panel.addEventListener("dragover", (e) => { e.preventDefault(); panel.classList.add("drag-over"); });
+  panel.addEventListener("dragleave", () => panel.classList.remove("drag-over"));
+  panel.addEventListener("drop", (e) => {
+    e.preventDefault();
+    panel.classList.remove("drag-over");
+    if (e.dataTransfer.files.length > 0) {
+      _uploadDataFile(e.dataTransfer.files[0]);
+    }
+  });
+
+  // Drop table button.
+  $("#data-drop-btn").addEventListener("click", () => {
+    if (_dsSelectedTable) _dropTable(_dsSelectedTable);
+  });
+
+  // Paging.
+  $("#data-prev-btn").addEventListener("click", () => {
+    if (_dsPage > 0) { _dsPage--; _loadTableData(_dsSelectedTable); }
+  });
+  $("#data-next-btn").addEventListener("click", () => {
+    _dsPage++;
+    _loadTableData(_dsSelectedTable);
+  });
+}
+
 
 /* ═══════════════════════════════════════════════════════════════
    MAP TAB — SVG mind-map of the exploration tree
@@ -5631,6 +6040,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Init subsystems.
   initTextarea();
   initTabs();
+  initTodoTab();
+  initDataTab();
   initResize();
   initClearLog();
   initClearSession();

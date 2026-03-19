@@ -954,8 +954,11 @@ class AgentContextMixin:
         if not cfg.datastore.enabled or not cfg.datastore.inject_table_list:
             return
         try:
-            from captain_claw.datastore import get_datastore_manager
-            dm = get_datastore_manager()
+            from captain_claw.datastore import get_datastore_manager, get_session_datastore_manager
+            if cfg.web.public_run == "computer" and self.session:
+                dm = get_session_datastore_manager(str(self.session.id))
+            else:
+                dm = get_datastore_manager()
             self._datastore_context_cache = await dm.get_tables_summary()
         except Exception:
             self._datastore_context_cache = []

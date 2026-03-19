@@ -1482,8 +1482,34 @@ class SessionManager:
         context: str | None = None,
         tags: str | None = None,
     ) -> TodoItem:
-        """Create and persist a to-do item."""
+        """Create and persist a to-do item.
+
+        Deduplicates: if a pending/in-progress todo with the same content
+        (case-insensitive) and source_session already exists, the existing
+        item is returned instead of creating a duplicate.
+        """
         await self._ensure_db()
+
+        # ── dedup check ──────────────────────────────────────────────
+        dedup_clauses = [
+            "LOWER(content) = LOWER(?)",
+            "status IN ('pending', 'in_progress')",
+        ]
+        dedup_params: list[Any] = [content.strip()]
+        if source_session:
+            dedup_clauses.append("source_session = ?")
+            dedup_params.append(source_session)
+        else:
+            dedup_clauses.append("source_session IS NULL")
+        async with self._db.execute(
+            f"SELECT {self._TODO_COLS} FROM todo_items WHERE {' AND '.join(dedup_clauses)} LIMIT 1",
+            tuple(dedup_params),
+        ) as cursor:
+            existing = await cursor.fetchone()
+        if existing:
+            return TodoItem.from_row(existing)
+
+        # ── insert ───────────────────────────────────────────────────
         now_iso = _utcnow_iso()
         item = TodoItem(
             id=str(uuid.uuid4()),
