@@ -272,6 +272,9 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
         elif cmd in ("/apis",):
             result = await handle_apis_command(server, args.strip())
 
+        elif cmd in ("/insights",):
+            result = await handle_insights_command(server, args.strip())
+
         elif cmd in ("/screenshot",):
             result = await _handle_screenshot_command(server, ws, args.strip())
 
@@ -1081,6 +1084,79 @@ async def _handle_reflection_command(server: WebServer, args: str) -> str:
         if r:
             return f"**Latest reflection** ({r.timestamp}):\n\n{r.summary}"
         return "No reflections yet. Use `/reflection generate` to create one."
+
+
+async def handle_insights_command(server: WebServer, args: str) -> str:
+    """Handle /insights subcommands in the web UI."""
+    from captain_claw.insights import get_insights_manager
+
+    mgr = get_insights_manager()
+
+    if not args or args.lower() in ("list", "ls"):
+        items = await mgr.list_recent(limit=20)
+        if not items:
+            return "No insights stored yet."
+        lines: list[str] = []
+        for idx, item in enumerate(items, 1):
+            cat = item.get("category", "fact")
+            imp = item.get("importance", 5)
+            tags = f" [{item['tags']}]" if item.get("tags") else ""
+            lines.append(
+                f"#{idx} [{cat}] (imp:{imp}) {item['content']}{tags}  `{item['id']}`"
+            )
+        total = await mgr.count()
+        return f"**Insights** ({len(items)} of {total}):\n" + "\n".join(lines)
+
+    parts = args.split(None, 1)
+    subcmd = parts[0].lower()
+    subargs = parts[1].strip() if len(parts) > 1 else ""
+
+    if subcmd == "search":
+        if not subargs:
+            return "Usage: `/insights search <query>`"
+        results = await mgr.search(subargs, limit=15)
+        if not results:
+            return f"No insights matching: `{subargs}`"
+        lines = []
+        for idx, item in enumerate(results, 1):
+            cat = item.get("category", "fact")
+            imp = item.get("importance", 5)
+            lines.append(f"#{idx} [{cat}] (imp:{imp}) {item['content']}  `{item['id']}`")
+        return f"**Search results for** `{subargs}`:\n" + "\n".join(lines)
+
+    if subcmd == "add":
+        if not subargs:
+            return "Usage: `/insights add <text>`"
+        session_id = server.agent.session.id if server.agent.session else None
+        insight_id = await mgr.add(
+            content=subargs,
+            category="fact",
+            importance=5,
+            source_tool="slash_command",
+            source_session=session_id,
+        )
+        if insight_id:
+            return f"Added insight: **{subargs}** (`{insight_id}`)"
+        return "Insight was deduped — a similar one already exists."
+
+    if subcmd in ("delete", "del", "remove", "rm"):
+        if not subargs:
+            return "Usage: `/insights delete <id>`"
+        ok = await mgr.delete(subargs.strip())
+        if not ok:
+            return f"Insight not found: `{subargs}`"
+        return f"Deleted insight `{subargs}`"
+
+    # Fallback: treat as search
+    results = await mgr.search(args, limit=15)
+    if not results:
+        return f"No insights matching: `{args}`"
+    lines = []
+    for idx, item in enumerate(results, 1):
+        cat = item.get("category", "fact")
+        imp = item.get("importance", 5)
+        lines.append(f"#{idx} [{cat}] (imp:{imp}) {item['content']}  `{item['id']}`")
+    return f"**Search results for** `{args}`:\n" + "\n".join(lines)
 
 
 def format_help() -> str:

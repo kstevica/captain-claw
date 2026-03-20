@@ -155,6 +155,10 @@ COMMANDS: list[dict[str, str]] = [
     {"command": "/apis search <query>", "description": "Search APIs", "category": "APIs"},
     {"command": "/apis update <id> <field=value>", "description": "Update API fields", "category": "APIs"},
     {"command": "/apis remove <id|#index|name>", "description": "Remove an API", "category": "APIs"},
+    {"command": "/insights", "description": "List recent insights", "category": "Insights"},
+    {"command": "/insights search <query>", "description": "Search insights", "category": "Insights"},
+    {"command": "/insights add <text>", "description": "Add an insight manually", "category": "Insights"},
+    {"command": "/insights delete <id>", "description": "Delete an insight", "category": "Insights"},
     {"command": "/monitor on|off", "description": "Toggle monitor split view", "category": "Monitor"},
     {"command": "/monitor trace on|off", "description": "Toggle LLM trace logging", "category": "Monitor"},
     {"command": "/approve user telegram <token>", "description": "Approve a Telegram user pairing", "category": "Telegram"},
@@ -1124,6 +1128,10 @@ class WebServer:
         from captain_claw.web.static_pages import serve_datastore
         return await serve_datastore(self, request)
 
+    async def _serve_insights(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_insights
+        return await serve_insights(self, request)
+
     async def _serve_playbooks(self, request: web.Request) -> web.FileResponse:
         from captain_claw.web.static_pages import serve_playbooks
         return await serve_playbooks(self, request)
@@ -1472,6 +1480,27 @@ class WebServer:
         from captain_claw.web.rest_datastore import export_table
         return await export_table(self, request)
 
+    # Insights REST
+    async def _ins_list(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_insights import list_insights
+        return await list_insights(self, request)
+
+    async def _ins_get(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_insights import get_insight
+        return await get_insight(self, request)
+
+    async def _ins_create(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_insights import create_insight
+        return await create_insight(self, request)
+
+    async def _ins_update(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_insights import update_insight
+        return await update_insight(self, request)
+
+    async def _ins_delete(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_insights import delete_insight
+        return await delete_insight(self, request)
+
     # Onboarding REST
     async def _get_onboarding_status(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_onboarding import get_onboarding_status
@@ -1730,6 +1759,12 @@ class WebServer:
         app.router.add_post("/api/datastore/tables/{name}/protections", self._ds_add_protection)
         app.router.add_delete("/api/datastore/tables/{name}/protections", self._ds_remove_protection)
         app.router.add_post("/api/datastore/upload", self._ds_upload_and_import)
+        # Insights
+        app.router.add_get("/api/insights", self._ins_list)
+        app.router.add_post("/api/insights", self._ins_create)
+        app.router.add_get("/api/insights/{id}", self._ins_get)
+        app.router.add_patch("/api/insights/{id}", self._ins_update)
+        app.router.add_delete("/api/insights/{id}", self._ins_delete)
         # Playbooks API
         app.router.add_get("/api/playbooks", self._pb_list)
         app.router.add_get("/api/playbooks/search", self._pb_search)
@@ -1790,6 +1825,7 @@ class WebServer:
             app.router.add_get("/files", self._serve_files)
             app.router.add_get("/onboarding", self._serve_onboarding)
             app.router.add_get("/datastore", self._serve_datastore)
+            app.router.add_get("/insights", self._serve_insights)
             app.router.add_get("/playbooks", self._serve_playbooks)
             app.router.add_get("/browser-workflows", self._serve_browser_workflows)
             app.router.add_get("/direct-api-calls", self._serve_direct_api_calls)

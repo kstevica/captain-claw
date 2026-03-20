@@ -41,6 +41,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "clipboard": "Read or write the system clipboard. Supports text, images, and files.",
     "gws": "Google Workspace CLI — access Google Drive (list, search, download, create), Docs (read, append), Calendar (list, search, create, agenda), and Gmail (list, search, read, threads). Uses the `gws` binary.",
     "datastore": "Manage persistent relational data tables (create, query, insert, update, delete, import/export)",
+    "insights": "Search and manage persistent cross-session insights — facts, contacts, decisions, preferences, deadlines auto-extracted from conversations. Actions: search, list, add, update, delete.",
     "personality": "Read or update the agent personality profile (name, description, background, expertise)",
     "browser": "Control a headless browser for web app interaction. Supports observe/act (page understanding), click/type with nth-match disambiguation, login with encrypted credentials + cookie persistence, network capture for API discovery, API replay (execute captured APIs directly — skip the browser!), and multi-app sessions. Use for login flows, form filling, and interacting with dynamic/React web apps.",
     "direct_api": "Register, manage, and execute HTTP API endpoints directly. Users define endpoints with URL, method, description, and payload schemas. Supports auth capture from browser sessions. Methods: GET, POST, PUT, PATCH (DELETE is rejected for safety).",
@@ -67,6 +68,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "clipboard": "read/write system clipboard",
     "gws": "Google Workspace: Drive, Docs, Calendar, Gmail",
     "datastore": "persistent relational tables",
+    "insights": "persistent cross-session insights (facts, contacts, decisions, deadlines)",
     "personality": "agent personality profile",
     "browser": "headless browser for dynamic web apps",
     "direct_api": "register and call HTTP endpoints",
@@ -984,6 +986,89 @@ class AgentContextMixin:
         lines.append('Use the "datastore" tool to query or modify these tables.')
         return "\n".join(lines)
 
+    # ── Insights extraction hook + context injection ─────────────────
+
+    async def _maybe_extract_insights_from_tool(
+        self, tool_name: str, arguments: dict[str, Any], result_content: str,
+    ) -> None:
+        """Post-tool-call hook: trigger insight extraction for key tools."""
+        cfg = get_config()
+        if not cfg.insights.enabled or not cfg.insights.auto_extract:
+            return
+
+        # Only trigger for specific high-value tool calls.
+        _GWS_TRIGGER_ACTIONS = {"mail_read", "mail_read_thread"}
+        trigger = False
+        trigger_label = tool_name
+
+        if tool_name == "gws":
+            action = str(arguments.get("action", "")).strip()
+            if action in _GWS_TRIGGER_ACTIONS:
+                trigger = True
+                trigger_label = f"gws:{action}"
+
+        if not trigger:
+            return
+
+        # Spawn as background task — don't block the main loop.
+        import asyncio as _asyncio
+        from captain_claw.insights import maybe_extract_insights
+
+        _asyncio.create_task(
+            maybe_extract_insights(
+                self,  # type: ignore[arg-type]
+                trigger=trigger_label,
+                tool_context=result_content[:3000] if result_content else None,
+            )
+        )
+
+    async def _refresh_insights_context_cache(self) -> None:
+        """Pre-fetch insights for context injection."""
+        cfg = get_config()
+        if not cfg.insights.enabled or not cfg.insights.inject_in_context:
+            return
+        try:
+            from captain_claw.insights import get_insights_manager, get_session_insights_manager
+            if cfg.web.public_run == "computer" and self.session:
+                mgr = get_session_insights_manager(str(self.session.id))
+            else:
+                mgr = get_insights_manager()
+            self._insights_context_cache = await mgr.get_for_context(
+                limit=cfg.insights.max_items_in_prompt,
+            )
+        except Exception:
+            self._insights_context_cache = []
+
+    def _build_insights_context_note(self, query: str = "") -> str:
+        """Build context note from relevant insights."""
+        cfg = get_config()
+        if not cfg.insights.enabled or not cfg.insights.inject_in_context:
+            return ""
+        items = getattr(self, "_insights_context_cache", None)
+        if not items:
+            return ""
+        lines = ["Persistent insights from memory:"]
+        for i in items:
+            imp = i.get("importance", 5)
+            cat = i.get("category", "fact")
+            lines.append(f"- [{cat}] (imp:{imp}) {i['content']}")
+        return "\n".join(lines)
+
+    def _build_insights_block(self) -> str:
+        """Build the {insights_block} for the system prompt."""
+        cfg = get_config()
+        if not cfg.insights.enabled:
+            return ""
+        items = getattr(self, "_insights_context_cache", None)
+        if not items:
+            return ""
+        return (
+            "You have persistent memory of key facts, contacts, decisions, and "
+            "deadlines via the \"insights\" tool. Relevant insights are automatically "
+            "surfaced in context. Use the insights tool to search, add, or manage "
+            "stored knowledge."
+        )
+
     def _build_semantic_memory_note(
         self,
         query: str | None,
@@ -1277,6 +1362,7 @@ class AgentContextMixin:
         await self._refresh_scripts_context_cache()
         await self._refresh_apis_context_cache()
         await self._refresh_datastore_context_cache()
+        await self._refresh_insights_context_cache()
 
         self._initialized = True
         log.info("Agent initialized", session_id=self.session.id)
@@ -1311,6 +1397,7 @@ class AgentContextMixin:
         "playbooks": ["playbooks"],
         "typesense": ["typesense"],
         "datastore": ["datastore"],
+        "insights": ["insights"],
         "personality": ["personality"],
         "termux": ["termux"],
         "browser": ["browser"],
@@ -1355,6 +1442,7 @@ class AgentContextMixin:
             WriteTool,
             XlsxExtractTool,
             SummarizeFilesTool,
+            InsightsTool,
         )
 
         config = get_config()
@@ -1425,6 +1513,8 @@ class AgentContextMixin:
                 self.tools.register(TypesenseTool(deep_memory=dm))
             elif tool_name == "datastore":
                 self.tools.register(DatastoreTool())
+            elif tool_name == "insights":
+                self.tools.register(InsightsTool())
             elif tool_name == "personality":
                 pt = PersonalityTool()
                 uid = getattr(self, "_user_id", None)
@@ -1834,6 +1924,7 @@ class AgentContextMixin:
         datastore_block = self._build_conditional_section(
             "datastore", "section_datastore.md",
         )
+        insights_block = self._build_insights_block()
 
         base_prompt = self.instructions.render(
             "system_prompt.md",
@@ -1854,6 +1945,7 @@ class AgentContextMixin:
             termux_policy_block=termux_policy_block,
             gws_block=gws_block,
             datastore_block=datastore_block,
+            insights_block=insights_block,
         )
 
         # Collapse triple+ newlines left by absent conditional sections.
@@ -2377,6 +2469,14 @@ class AgentContextMixin:
                 "content": datastore_note,
                 "tool_name": "datastore_context",
                 "token_count": self._count_tokens(datastore_note),
+            })
+        insights_note = self._build_insights_context_note()
+        if insights_note:
+            candidate_messages.append({
+                "role": "assistant",
+                "content": insights_note,
+                "tool_name": "insights_context",
+                "token_count": self._count_tokens(insights_note),
             })
         # Workspace manifest — compact listing of files created/modified
         # this session.  Gives the LLM a project map without needing

@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Insights — Captain Claw</title>
+    <link rel="stylesheet" href="/static/insights.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<header class="ins-header">
+    <div class="ins-header-left">
+        <a href="/" class="ins-logo-link"><img src="/static/logo.svg" alt="Home"></a>
+        <h1>Insights</h1>
+    </div>
+    <div class="ins-header-right">
+        <a href="/chat" class="ins-nav-link">&larr; Chat</a>
+    </div>
+</header>
+
+<div class="ins-layout">
+    <!-- Toolbar -->
+    <div class="ins-toolbar">
+        <input type="text" class="ins-search" id="searchInput" placeholder="Search insights..." autocomplete="off">
+        <select class="ins-filter" id="categoryFilter">
+            <option value="">All categories</option>
+            <option value="contact">Contact</option>
+            <option value="decision">Decision</option>
+            <option value="preference">Preference</option>
+            <option value="fact">Fact</option>
+            <option value="deadline">Deadline</option>
+            <option value="project">Project</option>
+            <option value="workflow">Workflow</option>
+        </select>
+        <button class="ins-btn" id="addBtn">+ Add</button>
+        <span class="ins-count" id="countLabel"></span>
+    </div>
+
+    <!-- List -->
+    <div class="ins-list" id="insightsList"></div>
+</div>
+
+<!-- Detail / Edit Modal -->
+<div class="ins-detail-overlay" id="detailOverlay">
+    <div class="ins-detail" id="detailPanel">
+        <h2 id="detailTitle">Insight</h2>
+
+        <div class="ins-detail-row">
+            <div class="ins-detail-label">Content</div>
+            <div class="ins-detail-value">
+                <textarea class="ins-detail-input" id="detailContent" rows="3"></textarea>
+            </div>
+        </div>
+        <div class="ins-detail-row">
+            <div class="ins-detail-label">Category</div>
+            <div class="ins-detail-value">
+                <select class="ins-detail-input" id="detailCategory">
+                    <option value="contact">Contact</option>
+                    <option value="decision">Decision</option>
+                    <option value="preference">Preference</option>
+                    <option value="fact">Fact</option>
+                    <option value="deadline">Deadline</option>
+                    <option value="project">Project</option>
+                    <option value="workflow">Workflow</option>
+                </select>
+            </div>
+        </div>
+        <div class="ins-detail-row">
+            <div class="ins-detail-label">Importance</div>
+            <div class="ins-detail-value">
+                <input type="number" class="ins-detail-input" id="detailImportance" min="1" max="10" value="5">
+            </div>
+        </div>
+        <div class="ins-detail-row">
+            <div class="ins-detail-label">Entity Key</div>
+            <div class="ins-detail-value">
+                <input type="text" class="ins-detail-input" id="detailEntityKey" placeholder="e.g. contact:john@acme.com">
+            </div>
+        </div>
+        <div class="ins-detail-row">
+            <div class="ins-detail-label">Tags</div>
+            <div class="ins-detail-value">
+                <input type="text" class="ins-detail-input" id="detailTags" placeholder="comma, separated">
+            </div>
+        </div>
+        <div class="ins-detail-row">
+            <div class="ins-detail-label">Source</div>
+            <div class="ins-detail-value">
+                <span id="detailSource" style="font-size:12px;color:var(--text-muted)"></span>
+            </div>
+        </div>
+        <div class="ins-detail-row">
+            <div class="ins-detail-label">Created</div>
+            <div class="ins-detail-value">
+                <span id="detailCreated" style="font-size:12px;color:var(--text-muted)"></span>
+            </div>
+        </div>
+
+        <div class="ins-detail-actions">
+            <button class="ins-btn ins-btn-danger" id="detailDeleteBtn">Delete</button>
+            <button class="ins-btn" id="detailSaveBtn">Save</button>
+            <button class="ins-btn" id="detailCancelBtn" style="background:var(--bg-tertiary);color:var(--text-secondary)">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<div class="ins-toast" id="toast"></div>
+
+<script src="/static/insights.js"></script>
+</body>
+</html>

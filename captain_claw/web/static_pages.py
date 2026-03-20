@@ -88,6 +88,10 @@ async def serve_datastore(server: WebServer, request: web.Request) -> web.FileRe
     return web.FileResponse(STATIC_DIR / "datastore.html")
 
 
+async def serve_insights(server: WebServer, request: web.Request) -> web.FileResponse:
+    return web.FileResponse(STATIC_DIR / "insights.html")
+
+
 async def serve_playbooks(server: WebServer, request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "playbooks.html")
 

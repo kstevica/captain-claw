@@ -393,6 +393,14 @@ async def _run_agent(
             except Exception:
                 pass
 
+        # Auto-extract insights (periodic trigger).
+        try:
+            import asyncio as _asyncio2
+            from captain_claw.insights import maybe_extract_insights
+            _asyncio2.create_task(maybe_extract_insights(agent, trigger="periodic"))
+        except Exception:
+            pass
+
     except Exception as e:
         log.error("Chat error", error=str(e), public=is_public)
         send({"type": "error", "message": f"Error: {str(e)}"})

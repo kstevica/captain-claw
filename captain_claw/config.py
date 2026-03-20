@@ -413,6 +413,7 @@ class ToolsConfig(BaseModel):
         "playbooks",
         "typesense",
         "datastore",
+        "insights",
         "personality",
         "termux",
         "edit",
@@ -642,6 +643,19 @@ class ApisMemoryConfig(BaseModel):
     max_items_in_prompt: int = 5
 
 
+class InsightsConfig(BaseModel):
+    """Persistent insights memory — auto-extracted facts, contacts, decisions."""
+
+    enabled: bool = True
+    auto_extract: bool = True
+    inject_in_context: bool = True
+    max_items_in_prompt: int = 8
+    extraction_interval_messages: int = 8
+    extraction_cooldown_seconds: int = 60
+    max_insights: int = 500
+    db_path: str = "~/.captain-claw/insights.db"
+
+
 class ScaleConfig(BaseModel):
     """Scale loop thresholds for list processing tasks."""
 
@@ -820,6 +834,7 @@ class Config(BaseSettings):
     scale: ScaleConfig = Field(default_factory=ScaleConfig)
     deep_memory: DeepMemoryConfig = Field(default_factory=DeepMemoryConfig)
     datastore: DatastoreConfig = Field(default_factory=DatastoreConfig)
+    insights: InsightsConfig = Field(default_factory=InsightsConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="CLAW_",

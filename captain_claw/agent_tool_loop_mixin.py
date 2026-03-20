@@ -1449,6 +1449,17 @@ class AgentToolLoopMixin:
                     except Exception as _ac_err:
                         log.warning("Auto-capture APIs failed", tool=tc.name, error=str(_ac_err))
 
+                # Auto-extract insights from key tool results.
+                if result.success and hasattr(self, "_maybe_extract_insights_from_tool"):
+                    try:
+                        await self._maybe_extract_insights_from_tool(
+                            tc.name,
+                            arguments if isinstance(arguments, dict) else {},
+                            _result_content,
+                        )
+                    except Exception as _ie:
+                        log.warning("Insight extraction hook failed", tool=tc.name, error=str(_ie))
+
             except Exception as e:
                 log.error("Tool execution failed", tool=tc.name, error=str(e))
 

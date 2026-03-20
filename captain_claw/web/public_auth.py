@@ -32,6 +32,7 @@ _SECTION_ROUTES: dict[str, dict[str, list[str]]] = {
             "/api/media",
             "/api/todos",
             "/api/datastore/",
+            "/api/insights",
         ],
         "ws": ["/ws"],
         "static": ["/static/", "/favicon.ico"],
