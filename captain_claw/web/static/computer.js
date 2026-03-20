@@ -2465,6 +2465,11 @@ function initTabs() {
       if (tab === "data") {
         loadDataTables();
       }
+
+      // Load insights when switching to Insights tab.
+      if (tab === "insights") {
+        loadInsights();
+      }
     });
   }
 }
@@ -2865,6 +2870,132 @@ function initDataTab() {
     _dsPage++;
     _loadTableData(_dsSelectedTable);
   });
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   INSIGHTS TAB
+   ═══════════════════════════════════════════════════════════════ */
+
+let _insightsCache = [];
+let _insightsQuery = "";
+let _insightsCategory = "";
+
+function _insightRelTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const diff = Date.now() - d.getTime();
+  if (diff < 60000) return "just now";
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+  if (diff < 604800000) return `${Math.floor(diff / 86400000)}d ago`;
+  return d.toLocaleDateString();
+}
+
+function _renderInsightCard(item) {
+  const cat = esc(item.category || "fact");
+  const time = _insightRelTime(item.updated_at || item.created_at);
+  const tags = item.tags ? `<span class="insight-tags">${esc(item.tags)}</span>` : "";
+  const imp = item.importance || 5;
+  return `
+    <div class="insight-card" data-id="${esc(item.id)}">
+      <div class="insight-body">
+        <div class="insight-text">${esc(item.content)}</div>
+        <div class="insight-meta">
+          <span class="insight-badge insight-cat-${cat}">${cat}</span>
+          ${imp >= 7 ? '<span class="insight-badge insight-important">★ ' + imp + '</span>' : ''}
+          ${tags}
+          <span class="insight-time">${time}</span>
+        </div>
+      </div>
+      <div class="insight-actions">
+        <button class="todo-action-btn todo-delete-btn insight-delete-btn" title="Delete">✕</button>
+      </div>
+    </div>`;
+}
+
+function _renderInsightsList() {
+  const el = $("#insights-content");
+  const countEl = $("#insights-count");
+  let items = _insightsCache;
+
+  if (_insightsQuery) {
+    const q = _insightsQuery.toLowerCase();
+    items = items.filter(i =>
+      (i.content || "").toLowerCase().includes(q) ||
+      (i.tags || "").toLowerCase().includes(q) ||
+      (i.category || "").toLowerCase().includes(q)
+    );
+  }
+  if (_insightsCategory) {
+    items = items.filter(i => i.category === _insightsCategory);
+  }
+
+  countEl.textContent = items.length ? `${items.length} insight${items.length !== 1 ? "s" : ""}` : "";
+
+  if (!items.length) {
+    el.innerHTML = '<span class="output-placeholder">No insights found.</span>';
+    el.classList.add("output-empty");
+    return;
+  }
+
+  el.classList.remove("output-empty");
+  el.innerHTML = items.map(_renderInsightCard).join("");
+
+  // Wire delete buttons.
+  for (const btn of el.querySelectorAll(".insight-delete-btn")) {
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const card = btn.closest(".insight-card");
+      const id = card.dataset.id;
+      if (!confirm("Delete this insight?")) return;
+      try {
+        await fetch(`/api/insights/${encodeURIComponent(id)}`, { method: "DELETE" });
+        await loadInsights();
+      } catch (err) {
+        console.error("Failed to delete insight", err);
+      }
+    });
+  }
+}
+
+async function loadInsights() {
+  const el = $("#insights-content");
+  try {
+    const params = new URLSearchParams();
+    if (_insightsQuery) params.set("q", _insightsQuery);
+    if (_insightsCategory) params.set("category", _insightsCategory);
+    params.set("limit", "100");
+    const res = await fetch(`/api/insights?${params}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    _insightsCache = data.items || [];
+    _renderInsightsList();
+  } catch (e) {
+    console.error("Failed to load insights", e);
+    el.innerHTML = '<span class="output-placeholder">Failed to load insights.</span>';
+    el.classList.add("output-empty");
+  }
+}
+
+function initInsightsTab() {
+  let _searchTimer = null;
+  const searchInput = $("#insights-search");
+  searchInput.addEventListener("input", () => {
+    clearTimeout(_searchTimer);
+    _searchTimer = setTimeout(() => {
+      _insightsQuery = searchInput.value.trim();
+      loadInsights();
+    }, 300);
+  });
+
+  const catFilter = $("#insights-category-filter");
+  catFilter.addEventListener("change", () => {
+    _insightsCategory = catFilter.value;
+    loadInsights();
+  });
+
+  $("#insights-refresh-btn").addEventListener("click", loadInsights);
 }
 
 
@@ -6042,6 +6173,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   initTabs();
   initTodoTab();
   initDataTab();
+  initInsightsTab();
   initResize();
   initClearLog();
   initClearSession();

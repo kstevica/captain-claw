@@ -177,27 +177,49 @@ class InsightsManager:
         category: str | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
-        """FTS5 BM25 search."""
+        """Search insights — tries FTS5 prefix match first, falls back to LIKE."""
         await self._ensure_db()
         assert self._db is not None
 
         cat_filter = ""
-        params: list[Any] = [query]
+        cat_params: list[Any] = []
         if category:
             cat_filter = "AND i.category = ?"
-            params.append(category.lower().strip())
-        params.append(limit)
+            cat_params = [category.lower().strip()]
 
-        sql = f"""
-            SELECT i.*, rank
-            FROM insights_fts fts
-            JOIN insights i ON i.rowid = fts.rowid
-            WHERE insights_fts MATCH ?
+        # Build FTS query: add * to each token for prefix matching.
+        tokens = query.strip().split()
+        fts_query = " ".join(f'"{t}"*' for t in tokens if t)
+
+        if fts_query:
+            sql = f"""
+                SELECT i.*, rank
+                FROM insights_fts fts
+                JOIN insights i ON i.rowid = fts.rowid
+                WHERE insights_fts MATCH ?
+                {cat_filter}
+                ORDER BY rank
+                LIMIT ?
+            """
+            params: list[Any] = [fts_query, *cat_params, limit]
+            try:
+                rows = await self._db.execute_fetchall(sql, params)
+                if rows:
+                    return [self._row_to_dict(r) for r in rows]
+            except Exception:
+                pass  # fall through to LIKE
+
+        # Fallback: LIKE substring search.
+        like_pat = f"%{query.strip()}%"
+        sql_like = f"""
+            SELECT * FROM insights
+            WHERE (content LIKE ? OR tags LIKE ?)
             {cat_filter}
-            ORDER BY rank
+            ORDER BY created_at DESC
             LIMIT ?
         """
-        rows = await self._db.execute_fetchall(sql, params)
+        params_like: list[Any] = [like_pat, like_pat, *cat_params, limit]
+        rows = await self._db.execute_fetchall(sql_like, params_like)
         return [self._row_to_dict(r) for r in rows]
 
     async def list_recent(

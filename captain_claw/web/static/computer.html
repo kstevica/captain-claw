@@ -123,6 +123,7 @@
             <button class="tab-btn" data-tab="files">Files</button>
             <button class="tab-btn" data-tab="todos">Todos</button>
             <button class="tab-btn" data-tab="data">Data</button>
+            <button class="tab-btn" data-tab="insights">Insights</button>
             <button class="tab-btn" data-tab="visual">Visual</button>
             <button class="tab-btn" data-tab="map" style="display:none;">Map</button>
           </div>
@@ -234,6 +235,26 @@
                 <button id="data-next-btn" class="tab-btn">Next ▶</button>
               </div>
             </div>
+          </div>
+        </div>
+        <div id="output-insights" class="output-tab">
+          <div id="insights-toolbar">
+            <button id="insights-refresh-btn" class="tab-btn" title="Refresh insights">↻ Refresh</button>
+            <input id="insights-search" type="text" placeholder="Search insights..." spellcheck="false" autocomplete="off">
+            <select id="insights-category-filter">
+              <option value="">All</option>
+              <option value="contact">Contact</option>
+              <option value="decision">Decision</option>
+              <option value="preference">Preference</option>
+              <option value="fact">Fact</option>
+              <option value="deadline">Deadline</option>
+              <option value="project">Project</option>
+              <option value="workflow">Workflow</option>
+            </select>
+            <span id="insights-count"></span>
+          </div>
+          <div id="insights-content" class="output-empty">
+            <span class="output-placeholder">Persistent insights will appear here...</span>
           </div>
         </div>
         <div id="output-visual" class="output-tab">
