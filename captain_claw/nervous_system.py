@@ -127,6 +127,14 @@ class NervousSystemManager:
             except Exception:
                 pass  # Column already exists.
 
+        # Source provenance column.
+        try:
+            await self._db.execute(
+                "ALTER TABLE intuitions ADD COLUMN source_trigger TEXT DEFAULT 'dream'"
+            )
+        except Exception:
+            pass  # Column already exists.
+
         # Maturation pipeline columns.
         for col, typedef in [
             ("maturation_state", "TEXT DEFAULT 'mature'"),     # "raw", "maturing", "mature"
@@ -158,6 +166,7 @@ class NervousSystemManager:
         confidence: float = 0.5,
         importance: int = 5,
         tags: str | None = None,
+        source_trigger: str = "dream",
     ) -> str | None:
         """Insert a new intuition.  Returns the ID, or None if deduped."""
         await self._ensure_db()
@@ -199,13 +208,13 @@ class NervousSystemManager:
                (id, content, thread_type, source_layers, source_ids,
                 source_session, confidence, importance, access_count,
                 last_accessed, validated, created_at, updated_at, decayed_at, tags,
-                resolution_state, maturation_state, dream_cycles_seen)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 0, ?, ?, NULL, ?, ?, ?, 0)""",
+                resolution_state, maturation_state, dream_cycles_seen, source_trigger)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 0, ?, ?, NULL, ?, ?, ?, 0, ?)""",
             (intuition_id, content, thread_type,
              json.dumps(source_layers or []),
              json.dumps(source_ids or []),
              source_session, confidence, importance, now, now, tags,
-             resolution_state, maturation_state),
+             resolution_state, maturation_state, source_trigger),
         )
         await self._db.commit()
         log.debug("Intuition stored", id=intuition_id, thread_type=thread_type,
@@ -759,6 +768,7 @@ class NervousSystemManager:
             # Musical cognition columns (schema migrations).
             "resolution_state", "resolved_from_id",
             "maturation_state", "matured_at", "dream_cycles_seen",
+            "source_trigger",
         ]
         d: dict[str, Any] = {}
         for i, col in enumerate(cols):
@@ -809,7 +819,7 @@ _ATTR_LAST_TIME = "_nervous_last_dream_time"
 _ATTR_RUNNING = "_nervous_dream_running"
 
 
-async def dream(agent: Agent) -> list[dict[str, Any]]:
+async def dream(agent: Agent, *, source_trigger: str = "dream") -> list[dict[str, Any]]:
     """Core dreaming function — synthesize connections across all memory layers."""
     from captain_claw.llm import LLMResponse, Message
     from captain_claw.reflections import load_latest_reflection
@@ -979,6 +989,7 @@ async def dream(agent: Agent) -> list[dict[str, Any]]:
             confidence=float(item.get("confidence", 0.5)),
             importance=int(item.get("importance", 5)),
             tags=item.get("tags") or None,
+            source_trigger=source_trigger,
         )
         if intuition_id:
             stored.append(item)
@@ -1169,7 +1180,7 @@ async def maybe_idle_dream(
             _emit("🌙 Idle dreaming started — processing while inactive",
                   tool="nervous_system", phase="tool")
 
-        result = await dream(agent)
+        result = await dream(agent, source_trigger="idle_dream")
 
         # Record idle dream metric.
         try:

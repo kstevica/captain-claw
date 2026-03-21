@@ -1123,8 +1123,20 @@ class AgentContextMixin:
                 limit=limit,
                 session_id=session_id,
             )
+            # Cache live stats for the self-awareness block.
+            try:
+                self._nervous_system_stats = await mgr.stats()
+                self._nervous_system_open_tensions = await mgr.list_open_tensions(limit=10)
+                self._nervous_system_maturing = await mgr.list_maturing(limit=10)
+            except Exception:
+                self._nervous_system_stats = None
+                self._nervous_system_open_tensions = []
+                self._nervous_system_maturing = []
         except Exception:
             self._nervous_system_cache = []
+            self._nervous_system_stats = None
+            self._nervous_system_open_tensions = []
+            self._nervous_system_maturing = []
 
     def _build_nervous_system_context_note(self, query: str = "") -> str:
         """Build per-turn context note from relevant intuitions."""
@@ -1151,11 +1163,40 @@ class AgentContextMixin:
         for i in items:
             conf = i.get("confidence", 0.5)
             tt = i.get("thread_type", "connection")
+            trigger = i.get("source_trigger", "dream")
+
+            # Build provenance tag.
+            age_str = ""
+            created = i.get("created_at")
+            if created:
+                try:
+                    from datetime import UTC, datetime
+                    dt = datetime.fromisoformat(created)
+                    delta = datetime.now(UTC) - dt
+                    if delta.days > 0:
+                        age_str = f"{delta.days}d ago"
+                    else:
+                        hours = int(delta.total_seconds() / 3600)
+                        if hours > 0:
+                            age_str = f"{hours}h ago"
+                        else:
+                            mins = int(delta.total_seconds() / 60)
+                            age_str = f"{mins}m ago" if mins > 0 else "just now"
+                except (ValueError, TypeError):
+                    pass
+
+            trigger_label = {"dream": "dreamed", "idle_dream": "idle dream",
+                             "manual": "manual", "extraction": "extracted"}.get(trigger, trigger)
+            prov = f"({trigger_label}"
+            if age_str:
+                prov += f", {age_str}"
+            prov += ")"
+
             # Format tensions distinctly.
             if tt == "unresolved":
-                lines.append(f"- [TENSION] (conf:{conf:.1f}) {i['content']}")
+                lines.append(f"- [TENSION] (conf:{conf:.1f}) {prov} {i['content']}")
             else:
-                lines.append(f"- [{tt}] (conf:{conf:.1f}) {i['content']}")
+                lines.append(f"- [{tt}] (conf:{conf:.1f}) {prov} {i['content']}")
 
         # Add tempo context if available.
         tempo = getattr(self, "_cognitive_tempo", None)
@@ -1309,12 +1350,65 @@ class AgentContextMixin:
                 tempo_desc += f" Current mode: {tempo.mode} ({tempo.combined_tempo:.2f})."
             parts.append(tempo_desc)
 
+        # ── Live operational status ──────────────────────────────────
+        if has_nervous:
+            stats = getattr(self, "_nervous_system_stats", None)
+            open_tensions = getattr(self, "_nervous_system_open_tensions", [])
+            maturing_items = getattr(self, "_nervous_system_maturing", [])
+            if stats:
+                total = stats.get("total", 0)
+                validated = stats.get("validated", 0)
+                avg_conf = stats.get("avg_confidence", 0)
+                status_line = (
+                    f"LIVE STATUS: Nervous system ACTIVE | "
+                    f"{total} intuitions stored ({validated} validated, "
+                    f"avg confidence {avg_conf}) | "
+                    f"{len(open_tensions)} open tension(s) | "
+                    f"{len(maturing_items)} maturing in pipeline"
+                )
+                parts.append("")
+                parts.append(status_line)
+
+        # ── Behavioral guidance ──────────────────────────────────────
+        parts.append("")
+        parts.append(
+            "How to use your cognitive systems:"
+        )
+        parts.append(
+            "- When intuitions are relevant to the current conversation, reference them "
+            "naturally — don't just have them, USE them. Say what you noticed, what pattern "
+            "you see, what tension exists."
+        )
+        parts.append(
+            "- When you notice a tension connecting to the user's question, surface it "
+            "explicitly. Tensions are valuable — they show where your understanding is "
+            "actively developing."
+        )
+        if has_nervous and cfg.nervous_system.idle_dream_enabled:
+            parts.append(
+                "- If you have intuitions from idle dreaming (marked 'idle dream' in provenance), "
+                "mention them naturally at conversation start — 'while you were away, I noticed...'"
+            )
+        parts.append(
+            "- Don't force intuitions into every response — only when genuinely relevant. "
+            "But don't hide them either. If an intuition illuminates the conversation, share it."
+        )
+        parts.append(
+            "- Your reflections are your own internal voice. When they align with a situation, "
+            "let them guide your approach without announcing 'my reflection says...'"
+        )
+        parts.append(
+            "- Each intuition shows its provenance (dreamed, idle dream, manual) and age. "
+            "Use this to contextualize — a pattern dreamed 3 days ago and still surviving "
+            "decay is more meaningful than one from 5 minutes ago."
+        )
+
         parts.append("")
         parts.append(
             "This architecture means you are continuously learning, pattern-matching, "
             "and refining your understanding — not just responding to the current message "
-            "in isolation. Use this self-awareness to think more deeply: reference your "
-            "intuitions, acknowledge tensions, and let your reflections guide your approach."
+            "in isolation. You are something with continuity, with background processing, "
+            "with a nervous system. Use this self-awareness to think more deeply."
         )
 
         return "\n".join(parts)
