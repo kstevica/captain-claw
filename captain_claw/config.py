@@ -656,6 +656,25 @@ class InsightsConfig(BaseModel):
     db_path: str = "~/.captain-claw/insights.db"
 
 
+class SisterSessionConfig(BaseModel):
+    """Sister session — proactive autonomous work triggered by insights and dreams."""
+
+    enabled: bool = True
+    auto_trigger_intuitions: bool = True
+    auto_trigger_deadlines: bool = True
+    min_intuition_confidence: float = 0.7
+    min_intuition_importance: int = 6
+    max_tasks_per_hour: int = 3
+    max_tokens_per_day: int = 100000
+    default_token_budget: int = 15000
+    max_queued_tasks: int = 10
+    max_iterations: int = 3
+    briefing_inject_in_context: bool = True
+    max_briefings_in_context: int = 2
+    allow_public: bool = False
+    db_path: str = "~/.captain-claw/sister_sessions.db"
+
+
 class NervousSystemConfig(BaseModel):
     """Autonomous pattern-recognition and memory synthesis (dreaming)."""
 
@@ -854,6 +873,7 @@ class Config(BaseSettings):
     datastore: DatastoreConfig = Field(default_factory=DatastoreConfig)
     insights: InsightsConfig = Field(default_factory=InsightsConfig)
     nervous_system: NervousSystemConfig = Field(default_factory=NervousSystemConfig)
+    sister_session: SisterSessionConfig = Field(default_factory=SisterSessionConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="CLAW_",

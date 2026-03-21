@@ -147,3 +147,7 @@ async def serve_personality(server: WebServer, request: web.Request) -> web.File
 
 async def serve_semantic_memory(server: WebServer, request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "semantic-memory.html")
+
+
+async def serve_briefings(server: WebServer, request: web.Request) -> web.FileResponse:
+    return web.FileResponse(STATIC_DIR / "briefings.html")

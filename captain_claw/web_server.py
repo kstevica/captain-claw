@@ -174,6 +174,18 @@ COMMANDS: list[dict[str, str]] = [
     {"command": "/intuition delete <id>", "description": "Delete an intuition", "category": "Nervous System"},
     {"command": "/intuition stats", "description": "Show nervous system statistics", "category": "Nervous System"},
     {"command": "/intuition validate <id>", "description": "Validate an intuition (protect from decay)", "category": "Nervous System"},
+    {"command": "/briefing", "description": "List unread briefings", "category": "Sister Session"},
+    {"command": "/briefing all", "description": "List all briefings", "category": "Sister Session"},
+    {"command": "/briefing dismiss <id>", "description": "Dismiss a briefing", "category": "Sister Session"},
+    {"command": "/briefing dismiss all", "description": "Dismiss all unread briefings", "category": "Sister Session"},
+    {"command": "/briefing stats", "description": "Show sister session statistics", "category": "Sister Session"},
+    {"command": "/sister investigate <query>", "description": "Create an investigation task", "category": "Sister Session"},
+    {"command": "/sister status", "description": "Show sister session status", "category": "Sister Session"},
+    {"command": "/sister tasks", "description": "List queued tasks", "category": "Sister Session"},
+    {"command": "/sister delete <id>", "description": "Cancel a queued task", "category": "Sister Session"},
+    {"command": "/watch", "description": "List active watches", "category": "Sister Session"},
+    {"command": "/watch every <interval> <query>", "description": "Create a recurring watch", "category": "Sister Session"},
+    {"command": "/watch delete <id>", "description": "Delete a watch", "category": "Sister Session"},
 ]
 
 
@@ -274,6 +286,13 @@ class WebServer:
         # Prime GDrive tree cache for context injection (non-blocking).
         if hasattr(self.agent, "_refresh_gdrive_trees"):
             asyncio.ensure_future(self.agent._refresh_gdrive_trees())
+
+        # Wire sister session broadcast callback for WebSocket notifications.
+        try:
+            from captain_claw.sister_session import set_broadcast_callback
+            set_broadcast_callback(self._broadcast)
+        except Exception:
+            pass
 
     # ── Public-mode per-session agents ──────────────────────────────
 
@@ -390,6 +409,10 @@ class WebServer:
                 pass
             try:
                 await agent._refresh_nervous_system_cache()
+            except Exception:
+                pass
+            try:
+                await agent._refresh_briefing_context_cache()
             except Exception:
                 pass
 
@@ -1177,6 +1200,10 @@ class WebServer:
         from captain_claw.web.static_pages import serve_personality
         return await serve_personality(self, request)
 
+    async def _serve_briefings(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_briefings
+        return await serve_briefings(self, request)
+
     # ── Public session API ──────────────────────────────────────────
 
     async def _public_session_new(self, request: web.Request) -> web.Response:
@@ -1551,6 +1578,56 @@ class WebServer:
         from captain_claw.web.rest_nervous_system import get_stats
         return await get_stats(self, request)
 
+    # Sister Session REST
+
+    async def _ss_list_tasks(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_sister_session import list_tasks
+        return await list_tasks(self, request)
+
+    async def _ss_get_task(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_sister_session import get_task
+        return await get_task(self, request)
+
+    async def _ss_create_task(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_sister_session import create_task
+        return await create_task(self, request)
+
+    async def _ss_delete_task(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_sister_session import delete_task
+        return await delete_task(self, request)
+
+    async def _ss_list_briefings(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_sister_session import list_briefings
+        return await list_briefings(self, request)
+
+    async def _ss_get_briefing(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_sister_session import get_briefing
+        return await get_briefing(self, request)
+
+    async def _ss_update_briefing(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_sister_session import update_briefing
+        return await update_briefing(self, request)
+
+    async def _ss_delete_briefing(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_sister_session import delete_briefing
+        return await delete_briefing(self, request)
+
+    async def _ss_stats(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_sister_session import get_stats
+        return await get_stats(self, request)
+
+    async def _ss_list_watches(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_sister_session import list_watches
+        return await list_watches(self, request)
+
+    async def _ss_create_watch(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_sister_session import create_watch
+        return await create_watch(self, request)
+
+    async def _ss_delete_watch(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_sister_session import delete_watch
+        return await delete_watch(self, request)
+
     # Onboarding REST
     async def _get_onboarding_status(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_onboarding import get_onboarding_status
@@ -1823,6 +1900,19 @@ class WebServer:
         app.router.add_get("/api/nervous-system/{id}", self._ns_get)
         app.router.add_patch("/api/nervous-system/{id}", self._ns_update)
         app.router.add_delete("/api/nervous-system/{id}", self._ns_delete)
+        # Sister Session
+        app.router.add_get("/api/sister/tasks", self._ss_list_tasks)
+        app.router.add_post("/api/sister/tasks", self._ss_create_task)
+        app.router.add_get("/api/sister/stats", self._ss_stats)
+        app.router.add_get("/api/sister/tasks/{id}", self._ss_get_task)
+        app.router.add_delete("/api/sister/tasks/{id}", self._ss_delete_task)
+        app.router.add_get("/api/briefings", self._ss_list_briefings)
+        app.router.add_get("/api/briefings/{id}", self._ss_get_briefing)
+        app.router.add_patch("/api/briefings/{id}", self._ss_update_briefing)
+        app.router.add_delete("/api/briefings/{id}", self._ss_delete_briefing)
+        app.router.add_get("/api/sister/watches", self._ss_list_watches)
+        app.router.add_post("/api/sister/watches", self._ss_create_watch)
+        app.router.add_delete("/api/sister/watches/{id}", self._ss_delete_watch)
         # Playbooks API
         app.router.add_get("/api/playbooks", self._pb_list)
         app.router.add_get("/api/playbooks/search", self._pb_search)
@@ -1894,6 +1984,7 @@ class WebServer:
             app.router.add_get("/computer", self._serve_computer)
             app.router.add_get("/personality", self._serve_personality)
             app.router.add_get("/semantic-memory", self._serve_semantic_memory)
+            app.router.add_get("/briefings", self._serve_briefings)
             app.router.add_post("/api/computer/visualize", self._computer_visualize)
             app.router.add_post("/api/computer/visualize/stream", self._computer_visualize_stream)
             app.router.add_post("/api/computer/exploration", self._exploration_save)

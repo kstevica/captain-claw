@@ -56,6 +56,7 @@ Context awareness:
 {datastore_block}
 {insights_block}
 {nervous_system_block}
+{briefing_block}
 
 Efficient tool use:
 - Minimum tool calls needed. Stop when you have enough info.

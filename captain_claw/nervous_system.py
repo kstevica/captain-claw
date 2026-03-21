@@ -767,6 +767,14 @@ async def dream(agent: Agent) -> list[dict[str, Any]]:
         else:
             _emit("🧠 Dreaming done — no new intuitions", tool="nervous_system", phase="tool")
 
+    # 13. Sister session hook — check if intuitions should trigger proactive tasks.
+    if stored:
+        try:
+            from captain_claw.sister_session import on_intuitions_stored
+            await on_intuitions_stored(agent, stored)
+        except Exception as exc:
+            log.debug("Sister session hook failed (non-fatal)", error=str(exc))
+
     # Update tracking state.
     if agent.session:
         setattr(agent, _ATTR_LAST_MSG_IDX, len(agent.session.messages))

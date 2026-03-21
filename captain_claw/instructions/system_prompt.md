@@ -83,6 +83,7 @@ Conversation context and follow-up awareness:
 {datastore_block}
 {insights_block}
 {nervous_system_block}
+{briefing_block}
 
 Large-scale and incremental output policy:
 - When a task involves processing many items (files, URLs, records — more than ~10), DO NOT try to hold all results in context. The context window will overflow and earlier results will be lost to compaction.

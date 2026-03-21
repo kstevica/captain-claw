@@ -23,6 +23,7 @@ class CommandLane:
     SUBAGENT = "subagent"
     NESTED = "nested"
     AGENT_RUNTIME = "agent_runtime"
+    SISTER = "sister"
 
 
 class CommandLaneClearedError(RuntimeError):

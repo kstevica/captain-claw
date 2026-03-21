@@ -586,6 +586,14 @@ async def extract_insights(
         else:
             _emit("💡 Insight extraction done — nothing new to store", tool="insights", phase="tool")
 
+    # Sister session hook — check if any insights involve approaching deadlines.
+    if stored:
+        try:
+            from captain_claw.sister_session import on_insights_stored
+            await on_insights_stored(agent, stored)
+        except Exception as exc:
+            log.debug("Sister session hook failed (non-fatal)", error=str(exc))
+
     # Update tracking state.
     if agent.session:
         setattr(agent, _ATTR_LAST_MSG_IDX, len(agent.session.messages))

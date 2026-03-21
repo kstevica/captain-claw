@@ -34,6 +34,8 @@ _SECTION_ROUTES: dict[str, dict[str, list[str]]] = {
             "/api/datastore/",
             "/api/insights",
             "/api/nervous-system",
+            "/api/sister/",
+            "/api/briefings",
         ],
         "ws": ["/ws"],
         "static": ["/static/", "/favicon.ico"],

@@ -284,6 +284,15 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
         elif cmd in ("/intuition", "/intuitions", "/dream"):
             result = await _handle_intuition_command(server, args.strip())
 
+        elif cmd in ("/briefing", "/briefings"):
+            result = await _handle_briefing_command(server, args.strip())
+
+        elif cmd == "/sister":
+            result = await _handle_sister_command(server, args.strip())
+
+        elif cmd == "/watch":
+            result = await _handle_watch_command(server, args.strip())
+
         else:
             result = f"Unknown command: `{cmd}`. Type `/help` for available commands."
 
@@ -1272,6 +1281,278 @@ async def _handle_intuition_command(server: "WebServer", args: str) -> str:
         conf = item.get("confidence", 0.5)
         lines.append(f"#{idx} [{tt}] (conf:{conf:.1f}) {item['content']}  `{item['id']}`")
     return f"**Search results for** `{args}`:\n" + "\n".join(lines)
+
+
+async def _handle_briefing_command(server: "WebServer", args: str) -> str:
+    """Handle /briefing subcommands in the web UI."""
+    from captain_claw.sister_session import get_sister_session_manager
+
+    mgr = get_sister_session_manager()
+
+    # Get current session ID for filtering
+    session_id = None
+    agent = getattr(server, "agent", None)
+    if agent and agent.session:
+        session_id = str(agent.session.id)
+
+    if not args or args.lower() in ("list", "ls"):
+        items = await mgr.list_briefings(session_id, status="unread", limit=20)
+        if not items:
+            # Check for any briefings at all
+            all_items = await mgr.list_briefings(session_id, limit=5)
+            if all_items:
+                return "No unread briefings. Use `/briefing all` to see all."
+            return "No briefings yet. Tasks from insights and dreams will produce briefings here."
+        lines: list[str] = []
+        for idx, item in enumerate(items, 1):
+            icon = "\u26a1" if item.get("actionable") else "\U0001f4cb"
+            src = item.get("source_type", "?")
+            conf = item.get("confidence", 0.0)
+            lines.append(
+                f"#{idx} {icon} [{src}] (conf:{conf:.1f}) {item['summary']}  `{item['id']}`"
+            )
+        return f"**Unread Briefings** ({len(items)}):\n" + "\n".join(lines)
+
+    parts = args.split(None, 1)
+    subcmd = parts[0].lower()
+    subargs = parts[1].strip() if len(parts) > 1 else ""
+
+    if subcmd == "all":
+        items = await mgr.list_briefings(session_id, limit=30)
+        if not items:
+            return "No briefings yet."
+        lines = []
+        for idx, item in enumerate(items, 1):
+            icon = "\u26a1" if item.get("actionable") else "\U0001f4cb"
+            src = item.get("source_type", "?")
+            status = item.get("status", "unread")
+            lines.append(
+                f"#{idx} {icon} [{src}] ({status}) {item['summary']}  `{item['id']}`"
+            )
+        total = await mgr.count_briefings(session_id)
+        return f"**All Briefings** ({len(items)} of {total}):\n" + "\n".join(lines)
+
+    if subcmd in ("dismiss", "close"):
+        if subargs.lower() == "all":
+            items = await mgr.list_briefings(session_id, status="unread", limit=100)
+            count = 0
+            for item in items:
+                await mgr.dismiss(item["id"])
+                count += 1
+            return f"Dismissed {count} briefing(s)."
+        if not subargs:
+            return "Usage: `/briefing dismiss <id>` or `/briefing dismiss all`"
+        ok = await mgr.dismiss(subargs.strip())
+        if not ok:
+            return f"Briefing not found: `{subargs}`"
+        return f"Dismissed briefing `{subargs}`."
+
+    if subcmd in ("delete", "del", "rm"):
+        if not subargs:
+            return "Usage: `/briefing delete <id>`"
+        ok = await mgr.delete_briefing(subargs.strip())
+        if not ok:
+            return f"Briefing not found: `{subargs}`"
+        return f"Deleted briefing `{subargs}`."
+
+    if subcmd == "stats":
+        data = await mgr.stats(session_id)
+        lines = [
+            "**Sister Session Stats:**",
+            f"- Total tasks: {data['total_tasks']}",
+            f"- Queued: {data['queued_tasks']}",
+            f"- Completed: {data['done_tasks']}",
+            f"- Total briefings: {data['total_briefings']}",
+            f"- Unread: {data['unread_briefings']}",
+            f"- Tokens today: {data['tokens_used_today']:,}",
+            f"- Tasks today: {data['tasks_run_today']}",
+        ]
+        return "\n".join(lines)
+
+    # Treat as briefing ID lookup
+    item = await mgr.get_briefing(args.strip())
+    if item:
+        if item.get("status") == "unread":
+            await mgr.mark_read(item["id"])
+        icon = "\u26a1" if item.get("actionable") else "\U0001f4cb"
+        src = item.get("source_type", "?")
+        lines = [
+            f"**{icon} Briefing** ({src})",
+            f"**Reason:** {item.get('trigger_reason', '')}",
+            f"**Confidence:** {item.get('confidence', 0.0):.1f}",
+            f"**Status:** {item.get('status', 'unread')}",
+            "",
+            item.get("body") or item.get("summary", ""),
+        ]
+        return "\n".join(lines)
+
+    return f"Briefing not found: `{args}`. Use `/briefing` to list unread briefings."
+
+
+async def _handle_sister_command(server: "WebServer", args: str) -> str:
+    """Handle /sister subcommands in the web UI."""
+    from captain_claw.sister_session import get_sister_session_manager, maybe_create_proactive_task
+
+    mgr = get_sister_session_manager()
+
+    if not args:
+        return (
+            "**Sister Session** — proactive autonomous work\n\n"
+            "Commands:\n"
+            "- `/sister investigate <query>` — create an investigation task\n"
+            "- `/sister status` — show sister session stats\n"
+            "- `/sister tasks` — list queued tasks\n"
+            "- `/sister delete <id>` — delete a task\n"
+            "- `/briefing` — view briefing results"
+        )
+
+    parts = args.split(None, 1)
+    subcmd = parts[0].lower()
+    subargs = parts[1].strip() if len(parts) > 1 else ""
+
+    if subcmd in ("investigate", "research", "check"):
+        if not subargs:
+            return "Usage: `/sister investigate <query>`"
+        agent = getattr(server, "agent", None)
+        if not agent or not agent.session:
+            return "No active session."
+        task_id = await maybe_create_proactive_task(
+            parent_session_id=str(agent.session.id),
+            source_type="manual",
+            source_id=f"manual-{subargs[:20]}",
+            trigger_reason=subargs,
+            priority=8,
+        )
+        if task_id:
+            return f"Investigation task created: **{subargs}** (`{task_id}`)"
+        return "Task not created — rate limit, budget cap, or duplicate."
+
+    if subcmd in ("status", "stats"):
+        session_id = None
+        agent = getattr(server, "agent", None)
+        if agent and agent.session:
+            session_id = str(agent.session.id)
+        data = await mgr.stats(session_id)
+        lines = [
+            "**Sister Session Status:**",
+            f"- Queued tasks: {data['queued_tasks']}",
+            f"- Completed tasks: {data['done_tasks']}",
+            f"- Unread briefings: {data['unread_briefings']}",
+            f"- Tokens used today: {data['tokens_used_today']:,}",
+            f"- Tasks run today: {data['tasks_run_today']}",
+        ]
+        return "\n".join(lines)
+
+    if subcmd in ("tasks", "queue"):
+        session_id = None
+        agent = getattr(server, "agent", None)
+        if agent and agent.session:
+            session_id = str(agent.session.id)
+        items = await mgr.list_tasks(session_id, status="queued", limit=20)
+        if not items:
+            return "No queued tasks."
+        lines = []
+        for idx, item in enumerate(items, 1):
+            src = item.get("source_type", "?")
+            pri = item.get("priority", 5)
+            lines.append(
+                f"#{idx} [{src}] (pri:{pri}) {item.get('trigger_reason', '')}  `{item['id']}`"
+            )
+        return f"**Queued Tasks** ({len(items)}):\n" + "\n".join(lines)
+
+    if subcmd in ("delete", "del", "rm", "cancel"):
+        if not subargs:
+            return "Usage: `/sister delete <id>`"
+        ok = await mgr.delete_task(subargs.strip())
+        if not ok:
+            return f"Task not found: `{subargs}`"
+        return f"Deleted task `{subargs}`."
+
+    return f"Unknown sister command: `{subcmd}`. Use `/sister` for help."
+
+
+async def _handle_watch_command(server: "WebServer", args: str) -> str:
+    """Handle /watch subcommands."""
+    from captain_claw.sister_session import get_sister_session_manager
+
+    mgr = get_sister_session_manager()
+    session_id = None
+    agent = getattr(server, "agent", None)
+    if agent and agent.session:
+        session_id = str(agent.session.id)
+
+    if not args:
+        return (
+            "**Watch** — periodic monitoring\n\n"
+            "Usage:\n"
+            "- `/watch <query> [every <interval>]` — create a watch\n"
+            "- `/watch list` — list active watches\n"
+            "- `/watch delete <id>` — remove a watch\n\n"
+            "Examples:\n"
+            "- `/watch check if PR #123 is merged every 30m`\n"
+            "- `/watch monitor HN front page for our launch every 1h`"
+        )
+
+    parts = args.split(None, 1)
+    subcmd = parts[0].lower()
+    subargs = parts[1].strip() if len(parts) > 1 else ""
+
+    if subcmd in ("list", "ls"):
+        items = await mgr.list_watches(session_id, limit=20)
+        if not items:
+            return "No active watches."
+        lines: list[str] = []
+        for idx, item in enumerate(items, 1):
+            interval = item.get("interval_seconds", 3600)
+            if interval >= 3600:
+                interval_str = f"{interval // 3600}h"
+            else:
+                interval_str = f"{interval // 60}m"
+            enabled = "\u2713" if item.get("enabled") else "\u2717"
+            lines.append(
+                f"#{idx} {enabled} (every {interval_str}) {item.get('query', '')}  `{item['id']}`"
+            )
+        return f"**Active Watches** ({len(items)}):\n" + "\n".join(lines)
+
+    if subcmd in ("delete", "del", "rm", "remove"):
+        if not subargs:
+            return "Usage: `/watch delete <id>`"
+        ok = await mgr.delete_watch(subargs.strip())
+        if not ok:
+            return f"Watch not found: `{subargs}`"
+        return f"Deleted watch `{subargs}`."
+
+    # Parse "query every interval" pattern
+    query = args
+    interval_seconds = 3600  # Default: every hour
+
+    # Look for "every <interval>" at the end
+    import re
+    every_match = re.search(r'\s+every\s+(\d+)\s*(m|min|mins|minutes?|h|hr|hrs|hours?)\s*$', args, re.IGNORECASE)
+    if every_match:
+        query = args[:every_match.start()].strip()
+        amount = int(every_match.group(1))
+        unit = every_match.group(2).lower()
+        if unit.startswith("h"):
+            interval_seconds = amount * 3600
+        else:
+            interval_seconds = amount * 60
+
+    if not query:
+        return "Usage: `/watch <query> [every <interval>]`"
+    if not session_id:
+        return "No active session."
+
+    watch_id = await mgr.create_watch(
+        parent_session_id=session_id,
+        query=query,
+        interval_seconds=interval_seconds,
+    )
+    if interval_seconds >= 3600:
+        interval_str = f"{interval_seconds // 3600}h"
+    else:
+        interval_str = f"{interval_seconds // 60}m"
+    return f"Watch created (every {interval_str}): **{query}** (`{watch_id}`)"
 
 
 def format_help() -> str:

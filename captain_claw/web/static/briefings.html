@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sister Session — Captain Claw</title>
+    <link rel="stylesheet" href="/static/briefings.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<header class="brf-header">
+    <div class="brf-header-left">
+        <a href="/" class="brf-logo-link"><img src="/static/logo.svg" alt="Home"></a>
+        <h1>Sister Session</h1>
+        <span class="brf-unread-badge" id="headerUnread" style="display:none">0</span>
+    </div>
+    <div class="brf-header-right">
+        <a href="/insights" class="brf-nav-link">Insights</a>
+        <a href="/intuitions" class="brf-nav-link">Nervous System</a>
+        <a href="/chat" class="brf-nav-link">&larr; Chat</a>
+    </div>
+</header>
+
+<div class="brf-layout">
+    <!-- Stats bar -->
+    <div class="brf-stats-bar" id="statsBar">
+        <div class="brf-stat">Unread: <span class="brf-stat-value" id="statUnread">—</span></div>
+        <div class="brf-stat">Total briefings: <span class="brf-stat-value" id="statBriefings">—</span></div>
+        <div class="brf-stat">Queued tasks: <span class="brf-stat-value" id="statQueued">—</span></div>
+        <div class="brf-stat">Today's tokens: <span class="brf-stat-value" id="statTokens">—</span></div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="brf-tabs">
+        <button class="brf-tab active" data-tab="briefings">Briefings <span class="brf-tab-count" id="tabBriefingCount"></span></button>
+        <button class="brf-tab" data-tab="tasks">Tasks <span class="brf-tab-count" id="tabTaskCount"></span></button>
+        <button class="brf-tab" data-tab="watches">Watches <span class="brf-tab-count" id="tabWatchCount"></span></button>
+    </div>
+
+    <!-- Briefings toolbar -->
+    <div class="brf-toolbar" id="briefingsToolbar">
+        <select class="brf-filter" id="briefingStatusFilter">
+            <option value="">All statuses</option>
+            <option value="unread" selected>Unread</option>
+            <option value="read">Read</option>
+            <option value="dismissed">Dismissed</option>
+            <option value="acted">Acted</option>
+        </select>
+        <button class="brf-btn-secondary brf-btn" id="dismissAllBtn">Dismiss all unread</button>
+        <span class="brf-count" id="briefingCount"></span>
+    </div>
+
+    <!-- Tasks toolbar -->
+    <div class="brf-toolbar" id="tasksToolbar" style="display:none">
+        <select class="brf-filter" id="taskStatusFilter">
+            <option value="">All statuses</option>
+            <option value="queued">Queued</option>
+            <option value="running">Running</option>
+            <option value="done">Done</option>
+            <option value="failed">Failed</option>
+            <option value="dismissed">Dismissed</option>
+        </select>
+        <button class="brf-btn" id="createTaskBtn">+ Investigate</button>
+        <span class="brf-count" id="taskCount"></span>
+    </div>
+
+    <!-- Watches toolbar -->
+    <div class="brf-toolbar" id="watchesToolbar" style="display:none">
+        <button class="brf-btn" id="createWatchBtn">+ New Watch</button>
+        <span class="brf-count" id="watchCount"></span>
+    </div>
+
+    <!-- Content area -->
+    <div class="brf-list" id="contentList"></div>
+</div>
+
+<!-- Briefing Detail Modal -->
+<div class="brf-detail-overlay" id="detailOverlay">
+    <div class="brf-detail" id="detailPanel">
+        <h2 id="detailTitle">Briefing</h2>
+
+        <div class="brf-detail-row">
+            <div class="brf-detail-label">Status</div>
+            <div class="brf-detail-value" id="detailStatus"></div>
+        </div>
+        <div class="brf-detail-row">
+            <div class="brf-detail-label">Source</div>
+            <div class="brf-detail-value" id="detailSource"></div>
+        </div>
+        <div class="brf-detail-row">
+            <div class="brf-detail-label">Summary</div>
+            <div class="brf-detail-value" id="detailSummary"></div>
+        </div>
+        <div class="brf-detail-row">
+            <div class="brf-detail-label">Findings</div>
+            <div class="brf-detail-value"><pre id="detailFindings"></pre></div>
+        </div>
+        <div class="brf-detail-row">
+            <div class="brf-detail-label">Actionable</div>
+            <div class="brf-detail-value" id="detailActionable"></div>
+        </div>
+        <div class="brf-detail-row">
+            <div class="brf-detail-label">Confidence</div>
+            <div class="brf-detail-value" id="detailConfidence"></div>
+        </div>
+        <div class="brf-detail-row">
+            <div class="brf-detail-label">Tags</div>
+            <div class="brf-detail-value" id="detailTags"></div>
+        </div>
+        <div class="brf-detail-row">
+            <div class="brf-detail-label">Created</div>
+            <div class="brf-detail-value" id="detailCreated" style="color:var(--text-muted)"></div>
+        </div>
+
+        <div class="brf-detail-actions">
+            <button class="brf-btn brf-btn-danger" id="detailDeleteBtn">Delete</button>
+            <button class="brf-btn brf-btn-secondary" id="detailDismissBtn">Dismiss</button>
+            <button class="brf-btn brf-btn-secondary" id="detailActedBtn">Mark as Acted</button>
+            <button class="brf-btn" id="detailCloseBtn" style="background:var(--bg-tertiary);color:var(--text-secondary)">Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- Create Task Modal -->
+<div class="brf-detail-overlay" id="taskOverlay">
+    <div class="brf-detail" id="taskPanel" style="width:480px">
+        <h2>Create Investigation Task</h2>
+
+        <div class="brf-detail-row">
+            <div class="brf-detail-label">Query</div>
+            <div class="brf-detail-value">
+                <textarea id="taskQuery" rows="3" placeholder="What should the sister session investigate?" style="width:100%;padding:8px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;font-family:var(--font);outline:none;resize:vertical"></textarea>
+            </div>
+        </div>
+        <div class="brf-detail-row">
+            <div class="brf-detail-label">Priority</div>
+            <div class="brf-detail-value">
+                <input type="number" id="taskPriority" value="8" min="1" max="10" style="width:60px;padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;outline:none">
+                <span style="font-size:11px;color:var(--text-muted);margin-left:8px">1 (low) — 10 (critical)</span>
+            </div>
+        </div>
+
+        <div class="brf-detail-actions">
+            <button class="brf-btn" id="taskSubmitBtn">Create Task</button>
+            <button class="brf-btn" id="taskCancelBtn" style="background:var(--bg-tertiary);color:var(--text-secondary)">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<!-- Create Watch Modal -->
+<div class="brf-detail-overlay" id="watchOverlay">
+    <div class="brf-detail" id="watchPanel" style="width:480px">
+        <h2>Create Watch</h2>
+
+        <div class="brf-detail-row">
+            <div class="brf-detail-label">Query</div>
+            <div class="brf-detail-value">
+                <textarea id="watchQuery" rows="3" placeholder="What should the sister session periodically check?" style="width:100%;padding:8px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;font-family:var(--font);outline:none;resize:vertical"></textarea>
+            </div>
+        </div>
+        <div class="brf-detail-row">
+            <div class="brf-detail-label">Interval</div>
+            <div class="brf-detail-value">
+                <select id="watchInterval" style="padding:6px 10px;background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;font-family:var(--font);outline:none">
+                    <option value="1800">Every 30 minutes</option>
+                    <option value="3600" selected>Every hour</option>
+                    <option value="7200">Every 2 hours</option>
+                    <option value="14400">Every 4 hours</option>
+                    <option value="28800">Every 8 hours</option>
+                    <option value="43200">Every 12 hours</option>
+                    <option value="86400">Every day</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="brf-detail-actions">
+            <button class="brf-btn" id="watchSubmitBtn">Create Watch</button>
+            <button class="brf-btn" id="watchCancelBtn" style="background:var(--bg-tertiary);color:var(--text-secondary)">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<div class="brf-toast" id="toast"></div>
+
+<script src="/static/briefings.js"></script>
+</body>
+</html>

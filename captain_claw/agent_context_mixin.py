@@ -1120,6 +1120,58 @@ class AgentContextMixin:
             "inform your responses but treat low-confidence ones as speculative."
         )
 
+    # ── Sister session briefing context ──────────────────────────────
+
+    async def _refresh_briefing_context_cache(self) -> None:
+        """Pre-fetch unread briefings for context injection."""
+        cfg = get_config()
+        if not cfg.sister_session.enabled or not cfg.sister_session.briefing_inject_in_context:
+            return
+        try:
+            from captain_claw.sister_session import get_sister_session_manager, get_session_sister_manager
+            if cfg.web.public_run == "computer" and self.session:
+                mgr = get_session_sister_manager(str(self.session.id))
+            else:
+                mgr = get_sister_session_manager()
+            session_id = str(self.session.id) if self.session else None
+            self._briefing_context_cache = await mgr.list_briefings(
+                session_id,
+                status="unread",
+                limit=cfg.sister_session.max_briefings_in_context,
+            )
+        except Exception:
+            self._briefing_context_cache = []
+
+    def _build_briefing_context_note(self) -> str:
+        """Build context note from unread briefings."""
+        cfg = get_config()
+        if not cfg.sister_session.enabled or not cfg.sister_session.briefing_inject_in_context:
+            return ""
+        items = getattr(self, "_briefing_context_cache", None)
+        if not items:
+            return ""
+        lines = ["Your sister session has findings ready:"]
+        for b in items[:cfg.sister_session.max_briefings_in_context]:
+            icon = "\u26a1" if b.get("actionable") else "\U0001f4cb"
+            lines.append(f"- {icon} [{b.get('source_type', '?')}] {b.get('summary', '')}")
+        lines.append("The user can review details with /briefing.")
+        return "\n".join(lines)
+
+    def _build_briefing_block(self) -> str:
+        """Build the {briefing_block} for the system prompt."""
+        cfg = get_config()
+        if not cfg.sister_session.enabled:
+            return ""
+        items = getattr(self, "_briefing_context_cache", None)
+        if not items:
+            return ""
+        return (
+            "You have a sister session that proactively investigates insights and "
+            "hypotheses in the background. Unread briefings are shown in context. "
+            "Mention relevant findings naturally in your responses and suggest the "
+            "user run /briefing for details."
+        )
+
     def _build_semantic_memory_note(
         self,
         query: str | None,
@@ -1415,6 +1467,7 @@ class AgentContextMixin:
         await self._refresh_datastore_context_cache()
         await self._refresh_insights_context_cache()
         await self._refresh_nervous_system_cache()
+        await self._refresh_briefing_context_cache()
 
         self._initialized = True
         log.info("Agent initialized", session_id=self.session.id)
@@ -1978,6 +2031,7 @@ class AgentContextMixin:
         )
         insights_block = self._build_insights_block()
         nervous_system_block = self._build_nervous_system_block()
+        briefing_block = self._build_briefing_block()
 
         base_prompt = self.instructions.render(
             "system_prompt.md",
@@ -2000,6 +2054,7 @@ class AgentContextMixin:
             datastore_block=datastore_block,
             insights_block=insights_block,
             nervous_system_block=nervous_system_block,
+            briefing_block=briefing_block,
         )
 
         # Collapse triple+ newlines left by absent conditional sections.
@@ -2539,6 +2594,14 @@ class AgentContextMixin:
                 "content": nervous_note,
                 "tool_name": "nervous_system_context",
                 "token_count": self._count_tokens(nervous_note),
+            })
+        briefing_note = self._build_briefing_context_note()
+        if briefing_note:
+            candidate_messages.append({
+                "role": "assistant",
+                "content": briefing_note,
+                "tool_name": "briefing_context",
+                "token_count": self._count_tokens(briefing_note),
             })
         # Workspace manifest — compact listing of files created/modified
         # this session.  Gives the LLM a project map without needing

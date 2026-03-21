@@ -558,6 +558,13 @@ async def cron_scheduler_loop(ctx: RuntimeContext) -> None:
                 kind = getattr(job, "kind", "?")
                 log.info("cron_executing_job", job_id=job_id, kind=kind)
                 await execute_cron_job(ctx, job, trigger="scheduled")
+
+            # Poll sister session watches for due tasks
+            try:
+                from captain_claw.sister_session import poll_due_watches
+                await poll_due_watches()
+            except Exception:
+                pass
         except asyncio.CancelledError:
             log.info("cron_scheduler_loop_cancelled")
             raise
