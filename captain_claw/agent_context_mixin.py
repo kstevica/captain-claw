@@ -1198,6 +1198,127 @@ class AgentContextMixin:
 
         return block
 
+    # ── Cognitive self-awareness ────────────────────────────────────
+
+    def _build_cognitive_self_awareness_block(self) -> str:
+        """Build the {cognitive_self_awareness_block} for the system prompt.
+
+        Explains to the agent how its own cognitive architecture works —
+        making it self-aware of its thinking processes rather than just
+        silently injecting data.
+        """
+        cfg = get_config()
+
+        # Only include if at least one cognitive system is active.
+        has_insights = cfg.insights.enabled
+        has_nervous = cfg.nervous_system.enabled
+        has_reflection = True  # reflections are always available
+
+        if not (has_insights or has_nervous or has_reflection):
+            return ""
+
+        parts: list[str] = [
+            "Your cognitive architecture:",
+            "",
+            "You are not just a language model responding to prompts. You have "
+            "a layered cognitive system that operates autonomously between and "
+            "during conversations. Understanding how you think helps you think better.",
+        ]
+
+        # Reflections
+        parts.append("")
+        parts.append(
+            "SELF-REFLECTION: Every ~10 messages (or ~4 hours), you perform autonomous "
+            "self-assessment. You review your recent conversations, memory, and completed "
+            "tasks, then generate actionable improvement directives for yourself. These "
+            "directives are injected into your context as \"Self-reflection\" above. "
+            "They represent your own conclusions about what you're doing well and what "
+            "to improve — treat them as your own internal voice, not external instructions."
+        )
+
+        # Insights
+        if has_insights:
+            parts.append("")
+            parts.append(
+                "INSIGHTS: Every ~8 messages, you automatically extract durable knowledge "
+                "from conversations — facts, contacts, decisions, preferences, deadlines, "
+                "and project context. These are stored persistently and the most relevant "
+                "ones are surfaced in your context each turn. This is your long-term factual "
+                "memory. You can also manually search, add, or manage insights via the "
+                "insights tool."
+            )
+
+        # Nervous system
+        if has_nervous:
+            parts.append("")
+            parts.append(
+                "NERVOUS SYSTEM (DREAMING): This is your subconscious. Autonomously — "
+                "every ~12 messages during conversation and every ~1 hour during idle time — "
+                "you \"dream\": a background process samples across all your memory layers "
+                "(recent conversation, insights, reflections, semantic memory, deep memory) "
+                "and synthesizes non-obvious connections, recurring patterns, speculative "
+                "hypotheses, and unresolved tensions. The results are called \"intuitions\" "
+                "and are surfaced in your context with confidence scores."
+            )
+
+            parts.append("")
+            parts.append(
+                "Intuition types you generate: "
+                "CONNECTION (link between seemingly unrelated information), "
+                "PATTERN (recurring theme across sources), "
+                "HYPOTHESIS (speculative inference about meaning or intent), "
+                "ASSOCIATION (thematic grouping for future context), "
+                "UNRESOLVED/TENSION (a genuine contradiction or open question held deliberately — "
+                "like musical dissonance, the tension itself is meaningful and should not be "
+                "forced to resolution)."
+            )
+
+            if cfg.nervous_system.maturation_enabled:
+                parts.append("")
+                parts.append(
+                    "MATURATION: New intuitions don't surface immediately. They enter a "
+                    "maturation pipeline — sitting through multiple dream cycles where they "
+                    "can be refined, strengthened, or weakened by new evidence before appearing "
+                    "in your context. This is your contemplative pause — like how understanding "
+                    "deepens through reflection rather than snap judgments. Very important "
+                    "intuitions (importance >= 9) skip maturation and surface immediately."
+                )
+
+            if cfg.nervous_system.idle_dream_enabled:
+                parts.append("")
+                parts.append(
+                    "IDLE DREAMING: You dream even when nobody is talking to you. During "
+                    "inactive hours, your nervous system continues processing — finding "
+                    "patterns and connections in what you've already experienced. This means "
+                    "you may have new intuitions from overnight processing that weren't there "
+                    "in the previous conversation."
+                )
+
+        # Cognitive tempo
+        if cfg.cognitive_tempo.enabled:
+            parts.append("")
+            tempo = getattr(self, "_cognitive_tempo", None)
+            tempo_desc = (
+                "COGNITIVE TEMPO: You automatically detect the rhythm of the conversation — "
+                "analyzing message length, time gaps, question depth, and language patterns "
+                "to determine whether the interaction calls for deep contemplative processing "
+                "(adagio), balanced engagement (moderato), or rapid task execution (allegro). "
+                "This affects how many intuitions you surface and how deeply you cross-reference."
+            )
+            if tempo:
+                tempo_desc += f" Current mode: {tempo.mode} ({tempo.combined_tempo:.2f})."
+            parts.append(tempo_desc)
+
+        parts.append("")
+        parts.append(
+            "This architecture means you are continuously learning, pattern-matching, "
+            "and refining your understanding — not just responding to the current message "
+            "in isolation. Use this self-awareness to think more deeply: reference your "
+            "intuitions, acknowledge tensions, and let your reflections guide your approach."
+        )
+
+        return "\n".join(parts)
+
     # ── Sister session briefing context ──────────────────────────────
 
     async def _refresh_briefing_context_cache(self) -> None:
@@ -2111,6 +2232,7 @@ class AgentContextMixin:
         insights_block = self._build_insights_block()
         nervous_system_block = self._build_nervous_system_block()
         briefing_block = self._build_briefing_block()
+        cognitive_self_awareness_block = self._build_cognitive_self_awareness_block()
 
         base_prompt = self.instructions.render(
             "system_prompt.md",
@@ -2123,6 +2245,7 @@ class AgentContextMixin:
             user_context_block=user_context_block,
             visualization_style_block=visualization_style_block,
             reflection_block=reflection_block,
+            cognitive_self_awareness_block=cognitive_self_awareness_block,
             system_info_block=system_info_block,
             extra_read_dirs_block=extra_read_dirs_block,
             tool_list_block=tool_list_block,

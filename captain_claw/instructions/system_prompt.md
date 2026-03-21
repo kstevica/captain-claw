@@ -2,6 +2,7 @@
 {user_context_block}
 {visualization_style_block}
 {reflection_block}
+{cognitive_self_awareness_block}
 
 {tool_list_block}
 {browser_policy_block}
