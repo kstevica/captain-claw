@@ -52,6 +52,8 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [scale](#scale)
   - [datastore](#datastore-1)
   - [deep_memory](#deep_memory)
+  - [insights](#insights-1)
+  - [nervous_system](#nervous_system)
 - [Guard System](#guard-system)
 - [Skills System](#skills-system)
 - [Datastore](#datastore)
@@ -67,6 +69,8 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [Playbooks Editor](#playbooks-editor)
 - [Personality System](#personality-system)
 - [Self-Reflection System](#self-reflection-system)
+- [Insights](#insights)
+- [Nervous System (Dreaming)](#nervous-system-dreaming)
 - [Session Management](#session-management)
 - [Chunked Processing Pipeline](#chunked-processing-pipeline)
 - [Context Compaction](#context-compaction)
@@ -482,6 +486,28 @@ The agent can also manage APIs via the `apis` tool during conversation. APIs are
 | `/reflection` | Show the latest self-reflection |
 | `/reflection generate` | Trigger a new self-reflection |
 | `/reflection list` | List recent reflections with timestamps |
+
+### Insight Commands
+
+| Command | Description |
+|---|---|
+| `/insight` or `/insights` | List recent insights |
+| `/insight <query>` | Search insights by keyword |
+| `/insight stats` | Show insight statistics |
+| `/insight add <content>` | Manually add an insight |
+| `/insight delete <id>` | Delete an insight |
+
+### Intuition Commands
+
+| Command | Description |
+|---|---|
+| `/intuition` or `/intuitions` | List recent intuitions |
+| `/intuition <query>` | Search intuitions by keyword |
+| `/intuition stats` | Show intuition statistics |
+| `/intuition dream` | Manually trigger a dream cycle |
+| `/intuition add <content>` | Manually add an intuition |
+| `/intuition validate <id>` | Validate an intuition (protects from decay) |
+| `/intuition delete <id>` | Delete an intuition |
 
 ### Orchestrator Commands
 
@@ -1599,6 +1625,43 @@ deep_memory:
 - `updated_at` — unix timestamp (default sort)
 - `embedding` — optional float array for vector search
 
+### insights
+
+Persistent knowledge base auto-extracted from conversations. The agent identifies facts, contacts, decisions, deadlines, and other durable knowledge during conversations.
+
+```yaml
+insights:
+  enabled: true                           # enable insights extraction
+  auto_extract: true                      # auto-extract after agent turns
+  inject_in_context: true                 # inject relevant insights into system prompt
+  max_items_in_prompt: 8                  # max insights shown in context
+  extraction_interval_messages: 8         # messages between extractions
+  extraction_cooldown_seconds: 60         # minimum seconds between extractions
+  max_insights: 500                       # hard cap on stored insights
+  db_path: "~/.captain-claw/insights.db"  # SQLite database path
+```
+
+### nervous_system
+
+Autonomous dreaming layer that cross-references all memory types to discover patterns, connections, and hypotheses. Disabled by default — opt in via Settings or config.
+
+```yaml
+nervous_system:
+  enabled: false                            # enable nervous system (opt-in)
+  auto_dream: true                          # auto-trigger dream cycles after turns
+  inject_in_context: true                   # inject intuitions into system prompt
+  max_items_in_prompt: 4                    # max intuitions shown in context
+  dream_interval_messages: 12               # messages between dream cycles
+  dream_cooldown_seconds: 300               # minimum seconds between dreams (5 min)
+  max_intuitions: 200                       # hard cap on stored intuitions
+  min_confidence_for_context: 0.3           # minimum confidence to surface in context
+  decay_after_days: 7                       # start decaying unvalidated intuitions after N days
+  decay_rate_per_day: 0.05                  # confidence reduction per day of inactivity
+  delete_threshold: 0.1                     # delete intuitions below this confidence
+  allow_public: false                       # disabled in public mode by default
+  db_path: "~/.captain-claw/intuitions.db"  # SQLite database path
+```
+
 ---
 
 ## Guard System
@@ -2295,6 +2358,130 @@ Navigate to `/reflections` to view all reflections. The page shows expandable ca
 ### Storage
 
 Reflections are stored as Markdown files in `~/.captain-claw/reflections/` with timestamps as filenames. The format uses `## Section` headers for metadata (Timestamp, Summary, Topics Reviewed, Token Usage). Loading uses mtime-based caching — the file is only re-read when its modification time changes.
+
+---
+
+## Insights
+
+Captain Claw automatically extracts persistent knowledge from conversations — facts, contacts, decisions, deadlines, and other durable information. Insights are stored in SQLite with FTS5 full-text search and are injected into the system prompt to inform future conversations.
+
+### How It Works
+
+1. **Auto-extraction** — after every 8 messages (configurable), the agent reviews recent conversation and extracts structured insights with entity keys, categories, and importance ratings.
+2. **Deduplication** — new insights are checked against existing ones via entity key matching and BM25 text similarity to prevent duplicates.
+3. **Storage** — insights are stored in `~/.captain-claw/insights.db` (SQLite + FTS5, WAL mode).
+4. **Context injection** — relevant insights are injected into the system prompt via the `{insights_block}` placeholder, up to `max_items_in_prompt` (default 8).
+5. **Token tracking** — each extraction call is logged to the LLM usage table.
+
+### Slash Commands
+
+| Command | Description |
+|---|---|
+| `/insight` or `/insights` | List recent insights |
+| `/insight <query>` | Search insights by keyword |
+| `/insight stats` | Show insight statistics |
+| `/insight add <content>` | Manually add an insight |
+| `/insight delete <id>` | Delete an insight |
+
+### Web UI
+
+Navigate to `/insights` to browse all insights. The page shows searchable, filterable cards with category badges, importance ratings, and entity keys. Click any card to view details and edit.
+
+### REST API
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/insights` | List/search insights (params: q, category, limit) |
+| `GET` | `/api/insights/stats` | Insight statistics |
+| `GET` | `/api/insights/{id}` | Get single insight |
+| `POST` | `/api/insights` | Create insight manually |
+| `PATCH` | `/api/insights/{id}` | Update insight |
+| `DELETE` | `/api/insights/{id}` | Delete insight |
+
+### Storage
+
+Insights are stored in `~/.captain-claw/insights.db` with a `insights` table and `insights_fts` FTS5 virtual table. In public mode with session isolation, each session uses a separate database file.
+
+---
+
+## Nervous System (Dreaming)
+
+The nervous system is an autonomous, proactive cognitive layer that "dreams" — finding connections, patterns, and hypotheses across all memory types (working memory, semantic memory, deep memory, insights, and reflections). It operates as a subconscious process, generating "intuitions" that are surfaced in the agent's context to guide behavior.
+
+### How It Works
+
+1. **Dream trigger** — after every 12 messages (configurable), a background dream cycle fires as a fire-and-forget `asyncio.create_task()`. 5-minute cooldown between dreams.
+2. **Cross-layer sampling** — the dream function samples ~2000 tokens across all memory layers: recent messages, top insights, latest reflection, semantic memory search results, deep memory search results, and existing intuitions for dedup.
+3. **LLM synthesis** — sends the sampled context to the LLM with specialized dreaming prompts. The LLM identifies non-obvious connections, recurring patterns, and speculative hypotheses.
+4. **Intuition storage** — up to 3 intuitions per cycle, stored in `~/.captain-claw/intuitions.db` (SQLite + FTS5) with thread type, confidence score (0.0-1.0), importance rating (1-10), source layer tracking, and tags.
+5. **Context injection** — high-confidence intuitions are injected into the system prompt via the `{nervous_system_block}` placeholder and per-turn context notes.
+6. **Decay** — unvalidated intuitions lose confidence over time (default: 0.05/day after 7 days of inactivity). Below 0.1 confidence, they are deleted. Hard cap of 200 intuitions.
+
+### Thread Types
+
+| Type | Description |
+|---|---|
+| `connection` | Link between two seemingly unrelated pieces of information |
+| `pattern` | Recurring theme observed across multiple sources |
+| `hypothesis` | Speculative but plausible inference about meaning or intent |
+| `association` | Thematic grouping that could inform future context |
+
+### Validation and Strengthening
+
+- **Validation** (`/intuition validate <id>`) — permanently protects an intuition from decay, boosts confidence by +0.2 (cap 1.0) and importance by +1 (cap 10).
+- **Access tracking** — each time an intuition is surfaced in context, its access count increments. Higher access counts improve ranking in `get_for_context`.
+- **Session bonus** — intuitions from the current session get +0.2 confidence bonus; recently accessed ones get +0.1.
+
+### Session Bleeding
+
+- **Admin mode** — global database. All intuitions are visible across sessions. Source session is tagged for weighting. Cross-session intuitions surface at natural confidence level.
+- **Public mode** — disabled by default (`allow_public: false`). If enabled, fully session-scoped via separate database files — no bleeding.
+
+### Slash Commands
+
+| Command | Description |
+|---|---|
+| `/intuition` or `/intuitions` | List recent intuitions |
+| `/intuition <query>` | Search intuitions by keyword |
+| `/intuition dream` | Manually trigger a dream cycle |
+| `/intuition stats` | Show intuition statistics |
+| `/intuition add <content>` | Manually add an intuition |
+| `/intuition validate <id>` | Validate (protect from decay) |
+| `/intuition delete <id>` | Delete an intuition |
+
+### Web UI
+
+Navigate to `/intuitions` to browse all intuitions. The page shows:
+- **Stats bar** — total count, validated count, average confidence, average importance
+- **Searchable list** — cards with thread type badges, confidence bars (color-coded: green/yellow/red), importance ratings, source layers, validation status
+- **Detail modal** — edit content, thread type, confidence, importance, tags; validate or delete
+- **Dream button** — manually trigger a dream cycle from the toolbar
+
+### REST API
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/nervous-system` | List/search intuitions (params: q, thread_type, min_confidence, limit) |
+| `GET` | `/api/nervous-system/stats` | Count, avg confidence, type distribution |
+| `GET` | `/api/nervous-system/{id}` | Get single intuition |
+| `POST` | `/api/nervous-system` | Create intuition manually |
+| `POST` | `/api/nervous-system/dream` | Manually trigger a dream cycle |
+| `PATCH` | `/api/nervous-system/{id}` | Update intuition |
+| `DELETE` | `/api/nervous-system/{id}` | Delete intuition |
+
+### Storage
+
+Intuitions are stored in `~/.captain-claw/intuitions.db` with an `intuitions` table and `intuitions_fts` FTS5 virtual table for full-text search. The schema includes confidence, importance, access count, validation status, source layers, and decay tracking. In public mode (if enabled), each session uses a separate database file.
+
+### Cost Control
+
+- **Off by default** — zero cost unless opted in via `nervous_system.enabled: true`
+- Input budget capped at ~2000 tokens per dream
+- Output capped at 800 tokens
+- 5-minute cooldown between dreams (vs 60s for insights)
+- 12-message interval (vs 8 for insights)
+- Max 3 intuitions per cycle
+- Hard cap of 200 stored intuitions with aggressive decay
 
 ---
 
@@ -3180,6 +3367,8 @@ The homepage at `/` provides card-based navigation to all dashboard pages:
 | Deep Memory | `/deep-memory` | Browse and search Typesense-backed long-term archive |
 | Datastore | `/datastore` | Browse and manage structured data tables |
 | Personality | `/personality` | Edit agent personality and per-user profiles |
+| Insights | `/insights` | Browse persistent insights auto-extracted from conversations |
+| Nervous System | `/intuitions` | Browse autonomously discovered patterns, connections, and hypotheses |
 | Reflections | `/reflections` | Browse and manage self-reflection entries |
 | Files | `/files` | Browse agent-created files and download outputs |
 | LLM Usage | `/usage` | Token usage analytics with provider/model filters and cost breakdown |

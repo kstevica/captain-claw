@@ -25,11 +25,13 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | 30 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, STT, image gen/OCR/vision, screen capture + voice commands, desktop automation, Google Workspace CLI (gws — Drive, Docs, Calendar, Gmail), todo, contacts, scripts, APIs, datastore, deep memory, playbooks, personality, BotPort, Termux (Android) |
 | Personality system | Dual-profile system — global agent identity plus per-user profiles for tailored responses |
 | Self-reflection | Periodic self-assessment — reviews recent interactions, memory, and tasks to generate improvement directives injected into the system prompt |
+| Insights | Persistent knowledge base auto-extracted from conversations — facts, contacts, decisions, deadlines — with FTS search, dedup, and context injection |
+| Nervous system | Autonomous "dreaming" layer that cross-references all memory types to discover patterns, connections, and hypotheses — with confidence decay, validation, and session bleeding |
 | Skills system | OpenClaw-compatible skills with auto-discovery and GitHub install |
 | Orchestrator / DAG mode | Decompose complex tasks into parallel multi-session execution |
 | Memory / RAG | Hybrid vector + text retrieval across workspace and sessions |
 | Computer | Retro-themed research workspace — themed visual generation, exploration trees, multi-model selector, folder browser (local + Google Drive), file attachments (images, PDF, DOCX, XLSX, PPTX, MD, TXT, CSV), PDF export via WeasyPrint, persona selector, suggested next-step buttons, 14 built-in themes + custom theme engine, public mode with session isolation and BYOK (Bring Your Own Key) |
-| Web UI | Chat, Computer, monitor pane, instruction editor, command palette, persona selector, datastore browser, deep memory dashboard, reflections dashboard, personality editor, LLM usage analytics |
+| Web UI | Chat, Computer, monitor pane, instruction editor, command palette, persona selector, datastore browser, deep memory dashboard, insights browser, nervous system browser, reflections dashboard, personality editor, LLM usage analytics |
 | Live instructions (`/btw`) | Inject additional instructions while a task is running — works in Chat, Computer, and Telegram |
 | Prompt caching | Anthropic prompt caching with automatic cache breakpoints — reduces token costs by up to 90% on cache hits |
 | BotPort (agent-to-agent) | Route tasks to specialist agents across a network of Captain Claw instances |
@@ -371,6 +373,10 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 
 - **[Self-reflection system](USAGE.md#self-reflection-system)** — Periodic self-assessment that reviews recent conversations, memory facts, completed tasks, and the previous reflection to generate actionable improvement directives. The latest reflection is injected into the system prompt, enabling the agent to learn and adapt over time. Auto-triggers after sufficient activity (configurable cooldown), or run on demand with `/reflection generate`. Includes a web UI dashboard at `/reflections` and REST API.
 
+- **[Insights](USAGE.md#insights)** — Persistent knowledge base auto-extracted from conversations. The agent identifies facts, contacts, decisions, deadlines, and other durable knowledge, deduplicates via entity keys and BM25 similarity, and stores them in SQLite with FTS5 search. Relevant insights are automatically injected into the system prompt to inform future conversations. Includes a web browser at `/insights`, REST API, and `/insight` chat commands.
+
+- **[Nervous System](USAGE.md#nervous-system)** — Autonomous "dreaming" layer that proactively synthesizes across all memory types (working, semantic, deep, insights, reflections). Background dream cycles find non-obvious connections, recurring patterns, and speculative hypotheses, storing them as "intuitions" with confidence scores, importance ratings, and source layer tracking. Intuitions decay over time unless validated, bleed across sessions in admin mode, and are surfaced in the agent's context to guide behavior. Configurable via Settings. Includes a web browser at `/intuitions`, REST API, and `/intuition` chat commands.
+
 - **[Desktop automation](USAGE.md#desktop-action)** — Cross-platform desktop GUI automation via `pyautogui`. Click, double-click, right-click, type text, press keys, trigger hotkeys, scroll, drag, and open apps/folders/URLs. Pairs with `screen_capture` — capture a screenshot first, identify coordinates, then act on them. Includes a `screenshot_click` action that combines vision-based element detection with clicking. Requires `pip install pyautogui`.
 
 - **[Screen capture + voice commands](USAGE.md#screen-capture)** — Capture screenshots via `/screenshot`, the `screen_capture` tool, or a global hotkey (double-tap Shift, configurable). Hold the key and speak — audio is transcribed in realtime via Soniox (or Whisper/Gemini) and submitted alongside the screenshot. If text is selected in any app, it's captured via the clipboard and used as context instead of a screenshot. Voice instructions trigger an audio response via TTS so the agent speaks back. The global hotkey is opt-in — enable it in **Settings → Voice & Hotkey** (hot-reloads without restart). Install with `pip install captain-claw[screen]`.
@@ -400,6 +406,8 @@ ruff check captain_claw/
 | `captain_claw/tools/` | Tool registry and 30 tool implementations |
 | `captain_claw/personality.py` | Agent and per-user personality profiles |
 | `captain_claw/reflections.py` | Self-reflection system with auto-trigger and prompt injection |
+| `captain_claw/insights.py` | Persistent insights memory with auto-extraction and FTS5 search |
+| `captain_claw/nervous_system.py` | Autonomous dreaming and intuition synthesis across memory layers |
 | `captain_claw/session/` | SQLite-backed session persistence |
 | `captain_claw/skills.py` | Skill discovery, loading, and invocation |
 | `captain_claw/session_orchestrator.py` | Parallel multi-session DAG orchestrator |
