@@ -190,6 +190,18 @@ class AgentToolLoopMixin:
                     # (no spaces, no shell operators, just slashes and names)
                     if re.match(r'^[\w./_~-]+$', cmd) and '/' in cmd and ' ' not in cmd:
                         continue
+                    # Reject prose, bullet lists, and formatted text that ended
+                    # up inside a generic code block.  Real shell commands don't
+                    # contain bullet markers, arrows, checkmarks, or emoji.
+                    if re.search(r'[\-•→←✓✗❓❌✅🔗]', cmd):
+                        continue
+                    # Multi-line content with list-like structure is prose,
+                    # not a command (e.g. "Step 1:\n- do X\n- do Y").
+                    cmd_lines = [ln for ln in cmd.splitlines() if ln.strip()]
+                    if len(cmd_lines) > 1:
+                        bullet_lines = sum(1 for ln in cmd_lines if re.match(r'\s*[-*•→>]\s', ln))
+                        if bullet_lines >= 2:
+                            continue
                     return cmd
 
         return None
