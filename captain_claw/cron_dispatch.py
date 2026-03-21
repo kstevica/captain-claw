@@ -565,6 +565,13 @@ async def cron_scheduler_loop(ctx: RuntimeContext) -> None:
                 await poll_due_watches()
             except Exception:
                 pass
+
+            # Idle dreaming — dream during inactive hours
+            try:
+                from captain_claw.nervous_system import maybe_idle_dream
+                await maybe_idle_dream(ctx.agent)
+            except Exception:
+                pass
         except asyncio.CancelledError:
             log.info("cron_scheduler_loop_cancelled")
             raise

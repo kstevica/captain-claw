@@ -27,7 +27,7 @@ log = get_logger(__name__)
 # ── Constants ────────────────────────────────────────────────────────
 
 VALID_THREAD_TYPES = frozenset({
-    "connection", "pattern", "hypothesis", "association",
+    "connection", "pattern", "hypothesis", "association", "unresolved",
 })
 
 # BM25 rank threshold for dedup (FTS5 returns negative ranks; closer to 0 = better).
@@ -116,6 +116,28 @@ class NervousSystemManager:
                 VALUES (new.rowid, new.content, new.thread_type, new.tags);
             END
         """)
+        # ── Schema migrations for musical cognition features ──────────
+        # Tension tracking columns.
+        for col, default in [
+            ("resolution_state", "NULL"),     # NULL (normal), "open" (active tension), "resolved"
+            ("resolved_from_id", "NULL"),      # Links resolved intuition back to source tension
+        ]:
+            try:
+                await self._db.execute(f"ALTER TABLE intuitions ADD COLUMN {col} TEXT DEFAULT {default}")
+            except Exception:
+                pass  # Column already exists.
+
+        # Maturation pipeline columns.
+        for col, typedef in [
+            ("maturation_state", "TEXT DEFAULT 'mature'"),     # "raw", "maturing", "mature"
+            ("matured_at", "TEXT DEFAULT NULL"),
+            ("dream_cycles_seen", "INTEGER DEFAULT 0"),
+        ]:
+            try:
+                await self._db.execute(f"ALTER TABLE intuitions ADD COLUMN {col} {typedef}")
+            except Exception:
+                pass  # Column already exists.
+
         await self._db.commit()
 
     async def close(self) -> None:
@@ -157,19 +179,61 @@ class NervousSystemManager:
         now = datetime.now(UTC).isoformat(timespec="seconds")
         intuition_id = uuid.uuid4().hex[:12]
 
+        # Determine initial maturation state.
+        cfg = get_config()
+        if thread_type == "unresolved":
+            # Tensions always start as mature (they ARE the point — surface them).
+            maturation_state = "mature"
+            resolution_state = "open"
+        elif cfg.nervous_system.maturation_enabled and importance < cfg.nervous_system.maturation_skip_importance:
+            # Normal intuitions enter maturation pipeline.
+            maturation_state = "raw"
+            resolution_state = None
+        else:
+            # High-importance intuitions skip maturation (fortissimo bypass).
+            maturation_state = "mature"
+            resolution_state = None
+
         await self._db.execute(
             """INSERT INTO intuitions
                (id, content, thread_type, source_layers, source_ids,
                 source_session, confidence, importance, access_count,
-                last_accessed, validated, created_at, updated_at, decayed_at, tags)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 0, ?, ?, NULL, ?)""",
+                last_accessed, validated, created_at, updated_at, decayed_at, tags,
+                resolution_state, maturation_state, dream_cycles_seen)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 0, ?, ?, NULL, ?, ?, ?, 0)""",
             (intuition_id, content, thread_type,
              json.dumps(source_layers or []),
              json.dumps(source_ids or []),
-             source_session, confidence, importance, now, now, tags),
+             source_session, confidence, importance, now, now, tags,
+             resolution_state, maturation_state),
         )
         await self._db.commit()
-        log.debug("Intuition stored", id=intuition_id, thread_type=thread_type)
+        log.debug("Intuition stored", id=intuition_id, thread_type=thread_type,
+                   maturation=maturation_state)
+
+        # Record metric for tensions.
+        if thread_type == "unresolved":
+            try:
+                from captain_claw.cognitive_metrics import get_cognitive_metrics_manager
+                cm = get_cognitive_metrics_manager()
+                await cm.record_event("tension_created", "tension",
+                                      session_id=source_session,
+                                      payload={"intuition_id": intuition_id,
+                                                "content": content[:200],
+                                                "confidence": confidence})
+            except Exception:
+                pass
+        elif maturation_state == "raw":
+            try:
+                from captain_claw.cognitive_metrics import get_cognitive_metrics_manager
+                cm = get_cognitive_metrics_manager()
+                await cm.record_event("maturation_started", "maturation",
+                                      session_id=source_session,
+                                      payload={"intuition_id": intuition_id,
+                                                "thread_type": thread_type})
+            except Exception:
+                pass
+
         return intuition_id
 
     async def search(
@@ -340,8 +404,13 @@ class NervousSystemManager:
         cfg = get_config()
         min_conf = cfg.nervous_system.min_confidence_for_context
 
+        # Only surface mature intuitions (maturation pipeline gate).
         rows = await self._db.execute_fetchall(
-            "SELECT * FROM intuitions WHERE confidence >= ? ORDER BY importance DESC, confidence DESC, created_at DESC LIMIT ?",
+            """SELECT * FROM intuitions
+               WHERE confidence >= ?
+               AND (maturation_state IS NULL OR maturation_state = 'mature')
+               ORDER BY importance DESC, confidence DESC, created_at DESC
+               LIMIT ?""",
             (min_conf, limit * 3),  # Fetch extra for scoring.
         )
 
@@ -415,32 +484,40 @@ class NervousSystemManager:
         decay_rate = cfg.nervous_system.decay_rate_per_day
         delete_thresh = cfg.nervous_system.delete_threshold
 
+        tension_decay_mult = cfg.nervous_system.tension_decay_multiplier
+        tension_del_thresh = cfg.nervous_system.tension_delete_threshold
+
         # 1. Delete very low confidence unvalidated intuitions.
+        # Normal intuitions use standard threshold; tensions use lower threshold.
         cursor = await self._db.execute(
-            "DELETE FROM intuitions WHERE confidence < ? AND validated = 0",
-            (delete_thresh,),
+            """DELETE FROM intuitions WHERE validated = 0
+               AND ((thread_type != 'unresolved' AND confidence < ?)
+                OR  (thread_type = 'unresolved' AND confidence < ?))""",
+            (delete_thresh, tension_del_thresh),
         )
         deleted = cursor.rowcount or 0
 
         # 2. Decay unvalidated intuitions not accessed recently.
         cutoff = (now - timedelta(days=decay_days)).isoformat(timespec="seconds")
         rows = await self._db.execute_fetchall(
-            """SELECT id, confidence, last_accessed, created_at FROM intuitions
+            """SELECT id, confidence, last_accessed, created_at, thread_type FROM intuitions
                WHERE validated = 0 AND confidence >= ?
                AND (last_accessed IS NULL OR last_accessed < ?)
                AND created_at < ?""",
-            (delete_thresh, cutoff, cutoff),
+            (min(delete_thresh, tension_del_thresh), cutoff, cutoff),
         )
 
         decayed = 0
         for row in rows:
-            intuition_id, conf, last_acc, created = row[0], row[1], row[2], row[3]
+            intuition_id, conf, last_acc, created, tt = row[0], row[1], row[2], row[3], row[4]
             ref_date = last_acc or created
             try:
                 ref_dt = datetime.fromisoformat(ref_date)
                 days_inactive = (now - ref_dt).days - decay_days
                 if days_inactive > 0:
-                    new_conf = max(0.0, conf - (decay_rate * days_inactive))
+                    # Tensions decay at a slower rate — like sustained dissonance.
+                    effective_rate = decay_rate * tension_decay_mult if tt == "unresolved" else decay_rate
+                    new_conf = max(0.0, conf - (effective_rate * days_inactive))
                     await self._db.execute(
                         "UPDATE intuitions SET confidence = ?, decayed_at = ? WHERE id = ?",
                         (new_conf, now.isoformat(timespec="seconds"), intuition_id),
@@ -469,6 +546,166 @@ class NervousSystemManager:
         if deleted or decayed:
             log.info("Nervous system decay pass", deleted=deleted, decayed=decayed)
         return deleted + decayed
+
+    # ── tension tracking ────────────────────────────────────────────
+
+    async def resolve_tension(
+        self,
+        intuition_id: str,
+        *,
+        resolved_type: str = "connection",
+        resolution_content: str | None = None,
+        confidence_boost: float = 0.2,
+        source_session: str | None = None,
+    ) -> str | None:
+        """Resolve an unresolved tension — transforms it into a connection/pattern.
+
+        Returns the ID of the new resolved intuition if resolution_content given,
+        or the original ID if transformed in place.
+        """
+        await self._ensure_db()
+        assert self._db is not None
+
+        original = await self.get(intuition_id)
+        if not original or original.get("thread_type") != "unresolved":
+            return None
+
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        old_conf = original.get("confidence", 0.5)
+        new_conf = min(1.0, old_conf + confidence_boost)
+
+        # Mark the original as resolved.
+        await self._db.execute(
+            """UPDATE intuitions SET
+               resolution_state = 'resolved',
+               thread_type = ?,
+               confidence = ?,
+               updated_at = ?
+               WHERE id = ?""",
+            (resolved_type, new_conf, now, intuition_id),
+        )
+
+        result_id = intuition_id
+
+        # Optionally create a new intuition capturing the resolution insight.
+        if resolution_content:
+            result_id = await self.add(
+                content=resolution_content,
+                thread_type=resolved_type,
+                source_layers=original.get("source_layers") or [],
+                source_session=source_session,
+                confidence=new_conf,
+                importance=max(original.get("importance", 5), 6),
+            )
+            if result_id:
+                await self._db.execute(
+                    "UPDATE intuitions SET resolved_from_id = ? WHERE id = ?",
+                    (intuition_id, result_id),
+                )
+
+        await self._db.commit()
+
+        # Record metric.
+        try:
+            from captain_claw.cognitive_metrics import get_cognitive_metrics_manager
+            cm = get_cognitive_metrics_manager()
+            created_at = original.get("created_at", now)
+            try:
+                lifespan_hours = (datetime.fromisoformat(now) - datetime.fromisoformat(created_at)).total_seconds() / 3600
+            except (ValueError, TypeError):
+                lifespan_hours = 0
+            await cm.record_event("tension_resolved", "tension",
+                                  session_id=source_session,
+                                  payload={"intuition_id": intuition_id,
+                                           "resolved_to_type": resolved_type,
+                                           "lifespan_hours": round(lifespan_hours, 1),
+                                           "confidence_delta": round(new_conf - old_conf, 2)})
+        except Exception:
+            pass
+
+        log.info("Tension resolved", id=intuition_id, resolved_type=resolved_type)
+        return result_id
+
+    async def list_open_tensions(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Return all open (unresolved) tensions."""
+        await self._ensure_db()
+        assert self._db is not None
+
+        rows = await self._db.execute_fetchall(
+            """SELECT * FROM intuitions
+               WHERE thread_type = 'unresolved' AND resolution_state = 'open'
+               ORDER BY importance DESC, confidence DESC, created_at DESC
+               LIMIT ?""",
+            (limit,),
+        )
+        return [self._row_to_dict(r) for r in rows]
+
+    # ── maturation pipeline ──────────────────────────────────────────
+
+    async def advance_maturation(self) -> int:
+        """Advance the maturation pipeline — called after each dream cycle.
+
+        Increments dream_cycles_seen for all raw/maturing intuitions.
+        Transitions to 'mature' when cycles_required is reached.
+        Returns count of newly matured intuitions.
+        """
+        await self._ensure_db()
+        assert self._db is not None
+
+        cfg = get_config()
+        cycles_required = cfg.nervous_system.maturation_cycles_required
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+
+        # Increment cycle count for all non-mature intuitions.
+        await self._db.execute(
+            """UPDATE intuitions SET
+               dream_cycles_seen = dream_cycles_seen + 1,
+               maturation_state = CASE
+                   WHEN maturation_state = 'raw' THEN 'maturing'
+                   ELSE maturation_state
+               END
+               WHERE maturation_state IN ('raw', 'maturing')""",
+        )
+
+        # Transition to mature when threshold reached.
+        cursor = await self._db.execute(
+            """UPDATE intuitions SET
+               maturation_state = 'mature',
+               matured_at = ?
+               WHERE maturation_state = 'maturing'
+               AND dream_cycles_seen >= ?""",
+            (now, cycles_required),
+        )
+        matured_count = cursor.rowcount or 0
+        await self._db.commit()
+
+        # Record metrics for matured intuitions.
+        if matured_count > 0:
+            try:
+                from captain_claw.cognitive_metrics import get_cognitive_metrics_manager
+                cm = get_cognitive_metrics_manager()
+                await cm.record_event("maturation_completed", "maturation",
+                                      payload={"count": matured_count,
+                                               "cycles_required": cycles_required})
+            except Exception:
+                pass
+            log.info("Intuitions matured", count=matured_count)
+
+        return matured_count
+
+    async def list_maturing(self, limit: int = 5) -> list[dict[str, Any]]:
+        """Return intuitions currently in the maturation pipeline."""
+        await self._ensure_db()
+        assert self._db is not None
+
+        rows = await self._db.execute_fetchall(
+            """SELECT * FROM intuitions
+               WHERE maturation_state IN ('raw', 'maturing')
+               ORDER BY dream_cycles_seen DESC, importance DESC
+               LIMIT ?""",
+            (limit,),
+        )
+        return [self._row_to_dict(r) for r in rows]
 
     async def count(self) -> int:
         """Total intuition count."""
@@ -519,6 +756,9 @@ class NervousSystemManager:
             "source_session", "confidence", "importance", "access_count",
             "last_accessed", "validated", "created_at", "updated_at",
             "decayed_at", "tags",
+            # Musical cognition columns (schema migrations).
+            "resolution_state", "resolved_from_id",
+            "maturation_state", "matured_at", "dream_cycles_seen",
         ]
         d: dict[str, Any] = {}
         for i, col in enumerate(cols):
@@ -661,6 +901,20 @@ async def dream(agent: Agent) -> list[dict[str, Any]]:
         lines = [f"- [{i['thread_type']}] {i['content']}" for i in existing]
         existing_text = "\n".join(lines)
 
+    # 6b. Load open tensions for resolution checking.
+    open_tensions = await mgr.list_open_tensions(limit=5)
+    tensions_text = ""
+    if open_tensions:
+        lines = [f"- [id:{i['id']}] {i['content']}" for i in open_tensions]
+        tensions_text = "\n".join(lines)
+
+    # 6c. Load maturing intuitions for refinement.
+    maturing = await mgr.list_maturing(limit=5)
+    maturing_text = ""
+    if maturing:
+        lines = [f"- [{i['thread_type']}] (cycles:{i.get('dream_cycles_seen', 0)}) {i['content']}" for i in maturing]
+        maturing_text = "\n".join(lines)
+
     # 7. Build LLM messages.
     system_prompt = agent.instructions.load("dreaming_system_prompt.md")
     user_prompt = agent.instructions.render(
@@ -671,6 +925,8 @@ async def dream(agent: Agent) -> list[dict[str, Any]]:
         semantic_text=semantic_text or "(No semantic memory matches.)",
         deep_text=deep_text or "(No deep memory matches.)",
         existing_intuitions=existing_text or "(No existing intuitions.)",
+        open_tensions_text=tensions_text or "(No open tensions.)",
+        maturing_text=maturing_text or "(No maturing intuitions.)",
     )
 
     messages = [
@@ -752,10 +1008,36 @@ async def dream(agent: Agent) -> list[dict[str, Any]]:
     except Exception:
         pass
 
+    # 12b. Advance maturation pipeline.
+    matured_count = 0
+    try:
+        matured_count = await mgr.advance_maturation()
+    except Exception:
+        pass
+
+    # 12c. Record dream cycle metric.
+    try:
+        from captain_claw.cognitive_metrics import get_cognitive_metrics_manager
+        cm = get_cognitive_metrics_manager()
+        await cm.record_event("dream_cycle", "dream",
+                              session_id=session_id,
+                              payload={
+                                  "intuitions_extracted": len(new_intuitions),
+                                  "intuitions_stored": len(stored),
+                                  "tensions_open": len(open_tensions),
+                                  "maturing_count": len(maturing),
+                                  "matured_this_cycle": matured_count,
+                                  "prompt_tokens": usage.get("prompt_tokens", 0),
+                                  "completion_tokens": usage.get("completion_tokens", 0),
+                              })
+    except Exception:
+        pass
+
     log.info(
         "Nervous system dreaming completed",
         extracted=len(new_intuitions),
         stored=len(stored),
+        matured=matured_count,
         prompt_tokens=usage.get("prompt_tokens", 0),
         completion_tokens=usage.get("completion_tokens", 0),
     )
@@ -826,5 +1108,84 @@ async def maybe_dream(
 
     except Exception as exc:
         log.warning("Nervous system dreaming failed (non-fatal)", error=str(exc))
+        setattr(agent, _ATTR_RUNNING, False)
+        return None
+
+
+# ── Idle Dreaming ─────────────────────────────────────────────────────
+
+_ATTR_LAST_IDLE_DREAM = "_nervous_last_idle_dream_time"
+
+
+async def maybe_idle_dream(
+    agent: Agent,
+) -> list[dict[str, Any]] | None:
+    """Trigger a dream cycle during idle time — no message count requirement.
+
+    Unlike maybe_dream(), this fires based on wall-clock time alone,
+    allowing the agent to "sleep and dream" even when nobody is talking.
+    Respects its own interval (idle_dream_interval_seconds) separately
+    from the conversation-triggered cooldown.
+    """
+    try:
+        cfg = get_config()
+        if not cfg.nervous_system.enabled or not cfg.nervous_system.idle_dream_enabled:
+            return None
+
+        # Public mode guard.
+        is_public = getattr(agent, "_is_public", False)
+        if is_public and not cfg.nervous_system.allow_public:
+            return None
+
+        # Guard: only one dream at a time (shared with maybe_dream).
+        if getattr(agent, _ATTR_RUNNING, False):
+            return None
+
+        # Idle interval check.
+        last_idle = getattr(agent, _ATTR_LAST_IDLE_DREAM, 0.0)
+        interval = cfg.nervous_system.idle_dream_interval_seconds
+        if time.time() - last_idle < interval:
+            return None
+
+        # Must have a session with enough messages to dream about.
+        if not agent.session:
+            return None
+        min_msgs = cfg.nervous_system.idle_dream_min_session_messages
+        if len(agent.session.messages) < min_msgs:
+            return None
+
+        # Don't idle-dream if a conversation-triggered dream just happened.
+        last_conv_dream = getattr(agent, _ATTR_LAST_TIME, 0.0)
+        conv_cooldown = cfg.nervous_system.dream_cooldown_seconds or _DEFAULT_COOLDOWN_SECONDS
+        if time.time() - last_conv_dream < conv_cooldown:
+            return None
+
+        setattr(agent, _ATTR_RUNNING, True)
+        setattr(agent, _ATTR_LAST_IDLE_DREAM, time.time())
+
+        log.info("Idle dreaming triggered")
+        _emit = getattr(agent, "_emit_thinking", None)
+        if callable(_emit):
+            _emit("🌙 Idle dreaming started — processing while inactive",
+                  tool="nervous_system", phase="tool")
+
+        result = await dream(agent)
+
+        # Record idle dream metric.
+        try:
+            from captain_claw.cognitive_metrics import get_cognitive_metrics_manager
+            cm = get_cognitive_metrics_manager()
+            session_id = str(agent.session.id) if agent.session else None
+            await cm.record_event("dream_cycle", "dream",
+                                  session_id=session_id,
+                                  payload={"trigger": "idle",
+                                           "intuitions_stored": len(result) if result else 0})
+        except Exception:
+            pass
+
+        return result
+
+    except Exception as exc:
+        log.warning("Idle dreaming failed (non-fatal)", error=str(exc))
         setattr(agent, _ATTR_RUNNING, False)
         return None

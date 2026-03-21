@@ -16,4 +16,10 @@ Deep memory:
 Existing:
 {existing_intuitions}
 
+Open tensions:
+{open_tensions_text}
+
+Maturing:
+{maturing_text}
+
 New intuitions JSON:

@@ -409,6 +409,22 @@ async def _run_agent(
         except Exception:
             pass
 
+        # Record cognitive tempo metric (non-blocking).
+        try:
+            tempo = getattr(agent, "_cognitive_tempo", None)
+            if tempo:
+                import asyncio as _asyncio4
+                from captain_claw.cognitive_metrics import get_cognitive_metrics_manager
+                cm = get_cognitive_metrics_manager()
+                _asyncio4.create_task(cm.record_event(
+                    "tempo_detected", "tempo",
+                    session_id=str(agent.session.id) if agent.session else None,
+                    payload={"tempo": tempo.combined_tempo, "mode": tempo.mode,
+                             "signals": tempo.signals},
+                ))
+        except Exception:
+            pass
+
     except Exception as e:
         log.error("Chat error", error=str(e), public=is_public)
         send({"type": "error", "message": f"Error: {str(e)}"})

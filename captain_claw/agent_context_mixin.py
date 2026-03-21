@@ -1069,10 +1069,30 @@ class AgentContextMixin:
             "stored knowledge."
         )
 
+    # ── Cognitive tempo ─────────────────────────────────────────────
+
+    async def _assess_cognitive_tempo(self) -> None:
+        """Detect current cognitive tempo from recent messages."""
+        cfg = get_config()
+        if not cfg.cognitive_tempo.enabled:
+            self._cognitive_tempo = None
+            return
+        try:
+            from captain_claw.cognitive_tempo import assess_tempo
+            if self.session and self.session.messages:
+                self._cognitive_tempo = assess_tempo(
+                    self.session.messages,
+                    window=cfg.cognitive_tempo.analysis_window,
+                )
+            else:
+                self._cognitive_tempo = None
+        except Exception:
+            self._cognitive_tempo = None
+
     # ── Nervous system context ───────────────────────────────────────
 
     async def _refresh_nervous_system_cache(self) -> None:
-        """Pre-fetch intuitions for context injection."""
+        """Pre-fetch intuitions for context injection (tempo-adjusted)."""
         cfg = get_config()
         if not cfg.nervous_system.enabled or not cfg.nervous_system.inject_in_context:
             return
@@ -1083,8 +1103,24 @@ class AgentContextMixin:
             else:
                 mgr = get_nervous_system_manager()
             session_id = str(self.session.id) if self.session else None
+
+            # Tempo-adjusted context injection limits.
+            base_limit = cfg.nervous_system.max_items_in_prompt
+            tempo = getattr(self, "_cognitive_tempo", None)
+            if tempo and cfg.cognitive_tempo.enabled and cfg.cognitive_tempo.adjust_context_injection:
+                if tempo.mode == "adagio":
+                    # Deep mode: more intuitions, include speculative ones.
+                    limit = min(base_limit + 3, 8)
+                elif tempo.mode == "allegro":
+                    # Quick mode: fewer intuitions, only high-confidence.
+                    limit = max(1, base_limit - 2)
+                else:
+                    limit = base_limit
+            else:
+                limit = base_limit
+
             self._nervous_system_cache = await mgr.get_for_context(
-                limit=cfg.nervous_system.max_items_in_prompt,
+                limit=limit,
                 session_id=session_id,
             )
         except Exception:
@@ -1098,11 +1134,34 @@ class AgentContextMixin:
         items = getattr(self, "_nervous_system_cache", None)
         if not items:
             return ""
+
+        # Re-assess cognitive tempo from current messages (pure heuristics, no I/O).
+        if cfg.cognitive_tempo.enabled:
+            try:
+                from captain_claw.cognitive_tempo import assess_tempo
+                if self.session and self.session.messages:
+                    self._cognitive_tempo = assess_tempo(
+                        self.session.messages,
+                        window=cfg.cognitive_tempo.analysis_window,
+                    )
+            except Exception:
+                pass
+
         lines = ["Background intuitions (autonomously discovered patterns):"]
         for i in items:
             conf = i.get("confidence", 0.5)
             tt = i.get("thread_type", "connection")
-            lines.append(f"- [{tt}] (conf:{conf:.1f}) {i['content']}")
+            # Format tensions distinctly.
+            if tt == "unresolved":
+                lines.append(f"- [TENSION] (conf:{conf:.1f}) {i['content']}")
+            else:
+                lines.append(f"- [{tt}] (conf:{conf:.1f}) {i['content']}")
+
+        # Add tempo context if available.
+        tempo = getattr(self, "_cognitive_tempo", None)
+        if tempo:
+            lines.append(f"Current cognitive tempo: {tempo.mode} ({tempo.combined_tempo:.2f})")
+
         return "\n".join(lines)
 
     def _build_nervous_system_block(self) -> str:
@@ -1113,12 +1172,31 @@ class AgentContextMixin:
         items = getattr(self, "_nervous_system_cache", None)
         if not items:
             return ""
-        return (
+        block = (
             "You have an autonomous pattern-recognition system (\"nervous system\") "
             "that discovers connections across your memory layers. Relevant intuitions "
             "are automatically surfaced in context. These are hypotheses — use them to "
-            "inform your responses but treat low-confidence ones as speculative."
+            "inform your responses but treat low-confidence ones as speculative. "
+            "Intuitions marked [TENSION] are unresolved contradictions — hold them, "
+            "do not force resolution."
         )
+
+        # Tempo-appropriate guidance.
+        tempo = getattr(self, "_cognitive_tempo", None)
+        if tempo and cfg.cognitive_tempo.enabled and cfg.cognitive_tempo.adjust_response_guidance:
+            if tempo.mode == "adagio":
+                block += (
+                    " The current conversation calls for deep, contemplative processing. "
+                    "Take time to cross-reference, speculate, and draw connections. "
+                    "Sit with ambiguity rather than rushing to answers."
+                )
+            elif tempo.mode == "allegro":
+                block += (
+                    " The current conversation calls for quick, focused execution. "
+                    "Be concise and action-oriented. Prioritize doing over deliberating."
+                )
+
+        return block
 
     # ── Sister session briefing context ──────────────────────────────
 
@@ -1466,6 +1544,7 @@ class AgentContextMixin:
         await self._refresh_apis_context_cache()
         await self._refresh_datastore_context_cache()
         await self._refresh_insights_context_cache()
+        await self._assess_cognitive_tempo()
         await self._refresh_nervous_system_cache()
         await self._refresh_briefing_context_cache()
 

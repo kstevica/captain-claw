@@ -26,7 +26,7 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Personality system | Dual-profile system — global agent identity plus per-user profiles for tailored responses |
 | Self-reflection | Periodic self-assessment — reviews recent interactions, memory, and tasks to generate improvement directives injected into the system prompt |
 | Insights | Persistent knowledge base auto-extracted from conversations — facts, contacts, decisions, deadlines — with FTS search, dedup, and context injection |
-| Nervous system | Autonomous "dreaming" layer that cross-references all memory types to discover patterns, connections, and hypotheses — with confidence decay, validation, and session bleeding |
+| Nervous system | Autonomous "dreaming" layer that cross-references all memory types to discover patterns, connections, and hypotheses — with confidence decay, validation, session bleeding, idle dreaming, tension tracking, maturation pipeline, and cognitive tempo detection |
 | Skills system | OpenClaw-compatible skills with auto-discovery and GitHub install |
 | Orchestrator / DAG mode | Decompose complex tasks into parallel multi-session execution |
 | Memory / RAG | Hybrid vector + text retrieval across workspace and sessions |
@@ -375,7 +375,7 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 
 - **[Insights](USAGE.md#insights)** — Persistent knowledge base auto-extracted from conversations. The agent identifies facts, contacts, decisions, deadlines, and other durable knowledge, deduplicates via entity keys and BM25 similarity, and stores them in SQLite with FTS5 search. Relevant insights are automatically injected into the system prompt to inform future conversations. Includes a web browser at `/insights`, REST API, and `/insight` chat commands.
 
-- **[Nervous System](USAGE.md#nervous-system)** — Autonomous "dreaming" layer that proactively synthesizes across all memory types (working, semantic, deep, insights, reflections). Background dream cycles find non-obvious connections, recurring patterns, and speculative hypotheses, storing them as "intuitions" with confidence scores, importance ratings, and source layer tracking. Intuitions decay over time unless validated, bleed across sessions in admin mode, and are surfaced in the agent's context to guide behavior. Configurable via Settings. Includes a web browser at `/intuitions`, REST API, and `/intuition` chat commands.
+- **[Nervous System](USAGE.md#nervous-system)** — Autonomous "dreaming" layer that proactively synthesizes across all memory types (working, semantic, deep, insights, reflections). Background dream cycles find non-obvious connections, recurring patterns, and speculative hypotheses, storing them as "intuitions" with confidence scores, importance ratings, and source layer tracking. Intuitions decay over time unless validated, bleed across sessions in admin mode, and are surfaced in the agent's context to guide behavior. Includes **idle dreaming** (dreams during inactive hours via the cron scheduler) and **musical cognition** features: unresolved tension tracking (holds contradictions like musical dissonance rather than forcing resolution), a maturation pipeline (new intuitions sit through dream cycles before surfacing), and cognitive tempo detection (adagio/moderato/allegro mode adapts processing depth to conversation rhythm). Configurable via Settings. Includes a web browser at `/intuitions`, REST API, `/intuition` chat commands, and cognitive metrics tracking.
 
 - **[Desktop automation](USAGE.md#desktop-action)** — Cross-platform desktop GUI automation via `pyautogui`. Click, double-click, right-click, type text, press keys, trigger hotkeys, scroll, drag, and open apps/folders/URLs. Pairs with `screen_capture` — capture a screenshot first, identify coordinates, then act on them. Includes a `screenshot_click` action that combines vision-based element detection with clicking. Requires `pip install pyautogui`.
 
@@ -408,6 +408,8 @@ ruff check captain_claw/
 | `captain_claw/reflections.py` | Self-reflection system with auto-trigger and prompt injection |
 | `captain_claw/insights.py` | Persistent insights memory with auto-extraction and FTS5 search |
 | `captain_claw/nervous_system.py` | Autonomous dreaming and intuition synthesis across memory layers |
+| `captain_claw/cognitive_tempo.py` | Processing depth detection — adagio/moderato/allegro cognitive rhythm |
+| `captain_claw/cognitive_metrics.py` | Musical cognition tracking system for tension, maturation, and tempo metrics |
 | `captain_claw/session/` | SQLite-backed session persistence |
 | `captain_claw/skills.py` | Skill discovery, loading, and invocation |
 | `captain_claw/session_orchestrator.py` | Parallel multi-session DAG orchestrator |

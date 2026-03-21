@@ -1660,6 +1660,46 @@ nervous_system:
   delete_threshold: 0.1                     # delete intuitions below this confidence
   allow_public: false                       # disabled in public mode by default
   db_path: "~/.captain-claw/intuitions.db"  # SQLite database path
+  # Idle dreaming — dream during inactive hours
+  idle_dream_enabled: true                  # dream even when nobody is talking
+  idle_dream_interval_seconds: 3600         # dream every hour during idle
+  idle_dream_min_session_messages: 5        # minimum messages before idle dreaming
+  # Musical cognition — tension tracking
+  tension_decay_multiplier: 0.5             # tensions decay at half the normal rate
+  tension_delete_threshold: 0.05            # lower deletion threshold for tensions
+  max_open_tensions: 10                     # cap on simultaneous open tensions
+  # Musical cognition — maturation pipeline
+  maturation_enabled: true                  # new intuitions mature before surfacing
+  maturation_cycles_required: 2             # dream cycles required before surfacing
+  maturation_skip_importance: 9             # importance >= this skips maturation (fortissimo)
+```
+
+### cognitive_tempo
+
+Processing depth detection and user cognitive rhythm modeling. Analyzes conversation signals to adapt between deep contemplative processing (adagio) and rapid task execution (allegro). Pure heuristics — no LLM calls.
+
+```yaml
+cognitive_tempo:
+  enabled: false                            # enable tempo detection (opt-in)
+  analysis_window: 5                        # recent messages to analyze
+  adagio_threshold: 0.35                    # below this = deep contemplative mode
+  allegro_threshold: 0.65                   # above this = rapid execution mode
+  user_tempo_weight: 0.4                    # weight of user behavior signals
+  content_depth_weight: 0.6                 # weight of content analysis signals
+  adjust_context_injection: true            # let tempo affect intuition count in context
+  adjust_response_guidance: true            # let tempo affect system prompt guidance
+```
+
+### cognitive_metrics
+
+Tracking system for musical cognition features — records events and snapshots for before/after validation of tension tracking, maturation pipeline, and tempo detection.
+
+```yaml
+cognitive_metrics:
+  enabled: true                             # enable metrics tracking (on by default)
+  db_path: "~/.captain-claw/cognitive_metrics.db"  # SQLite database path
+  auto_snapshot_interval_hours: 24          # hours between automatic snapshots
+  max_events: 10000                         # max events before pruning
 ```
 
 ---
@@ -2406,16 +2446,18 @@ Insights are stored in `~/.captain-claw/insights.db` with a `insights` table and
 
 ## Nervous System (Dreaming)
 
-The nervous system is an autonomous, proactive cognitive layer that "dreams" — finding connections, patterns, and hypotheses across all memory types (working memory, semantic memory, deep memory, insights, and reflections). It operates as a subconscious process, generating "intuitions" that are surfaced in the agent's context to guide behavior.
+The nervous system is an autonomous, proactive cognitive layer that "dreams" — finding connections, patterns, and hypotheses across all memory types (working memory, semantic memory, deep memory, insights, and reflections). It operates as a subconscious process, generating "intuitions" that are surfaced in the agent's context to guide behavior. Inspired by how classical music creates cognitive impact, it includes musical cognition features: unresolved tension tracking (holding contradictions like dissonance), a maturation pipeline (contemplative pause before surfacing), and cognitive tempo detection (adapting processing depth to conversation rhythm).
 
 ### How It Works
 
-1. **Dream trigger** — after every 12 messages (configurable), a background dream cycle fires as a fire-and-forget `asyncio.create_task()`. 5-minute cooldown between dreams.
-2. **Cross-layer sampling** — the dream function samples ~2000 tokens across all memory layers: recent messages, top insights, latest reflection, semantic memory search results, deep memory search results, and existing intuitions for dedup.
-3. **LLM synthesis** — sends the sampled context to the LLM with specialized dreaming prompts. The LLM identifies non-obvious connections, recurring patterns, and speculative hypotheses.
-4. **Intuition storage** — up to 3 intuitions per cycle, stored in `~/.captain-claw/intuitions.db` (SQLite + FTS5) with thread type, confidence score (0.0-1.0), importance rating (1-10), source layer tracking, and tags.
-5. **Context injection** — high-confidence intuitions are injected into the system prompt via the `{nervous_system_block}` placeholder and per-turn context notes.
-6. **Decay** — unvalidated intuitions lose confidence over time (default: 0.05/day after 7 days of inactivity). Below 0.1 confidence, they are deleted. Hard cap of 200 intuitions.
+1. **Dream trigger** — after every 12 messages (configurable), a background dream cycle fires as a fire-and-forget `asyncio.create_task()`. 5-minute cooldown between dreams. Additionally, **idle dreaming** fires during inactive hours (default: every 1 hour) via the cron scheduler loop, allowing the agent to dream even when nobody is talking — as long as a session with at least 5 messages exists.
+2. **Cross-layer sampling** — the dream function samples ~2000 tokens across all memory layers: recent messages, top insights, latest reflection, semantic memory search results, deep memory search results, existing intuitions for dedup, open tensions for resolution checking, and maturing intuitions for refinement.
+3. **LLM synthesis** — sends the sampled context to the LLM with specialized dreaming prompts. The LLM identifies non-obvious connections, recurring patterns, speculative hypotheses, and unresolved tensions. It also refines maturing intuitions and checks if open tensions have been resolved.
+4. **Intuition storage** — up to 3 intuitions per cycle, stored in `~/.captain-claw/intuitions.db` (SQLite + FTS5) with thread type, confidence score (0.0-1.0), importance rating (1-10), source layer tracking, tags, resolution state, and maturation state.
+5. **Maturation** — new intuitions enter a maturation pipeline (raw → maturing → mature). Only mature intuitions are surfaced in context. High-importance intuitions (≥ 9) and tensions skip maturation.
+6. **Context injection** — mature, high-confidence intuitions are injected into the system prompt via the `{nervous_system_block}` placeholder and per-turn context notes. Cognitive tempo detection adjusts how many intuitions are surfaced (more in adagio mode, fewer in allegro).
+7. **Decay** — unvalidated intuitions lose confidence over time (default: 0.05/day after 7 days of inactivity). Below 0.1 confidence, they are deleted. Tensions decay at half rate and persist down to 0.05 confidence. Hard cap of 200 intuitions.
+8. **Metrics** — each dream cycle records cognitive metrics (tensions created/resolved, maturation throughput, tempo distribution) for before/after validation.
 
 ### Thread Types
 
@@ -2425,6 +2467,62 @@ The nervous system is an autonomous, proactive cognitive layer that "dreams" —
 | `pattern` | Recurring theme observed across multiple sources |
 | `hypothesis` | Speculative but plausible inference about meaning or intent |
 | `association` | Thematic grouping that could inform future context |
+| `unresolved` | A contradiction, open question, or tension between pieces of information — held deliberately rather than resolved, like musical dissonance |
+
+### Musical Cognition
+
+Inspired by how classical music creates deep cognitive impact through tension/release, dynamic contour, and entrainment, the nervous system includes three additional features:
+
+#### Unresolved Tension Tracking
+
+The agent can hold contradictions and open questions as first-class insights rather than forcing resolution. When the dreaming system detects genuine tension between memory layers — conflicting insights, contradictory user preferences, or open questions — it creates an `unresolved` intuition.
+
+- **Slower decay** — tensions decay at half the normal rate (`tension_decay_multiplier: 0.5`), giving them time to mature
+- **Lower deletion threshold** — tensions persist down to 0.05 confidence (vs 0.1 for normal intuitions)
+- **Resolution tracking** — when new information resolves a tension, the dream cycle transforms it into a `connection` or `pattern` with a confidence boost
+- **Context formatting** — tensions appear as `[TENSION]` in the agent's context, signaling that they should be held, not solved
+- **Cap** — maximum 10 simultaneous open tensions (`max_open_tensions`)
+
+#### Maturation Pipeline (Contemplative Pause)
+
+New intuitions don't surface immediately. They enter a maturation pipeline where subsequent dream cycles can refine them before they appear in the agent's context — like how musical themes develop through repetition with variation.
+
+- **Raw → Maturing → Mature** — new intuitions start as "raw", advance to "maturing" after the first dream cycle, and become "mature" (surfaceable) after the configured number of cycles
+- **Cycles required** — default 2 dream cycles before surfacing (`maturation_cycles_required`)
+- **Fortissimo bypass** — intuitions with importance ≥ 9 skip maturation entirely, surfacing immediately (like a sudden climax in music)
+- **Refinement** — during maturation, the dreaming LLM can adjust confidence and importance based on new evidence
+- **Tensions skip maturation** — `unresolved` intuitions are always surfaced immediately (the tension IS the insight)
+
+#### Cognitive Tempo Detection
+
+Pure heuristic analysis of conversation signals to determine whether the interaction calls for deep contemplative processing (adagio) or rapid task execution (allegro). No LLM calls — analyzes message metadata only.
+
+**Signals analyzed:**
+- Message length (longer → contemplative)
+- Time gaps between messages (longer → deliberate)
+- Question depth (why/how/what-if vs do/run/show)
+- Word complexity (average word length)
+- Reflective vs task-oriented language markers
+
+**Modes:**
+| Mode | Tempo range | Effect |
+|---|---|---|
+| `adagio` | < 0.35 | More intuitions surfaced (up to 8), lower confidence threshold, system prompt encourages cross-referencing and speculation |
+| `moderato` | 0.35 - 0.65 | Default behavior |
+| `allegro` | > 0.65 | Fewer intuitions surfaced (min 1), higher confidence threshold, system prompt encourages concise action-oriented responses |
+
+The tempo is re-assessed each turn and displayed in the nervous system context note.
+
+#### Cognitive Metrics
+
+All musical cognition features are tracked via a dedicated metrics system (`~/.captain-claw/cognitive_metrics.db`) that records events across features:
+
+- `tension_created` / `tension_resolved` — tracks tension lifecycle, resolution rate, and lifespan
+- `maturation_started` / `maturation_completed` — tracks pipeline throughput and completion rate
+- `tempo_detected` — tracks mode distribution across sessions
+- `dream_cycle` — tracks per-cycle statistics (intuitions stored, tensions open, matured count)
+
+Use `compare_snapshots()` to compare metrics at different points in time and validate whether these features improve reasoning quality.
 
 ### Validation and Strengthening
 
@@ -2471,17 +2569,20 @@ Navigate to `/intuitions` to browse all intuitions. The page shows:
 
 ### Storage
 
-Intuitions are stored in `~/.captain-claw/intuitions.db` with an `intuitions` table and `intuitions_fts` FTS5 virtual table for full-text search. The schema includes confidence, importance, access count, validation status, source layers, and decay tracking. In public mode (if enabled), each session uses a separate database file.
+Intuitions are stored in `~/.captain-claw/intuitions.db` with an `intuitions` table and `intuitions_fts` FTS5 virtual table for full-text search. The schema includes confidence, importance, access count, validation status, source layers, decay tracking, resolution state (for tensions), and maturation state (raw/maturing/mature). Cognitive metrics are stored separately in `~/.captain-claw/cognitive_metrics.db`. In public mode (if enabled), each session uses a separate database file.
 
 ### Cost Control
 
 - **Off by default** — zero cost unless opted in via `nervous_system.enabled: true`
-- Input budget capped at ~2000 tokens per dream
+- Input budget capped at ~2000 tokens per dream (slightly higher with tension and maturation context)
 - Output capped at 800 tokens
 - 5-minute cooldown between dreams (vs 60s for insights)
 - 12-message interval (vs 8 for insights)
 - Max 3 intuitions per cycle
 - Hard cap of 200 stored intuitions with aggressive decay
+- **Idle dreaming** — fires at most once per hour during idle time (configurable). Same token budget as regular dreams (~2800 tokens per cycle). Disable via `idle_dream_enabled: false`
+- **Cognitive tempo** — zero LLM cost (pure heuristics). Enable separately via `cognitive_tempo.enabled: true`
+- **Cognitive metrics** — zero LLM cost (event recording only). Enabled by default, prunes at 10,000 events
 
 ---
 

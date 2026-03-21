@@ -16,4 +16,10 @@ Deep memory (archive):
 Existing intuitions (do NOT re-generate these):
 {existing_intuitions}
 
-Find connections and patterns as JSON array:
+Open tensions (unresolved contradictions — check if any have been resolved by new information):
+{open_tensions_text}
+
+Maturing intuitions (refine these — adjust confidence/importance if new evidence warrants it):
+{maturing_text}
+
+Find connections, tensions, and patterns as JSON array:

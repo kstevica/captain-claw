@@ -692,6 +692,43 @@ class NervousSystemConfig(BaseModel):
     allow_public: bool = False
     db_path: str = "~/.captain-claw/intuitions.db"
 
+    # Idle dreaming — dream during inactive hours without user interaction.
+    idle_dream_enabled: bool = True
+    idle_dream_interval_seconds: int = 3600     # Dream every hour during idle (1h)
+    idle_dream_min_session_messages: int = 5    # Minimum messages in session before idle dreaming
+
+    # Tension tracking — unresolved contradictions held for deeper processing.
+    tension_decay_multiplier: float = 0.5       # Tensions decay at half the normal rate
+    tension_delete_threshold: float = 0.05      # Lower threshold before deletion
+    max_open_tensions: int = 10                 # Cap on simultaneous open tensions
+
+    # Maturation pipeline — new intuitions sit before being surfaced.
+    maturation_enabled: bool = True
+    maturation_cycles_required: int = 2         # Dream cycles before surfacing
+    maturation_skip_importance: int = 9         # >= this importance skips maturation (fortissimo)
+
+
+class CognitiveMetricsConfig(BaseModel):
+    """Musical cognition tracking and measurement."""
+
+    enabled: bool = True
+    db_path: str = "~/.captain-claw/cognitive_metrics.db"
+    auto_snapshot_interval_hours: int = 24
+    max_events: int = 10000
+
+
+class CognitiveTempoConfig(BaseModel):
+    """Processing depth detection and user cognitive rhythm modeling."""
+
+    enabled: bool = False
+    analysis_window: int = 5                    # Recent messages to analyze
+    adagio_threshold: float = 0.35              # Below this = deep contemplative mode
+    allegro_threshold: float = 0.65             # Above this = rapid execution mode
+    user_tempo_weight: float = 0.4              # Weight of user behavior signals
+    content_depth_weight: float = 0.6           # Weight of content analysis signals
+    adjust_context_injection: bool = True       # Let tempo affect intuition count
+    adjust_response_guidance: bool = True       # Let tempo affect system prompt guidance
+
 
 class ScaleConfig(BaseModel):
     """Scale loop thresholds for list processing tasks."""
@@ -874,6 +911,8 @@ class Config(BaseSettings):
     insights: InsightsConfig = Field(default_factory=InsightsConfig)
     nervous_system: NervousSystemConfig = Field(default_factory=NervousSystemConfig)
     sister_session: SisterSessionConfig = Field(default_factory=SisterSessionConfig)
+    cognitive_metrics: CognitiveMetricsConfig = Field(default_factory=CognitiveMetricsConfig)
+    cognitive_tempo: CognitiveTempoConfig = Field(default_factory=CognitiveTempoConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="CLAW_",
