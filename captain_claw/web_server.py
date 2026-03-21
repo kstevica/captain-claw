@@ -383,6 +383,16 @@ class WebServer:
             agent._initialized = True
             agent._byok_active = False
 
+            # Warm up context caches that initialize() would normally populate.
+            try:
+                await agent._refresh_insights_context_cache()
+            except Exception:
+                pass
+            try:
+                await agent._refresh_nervous_system_cache()
+            except Exception:
+                pass
+
             self._public_agents[session_id] = agent
             log.info("Created public agent", session_id=session_id, session_name=session.name)
             return agent

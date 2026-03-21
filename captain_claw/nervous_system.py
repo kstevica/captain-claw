@@ -576,7 +576,12 @@ async def dream(agent: Agent) -> list[dict[str, Any]]:
     from captain_claw.session import get_session_manager
 
     cfg = get_config()
-    mgr = get_nervous_system_manager()
+
+    # Use session-specific manager in public mode.
+    if cfg.web.public_run and agent.session:
+        mgr = get_session_nervous_system_manager(str(agent.session.id))
+    else:
+        mgr = get_nervous_system_manager()
 
     _emit = getattr(agent, "_emit_thinking", None)
     if callable(_emit):

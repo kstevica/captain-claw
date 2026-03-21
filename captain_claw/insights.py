@@ -442,7 +442,12 @@ async def extract_insights(
     from captain_claw.session import get_session_manager
 
     cfg = get_config()
-    mgr = get_insights_manager()
+
+    # Use session-specific manager in public mode.
+    if cfg.web.public_run and agent.session:
+        mgr = get_session_insights_manager(str(agent.session.id))
+    else:
+        mgr = get_insights_manager()
 
     # Emit to monitor/activity.
     _emit = getattr(agent, "_emit_thinking", None)
