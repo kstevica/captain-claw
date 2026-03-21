@@ -55,6 +55,7 @@ Context awareness:
 {gws_block}
 {datastore_block}
 {insights_block}
+{nervous_system_block}
 
 Efficient tool use:
 - Minimum tool calls needed. Stop when you have enough info.

@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nervous System — Captain Claw</title>
+    <link rel="stylesheet" href="/static/intuitions.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<header class="nts-header">
+    <div class="nts-header-left">
+        <a href="/" class="nts-logo-link"><img src="/static/logo.svg" alt="Home"></a>
+        <h1>Nervous System</h1>
+    </div>
+    <div class="nts-header-right">
+        <a href="/insights" class="nts-nav-link">Insights</a>
+        <a href="/reflections" class="nts-nav-link">Reflections</a>
+        <a href="/chat" class="nts-nav-link">&larr; Chat</a>
+    </div>
+</header>
+
+<div class="nts-layout">
+    <!-- Stats bar -->
+    <div class="nts-stats-bar" id="statsBar">
+        <div class="nts-stat">Total: <span class="nts-stat-value" id="statTotal">—</span></div>
+        <div class="nts-stat">Validated: <span class="nts-stat-value" id="statValidated">—</span></div>
+        <div class="nts-stat">Avg confidence: <span class="nts-stat-value" id="statConfidence">—</span></div>
+        <div class="nts-stat">Avg importance: <span class="nts-stat-value" id="statImportance">—</span></div>
+    </div>
+
+    <!-- Toolbar -->
+    <div class="nts-toolbar">
+        <input type="text" class="nts-search" id="searchInput" placeholder="Search intuitions..." autocomplete="off">
+        <select class="nts-filter" id="typeFilter">
+            <option value="">All types</option>
+            <option value="connection">Connection</option>
+            <option value="pattern">Pattern</option>
+            <option value="hypothesis">Hypothesis</option>
+            <option value="association">Association</option>
+        </select>
+        <button class="nts-btn nts-btn-secondary" id="dreamBtn">&#x1F4AD; Dream</button>
+        <button class="nts-btn" id="addBtn">+ Add</button>
+        <span class="nts-count" id="countLabel"></span>
+    </div>
+
+    <!-- List -->
+    <div class="nts-list" id="intuitionsList"></div>
+</div>
+
+<!-- Detail / Edit Modal -->
+<div class="nts-detail-overlay" id="detailOverlay">
+    <div class="nts-detail" id="detailPanel">
+        <h2 id="detailTitle">Intuition</h2>
+
+        <div class="nts-detail-row">
+            <div class="nts-detail-label">Content</div>
+            <div class="nts-detail-value">
+                <textarea class="nts-detail-input" id="detailContent" rows="3"></textarea>
+            </div>
+        </div>
+        <div class="nts-detail-row">
+            <div class="nts-detail-label">Thread Type</div>
+            <div class="nts-detail-value">
+                <select class="nts-detail-input" id="detailType">
+                    <option value="connection">Connection</option>
+                    <option value="pattern">Pattern</option>
+                    <option value="hypothesis">Hypothesis</option>
+                    <option value="association">Association</option>
+                </select>
+            </div>
+        </div>
+        <div class="nts-detail-row">
+            <div class="nts-detail-label">Confidence</div>
+            <div class="nts-detail-value">
+                <input type="range" class="nts-detail-input" id="detailConfidence" min="0" max="1" step="0.05" value="0.5" style="padding:0">
+                <span id="detailConfidenceLabel" style="font-size:12px;color:var(--text-muted);margin-left:8px">0.5</span>
+            </div>
+        </div>
+        <div class="nts-detail-row">
+            <div class="nts-detail-label">Importance</div>
+            <div class="nts-detail-value">
+                <input type="number" class="nts-detail-input" id="detailImportance" min="1" max="10" value="5">
+            </div>
+        </div>
+        <div class="nts-detail-row">
+            <div class="nts-detail-label">Tags</div>
+            <div class="nts-detail-value">
+                <input type="text" class="nts-detail-input" id="detailTags" placeholder="comma, separated">
+            </div>
+        </div>
+        <div class="nts-detail-row">
+            <div class="nts-detail-label">Source Layers</div>
+            <div class="nts-detail-value">
+                <span id="detailLayers" style="font-size:12px;color:var(--text-muted)"></span>
+            </div>
+        </div>
+        <div class="nts-detail-row">
+            <div class="nts-detail-label">Validated</div>
+            <div class="nts-detail-value">
+                <span id="detailValidated" style="font-size:12px"></span>
+            </div>
+        </div>
+        <div class="nts-detail-row">
+            <div class="nts-detail-label">Access Count</div>
+            <div class="nts-detail-value">
+                <span id="detailAccess" style="font-size:12px;color:var(--text-muted)"></span>
+            </div>
+        </div>
+        <div class="nts-detail-row">
+            <div class="nts-detail-label">Created</div>
+            <div class="nts-detail-value">
+                <span id="detailCreated" style="font-size:12px;color:var(--text-muted)"></span>
+            </div>
+        </div>
+
+        <div class="nts-detail-actions">
+            <button class="nts-btn nts-btn-danger" id="detailDeleteBtn">Delete</button>
+            <button class="nts-btn nts-btn-secondary" id="detailValidateBtn">Validate</button>
+            <button class="nts-btn" id="detailSaveBtn">Save</button>
+            <button class="nts-btn" id="detailCancelBtn" style="background:var(--bg-tertiary);color:var(--text-secondary)">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<div class="nts-toast" id="toast"></div>
+
+<script src="/static/intuitions.js"></script>
+</body>
+</html>

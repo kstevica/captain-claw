@@ -1069,6 +1069,57 @@ class AgentContextMixin:
             "stored knowledge."
         )
 
+    # ── Nervous system context ───────────────────────────────────────
+
+    async def _refresh_nervous_system_cache(self) -> None:
+        """Pre-fetch intuitions for context injection."""
+        cfg = get_config()
+        if not cfg.nervous_system.enabled or not cfg.nervous_system.inject_in_context:
+            return
+        try:
+            from captain_claw.nervous_system import get_nervous_system_manager, get_session_nervous_system_manager
+            if cfg.web.public_run == "computer" and self.session:
+                mgr = get_session_nervous_system_manager(str(self.session.id))
+            else:
+                mgr = get_nervous_system_manager()
+            session_id = str(self.session.id) if self.session else None
+            self._nervous_system_cache = await mgr.get_for_context(
+                limit=cfg.nervous_system.max_items_in_prompt,
+                session_id=session_id,
+            )
+        except Exception:
+            self._nervous_system_cache = []
+
+    def _build_nervous_system_context_note(self, query: str = "") -> str:
+        """Build per-turn context note from relevant intuitions."""
+        cfg = get_config()
+        if not cfg.nervous_system.enabled or not cfg.nervous_system.inject_in_context:
+            return ""
+        items = getattr(self, "_nervous_system_cache", None)
+        if not items:
+            return ""
+        lines = ["Background intuitions (autonomously discovered patterns):"]
+        for i in items:
+            conf = i.get("confidence", 0.5)
+            tt = i.get("thread_type", "connection")
+            lines.append(f"- [{tt}] (conf:{conf:.1f}) {i['content']}")
+        return "\n".join(lines)
+
+    def _build_nervous_system_block(self) -> str:
+        """Build the {nervous_system_block} for the system prompt."""
+        cfg = get_config()
+        if not cfg.nervous_system.enabled:
+            return ""
+        items = getattr(self, "_nervous_system_cache", None)
+        if not items:
+            return ""
+        return (
+            "You have an autonomous pattern-recognition system (\"nervous system\") "
+            "that discovers connections across your memory layers. Relevant intuitions "
+            "are automatically surfaced in context. These are hypotheses — use them to "
+            "inform your responses but treat low-confidence ones as speculative."
+        )
+
     def _build_semantic_memory_note(
         self,
         query: str | None,
@@ -1363,6 +1414,7 @@ class AgentContextMixin:
         await self._refresh_apis_context_cache()
         await self._refresh_datastore_context_cache()
         await self._refresh_insights_context_cache()
+        await self._refresh_nervous_system_cache()
 
         self._initialized = True
         log.info("Agent initialized", session_id=self.session.id)
@@ -1925,6 +1977,7 @@ class AgentContextMixin:
             "datastore", "section_datastore.md",
         )
         insights_block = self._build_insights_block()
+        nervous_system_block = self._build_nervous_system_block()
 
         base_prompt = self.instructions.render(
             "system_prompt.md",
@@ -1946,6 +1999,7 @@ class AgentContextMixin:
             gws_block=gws_block,
             datastore_block=datastore_block,
             insights_block=insights_block,
+            nervous_system_block=nervous_system_block,
         )
 
         # Collapse triple+ newlines left by absent conditional sections.
@@ -2477,6 +2531,14 @@ class AgentContextMixin:
                 "content": insights_note,
                 "tool_name": "insights_context",
                 "token_count": self._count_tokens(insights_note),
+            })
+        nervous_note = self._build_nervous_system_context_note()
+        if nervous_note:
+            candidate_messages.append({
+                "role": "assistant",
+                "content": nervous_note,
+                "tool_name": "nervous_system_context",
+                "token_count": self._count_tokens(nervous_note),
             })
         # Workspace manifest — compact listing of files created/modified
         # this session.  Gives the LLM a project map without needing

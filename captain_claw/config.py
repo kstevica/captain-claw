@@ -656,6 +656,24 @@ class InsightsConfig(BaseModel):
     db_path: str = "~/.captain-claw/insights.db"
 
 
+class NervousSystemConfig(BaseModel):
+    """Autonomous pattern-recognition and memory synthesis (dreaming)."""
+
+    enabled: bool = False
+    auto_dream: bool = True
+    inject_in_context: bool = True
+    max_items_in_prompt: int = 4
+    dream_interval_messages: int = 12
+    dream_cooldown_seconds: int = 300
+    max_intuitions: int = 200
+    min_confidence_for_context: float = 0.3
+    decay_after_days: int = 7
+    decay_rate_per_day: float = 0.05
+    delete_threshold: float = 0.1
+    allow_public: bool = False
+    db_path: str = "~/.captain-claw/intuitions.db"
+
+
 class ScaleConfig(BaseModel):
     """Scale loop thresholds for list processing tasks."""
 
@@ -835,6 +853,7 @@ class Config(BaseSettings):
     deep_memory: DeepMemoryConfig = Field(default_factory=DeepMemoryConfig)
     datastore: DatastoreConfig = Field(default_factory=DatastoreConfig)
     insights: InsightsConfig = Field(default_factory=InsightsConfig)
+    nervous_system: NervousSystemConfig = Field(default_factory=NervousSystemConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="CLAW_",

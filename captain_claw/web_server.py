@@ -167,6 +167,13 @@ COMMANDS: list[dict[str, str]] = [
     {"command": "/reflection", "description": "Show latest self-reflection", "category": "Reflections"},
     {"command": "/reflection generate", "description": "Trigger a new self-reflection", "category": "Reflections"},
     {"command": "/reflection list", "description": "List recent reflections", "category": "Reflections"},
+    {"command": "/intuition", "description": "List recent intuitions", "category": "Nervous System"},
+    {"command": "/intuition search <query>", "description": "Search intuitions", "category": "Nervous System"},
+    {"command": "/intuition dream", "description": "Trigger a dream cycle", "category": "Nervous System"},
+    {"command": "/intuition add <text>", "description": "Add an intuition manually", "category": "Nervous System"},
+    {"command": "/intuition delete <id>", "description": "Delete an intuition", "category": "Nervous System"},
+    {"command": "/intuition stats", "description": "Show nervous system statistics", "category": "Nervous System"},
+    {"command": "/intuition validate <id>", "description": "Validate an intuition (protect from decay)", "category": "Nervous System"},
 ]
 
 
@@ -1132,6 +1139,10 @@ class WebServer:
         from captain_claw.web.static_pages import serve_insights
         return await serve_insights(self, request)
 
+    async def _serve_intuitions(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_intuitions
+        return await serve_intuitions(self, request)
+
     async def _serve_playbooks(self, request: web.Request) -> web.FileResponse:
         from captain_claw.web.static_pages import serve_playbooks
         return await serve_playbooks(self, request)
@@ -1501,6 +1512,35 @@ class WebServer:
         from captain_claw.web.rest_insights import delete_insight
         return await delete_insight(self, request)
 
+    # Nervous System REST
+    async def _ns_list(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_nervous_system import list_intuitions
+        return await list_intuitions(self, request)
+
+    async def _ns_get(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_nervous_system import get_intuition
+        return await get_intuition(self, request)
+
+    async def _ns_create(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_nervous_system import create_intuition
+        return await create_intuition(self, request)
+
+    async def _ns_update(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_nervous_system import update_intuition
+        return await update_intuition(self, request)
+
+    async def _ns_delete(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_nervous_system import delete_intuition
+        return await delete_intuition(self, request)
+
+    async def _ns_dream(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_nervous_system import trigger_dream
+        return await trigger_dream(self, request)
+
+    async def _ns_stats(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_nervous_system import get_stats
+        return await get_stats(self, request)
+
     # Onboarding REST
     async def _get_onboarding_status(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_onboarding import get_onboarding_status
@@ -1765,6 +1805,14 @@ class WebServer:
         app.router.add_get("/api/insights/{id}", self._ins_get)
         app.router.add_patch("/api/insights/{id}", self._ins_update)
         app.router.add_delete("/api/insights/{id}", self._ins_delete)
+        # Nervous System
+        app.router.add_get("/api/nervous-system", self._ns_list)
+        app.router.add_post("/api/nervous-system", self._ns_create)
+        app.router.add_get("/api/nervous-system/stats", self._ns_stats)
+        app.router.add_post("/api/nervous-system/dream", self._ns_dream)
+        app.router.add_get("/api/nervous-system/{id}", self._ns_get)
+        app.router.add_patch("/api/nervous-system/{id}", self._ns_update)
+        app.router.add_delete("/api/nervous-system/{id}", self._ns_delete)
         # Playbooks API
         app.router.add_get("/api/playbooks", self._pb_list)
         app.router.add_get("/api/playbooks/search", self._pb_search)
@@ -1826,6 +1874,7 @@ class WebServer:
             app.router.add_get("/onboarding", self._serve_onboarding)
             app.router.add_get("/datastore", self._serve_datastore)
             app.router.add_get("/insights", self._serve_insights)
+            app.router.add_get("/intuitions", self._serve_intuitions)
             app.router.add_get("/playbooks", self._serve_playbooks)
             app.router.add_get("/browser-workflows", self._serve_browser_workflows)
             app.router.add_get("/direct-api-calls", self._serve_direct_api_calls)

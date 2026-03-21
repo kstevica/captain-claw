@@ -401,6 +401,14 @@ async def _run_agent(
         except Exception:
             pass
 
+        # Nervous system dreaming (background synthesis).
+        try:
+            import asyncio as _asyncio3
+            from captain_claw.nervous_system import maybe_dream
+            _asyncio3.create_task(maybe_dream(agent))
+        except Exception:
+            pass
+
     except Exception as e:
         log.error("Chat error", error=str(e), public=is_public)
         send({"type": "error", "message": f"Error: {str(e)}"})

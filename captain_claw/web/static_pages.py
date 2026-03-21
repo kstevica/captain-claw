@@ -92,6 +92,10 @@ async def serve_insights(server: WebServer, request: web.Request) -> web.FileRes
     return web.FileResponse(STATIC_DIR / "insights.html")
 
 
+async def serve_intuitions(server: WebServer, request: web.Request) -> web.FileResponse:
+    return web.FileResponse(STATIC_DIR / "intuitions.html")
+
+
 async def serve_playbooks(server: WebServer, request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "playbooks.html")
 

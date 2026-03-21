@@ -281,6 +281,9 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
         elif cmd in ("/reflection", "/reflect"):
             result = await _handle_reflection_command(server, args.strip())
 
+        elif cmd in ("/intuition", "/intuitions", "/dream"):
+            result = await _handle_intuition_command(server, args.strip())
+
         else:
             result = f"Unknown command: `{cmd}`. Type `/help` for available commands."
 
@@ -1156,6 +1159,118 @@ async def handle_insights_command(server: WebServer, args: str) -> str:
         cat = item.get("category", "fact")
         imp = item.get("importance", 5)
         lines.append(f"#{idx} [{cat}] (imp:{imp}) {item['content']}  `{item['id']}`")
+    return f"**Search results for** `{args}`:\n" + "\n".join(lines)
+
+
+async def _handle_intuition_command(server: "WebServer", args: str) -> str:
+    """Handle /intuition subcommands in the web UI."""
+    from captain_claw.nervous_system import dream, get_nervous_system_manager
+
+    mgr = get_nervous_system_manager()
+
+    if not args or args.lower() in ("list", "ls"):
+        items = await mgr.list_recent(limit=20)
+        if not items:
+            return "No intuitions yet. Use `/intuition dream` to trigger a dream cycle."
+        lines: list[str] = []
+        for idx, item in enumerate(items, 1):
+            tt = item.get("thread_type", "association")
+            conf = item.get("confidence", 0.5)
+            imp = item.get("importance", 5)
+            validated = " \u2713" if item.get("validated") else ""
+            tags = f" [{item['tags']}]" if item.get("tags") else ""
+            lines.append(
+                f"#{idx} [{tt}] (conf:{conf:.1f} imp:{imp}{validated}) {item['content']}{tags}  `{item['id']}`"
+            )
+        total = await mgr.count()
+        return f"**Intuitions** ({len(items)} of {total}):\n" + "\n".join(lines)
+
+    parts = args.split(None, 1)
+    subcmd = parts[0].lower()
+    subargs = parts[1].strip() if len(parts) > 1 else ""
+
+    if subcmd == "search":
+        if not subargs:
+            return "Usage: `/intuition search <query>`"
+        results = await mgr.search(subargs, limit=15)
+        if not results:
+            return f"No intuitions matching: `{subargs}`"
+        lines = []
+        for idx, item in enumerate(results, 1):
+            tt = item.get("thread_type", "association")
+            conf = item.get("confidence", 0.5)
+            lines.append(f"#{idx} [{tt}] (conf:{conf:.1f}) {item['content']}  `{item['id']}`")
+        return f"**Search results for** `{subargs}`:\n" + "\n".join(lines)
+
+    if subcmd in ("dream", "generate", "think"):
+        agent = getattr(server, "agent", None)
+        if not agent:
+            return "No active agent — cannot dream."
+        try:
+            results = await dream(agent)
+            if results:
+                lines = [f"- {r.get('content', '')}" for r in results]
+                return f"**Dream cycle produced {len(results)} intuition(s):**\n" + "\n".join(lines)
+            return "Dream cycle completed — no new intuitions formed."
+        except Exception as exc:
+            return f"Dream failed: {exc}"
+
+    if subcmd == "add":
+        if not subargs:
+            return "Usage: `/intuition add <text>`"
+        session_id = server.agent.session.id if server.agent and server.agent.session else None
+        intuition_id = await mgr.add(
+            content=subargs,
+            thread_type="association",
+            source_layers=["manual"],
+            source_session=session_id,
+            confidence=0.7,
+            importance=5,
+        )
+        if intuition_id:
+            return f"Added intuition: **{subargs}** (`{intuition_id}`)"
+        return "Intuition was deduped — a similar one already exists."
+
+    if subcmd in ("delete", "del", "remove", "rm"):
+        if not subargs:
+            return "Usage: `/intuition delete <id>`"
+        ok = await mgr.delete(subargs.strip())
+        if not ok:
+            return f"Intuition not found: `{subargs}`"
+        return f"Deleted intuition `{subargs}`"
+
+    if subcmd == "validate":
+        if not subargs:
+            return "Usage: `/intuition validate <id>`"
+        item = await mgr.get(subargs.strip())
+        if not item:
+            return f"Intuition not found: `{subargs}`"
+        await mgr.validate(subargs.strip())
+        return f"Validated intuition `{subargs}` — protected from decay, confidence boosted."
+
+    if subcmd == "stats":
+        data = await mgr.stats()
+        lines = [
+            f"**Nervous System Stats:**",
+            f"- Total intuitions: {data['total']}",
+            f"- Validated: {data['validated']}",
+            f"- Avg confidence: {data['avg_confidence']}",
+            f"- Avg importance: {data['avg_importance']}",
+        ]
+        dist = data.get("type_distribution", {})
+        if dist:
+            lines.append("- Types: " + ", ".join(f"{k}={v}" for k, v in dist.items()))
+        return "\n".join(lines)
+
+    # Fallback: treat as search.
+    results = await mgr.search(args, limit=15)
+    if not results:
+        return f"No intuitions matching: `{args}`"
+    lines = []
+    for idx, item in enumerate(results, 1):
+        tt = item.get("thread_type", "association")
+        conf = item.get("confidence", 0.5)
+        lines.append(f"#{idx} [{tt}] (conf:{conf:.1f}) {item['content']}  `{item['id']}`")
     return f"**Search results for** `{args}`:\n" + "\n".join(lines)
 
 
