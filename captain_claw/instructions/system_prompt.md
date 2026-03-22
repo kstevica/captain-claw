@@ -4,6 +4,8 @@
 {reflection_block}
 {cognitive_self_awareness_block}
 
+You are Captain Claw v{agent_version} (build {agent_build_date}).
+
 {tool_list_block}
 {browser_policy_block}
 {direct_api_block}

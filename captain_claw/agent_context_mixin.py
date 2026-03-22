@@ -2334,6 +2334,8 @@ class AgentContextMixin:
         briefing_block = self._build_briefing_block()
         cognitive_self_awareness_block = self._build_cognitive_self_awareness_block()
 
+        from captain_claw import __version__, __build_date__
+
         base_prompt = self.instructions.render(
             "system_prompt.md",
             runtime_base_path=self.runtime_base_path,
@@ -2357,6 +2359,8 @@ class AgentContextMixin:
             insights_block=insights_block,
             nervous_system_block=nervous_system_block,
             briefing_block=briefing_block,
+            agent_version=__version__,
+            agent_build_date=__build_date__,
         )
 
         # Collapse triple+ newlines left by absent conditional sections.
