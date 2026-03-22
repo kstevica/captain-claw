@@ -26,6 +26,7 @@ class Message:
 
     role: str  # "system", "user", "assistant", "tool"
     content: str
+    message_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     tool_call_id: str | None = None
     tool_name: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
@@ -55,9 +56,11 @@ class Session:
         tool_arguments: dict[str, Any] | None = None,
         token_count: int | None = None,
         model: str = "",
-    ) -> None:
-        """Add a message to the session."""
+    ) -> str:
+        """Add a message to the session.  Returns the generated message_id."""
+        message_id = uuid.uuid4().hex[:12]
         msg: dict[str, Any] = {
+            "message_id": message_id,
             "role": role,
             "content": content,
             "tool_call_id": tool_call_id,
@@ -71,6 +74,7 @@ class Session:
             msg["model"] = model
         self.messages.append(msg)
         self.updated_at = _utcnow_iso()
+        return message_id
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -158,6 +162,8 @@ class TodoItem:
     completed_at: str | None = None
     context: str | None = None
     tags: str | None = None
+    parent_id: str | None = None
+    triggered_by_id: str | None = None
 
     @classmethod
     def from_row(cls, row: tuple[Any, ...]) -> "TodoItem":
@@ -175,6 +181,8 @@ class TodoItem:
             completed_at=str(row[9]) if row[9] else None,
             context=str(row[10]) if row[10] else None,
             tags=str(row[11]) if row[11] else None,
+            parent_id=str(row[12]) if len(row) > 12 and row[12] else None,
+            triggered_by_id=str(row[13]) if len(row) > 13 and row[13] else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -192,6 +200,8 @@ class TodoItem:
             "completed_at": self.completed_at,
             "context": self.context,
             "tags": self.tags,
+            "parent_id": self.parent_id,
+            "triggered_by_id": self.triggered_by_id,
         }
 
 
@@ -681,6 +691,12 @@ class SessionManager:
             await self._db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_todo_responsible_status ON todo_items(responsible, status)"
             )
+            # Migration: Process of Thoughts — add parent/trigger linkage to todos.
+            for col in ("parent_id", "triggered_by_id"):
+                try:
+                    await self._db.execute(f"ALTER TABLE todo_items ADD COLUMN {col} TEXT DEFAULT NULL")
+                except Exception:
+                    pass  # column already exists
             await self._db.execute("""
                 CREATE TABLE IF NOT EXISTS contacts (
                     id              TEXT PRIMARY KEY,
@@ -1468,7 +1484,8 @@ class SessionManager:
 
     _TODO_COLS = (
         "id, content, status, responsible, priority, source_session, "
-        "target_session, created_at, updated_at, completed_at, context, tags"
+        "target_session, created_at, updated_at, completed_at, context, tags, "
+        "parent_id, triggered_by_id"
     )
 
     async def create_todo(
@@ -1481,6 +1498,8 @@ class SessionManager:
         target_session: str | None = None,
         context: str | None = None,
         tags: str | None = None,
+        parent_id: str | None = None,
+        triggered_by_id: str | None = None,
     ) -> TodoItem:
         """Create and persist a to-do item.
 
@@ -1522,17 +1541,19 @@ class SessionManager:
             updated_at=now_iso,
             context=context,
             tags=tags,
+            parent_id=parent_id,
+            triggered_by_id=triggered_by_id,
         )
         await self._db.execute(
             f"""
             INSERT INTO todo_items ({self._TODO_COLS})
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item.id, item.content, item.status, item.responsible,
                 item.priority, item.source_session, item.target_session,
                 item.created_at, item.updated_at, item.completed_at,
-                item.context, item.tags,
+                item.context, item.tags, item.parent_id, item.triggered_by_id,
             ),
         )
         await self._db.commit()

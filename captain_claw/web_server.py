@@ -1204,6 +1204,18 @@ class WebServer:
         from captain_claw.web.static_pages import serve_briefings
         return await serve_briefings(self, request)
 
+    async def _serve_brain_graph(self, request: web.Request) -> web.Response:
+        from captain_claw.web.static_pages import serve_brain_graph
+        return await serve_brain_graph(self, request)
+
+    async def _bg_get_data(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_brain_graph import get_graph_data
+        return await get_graph_data(self, request)
+
+    async def _bg_get_message(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_brain_graph import get_message_content
+        return await get_message_content(self, request)
+
     # ── Public session API ──────────────────────────────────────────
 
     async def _public_session_new(self, request: web.Request) -> web.Response:
@@ -1985,6 +1997,9 @@ class WebServer:
             app.router.add_get("/personality", self._serve_personality)
             app.router.add_get("/semantic-memory", self._serve_semantic_memory)
             app.router.add_get("/briefings", self._serve_briefings)
+            app.router.add_get("/brain-graph", self._serve_brain_graph)
+            app.router.add_get("/api/brain-graph", self._bg_get_data)
+            app.router.add_get("/api/brain-graph/message/{msg_id}", self._bg_get_message)
             app.router.add_post("/api/computer/visualize", self._computer_visualize)
             app.router.add_post("/api/computer/visualize/stream", self._computer_visualize_stream)
             app.router.add_post("/api/computer/exploration", self._exploration_save)

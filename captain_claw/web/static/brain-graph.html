@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Brain Graph — Captain Claw</title>
+    <link rel="stylesheet" href="/static/brain-graph.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+    <script src="https://unpkg.com/3d-force-graph@1.73.4/dist/3d-force-graph.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked@15.0.0/marked.min.js"></script>
+</head>
+<body>
+
+<header class="bg-header">
+    <div class="bg-header-left">
+        <a href="/" class="bg-logo-link"><img src="/static/logo.svg" alt="Home"></a>
+        <h1>Brain Graph</h1>
+        <span class="bg-stats" id="statsLabel">Loading...</span>
+    </div>
+    <div class="bg-header-right">
+        <button class="bg-btn" id="btnRefresh" title="Reload graph data">Refresh</button>
+        <button class="bg-btn" id="btnReset" title="Reset camera">Reset View</button>
+        <a href="/insights" class="bg-nav-link">Insights</a>
+        <a href="/intuitions" class="bg-nav-link">Intuitions</a>
+        <a href="/chat" class="bg-nav-link">&larr; Chat</a>
+    </div>
+</header>
+
+<!-- Controls panel -->
+<div class="bg-controls" id="controlsPanel">
+    <h3>Filters</h3>
+    <div class="bg-filter-group">
+        <label><input type="checkbox" data-type="insight" checked> <span class="bg-dot" style="background:#FFD700"></span> Insights</label>
+        <label><input type="checkbox" data-type="intuition" checked> <span class="bg-dot" style="background:#9B59B6"></span> Intuitions</label>
+        <label><input type="checkbox" data-type="tension" checked> <span class="bg-dot" style="background:#E74C3C"></span> Tensions</label>
+        <label><input type="checkbox" data-type="task" checked> <span class="bg-dot" style="background:#3498DB"></span> Tasks</label>
+        <label><input type="checkbox" data-type="briefing" checked> <span class="bg-dot" style="background:#2ECC71"></span> Briefings</label>
+        <label><input type="checkbox" data-type="todo" checked> <span class="bg-dot" style="background:#1ABC9C"></span> Todos</label>
+        <label><input type="checkbox" data-type="contact" checked> <span class="bg-dot" style="background:#F39C12"></span> Contacts</label>
+        <label><input type="checkbox" data-type="message" checked> <span class="bg-dot" style="background:#7CB9E8"></span> Messages</label>
+        <label><input type="checkbox" data-type="session" checked> <span class="bg-dot" style="background:#95A5A6"></span> Sessions</label>
+        <label><input type="checkbox" data-type="event" checked> <span class="bg-dot" style="background:#00BCD4"></span> Events</label>
+    </div>
+    <div class="bg-search-wrap">
+        <input type="text" id="searchInput" placeholder="Search nodes..." autocomplete="off">
+    </div>
+    <div class="bg-slider-wrap">
+        <label>Node limit: <span id="limitLabel">100</span></label>
+        <input type="range" id="limitSlider" min="20" max="500" value="100" step="10">
+    </div>
+</div>
+
+<!-- Detail panel (slides in on node click) -->
+<div class="bg-detail" id="detailPanel">
+    <button class="bg-detail-close" id="detailClose">&times;</button>
+    <div class="bg-detail-nav" id="detailNav">
+        <button class="bg-nav-btn" id="btnPrev" title="Previous node">&larr; Prev</button>
+        <span class="bg-nav-pos" id="navPos"></span>
+        <button class="bg-nav-btn" id="btnNext" title="Next node">Next &rarr;</button>
+    </div>
+    <h3 id="detailTitle">—</h3>
+    <div class="bg-detail-type" id="detailType"></div>
+    <div class="bg-detail-meta" id="detailMeta"></div>
+    <div class="bg-detail-connections" id="detailConnections"></div>
+    <hr class="bg-detail-divider">
+    <div class="bg-detail-body" id="detailBody"></div>
+</div>
+
+<!-- Live status indicator -->
+<div class="bg-live" id="liveIndicator">
+    <span class="bg-live-dot"></span> Live
+</div>
+
+<!-- Content modal (full message rendered as MD) -->
+<div class="bg-modal-overlay" id="modalOverlay">
+    <div class="bg-modal">
+        <div class="bg-modal-header">
+            <span class="bg-modal-title" id="modalTitle"></span>
+            <button class="bg-modal-close" id="modalClose">&times;</button>
+        </div>
+        <div class="bg-modal-body" id="modalBody"></div>
+    </div>
+</div>
+
+<!-- 3D graph container (full viewport) -->
+<div id="graphContainer"></div>
+
+<script src="/static/brain-graph.js"></script>
+</body>
+</html>

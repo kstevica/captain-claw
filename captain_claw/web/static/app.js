@@ -334,9 +334,20 @@
             likeBtn.addEventListener('click', function () { sendFeedback('good'); });
             dislikeBtn.addEventListener('click', function () { sendFeedback('bad'); });
 
+            // Brain Graph button
+            var graphBtn = document.createElement('button');
+            graphBtn.className = 'msg-fb-btn';
+            graphBtn.title = 'View in Brain Graph';
+            graphBtn.innerHTML = '&#x1F9E0;';
+            graphBtn.addEventListener('click', function () {
+                var params = '?focus_ts=' + encodeURIComponent(timestamp || '');
+                window.open('/brain-graph' + params, '_blank');
+            });
+
             if (feedback) fbRow.dataset.feedback = feedback;
             fbRow.appendChild(likeBtn);
             fbRow.appendChild(dislikeBtn);
+            fbRow.appendChild(graphBtn);
             fbRow.appendChild(fbSaved);
             div.appendChild(fbRow);
         }

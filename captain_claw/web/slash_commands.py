@@ -79,7 +79,9 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
                     "- All deep memory documents (Typesense)\n"
                     "- All datastore tables\n"
                     "- All sessions\n"
-                    "- All todos, contacts, scripts, apis\n\n"
+                    "- All todos, contacts, scripts, apis\n"
+                    "- All insights, intuitions, cognitive metrics\n"
+                    "- All sister session tasks, briefings, watches\n\n"
                     f"To confirm, run: `/nuke {code}`"
                 )
 
@@ -499,6 +501,42 @@ async def _execute_nuke(server: WebServer) -> str:
             pass
     if entity_count:
         lines.append(f"🗑️ Deleted **{entity_count}** entities (todos, contacts, scripts, apis)")
+
+    # 5b. Clear insights.
+    try:
+        from captain_claw.insights import get_insights_manager
+        insights_mgr = get_insights_manager()
+        insight_count = await insights_mgr.clear_all()
+        lines.append(f"💡 Deleted **{insight_count}** insights")
+    except Exception as e:
+        lines.append(f"⚠️ Insights clear failed: {e}")
+
+    # 5c. Clear intuitions (nervous system).
+    try:
+        from captain_claw.nervous_system import get_nervous_system_manager
+        ns_mgr = get_nervous_system_manager()
+        intuition_count = await ns_mgr.clear_all()
+        lines.append(f"🧠 Deleted **{intuition_count}** intuitions")
+    except Exception as e:
+        lines.append(f"⚠️ Intuitions clear failed: {e}")
+
+    # 5d. Clear cognitive metrics.
+    try:
+        from captain_claw.cognitive_metrics import get_cognitive_metrics_manager
+        cm_mgr = get_cognitive_metrics_manager()
+        cm_count = await cm_mgr.clear_all()
+        lines.append(f"📊 Deleted **{cm_count}** cognitive events/snapshots")
+    except Exception as e:
+        lines.append(f"⚠️ Cognitive metrics clear failed: {e}")
+
+    # 5e. Clear sister session tasks, briefings, watches.
+    try:
+        from captain_claw.sister_session import get_sister_session_manager
+        ss_mgr = get_sister_session_manager()
+        ss_count = await ss_mgr.clear_all()
+        lines.append(f"👯 Deleted **{ss_count}** sister session items (tasks, briefings, watches)")
+    except Exception as e:
+        lines.append(f"⚠️ Sister session clear failed: {e}")
 
     # 6. Create fresh session and switch to it.
     new_session = await sm.create_session(name="web-session")

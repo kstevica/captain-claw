@@ -151,3 +151,7 @@ async def serve_semantic_memory(server: WebServer, request: web.Request) -> web.
 
 async def serve_briefings(server: WebServer, request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "briefings.html")
+
+
+async def serve_brain_graph(server: WebServer, request: web.Request) -> web.Response:
+    return _cache_bust(STATIC_DIR / "brain-graph.html")

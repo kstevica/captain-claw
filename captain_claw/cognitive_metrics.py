@@ -93,6 +93,18 @@ class CognitiveMetricsManager:
             await self._db.close()
             self._db = None
 
+    async def clear_all(self) -> int:
+        """Delete ALL cognitive events and snapshots.  Returns total rows removed."""
+        await self._ensure_db()
+        assert self._db is not None
+
+        total = 0
+        for table in ("cognitive_events", "cognitive_snapshots"):
+            cursor = await self._db.execute(f"DELETE FROM {table}")
+            total += cursor.rowcount or 0
+        await self._db.commit()
+        return total
+
     # ── event recording ──────────────────────────────────────────────
 
     async def record_event(

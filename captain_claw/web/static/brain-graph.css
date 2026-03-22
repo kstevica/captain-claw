@@ -1,0 +1,586 @@
+/* Brain Graph — dark theme 3D visualization */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    background: #0a0a0f;
+    color: #e0e0e0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+}
+
+/* ── Header ────────────────────────────────────────────────────── */
+
+.bg-header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 100;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 16px;
+    background: rgba(10, 10, 15, 0.85);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.bg-header-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.bg-header-left h1 {
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+.bg-logo-link img {
+    height: 24px;
+    opacity: 0.8;
+}
+
+.bg-stats {
+    font-size: 12px;
+    color: #888;
+    margin-left: 8px;
+}
+
+.bg-header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.bg-btn {
+    padding: 4px 12px;
+    font-size: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.06);
+    color: #ccc;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.bg-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+}
+
+.bg-nav-link {
+    font-size: 12px;
+    color: #888;
+    text-decoration: none;
+    padding: 4px 8px;
+    transition: color 0.2s;
+}
+
+.bg-nav-link:hover {
+    color: #fff;
+}
+
+/* ── Controls Panel (top-left) ─────────────────────────────────── */
+
+.bg-controls {
+    position: fixed;
+    top: 56px;
+    left: 12px;
+    z-index: 90;
+    background: rgba(15, 15, 22, 0.9);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 14px;
+    width: 200px;
+    font-size: 12px;
+}
+
+.bg-controls h3 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #666;
+    margin-bottom: 10px;
+}
+
+.bg-filter-group {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-bottom: 12px;
+}
+
+.bg-filter-group label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    color: #bbb;
+    transition: color 0.15s;
+}
+
+.bg-filter-group label:hover {
+    color: #fff;
+}
+
+.bg-filter-group input[type="checkbox"] {
+    accent-color: #9B59B6;
+}
+
+.bg-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+}
+
+.bg-search-wrap {
+    margin-bottom: 10px;
+}
+
+.bg-search-wrap input {
+    width: 100%;
+    padding: 5px 8px;
+    font-size: 12px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+    color: #ddd;
+    outline: none;
+}
+
+.bg-search-wrap input:focus {
+    border-color: #9B59B6;
+}
+
+.bg-slider-wrap {
+    color: #888;
+}
+
+.bg-slider-wrap input[type="range"] {
+    width: 100%;
+    margin-top: 4px;
+    accent-color: #9B59B6;
+}
+
+/* ── Detail Panel (right side) ─────────────────────────────────── */
+
+.bg-detail {
+    position: fixed;
+    top: 48px;
+    right: -380px;
+    z-index: 90;
+    width: 360px;
+    height: calc(100vh - 48px);
+    background: rgba(15, 15, 22, 0.95);
+    backdrop-filter: blur(16px);
+    border-left: 1px solid rgba(255, 255, 255, 0.08);
+    padding: 20px;
+    overflow-y: auto;
+    transition: right 0.3s ease;
+    display: flex;
+    flex-direction: column;
+}
+
+.bg-detail.open {
+    right: 0;
+}
+
+.bg-detail-close {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 20px;
+    cursor: pointer;
+}
+
+.bg-detail-close:hover {
+    color: #fff;
+}
+
+.bg-detail h3 {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    padding-right: 24px;
+    word-break: break-word;
+}
+
+.bg-detail-type {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+    margin-bottom: 12px;
+}
+
+.bg-detail-divider {
+    border: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    margin: 8px 0;
+}
+
+.bg-detail-body {
+    font-size: 13px;
+    line-height: 1.7;
+    color: #ccc;
+    word-break: break-word;
+    white-space: pre-wrap;
+    flex: 1;
+    overflow-y: auto;
+    padding-bottom: 20px;
+}
+
+.bg-detail-meta {
+    font-size: 11px;
+    color: #777;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.bg-detail-meta span {
+    display: flex;
+    justify-content: space-between;
+}
+
+.bg-detail-meta .meta-label {
+    color: #555;
+}
+
+/* ── Navigation (Prev/Next) ────────────────────────────────────── */
+
+.bg-detail-nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+    gap: 6px;
+}
+
+.bg-nav-btn {
+    padding: 5px 12px;
+    font-size: 11px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.06);
+    color: #ccc;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+.bg-nav-btn:hover:not(:disabled) {
+    background: rgba(155, 89, 182, 0.3);
+    border-color: #9B59B6;
+    color: #fff;
+}
+
+.bg-nav-btn:disabled {
+    opacity: 0.25;
+    cursor: default;
+}
+
+.bg-nav-pos {
+    font-size: 10px;
+    color: #666;
+    text-align: center;
+    flex: 1;
+}
+
+/* ── Connections list ──────────────────────────────────────────── */
+
+.bg-detail-connections {
+    margin-bottom: 12px;
+    font-size: 11px;
+}
+
+.bg-detail-connections h4 {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: #555;
+    margin-bottom: 6px;
+}
+
+.bg-conn-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 6px;
+    margin-bottom: 2px;
+    border-radius: 3px;
+    cursor: pointer;
+    color: #aaa;
+    transition: background 0.15s;
+}
+
+.bg-conn-item:hover {
+    background: rgba(255, 255, 255, 0.06);
+    color: #fff;
+}
+
+.bg-conn-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.bg-conn-arrow {
+    color: #555;
+    font-size: 10px;
+}
+
+.bg-conn-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ── Live Indicator ────────────────────────────────────────────── */
+
+.bg-live {
+    position: fixed;
+    bottom: 16px;
+    left: 16px;
+    z-index: 90;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: #555;
+    transition: color 0.3s;
+}
+
+.bg-live.connected {
+    color: #2ECC71;
+}
+
+.bg-live-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #555;
+    transition: background 0.3s;
+}
+
+.bg-live.connected .bg-live-dot {
+    background: #2ECC71;
+    box-shadow: 0 0 6px #2ECC71;
+    animation: live-pulse 2s ease-in-out infinite;
+}
+
+@keyframes live-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+/* ── Graph Container ───────────────────────────────────────────── */
+
+#graphContainer {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+}
+
+#graphContainer canvas {
+    outline: none;
+}
+
+/* ── Tooltip (rendered by 3d-force-graph) ──────────────────────── */
+
+.graph-tooltip {
+    font-size: 12px !important;
+    background: rgba(15, 15, 22, 0.92) !important;
+    color: #e0e0e0 !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
+    border-radius: 6px !important;
+    padding: 6px 10px !important;
+    max-width: 280px !important;
+    pointer-events: none !important;
+    backdrop-filter: blur(8px) !important;
+}
+
+/* ── Content Modal ─────────────────────────────────────────────── */
+
+.bg-modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(4px);
+    justify-content: center;
+    align-items: center;
+}
+
+.bg-modal-overlay.open {
+    display: flex;
+}
+
+.bg-modal {
+    background: #1a1a24;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    width: 90vw;
+    max-width: 720px;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.bg-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 20px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.bg-modal-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #bbb;
+}
+
+.bg-modal-close {
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 22px;
+    cursor: pointer;
+    padding: 0 4px;
+}
+
+.bg-modal-close:hover {
+    color: #fff;
+}
+
+.bg-modal-body {
+    padding: 20px;
+    overflow-y: auto;
+    font-size: 14px;
+    line-height: 1.7;
+    color: #ddd;
+}
+
+.bg-modal-body h1, .bg-modal-body h2, .bg-modal-body h3,
+.bg-modal-body h4, .bg-modal-body h5, .bg-modal-body h6 {
+    color: #eee;
+    margin: 1em 0 0.5em;
+}
+
+.bg-modal-body h1 { font-size: 1.4em; }
+.bg-modal-body h2 { font-size: 1.2em; }
+.bg-modal-body h3 { font-size: 1.1em; }
+
+.bg-modal-body p {
+    margin: 0.6em 0;
+}
+
+.bg-modal-body ul, .bg-modal-body ol {
+    margin: 0.5em 0;
+    padding-left: 1.5em;
+}
+
+.bg-modal-body li {
+    margin: 0.3em 0;
+}
+
+.bg-modal-body code {
+    background: rgba(255, 255, 255, 0.08);
+    padding: 2px 5px;
+    border-radius: 3px;
+    font-size: 0.9em;
+}
+
+.bg-modal-body pre {
+    background: rgba(0, 0, 0, 0.4);
+    padding: 12px;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 0.8em 0;
+}
+
+.bg-modal-body pre code {
+    background: none;
+    padding: 0;
+}
+
+.bg-modal-body blockquote {
+    border-left: 3px solid #9B59B6;
+    margin: 0.8em 0;
+    padding: 4px 12px;
+    color: #aaa;
+}
+
+.bg-modal-body a {
+    color: #7CB9E8;
+}
+
+.bg-modal-body table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 0.8em 0;
+}
+
+.bg-modal-body th, .bg-modal-body td {
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 6px 10px;
+    text-align: left;
+    font-size: 13px;
+}
+
+.bg-modal-body th {
+    background: rgba(255, 255, 255, 0.05);
+    color: #bbb;
+}
+
+.bg-modal-body hr {
+    border: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    margin: 1em 0;
+}
+
+/* ── Show button in detail panel ─────────────────────────────── */
+
+.bg-show-full-btn {
+    display: inline-block;
+    padding: 5px 14px;
+    margin-top: 8px;
+    font-size: 12px;
+    border: 1px solid rgba(155, 89, 182, 0.4);
+    border-radius: 4px;
+    background: rgba(155, 89, 182, 0.15);
+    color: #c89eff;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.bg-show-full-btn:hover {
+    background: rgba(155, 89, 182, 0.3);
+    color: #fff;
+}
+
+/* ── Scrollbar ─────────────────────────────────────────────────── */
+
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.12); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }

@@ -112,6 +112,13 @@ class InsightsManager:
                 VALUES (new.rowid, new.content, new.category, new.tags);
             END
         """)
+        # Migration: Process of Thoughts — add source_message_id and supersedes_id.
+        for col in ("source_message_id", "supersedes_id"):
+            try:
+                await self._db.execute(f"ALTER TABLE insights ADD COLUMN {col} TEXT DEFAULT NULL")
+            except Exception:
+                pass  # column already exists
+
         await self._db.commit()
 
     async def close(self) -> None:
@@ -132,6 +139,8 @@ class InsightsManager:
         source_session: str | None = None,
         tags: str | None = None,
         expires_at: str | None = None,
+        source_message_id: str | None = None,
+        supersedes_id: str | None = None,
     ) -> str | None:
         """Insert a new insight.  Returns the insight ID, or None if deduped."""
         await self._ensure_db()
@@ -141,19 +150,21 @@ class InsightsManager:
         if category not in VALID_CATEGORIES:
             category = "fact"
 
-        # Dedup: entity_key exact match → update existing.
+        # Dedup: entity_key exact match → supersede existing (preserves lineage).
         if entity_key:
             existing = await self.find_by_entity_key(entity_key)
             if existing:
-                await self.update(existing["id"], content=content, importance=importance, tags=tags)
-                log.debug("Insight deduped via entity_key", entity_key=entity_key)
-                return existing["id"]
+                supersedes_id = existing["id"]
+                await self.delete(existing["id"])
+                log.debug("Insight superseded via entity_key", entity_key=entity_key,
+                          old_id=supersedes_id)
 
         # Dedup: FTS similarity check.
-        similar = await self.find_similar(content, limit=1)
-        if similar:
-            log.debug("Insight deduped via FTS similarity", score=similar[0].get("rank"))
-            return None
+        if not supersedes_id:
+            similar = await self.find_similar(content, limit=1)
+            if similar:
+                log.debug("Insight deduped via FTS similarity", score=similar[0].get("rank"))
+                return None
 
         now = datetime.now(UTC).isoformat(timespec="seconds")
         insight_id = uuid.uuid4().hex[:12]
@@ -161,13 +172,16 @@ class InsightsManager:
         await self._db.execute(
             """INSERT INTO insights
                (id, content, category, entity_key, importance, source_tool,
-                source_session, created_at, updated_at, expires_at, tags)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                source_session, created_at, updated_at, expires_at, tags,
+                source_message_id, supersedes_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (insight_id, content, category, entity_key, importance,
-             source_tool, source_session, now, now, expires_at, tags),
+             source_tool, source_session, now, now, expires_at, tags,
+             source_message_id, supersedes_id),
         )
         await self._db.commit()
-        log.debug("Insight stored", id=insight_id, category=category)
+        log.debug("Insight stored", id=insight_id, category=category,
+                  supersedes=supersedes_id)
         return insight_id
 
     async def search(
@@ -285,6 +299,15 @@ class InsightsManager:
         await self._db.commit()
         return (cursor.rowcount or 0) > 0
 
+    async def clear_all(self) -> int:
+        """Delete ALL insights.  Returns the number of rows removed."""
+        await self._ensure_db()
+        assert self._db is not None
+
+        cursor = await self._db.execute("DELETE FROM insights")
+        await self._db.commit()
+        return cursor.rowcount or 0
+
     # ── dedup helpers ────────────────────────────────────────────────
 
     async def find_similar(
@@ -387,7 +410,7 @@ class InsightsManager:
         cols = [
             "id", "content", "category", "entity_key", "importance",
             "source_tool", "source_session", "created_at", "updated_at",
-            "expires_at", "tags",
+            "expires_at", "tags", "source_message_id", "supersedes_id",
         ]
         d: dict[str, Any] = {}
         for i, col in enumerate(cols):
@@ -528,6 +551,14 @@ async def extract_insights(
     session_id = agent.session.id if agent.session else None
     source = trigger if trigger != "periodic" else None
 
+    # Process of Thoughts: find the most recent user message_id for provenance.
+    source_message_id: str | None = None
+    if agent.session and agent.session.messages:
+        for m in reversed(agent.session.messages):
+            if m.get("role") == "user" and m.get("message_id"):
+                source_message_id = m["message_id"]
+                break
+
     for item in new_insights[:5]:  # Cap at 5.
         if not isinstance(item, dict) or not item.get("content"):
             continue
@@ -540,6 +571,7 @@ async def extract_insights(
             source_session=session_id,
             tags=item.get("tags") or None,
             expires_at=item.get("expires_at") or None,
+            source_message_id=source_message_id,
         )
         if insight_id:
             stored.append(item)
@@ -593,6 +625,13 @@ async def extract_insights(
             await on_insights_stored(agent, stored)
         except Exception as exc:
             log.debug("Sister session hook failed (non-fatal)", error=str(exc))
+
+        # Brain Graph live update — broadcast new insight nodes.
+        try:
+            from captain_claw.web.rest_brain_graph import broadcast_graph_nodes
+            broadcast_graph_nodes(agent, stored, node_type="insight")
+        except Exception:
+            pass  # non-fatal
 
     # Update tracking state.
     if agent.session:

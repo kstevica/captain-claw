@@ -142,6 +142,16 @@ class SisterSessionManager:
         """)
         await db.commit()
 
+    async def clear_all(self) -> int:
+        """Delete ALL proactive tasks, briefings, watches, and budget.  Returns total rows."""
+        db = await self._get_db()
+        total = 0
+        for table in ("proactive_tasks", "briefings", "watches", "daily_budget"):
+            cursor = await db.execute(f"DELETE FROM {table}")
+            total += cursor.rowcount or 0
+        await db.commit()
+        return total
+
     # ── Task CRUD ────────────────────────────────────────────────────
 
     async def create_task(

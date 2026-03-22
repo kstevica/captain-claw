@@ -146,6 +146,12 @@ class NervousSystemManager:
             except Exception:
                 pass  # Column already exists.
 
+        # Migration: Process of Thoughts — add source_message_id for provenance.
+        try:
+            await self._db.execute("ALTER TABLE intuitions ADD COLUMN source_message_id TEXT DEFAULT NULL")
+        except Exception:
+            pass  # Column already exists.
+
         await self._db.commit()
 
     async def close(self) -> None:
@@ -167,6 +173,7 @@ class NervousSystemManager:
         importance: int = 5,
         tags: str | None = None,
         source_trigger: str = "dream",
+        source_message_id: str | None = None,
     ) -> str | None:
         """Insert a new intuition.  Returns the ID, or None if deduped."""
         await self._ensure_db()
@@ -208,13 +215,15 @@ class NervousSystemManager:
                (id, content, thread_type, source_layers, source_ids,
                 source_session, confidence, importance, access_count,
                 last_accessed, validated, created_at, updated_at, decayed_at, tags,
-                resolution_state, maturation_state, dream_cycles_seen, source_trigger)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 0, ?, ?, NULL, ?, ?, ?, 0, ?)""",
+                resolution_state, maturation_state, dream_cycles_seen, source_trigger,
+                source_message_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 0, ?, ?, NULL, ?, ?, ?, 0, ?, ?)""",
             (intuition_id, content, thread_type,
              json.dumps(source_layers or []),
              json.dumps(source_ids or []),
              source_session, confidence, importance, now, now, tags,
-             resolution_state, maturation_state, source_trigger),
+             resolution_state, maturation_state, source_trigger,
+             source_message_id),
         )
         await self._db.commit()
         log.debug("Intuition stored", id=intuition_id, thread_type=thread_type,
@@ -358,6 +367,15 @@ class NervousSystemManager:
         )
         await self._db.commit()
         return (cursor.rowcount or 0) > 0
+
+    async def clear_all(self) -> int:
+        """Delete ALL intuitions.  Returns the number of rows removed."""
+        await self._ensure_db()
+        assert self._db is not None
+
+        cursor = await self._db.execute("DELETE FROM intuitions")
+        await self._db.commit()
+        return cursor.rowcount or 0
 
     # ── dedup helpers ────────────────────────────────────────────────
 
@@ -769,6 +787,8 @@ class NervousSystemManager:
             "resolution_state", "resolved_from_id",
             "maturation_state", "matured_at", "dream_cycles_seen",
             "source_trigger",
+            # Process of Thoughts provenance.
+            "source_message_id",
         ]
         d: dict[str, Any] = {}
         for i, col in enumerate(cols):
@@ -977,6 +997,14 @@ async def dream(agent: Agent, *, source_trigger: str = "dream") -> list[dict[str
     stored: list[dict[str, Any]] = []
     session_id = agent.session.id if agent.session else None
 
+    # Process of Thoughts: find the most recent user message_id for provenance.
+    source_message_id: str | None = None
+    if agent.session and agent.session.messages:
+        for m in reversed(agent.session.messages):
+            if m.get("role") == "user" and m.get("message_id"):
+                source_message_id = m["message_id"]
+                break
+
     for item in new_intuitions[:3]:  # Cap at 3 per dream.
         if not isinstance(item, dict) or not item.get("content"):
             continue
@@ -990,6 +1018,7 @@ async def dream(agent: Agent, *, source_trigger: str = "dream") -> list[dict[str
             importance=int(item.get("importance", 5)),
             tags=item.get("tags") or None,
             source_trigger=source_trigger,
+            source_message_id=source_message_id,
         )
         if intuition_id:
             stored.append(item)
@@ -1067,6 +1096,13 @@ async def dream(agent: Agent, *, source_trigger: str = "dream") -> list[dict[str
             await on_intuitions_stored(agent, stored)
         except Exception as exc:
             log.debug("Sister session hook failed (non-fatal)", error=str(exc))
+
+        # Brain Graph live update — broadcast new intuition nodes.
+        try:
+            from captain_claw.web.rest_brain_graph import broadcast_graph_nodes
+            broadcast_graph_nodes(agent, stored, node_type="intuition")
+        except Exception:
+            pass  # non-fatal
 
     # Update tracking state.
     if agent.session:

@@ -1708,8 +1708,19 @@ function _renderAnswerActions(container, content) {
   likeBtn.addEventListener("click", function () { sendFb("good"); });
   dislikeBtn.addEventListener("click", function () { sendFb("bad"); });
 
+  // Brain Graph button.
+  const graphBtn = document.createElement("button");
+  graphBtn.className = "answer-action-btn";
+  graphBtn.title = "View in Brain Graph";
+  graphBtn.innerHTML = "&#x1F9E0;";
+  graphBtn.addEventListener("click", function () {
+    const params = "?focus_ts=" + encodeURIComponent(lastAnswerTimestamp || "");
+    window.open("/brain-graph" + params, "_blank");
+  });
+
   bar.appendChild(likeBtn);
   bar.appendChild(dislikeBtn);
+  bar.appendChild(graphBtn);
   bar.appendChild(saved);
 
   container.parentElement.appendChild(bar);
