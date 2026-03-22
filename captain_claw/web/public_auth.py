@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 # Routes (prefixes) allowed per public section.
 _SECTION_ROUTES: dict[str, dict[str, list[str]]] = {
     "computer": {
-        "pages": ["/computer"],
+        "pages": ["/computer", "/brain-graph"],
         "api": [
             "/api/computer/",
             "/api/public/",
@@ -36,6 +36,7 @@ _SECTION_ROUTES: dict[str, dict[str, list[str]]] = {
             "/api/nervous-system",
             "/api/sister/",
             "/api/briefings",
+            "/api/brain-graph",
         ],
         "ws": ["/ws"],
         "static": ["/static/", "/favicon.ico"],

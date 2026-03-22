@@ -87,7 +87,12 @@ async def get_graph_data(server: WebServer, request: web.Request) -> web.Respons
         try:
             from captain_claw.session import get_session_manager
             sm = get_session_manager()
-            sessions = await sm.list_sessions(limit=limit)
+            if is_public and public_session_id:
+                # Public mode: only show this user's session.
+                pub_session = await sm.load_session(public_session_id)
+                sessions = [pub_session] if pub_session else []
+            else:
+                sessions = await sm.list_sessions(limit=limit)
             for s in sessions:
                 nid = f"session_{s.id}"
                 msgs = s.messages or []
@@ -280,9 +285,9 @@ async def get_graph_data(server: WebServer, request: web.Request) -> web.Respons
     # ── 4. Sister Session Tasks ───────────────────────────────────
     if _want("task"):
         try:
-            from captain_claw.sister_session import get_sister_session_manager
-            ss_mgr = get_sister_session_manager()
-            tasks = await ss_mgr.list_tasks(limit=limit)
+            from captain_claw.sister_session import get_sister_session_manager, get_session_sister_manager
+            ss_mgr = get_session_sister_manager(public_session_id) if is_public and public_session_id else get_sister_session_manager()
+            tasks = await ss_mgr.list_tasks(parent_session_id=public_session_id if is_public and public_session_id else None, limit=limit)
             for t in tasks:
                 nid = f"task_{t['id']}"
                 priority = int(t.get("priority", 5))
@@ -326,9 +331,9 @@ async def get_graph_data(server: WebServer, request: web.Request) -> web.Respons
     # ── 5. Briefings ──────────────────────────────────────────────
     if _want("briefing"):
         try:
-            from captain_claw.sister_session import get_sister_session_manager
-            ss_mgr = get_sister_session_manager()
-            briefings = await ss_mgr.list_briefings(limit=limit)
+            from captain_claw.sister_session import get_sister_session_manager, get_session_sister_manager
+            ss_mgr = get_session_sister_manager(public_session_id) if is_public and public_session_id else get_sister_session_manager()
+            briefings = await ss_mgr.list_briefings(parent_session_id=public_session_id if is_public and public_session_id else None, limit=limit)
             for b in briefings:
                 nid = f"briefing_{b['id']}"
                 nodes.append({
@@ -356,7 +361,7 @@ async def get_graph_data(server: WebServer, request: web.Request) -> web.Respons
         try:
             from captain_claw.session import get_session_manager
             sm = get_session_manager()
-            todos = await sm.list_todos(limit=limit)
+            todos = await sm.list_todos(limit=limit, session_filter=public_session_id if is_public and public_session_id else None)
             for td in todos:
                 nid = f"todo_{td.id}"
                 pri_map = {"low": 2, "normal": 5, "high": 7, "urgent": 9}
@@ -398,8 +403,8 @@ async def get_graph_data(server: WebServer, request: web.Request) -> web.Respons
         except Exception as e:
             log.warning("Brain graph: todos failed", error=str(e))
 
-    # ── 7. Contacts ───────────────────────────────────────────────
-    if _want("contact"):
+    # ── 7. Contacts (skip in public mode — global, not session-scoped)
+    if _want("contact") and not (is_public and public_session_id):
         try:
             from captain_claw.session import get_session_manager
             sm = get_session_manager()
@@ -433,7 +438,10 @@ async def get_graph_data(server: WebServer, request: web.Request) -> web.Respons
         try:
             from captain_claw.cognitive_metrics import get_cognitive_metrics_manager
             cm = get_cognitive_metrics_manager()
-            events = await cm.query_events(limit=min(limit, 50))
+            events = await cm.query_events(
+                session_id=public_session_id if is_public and public_session_id else None,
+                limit=min(limit, 50),
+            )
             for ev in events:
                 nid = f"event_{ev['id']}"
                 nodes.append({
@@ -505,10 +513,18 @@ async def get_message_content(server: WebServer, request: web.Request) -> web.Re
     if not msg_id:
         return web.json_response({"error": "msg_id required"}, status=400)
 
+    is_public, public_session_id = _resolve_public_session(request)
+
     try:
         from captain_claw.session import get_session_manager
         sm = get_session_manager()
-        sessions = await sm.list_sessions(limit=50)
+
+        # Public mode: only search the user's own session.
+        if is_public and public_session_id:
+            pub_session = await sm.load_session(public_session_id)
+            sessions = [pub_session] if pub_session else []
+        else:
+            sessions = await sm.list_sessions(limit=50)
 
         for s in sessions:
             for msg in (s.messages or []):

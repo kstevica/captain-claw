@@ -27,11 +27,13 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Self-reflection | Periodic self-assessment — reviews recent interactions, memory, and tasks to generate improvement directives injected into the system prompt |
 | Insights | Persistent knowledge base auto-extracted from conversations — facts, contacts, decisions, deadlines — with FTS search, dedup, and context injection |
 | Nervous system | Autonomous "dreaming" layer that cross-references all memory types to discover patterns, connections, and hypotheses — with confidence decay, validation, session bleeding, idle dreaming, tension tracking, maturation pipeline, and cognitive tempo detection |
+| Brain Graph | 3D force-directed visualization of the cognitive topology — insights, intuitions, tasks, contacts, sessions, and their connections rendered as an interactive WebGL graph with live WebSocket updates |
+| Process of Thoughts | Full lineage tracking across cognitive subsystems — every message, insight, intuition, task, and todo is connected via provenance IDs enabling traversal of the entire thought process |
 | Skills system | OpenClaw-compatible skills with auto-discovery and GitHub install |
 | Orchestrator / DAG mode | Decompose complex tasks into parallel multi-session execution |
 | Memory / RAG | Hybrid vector + text retrieval across workspace and sessions |
 | Computer | Retro-themed research workspace — themed visual generation, exploration trees, multi-model selector, folder browser (local + Google Drive), file attachments (images, PDF, DOCX, XLSX, PPTX, MD, TXT, CSV), PDF export via WeasyPrint, persona selector, suggested next-step buttons, 14 built-in themes + custom theme engine, public mode with session isolation and BYOK (Bring Your Own Key) |
-| Web UI | Chat, Computer, monitor pane, instruction editor, command palette, persona selector, datastore browser, deep memory dashboard, insights browser, nervous system browser, reflections dashboard, personality editor, LLM usage analytics |
+| Web UI | Chat, Computer, monitor pane, instruction editor, command palette, persona selector, datastore browser, deep memory dashboard, insights browser, nervous system browser, Brain Graph 3D visualization, reflections dashboard, personality editor, LLM usage analytics |
 | Live instructions (`/btw`) | Inject additional instructions while a task is running — works in Chat, Computer, and Telegram |
 | Prompt caching | Anthropic prompt caching with automatic cache breakpoints — reduces token costs by up to 90% on cache hits |
 | BotPort (agent-to-agent) | Route tasks to specialist agents across a network of Captain Claw instances |
@@ -230,7 +232,7 @@ Sessions are first-class. Create named sessions for separate projects, switch in
 /session procreate #1 #2 "merged context"      # merge two sessions
 /session run #2 summarize current blockers     # run prompt in another session
 /session export all                            # export chat + monitor history
-/nuke                                          # wipe everything and start fresh
+/nuke                                          # wipe everything (files, memory, insights, intuitions, sessions) and start fresh
 ```
 
 ### Tools
@@ -377,6 +379,10 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 
 - **[Nervous System](USAGE.md#nervous-system)** — Autonomous "dreaming" layer that proactively synthesizes across all memory types (working, semantic, deep, insights, reflections). Background dream cycles find non-obvious connections, recurring patterns, and speculative hypotheses, storing them as "intuitions" with confidence scores, importance ratings, and source layer tracking. Intuitions decay over time unless validated, bleed across sessions in admin mode, and are surfaced in the agent's context to guide behavior. Includes **idle dreaming** (dreams during inactive hours via the cron scheduler) and **musical cognition** features: unresolved tension tracking (holds contradictions like musical dissonance rather than forcing resolution), a maturation pipeline (new intuitions sit through dream cycles before surfacing), and cognitive tempo detection (adagio/moderato/allegro mode adapts processing depth to conversation rhythm). Configurable via Settings. Includes a web browser at `/intuitions`, REST API, `/intuition` chat commands, and cognitive metrics tracking.
 
+- **[Brain Graph](USAGE.md#brain-graph)** — Interactive 3D force-directed visualization of the agent's cognitive topology at `/brain-graph`. Built on Three.js and 3d-force-graph, it renders insights, intuitions, tasks, briefings, todos, contacts, sessions, messages, and cognitive events as typed 3D nodes with directional edges showing provenance chains. Features include: typed node shapes (spheres, boxes, icosahedrons, tetrahedrons, etc.), dynamic session spheres that auto-size to enclose child nodes, WebSocket live updates when new insights or intuitions are created, node detail panel with prev/next navigation, clickable connections list, full content modal with markdown rendering, search and type filters, focus-on-node deep linking from chat and computer via the brain button, and public mode support.
+
+- **[Process of Thoughts](USAGE.md#process-of-thoughts)** — Full lineage tracking across all cognitive subsystems. Every message gets a unique `message_id`, insights track `source_message_id` and `supersedes_id` for evolution chains, intuitions track `source_message_id` and `resolved_from_id` for tension resolution, todos support `parent_id` for subtask hierarchy and `triggered_by_id` for causal chains. Sister session tasks link back via `source_type` and `source_id`. Together these edges form a traversable thought graph — the "Process of Thoughts" — that traces how a conversation message became an insight, which triggered a dream cycle intuition, which spawned a sister session task, which produced a briefing.
+
 - **[Desktop automation](USAGE.md#desktop-action)** — Cross-platform desktop GUI automation via `pyautogui`. Click, double-click, right-click, type text, press keys, trigger hotkeys, scroll, drag, and open apps/folders/URLs. Pairs with `screen_capture` — capture a screenshot first, identify coordinates, then act on them. Includes a `screenshot_click` action that combines vision-based element detection with clicking. Requires `pip install pyautogui`.
 
 - **[Screen capture + voice commands](USAGE.md#screen-capture)** — Capture screenshots via `/screenshot`, the `screen_capture` tool, or a global hotkey (double-tap Shift, configurable). Hold the key and speak — audio is transcribed in realtime via Soniox (or Whisper/Gemini) and submitted alongside the screenshot. If text is selected in any app, it's captured via the clipboard and used as context instead of a screenshot. Voice instructions trigger an audio response via TTS so the agent speaks back. The global hotkey is opt-in — enable it in **Settings → Voice & Hotkey** (hot-reloads without restart). Install with `pip install captain-claw[screen]`.
@@ -410,6 +416,7 @@ ruff check captain_claw/
 | `captain_claw/nervous_system.py` | Autonomous dreaming and intuition synthesis across memory layers |
 | `captain_claw/cognitive_tempo.py` | Processing depth detection — adagio/moderato/allegro cognitive rhythm |
 | `captain_claw/cognitive_metrics.py` | Musical cognition tracking system for tension, maturation, and tempo metrics |
+| `captain_claw/web/rest_brain_graph.py` | Brain Graph REST API — aggregates all cognitive data into graph nodes/edges |
 | `captain_claw/session/` | SQLite-backed session persistence |
 | `captain_claw/skills.py` | Skill discovery, loading, and invocation |
 | `captain_claw/session_orchestrator.py` | Parallel multi-session DAG orchestrator |

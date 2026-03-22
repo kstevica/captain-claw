@@ -71,6 +71,8 @@ For a quick overview and installation guide, see [README.md](README.md).
 - [Self-Reflection System](#self-reflection-system)
 - [Insights](#insights)
 - [Nervous System (Dreaming)](#nervous-system-dreaming)
+- [Brain Graph](#brain-graph)
+- [Process of Thoughts](#process-of-thoughts)
 - [Session Management](#session-management)
 - [Chunked Processing Pipeline](#chunked-processing-pipeline)
 - [Context Compaction](#context-compaction)
@@ -2583,6 +2585,99 @@ Intuitions are stored in `~/.captain-claw/intuitions.db` with an `intuitions` ta
 - **Idle dreaming** — fires at most once per hour during idle time (configurable). Same token budget as regular dreams (~2800 tokens per cycle). Disable via `idle_dream_enabled: false`
 - **Cognitive tempo** — zero LLM cost (pure heuristics). Enable separately via `cognitive_tempo.enabled: true`
 - **Cognitive metrics** — zero LLM cost (event recording only). Enabled by default, prunes at 10,000 events
+
+---
+
+## Brain Graph
+
+Interactive 3D force-directed visualization of the agent's cognitive topology at `/brain-graph`. Built on Three.js and 3d-force-graph (loaded from CDN, no build step), it renders all cognitive data sources as a navigable graph in WebGL.
+
+### Node Types
+
+| Type | Shape | Color | Size by |
+|------|-------|-------|---------|
+| Session | Transparent wireframe sphere | Gray | Message count (auto-sizes to enclose children) |
+| Message | Tetrahedron | Yellow (user) / Light blue (assistant) | Fixed |
+| Insight | Sphere | Gold | Importance |
+| Intuition | Sphere | Purple | Confidence + importance |
+| Tension | Icosahedron | Red | Importance |
+| Task | Box | Blue | Priority |
+| Briefing | Cone | Green | Fixed |
+| Todo | Octahedron | Teal | Priority |
+| Contact | Dodecahedron | Orange | Mention count |
+| Cognitive Event | Small sphere | Cyan | Fixed |
+
+### Edge Types
+
+| Relation | Meaning |
+|----------|---------|
+| contains | Session contains child nodes |
+| sequence | Sequential message chain within a session |
+| supersedes | Insight replaced an older insight (evolution) |
+| resolves | Intuition resolved a tension |
+| triggers | Insight or intuition triggered a sister session task |
+| parent | Todo subtask hierarchy |
+| source | Intuition synthesized from source insights |
+
+### Features
+
+- **Live updates** — WebSocket streaming adds new nodes in real-time as insights and intuitions are created
+- **Detail panel** — click any node to see metadata, connections, and navigate with Prev/Next buttons
+- **Connection traversal** — clickable connections list shows all linked nodes; click to jump between them
+- **Full content modal** — "Show full content" button fetches complete message text from the session database and renders as markdown
+- **Search** — filter nodes by label, type, or status
+- **Type filters** — toggle visibility of each node type via checkboxes
+- **Node limit slider** — control how many nodes per type are loaded (20-500)
+- **Dynamic session spheres** — session wireframe spheres auto-resize to enclose their furthest child node
+- **Deep linking** — the brain button on chat and computer messages opens `/brain-graph?focus_ts=<timestamp>` which auto-selects and zooms to the matching node
+- **Keyboard navigation** — Arrow keys or `[`/`]` to step through connected nodes, Escape to close panels
+- **Public mode** — fully supported with session-isolated data
+
+### API
+
+```
+GET /api/brain-graph                    — full graph as {nodes, links, stats}
+GET /api/brain-graph?limit=200          — max nodes per type
+GET /api/brain-graph?types=insight,intuition — filter by node type
+GET /api/brain-graph/message/{msg_id}   — fetch full message content by ID
+```
+
+---
+
+## Process of Thoughts
+
+Full lineage tracking across all cognitive subsystems — a persistent, multi-session thought topology that connects every cognitive artifact via provenance IDs.
+
+### Provenance Fields
+
+| Component | Field | Links to |
+|-----------|-------|----------|
+| Message | `message_id` | Auto-generated 12-char hex ID on every message |
+| Insight | `source_message_id` | The user message that triggered insight extraction |
+| Insight | `supersedes_id` | The older insight this one replaced (evolution chain) |
+| Intuition | `source_message_id` | The user message active during the dream cycle |
+| Intuition | `resolved_from_id` | The tension this intuition resolved |
+| Intuition | `source_ids` | Array of insight/intuition IDs used as synthesis input |
+| Sister Task | `source_type` + `source_id` | The insight or intuition that triggered the task |
+| Todo | `parent_id` | Parent todo for subtask hierarchy |
+| Todo | `triggered_by_id` | The insight or intuition that created this todo |
+
+### Thought Chain Example
+
+```
+User message (msg_abc123)
+  → Insight extracted (source_message_id: abc123)
+    → Supersedes older insight (supersedes_id: old_insight_id)
+    → Dream cycle picks up insight (source_ids: [insight_id])
+      → Intuition created (source_message_id: abc123)
+        → Sister session task triggered (source_id: intuition_id)
+          → Briefing produced
+            → Todo created (triggered_by_id: intuition_id)
+```
+
+### Schema Migrations
+
+All new columns use safe `ALTER TABLE ADD COLUMN` with try/except for idempotency. Existing data gets `NULL` in new columns (fully backward compatible).
 
 ---
 
