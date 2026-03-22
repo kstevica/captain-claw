@@ -1216,6 +1216,14 @@ class WebServer:
         from captain_claw.web.rest_brain_graph import get_message_content
         return await get_message_content(self, request)
 
+    async def _get_version(self, request: web.Request) -> web.Response:
+        from captain_claw import __version__, __build_date__
+        return web.json_response({
+            "version": __version__,
+            "build_date": __build_date__,
+            "name": "Captain Claw",
+        })
+
     # ── Public session API ──────────────────────────────────────────
 
     async def _public_session_new(self, request: web.Request) -> web.Response:
@@ -2000,6 +2008,7 @@ class WebServer:
             app.router.add_get("/brain-graph", self._serve_brain_graph)
             app.router.add_get("/api/brain-graph", self._bg_get_data)
             app.router.add_get("/api/brain-graph/message/{msg_id}", self._bg_get_message)
+            app.router.add_get("/api/version", self._get_version)
             app.router.add_post("/api/computer/visualize", self._computer_visualize)
             app.router.add_post("/api/computer/visualize/stream", self._computer_visualize_stream)
             app.router.add_post("/api/computer/exploration", self._exploration_save)

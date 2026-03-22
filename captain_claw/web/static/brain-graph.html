@@ -6,6 +6,7 @@
     <title>Brain Graph — Captain Claw</title>
     <link rel="stylesheet" href="/static/brain-graph.css">
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <script src="/static/version.js" defer></script>
     <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
     <script src="https://unpkg.com/3d-force-graph@1.73.4/dist/3d-force-graph.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked@15.0.0/marked.min.js"></script>
@@ -16,6 +17,7 @@
     <div class="bg-header-left">
         <a href="/" class="bg-logo-link"><img src="/static/logo.svg" alt="Home"></a>
         <h1>Brain Graph</h1>
+        <span class="version-badge" id="versionBadge" style="font-size:10px;color:#666;margin-left:4px;"></span>
         <span class="bg-stats" id="statsLabel">Loading...</span>
     </div>
     <div class="bg-header-right">
