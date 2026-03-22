@@ -953,6 +953,7 @@ class AgentOrchestrationMixin:
             )
             # ── LLM call with retry for transient errors ───────────
             _max_llm_retries = 4
+            response = None  # type: ignore[assignment]
             for _llm_attempt in range(_max_llm_retries + 1):
                 try:
                     response = await self._complete_with_guards(
@@ -1046,6 +1047,11 @@ class AgentOrchestrationMixin:
             else:
                 # for-loop exhausted without break — 500 fallback used `break`
                 continue  # continue outer turn loop
+
+            # Guard: if `break` exited the retry loop after a 500 fallback
+            # without a successful LLM response, skip to the next iteration.
+            if response is None:
+                continue
 
             self._record_pipeline_task_usage(
                 planning_pipeline,
