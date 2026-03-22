@@ -34,12 +34,17 @@ class CronTool(Tool):
     • "Show me all scheduled jobs"
 
     Schedule formats:
-      every <N>m          — every N minutes  (e.g. every 15m)
-      every <N>h          — every N hours    (e.g. every 2h)
-      daily <HH:MM>       — once a day       (e.g. daily 09:00)
-      weekly <day> <HH:MM> — once a week     (e.g. weekly fri 17:00)
+      every <N>m            — every N minutes   (e.g. every 15m)
+      every <N>h            — every N hours     (e.g. every 2h)
+      daily <HH:MM>         — once a day        (e.g. daily 09:00)
+      weekly <day> <HH:MM>  — once a week       (e.g. weekly fri 17:00)
+      in <N>d               — one-shot in N days  (e.g. in 3d)
+      in <N>h               — one-shot in N hours (e.g. in 2h)
+      in <N>m               — one-shot in N min   (e.g. in 30m)
+      once <ISO-datetime>   — one-shot at exact time
 
     Days: mon, tue, wed, thu, fri, sat, sun (full names also accepted).
+    One-shot jobs run once and then auto-disable.
     """
 
     name = "cron"
@@ -67,8 +72,10 @@ class CronTool(Tool):
                 "type": "string",
                 "description": (
                     "Schedule string (required for 'create').  "
-                    "Formats: 'every 15m', 'every 2h', 'daily 09:00', "
-                    "'weekly fri 17:00'."
+                    "Recurring: 'every 15m', 'every 2h', 'daily 09:00', "
+                    "'weekly fri 17:00'.  "
+                    "One-shot: 'in 3d', 'in 2h', 'in 30m', "
+                    "'once 2026-03-25T09:00:00'."
                 ),
             },
             "task": {

@@ -97,7 +97,54 @@ def parse_schedule_tokens(tokens: list[str]) -> tuple[dict[str, Any], int]:
             "minute": minute,
         }, 3
 
-    raise ValueError("Unsupported schedule. Use: every|daily|weekly")
+    # One-shot: "in 3d", "in 2h", "in 30m", "in 3 days", "in 2 hours"
+    if head == "in":
+        if len(tokens) < 2:
+            raise ValueError("Usage: in <Nd|Nh|Nm> (e.g. in 3d, in 2h, in 30m)")
+        # Handle "in 3d" or "in 3 days" (two tokens)
+        value = tokens[1].strip().lower()
+        match = re.fullmatch(r"(\d+)([dhm])", value)
+        consumed = 2
+        if not match and len(tokens) >= 3:
+            # "in 3 days" / "in 2 hours" / "in 30 minutes"
+            unit_word = tokens[2].strip().lower().rstrip("s")  # strip plural
+            unit_map = {"day": "d", "hour": "h", "minute": "m", "min": "m"}
+            unit_char = unit_map.get(unit_word)
+            if unit_char and value.isdigit():
+                match = re.fullmatch(r"(\d+)([dhm])", f"{value}{unit_char}")
+                consumed = 3
+        if not match:
+            raise ValueError("Usage: in <Nd|Nh|Nm> (e.g. in 3d, in 2h, in 30m)")
+        amount = int(match.group(1))
+        unit = match.group(2)
+        if amount <= 0:
+            raise ValueError("Amount must be > 0")
+        return {
+            "type": "once",
+            "unit": {"d": "days", "h": "hours", "m": "minutes"}[unit],
+            "amount": amount,
+        }, consumed
+
+    # One-shot: "once <ISO-datetime>" or "once <YYYY-MM-DD>"
+    if head == "once":
+        if len(tokens) < 2:
+            raise ValueError("Usage: once <YYYY-MM-DD> or once <ISO-datetime>")
+        dt_str = tokens[1].strip()
+        try:
+            target = datetime.fromisoformat(dt_str)
+            if target.tzinfo is None:
+                target = target.replace(tzinfo=UTC)
+        except ValueError:
+            raise ValueError(f"Cannot parse datetime: {dt_str}")
+        return {
+            "type": "once",
+            "target_iso": target.astimezone(UTC).isoformat(),
+        }, 2
+
+    raise ValueError(
+        "Unsupported schedule. Use: every <Nm|Nh> | daily <HH:MM> | "
+        "weekly <day> <HH:MM> | in <Nd|Nh|Nm> | once <datetime>"
+    )
 
 
 def schedule_to_text(schedule: dict[str, Any]) -> str:
@@ -116,6 +163,12 @@ def schedule_to_text(schedule: dict[str, Any]) -> str:
             f"weekly {day} "
             f"{int(schedule.get('hour', 0)):02d}:{int(schedule.get('minute', 0)):02d}"
         )
+    if typ == "once":
+        if "target_iso" in schedule:
+            return f"once at {schedule['target_iso']}"
+        amount = schedule.get("amount", "?")
+        unit = schedule.get("unit", "days")
+        return f"in {amount} {unit}"
     return "unknown"
 
 
@@ -148,6 +201,21 @@ def compute_next_run(schedule: dict[str, Any], now: datetime | None = None) -> d
         if candidate <= current:
             candidate += timedelta(days=7)
         return candidate
+
+    if typ == "once":
+        # Absolute target time.
+        if "target_iso" in schedule:
+            return parse_iso(str(schedule["target_iso"]))
+        # Relative delay (in Nd/Nh/Nm).
+        amount = max(1, int(schedule.get("amount", 1)))
+        unit = str(schedule.get("unit", "days")).lower()
+        if unit.startswith("day"):
+            return current + timedelta(days=amount)
+        if unit.startswith("hour"):
+            return current + timedelta(hours=amount)
+        if unit.startswith("minute") or unit.startswith("min"):
+            return current + timedelta(minutes=amount)
+        return current + timedelta(days=amount)
 
     raise ValueError("Unknown schedule type")
 

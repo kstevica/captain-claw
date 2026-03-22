@@ -501,14 +501,20 @@ async def execute_cron_job(ctx: RuntimeContext, job: Any, trigger: str = "schedu
             trigger=trigger, kind=kind, session_id=session_id,
         )
 
+        # One-shot jobs auto-disable after a single run.
+        is_once = str(schedule.get("type", "")).strip().lower() == "once"
         next_run_at_iso = to_utc_iso(compute_next_run(schedule))
-        await ctx.agent.session_manager.update_cron_job(
-            job_id,
-            last_run_at=started_at_iso,
-            next_run_at=next_run_at_iso,
-            last_status="queued" if queued_for_followup else "ok",
-            last_error="",
-        )
+        update_kwargs: dict[str, Any] = {
+            "last_run_at": started_at_iso,
+            "next_run_at": next_run_at_iso,
+            "last_status": "queued" if queued_for_followup else "ok",
+            "last_error": "",
+        }
+        if is_once:
+            update_kwargs["enabled"] = False
+            update_kwargs["last_status"] = "completed"
+            log.info("One-shot cron job completed, auto-disabled", job_id=job_id)
+        await ctx.agent.session_manager.update_cron_job(job_id, **update_kwargs)
     except Exception as e:
         error_text = str(e)
         log.error("cron_job_execute_failed", job_id=job_id, trigger=trigger, error=error_text)
