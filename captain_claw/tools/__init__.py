@@ -47,6 +47,7 @@ from captain_claw.tools.screen_capture import ScreenCaptureTool
 from captain_claw.tools.desktop_action import DesktopActionTool
 from captain_claw.tools.summarize_files import SummarizeFilesTool
 from captain_claw.tools.insights import InsightsTool
+from captain_claw.tools.cron_tool import CronTool
 
 __all__ = [
     "Tool",
@@ -94,4 +95,5 @@ __all__ = [
     "DesktopActionTool",
     "SummarizeFilesTool",
     "InsightsTool",
+    "CronTool",
 ]

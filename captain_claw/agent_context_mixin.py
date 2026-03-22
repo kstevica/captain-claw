@@ -1803,6 +1803,7 @@ class AgentContextMixin:
         "pinchtab": ["pinchtab"],
         "screen_capture": ["screen_capture"],
         "desktop_action": ["desktop_action"],
+        "cron": ["cron"],
     }
 
     def _register_default_tools(self) -> None:
@@ -1842,6 +1843,7 @@ class AgentContextMixin:
             XlsxExtractTool,
             SummarizeFilesTool,
             InsightsTool,
+            CronTool,
         )
 
         config = get_config()
@@ -1914,6 +1916,10 @@ class AgentContextMixin:
                 self.tools.register(DatastoreTool())
             elif tool_name == "insights":
                 self.tools.register(InsightsTool())
+            elif tool_name == "cron":
+                ct = CronTool()
+                ct._agent = self
+                self.tools.register(ct)
             elif tool_name == "personality":
                 pt = PersonalityTool()
                 uid = getattr(self, "_user_id", None)
