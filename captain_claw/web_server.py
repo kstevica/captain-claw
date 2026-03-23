@@ -386,6 +386,27 @@ class WebServer:
                 send({"type": "approval_notice", "message": message})
                 return True
 
+            # Playbook approval callback scoped to this public session's WS.
+            async def _public_playbook_approval(message: str, _send=send) -> bool:
+                import uuid as _uuid
+                request_id = str(_uuid.uuid4())
+                event = asyncio.Event()
+                result_holder: list[bool] = [True]  # default: approve on timeout
+                self._pending_playbook_approvals[request_id] = (event, result_holder)
+                _send({
+                    "type": "approval_request",
+                    "id": request_id,
+                    "message": message,
+                    "category": "playbook",
+                })
+                try:
+                    await asyncio.wait_for(event.wait(), timeout=60.0)
+                except asyncio.TimeoutError:
+                    pass
+                finally:
+                    self._pending_playbook_approvals.pop(request_id, None)
+                return result_holder[0]
+
             agent = Agent(
                 provider=self.agent.provider if self.agent else None,
                 status_callback=status_cb,
@@ -395,7 +416,7 @@ class WebServer:
                 tool_stream_callback=tool_stream_cb,
             )
             agent.response_stream_callback = response_stream_cb
-            agent.playbook_approval_callback = self._playbook_approval_callback
+            agent.playbook_approval_callback = _public_playbook_approval
 
             # Bind to the public session (skip default session loading).
             agent.session = session

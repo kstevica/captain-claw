@@ -86,7 +86,7 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
         "models": models,
         "commands": COMMANDS if not public_session_id else [],
         "personalities": personalities,
-        "playbooks": _playbook_list if not public_session_id else [],
+        "playbooks": _playbook_list,
         "is_public": bool(public_session_id),
     })
 
@@ -339,33 +339,30 @@ async def handle_ws_message(
 
     elif msg_type == "set_playbook":
         # Override which playbook the agent uses for retrieval.
-        # Public users cannot change playbook — it affects the shared agent.
-        _is_pub = getattr(ws, "_public_session_id", None)
-        if _is_pub:
-            await server._send(ws, {
-                "type": "command_result",
-                "command": "/playbook",
-                "content": "Playbook selection is not available in public mode.",
-            })
-        else:
-            playbook_id = str(data.get("playbook_id", "")).strip()
-            if server.agent:
-                server.agent._playbook_override = playbook_id or None
+        playbook_id = str(data.get("playbook_id", "")).strip()
+        # Resolve the target agent — public users have their own agent.
+        _pub_sid = getattr(ws, "_public_session_id", None)
+        _target_agent = server._public_agents.get(_pub_sid) if _pub_sid else server.agent
+        if not _target_agent:
+            _target_agent = server.agent  # fallback
+        if _target_agent:
+                _target_agent._playbook_override = playbook_id or None
                 # Report the change.
                 if not playbook_id:
-                    server.agent._playbook_override_name = "Auto"
+                    _target_agent._playbook_override_name = "Auto"
                     msg_text = "Playbook mode set to **Auto**. The system will automatically select relevant playbooks."
                 elif playbook_id == "__none__":
-                    server.agent._playbook_override_name = "None"
+                    _target_agent._playbook_override_name = "None"
                     msg_text = "Playbook mode set to **None**. No playbook guidance will be injected."
                 else:
                     from captain_claw.session import get_session_manager as _get_sm
                     _sm = _get_sm()
                     pb = await _sm.load_playbook(playbook_id)
                     label = pb.name if pb else playbook_id
-                    server.agent._playbook_override_name = label
+                    _target_agent._playbook_override_name = label
                     msg_text = f"Playbook override set to **{label}**. This playbook will be used for all tasks."
-                server._broadcast({"type": "session_info", **server._session_info()})
+                if not _pub_sid:
+                    server._broadcast({"type": "session_info", **server._session_info()})
                 await server._send(ws, {
                     "type": "command_result",
                     "command": "/playbook",
