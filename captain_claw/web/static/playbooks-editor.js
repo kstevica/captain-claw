@@ -28,7 +28,11 @@
     var pbDetailMeta   = document.getElementById('pbDetailMeta');
     var pbDetailContent = document.getElementById('pbDetailContent');
     var pbEditBtn      = document.getElementById('pbEditBtn');
+    var pbExportOneBtn = document.getElementById('pbExportOneBtn');
     var pbDeleteBtn    = document.getElementById('pbDeleteBtn');
+    var pbImportBtn    = document.getElementById('pbImportBtn');
+    var pbImportFile   = document.getElementById('pbImportFile');
+    var pbExportAllBtn = document.getElementById('pbExportAllBtn');
     var pbForm         = document.getElementById('pbForm');
     var pbFormTitle    = document.getElementById('pbFormTitle');
     var pbCancelBtn    = document.getElementById('pbCancelBtn');
@@ -64,6 +68,10 @@
         pbSaveBtn.addEventListener('click', onSaveForm);
         pbModalCancel.addEventListener('click', hideDeleteModal);
         pbModalConfirm.addEventListener('click', onConfirmDelete);
+        pbExportOneBtn.addEventListener('click', onExportOne);
+        pbExportAllBtn.addEventListener('click', onExportAll);
+        pbImportBtn.addEventListener('click', function () { pbImportFile.click(); });
+        pbImportFile.addEventListener('change', onImportFiles);
 
         document.addEventListener('keydown', function (e) {
             if (e.key === 'Escape') {
@@ -475,6 +483,77 @@
             pbModalConfirm.textContent = 'Delete';
             showToast('Delete failed: ' + (err.message || err), 'error');
         });
+    }
+
+    // ── Export / Import ──────────────────────────────────────────────
+
+    function onExportOne() {
+        if (!selectedItem) return;
+        window.location.href = API + '/' + selectedItem.id + '/export';
+    }
+
+    function onExportAll() {
+        var url = '/api/playbooks-export';
+        if (filterType) url += '?task_type=' + encodeURIComponent(filterType);
+        window.location.href = url;
+    }
+
+    function onImportFiles() {
+        var files = pbImportFile.files;
+        if (!files || !files.length) return;
+
+        var pending = files.length;
+        var totalImported = 0;
+        var totalErrors = [];
+
+        Array.prototype.forEach.call(files, function (file) {
+            var reader = new FileReader();
+            reader.onload = function (e) {
+                var payload;
+                try {
+                    payload = JSON.parse(e.target.result);
+                } catch (err) {
+                    totalErrors.push(file.name + ': invalid JSON');
+                    pending--;
+                    if (pending === 0) finishImport(totalImported, totalErrors);
+                    return;
+                }
+
+                apiFetch('/api/playbooks-import', { method: 'POST', body: payload })
+                    .then(function (result) {
+                        totalImported += (result.imported || 0);
+                        if (result.errors && result.errors.length) {
+                            result.errors.forEach(function (err) {
+                                totalErrors.push(file.name + ' [' + err.index + ']: ' + err.error);
+                            });
+                        }
+                    })
+                    .catch(function (err) {
+                        totalErrors.push(file.name + ': ' + (err.message || err));
+                    })
+                    .then(function () {
+                        pending--;
+                        if (pending === 0) finishImport(totalImported, totalErrors);
+                    });
+            };
+            reader.readAsText(file);
+        });
+
+        // Reset file input so same file can be re-imported.
+        pbImportFile.value = '';
+    }
+
+    function finishImport(imported, errors) {
+        if (imported > 0) {
+            showToast('Imported ' + imported + ' playbook' + (imported > 1 ? 's' : ''), 'success');
+            loadItems();
+        }
+        if (errors.length > 0) {
+            showToast('Import errors: ' + errors.join('; '), 'error');
+        }
+        if (imported === 0 && errors.length === 0) {
+            showToast('Nothing to import', 'error');
+        }
     }
 
     // ── Cancel ───────────────────────────────────────────────────────

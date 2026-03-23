@@ -31,31 +31,32 @@
     </div>
     <button id="titlebar-toggle" title="Menu" aria-label="Menu">&#9776;</button>
     <div id="titlebar-right">
-      <button id="persona-btn" title="Choose persona">👤 <span id="persona-btn-label">No profile</span></button>
-      <button id="model-btn" title="Choose model">🧠 <span id="model-btn-label">Default</span></button>
-      <button id="byok-btn" title="Use your own API key" style="display:none">🔑 <span id="byok-btn-label">BYOK</span></button>
-      <button id="tier-btn" title="Visual token budget">📐 Standard</button>
+      <button id="persona-btn" title="Choose persona" data-label="Persona">👤 <span id="persona-btn-label">No profile</span></button>
+      <button id="model-btn" title="Choose model" data-label="Model">🧠 <span id="model-btn-label">Default</span></button>
+      <button id="byok-btn" title="Use your own API key" data-label="API Key" style="display:none">🔑 <span id="byok-btn-label">BYOK</span></button>
+      <button id="tier-btn" title="Visual token budget" data-label="Token Budget">📐 Standard</button>
       <div id="tier-panel" class="toolbar-popup hidden">
         <button class="tier-opt" data-tier="micro">Micro (4k)</button>
         <button class="tier-opt" data-tier="minimal">Minimal (8k)</button>
         <button class="tier-opt" data-tier="standard">Standard (16k)</button>
         <button class="tier-opt" data-tier="generous">Generous (32k)</button>
       </div>
-      <button id="theme-btn" title="Choose theme">🎨 Theme</button>
-      <button id="sound-btn" title="Sound effects">🔊 Typewriter</button>
+      <button id="theme-btn" title="Choose theme" data-label="Theme">🎨 Theme</button>
+      <button id="sound-btn" title="Sound effects" data-label="Sound">🔊 Typewriter</button>
       <div id="sound-panel" class="toolbar-popup hidden">
         <button class="sound-opt" data-sound="off">🔇 Off</button>
         <button class="sound-opt" data-sound="typewriter">🔊 Typewriter</button>
         <button class="sound-opt" data-sound="modem">🔊 Modem</button>
       </div>
-      <button id="textsize-btn" title="Text size">Aa Size</button>
+      <button id="textsize-btn" title="Text size" data-label="Text Size">Aa Size</button>
       <div id="textsize-panel" class="toolbar-popup hidden">
         <button class="textsize-opt" data-size="standard">Aa Standard</button>
         <button class="textsize-opt" data-size="large">Aa Large</button>
         <button class="textsize-opt" data-size="larger">Aa Larger</button>
         <button class="textsize-opt" data-size="laaaarger">Aa Laaaarger</button>
       </div>
-      <button id="clear-session-btn" title="Clear session">🗑 Clear</button>
+      <button id="playbook-btn" title="Select playbook" data-label="Playbook">📋 <span id="playbook-btn-label">Auto</span></button>
+      <button id="clear-session-btn" title="Clear session" data-label="Session">🗑 Clear</button>
     </div>
   </header>
 
@@ -407,6 +408,41 @@
       <div class="window-body">
         <div class="model-grid" id="persona-grid">
           <div class="model-loading">Loading personas...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Approval modal ── -->
+  <div id="approval-modal">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content window">
+      <div class="window-title">
+        <span class="window-title-text">Approval Required</span>
+      </div>
+      <div class="window-body">
+        <div id="approval-message" style="padding:8px 4px;font-size:13px;line-height:1.5;white-space:pre-wrap;"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;">
+          <button id="approval-decline-btn" class="tab-btn" style="padding:6px 16px;">✕ Decline</button>
+          <button id="approval-approve-btn" class="tab-btn" style="padding:6px 16px;font-weight:bold;">✓ Approve</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Playbook selector modal ── -->
+  <div id="playbook-modal">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content window">
+      <div class="window-title">
+        <span class="window-title-text">Choose Playbook</span>
+        <div class="window-controls">
+          <button class="win-btn modal-close" title="Close">✕</button>
+        </div>
+      </div>
+      <div class="window-body">
+        <div class="model-grid" id="playbook-grid">
+          <div class="model-loading">Loading playbooks...</div>
         </div>
       </div>
     </div>

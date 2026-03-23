@@ -527,7 +527,7 @@ class WebServer:
         """Async blocking approval for playbook usage.
 
         Broadcasts an ``approval_request`` message to all clients and waits
-        for a response.  Falls back to auto-approve after 60 s timeout.
+        for a response.  Falls back to auto-approve after 15 s timeout.
         """
         import uuid
         request_id = str(uuid.uuid4())
@@ -543,7 +543,7 @@ class WebServer:
         })
 
         try:
-            await asyncio.wait_for(event.wait(), timeout=60.0)
+            await asyncio.wait_for(event.wait(), timeout=15.0)
         except asyncio.TimeoutError:
             # Auto-approve on timeout so automated tasks don't hang forever.
             result_holder[0] = True
@@ -1471,6 +1471,18 @@ class WebServer:
         from captain_claw.web.rest_playbooks import delete_playbook
         return await delete_playbook(self, request)
 
+    async def _pb_export_one(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_playbooks import export_playbook
+        return await export_playbook(self, request)
+
+    async def _pb_export_all(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_playbooks import export_all_playbooks
+        return await export_all_playbooks(self, request)
+
+    async def _pb_import(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_playbooks import import_playbooks
+        return await import_playbooks(self, request)
+
     async def _pb_wizard_step(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_playbook_wizard import wizard_step
         return await wizard_step(self, request)
@@ -1987,8 +1999,11 @@ class WebServer:
         # Playbooks API
         app.router.add_get("/api/playbooks", self._pb_list)
         app.router.add_get("/api/playbooks/search", self._pb_search)
+        app.router.add_get("/api/playbooks-export", self._pb_export_all)
+        app.router.add_post("/api/playbooks-import", self._pb_import)
         app.router.add_post("/api/playbooks", self._pb_create)
         app.router.add_get("/api/playbooks/{id}", self._pb_get)
+        app.router.add_get("/api/playbooks/{id}/export", self._pb_export_one)
         app.router.add_patch("/api/playbooks/{id}", self._pb_update)
         app.router.add_delete("/api/playbooks/{id}", self._pb_delete)
         # Playbook Wizard API

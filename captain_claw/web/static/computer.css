@@ -779,6 +779,25 @@ body.textsize-laaaarger { zoom: 1.8; }
   cursor: pointer;
 }
 
+/* Mobile menu: show data-label as a caption row above each button */
+#titlebar-right > button[data-label] {
+  position: relative;
+  padding-top: 22px;
+}
+#titlebar-right > button[data-label]::before {
+  content: attr(data-label);
+  display: block;
+  position: absolute;
+  top: 4px;
+  left: 14px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  opacity: 0.5;
+  color: var(--titlebar-fg, #e0e0e6);
+  pointer-events: none;
+}
+
 #titlebar-right select:hover,
 #titlebar-right button:hover {
   background: rgba(255,255,255,.08);
@@ -1657,6 +1676,9 @@ body.textsize-laaaarger { zoom: 1.8; }
   gap: 6px;
   padding: 3px 10px;
   background: var(--chrome);
+  position: sticky;
+  top: 0;
+  z-index: 1;
   border-bottom: var(--bevel, 1px) solid var(--chrome-lo);
   cursor: pointer;
   user-select: none;
@@ -3466,6 +3488,88 @@ body.textsize-laaaarger .modal-content { height: 50vh; max-height: 50vh; }
 
 /* Toolbar popup panels are positioned by JS */
 
+/* Playbook selector */
+#playbook-btn {
+  font-family: var(--font);
+  font-size: 11px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--chrome-lo);
+  border-radius: var(--radius);
+  padding: 2px 6px;
+  cursor: pointer;
+}
+
+/* Approval modal */
+#approval-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 12000;
+}
+#approval-modal.active {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#approval-modal .modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,.6);
+}
+#approval-modal .modal-content {
+  position: relative;
+  width: min(480px, 90vw);
+  display: flex;
+  flex-direction: column;
+}
+#approval-modal .window-body {
+  padding: 12px 16px;
+}
+#approval-approve-btn {
+  background: var(--accent, #ff8800) !important;
+  color: #fff !important;
+  border-color: var(--accent, #ff8800) !important;
+}
+
+#playbook-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+}
+#playbook-modal.active {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#playbook-modal .modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,.55);
+}
+#playbook-modal .modal-content {
+  position: relative;
+  width: min(620px, 90vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+#playbook-modal .window-body {
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.pb-section-label {
+  font-size: 0.7rem;
+  color: var(--text);
+  opacity: 0.5;
+  padding: 10px 12px 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: bold;
+}
+
 #clear-session-btn {
   font-family: var(--font);
   font-size: 11px;
@@ -4558,6 +4662,34 @@ body.stream-panel-open #workspace {
     max-width: 120px;
     font-size: 12px;
     padding: 3px 8px;
+  }
+
+  /* Output tab bar: own row with horizontal scroll on mobile */
+  #output-panel .window-title {
+    flex-wrap: wrap;
+    height: auto;
+    padding-bottom: 0;
+  }
+  #output-panel .window-title-text {
+    flex-basis: 100%;
+  }
+  #output-panel .window-controls {
+    flex-basis: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;          /* Firefox */
+    padding-bottom: 3px;
+  }
+  #output-panel .window-controls::-webkit-scrollbar {
+    display: none;                  /* Chrome/Safari */
+  }
+  #output-tabs {
+    gap: 4px;
+  }
+  #output-panel .tab-btn {
+    font-size: 13px;
+    padding: 5px 12px;
+    flex-shrink: 0;
   }
 
   /* Stream panel: full width on mobile */

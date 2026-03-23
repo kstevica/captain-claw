@@ -138,6 +138,108 @@ async def delete_playbook(server: WebServer, request: web.Request) -> web.Respon
     return web.Response(status=204)
 
 
+# ── Export / Import ──────────────────────────────────────────────────
+
+_EXPORT_FIELDS = (
+    "name", "task_type", "rating", "do_pattern", "dont_pattern",
+    "trigger_description", "reasoning", "tags", "examples", "script_ids",
+)
+
+
+def _export_dict(p: Any) -> dict[str, Any]:
+    """Portable playbook representation (no internal IDs or timestamps)."""
+    return {k: getattr(p, k) for k in _EXPORT_FIELDS}
+
+
+async def export_playbook(server: WebServer, request: web.Request) -> web.Response:
+    """GET /api/playbooks/{id}/export — export a single playbook as JSON."""
+    sm = get_session_manager()
+    pid = request.match_info.get("id", "")
+    item = await sm.load_playbook(pid)
+    if not item:
+        return web.json_response({"error": "Playbook not found"}, status=404)
+    payload = _export_dict(item)
+    return web.Response(
+        body=json.dumps(payload, indent=2, default=str),
+        content_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="playbook-{item.name.replace(" ", "-").lower()}.json"',
+        },
+    )
+
+
+async def export_all_playbooks(server: WebServer, request: web.Request) -> web.Response:
+    """GET /api/playbooks-export — export all playbooks as a JSON array."""
+    sm = get_session_manager()
+    task_type = request.query.get("task_type") or None
+    items = await sm.list_playbooks(limit=1000, task_type=task_type)
+    payload = [_export_dict(p) for p in items]
+    return web.Response(
+        body=json.dumps(payload, indent=2, default=str),
+        content_type="application/json",
+        headers={
+            "Content-Disposition": 'attachment; filename="playbooks-export.json"',
+        },
+    )
+
+
+async def import_playbooks(server: WebServer, request: web.Request) -> web.Response:
+    """POST /api/playbooks-import — import playbooks from JSON (single object or array)."""
+    sm = get_session_manager()
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    # Accept single object or array.
+    items = body if isinstance(body, list) else [body]
+    created = []
+    errors = []
+
+    for idx, entry in enumerate(items):
+        if not isinstance(entry, dict):
+            errors.append({"index": idx, "error": "Expected a JSON object"})
+            continue
+
+        name = str(entry.get("name", "")).strip()
+        task_type = str(entry.get("task_type", "")).strip()
+        do_pattern = str(entry.get("do_pattern", "")).strip()
+        dont_pattern = str(entry.get("dont_pattern", "")).strip()
+
+        if not name:
+            errors.append({"index": idx, "error": "name is required"})
+            continue
+        if not task_type:
+            errors.append({"index": idx, "error": "task_type is required"})
+            continue
+        if not do_pattern and not dont_pattern:
+            errors.append({"index": idx, "error": "At least one of do_pattern or dont_pattern is required"})
+            continue
+
+        try:
+            item = await sm.create_playbook(
+                name=name,
+                task_type=task_type,
+                rating=str(entry.get("rating", "good")).strip() or "good",
+                do_pattern=do_pattern,
+                dont_pattern=dont_pattern,
+                trigger_description=str(entry.get("trigger_description", "")).strip(),
+                reasoning=str(entry.get("reasoning", "")).strip() or None,
+                tags=str(entry.get("tags", "")).strip() or None,
+                examples=str(entry.get("examples", "")).strip() or None,
+                script_ids=str(entry.get("script_ids", "")).strip() or None,
+            )
+            created.append(_playbook_dict(item))
+        except Exception as exc:
+            errors.append({"index": idx, "error": str(exc)})
+
+    return web.json_response(
+        {"imported": len(created), "errors": errors, "playbooks": created},
+        status=201 if created else 400,
+        dumps=_JSON_DUMPS,
+    )
+
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 

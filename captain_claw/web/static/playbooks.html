@@ -15,6 +15,9 @@
         <h1>Playbooks</h1>
     </div>
     <div class="pb-header-right">
+        <input type="file" id="pbImportFile" accept=".json" style="display:none" multiple>
+        <button class="pb-btn secondary pb-header-btn" id="pbImportBtn" title="Import playbooks from JSON">Import</button>
+        <button class="pb-btn secondary pb-header-btn" id="pbExportAllBtn" title="Export all playbooks">Export All</button>
         <a href="/chat" class="pb-nav-link">&larr; Chat</a>
     </div>
 </header>
@@ -64,6 +67,7 @@
                     <div class="pb-detail-meta" id="pbDetailMeta"></div>
                 </div>
                 <div class="pb-detail-actions">
+                    <button class="pb-btn secondary" id="pbExportOneBtn" title="Export this playbook">Export</button>
                     <button class="pb-btn primary" id="pbEditBtn">Edit</button>
                     <button class="pb-btn danger" id="pbDeleteBtn">Delete</button>
                 </div>

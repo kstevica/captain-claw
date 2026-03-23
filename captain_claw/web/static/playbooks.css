@@ -72,6 +72,11 @@ html, body {
     gap: 12px;
 }
 
+.pb-header-btn {
+    font-size: 12px;
+    padding: 4px 10px;
+}
+
 .pb-nav-link {
     color: var(--text-secondary);
     text-decoration: none;

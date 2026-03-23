@@ -32,6 +32,10 @@ let availableModels = [];
 let availablePersonas = [];
 let selectedPersona = localStorage.getItem("computer-persona") || "";
 
+// Playbook state.
+let availablePlaybooks = [];
+let selectedPlaybookId = localStorage.getItem("computer-playbook") || ""; // '' = auto, '__none__' = disabled
+
 // BYOK (Bring Your Own Key) state.
 let isPublicSession = false;
 let byokProvider = localStorage.getItem("computer-byok-provider") || "";
@@ -1250,9 +1254,7 @@ function handleMessage(data) {
       break;
 
     case "approval_request":
-      // Auto-approve in Computer mode (can be refined later).
-      send({ type: "approval_response", approved: true, request_id: data.request_id });
-      logEntry("system", `Auto-approved: ${data.tool || "action"}`);
+      showApprovalModal(data.id, data.message, data.category || "action");
       break;
 
     case "byok_status":
@@ -1293,6 +1295,14 @@ function handleWelcome(data) {
   if (selectedPersona && connected) {
     send({ type: "set_personality", personality_id: selectedPersona });
     logEntry("system", `Applying saved persona: ${selectedPersona}`);
+  }
+
+  // Apply the saved playbook selection to the session.
+  if (selectedPlaybookId && connected) {
+    send({ type: "set_playbook", playbook_id: selectedPlaybookId });
+    const pbLabel = selectedPlaybookId === "__none__" ? "None"
+      : (availablePlaybooks.find(p => p.id === selectedPlaybookId)?.name || selectedPlaybookId.slice(0, 8));
+    logEntry("system", `Applying saved playbook: ${pbLabel}`);
   }
 
   // Load exploration history.
@@ -4125,6 +4135,12 @@ function initSelectors() {
 
   // BYOK modal.
   initByokModal();
+
+  // Playbook modal.
+  initPlaybookModal();
+
+  // Approval modal.
+  initApprovalModal();
 }
 
 /* ── BYOK (Bring Your Own Key) ───────────────────────────────── */
@@ -4413,14 +4429,14 @@ function markdownToHtml(md) {
     let tableHtml = '<table><thead><tr>';
     headerCells.forEach((cell, ci) => {
       const align = aligns[ci] || 'left';
-      tableHtml += `<th style="text-align:${align}">${esc(cell)}</th>`;
+      tableHtml += `<th style="text-align:${align}">${_inlineMd(cell)}</th>`;
     });
     tableHtml += '</tr></thead><tbody>';
     for (const row of bodyRows) {
       tableHtml += '<tr>';
       row.forEach((cell, ci) => {
         const align = aligns[ci] || 'left';
-        tableHtml += `<td style="text-align:${align}">${esc(cell)}</td>`;
+        tableHtml += `<td style="text-align:${align}">${_inlineMd(cell)}</td>`;
       });
       tableHtml += '</tr>';
     }
@@ -4438,6 +4454,16 @@ function markdownToHtml(md) {
   html = html.replace(/\n{2,}/g, "\n");
 
   return html;
+}
+
+/** Apply inline markdown (bold, italic, code, links) to a table cell. */
+function _inlineMd(text) {
+  let s = esc(text);
+  s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/\*(.+?)\*/g, "<em>$1</em>");
+  s = s.replace(/`(.+?)`/g, "<code>$1</code>");
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+  return s;
 }
 
 function parseTableRow(line) {
@@ -6165,6 +6191,173 @@ function initSound() {
     });
 }
 
+/* ── Approval modal ──────────────────────────────────────────── */
+
+let _currentApprovalId = null;
+const _approvedPlaybooks = new Set();  // Track already-approved playbooks this session
+
+function showApprovalModal(id, message, category) {
+  // Auto-approve if this playbook was already approved in this session.
+  if (category === "playbook") {
+    // Extract playbook name(s) from message for dedup key.
+    const key = message.replace(/\s+/g, " ").trim();
+    if (_approvedPlaybooks.has(key)) {
+      send({ type: "approval_response", id, approved: true });
+      logEntry("system", `✓ Auto-approved (already approved): ${category}`);
+      return;
+    }
+    // Store for future dedup after user approves.
+    _currentApprovalKey = key;
+  }
+
+  _currentApprovalId = id;
+  const msgEl = $("#approval-message");
+  if (msgEl) msgEl.innerHTML = markdownToHtml(message);
+  $("#approval-modal").classList.add("active");
+  logEntry("system", `⏳ Approval requested: ${category}`);
+}
+
+let _currentApprovalKey = null;
+
+function respondApproval(approved) {
+  if (_currentApprovalId) {
+    send({ type: "approval_response", id: _currentApprovalId, approved });
+    logEntry("system", approved ? "✓ Approved" : "✕ Declined");
+    // Remember approval so we don't ask again for the same playbook.
+    if (approved && _currentApprovalKey) {
+      _approvedPlaybooks.add(_currentApprovalKey);
+    }
+  }
+  _currentApprovalId = null;
+  _currentApprovalKey = null;
+  $("#approval-modal").classList.remove("active");
+}
+
+function initApprovalModal() {
+  const approveBtn = $("#approval-approve-btn");
+  const declineBtn = $("#approval-decline-btn");
+  const backdrop = $("#approval-modal .modal-backdrop");
+  if (approveBtn) approveBtn.addEventListener("click", () => respondApproval(true));
+  if (declineBtn) declineBtn.addEventListener("click", () => respondApproval(false));
+  // Backdrop click = decline (safe default).
+  if (backdrop) backdrop.addEventListener("click", () => respondApproval(false));
+  document.addEventListener("keydown", (e) => {
+    if (!$("#approval-modal").classList.contains("active")) return;
+    if (e.key === "Enter") { e.preventDefault(); respondApproval(true); }
+    if (e.key === "Escape") { e.preventDefault(); respondApproval(false); }
+  });
+}
+
+/* ── Playbook selector ────────────────────────────────────────── */
+
+async function loadPlaybooks() {
+  try {
+    const res = await fetch("/api/playbooks");
+    if (!res.ok) return;
+    availablePlaybooks = await res.json();
+    renderPlaybookGrid();
+    updatePlaybookBtnLabel();
+    console.log(`[Computer] Loaded ${availablePlaybooks.length} playbooks`);
+  } catch (e) {
+    console.warn("Failed to load playbooks:", e);
+  }
+}
+
+function renderPlaybookGrid() {
+  const grid = $("#playbook-grid");
+  if (!grid) return;
+  grid.innerHTML = "";
+
+  // Auto card.
+  grid.appendChild(_pbCard("", "📋", "Auto", "System picks best match"));
+
+  // None card.
+  grid.appendChild(_pbCard("__none__", "🚫", "None", "No playbook guidance"));
+
+  // Group by task_type.
+  if (availablePlaybooks.length) {
+    const grouped = {};
+    availablePlaybooks.forEach(pb => {
+      const t = pb.task_type || "other";
+      if (!grouped[t]) grouped[t] = [];
+      grouped[t].push(pb);
+    });
+    for (const [type, pbs] of Object.entries(grouped).sort()) {
+      const label = document.createElement("div");
+      label.className = "pb-section-label";
+      label.textContent = type;
+      grid.appendChild(label);
+      pbs.forEach(pb => {
+        const desc = pb.trigger_description || pb.tags || "";
+        grid.appendChild(_pbCard(pb.id, "📋", pb.name, desc));
+      });
+    }
+  }
+}
+
+function _pbCard(pbid, icon, name, detail) {
+  const card = document.createElement("div");
+  card.className = "model-card" + (selectedPlaybookId === pbid ? " selected" : "");
+  card.dataset.pbid = pbid;
+  card.innerHTML = `
+    <div class="model-card-icon">${icon}</div>
+    <div class="model-card-info">
+      <div class="model-card-name">${name}</div>
+      <div class="model-card-detail">${detail}</div>
+    </div>`;
+  card.addEventListener("click", () => selectPlaybook(pbid));
+  return card;
+}
+
+function selectPlaybook(pbid) {
+  selectedPlaybookId = pbid;
+  localStorage.setItem("computer-playbook", pbid);
+  updatePlaybookBtnLabel();
+  renderPlaybookGrid();
+  closePlaybookModal();
+
+  if (connected) {
+    send({ type: "set_playbook", playbook_id: pbid });
+  }
+  const label = pbid === "__none__" ? "None"
+    : pbid ? (availablePlaybooks.find(p => p.id === pbid)?.name || pbid)
+    : "Auto";
+  logEntry("system", `Playbook: ${label}`);
+}
+
+function updatePlaybookBtnLabel() {
+  const label = $("#playbook-btn-label");
+  if (!label) return;
+  if (!selectedPlaybookId) {
+    label.textContent = "Auto";
+  } else if (selectedPlaybookId === "__none__") {
+    label.textContent = "None";
+  } else {
+    const pb = availablePlaybooks.find(p => p.id === selectedPlaybookId);
+    label.textContent = pb ? pb.name : selectedPlaybookId.slice(0, 8);
+  }
+}
+
+function openPlaybookModal() {
+  renderPlaybookGrid();
+  $("#playbook-modal").classList.add("active");
+}
+
+function closePlaybookModal() {
+  $("#playbook-modal").classList.remove("active");
+}
+
+function initPlaybookModal() {
+  $("#playbook-btn").addEventListener("click", openPlaybookModal);
+  $("#playbook-modal .modal-close").addEventListener("click", closePlaybookModal);
+  $("#playbook-modal .modal-backdrop").addEventListener("click", closePlaybookModal);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && $("#playbook-modal").classList.contains("active")) {
+      closePlaybookModal();
+    }
+  });
+}
+
 /* ═══════════════════════════════════════════════════════════════
    INIT
    ═══════════════════════════════════════════════════════════════ */
@@ -6200,9 +6393,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   initSound();
   initTextSize();
 
-  // Load available models and personas for selectors.
+  // Load available models, personas, and playbooks for selectors.
   loadModels();
   loadPersonas();
+  loadPlaybooks();
 
   // Listen for postMessage from visual iframe.
   window.addEventListener("message", handleIframeMessage);
