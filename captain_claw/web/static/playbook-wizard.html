@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Playbook Wizard - Captain Claw</title>
+    <link rel="stylesheet" href="/static/playbook-wizard.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+
+<header class="wiz-header">
+    <div class="wiz-header-left">
+        <a href="/" class="wiz-logo-link"><img src="/static/logo.svg" width="28" height="28"></a>
+        <h1>Playbook Wizard</h1>
+    </div>
+    <div class="wiz-header-center">
+        <div class="wiz-phases" id="wizPhases">
+            <span class="wiz-phase active" data-phase="outcome">Outcome</span>
+            <span class="wiz-phase-arrow">&rarr;</span>
+            <span class="wiz-phase" data-phase="details">Details</span>
+            <span class="wiz-phase-arrow">&rarr;</span>
+            <span class="wiz-phase" data-phase="review">Review</span>
+        </div>
+    </div>
+    <div class="wiz-header-right">
+        <a href="/playbooks" class="wiz-nav-link">Playbooks</a>
+        <a href="/chat" class="wiz-nav-link">&larr; Chat</a>
+    </div>
+</header>
+
+<main class="wiz-main">
+    <div class="wiz-conversation" id="wizConversation">
+        <!-- Messages will be rendered here -->
+    </div>
+
+    <!-- Playbook preview card (shown when wizard produces a playbook) -->
+    <div class="wiz-preview-card" id="wizPreviewCard" style="display:none;">
+        <div class="wiz-preview-header">
+            <h2>Playbook Preview</h2>
+            <p class="wiz-preview-sub">Review and edit before saving</p>
+        </div>
+        <div class="wiz-preview-fields">
+            <div class="wiz-preview-row">
+                <div class="wiz-preview-group">
+                    <label>Name</label>
+                    <input type="text" class="wiz-input" id="prevName">
+                </div>
+                <div class="wiz-preview-group">
+                    <label>Task Type</label>
+                    <select class="wiz-select" id="prevTaskType">
+                        <option value="batch-processing">Batch Processing</option>
+                        <option value="web-research">Web Research</option>
+                        <option value="code-generation">Code Generation</option>
+                        <option value="document-processing">Document Processing</option>
+                        <option value="data-transformation">Data Transformation</option>
+                        <option value="orchestration">Orchestration</option>
+                        <option value="interactive">Interactive</option>
+                        <option value="file-management">File Management</option>
+                        <option value="other">Other</option>
+                    </select>
+                </div>
+            </div>
+            <div class="wiz-preview-group">
+                <label>Trigger Description</label>
+                <input type="text" class="wiz-input" id="prevTrigger">
+            </div>
+            <div class="wiz-preview-group">
+                <label>DO Pattern (recommended approach)</label>
+                <textarea class="wiz-textarea wiz-code" id="prevDoPattern" rows="8"></textarea>
+            </div>
+            <div class="wiz-preview-group">
+                <label>DON'T Pattern (anti-pattern)</label>
+                <textarea class="wiz-textarea wiz-code" id="prevDontPattern" rows="8"></textarea>
+            </div>
+            <div class="wiz-preview-group">
+                <label>Examples</label>
+                <textarea class="wiz-textarea wiz-code" id="prevExamples" rows="5"></textarea>
+            </div>
+            <div class="wiz-preview-row">
+                <div class="wiz-preview-group">
+                    <label>Reasoning</label>
+                    <input type="text" class="wiz-input" id="prevReasoning">
+                </div>
+                <div class="wiz-preview-group">
+                    <label>Tags</label>
+                    <input type="text" class="wiz-input" id="prevTags">
+                </div>
+            </div>
+        </div>
+        <div class="wiz-preview-actions">
+            <button class="wiz-btn secondary" id="wizStartOver">Start Over</button>
+            <button class="wiz-btn primary" id="wizSaveBtn">Save Playbook</button>
+        </div>
+    </div>
+</main>
+
+<div class="wiz-input-area" id="wizInputArea">
+    <div class="wiz-input-wrap">
+        <textarea class="wiz-user-input" id="wizUserInput" rows="1"
+                  placeholder="Describe what you want this playbook to achieve..."></textarea>
+        <button class="wiz-send-btn" id="wizSendBtn" title="Send">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+            </svg>
+        </button>
+    </div>
+</div>
+
+<!-- Toast -->
+<div class="wiz-toast" id="wizToast"></div>
+
+<script src="/static/playbook-wizard.js"></script>
+</body>
+</html>

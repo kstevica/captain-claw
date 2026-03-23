@@ -7,9 +7,9 @@ This mixin handles:
 - Distilling session traces into playbook proposals
 - Session rating flow
 
-Playbooks are human-reviewed do/don't patterns that improve orchestration
-decisions by providing concrete pseudo-code examples of what works (and
-what doesn't) for recurring task types.
+Playbooks are human-reviewed do/don't patterns, concrete examples, and
+linked scripts that improve orchestration decisions by providing reusable
+knowledge of what works (and what doesn't) for recurring task types.
 """
 
 import asyncio
@@ -18,7 +18,7 @@ from typing import Any
 
 from captain_claw.config import get_config
 from captain_claw.logging import get_logger
-from captain_claw.session import PlaybookEntry, get_session_manager
+from captain_claw.session import PlaybookEntry, ScriptEntry, get_session_manager
 
 log = get_logger(__name__)
 
@@ -74,11 +74,17 @@ def classify_task_type(user_input: str) -> str | None:
 # Formatting helpers
 # ---------------------------------------------------------------------------
 
-def format_playbook_block(entries: list[PlaybookEntry]) -> str:
+def format_playbook_block(
+    entries: list[PlaybookEntry],
+    resolved_scripts: dict[str, list[ScriptEntry]] | None = None,
+) -> str:
     """Render a concise playbook context block for prompt injection.
 
     Returns an empty string when *entries* is empty so callers can safely
     concatenate or pass as a template variable.
+
+    *resolved_scripts* maps playbook IDs to pre-fetched ScriptEntry lists
+    (populated by the async caller that has access to SessionManager).
     """
     if not entries:
         return ""
@@ -94,13 +100,28 @@ def format_playbook_block(entries: list[PlaybookEntry]) -> str:
             parts.append(f"DO:\n{entry.do_pattern}")
         if entry.dont_pattern:
             parts.append(f"DON'T:\n{entry.dont_pattern}")
+        if entry.examples:
+            parts.append(f"EXAMPLES:\n{entry.examples}")
         if entry.reasoning:
             parts.append(f"Why: {entry.reasoning}")
+        # Linked scripts (pre-resolved by caller).
+        scripts = (resolved_scripts or {}).get(entry.id, [])
+        if scripts:
+            script_lines = ["SCRIPTS:"]
+            for s in scripts:
+                lang = f" ({s.language})" if s.language else ""
+                script_lines.append(f"  - {s.name}{lang}: {s.file_path}")
+                if s.purpose:
+                    script_lines.append(f"    {s.purpose}")
+            parts.append("\n".join(script_lines))
     parts.append("--- END PLAYBOOK ---\n")
     return "\n".join(parts)
 
 
-def format_playbook_context_note(entries: list[PlaybookEntry]) -> str:
+def format_playbook_context_note(
+    entries: list[PlaybookEntry],
+    resolved_scripts: dict[str, list[ScriptEntry]] | None = None,
+) -> str:
     """Build a lighter context note suitable for message-level injection."""
     if not entries:
         return ""
@@ -111,6 +132,12 @@ def format_playbook_context_note(entries: list[PlaybookEntry]) -> str:
             lines.append(f"  DO: {entry.do_pattern[:300]}")
         if entry.dont_pattern:
             lines.append(f"  DON'T: {entry.dont_pattern[:300]}")
+        if entry.examples:
+            lines.append(f"  EXAMPLES: {entry.examples[:300]}")
+        scripts = (resolved_scripts or {}).get(entry.id, [])
+        if scripts:
+            names = ", ".join(f"{s.name} ({s.file_path})" for s in scripts)
+            lines.append(f"  SCRIPTS: {names}")
     return "\n".join(lines)
 
 
@@ -180,6 +207,23 @@ class AgentPlaybookMixin:
     """Mixin that adds playbook retrieval, distillation, and injection to Agent."""
 
     # -------------------------------------------------------------------
+    # Monitor helper
+    # -------------------------------------------------------------------
+
+    def _emit_playbook_event(self, action: str, details: dict | None = None, output: str = "") -> None:
+        """Emit a playbook activity event to the monitor panel."""
+        callback = getattr(self, "tool_output_callback", None)
+        if callback is None:
+            return
+        try:
+            args = {"action": action}
+            if details:
+                args.update(details)
+            callback("playbook", args, output)
+        except Exception:
+            pass
+
+    # -------------------------------------------------------------------
     # Retrieval
     # -------------------------------------------------------------------
 
@@ -219,6 +263,11 @@ class AgentPlaybookMixin:
         # ── Auto mode ─────────────────────────────────────────
         # Step 1: classify
         effective_type = task_type or classify_task_type(user_input)
+        self._emit_playbook_event(
+            "search",
+            {"task_type": effective_type or "auto", "query": user_input[:100]},
+            f"Searching playbooks (type: {effective_type or 'any'})…",
+        )
 
         # Step 2: search within type
         candidates: list[PlaybookEntry] = []
@@ -246,11 +295,91 @@ class AgentPlaybookMixin:
                 limit=max_results, task_type=effective_type,
             )
 
-        return candidates[:max_results]
+        result = candidates[:max_results]
+        if result:
+            names = ", ".join(e.name for e in result)
+            self._emit_playbook_event(
+                "matched",
+                {"count": len(result), "names": names},
+                f"Found {len(result)} playbook(s): {names}",
+            )
+        else:
+            self._emit_playbook_event("no_match", {}, "No matching playbooks found")
+        return result
+
+    # -------------------------------------------------------------------
+    # Playbook approval
+    # -------------------------------------------------------------------
+
+    async def _request_playbook_approval(
+        self,
+        entries: list[PlaybookEntry],
+    ) -> bool:
+        """Request user approval before injecting playbooks.
+
+        Uses the async ``playbook_approval_callback`` if configured.
+        When no callback is set, playbooks are used without approval.
+        Returns True if approved (or no callback), False if declined.
+        """
+        callback = getattr(self, "playbook_approval_callback", None)
+        if callback is None:
+            return True
+        try:
+            descriptions = []
+            for e in entries:
+                desc = f"**{e.name}** [{e.task_type}]"
+                if e.trigger_description:
+                    desc += f" — {e.trigger_description}"
+                descriptions.append(desc)
+            message = "Playbook match found:\n" + "\n".join(
+                f"  {d}" for d in descriptions
+            )
+            names = ", ".join(e.name for e in entries)
+            self._emit_playbook_event(
+                "approval_requested",
+                {"names": names},
+                f"Requesting approval for: {names}",
+            )
+            approved = await callback(message)
+            self._emit_playbook_event(
+                "approval_resolved",
+                {"approved": approved, "names": names},
+                f"Playbook {'approved' if approved else 'declined'}: {names}",
+            )
+            return approved
+        except Exception:
+            log.warning("Playbook approval callback failed, proceeding without approval")
+            return True
 
     # -------------------------------------------------------------------
     # Injection (planner + scale)
     # -------------------------------------------------------------------
+
+    @staticmethod
+    async def _resolve_playbook_scripts(
+        entries: list[PlaybookEntry],
+    ) -> dict[str, list[ScriptEntry]]:
+        """Resolve linked script_ids for a list of playbook entries.
+
+        Returns a dict mapping playbook ID → list of resolved ScriptEntry
+        objects.  Unknown IDs are silently skipped.
+        """
+        result: dict[str, list[ScriptEntry]] = {}
+        sm = get_session_manager()
+        for entry in entries:
+            if not entry.script_ids:
+                continue
+            scripts: list[ScriptEntry] = []
+            for sid in (s.strip() for s in entry.script_ids.split(",") if s.strip()):
+                try:
+                    script = await sm.load_script(sid)
+                    if script:
+                        scripts.append(script)
+                except Exception:
+                    pass
+            if scripts:
+                result[entry.id] = scripts
+        return result
 
     async def _build_playbook_block(
         self,
@@ -266,6 +395,16 @@ class AgentPlaybookMixin:
         if not entries:
             return ""
 
+        # Notify user which playbooks are being used.
+        names = ", ".join(e.name for e in entries)
+        self._set_runtime_status(f"Using playbook: {names}")
+
+        # Request approval if callback is configured.
+        approved = await self._request_playbook_approval(entries)
+        if not approved:
+            self._set_runtime_status("Playbook usage declined by user")
+            return ""
+
         # Increment usage
         sm = get_session_manager()
         for entry in entries:
@@ -274,7 +413,14 @@ class AgentPlaybookMixin:
             except Exception:
                 pass  # best-effort
 
-        return format_playbook_block(entries)
+        resolved_scripts = await self._resolve_playbook_scripts(entries)
+        block = format_playbook_block(entries, resolved_scripts=resolved_scripts)
+        self._emit_playbook_event(
+            "injected",
+            {"names": names, "target": "planner", "block_chars": len(block)},
+            f"Injected playbook into planner: {names} ({len(block)} chars)",
+        )
+        return block
 
     async def _build_playbook_context_note(
         self,
@@ -289,6 +435,16 @@ class AgentPlaybookMixin:
         if not entries:
             return ""
 
+        # Notify user which playbooks are being used.
+        names = ", ".join(e.name for e in entries)
+        self._set_runtime_status(f"Using playbook: {names}")
+
+        # Request approval if callback is configured.
+        approved = await self._request_playbook_approval(entries)
+        if not approved:
+            self._set_runtime_status("Playbook usage declined by user")
+            return ""
+
         sm = get_session_manager()
         for entry in entries:
             try:
@@ -296,7 +452,8 @@ class AgentPlaybookMixin:
             except Exception:
                 pass
 
-        return format_playbook_context_note(entries)
+        resolved_scripts = await self._resolve_playbook_scripts(entries)
+        return format_playbook_context_note(entries, resolved_scripts=resolved_scripts)
 
     def _build_playbook_context_note_sync(
         self,
@@ -362,6 +519,12 @@ class AgentPlaybookMixin:
         session_summary = _extract_session_summary(messages)
         tool_trace = _extract_tool_trace(messages)
 
+        self._emit_playbook_event(
+            "distill_start",
+            {"session_id": session_id, "rating": rating, "message_count": len(messages)},
+            f"Distilling session {session_id[:8]}… ({len(messages)} messages, rated {rating})",
+        )
+
         # Build the distillation prompt via InstructionLoader.
         instructions = getattr(self, "instructions", None)
         if instructions is None:
@@ -413,6 +576,11 @@ class AgentPlaybookMixin:
                 return None
 
         if not isinstance(payload, dict):
+            self._emit_playbook_event(
+                "distill_failed",
+                {"session_id": session_id, "reason": "invalid_json"},
+                "Distillation failed: LLM response was not valid JSON",
+            )
             return None
 
         # Validate required fields.
@@ -420,8 +588,19 @@ class AgentPlaybookMixin:
         missing = required - set(payload.keys())
         if missing:
             log.warning("Distill: missing fields in proposal", missing=missing)
+            self._emit_playbook_event(
+                "distill_failed",
+                {"session_id": session_id, "reason": "missing_fields", "missing": list(missing)},
+                f"Distillation failed: missing fields {missing}",
+            )
             return None
 
+        pb_name = payload.get("name", "?")
+        self._emit_playbook_event(
+            "distill_complete",
+            {"session_id": session_id, "name": pb_name, "task_type": payload.get("task_type", "?")},
+            f"Distilled playbook proposal: {pb_name} [{payload.get('task_type', '?')}]",
+        )
         return payload
 
     async def _rate_and_distill_session(
@@ -480,7 +659,7 @@ class AgentPlaybookMixin:
     ) -> PlaybookEntry:
         """Persist a distilled playbook proposal to the database."""
         sm = get_session_manager()
-        return await sm.create_playbook(
+        entry = await sm.create_playbook(
             name=str(proposal.get("name", "Unnamed playbook")),
             task_type=str(proposal.get("task_type", "other")),
             rating=rating,
@@ -488,5 +667,12 @@ class AgentPlaybookMixin:
             dont_pattern=str(proposal.get("dont_pattern", "")),
             trigger_description=str(proposal.get("trigger_description", "")),
             reasoning=str(proposal.get("reasoning", "")),
+            examples=str(proposal["examples"]) if proposal.get("examples") else None,
             source_session=source_session,
         )
+        self._emit_playbook_event(
+            "saved",
+            {"id": entry.id, "name": entry.name, "task_type": entry.task_type},
+            f"Playbook saved: {entry.name} [{entry.task_type}] (id: {entry.id[:8]}…)",
+        )
+        return entry

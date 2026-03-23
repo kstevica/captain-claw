@@ -100,6 +100,10 @@ async def serve_playbooks(server: WebServer, request: web.Request) -> web.FileRe
     return web.FileResponse(STATIC_DIR / "playbooks.html")
 
 
+async def serve_playbook_wizard(server: WebServer, request: web.Request) -> web.FileResponse:
+    return web.FileResponse(STATIC_DIR / "playbook-wizard.html")
+
+
 async def serve_browser_workflows(server: WebServer, request: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "browser-workflows.html")
 

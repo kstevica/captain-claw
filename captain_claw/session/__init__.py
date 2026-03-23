@@ -452,6 +452,8 @@ class PlaybookEntry:
     trigger_description: str  # when to apply this playbook
     reasoning: str | None = None
     tags: str | None = None
+    examples: str | None = None  # Concrete code/command examples
+    script_ids: str | None = None  # Comma-separated linked script IDs
     use_count: int = 0
     last_used_at: str | None = None
     source_session: str | None = None
@@ -475,6 +477,8 @@ class PlaybookEntry:
             source_session=str(row[11]) if row[11] else None,
             created_at=str(row[12]),
             updated_at=str(row[13]),
+            examples=str(row[14]) if len(row) > 14 and row[14] else None,
+            script_ids=str(row[15]) if len(row) > 15 and row[15] else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -484,6 +488,7 @@ class PlaybookEntry:
             "dont_pattern": self.dont_pattern,
             "trigger_description": self.trigger_description,
             "reasoning": self.reasoning, "tags": self.tags,
+            "examples": self.examples, "script_ids": self.script_ids,
             "use_count": self.use_count, "last_used_at": self.last_used_at,
             "source_session": self.source_session,
             "created_at": self.created_at, "updated_at": self.updated_at,
@@ -835,6 +840,14 @@ class SessionManager:
             await self._db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_playbooks_use_count ON playbooks(use_count DESC)"
             )
+            # Migration: add examples and script_ids columns for existing databases.
+            for col in ("examples", "script_ids"):
+                try:
+                    await self._db.execute(
+                        f"ALTER TABLE playbooks ADD COLUMN {col} TEXT DEFAULT NULL"
+                    )
+                except Exception:
+                    pass  # column already exists
             # -- Browser workflows (recorded user interactions) --
             await self._db.execute("""
                 CREATE TABLE IF NOT EXISTS browser_workflows (
@@ -2377,7 +2390,7 @@ class SessionManager:
     _PLAYBOOK_COLS = (
         "id, name, task_type, rating, do_pattern, dont_pattern, "
         "trigger_description, reasoning, tags, use_count, last_used_at, "
-        "source_session, created_at, updated_at"
+        "source_session, created_at, updated_at, examples, script_ids"
     )
 
     async def create_playbook(
@@ -2391,6 +2404,8 @@ class SessionManager:
         trigger_description: str = "",
         reasoning: str | None = None,
         tags: str | None = None,
+        examples: str | None = None,
+        script_ids: str | None = None,
         source_session: str | None = None,
     ) -> PlaybookEntry:
         await self._ensure_db()
@@ -2399,19 +2414,21 @@ class SessionManager:
             id=str(uuid.uuid4()), name=name, task_type=task_type,
             rating=rating, do_pattern=do_pattern, dont_pattern=dont_pattern,
             trigger_description=trigger_description, reasoning=reasoning,
-            tags=tags, source_session=source_session,
+            tags=tags, examples=examples, script_ids=script_ids,
+            source_session=source_session,
             created_at=now, updated_at=now,
         )
         await self._db.execute(
             f"""
             INSERT INTO playbooks ({self._PLAYBOOK_COLS})
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (entry.id, entry.name, entry.task_type, entry.rating,
              entry.do_pattern, entry.dont_pattern, entry.trigger_description,
              entry.reasoning, entry.tags, entry.use_count,
              entry.last_used_at, entry.source_session,
-             entry.created_at, entry.updated_at),
+             entry.created_at, entry.updated_at,
+             entry.examples, entry.script_ids),
         )
         await self._db.commit()
         return entry
@@ -2483,11 +2500,12 @@ class SessionManager:
                   AND (name LIKE ? COLLATE NOCASE
                     OR trigger_description LIKE ? COLLATE NOCASE
                     OR do_pattern LIKE ? COLLATE NOCASE
+                    OR examples LIKE ? COLLATE NOCASE
                     OR tags LIKE ? COLLATE NOCASE)
                 ORDER BY use_count DESC, updated_at DESC
                 LIMIT ?
                 """,
-                (task_type, pattern, pattern, pattern, pattern, limit),
+                (task_type, pattern, pattern, pattern, pattern, pattern, limit),
             ) as cursor:
                 rows = await cursor.fetchall()
         else:
@@ -2498,11 +2516,12 @@ class SessionManager:
                 WHERE name LIKE ? COLLATE NOCASE
                    OR trigger_description LIKE ? COLLATE NOCASE
                    OR do_pattern LIKE ? COLLATE NOCASE
+                   OR examples LIKE ? COLLATE NOCASE
                    OR tags LIKE ? COLLATE NOCASE
                 ORDER BY use_count DESC, updated_at DESC
                 LIMIT ?
                 """,
-                (pattern, pattern, pattern, pattern, limit),
+                (pattern, pattern, pattern, pattern, pattern, limit),
             ) as cursor:
                 rows = await cursor.fetchall()
         return [PlaybookEntry.from_row(r) for r in rows]
@@ -2513,7 +2532,7 @@ class SessionManager:
         await self._ensure_db()
         allowed = {
             "name", "task_type", "rating", "do_pattern", "dont_pattern",
-            "trigger_description", "reasoning", "tags",
+            "trigger_description", "reasoning", "tags", "examples", "script_ids",
         }
         sets = []
         vals: list[Any] = []

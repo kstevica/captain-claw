@@ -73,6 +73,7 @@ class Agent(
         self.status_callback = status_callback
         self.tool_output_callback = tool_output_callback
         self.approval_callback = approval_callback
+        self.playbook_approval_callback: Callable[[str], Any] | None = None
         self.thinking_callback = thinking_callback
         self._tool_stream_callback = tool_stream_callback
         self.response_stream_callback: Callable[[str], None] | None = None

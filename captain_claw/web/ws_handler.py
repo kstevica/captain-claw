@@ -409,4 +409,7 @@ async def handle_ws_message(
             log.info("Cancel signal received via WebSocket", public=bool(_pub_sid))
 
     elif msg_type == "approval_response":
-        pass
+        request_id = str(data.get("id", ""))
+        approved = bool(data.get("approved", False))
+        if request_id:
+            server.resolve_playbook_approval(request_id, approved)

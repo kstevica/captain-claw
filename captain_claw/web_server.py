@@ -242,6 +242,8 @@ class WebServer:
         self._public_agent_locks: dict[str, asyncio.Lock] = {}
         # Tracks which WS each public agent is currently sending to.
         self._public_active_ws: dict[str, web.WebSocketResponse] = {}
+        # Pending playbook approval requests: request_id → (event, [result_bool])
+        self._pending_playbook_approvals: dict[str, tuple[asyncio.Event, list[bool]]] = {}
 
     async def _init_agent(self) -> None:
         """Initialize the agent with web callbacks."""
@@ -253,6 +255,7 @@ class WebServer:
             tool_stream_callback=self._tool_stream_callback,
         )
         self.agent.response_stream_callback = self._response_stream_callback
+        self.agent.playbook_approval_callback = self._playbook_approval_callback
         await self.agent.initialize()
 
         # Initialize orchestrator (shares provider and callbacks with main agent).
@@ -392,6 +395,7 @@ class WebServer:
                 tool_stream_callback=tool_stream_cb,
             )
             agent.response_stream_callback = response_stream_cb
+            agent.playbook_approval_callback = self._playbook_approval_callback
 
             # Bind to the public session (skip default session loading).
             agent.session = session
@@ -516,6 +520,45 @@ class WebServer:
             "message": message,
         })
         return True
+
+    # ── Playbook approval (blocking async) ────────────────────────────
+
+    async def _playbook_approval_callback(self, message: str) -> bool:
+        """Async blocking approval for playbook usage.
+
+        Broadcasts an ``approval_request`` message to all clients and waits
+        for a response.  Falls back to auto-approve after 60 s timeout.
+        """
+        import uuid
+        request_id = str(uuid.uuid4())
+        event = asyncio.Event()
+        result_holder: list[bool] = [True]  # default: approve on timeout
+        self._pending_playbook_approvals[request_id] = (event, result_holder)
+
+        self._broadcast({
+            "type": "approval_request",
+            "id": request_id,
+            "message": message,
+            "category": "playbook",
+        })
+
+        try:
+            await asyncio.wait_for(event.wait(), timeout=60.0)
+        except asyncio.TimeoutError:
+            # Auto-approve on timeout so automated tasks don't hang forever.
+            result_holder[0] = True
+        finally:
+            self._pending_playbook_approvals.pop(request_id, None)
+
+        return result_holder[0]
+
+    def resolve_playbook_approval(self, request_id: str, approved: bool) -> None:
+        """Called by ws_handler when the client responds to an approval request."""
+        pending = self._pending_playbook_approvals.get(request_id)
+        if pending:
+            event, result_holder = pending
+            result_holder[0] = approved
+            event.set()
 
     # ── Broadcast / Send ──────────────────────────────────────────────
 
@@ -1180,6 +1223,10 @@ class WebServer:
         from captain_claw.web.static_pages import serve_playbooks
         return await serve_playbooks(self, request)
 
+    async def _serve_playbook_wizard(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_playbook_wizard
+        return await serve_playbook_wizard(self, request)
+
     async def _serve_skills(self, request: web.Request) -> web.FileResponse:
         from captain_claw.web.static_pages import serve_skills
         return await serve_skills(self, request)
@@ -1423,6 +1470,10 @@ class WebServer:
     async def _pb_delete(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_playbooks import delete_playbook
         return await delete_playbook(self, request)
+
+    async def _pb_wizard_step(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_playbook_wizard import wizard_step
+        return await wizard_step(self, request)
 
     async def _serve_browser_workflows(self, request: web.Request) -> web.FileResponse:
         from captain_claw.web.static_pages import serve_browser_workflows
@@ -1940,6 +1991,8 @@ class WebServer:
         app.router.add_get("/api/playbooks/{id}", self._pb_get)
         app.router.add_patch("/api/playbooks/{id}", self._pb_update)
         app.router.add_delete("/api/playbooks/{id}", self._pb_delete)
+        # Playbook Wizard API
+        app.router.add_post("/api/playbook-wizard/step", self._pb_wizard_step)
         # Browser Workflows API
         app.router.add_get("/api/browser-workflows", self._bw_list)
         app.router.add_post("/api/browser-workflows", self._bw_create)
@@ -1996,6 +2049,7 @@ class WebServer:
             app.router.add_get("/insights", self._serve_insights)
             app.router.add_get("/intuitions", self._serve_intuitions)
             app.router.add_get("/playbooks", self._serve_playbooks)
+            app.router.add_get("/playbook-wizard", self._serve_playbook_wizard)
             app.router.add_get("/browser-workflows", self._serve_browser_workflows)
             app.router.add_get("/direct-api-calls", self._serve_direct_api_calls)
             app.router.add_get("/skills", self._serve_skills)

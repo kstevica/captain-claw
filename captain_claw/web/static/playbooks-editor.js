@@ -47,6 +47,8 @@
     var fTrigger    = document.getElementById('fTrigger');
     var fDoPattern  = document.getElementById('fDoPattern');
     var fDontPattern = document.getElementById('fDontPattern');
+    var fExamples   = document.getElementById('fExamples');
+    var fScriptIds  = document.getElementById('fScriptIds');
     var fReasoning  = document.getElementById('fReasoning');
 
     // ── Init ─────────────────────────────────────────────────────────
@@ -219,6 +221,12 @@
         if (item.dont_pattern) {
             addCodeSection(pbDetailContent, "DON'T (avoid)", item.dont_pattern, 'dont-pattern');
         }
+        if (item.examples) {
+            addCodeSection(pbDetailContent, 'Examples', item.examples, 'examples');
+        }
+        if (item.script_ids) {
+            addSection(pbDetailContent, 'Linked Scripts', item.script_ids);
+        }
         if (item.reasoning) {
             addSection(pbDetailContent, 'Reasoning', item.reasoning);
         }
@@ -360,6 +368,8 @@
         fTrigger.value = item ? item.trigger_description || '' : '';
         fDoPattern.value = item ? item.do_pattern || '' : '';
         fDontPattern.value = item ? item.dont_pattern || '' : '';
+        fExamples.value = item ? item.examples || '' : '';
+        fScriptIds.value = item ? item.script_ids || '' : '';
         fReasoning.value = item ? item.reasoning || '' : '';
 
         setTimeout(function () { fName.focus(); }, 50);
@@ -388,7 +398,9 @@
             dont_pattern: dontPattern,
             trigger_description: fTrigger.value.trim(),
             reasoning: fReasoning.value.trim(),
-            tags: fTags.value.trim()
+            tags: fTags.value.trim(),
+            examples: fExamples.value.trim(),
+            script_ids: fScriptIds.value.trim()
         };
 
         pbSaveBtn.disabled = true;

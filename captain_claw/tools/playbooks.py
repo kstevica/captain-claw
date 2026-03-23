@@ -41,7 +41,8 @@ class PlaybooksTool(Tool):
     name = "playbooks"
     description = (
         "Manage persistent cross-session orchestration playbooks. "
-        "Playbooks capture proven do/don't patterns for recurring task types "
+        "Playbooks capture proven do/don't patterns, concrete examples, "
+        "and linked scripts for recurring task types "
         "(batch-processing, web-research, code-generation, document-processing, "
         "data-transformation, orchestration, interactive, file-management, other). "
         "Use action 'add' to register, 'list' to query, 'search' to find, "
@@ -93,6 +94,20 @@ class PlaybooksTool(Tool):
                 "type": "string",
                 "description": "Comma-separated tags.",
             },
+            "examples": {
+                "type": "string",
+                "description": (
+                    "Concrete code/command examples showing how the pattern is "
+                    "executed (shell snippets, tool call patterns, code templates)."
+                ),
+            },
+            "script_ids": {
+                "type": "string",
+                "description": (
+                    "Comma-separated IDs of linked scripts (from the scripts tool) "
+                    "that implement or support this playbook."
+                ),
+            },
             "query": {
                 "type": "string",
                 "description": "Search query (for 'search').",
@@ -121,6 +136,8 @@ class PlaybooksTool(Tool):
         trigger_description: str | None = None,
         reasoning: str | None = None,
         tags: str | None = None,
+        examples: str | None = None,
+        script_ids: str | None = None,
         query: str | None = None,
         session_id: str | None = None,
         note: str | None = None,
@@ -133,7 +150,8 @@ class PlaybooksTool(Tool):
             if action == "add":
                 return await self._add(
                     sm, name, task_type, rating, do_pattern, dont_pattern,
-                    trigger_description, reasoning, tags, _session_id,
+                    trigger_description, reasoning, tags, examples, script_ids,
+                    _session_id,
                 )
             if action == "list":
                 return await self._list(sm, task_type)
@@ -145,6 +163,7 @@ class PlaybooksTool(Tool):
                 return await self._update(
                     sm, playbook_id, name, task_type, rating, do_pattern,
                     dont_pattern, trigger_description, reasoning, tags,
+                    examples, script_ids,
                 )
             if action == "remove":
                 return await self._remove(sm, playbook_id)
@@ -168,6 +187,8 @@ class PlaybooksTool(Tool):
         trigger_description: str | None,
         reasoning: str | None,
         tags: str | None,
+        examples: str | None,
+        script_ids: str | None,
         session_id: str | None,
     ) -> ToolResult:
         if not name or not name.strip():
@@ -193,6 +214,8 @@ class PlaybooksTool(Tool):
             trigger_description=(trigger_description or "").strip(),
             reasoning=reasoning,
             tags=tags,
+            examples=examples,
+            script_ids=script_ids,
             source_session=session_id,
         )
         return ToolResult(
@@ -250,10 +273,25 @@ class PlaybooksTool(Tool):
             parts.append(f"\n--- DO (recommended) ---\n{item.do_pattern}")
         if item.dont_pattern:
             parts.append(f"\n--- DON'T (avoid) ---\n{item.dont_pattern}")
+        if item.examples:
+            parts.append(f"\n--- EXAMPLES ---\n{item.examples}")
         if item.reasoning:
             parts.append(f"\nReasoning: {item.reasoning}")
         if item.tags:
             parts.append(f"Tags: {item.tags}")
+        # Resolve linked scripts.
+        if item.script_ids:
+            script_lines = ["\n--- LINKED SCRIPTS ---"]
+            for sid in (s.strip() for s in item.script_ids.split(",") if s.strip()):
+                script = await sm.load_script(sid)
+                if script:
+                    lang = f" ({script.language})" if script.language else ""
+                    script_lines.append(f"  • {script.name}{lang}: {script.file_path}")
+                    if script.purpose:
+                        script_lines.append(f"    {script.purpose}")
+                else:
+                    script_lines.append(f"  • [unknown script: {sid[:8]}]")
+            parts.extend(script_lines)
         parts.append(f"Uses: {item.use_count}")
         if item.last_used_at:
             parts.append(f"Last used: {item.last_used_at}")
@@ -274,6 +312,8 @@ class PlaybooksTool(Tool):
         trigger_description: str | None,
         reasoning: str | None,
         tags: str | None,
+        examples: str | None,
+        script_ids: str | None,
     ) -> ToolResult:
         if not playbook_id:
             return ToolResult(success=False, error="'playbook_id' is required for update.")
@@ -302,6 +342,10 @@ class PlaybooksTool(Tool):
             fields["reasoning"] = reasoning
         if tags is not None:
             fields["tags"] = tags
+        if examples is not None:
+            fields["examples"] = examples
+        if script_ids is not None:
+            fields["script_ids"] = script_ids
         if not fields:
             return ToolResult(success=False, error="No fields to update.")
         ok = await sm.update_playbook(item.id, **fields)
@@ -357,6 +401,7 @@ class PlaybooksTool(Tool):
                 dont_pattern=str(proposal.get("dont_pattern", "")),
                 trigger_description=str(proposal.get("trigger_description", "")),
                 reasoning=str(proposal.get("reasoning", "")),
+                examples=str(proposal["examples"]) if proposal.get("examples") else None,
                 source_session=session_id,
             )
             parts = [

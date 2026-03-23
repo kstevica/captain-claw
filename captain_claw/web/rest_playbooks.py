@@ -82,6 +82,8 @@ async def create_playbook(server: WebServer, request: web.Request) -> web.Respon
         trigger_description=str(body.get("trigger_description", "")).strip(),
         reasoning=str(body.get("reasoning", "")).strip() or None,
         tags=str(body.get("tags", "")).strip() or None,
+        examples=str(body.get("examples", "")).strip() or None,
+        script_ids=str(body.get("script_ids", "")).strip() or None,
         source_session=str(body.get("source_session", "")).strip() or None,
     )
     return web.json_response(_playbook_dict(item), status=201, dumps=_JSON_DUMPS)
@@ -103,7 +105,7 @@ async def update_playbook(server: WebServer, request: web.Request) -> web.Respon
     fields: dict[str, Any] = {}
     for key in (
         "name", "task_type", "rating", "do_pattern", "dont_pattern",
-        "trigger_description", "reasoning", "tags",
+        "trigger_description", "reasoning", "tags", "examples", "script_ids",
     ):
         if key in body:
             val = body[key]
@@ -151,6 +153,8 @@ def _playbook_dict(p: Any) -> dict[str, Any]:
         "trigger_description": p.trigger_description,
         "reasoning": p.reasoning,
         "tags": p.tags,
+        "examples": p.examples,
+        "script_ids": p.script_ids,
         "use_count": p.use_count,
         "last_used_at": p.last_used_at,
         "source_session": p.source_session,

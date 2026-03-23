@@ -22,6 +22,7 @@ Return ONLY a JSON object (no markdown, no code fences):
   "trigger_description": "when should this playbook activate — describe the task pattern in one sentence",
   "do_pattern": "pseudo-code of the recommended approach (what works)",
   "dont_pattern": "pseudo-code of what to avoid (what fails or is suboptimal)",
+  "examples": "concrete shell commands, tool call patterns, or code snippets that worked (optional, omit if none are notable)",
   "reasoning": "one sentence explaining why this pattern matters"
 }}
 
@@ -30,5 +31,6 @@ Rules:
 - Focus on the ORCHESTRATION decisions (tool ordering, looping strategy, context management), not the content of the task.
 - If the session was rated "good", the `do_pattern` should reflect what actually happened. The `dont_pattern` should describe the obvious anti-pattern.
 - If the session was rated "bad", the `dont_pattern` should reflect what actually happened. The `do_pattern` should describe what should have been done instead.
+- If the session trace contains notable shell commands, tool call patterns, or reusable code snippets, include them in the `examples` field. Make them generic — replace specific paths, filenames, URLs, and user data with placeholders (e.g., `<input_dir>`, `<output_file>`). Omit the field if nothing is worth reusing.
 - Keep the `trigger_description` generic enough to match similar future tasks, but specific enough to not match unrelated ones.
 - Never include specific file names, URLs, or user data in the patterns — keep them abstract.

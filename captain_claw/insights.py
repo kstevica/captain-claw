@@ -534,13 +534,15 @@ async def extract_insights(
     # 6. Parse JSON response.
     new_insights: list[dict[str, Any]] = []
     try:
-        # Handle markdown code fences.
-        text = raw
+        # Handle markdown code fences and trailing commentary.
+        text = raw.strip()
         if text.startswith("```"):
             text = "\n".join(text.split("\n")[1:])
-        if text.endswith("```"):
-            text = "\n".join(text.split("\n")[:-1])
-        parsed = json.loads(text)
+        # Find closing fence — anything after it is LLM commentary, not JSON.
+        fence_idx = text.find("\n```")
+        if fence_idx != -1:
+            text = text[:fence_idx]
+        parsed = json.loads(text.strip())
         if isinstance(parsed, list):
             new_insights = parsed
     except (json.JSONDecodeError, ValueError) as exc:

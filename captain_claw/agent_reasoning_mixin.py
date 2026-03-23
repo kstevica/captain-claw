@@ -1202,7 +1202,12 @@ class AgentReasoningMixin:
             if key in seen:
                 continue
             seen.add(key)
-            members.append(candidate[:160])
+            # URLs can be very long (200+ chars); truncating them causes 404s.
+            # Use a generous limit when a URL is present (standalone or embedded
+            # in a label like "Title — https://example.com/very-long-slug").
+            _has_url = "http://" in candidate or "https://" in candidate
+            max_len = 512 if _has_url else 160
+            members.append(candidate[:max_len])
         return members
 
     @staticmethod
