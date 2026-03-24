@@ -143,6 +143,7 @@ COMMANDS: list[dict[str, str]] = [
     {"command": "/contacts update <id> <field=value>", "description": "Update contact fields", "category": "Contacts"},
     {"command": "/contacts importance <id> <1-10>", "description": "Set contact importance", "category": "Contacts"},
     {"command": "/contacts remove <id|#index|name>", "description": "Remove a contact", "category": "Contacts"},
+    {"command": "/contacts import <path>", "description": "Import from Google CSV or vCard", "category": "Contacts"},
     {"command": "/scripts", "description": "List scripts", "category": "Scripts"},
     {"command": "/scripts add <name> <path>", "description": "Register a script", "category": "Scripts"},
     {"command": "/scripts info <id|#index|name>", "description": "Show script details", "category": "Scripts"},
@@ -923,6 +924,14 @@ class WebServer:
     async def _delete_contact(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_entities import delete_contact
         return await delete_contact(self, request)
+
+    async def _import_contacts(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_entities import import_contacts
+        return await import_contacts(self, request)
+
+    async def _preview_contacts_import(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_entities import preview_contacts_import
+        return await preview_contacts_import(self, request)
 
     # Personality
     async def _get_personality(self, request: web.Request) -> web.Response:
@@ -1920,6 +1929,8 @@ class WebServer:
         app.router.add_get("/api/contacts", self._list_contacts)
         app.router.add_get("/api/contacts/search", self._search_contacts)
         app.router.add_post("/api/contacts", self._create_contact)
+        app.router.add_post("/api/contacts/import", self._import_contacts)
+        app.router.add_post("/api/contacts/import/preview", self._preview_contacts_import)
         app.router.add_get("/api/contacts/{id}", self._get_contact)
         app.router.add_patch("/api/contacts/{id}", self._update_contact)
         app.router.add_delete("/api/contacts/{id}", self._delete_contact)

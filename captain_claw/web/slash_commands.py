@@ -862,6 +862,41 @@ async def handle_contacts_command(server: WebServer, args: str) -> str:
         ok = await sm.update_contact(item.id, **kwargs)
         return f"Updated contact: **{item.name}**" if ok else "Update failed."
 
+    if subcmd == "import":
+        if not subargs:
+            return (
+                "Usage: `/contacts import <path-to-file>`\n"
+                "Supported formats:\n"
+                "- Google Contacts CSV export (`.csv`)\n"
+                "- vCard file (`.vcf`)\n\n"
+                "To export from Google: contacts.google.com → Export → Google CSV"
+            )
+        from pathlib import Path as _Path
+        file_path = _Path(subargs.strip()).expanduser().resolve()
+        if not file_path.exists():
+            return f"File not found: `{file_path}`"
+        if not file_path.is_file():
+            return f"Not a file: `{file_path}`"
+        ext = file_path.suffix.lower()
+        if ext not in (".csv", ".vcf"):
+            return f"Unsupported format `{ext}`. Use .csv (Google Contacts) or .vcf (vCard)."
+        file_bytes = file_path.read_bytes()
+        if not file_bytes:
+            return "File is empty."
+        from captain_claw.web.rest_entities import _import_google_csv, _import_vcard
+        if ext == ".vcf":
+            result = await _import_vcard(sm, file_bytes)
+        else:
+            result = await _import_google_csv(sm, file_bytes)
+        imported = result.get("imported", 0)
+        skipped = result.get("skipped", 0)
+        fmt = result.get("format", ext)
+        msg = f"**Import complete** ({fmt}): {imported} imported, {skipped} skipped."
+        errors = result.get("errors", [])
+        if errors:
+            msg += "\nErrors:\n" + "\n".join(f"- {e}" for e in errors[:10])
+        return msg
+
     # Fallback: treat as search
     items = await sm.search_contacts(args, limit=20)
     if not items:

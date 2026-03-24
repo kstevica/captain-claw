@@ -220,6 +220,24 @@ html, body {
     background: var(--accent-hover);
 }
 
+.mem-import-btn {
+    font-size: 16px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+}
+
+.mem-import-btn:hover {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+}
+
+.mem-import-btn:disabled {
+    opacity: 0.6;
+    cursor: wait;
+}
+
 .mem-item-list {
     flex: 1;
     overflow-y: auto;
@@ -636,6 +654,137 @@ html, body {
     display: flex;
     justify-content: flex-end;
     gap: 8px;
+}
+
+/* ─── Import Modal ────────────────────────────────────── */
+
+.mem-import-modal {
+    min-width: 520px;
+    max-width: 720px;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.mem-import-modal .mem-modal-body {
+    flex: 1;
+    overflow-y: auto;
+    max-height: 60vh;
+}
+
+.import-info {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-bottom: 16px;
+    line-height: 1.5;
+}
+
+.import-info strong {
+    color: var(--text-primary);
+}
+
+.import-preview-table-wrap {
+    margin-bottom: 16px;
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+}
+
+.import-preview-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+    font-family: var(--font-mono);
+}
+
+.import-preview-table th {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    font-size: 10px;
+    padding: 6px 10px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+}
+
+.import-preview-table td {
+    padding: 4px 10px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.import-preview-table tr:last-child td {
+    border-bottom: none;
+}
+
+.import-mapping {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.import-map-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.import-map-label {
+    width: 110px;
+    flex-shrink: 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.import-map-label .required {
+    color: var(--red);
+    margin-left: 2px;
+}
+
+.import-map-arrow {
+    color: var(--text-muted);
+    font-size: 12px;
+    flex-shrink: 0;
+}
+
+.import-map-select {
+    flex: 1;
+    padding: 5px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font);
+    font-size: 12px;
+    outline: none;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238b949e' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    padding-right: 28px;
+}
+
+.import-map-select:focus {
+    border-color: var(--accent);
+}
+
+.import-map-select.mapped {
+    border-color: var(--green);
+    color: var(--text-primary);
+}
+
+.import-map-select.unmapped {
+    color: var(--text-muted);
 }
 
 /* ─── Toast / Notification ────────────────────────────── */

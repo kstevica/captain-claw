@@ -185,6 +185,16 @@
     var memModalBody    = document.getElementById('memModalBody');
     var memModalCancel  = document.getElementById('memModalCancel');
     var memModalConfirm = document.getElementById('memModalConfirm');
+    var memImportBtn    = document.getElementById('memImportBtn');
+    var memImportFile   = document.getElementById('memImportFile');
+    var importModalOverlay = document.getElementById('importModalOverlay');
+    var importModalTitle   = document.getElementById('importModalTitle');
+    var importInfo         = document.getElementById('importInfo');
+    var importPreviewWrap  = document.getElementById('importPreviewWrap');
+    var importPreviewTable = document.getElementById('importPreviewTable');
+    var importMapping      = document.getElementById('importMapping');
+    var importModalCancel  = document.getElementById('importModalCancel');
+    var importModalConfirm = document.getElementById('importModalConfirm');
     var memToast        = document.getElementById('memToast');
 
     var countEls = {
@@ -216,10 +226,19 @@
         memModalCancel.addEventListener('click', hideDeleteModal);
         memModalConfirm.addEventListener('click', onConfirmDelete);
 
+        // Import button (contacts only)
+        memImportBtn.addEventListener('click', function () { memImportFile.click(); });
+        memImportFile.addEventListener('change', onImportFileSelected);
+        importModalCancel.addEventListener('click', hideImportModal);
+        importModalConfirm.addEventListener('click', onImportConfirm);
+        updateImportBtnVisibility();
+
         // Keyboard shortcut: Escape to close modal/form
         document.addEventListener('keydown', function (e) {
             if (e.key === 'Escape') {
-                if (memModalOverlay.style.display !== 'none') {
+                if (importModalOverlay.style.display !== 'none') {
+                    hideImportModal();
+                } else if (memModalOverlay.style.display !== 'none') {
                     hideDeleteModal();
                 } else if (isEditing) {
                     onCancelForm();
@@ -253,6 +272,7 @@
         }
 
         // Reset right panel
+        updateImportBtnVisibility();
         showEmptyState();
         loadItems();
     }
@@ -707,6 +727,234 @@
         } else {
             showEmptyState();
         }
+    }
+
+    // ── Import (Contacts) ─────────────────────────────────────────────────────
+
+    var _importFile = null;      // File object kept for the confirm step.
+    var _importPreview = null;   // Preview response from backend.
+
+    // Our contact fields the user can map to.
+    var IMPORT_FIELDS = [
+        { key: 'first_name',    label: 'First Name',    required: false },
+        { key: 'middle_name',   label: 'Middle Name',   required: false },
+        { key: 'last_name',     label: 'Last Name',     required: false },
+        { key: 'name',          label: 'Full Name',     required: false },
+        { key: 'email',         label: 'Email',         required: false },
+        { key: 'phone',         label: 'Phone',         required: false },
+        { key: 'organization',  label: 'Organization',  required: false },
+        { key: 'position',      label: 'Position',      required: false },
+        { key: 'notes',         label: 'Notes',         required: false },
+        { key: 'tags',          label: 'Tags / Labels', required: false },
+        { key: 'description',   label: 'Description',   required: false }
+    ];
+
+    function updateImportBtnVisibility() {
+        memImportBtn.style.display = (activeType === 'contacts') ? '' : 'none';
+    }
+
+    function onImportFileSelected() {
+        var file = memImportFile.files && memImportFile.files[0];
+        if (!file) return;
+
+        var ext = file.name.split('.').pop().toLowerCase();
+        if (ext !== 'csv' && ext !== 'vcf') {
+            showToast('Unsupported format. Use .csv or .vcf', 'error');
+            memImportFile.value = '';
+            return;
+        }
+
+        _importFile = file;
+        memImportBtn.disabled = true;
+        memImportBtn.textContent = '\u23F3';
+
+        // Step 1: Send to preview endpoint to get headers + auto-mapping.
+        var formData = new FormData();
+        formData.append('file', file);
+
+        fetch('/api/contacts/import/preview', { method: 'POST', body: formData })
+            .then(function (res) { return res.json(); })
+            .then(function (data) {
+                memImportBtn.disabled = false;
+                memImportBtn.textContent = '\u2B06';
+                memImportFile.value = '';
+
+                if (data.error) {
+                    showToast('Preview failed: ' + data.error, 'error');
+                    _importFile = null;
+                    return;
+                }
+
+                _importPreview = data;
+                showImportModal(data);
+            })
+            .catch(function (err) {
+                memImportBtn.disabled = false;
+                memImportBtn.textContent = '\u2B06';
+                memImportFile.value = '';
+                _importFile = null;
+                showToast('Preview failed: ' + (err.message || err), 'error');
+            });
+    }
+
+    function showImportModal(preview) {
+        importModalTitle.textContent = 'Import Contacts — ' + (preview.filename || 'file');
+
+        // Info line.
+        importInfo.innerHTML = '<strong>' + preview.totalRows + '</strong> rows found in <strong>' +
+            (preview.format === 'csv' ? 'CSV' : 'vCard') + '</strong> file with <strong>' +
+            preview.headers.length + '</strong> columns.';
+
+        // Sample preview table.
+        if (preview.sample && preview.sample.length > 0) {
+            importPreviewWrap.style.display = '';
+            var html = '<thead><tr>';
+            // Show only columns that have data in the sample rows.
+            var visibleHeaders = preview.headers.filter(function (h) {
+                return preview.sample.some(function (row) {
+                    return row[h] && String(row[h]).trim();
+                });
+            });
+            // Cap visible columns to avoid overflow.
+            if (visibleHeaders.length > 8) visibleHeaders = visibleHeaders.slice(0, 8);
+            visibleHeaders.forEach(function (h) {
+                html += '<th>' + _esc(h) + '</th>';
+            });
+            html += '</tr></thead><tbody>';
+            preview.sample.forEach(function (row) {
+                html += '<tr>';
+                visibleHeaders.forEach(function (h) {
+                    var val = String(row[h] || '').trim();
+                    if (val.length > 40) val = val.substring(0, 37) + '...';
+                    html += '<td>' + _esc(val || '\u2014') + '</td>';
+                });
+                html += '</tr>';
+            });
+            html += '</tbody>';
+            importPreviewTable.innerHTML = html;
+        } else {
+            importPreviewWrap.style.display = 'none';
+        }
+
+        // Mapping dropdowns.
+        var autoMap = preview.autoMap || {};
+        importMapping.innerHTML = '';
+
+        IMPORT_FIELDS.forEach(function (field) {
+            var row = document.createElement('div');
+            row.className = 'import-map-row';
+
+            var label = document.createElement('div');
+            label.className = 'import-map-label';
+            label.textContent = field.label;
+            if (field.required) {
+                var req = document.createElement('span');
+                req.className = 'required';
+                req.textContent = '*';
+                label.appendChild(req);
+            }
+            row.appendChild(label);
+
+            var arrow = document.createElement('div');
+            arrow.className = 'import-map-arrow';
+            arrow.textContent = '\u2190';
+            row.appendChild(arrow);
+
+            var select = document.createElement('select');
+            select.className = 'import-map-select';
+            select.setAttribute('data-field', field.key);
+
+            // Empty option.
+            var emptyOpt = document.createElement('option');
+            emptyOpt.value = '';
+            emptyOpt.textContent = '— skip —';
+            select.appendChild(emptyOpt);
+
+            preview.headers.forEach(function (h) {
+                var opt = document.createElement('option');
+                opt.value = h;
+                opt.textContent = h;
+                if (autoMap[field.key] === h) opt.selected = true;
+                select.appendChild(opt);
+            });
+
+            select.className = 'import-map-select ' + (select.value ? 'mapped' : 'unmapped');
+            select.addEventListener('change', function () {
+                select.className = 'import-map-select ' + (select.value ? 'mapped' : 'unmapped');
+            });
+
+            row.appendChild(select);
+            importMapping.appendChild(row);
+        });
+
+        importModalConfirm.disabled = false;
+        importModalConfirm.textContent = 'Import';
+        importModalOverlay.style.display = '';
+    }
+
+    function hideImportModal() {
+        importModalOverlay.style.display = 'none';
+        _importFile = null;
+        _importPreview = null;
+    }
+
+    function onImportConfirm() {
+        if (!_importFile) return;
+
+        // Collect mapping from dropdowns.
+        var mapping = {};
+        var selects = importMapping.querySelectorAll('[data-field]');
+        selects.forEach(function (sel) {
+            var field = sel.getAttribute('data-field');
+            var col = sel.value;
+            if (col) mapping[field] = col;
+        });
+
+        // Need at least one name-ish field mapped.
+        if (!mapping.name && !mapping.first_name && !mapping.last_name &&
+            !mapping.email && !mapping.phone) {
+            showToast('Map at least one name, email, or phone column', 'error');
+            return;
+        }
+
+        importModalConfirm.disabled = true;
+        importModalConfirm.textContent = 'Importing...';
+
+        var formData = new FormData();
+        formData.append('file', _importFile);
+        formData.append('mapping', JSON.stringify(mapping));
+
+        fetch('/api/contacts/import', { method: 'POST', body: formData })
+            .then(function (res) { return res.json(); })
+            .then(function (data) {
+                importModalConfirm.disabled = false;
+                importModalConfirm.textContent = 'Import';
+
+                if (data.error) {
+                    showToast('Import failed: ' + data.error, 'error');
+                    return;
+                }
+
+                hideImportModal();
+
+                var msg = 'Imported ' + (data.imported || 0) + ' contacts';
+                if (data.skipped > 0) msg += ', ' + data.skipped + ' skipped';
+                showToast(msg, 'success');
+
+                loadAllCounts();
+                loadItems();
+            })
+            .catch(function (err) {
+                importModalConfirm.disabled = false;
+                importModalConfirm.textContent = 'Import';
+                showToast('Import failed: ' + (err.message || err), 'error');
+            });
+    }
+
+    function _esc(str) {
+        var el = document.createElement('span');
+        el.textContent = str;
+        return el.innerHTML;
     }
 
     // ── Panel Visibility Helpers ─────────────────────────────────────────────

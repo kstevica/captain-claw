@@ -49,6 +49,8 @@
         <div class="mem-list-header">
             <input type="text" class="mem-search" id="memSearch"
                    placeholder="Search..." autocomplete="off">
+            <button class="mem-add-btn mem-import-btn" id="memImportBtn" title="Import from Google CSV or vCard" style="display:none;">&#x2B06;</button>
+            <input type="file" id="memImportFile" accept=".csv,.vcf" style="display:none;">
             <button class="mem-add-btn" id="memAddBtn" title="Add new">+</button>
         </div>
         <div class="mem-item-list" id="memItemList">
@@ -100,6 +102,24 @@
         <div class="mem-modal-actions">
             <button class="mem-btn secondary" id="memModalCancel">Cancel</button>
             <button class="mem-btn danger" id="memModalConfirm">Delete</button>
+        </div>
+    </div>
+</div>
+
+<!-- Import mapping modal -->
+<div class="mem-modal-overlay" id="importModalOverlay" style="display:none;">
+    <div class="mem-modal mem-import-modal">
+        <div class="mem-modal-title" id="importModalTitle">Import Contacts</div>
+        <div class="mem-modal-body">
+            <div class="import-info" id="importInfo"></div>
+            <div class="import-preview-table-wrap" id="importPreviewWrap" style="display:none;">
+                <table class="import-preview-table" id="importPreviewTable"></table>
+            </div>
+            <div class="import-mapping" id="importMapping"></div>
+        </div>
+        <div class="mem-modal-actions">
+            <button class="mem-btn secondary" id="importModalCancel">Cancel</button>
+            <button class="mem-btn primary" id="importModalConfirm">Import</button>
         </div>
     </div>
 </div>
