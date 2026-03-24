@@ -242,7 +242,66 @@ async def _handle_telegram_message(server: WebServer, message: TelegramMessage) 
             except Exception as dl_exc:
                 log.warning("Telegram photo download failed", error=str(dl_exc))
 
-        if not text and not image_path:
+        # Download attached document (Word, PDF, Excel, PowerPoint, etc.).
+        file_path: str | None = None
+        if message.document_file_id:
+            try:
+                from datetime import UTC, datetime
+                from pathlib import Path
+
+                from captain_claw.config import get_config
+
+                cfg = get_config()
+                workspace = cfg.resolved_workspace_path()
+                session_id = user_agent.session.id if user_agent.session else "uploads"
+                stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+                original_name = message.document_file_name or "document"
+                ext = Path(original_name).suffix.lower() if Path(original_name).suffix else ""
+                safe_stem = "".join(
+                    c if c.isalnum() or c in "-_." else "_"
+                    for c in Path(original_name).stem
+                )[:60]
+                filename = f"tg-{safe_stem}-{stamp}{ext}"
+                dest_dir = workspace / "saved" / "downloads" / session_id
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest = dest_dir / filename
+                await bridge.download_file(message.document_file_id, dest)
+                file_path = str(dest)
+                log.info("Telegram document downloaded", path=file_path, original=original_name)
+            except Exception as dl_exc:
+                log.warning("Telegram document download failed", error=str(dl_exc))
+
+        # Extract contact information.
+        contact_text: str | None = None
+        if message.contact_phone:
+            parts = [message.contact_first_name, message.contact_last_name]
+            name = " ".join(p for p in parts if p).strip() or "Unknown"
+            contact_text = f"[Contact: {name}, phone: {message.contact_phone}]"
+            if message.contact_vcard:
+                # Save vCard file for the agent to process.
+                try:
+                    from datetime import UTC, datetime
+                    from pathlib import Path
+
+                    from captain_claw.config import get_config
+
+                    cfg = get_config()
+                    workspace = cfg.resolved_workspace_path()
+                    session_id = user_agent.session.id if user_agent.session else "uploads"
+                    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+                    safe_name = "".join(
+                        c if c.isalnum() or c in "-_." else "_" for c in name
+                    )[:40]
+                    dest_dir = workspace / "saved" / "downloads" / session_id
+                    dest_dir.mkdir(parents=True, exist_ok=True)
+                    vcf_path = dest_dir / f"tg-contact-{safe_name}-{stamp}.vcf"
+                    vcf_path.write_text(message.contact_vcard, encoding="utf-8")
+                    contact_text += f"\n[Attached file: {vcf_path}]"
+                    log.info("Telegram contact vCard saved", path=str(vcf_path))
+                except Exception as vcf_exc:
+                    log.warning("Telegram vCard save failed", error=str(vcf_exc))
+
+        if not text and not image_path and not file_path and not contact_text:
             return
 
         # Strip @botname suffix from commands.
@@ -297,11 +356,21 @@ async def _handle_telegram_message(server: WebServer, message: TelegramMessage) 
                 )
                 return
 
-        # Build effective text with image context if present.
+        # Build effective text with attachment context if present.
         effective_text = text
+        attachment_lines: list[str] = []
         if image_path:
-            prefix = f"[Attached image: {image_path}]\n"
-            effective_text = prefix + (text or "Please analyze this image.")
+            attachment_lines.append(f"[Attached image: {image_path}]")
+        if file_path:
+            attachment_lines.append(f"[Attached file: {file_path}]")
+        if contact_text:
+            attachment_lines.append(contact_text)
+        if attachment_lines:
+            prefix = "\n".join(attachment_lines) + "\n"
+            default_msg = "Please analyze this image." if image_path else "I've attached a file."
+            if contact_text and not image_path and not file_path:
+                default_msg = "I'm sharing this contact."
+            effective_text = prefix + (text or default_msg)
 
         user_label = message.username or message.first_name or str(message.user_id)
         server._broadcast({
@@ -875,7 +944,10 @@ async def _tg_process_with_typing(
                 await _tg_send(server, chat_id, response, reply_to_message_id=reply_to_message_id)
 
                 # Send any generated images back to Telegram.
-                from captain_claw.platform_adapter import collect_turn_generated_image_paths
+                from captain_claw.platform_adapter import (
+                    collect_turn_generated_document_paths,
+                    collect_turn_generated_image_paths,
+                )
                 if user_agent.session and server._telegram_bridge:
                     for img_path in collect_turn_generated_image_paths(user_agent.session, turn_start_idx):
                         try:
@@ -884,6 +956,18 @@ async def _tg_process_with_typing(
                             )
                         except Exception as img_exc:
                             log.warning("Telegram send_photo failed", path=str(img_path), error=str(img_exc))
+
+                # Send any generated documents back to Telegram.
+                if user_agent.session and server._telegram_bridge:
+                    for doc_path in collect_turn_generated_document_paths(user_agent.session, turn_start_idx):
+                        try:
+                            await server._telegram_bridge.send_document(
+                                chat_id, doc_path,
+                                caption=doc_path.name,
+                                reply_to_message_id=reply_to_message_id,
+                            )
+                        except Exception as doc_exc:
+                            log.warning("Telegram send_document failed", path=str(doc_path), error=str(doc_exc))
 
                 server._broadcast({
                     "type": "chat_message",

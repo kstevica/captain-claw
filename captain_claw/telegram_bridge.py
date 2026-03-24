@@ -64,6 +64,12 @@ class TelegramMessage:
     first_name: str
     text: str
     photo_file_id: str = ""
+    document_file_id: str = ""
+    document_file_name: str = ""
+    contact_phone: str = ""
+    contact_first_name: str = ""
+    contact_last_name: str = ""
+    contact_vcard: str = ""
     business_connection_id: str = ""
 
 
@@ -154,9 +160,16 @@ class TelegramBridge:
                 msg = item.get("business_message")
             if not isinstance(msg, dict):
                 continue
-            # Extract text, or caption + photo for image messages.
+            # Extract text, or caption + photo/document for media messages.
             text = str(msg.get("text", "")).strip()
             photo_file_id = ""
+            document_file_id = ""
+            document_file_name = ""
+            contact_phone = ""
+            contact_first_name = ""
+            contact_last_name = ""
+            contact_vcard = ""
+
             photo_array = msg.get("photo")
             if isinstance(photo_array, list) and photo_array:
                 # Telegram sends multiple sizes; pick the largest (last).
@@ -166,7 +179,24 @@ class TelegramBridge:
                 # Use caption as text for photo messages.
                 if not text:
                     text = str(msg.get("caption", "")).strip()
-            if not text and not photo_file_id:
+
+            # Document attachments (Word, PDF, Excel, etc.).
+            doc = msg.get("document")
+            if isinstance(doc, dict):
+                document_file_id = str(doc.get("file_id", "")).strip()
+                document_file_name = str(doc.get("file_name", "")).strip()
+                if not text:
+                    text = str(msg.get("caption", "")).strip()
+
+            # Contact messages.
+            contact = msg.get("contact")
+            if isinstance(contact, dict):
+                contact_phone = str(contact.get("phone_number", "")).strip()
+                contact_first_name = str(contact.get("first_name", "")).strip()
+                contact_last_name = str(contact.get("last_name", "")).strip()
+                contact_vcard = str(contact.get("vcard", "")).strip()
+
+            if not text and not photo_file_id and not document_file_id and not contact_phone:
                 continue
             from_user = msg.get("from")
             chat = msg.get("chat")
@@ -186,6 +216,12 @@ class TelegramBridge:
                     first_name=str(from_user.get("first_name", "")).strip(),
                     text=text,
                     photo_file_id=photo_file_id,
+                    document_file_id=document_file_id,
+                    document_file_name=document_file_name,
+                    contact_phone=contact_phone,
+                    contact_first_name=contact_first_name,
+                    contact_last_name=contact_last_name,
+                    contact_vcard=contact_vcard,
                     business_connection_id=str(msg.get("business_connection_id", "")).strip(),
                 )
             )
@@ -368,6 +404,81 @@ class TelegramBridge:
                 data=payload,
                 files=files,
             )
+        response.raise_for_status()
+
+    async def send_document(
+        self,
+        chat_id: int,
+        file_path: str | Path,
+        *,
+        caption: str = "",
+        reply_to_message_id: int | None = None,
+    ) -> None:
+        """Upload a generic document file to Telegram using sendDocument.
+
+        Suitable for Word, PowerPoint, Excel, PDF, TXT, MD and similar files.
+        """
+        doc_path = Path(file_path).expanduser().resolve()
+        if not doc_path.exists() or not doc_path.is_file():
+            raise FileNotFoundError(f"Telegram document file not found: {doc_path}")
+        payload: dict[str, Any] = {"chat_id": int(chat_id)}
+        caption_text = str(caption or "").strip()
+        if caption_text:
+            payload["caption"] = caption_text
+        if reply_to_message_id:
+            payload["reply_to_message_id"] = int(reply_to_message_id)
+        mime_types: dict[str, str] = {
+            ".pdf": "application/pdf",
+            ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".doc": "application/msword",
+            ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            ".ppt": "application/vnd.ms-powerpoint",
+            ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ".xls": "application/vnd.ms-excel",
+            ".csv": "text/csv",
+            ".txt": "text/plain",
+            ".md": "text/markdown",
+            ".vcf": "text/vcard",
+        }
+        mime = mime_types.get(doc_path.suffix.lower(), "application/octet-stream")
+        with doc_path.open("rb") as handle:
+            files = {
+                "document": (
+                    doc_path.name,
+                    handle,
+                    mime,
+                )
+            }
+            response = await self._client.post(
+                self._url("sendDocument"),
+                data=payload,
+                files=files,
+            )
+        response.raise_for_status()
+
+    async def send_contact(
+        self,
+        chat_id: int,
+        phone_number: str,
+        first_name: str,
+        *,
+        last_name: str = "",
+        vcard: str = "",
+        reply_to_message_id: int | None = None,
+    ) -> None:
+        """Send a contact to Telegram using sendContact."""
+        payload: dict[str, Any] = {
+            "chat_id": int(chat_id),
+            "phone_number": str(phone_number or "").strip(),
+            "first_name": str(first_name or "").strip(),
+        }
+        if last_name:
+            payload["last_name"] = str(last_name).strip()
+        if vcard:
+            payload["vcard"] = str(vcard).strip()
+        if reply_to_message_id:
+            payload["reply_to_message_id"] = int(reply_to_message_id)
+        response = await self._client.post(self._url("sendContact"), json=payload)
         response.raise_for_status()
 
     async def download_file(self, file_id: str, dest: Path) -> Path:
