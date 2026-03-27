@@ -43,7 +43,7 @@ export function SendContextModal({ sourceId: _sourceId, sourceName, messages, ta
     lines.push('')
     for (const m of selectedMessages) {
       const role = m.role === 'user' ? 'User' : 'Assistant'
-      const content = m.content.length > 2000 ? m.content.slice(0, 2000) + '\n...(truncated)' : m.content
+      const content = m.content
       lines.push(`**${role}:**`)
       lines.push(content)
       lines.push('')
