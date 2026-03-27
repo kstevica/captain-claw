@@ -3587,6 +3587,135 @@ web:
 
 ---
 
+## Flight Deck
+
+Flight Deck is a management dashboard for running multiple Captain Claw agents. It provides a unified UI to spawn, monitor, chat with, and transfer files between agents — whether they run in Docker containers or as local pip-installed instances.
+
+### Starting
+
+```bash
+captain-claw-fd                    # default: http://0.0.0.0:25080
+captain-claw-fd --port 8080        # custom port
+captain-claw-fd --dev              # API-only mode (use with Vite dev server)
+python -m captain_claw.flight_deck # alternative
+```
+
+Flight Deck serves both the React frontend and the FastAPI backend from a single process. No separate build step is needed for production — the built frontend is bundled with the Python package.
+
+### Features
+
+| Feature | Description |
+|---|---|
+| Docker container management | Spawn, stop, restart, remove Captain Claw containers with full config (provider, model, tools, platforms) |
+| Local agent management | Register any CC instance by host:port, probe status, connect for chat |
+| Multi-agent chat | WebSocket-based chat with multiple agents simultaneously via tabbed interface |
+| File browser & transfer | Browse agent files, select files, and send them to another agent |
+| Context transfer | Forward conversation history (last N messages) + a task prompt to another agent |
+| Container logs | View and stream Docker container logs |
+| Agent status | Real-time busy/idle indicators on agent cards with status text |
+| Markdown chat | Full GFM markdown rendering (tables, code, lists) in chat messages |
+
+### Agent Types
+
+**Docker containers** — Spawned from Flight Deck's Spawn Agent page. Full lifecycle management (start/stop/restart/remove), logs, and auto-configured networking.
+
+**Local agents** — Any Captain Claw instance reachable via HTTP. Register with name, host, port, and optional auth token. Useful for pip-installed instances or remote agents.
+
+### Spawning Docker Agents
+
+The Spawn Agent page lets you configure:
+
+- **LLM provider and model** — OpenAI, Anthropic, Gemini, Ollama, OpenRouter
+- **Tools** — Select which tools the agent has access to
+- **Platforms** — Enable Telegram, Discord, or Slack bots
+- **Web UI** — Port and auth token for the agent's own web interface
+- **BotPort** — Connect to a BotPort hub for multi-agent routing
+- **Docker settings** — Image, network mode, extra volumes, environment variables
+
+Spawned containers are managed under `fd-data/<agent-slug>/` with isolated config, workspace, sessions, and skills directories.
+
+### Chat
+
+Click **Chat** on any online agent card to open a WebSocket chat session. The chat panel supports:
+
+- Multiple concurrent sessions (tabbed interface)
+- Markdown rendering with GFM tables
+- Tool call visibility (expandable, last 3 per turn)
+- Stop button for cancelling running tasks
+- Auto-scroll and status indicators
+
+Chat connections are proxied through the Flight Deck backend to avoid browser CORS restrictions.
+
+### File Transfer
+
+Click **Files** on an agent card to browse its workspace files. Select files and click a destination agent button to transfer:
+
+1. Flight Deck downloads the file from the source agent via `GET /api/files/download`
+2. Uploads it to the destination agent via `POST /api/file/upload`
+3. Shows per-file transfer status and a completion summary
+
+### Context Transfer
+
+Click the forward arrow (↗) in the chat panel tab bar to send conversation context to another agent:
+
+1. **Slider** — Select how many recent messages to include (0 to all)
+2. **Preview** — Review the selected messages before sending
+3. **Task** — Write what the receiving agent should do with the context
+4. **Destination** — Choose which agent receives the context + task
+
+The context is formatted as a single message with the conversation history and task appended.
+
+### Development Mode
+
+For frontend development with hot module replacement:
+
+```bash
+# Terminal 1: Flight Deck API backend
+captain-claw-fd --dev
+
+# Terminal 2: Vite dev server with HMR
+cd flight-deck
+npm install
+npm run dev    # http://localhost:5173
+```
+
+The Vite dev server proxies `/fd` requests to the backend on port 25080.
+
+### Building the Frontend
+
+```bash
+cd flight-deck
+npm run build    # outputs to captain_claw/flight_deck/static/
+```
+
+The built files are included in the Python package as package data, so `pip install captain-claw` includes the pre-built frontend.
+
+### Configuration
+
+Flight Deck uses environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `FD_DATA_DIR` | `./fd-data` | Directory for agent data (config, workspace, sessions) |
+
+### Connection Settings
+
+Each Captain Claw agent exposes connection info in its Settings page under "Connection Info":
+
+- **WebSocket URL** — `ws://host:port/ws` (for chat)
+- **HTTP URL** — `http://host:port` (for API)
+- **Auth status** — Whether an auth token is configured
+
+### macOS Docker Notes
+
+On macOS, Docker's `--network host` mode is silently ignored. Flight Deck automatically detects macOS and:
+
+- Switches to bridge networking with explicit port mapping
+- Uses `host.docker.internal` for Ollama and other host-side services
+- Sets `OLLAMA_BASE_URL` environment variable in containers
+
+---
+
 ## Remote Integrations
 
 Captain Claw can run alongside Telegram, Slack, and Discord bots.

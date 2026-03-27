@@ -10,6 +10,7 @@ from captain_claw.discord_bridge import DiscordBridge
 from captain_claw.platform_adapter import PlatformAdapter, cleanup_expired_pairings
 from captain_claw.slack_bridge import SlackBridge
 from captain_claw.telegram_bridge import TelegramBridge
+from captain_claw.twitter_bridge import TwitterBridge
 
 if TYPE_CHECKING:
     from captain_claw.runtime_context import RuntimeContext
@@ -78,6 +79,35 @@ async def init_platforms(ctx: RuntimeContext) -> None:
             ctx.ui.append_system_line("Discord UI enabled (polling started).")
         else:
             ctx.ui.append_system_line("Discord enabled but bot_token is empty; skipping Discord startup.")
+
+    # Twitter
+    twitter_cfg = cfg.twitter
+    ctx.twitter.config = twitter_cfg
+    ctx.twitter.enabled = bool(
+        twitter_cfg.enabled
+        and twitter_cfg.access_token.strip()
+    )
+    if ctx.twitter.enabled:
+        access_token = twitter_cfg.access_token.strip()
+        if access_token:
+            ctx.twitter.bridge = TwitterBridge(
+                client_id=twitter_cfg.client_id.strip(),
+                client_secret=twitter_cfg.client_secret.strip(),
+                access_token=access_token,
+                refresh_token=twitter_cfg.refresh_token.strip(),
+                api_base_url=twitter_cfg.api_base_url,
+            )
+            ctx.twitter.offsets = {}
+            adapter = PlatformAdapter(ctx, "twitter")
+            await adapter.load_state()
+            cleanup_expired_pairings(ctx.twitter.pending_pairings)
+            await adapter._save_state()
+            ctx.twitter.poll_task = asyncio.create_task(
+                _twitter_poll_loop(ctx)
+            )
+            ctx.ui.append_system_line("Twitter/X UI enabled (polling started).")
+        else:
+            ctx.ui.append_system_line("Twitter enabled but access_token is empty; skipping Twitter startup.")
 
 
 async def teardown_platforms(ctx: RuntimeContext) -> None:
@@ -179,3 +209,24 @@ async def _discord_poll_loop(ctx: RuntimeContext) -> None:
         except Exception as e:
             ctx.ui.append_system_line(f"Discord poll error: {e}")
             await asyncio.sleep(2.0)
+
+
+async def _twitter_poll_loop(ctx: RuntimeContext) -> None:
+    """Background Twitter/X polling and message dispatch."""
+    from captain_claw.remote_command_handler import handle_platform_message
+
+    bridge = ctx.twitter.bridge
+    assert bridge is not None
+    cfg = ctx.twitter.config
+    while True:
+        try:
+            updates, next_offsets = await bridge.get_updates(ctx.twitter.offsets or {})
+            ctx.twitter.offsets = dict(next_offsets)
+            for update in updates:
+                asyncio.create_task(handle_platform_message(ctx, "twitter", update))
+            await asyncio.sleep(max(1, int(cfg.poll_timeout_seconds)))
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            ctx.ui.append_system_line(f"Twitter poll error: {e}")
+            await asyncio.sleep(5.0)

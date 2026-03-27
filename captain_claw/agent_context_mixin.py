@@ -1945,6 +1945,9 @@ class AgentContextMixin:
             elif tool_name == "desktop_action":
                 from captain_claw.tools.desktop_action import DesktopActionTool
                 self.tools.register(DesktopActionTool())
+            elif tool_name == "twitter":
+                from captain_claw.tools.twitter import TwitterTool
+                self.tools.register(TwitterTool())
         # Always-on tools (registered regardless of tools.enabled).
         from captain_claw.tools.clipboard import ClipboardTool
         self.tools.register(ClipboardTool())

@@ -48,6 +48,7 @@ from captain_claw.tools.desktop_action import DesktopActionTool
 from captain_claw.tools.summarize_files import SummarizeFilesTool
 from captain_claw.tools.insights import InsightsTool
 from captain_claw.tools.cron_tool import CronTool
+from captain_claw.tools.twitter import TwitterTool
 
 __all__ = [
     "Tool",
@@ -96,4 +97,5 @@ __all__ = [
     "SummarizeFilesTool",
     "InsightsTool",
     "CronTool",
+    "TwitterTool",
 ]

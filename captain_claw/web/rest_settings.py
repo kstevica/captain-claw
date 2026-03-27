@@ -52,6 +52,7 @@ _SECRET_FIELDS: frozenset[str] = frozenset({
     "memory.embeddings.litellm_api_key",
     "botport.key",
     "botport.secret",
+    "web.auth_token",
 })
 
 # Fields shown as readonly (require manual edit + restart).
@@ -854,6 +855,14 @@ def _build_schema() -> list[dict[str, Any]]:
             "icon": "\U0001F310",
             "sections": [
                 {
+                    "id": "web_connection",
+                    "title": "Connection",
+                    "description": "How to reach this agent from Flight Deck or other tools.",
+                    "type": "custom",
+                    "custom_id": "web_connection_info",
+                    "fields": [],
+                },
+                {
                     "id": "web_server",
                     "title": "Web Server",
                     "description": "Web UI and API settings.  Host and port require a restart.",
@@ -861,9 +870,14 @@ def _build_schema() -> list[dict[str, Any]]:
                         _field("web.enabled", "Enable web server", type="toggle"),
                         _field("web.host", "Host", type="text"),
                         _field("web.port", "Port", type="number"),
+                        _field("web.auth_token", "Auth Token", type="secret",
+                               description="Set a token to require authentication. Leave empty for no auth."),
+                        _field("web.auth_cookie_max_age", "Cookie max age (days)", type="number"),
                         _field("web.api_enabled", "Enable OpenAI-compatible API", type="toggle"),
                         _field("web.api_pool_max_agents", "API pool max agents", type="number"),
                         _field("web.api_pool_idle_seconds", "API pool idle (s)", type="number"),
+                        _field("web.public_run", "Public run mode", type="text",
+                               description="Section name to expose publicly (e.g. 'computer'). Empty = disabled."),
                     ],
                 },
             ],

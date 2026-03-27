@@ -1,89 +1,100 @@
-# Captain Claw v0.4.5 Release Notes
+# Captain Claw v0.4.6 Release Notes
 
-**Release title:** Brain Graph, Process of Thoughts, Nuke Reset
+**Release title:** Flight Deck — Multi-Agent Management Dashboard
 
-**Release date:** 2026-03-22
+**Release date:** 2026-03-27
 
 ## Highlights
 
-This release introduces the **Brain Graph** — a 3D interactive visualization of the agent's entire cognitive topology, rendered with Three.js and force-directed physics. Every insight, intuition, task, todo, contact, session, and message is a node; every provenance link is an edge. Combined with the new **Process of Thoughts** traceability layer (message-level IDs and cross-system lineage), you can now see and traverse how a conversation message became an insight, triggered a dream cycle intuition, spawned a sister session task, and produced a briefing — all in an interactive 3D graph with live WebSocket updates.
+This release introduces **Flight Deck** — a full-featured management dashboard for running multiple Captain Claw agents simultaneously. Spawn agents in Docker containers, register local or remote instances, chat with multiple agents via WebSocket, browse and transfer files between agents, and forward conversation context with tasks from one agent to another. Flight Deck is now bundled with Captain Claw and launches with a single command: `captain-claw-fd`.
 
 ## New Features
 
-### Brain Graph Visualization
+### Flight Deck Dashboard
 
-Interactive 3D force-directed graph at `/brain-graph`, built on Three.js + 3d-force-graph (CDN-loaded, no build step):
+Multi-agent management UI built with React + FastAPI, served from a single process:
 
-- **9 node types** with distinct 3D shapes — sessions (wireframe spheres), messages (tetrahedrons), insights (spheres), intuitions (spheres), tensions (icosahedrons), tasks (boxes), briefings (cones), todos (octahedrons), contacts (dodecahedrons), cognitive events (small spheres)
-- **7 edge types** with directional arrows — contains, sequence, supersedes, resolves, triggers, parent, source
-- **Dynamic session spheres** — wireframe spheres auto-resize every frame to enclose their furthest child node with 20% padding
-- **WebSocket live updates** — new insights and intuitions appear in real-time as they're created during conversation
-- **Detail panel** with prev/next navigation — click a node to see metadata, connections, and step through linked nodes with arrow keys
-- **Connections list** — clickable list of all incoming/outgoing edges for the selected node
-- **Full content modal** — "Show full content" button fetches complete message text from the session DB via REST API and renders as markdown
-- **Search and filters** — text search highlights matching nodes; per-type checkboxes toggle visibility; node limit slider (20-500)
-- **Deep linking from chat/computer** — brain button on assistant messages opens `/brain-graph?focus_ts=<timestamp>`, auto-selecting and zooming to that node
-- **Keyboard navigation** — left/right arrows or `[`/`]` step through connected nodes, Escape closes panels
-- **Public mode** — fully supported with session-isolated insights and intuitions
-- **REST API** — `GET /api/brain-graph` (full graph data), `GET /api/brain-graph/message/{msg_id}` (full message content)
-- **Home page card** — new Brain Graph card with web icon on the homepage
+- **`captain-claw-fd`** CLI command starts the dashboard on port 25080
+- **Docker container management** — spawn agents with full configuration (provider, model, tools, platforms, BotPort, networking), start/stop/restart/remove containers, view logs
+- **Local agent management** — register any Captain Claw instance by host:port with optional auth token, probe status, connect for chat
+- **Multi-agent chat** — WebSocket-based chat with multiple agents simultaneously via a tabbed interface, proxied through the backend to avoid CORS
+- **Markdown rendering** — full GFM support (tables, code blocks, lists, bold/italic) in both user and assistant messages
+- **Agent status indicators** — real-time busy/idle status on agent cards with spinner and status text (e.g., "Using web_fetch...")
+- **Smart message filtering** — strips CC suggestion prompts, limits tool messages to last 3 per turn, deduplicates echoed user messages
 
-### Process of Thoughts (PoT) Traceability
+### File Browser & Transfer
 
-Full lineage tracking across all cognitive subsystems via provenance IDs:
+Browse and transfer files between agents without manual download/upload:
 
-- **Message IDs** — every message in `Session.add_message()` gets a unique 12-char hex `message_id`; method now returns the ID
-- **Insight provenance** — new `source_message_id` column tracks which user message triggered extraction; new `supersedes_id` column tracks insight evolution when entity_key dedup fires (creates new insight linking to predecessor instead of silent update)
-- **Intuition provenance** — new `source_message_id` column tracks which user message was active during the dream cycle
-- **Todo hierarchy** — new `parent_id` column for subtask relationships; new `triggered_by_id` column linking to the insight or intuition that created the todo
-- **Schema migrations** — all new columns use safe `ALTER TABLE ADD COLUMN` with try/except pattern, fully backward compatible (existing data gets NULL)
+- **File browser** — click "Files" on any agent card to browse workspace files with size, type, and path info
+- **Multi-select** — checkbox selection with select-all support
+- **Agent-to-agent transfer** — select files and click a destination agent to transfer; Flight Deck downloads from source and uploads to destination
+- **Transfer status** — per-file progress indicators (spinner/checkmark/error) and a completion summary banner
 
-### Nuke Command — Full Cognitive Reset
+### Context Transfer
 
-The `/nuke` command now clears all cognitive subsystems in addition to workspace files, sessions, and entities:
+Forward conversation history and tasks between agents:
 
-- **Insights** — `InsightsManager.clear_all()` deletes all insights
-- **Intuitions** — `NervousSystemManager.clear_all()` deletes all intuitions
-- **Cognitive metrics** — `CognitiveMetricsManager.clear_all()` deletes all events and snapshots
-- **Sister sessions** — `SisterSessionManager.clear_all()` deletes all proactive tasks, briefings, watches, and daily budget
-- **Updated confirmation message** — lists all new items being cleared
-- **Per-section error handling** — each subsystem reports its own status
+- **Forward button** (↗) in the chat panel tab bar opens the context transfer modal
+- **Message slider** — select how many recent user/assistant messages to include (0 to all)
+- **Preview** — expandable preview of selected messages before sending
+- **Task prompt** — write what the receiving agent should do with the context
+- **Destination selection** — send to any other online agent
 
-### Brain Button in Chat and Computer
+### Connection Settings UI
 
-- **Chat** — brain icon button added next to like/dislike on every assistant message; opens Brain Graph in a new tab focused on that message
-- **Computer** — same brain button in the answer action bar next to copy/like/dislike
+Captain Claw's Settings page now shows connection information:
 
-## Version Changes
+- WebSocket URL, HTTP URL, and auth status
+- Copy-to-clipboard buttons for easy sharing
+- Auth token, cookie max age, and public run settings exposed in the Web Server section
 
-- `captain_claw` — 0.4.4 → 0.4.5
-- `botport` — 0.4.4 → 0.4.5
-- `desktop` — 0.4.4 → 0.4.5
+### macOS Docker Networking Fix
 
-## Internal
+Docker's `--network host` is silently ignored on macOS. Flight Deck now:
 
-### New Files
-- `captain_claw/web/rest_brain_graph.py` — Brain Graph REST API handler aggregating all cognitive data sources into unified graph format with WebSocket broadcast helper
-- `captain_claw/web/static/brain-graph.html` — Brain Graph page with CDN imports (Three.js, 3d-force-graph, marked.js)
-- `captain_claw/web/static/brain-graph.css` — Dark theme styling for graph viewport, controls panel, detail panel, content modal, navigation buttons
-- `captain_claw/web/static/brain-graph.js` — 3D force-directed graph initialization, data fetching, node rendering with typed shapes, WebSocket live updates, prev/next navigation, content modal, search/filter, dynamic session sphere sizing, auto-focus from URL params
+- Auto-detects macOS and switches to bridge networking with explicit port mapping
+- Uses `host.docker.internal` for Ollama and other host-side services in container configs
+- Sets `OLLAMA_BASE_URL` env var and `model.base_url` in config for Ollama providers
 
-### Modified Files
-- `pyproject.toml` — Version 0.4.4 → 0.4.5
-- `captain_claw/__init__.py` — Version bump
-- `botport/pyproject.toml` — Version bump
-- `botport/botport/__init__.py` — Version bump
-- `desktop/package.json` — Version bump
-- `captain_claw/session/__init__.py` — Added `message_id` to Message dataclass and `add_message()` (returns ID); added `parent_id` and `triggered_by_id` to TodoItem with schema migration, updated `_TODO_COLS`, `from_row()`, `to_dict()`, `create_todo()`
-- `captain_claw/insights.py` — Added `source_message_id` and `supersedes_id` columns with schema migration; updated `add()` signature; changed entity_key dedup to create new insight with `supersedes_id` instead of silent update; threaded `source_message_id` through `extract_insights()`; added `clear_all()` method; updated `_row_to_dict()` columns; added Brain Graph broadcast hook
-- `captain_claw/nervous_system.py` — Added `source_message_id` column with schema migration; updated `add()` signature; threaded `source_message_id` through `dream()`; added `clear_all()` method; updated `_row_to_dict()` columns; added Brain Graph broadcast hook
-- `captain_claw/cognitive_metrics.py` — Added `clear_all()` method for events and snapshots
-- `captain_claw/sister_session.py` — Added `clear_all()` method for tasks, briefings, watches, and daily budget
-- `captain_claw/web/slash_commands.py` — Updated nuke confirmation message; added clearing of insights, intuitions, cognitive metrics, and sister session data in `_execute_nuke()`
-- `captain_claw/web/static_pages.py` — Added `serve_brain_graph()` handler
-- `captain_claw/web_server.py` — Added `_serve_brain_graph()`, `_bg_get_data()`, `_bg_get_message()` methods; registered `/brain-graph`, `/api/brain-graph`, `/api/brain-graph/message/{msg_id}` routes
-- `captain_claw/web/static/app.js` — Added brain graph button to assistant message feedback row
-- `captain_claw/web/static/computer.js` — Added brain graph button to answer action bar
-- `captain_claw/web/static/home.html` — Added Brain Graph card with web icon
-- `README.md` — Added Brain Graph and Process of Thoughts to feature table, Web UI line, Advanced Features, and Architecture table
-- `USAGE.md` — Added Brain Graph and Process of Thoughts documentation sections with node/edge type tables, API reference, and thought chain examples
+### Docker Config Persistence Fix
+
+Resolved an issue where Flight Deck-provided config.yaml was overridden by CC's home directory config inside Docker containers. Config is now written to both `/app/config.yaml` (CWD) and the home-config volume mount.
+
+## Distribution Changes
+
+- **Flight Deck dependencies** (fastapi, uvicorn, docker, websockets) are now included in the standard `pip install captain-claw`
+- **New CLI entry point:** `captain-claw-fd` launches the Flight Deck dashboard
+- **Package includes built frontend** — `captain_claw/flight_deck/static/` contains the pre-built React app
+- **Frontend source** lives in `flight-deck/` for development (`npm run dev` for HMR, `npm run build` to rebuild)
+- Flight Deck can also be run as a Python module: `python -m captain_claw.flight_deck`
+
+## Architecture
+
+```
+captain_claw/
+  flight_deck/           # Python package
+    __init__.py
+    __main__.py          # python -m captain_claw.flight_deck
+    server.py            # FastAPI backend + static file serving
+    static/              # Built React frontend (bundled)
+flight-deck/             # Frontend source (React/TypeScript/Vite)
+  src/
+  package.json
+  vite.config.ts
+```
+
+## API Endpoints (Flight Deck Backend)
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/fd/containers` | List managed Docker containers |
+| POST | `/fd/spawn` | Spawn a new agent container |
+| POST | `/fd/containers/{id}/stop\|start\|restart` | Container lifecycle |
+| DELETE | `/fd/containers/{id}` | Remove container |
+| GET | `/fd/containers/{id}/logs` | Container logs (supports streaming) |
+| WS | `/fd/agent-ws/{host}/{port}` | WebSocket proxy to agent |
+| GET | `/fd/probe` | Probe agent availability |
+| GET | `/fd/agent-files/{host}/{port}` | List agent files (CORS proxy) |
+| POST | `/fd/transfer` | Transfer file between agents |
+| GET | `/fd/health` | Docker health check |

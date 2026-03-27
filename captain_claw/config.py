@@ -377,6 +377,15 @@ class ScreenCaptureToolConfig(BaseModel):
     stt_model: str = ""  # explicit model ID; empty = auto-detect provider
 
 
+class TwitterToolConfig(BaseModel):
+    """Twitter tool configuration (credentials for tool-only usage)."""
+
+    client_id: str = ""
+    client_secret: str = ""
+    access_token: str = ""
+    refresh_token: str = ""
+
+
 class ClipboardToolConfig(BaseModel):
     """Clipboard tool configuration."""
 
@@ -420,6 +429,7 @@ class ToolsConfig(BaseModel):
         "browser",
         "screen_capture",
         "desktop_action",
+        "twitter",
     ]
     shell: ShellToolConfig = Field(default_factory=ShellToolConfig)
     read: ReadToolConfig = Field(default_factory=ReadToolConfig)
@@ -437,6 +447,7 @@ class ToolsConfig(BaseModel):
     pinchtab: PinchTabConfig = Field(default_factory=PinchTabConfig)
     clipboard: ClipboardToolConfig = Field(default_factory=ClipboardToolConfig)
     screen_capture: ScreenCaptureToolConfig = Field(default_factory=ScreenCaptureToolConfig)
+    twitter: TwitterToolConfig = Field(default_factory=TwitterToolConfig)
     require_confirmation: list[str] = ["shell", "write", "edit"]
     plugin_dirs: list[str] = ["skills/tools"]
 
@@ -604,6 +615,19 @@ class DiscordConfig(BaseModel):
     poll_timeout_seconds: int = 25
     pairing_ttl_minutes: int = 30
     require_mention_in_guild: bool = True
+
+
+class TwitterConfig(BaseModel):
+    """Twitter/X bot UI configuration (OAuth 2.0 User Context)."""
+
+    enabled: bool = False
+    client_id: str = ""
+    client_secret: str = ""
+    access_token: str = ""
+    refresh_token: str = ""
+    api_base_url: str = "https://api.twitter.com/2"
+    poll_timeout_seconds: int = 30
+    pairing_ttl_minutes: int = 30
 
 
 class TodoConfig(BaseModel):
@@ -897,6 +921,7 @@ class Config(BaseSettings):
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     slack: SlackConfig = Field(default_factory=SlackConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
+    twitter: TwitterConfig = Field(default_factory=TwitterConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     google_oauth: GoogleOAuthConfig = Field(default_factory=GoogleOAuthConfig)
     todo: TodoConfig = Field(default_factory=TodoConfig)

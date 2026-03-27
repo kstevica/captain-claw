@@ -173,7 +173,10 @@ class AgentCompletionMixin:
             and not _scale_completed
         ):
             has_ds_export = self._turn_has_successful_datastore_export(turn_start_idx)
-            has_write = self._turn_has_successful_tool(turn_start_idx, "write")
+            has_write = (
+                self._turn_has_successful_tool(turn_start_idx, "write")
+                or self._turn_has_successful_tool(turn_start_idx, "edit")
+            )
             has_script_exec = self._turn_has_successful_script_execution(turn_start_idx)
             # Tools that directly produce file output (screenshots, images)
             # satisfy write_file without needing write+shell.
@@ -184,8 +187,8 @@ class AgentCompletionMixin:
             # Typesense index is a valid output sink — no file needed.
             has_index_output = self._turn_has_successful_tool(turn_start_idx, "typesense")
             # Any single file-producing action is sufficient.  The write
-            # tool alone proves a file was created (e.g. markdown, text).
-            # Script execution alone proves a script generated output.
+            # or edit tool proves a file was created/modified (e.g. markdown,
+            # text).  Script execution alone proves a script generated output.
             # Typesense indexing proves data was persisted to memory.
             file_produced = has_ds_export or has_write or has_script_exec or has_media_output or has_index_output
             if not file_produced and iteration < (hard_turn_iterations - 1):

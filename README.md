@@ -43,6 +43,7 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Cross-session script memory | Persistent script/file tracking with auto-capture from write tool |
 | Cross-session API memory | Persistent API endpoint tracking with auto-capture from web_fetch |
 | Cross-session playbook memory | Rate sessions to auto-distill reusable orchestration patterns (do/don't pseudo-code) with auto-injection |
+| Flight Deck | Multi-agent management dashboard — spawn Docker agents, chat with multiple agents, transfer files and context between agents, monitor status |
 | Datastore | SQLite-backed relational tables managed by the agent, with protection rules, import/export, web dashboard, and table export via UI |
 | Chunked processing pipeline | Run small-context models (20k–32k tokens) on large content via automatic content chunking |
 | Cron scheduling | Interval, daily, and weekly tasks inside the runtime |
@@ -88,6 +89,7 @@ captain-claw-web          # Web UI (default: http://127.0.0.1:23080)
 captain-claw              # Interactive terminal
 captain-claw --tui        # Terminal UI
 captain-claw --port 8080  # Override web server port
+captain-claw-fd           # Flight Deck multi-agent dashboard (default: http://0.0.0.0:25080)
 botport                   # BotPort agent-to-agent routing hub
 ```
 
@@ -325,6 +327,8 @@ For the full configuration reference (23 sections, every field), see [USAGE.md](
 
 Each of these is documented in detail in [USAGE.md](USAGE.md).
 
+- **[Flight Deck](USAGE.md#flight-deck)** — Multi-agent management dashboard. Spawn and manage Captain Claw agents in Docker containers, register local/remote agents by host:port, chat with multiple agents simultaneously via WebSocket, browse and transfer files between agents, forward conversation context with tasks to other agents. Includes real-time agent status monitoring, container lifecycle management (start/stop/restart/logs), and a visual spawn configurator. Run with `captain-claw-fd`.
+
 - **[Computer](USAGE.md#computer)** — A retro-themed research workspace at `/computer`. Three-panel layout with input area, activity log, and tabbed output (Answer, Blueprint, Files, Visual, Map). Features themed HTML visual generation via LLM, interactive exploration trees for multi-turn research, model selector modal, persona selector, token tier control, folder browser (local filesystem + Google Drive), file attachments (images, PDF, DOCX, XLSX, PPTX, MD, TXT, CSV), PDF export via WeasyPrint (preserves full CSS styling), suggested next-step buttons after each response, and 14 built-in themes (Amiga Workbench, Atari ST, C64, Classic Mac, Windows 3.1, Hacker Terminal, and more) plus a custom theme engine. Each theme includes unique boot sequences and CSS variable styling. Supports **public mode** (`web.public_run: "computer"`) with per-session isolation, access codes, route lockdown, and **BYOK (Bring Your Own Key)** — public users can provide their own LLM API credentials (OpenAI, Anthropic, Gemini, xAI, OpenRouter) stored only in the browser.
 
 - **[Orchestrator / DAG mode](USAGE.md#orchestrator--dag-mode)** — `/orchestrate` decomposes a complex request into a task DAG and runs tasks in parallel across separate sessions with real-time progress monitoring. Also available headless via `captain-claw-orchestrate`.
@@ -427,6 +431,7 @@ ruff check captain_claw/
 | `captain_claw/google_oauth_manager.py` | Google OAuth token management |
 | `captain_claw/cli.py` | Terminal UI |
 | `captain_claw/web/` | Web server (WebSocket + REST + static) |
+| `captain_claw/flight_deck/` | Flight Deck — multi-agent management dashboard (FastAPI + React) |
 | `captain_claw/orchestrator_cli.py` | Headless orchestrator CLI |
 | `captain_claw/agent_chunked_processing_mixin.py` | Chunked processing pipeline for small-context models |
 | `captain_claw/config.py` | Configuration and env overrides |

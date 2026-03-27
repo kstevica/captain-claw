@@ -128,6 +128,8 @@
                 // Personality uses a unified split-pane rendered at group level; skip here.
             } else if (section.type === 'custom' && section.custom_id === 'user_personalities') {
                 // Handled by the unified personality pane; skip here.
+            } else if (section.type === 'custom' && section.custom_id === 'web_connection_info') {
+                renderWebConnectionInfo(card);
             } else if (section.type === 'array') {
                 renderArraySection(card, section);
             } else {
@@ -1623,6 +1625,59 @@
         const d = document.createElement('div');
         d.textContent = str;
         return d.innerHTML;
+    }
+
+    // ── Web Connection Info ─────────────────────────────
+    function renderWebConnectionInfo(card) {
+        const host = getVal('web.host') || '127.0.0.1';
+        const port = getVal('web.port') || 23080;
+        const hasAuth = !!(getVal('web.auth_token') && getVal('web.auth_token') !== '••••••••');
+
+        const wrap = document.createElement('div');
+        wrap.className = 'st-web-connection-info';
+        wrap.innerHTML = `
+            <div class="st-conn-grid">
+                <div class="st-conn-item">
+                    <div class="st-conn-label">WebSocket URL</div>
+                    <div class="st-conn-value">
+                        <code id="connWsUrl">ws://${host}:${port}/ws</code>
+                        <button class="st-conn-copy" data-copy="connWsUrl" title="Copy">&#x2398;</button>
+                    </div>
+                </div>
+                <div class="st-conn-item">
+                    <div class="st-conn-label">Web UI</div>
+                    <div class="st-conn-value">
+                        <code id="connHttpUrl">http://${host}:${port}</code>
+                        <button class="st-conn-copy" data-copy="connHttpUrl" title="Copy">&#x2398;</button>
+                    </div>
+                </div>
+                <div class="st-conn-item">
+                    <div class="st-conn-label">Auth</div>
+                    <div class="st-conn-value">
+                        <code>${hasAuth ? 'Token set — required for connections' : 'No auth — open access'}</code>
+                    </div>
+                </div>
+            </div>
+            <p class="st-conn-hint">
+                Use these details in <strong>Flight Deck → Local Agents → Add Agent</strong> to connect to this instance.
+                For Docker containers, Flight Deck reads the web port automatically from container labels.
+            </p>
+        `;
+
+        // Copy buttons
+        wrap.querySelectorAll('.st-conn-copy').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const el = document.getElementById(btn.dataset.copy);
+                if (el) {
+                    navigator.clipboard.writeText(el.textContent).then(() => {
+                        btn.textContent = '✓';
+                        setTimeout(() => { btn.innerHTML = '&#x2398;'; }, 1500);
+                    });
+                }
+            });
+        });
+
+        card.appendChild(wrap);
     }
 
     // ── Boot ────────────────────────────────────────────

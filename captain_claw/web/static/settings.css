@@ -1172,3 +1172,74 @@ html, body {
 .st-vs-form {
     max-width: 640px;
 }
+
+/* ─── Web Connection Info ─────────────────────────────── */
+
+.st-web-connection-info {
+    padding: 16px 20px;
+}
+
+.st-conn-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.st-conn-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.st-conn-label {
+    flex: 0 0 100px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.st-conn-value {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.st-conn-value code {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 4px 10px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 13px;
+    color: var(--text-primary);
+}
+
+.st-conn-copy {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 4px 8px;
+    font-size: 13px;
+    transition: all 0.15s;
+}
+
+.st-conn-copy:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(88, 166, 255, 0.08);
+}
+
+.st-conn-hint {
+    margin-top: 16px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.6;
+}
+
+.st-conn-hint strong {
+    color: var(--text-secondary);
+}

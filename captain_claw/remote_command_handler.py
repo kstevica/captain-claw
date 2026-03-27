@@ -850,8 +850,8 @@ async def handle_platform_message(
 
         # Build monitor kwargs
         monitor_kwargs: dict[str, Any] = {
-            "user_id": getattr(message, "user_id", ""),
-            "username": getattr(message, "username", "") or "",
+            "user_id": adapter._message_user_id(message),
+            "username": getattr(message, "username", "") or getattr(message, "author_username", "") or "",
             "is_command": bool(getattr(message, "text", "").strip().startswith("/")),
             "text_preview": truncate_chat_text(getattr(message, "text", "")),
         }
@@ -866,11 +866,15 @@ async def handle_platform_message(
             monitor_kwargs["guild_id"] = getattr(message, "guild_id", "") or ""
             monitor_kwargs["message_id"] = message.id
             monitor_kwargs["mentioned_bot"] = bool(getattr(message, "mentioned_bot", False))
+        elif platform == "twitter":
+            from captain_claw.twitter_bridge import TwitterDM
+            monitor_kwargs["tweet_id"] = message.id
+            monitor_kwargs["is_dm"] = isinstance(message, TwitterDM)
 
         await adapter.monitor_event("incoming_message", **monitor_kwargs)
 
         # Pairing check
-        user_id_key = str(getattr(message, "user_id", "")).strip()
+        user_id_key = str(adapter._message_user_id(message)).strip()
         if user_id_key not in state.approved_users:
             await adapter.pair_unknown_user(message)
             return
@@ -902,8 +906,8 @@ async def handle_platform_message(
                     after_turn=_after_turn,
                 )
 
-            platform_labels = {"telegram": "Telegram", "slack": "Slack", "discord": "Discord"}
-            sender_labels = {"telegram": "TG", "slack": "SLACK", "discord": "DISCORD"}
+            platform_labels = {"telegram": "Telegram", "slack": "Slack", "discord": "Discord", "twitter": "Twitter/X"}
+            sender_labels = {"telegram": "TG", "slack": "SLACK", "discord": "DISCORD", "twitter": "X"}
             await adapter.run_with_typing(
                 channel_id,
                 handle_remote_command(
@@ -919,8 +923,12 @@ async def handle_platform_message(
             return
 
         # Normal chat message
-        user_label = getattr(message, "username", "") or str(getattr(message, "user_id", ""))
-        sender_labels = {"telegram": "TG", "slack": "SLACK", "discord": "DISCORD"}
+        user_label = (
+            getattr(message, "username", "")
+            or getattr(message, "author_username", "")
+            or str(adapter._message_user_id(message))
+        )
+        sender_labels = {"telegram": "TG", "slack": "SLACK", "discord": "DISCORD", "twitter": "X"}
         label = sender_labels.get(platform, platform.upper())
         await adapter.run_with_typing(
             channel_id,

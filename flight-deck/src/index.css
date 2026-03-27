@@ -1,0 +1,43 @@
+@import "tailwindcss";
+@import "@xyflow/react/dist/style.css";
+
+:root {
+  --fd-sidebar: 260px;
+  --fd-panel: 380px;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #52525b; }
+
+/* React Flow overrides for dark theme */
+.react-flow__background { background: #09090b !important; }
+.react-flow__minimap { background: #18181b !important; border: 1px solid #27272a !important; border-radius: 8px; }
+.react-flow__controls { background: #18181b !important; border: 1px solid #27272a !important; border-radius: 8px; }
+.react-flow__controls button { background: #18181b !important; color: #a1a1aa !important; border-bottom-color: #27272a !important; }
+.react-flow__controls button:hover { background: #27272a !important; }
+
+/* Chat markdown */
+.fd-markdown p { margin-bottom: 0.5em; }
+.fd-markdown p:last-child { margin-bottom: 0; }
+.fd-markdown strong { color: #e4e4e7; font-weight: 600; }
+.fd-markdown em { color: #a1a1aa; }
+.fd-markdown ul, .fd-markdown ol { margin: 0.4em 0; padding-left: 1.4em; }
+.fd-markdown li { margin-bottom: 0.2em; }
+.fd-markdown code { background: rgba(63,63,70,0.5); padding: 0.15em 0.35em; border-radius: 4px; font-size: 0.9em; }
+.fd-markdown pre { background: rgba(9,9,11,0.6); border: 1px solid #27272a; border-radius: 6px; padding: 0.6em 0.8em; margin: 0.5em 0; overflow-x: auto; }
+.fd-markdown pre code { background: none; padding: 0; }
+.fd-markdown h1, .fd-markdown h2, .fd-markdown h3 { font-weight: 600; color: #e4e4e7; margin: 0.6em 0 0.3em; }
+.fd-markdown h1 { font-size: 1.1em; }
+.fd-markdown h2 { font-size: 1.05em; }
+.fd-markdown h3 { font-size: 1em; }
+.fd-markdown a { color: #a78bfa; text-decoration: underline; }
+.fd-markdown blockquote { border-left: 2px solid #3f3f46; padding-left: 0.8em; color: #a1a1aa; margin: 0.4em 0; }
+.fd-markdown hr { border: none; border-top: 1px solid #27272a; margin: 0.6em 0; }
+.fd-markdown table { width: 100%; border-collapse: collapse; margin: 0.5em 0; font-size: 0.9em; }
+.fd-markdown th { text-align: left; font-weight: 600; color: #e4e4e7; padding: 0.4em 0.6em; border-bottom: 2px solid #3f3f46; }
+.fd-markdown td { padding: 0.35em 0.6em; border-bottom: 1px solid #27272a; }
+.fd-markdown tr:last-child td { border-bottom: none; }
+.fd-markdown tbody tr:hover { background: rgba(63,63,70,0.2); }

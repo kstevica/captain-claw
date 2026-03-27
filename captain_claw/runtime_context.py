@@ -67,6 +67,11 @@ class RuntimeContext:
         state_key_approved="discord_approved_users",
         state_key_pending="discord_pending_pairings",
     ))
+    twitter: PlatformState = field(default_factory=lambda: PlatformState(
+        name="twitter",
+        state_key_approved="twitter_approved_users",
+        state_key_pending="twitter_pending_pairings",
+    ))
 
     # Telegram command specs (shared by both registration and help text)
     telegram_command_specs: list[tuple[str, str]] = field(default_factory=lambda: [
@@ -102,7 +107,9 @@ class RuntimeContext:
             return self.slack
         if platform == "discord":
             return self.discord
+        if platform == "twitter":
+            return self.twitter
         raise ValueError(f"Unknown platform: {platform}")
 
     def platform_names(self) -> list[str]:
-        return ["telegram", "slack", "discord"]
+        return ["telegram", "slack", "discord", "twitter"]

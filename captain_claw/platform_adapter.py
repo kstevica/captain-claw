@@ -300,6 +300,22 @@ class PlatformAdapter:
                     text=text,
                     reply_to_message_id=str(reply_to or ""),
                 )
+            elif self.platform == "twitter":
+                from captain_claw.twitter_bridge import TwitterDM
+                # For Twitter: channel_id is either a tweet ID (mention reply)
+                # or a DM conversation participant ID.
+                # reply_to carries the tweet_id for mentions or "" for DMs.
+                is_dm = bool(str(channel_id).startswith("dm:"))
+                if is_dm:
+                    participant_id = str(channel_id).removeprefix("dm:")
+                    await self.bridge.send_dm(participant_id, text)
+                else:
+                    # Reply to the mention tweet — split long text into thread.
+                    from captain_claw.twitter_bridge import TwitterBridge
+                    chunks = TwitterBridge.split_for_thread(text)
+                    prev_id = str(reply_to or "")
+                    for chunk in chunks:
+                        prev_id = await self.bridge.post_tweet(chunk, reply_to_id=prev_id)
             await self.monitor_event(
                 "outgoing_message",
                 **self._channel_kwargs(channel_id),
@@ -331,6 +347,11 @@ class PlatformAdapter:
                             channel_id=str(channel_id), text=text,
                             reply_to_message_id="",
                         )
+                    elif self.platform == "twitter":
+                        from captain_claw.twitter_bridge import TwitterBridge
+                        chunks = TwitterBridge.split_for_thread(text)
+                        for chunk in chunks:
+                            await self.bridge.post_tweet(chunk)
                     log.info(f"{self.platform.title()} send retry without reply_to succeeded")
                 except Exception:
                     log.error(f"{self.platform.title()} send retry also failed", exc_info=True)
@@ -340,6 +361,8 @@ class PlatformAdapter:
     async def send_chat_action(self, channel_id: Any, action: str = "typing") -> None:
         if not self.bridge:
             return
+        if self.platform == "twitter":
+            return  # Twitter has no typing indicator API.
         try:
             if self.platform == "telegram":
                 await self.bridge.send_chat_action(chat_id=int(channel_id), action=action)
@@ -375,6 +398,8 @@ class PlatformAdapter:
                     channel_id=message.channel_id,
                     message_id=message.id,
                 )
+            elif self.platform == "twitter":
+                pass  # Twitter has no mark-as-read API.
         except Exception as e:
             self.ctx.ui.append_system_line(f"{self.platform.title()} mark-read failed: {e}")
 
@@ -892,11 +917,22 @@ class PlatformAdapter:
     # -- Platform-specific field accessors --------------------------------
 
     def _message_user_id(self, message: Any) -> Any:
+        if self.platform == "twitter":
+            from captain_claw.twitter_bridge import TwitterDM
+            if isinstance(message, TwitterDM):
+                return getattr(message, "sender_id", "")
+            return getattr(message, "author_id", "")
         return getattr(message, "user_id", "")
 
     def _message_channel_id(self, message: Any) -> Any:
         if self.platform == "telegram":
             return getattr(message, "chat_id", 0)
+        if self.platform == "twitter":
+            # For DMs, use "dm:<sender_id>" as channel; for mentions, use author_id.
+            from captain_claw.twitter_bridge import TwitterDM
+            if isinstance(message, TwitterDM):
+                return f"dm:{message.sender_id}"
+            return getattr(message, "author_id", "")
         return getattr(message, "channel_id", "")
 
     def _message_reply_id(self, message: Any) -> Any:
@@ -905,6 +941,8 @@ class PlatformAdapter:
         if self.platform == "slack":
             return getattr(message, "message_ts", "")
         if self.platform == "discord":
+            return getattr(message, "id", "")
+        if self.platform == "twitter":
             return getattr(message, "id", "")
         return None
 
@@ -928,7 +966,7 @@ async def approve_chat_pairing_token(
 ) -> tuple[bool, str]:
     """Approve a pairing token for any platform."""
     target = str(platform or "").strip().lower()
-    if target not in ("telegram", "slack", "discord"):
-        return False, "Usage: /approve user <telegram|slack|discord> <token>"
+    if target not in ("telegram", "slack", "discord", "twitter"):
+        return False, "Usage: /approve user <telegram|slack|discord|twitter> <token>"
     adapter = PlatformAdapter(ctx, target)
     return await adapter.approve_pairing_token(raw_token)

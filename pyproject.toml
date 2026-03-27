@@ -1,6 +1,6 @@
 [project]
 name = "captain-claw"
-version = "0.4.5"
+version = "0.4.6"
 description = "A powerful AI agentic system"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -43,6 +43,10 @@ dependencies = [
     "Pillow>=10.0.0",
     "numpy>=1.24.0",
     "scikit-learn>=1.3.0",
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
+    "docker>=7.0",
+    "websockets>=13.0",
 ]
 
 [project.optional-dependencies]
@@ -83,6 +87,7 @@ build = [
 captain-claw = "captain_claw.main:main"
 captain-claw-web = "captain_claw.web_server:main"
 captain-claw-orchestrate = "captain_claw.orchestrator_cli:cli_orchestrate"
+captain-claw-fd = "captain_claw.flight_deck.server:main"
 botport = "botport.server:main"
 
 [build-system]
@@ -112,5 +117,5 @@ where = [".", "botport"]
 include = ["captain_claw*", "botport", "botport.dashboard"]
 
 [tool.setuptools.package-data]
-captain_claw = ["web/static/**/*", "instructions/**/*"]
+captain_claw = ["web/static/**/*", "instructions/**/*", "flight_deck/static/**/*"]
 botport = ["dashboard/static/**/*"]

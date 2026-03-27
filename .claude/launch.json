@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "website",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": ["/Users/kstevica/captain-claw/website/start-preview.sh"],
+      "port": 4321
+    },
+    {
+      "name": "flight-deck",
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": ["-c", "source ~/.nvm/nvm.sh && nvm use 22 && cd /Users/kstevica/captain-claw/flight-deck && npx vite --port 5173"],
+      "port": 5173
+    }
+  ]
+}
