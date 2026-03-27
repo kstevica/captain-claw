@@ -1,6 +1,18 @@
 import { create } from 'zustand'
 import { AgentChatWS, type ChatMessage } from '../services/agentChat'
 
+interface AgentModelInfo {
+  id: string
+  label: string
+  selector: string
+}
+
+interface AgentPersonalityInfo {
+  id: string
+  name: string
+  description?: string
+}
+
 interface ChatSession {
   containerId: string
   containerName: string
@@ -12,6 +24,10 @@ interface ChatSession {
   connected: boolean
   busy: boolean // agent is processing
   statusText: string
+  models: AgentModelInfo[]
+  personalities: AgentPersonalityInfo[]
+  activeModel: string
+  activePersonality: string
 }
 
 interface ChatStore {
@@ -26,6 +42,8 @@ interface ChatStore {
   sendMessage: (containerId: string, content: string) => void
   sendBtw: (containerId: string, content: string) => void
   cancelTask: (containerId: string) => void
+  setModel: (containerId: string, selector: string) => void
+  setPersonality: (containerId: string, personalityId: string) => void
 }
 
 let msgCounter = 0
@@ -59,6 +77,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       connected: false,
       busy: false,
       statusText: '',
+      models: [],
+      personalities: [],
+      activeModel: '',
+      activePersonality: '',
     }
 
     const sessions = new Map(get().sessions)
@@ -77,9 +99,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     ws.on('welcome', (data) => {
       const sessionInfo = data.session as Record<string, unknown> | undefined
       const name = sessionInfo?.name as string || ''
-      if (name) {
-        updateSession(containerId, { statusText: `Session: ${name}` })
-      }
+      const models = (data.models as AgentModelInfo[] || [])
+      const personalities = (data.personalities as AgentPersonalityInfo[] || [])
+      const patch: Partial<ChatSession> = { models, personalities }
+      if (name) patch.statusText = `Session: ${name}`
+      updateSession(containerId, patch)
     })
 
     ws.on('chat_message', (data) => {
@@ -199,6 +223,22 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (session) {
       session.ws.cancel()
       updateSession(containerId, { busy: false, statusText: 'Cancelled' })
+    }
+  },
+
+  setModel: (containerId, selector) => {
+    const session = get().sessions.get(containerId)
+    if (session) {
+      session.ws.sendJSON({ type: 'set_model', selector })
+      updateSession(containerId, { activeModel: selector })
+    }
+  },
+
+  setPersonality: (containerId, personalityId) => {
+    const session = get().sessions.get(containerId)
+    if (session) {
+      session.ws.sendJSON({ type: 'set_personality', personality_id: personalityId })
+      updateSession(containerId, { activePersonality: personalityId })
     }
   },
 }))

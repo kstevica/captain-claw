@@ -13,6 +13,8 @@ export interface InstanceInfo {
   personas: PersonaInfo[]
   tools: string[]
   models: string[]
+  active_persona: string
+  active_model: string
   max_concurrent: number
   active_concerns: number
   status: 'connected' | 'disconnected'

@@ -69,6 +69,23 @@ def setup_dashboard_routes(app: web.Application, server: BotPortServer) -> None:
         summary = server.registry.get_summary()
         return web.json_response(summary)
 
+    async def api_patch_instance(request: web.Request) -> web.Response:
+        """PATCH /api/instances/{id} — update active_persona and/or active_model."""
+        instance_id = request.match_info.get("id", "")
+        instance = server.connections.get_instance(instance_id)
+        if instance is None:
+            return web.json_response({"error": "Instance not found"}, status=404)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        if "active_persona" in data:
+            instance.active_persona = str(data["active_persona"])
+        if "active_model" in data:
+            instance.active_model = str(data["active_model"])
+        return web.json_response(instance.to_dict())
+
     # Routes.
     app.router.add_get("/", index)
     app.router.add_get("/dashboard.css", dashboard_css)
@@ -79,3 +96,4 @@ def setup_dashboard_routes(app: web.Application, server: BotPortServer) -> None:
     app.router.add_get("/api/concerns/{id}", api_concern_detail)
     app.router.add_get("/api/stats", api_stats)
     app.router.add_get("/api/registry", api_registry)
+    app.router.add_patch("/api/instances/{id}", api_patch_instance)

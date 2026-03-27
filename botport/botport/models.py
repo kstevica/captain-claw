@@ -46,6 +46,8 @@ class InstanceInfo:
     personas: list[PersonaInfo] = field(default_factory=list)
     tools: list[str] = field(default_factory=list)
     models: list[str] = field(default_factory=list)
+    active_persona: str = ""   # User-selected active persona (empty = auto)
+    active_model: str = ""     # User-selected active model (empty = default)
     max_concurrent: int = 5
     active_concerns: int = 0
     status: str = "connected"  # connected | disconnected
@@ -72,6 +74,8 @@ class InstanceInfo:
             "personas": [p.to_dict() for p in self.personas],
             "tools": list(self.tools),
             "models": list(self.models),
+            "active_persona": self.active_persona,
+            "active_model": self.active_model,
             "max_concurrent": self.max_concurrent,
             "active_concerns": self.active_concerns,
             "status": self.status,
@@ -88,6 +92,8 @@ class InstanceInfo:
             personas=[PersonaInfo.from_dict(p) for p in (data.get("personas") or [])],
             tools=list(data.get("tools") or []),
             models=list(data.get("models") or []),
+            active_persona=str(data.get("active_persona", "")),
+            active_model=str(data.get("active_model", "")),
             max_concurrent=int(data.get("max_concurrent", 5)),
             active_concerns=int(data.get("active_concerns", 0)),
             status=str(data.get("status", "connected")),

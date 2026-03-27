@@ -59,3 +59,47 @@ export function formatSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
+
+export function getDownloadUrl(host: string, port: number, path: string, auth: string): string {
+  const params = new URLSearchParams({ path })
+  if (auth) params.set('token', auth)
+  return `${BASE}/agent-file-download/${encodeURIComponent(host)}/${port}?${params}`
+}
+
+export function getViewUrl(host: string, port: number, path: string, auth: string): string {
+  const params = new URLSearchParams({ path })
+  if (auth) params.set('token', auth)
+  return `${BASE}/agent-file-view/${encodeURIComponent(host)}/${port}?${params}`
+}
+
+/** Extract folder category from logical path (e.g. "downloads/file.txt" -> "downloads") */
+export function getFileCategory(file: AgentFile): string {
+  const logical = file.logical || file.physical
+  const parts = logical.split('/')
+  // logical paths like "downloads/session-id/file.txt" or "showcase/file.txt"
+  if (parts.length >= 2) return parts[0]
+  return 'other'
+}
+
+/** Get file type group for filtering */
+export function getFileTypeGroup(file: AgentFile): string {
+  const ext = file.extension.toLowerCase()
+  if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.ico', '.bmp'].includes(ext)) return 'image'
+  if (['.mp4', '.webm', '.avi', '.mov', '.mkv'].includes(ext)) return 'video'
+  if (['.mp3', '.wav', '.ogg', '.flac', '.aac'].includes(ext)) return 'audio'
+  if (['.pdf'].includes(ext)) return 'pdf'
+  if (['.html', '.htm'].includes(ext)) return 'html'
+  if (['.md', '.markdown'].includes(ext)) return 'markdown'
+  if (['.json', '.yaml', '.yml', '.toml', '.xml', '.csv', '.tsv'].includes(ext)) return 'data'
+  if (['.js', '.ts', '.jsx', '.tsx', '.py', '.rb', '.go', '.rs', '.java', '.c', '.cpp', '.h', '.css', '.scss'].includes(ext)) return 'code'
+  if (['.txt', '.log', '.ini', '.cfg', '.conf', '.env'].includes(ext)) return 'text'
+  if (['.zip', '.tar', '.gz', '.bz2', '.7z', '.rar'].includes(ext)) return 'archive'
+  if (['.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods'].includes(ext)) return 'document'
+  return 'other'
+}
+
+/** Check if file can be viewed inline in browser */
+export function isViewable(file: AgentFile): boolean {
+  const group = getFileTypeGroup(file)
+  return ['html', 'markdown', 'text', 'code', 'data', 'image', 'pdf'].includes(group)
+}

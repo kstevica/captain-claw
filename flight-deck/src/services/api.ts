@@ -49,6 +49,11 @@ export const getConcerns = (active = false) =>
   fetchJSON<Concern[]>(`/concerns${active ? '?active=true' : ''}`)
 export const getConcern = (id: string) => fetchJSON<Concern>(`/concerns/${id}`)
 export const getStats = () => fetchJSON<BotPortStats>('/stats')
+export const patchInstance = (id: string, data: { active_persona?: string; active_model?: string }) =>
+  fetchJSON<InstanceInfo>(`/instances/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  })
 
 // ── Swarm Projects ──
 

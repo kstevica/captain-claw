@@ -1,7 +1,9 @@
-import { X, Send, Tag, Wrench, Brain } from 'lucide-react'
+import { X, Send, Tag, Wrench, Brain, Cpu } from 'lucide-react'
 import { useState } from 'react'
 import type { InstanceInfo, Concern } from '../../types'
 import { StatusBadge } from '../common/StatusBadge'
+import { useAgentStore } from '../../stores/agentStore'
+import * as api from '../../services/api'
 
 interface Props {
   instance: InstanceInfo
@@ -11,10 +13,29 @@ interface Props {
 
 export function AgentDetail({ instance, concerns, onClose }: Props) {
   const [message, setMessage] = useState('')
+  const upsertInstance = useAgentStore((s) => s.upsertInstance)
 
   const instanceConcerns = concerns.filter(
     (c) => c.from_instance === instance.id || c.assigned_instance === instance.id
   )
+
+  const handlePersonaChange = async (persona: string) => {
+    try {
+      const updated = await api.patchInstance(instance.id, { active_persona: persona })
+      upsertInstance(updated)
+    } catch (e) {
+      console.error('Failed to update persona:', e)
+    }
+  }
+
+  const handleModelChange = async (model: string) => {
+    try {
+      const updated = await api.patchInstance(instance.id, { active_model: model })
+      upsertInstance(updated)
+    } catch (e) {
+      console.error('Failed to update model:', e)
+    }
+  }
 
   return (
     <div className="flex h-full flex-col border-l border-zinc-800 bg-zinc-900/70 w-[var(--fd-panel)]">
@@ -30,13 +51,50 @@ export function AgentDetail({ instance, concerns, onClose }: Props) {
       </div>
 
       <div className="flex-1 overflow-y-auto">
+        {/* Active Persona */}
+        <Section icon={Brain} title="Active Persona">
+          <select
+            value={instance.active_persona || ''}
+            onChange={(e) => handlePersonaChange(e.target.value)}
+            className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+          >
+            <option value="">Auto (router decides)</option>
+            {instance.personas.map((p) => (
+              <option key={p.name} value={p.name}>{p.name}</option>
+            ))}
+          </select>
+          {instance.active_persona && (
+            <p className="mt-1.5 text-xs text-zinc-500">
+              {instance.personas.find((p) => p.name === instance.active_persona)?.description || ''}
+            </p>
+          )}
+        </Section>
+
+        {/* Active Model */}
+        <Section icon={Cpu} title="Active Model">
+          <select
+            value={instance.active_model || ''}
+            onChange={(e) => handleModelChange(e.target.value)}
+            className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+          >
+            <option value="">Default</option>
+            {instance.models.map((m) => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+          </select>
+        </Section>
+
         {/* Personas */}
         <Section icon={Brain} title="Personas">
           {instance.personas.length === 0 ? (
             <p className="text-xs text-zinc-600">No personas configured</p>
           ) : (
             instance.personas.map((p) => (
-              <div key={p.name} className="mb-2 rounded-lg bg-zinc-950/50 p-3">
+              <div key={p.name} className={`mb-2 rounded-lg p-3 ${
+                instance.active_persona === p.name
+                  ? 'bg-violet-500/10 border border-violet-500/30'
+                  : 'bg-zinc-950/50'
+              }`}>
                 <div className="text-sm font-medium">{p.name}</div>
                 {p.description && <p className="mt-0.5 text-xs text-zinc-400">{p.description}</p>}
                 {p.expertise_tags.length > 0 && (

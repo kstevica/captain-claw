@@ -302,6 +302,13 @@ class BotPortServer:
         target = route_result.instance
         persona_hint = route_result.persona_name
 
+        # Override with user-selected active persona/model if set.
+        if target.active_persona:
+            persona_hint = target.active_persona
+        dispatch_context = dict(concern.context)
+        if target.active_model:
+            dispatch_context["model_id"] = target.active_model
+
         # Assign and dispatch.
         concern.assigned_instance_name = target.name
         await self.concerns.assign_concern(concern.id, target.id, target.name)
@@ -319,7 +326,7 @@ class BotPortServer:
             concern_id=concern.id,
             from_instance_name=from_name,
             task=concern.task,
-            context=concern.context,
+            context=dispatch_context,
             persona_hint=persona_hint,
         ))
 

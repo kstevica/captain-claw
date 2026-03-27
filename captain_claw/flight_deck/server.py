@@ -403,7 +403,11 @@ def start_container(container_id: str):
     c = _find_container(container_id)
     if c.status == "running":
         return ContainerActionResult(ok=True, container_id=c.short_id, message="Already running")
-    c.start()
+    try:
+        c.start()
+    except docker.errors.APIError as exc:
+        explanation = exc.explanation or str(exc)
+        raise HTTPException(500, f"Docker start failed: {explanation}")
     return ContainerActionResult(ok=True, container_id=c.short_id, message="Started")
 
 
@@ -561,6 +565,63 @@ async def transfer_file(req: TransferRequest):
 
         result = up_resp.json()
         return {"ok": True, "filename": filename, "dest_path": result.get("path", ""), "size": result.get("size", 0)}
+
+
+@app.get("/fd/agent-file-download/{host}/{port}")
+async def agent_file_download(host: str, port: int, path: str, token: str = ""):
+    """Proxy file download from a CC agent."""
+    import httpx
+    import urllib.parse
+    params = f"path={urllib.parse.quote(path)}"
+    if token:
+        params += f"&token={urllib.parse.quote(token)}"
+    url = f"http://{host}:{port}/api/files/download?{params}"
+    try:
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                raise HTTPException(resp.status_code, f"Agent returned {resp.status_code}")
+            cd = resp.headers.get("content-disposition", "")
+            ct = resp.headers.get("content-type", "application/octet-stream")
+            headers = {"Content-Type": ct}
+            if cd:
+                headers["Content-Disposition"] = cd
+            else:
+                filename = path.rsplit("/", 1)[-1]
+                headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+            from starlette.responses import Response
+            return Response(content=resp.content, headers=headers)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.get("/fd/agent-file-view/{host}/{port}")
+async def agent_file_view(host: str, port: int, path: str, token: str = ""):
+    """Proxy file view from a CC agent (inline, no download header)."""
+    import httpx
+    import urllib.parse
+    params = f"path={urllib.parse.quote(path)}"
+    if token:
+        params += f"&token={urllib.parse.quote(token)}"
+    # Try the /api/files/view endpoint first, fall back to /download
+    url = f"http://{host}:{port}/api/files/view?{params}"
+    try:
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                # Fallback to download endpoint
+                url2 = f"http://{host}:{port}/api/files/download?{params}"
+                resp = await client.get(url2)
+                if resp.status_code != 200:
+                    raise HTTPException(resp.status_code, f"Agent returned {resp.status_code}")
+            ct = resp.headers.get("content-type", "text/plain")
+            from starlette.responses import Response
+            return Response(content=resp.content, headers={
+                "Content-Type": ct,
+                "Content-Disposition": "inline",
+            })
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
 
 
 @app.get("/fd/health")

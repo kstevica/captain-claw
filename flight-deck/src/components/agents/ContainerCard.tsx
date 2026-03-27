@@ -113,6 +113,36 @@ export function ContainerCard({ container, onBrowseFiles }: { container: Contain
           <span className="font-mono">{container.image}</span>
         </div>
 
+        {/* Persona / Model override (visible when chat connected) */}
+        {session?.connected && (session.models.length > 0 || session.personalities.length > 0) && (
+          <div className="mb-3 flex flex-wrap gap-2">
+            {session.personalities.length > 0 && (
+              <select
+                value={session.activePersonality}
+                onChange={(e) => useChatStore.getState().setPersonality(container.id, e.target.value)}
+                className="flex-1 min-w-[120px] rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none"
+              >
+                <option value="">Default persona</option>
+                {session.personalities.map((p) => (
+                  <option key={p.id || p.name} value={p.id || p.name}>{p.name}</option>
+                ))}
+              </select>
+            )}
+            {session.models.length > 0 && (
+              <select
+                value={session.activeModel}
+                onChange={(e) => useChatStore.getState().setModel(container.id, e.target.value)}
+                className="flex-1 min-w-[120px] rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-300 focus:border-violet-500/50 focus:outline-none"
+              >
+                <option value="">Default model</option>
+                {session.models.map((m) => (
+                  <option key={m.selector || m.id} value={m.selector || m.id}>{m.label || m.id}</option>
+                ))}
+              </select>
+            )}
+          </div>
+        )}
+
         {/* Busy indicator */}
         {busy && (
           <div className="mb-3 flex items-center gap-2 rounded-lg bg-violet-500/10 px-3 py-1.5">

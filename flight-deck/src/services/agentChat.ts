@@ -95,6 +95,11 @@ export class AgentChatWS {
     this.ws.send(JSON.stringify({ type: 'cancel' }))
   }
 
+  sendJSON(data: Record<string, unknown>) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    this.ws.send(JSON.stringify(data))
+  }
+
   on(event: string, handler: EventHandler): () => void {
     if (!this.handlers.has(event)) this.handlers.set(event, new Set())
     this.handlers.get(event)!.add(handler)
