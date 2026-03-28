@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 
 import docker
 import yaml
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -637,6 +637,25 @@ async def agent_file_view(host: str, port: int, path: str, token: str = ""):
                 "Content-Type": ct,
                 "Content-Disposition": "inline",
             })
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.post("/fd/agent-file-upload/{host}/{port}")
+async def agent_file_upload(host: str, port: int, token: str = "", file: UploadFile = File(...)):
+    """Proxy file upload to a CC agent."""
+    import httpx
+
+    params = f"?token={token}" if token else ""
+    url = f"http://{host}:{port}/api/file/upload{params}"
+    content = await file.read()
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            files = {"file": (file.filename or "upload", content, file.content_type or "application/octet-stream")}
+            resp = await client.post(url, files=files)
+            if resp.status_code != 200:
+                raise HTTPException(resp.status_code, f"Agent upload failed: {resp.status_code}")
+            return resp.json()
     except httpx.ConnectError:
         raise HTTPException(502, "Cannot connect to agent")
 

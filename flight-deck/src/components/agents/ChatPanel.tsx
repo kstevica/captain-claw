@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import {
   X,
   Send,
@@ -11,6 +11,11 @@ import {
   ChevronRight,
   Minus,
   Forward,
+  Paperclip,
+  FileIcon,
+  ImageIcon,
+  Clipboard,
+  XCircle,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -18,7 +23,23 @@ import { useChatStore } from '../../stores/chatStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useContainerStore } from '../../stores/containerStore'
 import { SendContextModal } from './SendContextModal'
+import { uploadFileToAgent, formatSize } from '../../services/fileTransfer'
 import type { ChatMessage } from '../../services/agentChat'
+
+interface Attachment {
+  id: string
+  file: File
+  name: string
+  size: number
+  type: string
+  preview?: string // data URL for images
+  status: 'pending' | 'uploading' | 'uploaded' | 'error'
+  uploadedPath?: string
+  error?: string
+}
+
+let attachId = 0
+function nextAttachId() { return `attach-${Date.now()}-${++attachId}` }
 
 export function ChatPanel() {
   const { sessions, activeChatId, chatOpen, closeChat, switchChat, disconnectChat, sendMessage, cancelTask } =
@@ -44,7 +65,7 @@ export function ChatPanel() {
   ]
 
   return (
-    <div className="flex w-[480px] flex-col border-l border-zinc-800 bg-zinc-950/80">
+    <div className="flex h-full flex-col border-l border-zinc-800 bg-zinc-950/80">
       {/* Tab bar */}
       <div className="flex items-center border-b border-zinc-800 bg-zinc-900/60">
         <div className="flex flex-1 items-center gap-0.5 overflow-x-auto px-1 py-1">
@@ -102,6 +123,22 @@ export function ChatPanel() {
   )
 }
 
+// Resolve the agent connection info for the current session
+function useAgentConnection(containerId: string) {
+  const containers = useContainerStore((s) => s.containers)
+  const localAgents = useLocalAgentStore((s) => s.agents)
+
+  const container = containers.find((c) => c.id === containerId)
+  if (container && container.web_port) {
+    return { host: 'localhost', port: container.web_port, auth: container.web_auth }
+  }
+  const local = localAgents.find((a) => a.id === containerId)
+  if (local) {
+    return { host: local.host, port: local.port, auth: local.authToken }
+  }
+  return null
+}
+
 function ChatContent({
   session,
   onSend,
@@ -112,8 +149,11 @@ function ChatContent({
   onCancel: () => void
 }) {
   const [input, setInput] = useState('')
+  const [attachments, setAttachments] = useState<Attachment[]>([])
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const conn = useAgentConnection(session.containerId)
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -125,11 +165,112 @@ function ChatContent({
     inputRef.current?.focus()
   }, [session.containerId])
 
+  // Upload a file attachment to the agent
+  const uploadAttachment = useCallback(async (att: Attachment) => {
+    if (!conn) return
+    setAttachments((prev) => prev.map((a) => a.id === att.id ? { ...a, status: 'uploading' } : a))
+    try {
+      const result = await uploadFileToAgent(conn.host, conn.port, conn.auth, att.file)
+      setAttachments((prev) => prev.map((a) => a.id === att.id ? { ...a, status: 'uploaded', uploadedPath: result.path } : a))
+    } catch (err) {
+      setAttachments((prev) => prev.map((a) => a.id === att.id ? { ...a, status: 'error', error: String(err) } : a))
+    }
+  }, [conn])
+
+  // Add files as attachments
+  const addFiles = useCallback((files: FileList | File[]) => {
+    const newAttachments: Attachment[] = Array.from(files).map((file) => {
+      const att: Attachment = {
+        id: nextAttachId(),
+        file,
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        status: 'pending',
+      }
+      // Generate preview for images
+      if (file.type.startsWith('image/')) {
+        const reader = new FileReader()
+        reader.onload = (e) => {
+          setAttachments((prev) => prev.map((a) => a.id === att.id ? { ...a, preview: e.target?.result as string } : a))
+        }
+        reader.readAsDataURL(file)
+      }
+      return att
+    })
+    setAttachments((prev) => [...prev, ...newAttachments])
+    // Auto-upload each
+    newAttachments.forEach((att) => uploadAttachment(att))
+  }, [uploadAttachment])
+
+  // Handle paste (clipboard images/files and text)
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    const items = e.clipboardData.items
+    const files: File[] = []
+    let hasFiles = false
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i]
+      if (item.kind === 'file') {
+        const file = item.getAsFile()
+        if (file) {
+          files.push(file)
+          hasFiles = true
+        }
+      }
+    }
+
+    if (hasFiles) {
+      e.preventDefault()
+      addFiles(files)
+    }
+    // If no files, let the default paste handle text
+  }, [addFiles])
+
+  // Handle drag-and-drop on the chat area
+  const [dragOver, setDragOver] = useState(false)
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setDragOver(true)
+  }, [])
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setDragOver(false)
+  }, [])
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setDragOver(false)
+    if (e.dataTransfer.files.length > 0) {
+      addFiles(e.dataTransfer.files)
+    }
+  }, [addFiles])
+
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id))
+  }, [])
+
   const handleSend = () => {
     const text = input.trim()
-    if (!text || !session.connected) return
-    onSend(text)
+    const uploadedFiles = attachments.filter((a) => a.status === 'uploaded' && a.uploadedPath)
+    const hasContent = text || uploadedFiles.length > 0
+    if (!hasContent || !session.connected) return
+
+    // Build message with file references
+    let content = text
+    if (uploadedFiles.length > 0) {
+      const fileRefs = uploadedFiles.map((a) => `[Attached file: ${a.name} → ${a.uploadedPath}]`).join('\n')
+      content = content ? `${content}\n\n${fileRefs}` : fileRefs
+    }
+
+    onSend(content)
     setInput('')
+    setAttachments([])
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -139,19 +280,53 @@ function ChatContent({
     }
   }
 
+  const pasteFromClipboard = useCallback(async () => {
+    try {
+      const items = await navigator.clipboard.read()
+      const files: File[] = []
+      for (const item of items) {
+        for (const type of item.types) {
+          if (type.startsWith('image/') || type === 'application/octet-stream') {
+            const blob = await item.getType(type)
+            const ext = type.split('/')[1] || 'png'
+            const file = new File([blob], `clipboard-${Date.now()}.${ext}`, { type })
+            files.push(file)
+          }
+        }
+      }
+      if (files.length > 0) {
+        addFiles(files)
+      } else {
+        // Fallback: paste as text
+        const text = await navigator.clipboard.readText()
+        if (text) {
+          setInput((prev) => prev + text)
+          inputRef.current?.focus()
+        }
+      }
+    } catch {
+      // Fallback to text
+      try {
+        const text = await navigator.clipboard.readText()
+        if (text) {
+          setInput((prev) => prev + text)
+          inputRef.current?.focus()
+        }
+      } catch { /* clipboard not available */ }
+    }
+  }, [addFiles])
+
   // Build visible messages: keep user + assistant, only last 3 tool/system
   const visibleMessages = (() => {
     const all = session.messages.filter((m) => m.role !== 'tool' || m.tool_name)
     const result: ChatMessage[] = []
-    // Walk backwards to count tool/system messages per "turn" (between user messages)
     let toolCount = 0
     for (let i = all.length - 1; i >= 0; i--) {
       const m = all[i]
       if (m.role === 'user' || m.role === 'assistant') {
-        toolCount = 0 // reset on each user/assistant message
+        toolCount = 0
         result.unshift(m)
       } else {
-        // tool or system
         toolCount++
         if (toolCount <= 3) {
           result.unshift(m)
@@ -161,14 +336,33 @@ function ChatContent({
     return result
   })()
 
+  const pendingUploads = attachments.filter((a) => a.status === 'uploading').length
+  const hasErrors = attachments.some((a) => a.status === 'error')
+
   return (
-    <>
+    <div
+      className={`flex flex-1 flex-col overflow-hidden ${dragOver ? 'ring-2 ring-inset ring-violet-500/50' : ''}`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {/* Drag overlay */}
+      {dragOver && (
+        <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center bg-zinc-950/60">
+          <div className="rounded-xl border-2 border-dashed border-violet-500/50 bg-zinc-900/90 px-8 py-6 text-center">
+            <Paperclip className="mx-auto h-8 w-8 text-violet-400" />
+            <p className="mt-2 text-sm font-medium text-violet-300">Drop files to attach</p>
+          </div>
+        </div>
+      )}
+
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-3">
         {visibleMessages.length === 0 && session.connected && (
           <div className="mt-12 text-center">
             <MessageSquare className="mx-auto h-8 w-8 text-zinc-700" />
             <p className="mt-2 text-sm text-zinc-500">Send a message to start chatting with this agent.</p>
+            <p className="mt-1 text-xs text-zinc-600">You can drag & drop files or paste images from clipboard.</p>
           </div>
         )}
 
@@ -194,15 +388,61 @@ function ChatContent({
         <div ref={messagesEndRef} />
       </div>
 
+      {/* Attachments strip */}
+      {attachments.length > 0 && (
+        <div className="border-t border-zinc-800/50 px-3 py-2">
+          <div className="flex flex-wrap gap-2">
+            {attachments.map((att) => (
+              <AttachmentChip key={att.id} attachment={att} onRemove={removeAttachment} />
+            ))}
+          </div>
+          {hasErrors && (
+            <p className="mt-1 text-[10px] text-red-400">Some files failed to upload. Remove and retry.</p>
+          )}
+        </div>
+      )}
+
       {/* Input */}
       <div className="border-t border-zinc-800 p-3">
         <div className="flex items-end gap-2">
+          {/* Attach button */}
+          <div className="flex gap-0.5">
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!session.connected}
+              className="flex h-[38px] items-center rounded-lg px-2 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-40"
+              title="Attach file"
+            >
+              <Paperclip className="h-4 w-4" />
+            </button>
+            <button
+              onClick={pasteFromClipboard}
+              disabled={!session.connected}
+              className="flex h-[38px] items-center rounded-lg px-2 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-40"
+              title="Paste from clipboard"
+            >
+              <Clipboard className="h-4 w-4" />
+            </button>
+          </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              if (e.target.files && e.target.files.length > 0) {
+                addFiles(e.target.files)
+                e.target.value = ''
+              }
+            }}
+          />
           <textarea
             ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={session.connected ? 'Send a message...' : 'Connecting...'}
+            onPaste={handlePaste}
+            placeholder={session.connected ? 'Message, paste image, or drop files...' : 'Connecting...'}
             disabled={!session.connected}
             rows={1}
             className="max-h-32 min-h-[38px] flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none disabled:opacity-40"
@@ -224,15 +464,56 @@ function ChatContent({
           ) : (
             <button
               onClick={handleSend}
-              disabled={!input.trim() || !session.connected}
+              disabled={(!input.trim() && attachments.filter((a) => a.status === 'uploaded').length === 0) || !session.connected || pendingUploads > 0}
               className="flex h-[38px] items-center gap-1.5 rounded-lg bg-violet-600 px-3 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+              title={pendingUploads > 0 ? 'Waiting for uploads...' : 'Send'}
             >
-              <Send className="h-4 w-4" />
+              {pendingUploads > 0 ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
             </button>
           )}
         </div>
       </div>
-    </>
+    </div>
+  )
+}
+
+function AttachmentChip({ attachment, onRemove }: { attachment: Attachment; onRemove: (id: string) => void }) {
+  const isImage = attachment.type.startsWith('image/')
+
+  return (
+    <div
+      className={`group relative flex items-center gap-1.5 rounded-lg border px-2 py-1.5 text-xs ${
+        attachment.status === 'error'
+          ? 'border-red-800 bg-red-950/30 text-red-400'
+          : attachment.status === 'uploading'
+          ? 'border-violet-800/50 bg-violet-950/20 text-violet-300'
+          : attachment.status === 'uploaded'
+          ? 'border-zinc-700 bg-zinc-800/50 text-zinc-300'
+          : 'border-zinc-700 bg-zinc-800/50 text-zinc-400'
+      }`}
+    >
+      {/* Preview or icon */}
+      {attachment.preview ? (
+        <img src={attachment.preview} alt="" className="h-6 w-6 rounded object-cover" />
+      ) : isImage ? (
+        <ImageIcon className="h-3.5 w-3.5 shrink-0" />
+      ) : (
+        <FileIcon className="h-3.5 w-3.5 shrink-0" />
+      )}
+
+      <span className="max-w-[120px] truncate">{attachment.name}</span>
+      <span className="text-zinc-600">{formatSize(attachment.size)}</span>
+
+      {attachment.status === 'uploading' && <Loader2 className="h-3 w-3 animate-spin text-violet-400" />}
+
+      {/* Remove button */}
+      <button
+        onClick={() => onRemove(attachment.id)}
+        className="ml-0.5 rounded p-0.5 text-zinc-600 hover:text-zinc-300"
+      >
+        <XCircle className="h-3.5 w-3.5" />
+      </button>
+    </div>
   )
 }
 

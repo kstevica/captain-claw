@@ -3,6 +3,7 @@ import { MessageSquare, Trash2, RefreshCw, Cpu, ExternalLink, Loader2, FolderOpe
 import type { LocalAgent } from '../../stores/localAgentStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useChatStore } from '../../stores/chatStore'
+import { EmbeddedChat } from './EmbeddedChat'
 
 const statusStyles: Record<string, string> = {
   online: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
@@ -20,7 +21,8 @@ export function LocalAgentCard({ agent, onBrowseFiles }: { agent: LocalAgent; on
   const [descDraft, setDescDraft] = useState('')
 
   return (
-    <div className={`rounded-xl border bg-zinc-900/50 p-5 ${busy ? 'border-violet-500/40' : 'border-zinc-800'}`}>
+    <div className={`rounded-xl border bg-zinc-900/50 overflow-hidden ${busy ? 'border-violet-500/40' : 'border-zinc-800'}`}>
+      <div className="p-5">
       {/* Header */}
       <div className="mb-3 flex items-start justify-between">
         <div className="flex items-center gap-3">
@@ -171,6 +173,18 @@ export function LocalAgentCard({ agent, onBrowseFiles }: { agent: LocalAgent; on
           Remove
         </button>
       </div>
+      </div>
+
+      {/* Embedded Chat */}
+      {agent.status === 'online' && (
+        <EmbeddedChat
+          containerId={agent.id}
+          containerName={agent.name}
+          host={agent.host}
+          port={agent.port}
+          auth={agent.authToken}
+        />
+      )}
     </div>
   )
 }

@@ -4,6 +4,7 @@ import type { ContainerInfo } from '../../services/docker'
 import { getContainerLogs } from '../../services/docker'
 import { useContainerStore } from '../../stores/containerStore'
 import { useChatStore } from '../../stores/chatStore'
+import { EmbeddedChat } from './EmbeddedChat'
 
 const statusColors: Record<string, string> = {
   running: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
@@ -224,7 +225,7 @@ export function ContainerCard({ container, onBrowseFiles }: { container: Contain
           <div className="flex-1" />
           <ActionBtn icon={Trash2} label="Remove" loading={actionLoading === 'remove'} danger
             onClick={() => {
-              if (confirm(`Remove container '${container.name}'?`))
+              if (confirm(`This will permanently destroy the Docker container '${container.name}' and all its data.\n\nAre you sure you want to remove it?`))
                 doAction('remove', () => removeContainer(container.id))
             }} />
         </div>
@@ -283,6 +284,17 @@ export function ContainerCard({ container, onBrowseFiles }: { container: Contain
             {logs || '(empty)'}
           </pre>
         </div>
+      )}
+
+      {/* Embedded Chat */}
+      {isRunning && container.web_port && (
+        <EmbeddedChat
+          containerId={container.id}
+          containerName={container.agent_name || container.name}
+          host="localhost"
+          port={container.web_port}
+          auth={container.web_auth}
+        />
       )}
     </div>
   )

@@ -72,6 +72,26 @@ export function getViewUrl(host: string, port: number, path: string, auth: strin
   return `${BASE}/agent-file-view/${encodeURIComponent(host)}/${port}?${params}`
 }
 
+/** Upload a file to an agent */
+export async function uploadFileToAgent(
+  host: string,
+  port: number,
+  auth: string,
+  file: File,
+): Promise<{ path: string; size: number; filename: string }> {
+  const params = new URLSearchParams()
+  if (auth) params.set('token', auth)
+  const qs = params.toString() ? `?${params}` : ''
+  const form = new FormData()
+  form.append('file', file)
+  const resp = await fetch(`${BASE}/agent-file-upload/${encodeURIComponent(host)}/${port}${qs}`, {
+    method: 'POST',
+    body: form,
+  })
+  if (!resp.ok) throw new Error(`Upload failed: ${resp.status}`)
+  return resp.json()
+}
+
 /** Extract folder category from logical path (e.g. "downloads/file.txt" -> "downloads") */
 export function getFileCategory(file: AgentFile): string {
   const logical = file.logical || file.physical
