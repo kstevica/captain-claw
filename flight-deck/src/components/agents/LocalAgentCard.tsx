@@ -1,4 +1,5 @@
-import { MessageSquare, Trash2, RefreshCw, Cpu, ExternalLink, Loader2, FolderOpen } from 'lucide-react'
+import { useState } from 'react'
+import { MessageSquare, Trash2, RefreshCw, Cpu, ExternalLink, Loader2, FolderOpen, Pencil, Check, X } from 'lucide-react'
 import type { LocalAgent } from '../../stores/localAgentStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useChatStore } from '../../stores/chatStore'
@@ -10,11 +11,13 @@ const statusStyles: Record<string, string> = {
 }
 
 export function LocalAgentCard({ agent, onBrowseFiles }: { agent: LocalAgent; onBrowseFiles?: () => void }) {
-  const { removeAgent, probeAgent } = useLocalAgentStore()
+  const { removeAgent, probeAgent, updateAgent } = useLocalAgentStore()
   const openChat = useChatStore((s) => s.openChat)
   const session = useChatStore((s) => s.sessions.get(agent.id))
   const busy = session?.busy ?? false
   const statusText = session?.statusText ?? ''
+  const [editingDesc, setEditingDesc] = useState(false)
+  const [descDraft, setDescDraft] = useState('')
 
   return (
     <div className={`rounded-xl border bg-zinc-900/50 p-5 ${busy ? 'border-violet-500/40' : 'border-zinc-800'}`}>
@@ -58,6 +61,49 @@ export function LocalAgentCard({ agent, onBrowseFiles }: { agent: LocalAgent; on
             {agent.status}
           </span>
         </div>
+      </div>
+
+      {/* Description (editable) */}
+      <div className="mb-3 group/desc">
+        {editingDesc ? (
+          <div className="flex items-center gap-1.5">
+            <input
+              value={descDraft}
+              onChange={(e) => setDescDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') { updateAgent(agent.id, { description: descDraft.trim() }); setEditingDesc(false) }
+                if (e.key === 'Escape') setEditingDesc(false)
+              }}
+              placeholder="What this agent does..."
+              className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-sm text-zinc-300 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
+              autoFocus
+            />
+            <button
+              onClick={() => { updateAgent(agent.id, { description: descDraft.trim() }); setEditingDesc(false) }}
+              className="rounded p-1 text-emerald-400 hover:bg-zinc-800"
+            >
+              <Check className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={() => setEditingDesc(false)}
+              className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5">
+            <p className="text-sm text-zinc-400 flex-1">
+              {agent.description || <span className="text-zinc-600 italic">No description</span>}
+            </p>
+            <button
+              onClick={() => { setDescDraft(agent.description || ''); setEditingDesc(true) }}
+              className="rounded p-1 text-zinc-600 opacity-0 transition-opacity group-hover/desc:opacity-100 hover:bg-zinc-800 hover:text-zinc-300"
+            >
+              <Pencil className="h-3 w-3" />
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Persona / Model override (visible when chat connected) */}

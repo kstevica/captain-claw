@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import { useAgentStore } from '../stores/agentStore'
 import { useContainerStore } from '../stores/containerStore'
 import { useLocalAgentStore } from '../stores/localAgentStore'
@@ -7,8 +7,44 @@ import { AgentDetail } from '../components/agents/AgentDetail'
 import { ContainerCard } from '../components/agents/ContainerCard'
 import { LocalAgentCard } from '../components/agents/LocalAgentCard'
 import { FileBrowser } from '../components/agents/FileBrowser'
-import { Box, Radio, Cpu, Plus } from 'lucide-react'
+import { Radio, Plus, Server, LayoutGrid, Move } from 'lucide-react'
 import type { AgentEndpoint } from '../services/fileTransfer'
+
+// ── Unified agent item ──
+
+type UnifiedAgent =
+  | { kind: 'docker'; id: string; data: ReturnType<typeof useContainerStore.getState>['containers'][number] }
+  | { kind: 'local'; id: string; data: ReturnType<typeof useLocalAgentStore.getState>['agents'][number] }
+
+// ── Position persistence ──
+
+interface Position { x: number; y: number }
+
+const POS_KEY = 'fd:agent-positions'
+const LAYOUT_KEY = 'fd:agent-layout-mode'
+const CARD_W = 480
+const CARD_GAP = 24
+
+function loadPositions(): Record<string, Position> {
+  try { return JSON.parse(localStorage.getItem(POS_KEY) || '{}') } catch { return {} }
+}
+function savePositions(pos: Record<string, Position>) {
+  localStorage.setItem(POS_KEY, JSON.stringify(pos))
+}
+function loadLayoutMode(): 'grid' | 'free' {
+  return (localStorage.getItem(LAYOUT_KEY) as 'grid' | 'free') || 'grid'
+}
+function saveLayoutMode(mode: 'grid' | 'free') {
+  localStorage.setItem(LAYOUT_KEY, mode)
+}
+
+// Auto-layout: arrange cards in a grid pattern for initial positions
+function autoPosition(index: number, containerWidth: number): Position {
+  const cols = Math.max(1, Math.floor((containerWidth + CARD_GAP) / (CARD_W + CARD_GAP)))
+  const col = index % cols
+  const row = Math.floor(index / cols)
+  return { x: col * (CARD_W + CARD_GAP), y: row * 220 }
+}
 
 export function DesktopPage() {
   const { instances, concerns, selectedInstanceId, selectInstance } = useAgentStore()
@@ -17,6 +53,13 @@ export function DesktopPage() {
   const selectedInstance = instances.find((i) => i.id === selectedInstanceId)
   const [showAddAgent, setShowAddAgent] = useState(false)
   const [browsingAgent, setBrowsingAgent] = useState<AgentEndpoint | null>(null)
+  const [positions, setPositions] = useState<Record<string, Position>>(loadPositions)
+  const [layoutMode, setLayoutMode] = useState<'grid' | 'free'>(loadLayoutMode)
+
+  // Drag state
+  const [dragId, setDragId] = useState<string | null>(null)
+  const dragStart = useRef<{ mouseX: number; mouseY: number; startX: number; startY: number } | null>(null)
+  const canvasRef = useRef<HTMLDivElement>(null)
 
   // Build list of all agents with web endpoints for file transfer
   const allAgentEndpoints: AgentEndpoint[] = [
@@ -36,14 +79,153 @@ export function DesktopPage() {
     return () => clearInterval(interval)
   }, [checkHealth, fetchContainers, probeAll])
 
+  // Build unified agent list
+  const unifiedAgents: UnifiedAgent[] = useMemo(() => [
+    ...containers.map((c) => ({ kind: 'docker' as const, id: c.id, data: c })),
+    ...localAgents.map((a) => ({ kind: 'local' as const, id: a.id, data: a })),
+  ], [containers, localAgents])
+
+  // Assign initial positions for new agents
+  useEffect(() => {
+    if (layoutMode !== 'free') return
+    const canvasW = canvasRef.current?.clientWidth ?? 960
+    let changed = false
+    const updated = { ...positions }
+    unifiedAgents.forEach((agent, i) => {
+      if (!updated[agent.id]) {
+        updated[agent.id] = autoPosition(i, canvasW)
+        changed = true
+      }
+    })
+    if (changed) {
+      savePositions(updated)
+      setPositions(updated)
+    }
+  }, [unifiedAgents, layoutMode]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Free drag handlers (pointer events for smooth dragging)
+  const handlePointerDown = useCallback((e: React.PointerEvent, id: string) => {
+    // Only start drag from the handle
+    if (layoutMode !== 'free') return
+    e.preventDefault()
+    e.stopPropagation()
+    const pos = positions[id] || { x: 0, y: 0 }
+    dragStart.current = { mouseX: e.clientX, mouseY: e.clientY, startX: pos.x, startY: pos.y }
+    setDragId(id)
+    ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
+  }, [layoutMode, positions])
+
+  const handlePointerMove = useCallback((e: React.PointerEvent) => {
+    if (!dragId || !dragStart.current) return
+    const dx = e.clientX - dragStart.current.mouseX
+    const dy = e.clientY - dragStart.current.mouseY
+    const newX = Math.max(0, dragStart.current.startX + dx)
+    const newY = Math.max(0, dragStart.current.startY + dy)
+    setPositions((prev) => ({ ...prev, [dragId]: { x: newX, y: newY } }))
+  }, [dragId])
+
+  const handlePointerUp = useCallback(() => {
+    if (dragId) {
+      savePositions({ ...positions, [dragId]: positions[dragId] })
+    }
+    setDragId(null)
+    dragStart.current = null
+  }, [dragId, positions])
+
+  const toggleLayout = () => {
+    const next = layoutMode === 'grid' ? 'free' : 'grid'
+    saveLayoutMode(next)
+    setLayoutMode(next)
+    // When switching to free, auto-position any agents without positions
+    if (next === 'free') {
+      const canvasW = canvasRef.current?.clientWidth ?? 960
+      const updated = { ...positions }
+      unifiedAgents.forEach((agent, i) => {
+        if (!updated[agent.id]) {
+          updated[agent.id] = autoPosition(i, canvasW)
+        }
+      })
+      savePositions(updated)
+      setPositions(updated)
+    }
+  }
+
+  const resetPositions = () => {
+    const canvasW = canvasRef.current?.clientWidth ?? 960
+    const updated: Record<string, Position> = {}
+    unifiedAgents.forEach((agent, i) => {
+      updated[agent.id] = autoPosition(i, canvasW)
+    })
+    savePositions(updated)
+    setPositions(updated)
+  }
+
   const hasContent = instances.length > 0 || containers.length > 0 || localAgents.length > 0
+  const agentCount = containers.length + localAgents.length
+
+  // Calculate canvas height for free mode
+  const canvasHeight = useMemo(() => {
+    if (layoutMode !== 'free') return 'auto'
+    let maxY = 400
+    for (const agent of unifiedAgents) {
+      const pos = positions[agent.id]
+      if (pos) maxY = Math.max(maxY, pos.y + 260)
+    }
+    return `${maxY}px`
+  }, [layoutMode, unifiedAgents, positions])
+
+  const renderAgentCard = (agent: UnifiedAgent) => {
+    if (agent.kind === 'docker') {
+      return (
+        <ContainerCard
+          container={agent.data}
+          onBrowseFiles={
+            agent.data.status === 'running' && agent.data.web_port
+              ? () => setBrowsingAgent({ id: agent.data.id, name: agent.data.agent_name || agent.data.name, host: 'localhost', port: agent.data.web_port!, auth: agent.data.web_auth })
+              : undefined
+          }
+        />
+      )
+    }
+    return (
+      <LocalAgentCard
+        agent={agent.data}
+        onBrowseFiles={
+          agent.data.status === 'online'
+            ? () => setBrowsingAgent({ id: agent.data.id, name: agent.data.name, host: agent.data.host, port: agent.data.port, auth: agent.data.authToken })
+            : undefined
+        }
+      />
+    )
+  }
 
   return (
     <div className="flex h-full">
-      <div className="flex-1 overflow-y-auto p-6">
-        <div className="mb-6">
-          <h1 className="text-lg font-semibold">Agent Desktop</h1>
-          <p className="text-sm text-zinc-500">Monitor and control your personal assistants</p>
+      <div className="flex-1 overflow-auto p-6">
+        <div className="mb-6 flex items-center justify-between">
+          <div>
+            <h1 className="text-lg font-semibold">Agent Desktop</h1>
+            <p className="text-sm text-zinc-500">Monitor and control your personal assistants</p>
+          </div>
+          <div className="flex items-center gap-1">
+            {layoutMode === 'free' && (
+              <button
+                onClick={resetPositions}
+                className="rounded-md px-2 py-1 text-xs font-medium text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+                title="Reset positions"
+              >
+                Reset
+              </button>
+            )}
+            <button
+              onClick={toggleLayout}
+              className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 border border-zinc-800"
+              title={layoutMode === 'grid' ? 'Switch to free layout' : 'Switch to grid layout'}
+            >
+              {layoutMode === 'grid' ? <Move className="h-3.5 w-3.5" /> : <LayoutGrid className="h-3.5 w-3.5" />}
+              {layoutMode === 'grid' ? 'Free Layout' : 'Grid Layout'}
+            </button>
+          </div>
         </div>
 
         {/* BotPort connected agents */}
@@ -61,88 +243,95 @@ export function DesktopPage() {
           </div>
         )}
 
-        {/* Docker containers */}
-        {dockerAvailable && (
-          <div className="mb-8">
-            <div className="mb-3 flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-zinc-500">
-              <Box className="h-3.5 w-3.5" />
-              Docker Containers ({containers.length})
-            </div>
-            {containers.length > 0 ? (
-              <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
-                {containers.map((c) => (
-                  <ContainerCard key={c.id} container={c} onBrowseFiles={
-                    c.status === 'running' && c.web_port
-                      ? () => setBrowsingAgent({ id: c.id, name: c.agent_name || c.name, host: 'localhost', port: c.web_port!, auth: c.web_auth })
-                      : undefined
-                  } />
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-zinc-600">No managed containers. Spawn one from the Spawn Agent page.</p>
-            )}
-          </div>
-        )}
-
-        {/* Local agents (pip-installed, remote, etc.) */}
+        {/* Unified Agents (Docker + Local) */}
         <div className="mb-8">
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-zinc-500">
-              <Cpu className="h-3.5 w-3.5" />
-              Local Agents ({localAgents.length})
+              <Server className="h-3.5 w-3.5" />
+              Agents ({agentCount})
             </div>
             <button
               onClick={() => setShowAddAgent(!showAddAgent)}
               className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
             >
               <Plus className="h-3.5 w-3.5" />
-              Add Agent
+              Add Local Agent
             </button>
           </div>
 
           {showAddAgent && (
             <AddAgentForm
-              onAdd={(name, host, port, auth) => { addAgent(name, host, port, auth); setShowAddAgent(false) }}
+              onAdd={(name, description, host, port, auth) => { addAgent(name, description, host, port, auth); setShowAddAgent(false) }}
               onCancel={() => setShowAddAgent(false)}
             />
           )}
 
-          {localAgents.length > 0 && (
-            <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
-              {localAgents.map((a) => (
-                <LocalAgentCard key={a.id} agent={a} onBrowseFiles={
-                  a.status === 'online'
-                    ? () => setBrowsingAgent({ id: a.id, name: a.name, host: a.host, port: a.port, auth: a.authToken })
-                    : undefined
-                } />
-              ))}
-            </div>
-          )}
-
-          {localAgents.length === 0 && !showAddAgent && (
-            <p className="text-sm text-zinc-600">
-              No local agents registered. Click "Add Agent" to connect to a Captain Claw instance running on this machine or remotely.
-            </p>
+          {agentCount > 0 ? (
+            layoutMode === 'grid' ? (
+              /* ── Grid layout ── */
+              <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
+                {unifiedAgents.map((agent) => (
+                  <div key={agent.id}>{renderAgentCard(agent)}</div>
+                ))}
+              </div>
+            ) : (
+              /* ── Free layout canvas ── */
+              <div
+                ref={canvasRef}
+                className="relative"
+                style={{ minHeight: canvasHeight }}
+                onPointerMove={handlePointerMove}
+                onPointerUp={handlePointerUp}
+              >
+                {unifiedAgents.map((agent) => {
+                  const pos = positions[agent.id] || { x: 0, y: 0 }
+                  const isDragging = dragId === agent.id
+                  return (
+                    <div
+                      key={agent.id}
+                      className={`absolute transition-shadow ${isDragging ? 'z-50 shadow-2xl shadow-violet-500/20' : 'z-10'}`}
+                      style={{
+                        left: pos.x,
+                        top: pos.y,
+                        width: CARD_W,
+                        transition: isDragging ? 'none' : 'box-shadow 0.2s',
+                      }}
+                    >
+                      {/* Drag handle bar */}
+                      <div
+                        onPointerDown={(e) => handlePointerDown(e, agent.id)}
+                        className={`flex items-center justify-center h-5 -mb-1 rounded-t-xl cursor-grab active:cursor-grabbing select-none transition-colors ${
+                          isDragging ? 'bg-violet-500/20' : 'bg-zinc-800/60 hover:bg-zinc-700/60'
+                        }`}
+                      >
+                        <div className="flex gap-0.5">
+                          <span className="block h-0.5 w-5 rounded-full bg-zinc-600" />
+                        </div>
+                      </div>
+                      {renderAgentCard(agent)}
+                    </div>
+                  )
+                })}
+              </div>
+            )
+          ) : (
+            !showAddAgent && (
+              <p className="text-sm text-zinc-600">
+                {dockerAvailable
+                  ? 'No agents running. Spawn one from the Spawn Agent page, or click "Add Local Agent" to connect to an existing instance.'
+                  : 'No agents registered. Click "Add Local Agent" to connect to a Captain Claw instance.'}
+              </p>
+            )
           )}
         </div>
 
-        {!hasContent && !dockerAvailable && (
-          <div className="mt-20 text-center">
-            <p className="text-zinc-500">No agents connected to BotPort.</p>
-            <p className="mt-1 text-sm text-zinc-600">
-              Start a Captain Claw instance with botport enabled, or spawn one from the Spawn Agent page.
-            </p>
-            <p className="mt-3 text-xs text-zinc-600">
-              Flight Deck backend not reachable — start it to manage Docker containers directly.
-            </p>
-          </div>
-        )}
-
-        {!hasContent && dockerAvailable && (
+        {!hasContent && (
           <div className="mt-20 text-center">
             <p className="text-zinc-500">No agents running.</p>
             <p className="mt-1 text-sm text-zinc-600">
-              Spawn one from the Spawn Agent page.
+              {dockerAvailable
+                ? 'Spawn one from the Spawn Agent page, or add a local agent.'
+                : 'Start a Captain Claw instance with botport enabled, or add a local agent.'}
             </p>
           </div>
         )}
@@ -170,10 +359,11 @@ export function DesktopPage() {
 }
 
 function AddAgentForm({ onAdd, onCancel }: {
-  onAdd: (name: string, host: string, port: number, auth: string) => void
+  onAdd: (name: string, description: string, host: string, port: number, auth: string) => void
   onCancel: () => void
 }) {
   const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
   const [host, setHost] = useState('localhost')
   const [port, setPort] = useState('24080')
   const [auth, setAuth] = useState('')
@@ -182,7 +372,7 @@ function AddAgentForm({ onAdd, onCancel }: {
     e.preventDefault()
     const p = parseInt(port, 10)
     if (!name.trim() || !host.trim() || isNaN(p)) return
-    onAdd(name.trim(), host.trim(), p, auth.trim())
+    onAdd(name.trim(), description.trim(), host.trim(), p, auth.trim())
   }
 
   return (
@@ -195,6 +385,14 @@ function AddAgentForm({ onAdd, onCancel }: {
             placeholder="My Agent"
             className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
             autoFocus
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-xs font-medium text-zinc-500">Description</label>
+          <input
+            value={description} onChange={(e) => setDescription(e.target.value)}
+            placeholder="What this agent does..."
+            className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
           />
         </div>
         <div>

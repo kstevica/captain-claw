@@ -5,6 +5,7 @@ const STORAGE_KEY = 'fd:local-agents'
 export interface LocalAgent {
   id: string
   name: string
+  description: string
   host: string
   port: number
   authToken: string
@@ -13,9 +14,9 @@ export interface LocalAgent {
 
 interface LocalAgentStore {
   agents: LocalAgent[]
-  addAgent: (name: string, host: string, port: number, authToken: string) => void
+  addAgent: (name: string, description: string, host: string, port: number, authToken: string) => void
   removeAgent: (id: string) => void
-  updateAgent: (id: string, patch: Partial<Pick<LocalAgent, 'name' | 'host' | 'port' | 'authToken'>>) => void
+  updateAgent: (id: string, patch: Partial<Pick<LocalAgent, 'name' | 'description' | 'host' | 'port' | 'authToken'>>) => void
   probeAgent: (id: string) => Promise<void>
   probeAll: () => Promise<void>
 }
@@ -35,9 +36,9 @@ function save(agents: LocalAgent[]) {
 export const useLocalAgentStore = create<LocalAgentStore>((set, get) => ({
   agents: load(),
 
-  addAgent: (name, host, port, authToken) => {
+  addAgent: (name, description, host, port, authToken) => {
     const id = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    const agent: LocalAgent = { id, name, host, port, authToken, status: 'unknown' }
+    const agent: LocalAgent = { id, name, description, host, port, authToken, status: 'unknown' }
     const agents = [...get().agents, agent]
     save(agents)
     set({ agents })

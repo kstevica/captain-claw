@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, ExternalLink, Loader2, FolderOpen } from 'lucide-react'
+import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, ExternalLink, Loader2, FolderOpen, Pencil, Check, X } from 'lucide-react'
 import type { ContainerInfo } from '../../services/docker'
 import { getContainerLogs } from '../../services/docker'
 import { useContainerStore } from '../../stores/containerStore'
@@ -15,7 +15,7 @@ const statusColors: Record<string, string> = {
 }
 
 export function ContainerCard({ container, onBrowseFiles }: { container: ContainerInfo; onBrowseFiles?: () => void }) {
-  const { stopContainer, startContainer, restartContainer, removeContainer } = useContainerStore()
+  const { stopContainer, startContainer, restartContainer, removeContainer, setDescription } = useContainerStore()
   const openChat = useChatStore((s) => s.openChat)
   const session = useChatStore((s) => s.sessions.get(container.id))
   const busy = session?.busy ?? false
@@ -26,6 +26,8 @@ export function ContainerCard({ container, onBrowseFiles }: { container: Contain
   const [actionLoading, setActionLoading] = useState<string | null>(null)
   const [showConnect, setShowConnect] = useState(false)
   const [connectPort, setConnectPort] = useState('24080')
+  const [editingDesc, setEditingDesc] = useState(false)
+  const [descDraft, setDescDraft] = useState('')
 
   const isRunning = container.status === 'running'
 
@@ -66,7 +68,14 @@ export function ContainerCard({ container, onBrowseFiles }: { container: Contain
             </div>
             <div>
               <h3 className="text-base font-semibold">{container.agent_name || container.name}</h3>
-              <span className="text-xs text-zinc-500 font-mono">{container.id}</span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-zinc-500 font-mono">{container.id}</span>
+                {container.web_port != null && (
+                  <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-xs font-mono text-emerald-400/80">
+                    :{container.web_port}
+                  </span>
+                )}
+              </div>
             </div>
           </div>
           <div className="flex items-center gap-1.5">
@@ -107,6 +116,49 @@ export function ContainerCard({ container, onBrowseFiles }: { container: Contain
               {container.status}
             </span>
           </div>
+        </div>
+
+        {/* Description (editable) */}
+        <div className="mb-3 group/desc">
+          {editingDesc ? (
+            <div className="flex items-center gap-1.5">
+              <input
+                value={descDraft}
+                onChange={(e) => setDescDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { setDescription(container.id, descDraft.trim()); setEditingDesc(false) }
+                  if (e.key === 'Escape') setEditingDesc(false)
+                }}
+                placeholder="What this agent does..."
+                className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-sm text-zinc-300 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
+                autoFocus
+              />
+              <button
+                onClick={() => { setDescription(container.id, descDraft.trim()); setEditingDesc(false) }}
+                className="rounded p-1 text-emerald-400 hover:bg-zinc-800"
+              >
+                <Check className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={() => setEditingDesc(false)}
+                className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5">
+              <p className="text-sm text-zinc-400 flex-1">
+                {container.description || <span className="text-zinc-600 italic">No description</span>}
+              </p>
+              <button
+                onClick={() => { setDescDraft(container.description || ''); setEditingDesc(true) }}
+                className="rounded p-1 text-zinc-600 opacity-0 transition-opacity group-hover/desc:opacity-100 hover:bg-zinc-800 hover:text-zinc-300"
+              >
+                <Pencil className="h-3 w-3" />
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="mb-4 text-xs text-zinc-500">

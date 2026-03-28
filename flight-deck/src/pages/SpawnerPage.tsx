@@ -9,6 +9,7 @@ import { spawnAgent, type SpawnConfig } from '../services/docker'
 interface AgentConfig {
   // Identity
   name: string
+  description: string
   hostname: string
   image: string
 
@@ -73,6 +74,7 @@ const ALL_TOOLS = [
 
 const defaultConfig: AgentConfig = {
   name: '',
+  description: '',
   hostname: 'captain-claw',
   image: 'kstevica/captain-claw:latest',
   provider: 'ollama',
@@ -444,6 +446,9 @@ export function SpawnerPage() {
                   <input value={config.hostname} onChange={(e) => update('hostname', e.target.value)} placeholder="captain-claw" className="input" />
                 </Field>
               </div>
+              <Field label="Description">
+                <input value={config.description} onChange={(e) => update('description', e.target.value)} placeholder="What this agent does..." className="input" />
+              </Field>
               <Field label="Docker Image">
                 <input value={config.image} onChange={(e) => update('image', e.target.value)} className="input" />
               </Field>
@@ -679,6 +684,7 @@ export function SpawnerPage() {
                 try {
                   const payload: SpawnConfig = {
                     name: config.name,
+                    description: config.description,
                     hostname: config.hostname,
                     image: config.image,
                     provider: config.provider,

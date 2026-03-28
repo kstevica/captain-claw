@@ -61,6 +61,7 @@ class AgentConfig(BaseModel):
     """Agent spawn configuration — matches the frontend form."""
     # Identity
     name: str = ""
+    description: str = ""
     hostname: str = "captain-claw"
     image: str = CC_IMAGE_DEFAULT
 
@@ -112,6 +113,7 @@ class ContainerInfo(BaseModel):
     image: str
     created: str
     agent_name: str = ""
+    description: str = ""
     ports: dict = Field(default_factory=dict)
     web_port: int | None = None
     web_auth: str = ""
@@ -232,6 +234,19 @@ def _build_env(c: AgentConfig) -> str:
 def _container_info(c: docker.models.containers.Container) -> ContainerInfo:
     labels = c.labels or {}
     web_port_str = labels.get("flight-deck.web-port", "")
+    # Try label first, then fall back to Docker port bindings
+    web_port: int | None = int(web_port_str) if web_port_str else None
+    if web_port is None:
+        # Extract from Docker port mappings (e.g. {"24080/tcp": [{"HostPort": "24080"}]})
+        docker_ports = c.attrs.get("NetworkSettings", {}).get("Ports", {}) or {}
+        for container_port, bindings in docker_ports.items():
+            if bindings:
+                try:
+                    web_port = int(bindings[0].get("HostPort", 0))
+                    if web_port:
+                        break
+                except (ValueError, IndexError, TypeError):
+                    pass
     return ContainerInfo(
         id=c.short_id,
         name=c.name,
@@ -239,8 +254,9 @@ def _container_info(c: docker.models.containers.Container) -> ContainerInfo:
         image=str(c.image.tags[0]) if c.image.tags else str(c.image.short_id),
         created=str(c.attrs.get("Created", "")),
         agent_name=labels.get("flight-deck.agent-name", ""),
+        description=labels.get("flight-deck.description", ""),
         ports=c.attrs.get("NetworkSettings", {}).get("Ports", {}),
-        web_port=int(web_port_str) if web_port_str else None,
+        web_port=web_port,
         web_auth=labels.get("flight-deck.web-auth", ""),
     )
 
@@ -333,6 +349,7 @@ def spawn_agent(config: AgentConfig):
     labels = {
         CONTAINER_LABEL: "true",
         "flight-deck.agent-name": config.name or slug,
+        "flight-deck.description": config.description or "",
         "flight-deck.image": config.image,
         "flight-deck.web-port": str(config.web_port) if config.web_enabled else "",
         "flight-deck.web-auth": config.web_auth_token or "",

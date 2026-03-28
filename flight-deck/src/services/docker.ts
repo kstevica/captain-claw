@@ -23,6 +23,7 @@ export interface ContainerInfo {
   image: string
   created: string
   agent_name: string
+  description: string
   ports: Record<string, unknown>
   web_port: number | null
   web_auth: string
@@ -42,6 +43,7 @@ export interface ContainerActionResult {
 
 export interface SpawnConfig {
   name: string
+  description: string
   hostname: string
   image: string
   provider: string
