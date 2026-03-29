@@ -1,100 +1,156 @@
-# Captain Claw v0.4.6 Release Notes
+# Captain Claw v0.4.7 Release Notes
 
-**Release title:** Flight Deck — Multi-Agent Management Dashboard
+**Release title:** Flight Deck Upgrade — Director, Operations, Pipelines & Collaboration
 
-**Release date:** 2026-03-27
+**Release date:** 2026-03-29
 
 ## Highlights
 
-This release introduces **Flight Deck** — a full-featured management dashboard for running multiple Captain Claw agents simultaneously. Spawn agents in Docker containers, register local or remote instances, chat with multiple agents via WebSocket, browse and transfer files between agents, and forward conversation context with tasks from one agent to another. Flight Deck is now bundled with Captain Claw and launches with a single command: `captain-claw-fd`.
+This release is a major upgrade to **Flight Deck**, the multi-agent management dashboard. The Agent Desktop now supports free-form draggable layouts, embedded chat on agent cards, and resizable panels. New views include a **Director panel** for unified agent oversight with broadcast, an **Operations dashboard** for token usage and cost analytics, and **Agent Pipelines** for chaining agent outputs automatically. Collaboration features — pinned messages, shared clipboard, notification center, keyboard shortcuts, and dark/light theme — round out the experience.
 
 ## New Features
 
-### Flight Deck Dashboard
+### Director Panel
 
-Multi-agent management UI built with React + FastAPI, served from a single process:
+A collapsible left panel (Cmd+D) providing unified oversight of all agents:
 
-- **`captain-claw-fd`** CLI command starts the dashboard on port 25080
-- **Docker container management** — spawn agents with full configuration (provider, model, tools, platforms, BotPort, networking), start/stop/restart/remove containers, view logs
-- **Local agent management** — register any Captain Claw instance by host:port with optional auth token, probe status, connect for chat
-- **Multi-agent chat** — WebSocket-based chat with multiple agents simultaneously via a tabbed interface, proxied through the backend to avoid CORS
-- **Markdown rendering** — full GFM support (tables, code blocks, lists, bold/italic) in both user and assistant messages
-- **Agent status indicators** — real-time busy/idle status on agent cards with spinner and status text (e.g., "Using web_fetch...")
-- **Smart message filtering** — strips CC suggestion prompts, limits tool messages to last 3 per turn, deduplicates echoed user messages
+- **Agents tab** — all Docker and local agents listed with real-time status, current activity text, last interaction time
+- **Activity Feed tab** — chronological feed of agent events
+- **Broadcast** — send a message to all running agents simultaneously
+- **Filter & sort** — filter by status (running/stopped/error), sort by name, status, last active, or type
+- **Expandable rows** — click to reveal description, host info, creation time, and recent message previews
+- **Quick actions** — Stop All, Restart All buttons
+- **Resizable** — drag right edge to resize (220–500px, persisted to localStorage)
 
-### File Browser & Transfer
+### Operations Dashboard
 
-Browse and transfer files between agents without manual download/upload:
+A dedicated analytics view (Cmd+2) for monitoring agent usage and costs:
 
-- **File browser** — click "Files" on any agent card to browse workspace files with size, type, and path info
-- **Multi-select** — checkbox selection with select-all support
-- **Agent-to-agent transfer** — select files and click a destination agent to transfer; Flight Deck downloads from source and uploads to destination
-- **Transfer status** — per-file progress indicators (spinner/checkmark/error) and a completion summary banner
+- **Summary cards** — total tokens, estimated cost (USD), API calls, average latency, data transferred, cache hit rate
+- **Token distribution bar** — visual breakdown of input, output, and cached tokens
+- **Per-agent usage table** — sortable columns for tokens, cost, calls, latency per agent
+- **Model breakdown table** — usage grouped by LLM model across all agents
+- **Agent health grid** — status cards for all connected agents
+- **Period filter** — last hour, today, yesterday, this week, this month, all time
+- **Cost estimation** — uses published pricing for Claude, GPT, and Gemini models
+- **Backend proxy** — new `/fd/agent-usage/{host}/{port}` endpoint proxies agent usage APIs with auth cookie handling
 
-### Context Transfer
+### Agent Pipelines
 
-Forward conversation history and tasks between agents:
+Chain agents together so output from one automatically flows to the next. Moved to the Workflows view (Cmd+3) with a redesigned visual builder:
 
-- **Forward button** (↗) in the chat panel tab bar opens the context transfer modal
-- **Message slider** — select how many recent user/assistant messages to include (0 to all)
-- **Preview** — expandable preview of selected messages before sending
-- **Task prompt** — write what the receiving agent should do with the context
-- **Destination selection** — send to any other online agent
+- **Visual pipeline cards** — large rounded cards with status badges, enable/disable toggle, mini flow preview
+- **Vertical flow diagram** — expanded view shows numbered step cards with gradient arrow connectors
+- **Step editor** — add agents from a selector, set optional prompt prefixes, remove steps
+- **Contextual forwarding** — forwarded messages include pipeline name, source agent name, and instructions for the receiving agent to process based on its playbooks, instructions, and persona
+- **Auto-trigger** — subscribes to Zustand store changes; when an agent at step N responds, step N+1 receives the output automatically
+- **Notifications** — pipeline forwarding events appear in the notification center
 
-### Connection Settings UI
+### Agent Desktop Overhaul
 
-Captain Claw's Settings page now shows connection information:
+The desktop view now combines Docker and local agents into one unified stage:
 
-- WebSocket URL, HTTP URL, and auth status
-- Copy-to-clipboard buttons for easy sharing
-- Auth token, cookie max age, and public run settings exposed in the Web Server section
+- **Free-form layout** — drag agent cards anywhere on the canvas using pointer events (not HTML5 drag); positions persisted to localStorage
+- **Grid layout** — traditional card grid as an alternative
+- **Layout toggle** — switch between grid and free-form modes
+- **Embedded chat** — collapsible chat panel directly on each agent card
+- **Agent descriptions** — editable description field on each card
+- **Container removal** — removing an agent now also removes its Docker container with a confirmation dialog
 
-### macOS Docker Networking Fix
+### Chat Enhancements
 
-Docker's `--network host` is silently ignored on macOS. Flight Deck now:
+- **Pin messages** — hover any message and click the pin icon (amber) to save with tags
+- **Copy to shared clipboard** — click the clipboard icon (cyan) to share snippets across agents
+- **File attachments** — attach files and clipboard content to messages
+- **Resizable panel** — drag the left edge to resize between 320–900px (persisted)
+- **Full context forwarding** — removed the 2000-character truncation limit when sending context between agents
+- **Width from parent** — chat panel width now controlled by the App layout, not hardcoded
 
-- Auto-detects macOS and switches to bridge networking with explicit port mapping
-- Uses `host.docker.internal` for Ollama and other host-side services in container configs
-- Sets `OLLAMA_BASE_URL` env var and `model.base_url` in config for Ollama providers
+### Pinned Messages Panel
 
-### Docker Config Persistence Fix
+Pin important chat messages for quick reference:
 
-Resolved an issue where Flight Deck-provided config.yaml was overridden by CC's home directory config inside Docker containers. Config is now written to both `/app/config.yaml` (CWD) and the home-config volume mount.
+- Tag system with filtering by tag, agent name, or content
+- Expandable message previews with full markdown rendering
+- Copy, tag, and unpin actions per message
 
-## Distribution Changes
+### Shared Clipboard
 
-- **Flight Deck dependencies** (fastapi, uvicorn, docker, websockets) are now included in the standard `pip install captain-claw`
-- **New CLI entry point:** `captain-claw-fd` launches the Flight Deck dashboard
-- **Package includes built frontend** — `captain_claw/flight_deck/static/` contains the pre-built React app
-- **Frontend source** lives in `flight-deck/` for development (`npm run dev` for HMR, `npm run build` to rebuild)
-- Flight Deck can also be run as a Python module: `python -m captain_claw.flight_deck`
+Cross-agent clipboard for sharing text between agents:
 
-## Architecture
+- Add entries manually or from chat messages
+- Pin important items, edit inline, send to any online agent
 
-```
-captain_claw/
-  flight_deck/           # Python package
-    __init__.py
-    __main__.py          # python -m captain_claw.flight_deck
-    server.py            # FastAPI backend + static file serving
-    static/              # Built React frontend (bundled)
-flight-deck/             # Frontend source (React/TypeScript/Vite)
-  src/
-  package.json
-  vite.config.ts
-```
+### Notification Center
 
-## API Endpoints (Flight Deck Backend)
+Bell icon in the top bar with:
 
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/fd/containers` | List managed Docker containers |
-| POST | `/fd/spawn` | Spawn a new agent container |
-| POST | `/fd/containers/{id}/stop\|start\|restart` | Container lifecycle |
-| DELETE | `/fd/containers/{id}` | Remove container |
-| GET | `/fd/containers/{id}/logs` | Container logs (supports streaming) |
-| WS | `/fd/agent-ws/{host}/{port}` | WebSocket proxy to agent |
-| GET | `/fd/probe` | Probe agent availability |
-| GET | `/fd/agent-files/{host}/{port}` | List agent files (CORS proxy) |
-| POST | `/fd/transfer` | Transfer file between agents |
-| GET | `/fd/health` | Docker health check |
+- Unread badge count
+- Type filters (info, success, warning, error)
+- Auto-notifications for agent connect/disconnect and pipeline forwarding
+- Mark read, clear individual or all
+
+### Keyboard Shortcuts
+
+Full keyboard navigation with Cmd/Ctrl modifiers:
+
+| Shortcut | Action |
+|---|---|
+| Cmd/Ctrl+1–4 | Switch views (Desktop, Operations, Workflows, Spawner) |
+| Cmd/Ctrl+D | Toggle Director panel |
+| Cmd/Ctrl+J | Toggle Chat panel |
+| Cmd/Ctrl+K | Toggle Shortcuts overlay |
+| Cmd/Ctrl+[ / ] | Previous / Next chat tab |
+| Escape | Close modals and panels |
+
+### Dark/Light Theme
+
+- Sun/Moon toggle in the top bar
+- Full light mode with overrides for zinc palette, scrollbars, markdown styles, and chat top bar
+- Theme preference persisted to localStorage
+
+### Resizable Panels
+
+All side panels support drag-to-resize with persisted widths:
+
+| Panel | Min | Max | Default |
+|---|---|---|---|
+| Director (left) | 220px | 500px | 300px |
+| Chat (right) | 320px | 900px | 480px |
+| Tool panels | 280px | 500px | 340px |
+
+## Backend Changes
+
+- **`/fd/agent-usage/{host}/{port}`** — new proxy endpoint for fetching agent usage statistics, handles auth cookie from 302 redirects
+- **Auth handling** — proxy endpoints now follow redirects, capture cookies from 302 responses, and retry with cookies
+
+## New Stores (Zustand)
+
+| Store | Purpose |
+|---|---|
+| `pinnedStore` | Pinned messages with tags, notes |
+| `clipboardStore` | Shared clipboard entries with pin support |
+| `pipelineStore` | Pipeline chains with steps and prompt prefixes |
+| `notificationStore` | Notifications with types and read state |
+| `groupStore` | Agent groups with colors |
+| `themeStore` | Dark/light theme with `applyTheme()` |
+
+## New Components
+
+| Component | Description |
+|---|---|
+| `DirectorPanel` | Unified agent overview with broadcast and activity feed |
+| `OperationsPage` | Token usage analytics dashboard |
+| `PinnedMessages` | Pinned message viewer with tag filtering |
+| `SharedClipboard` | Cross-agent clipboard panel |
+| `PipelineBuilder` | Visual pipeline creation (now in WorkflowPage) |
+| `NotificationCenter` | Bell dropdown with type filtering |
+| `KeyboardShortcuts` | Shortcuts hook + overlay modal |
+| `EmbeddedChat` | Inline chat on agent cards |
+| `FileViewer` | Syntax-highlighted file viewer |
+
+## Stats
+
+- **~5,900 lines added** across 42 files
+- 11 new components, 6 new stores
+- 1 new backend endpoint

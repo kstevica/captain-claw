@@ -3608,12 +3608,23 @@ Flight Deck serves both the React frontend and the FastAPI backend from a single
 |---|---|
 | Docker container management | Spawn, stop, restart, remove Captain Claw containers with full config (provider, model, tools, platforms) |
 | Local agent management | Register any CC instance by host:port, probe status, connect for chat |
-| Multi-agent chat | WebSocket-based chat with multiple agents simultaneously via tabbed interface |
-| File browser & transfer | Browse agent files, select files, and send them to another agent |
-| Context transfer | Forward conversation history (last N messages) + a task prompt to another agent |
+| Multi-agent chat | WebSocket-based chat with multiple agents simultaneously via tabbed interface, resizable panel (320–900px) |
+| File browser & transfer | Browse agent files with file viewer (syntax highlighting, image preview), select files, and send them to another agent |
+| Context transfer | Forward full conversation history (no truncation) + a task prompt to another agent |
 | Container logs | View and stream Docker container logs |
 | Agent status | Real-time busy/idle indicators on agent cards with status text |
 | Markdown chat | Full GFM markdown rendering (tables, code, lists) in chat messages |
+| Director panel | Unified agent overview with status, activity feed, broadcast to all agents, filter/sort, quick actions (stop all, restart all) |
+| Operations dashboard | Per-agent token usage, cost estimates, model breakdown, latency stats, cache hit rates — filterable by time period |
+| Agent pipelines | Chain agents together — output from one automatically flows to the next with context about the pipeline and source agent |
+| Pinned messages | Pin important chat messages with tags for quick reference |
+| Shared clipboard | Cross-agent clipboard for sharing text snippets between agents |
+| Notification center | Bell icon with unread count, type filters (info/success/warning/error), agent connect/disconnect and pipeline events |
+| Keyboard shortcuts | Cmd/Ctrl+1–4 for views, Cmd+D director, Cmd+J chat, Cmd+K shortcuts overlay, Cmd+[ ] switch chat tabs |
+| Dark/light theme | Full theme support with toggle in top bar, light mode overrides for all zinc palette and markdown styles |
+| Free-form layout | Drag agent cards freely on the desktop, positions persisted to localStorage |
+| Embedded chat | Collapsible chat panel directly on agent cards |
+| Resizable panels | Director (220–500px), chat (320–900px), and tool panels (280–500px) are all resizable with drag handles |
 
 ### Agent Types
 
@@ -3634,6 +3645,20 @@ The Spawn Agent page lets you configure:
 
 Spawned containers are managed under `fd-data/<agent-slug>/` with isolated config, workspace, sessions, and skills directories.
 
+### Agent Desktop
+
+The Agent Desktop combines Docker and local agents into a unified view with two layout modes:
+
+- **Grid layout** — traditional card grid
+- **Free-form layout** — drag agent cards anywhere on the canvas, positions saved to localStorage
+
+Agent cards show status, description (editable), model/persona info, and quick action buttons. Each card has:
+
+- **Embedded chat** — collapsible chat panel directly on the card
+- **Chat button** — opens the full chat panel on the right
+- **Files button** — opens the file browser
+- **Remove button** — with confirmation dialog (Docker containers are also removed)
+
 ### Chat
 
 Click **Chat** on any online agent card to open a WebSocket chat session. The chat panel supports:
@@ -3643,16 +3668,82 @@ Click **Chat** on any online agent card to open a WebSocket chat session. The ch
 - Tool call visibility (expandable, last 3 per turn)
 - Stop button for cancelling running tasks
 - Auto-scroll and status indicators
+- **Pin messages** — save important messages with tags for later reference
+- **Copy to clipboard** — share snippets to the shared clipboard
+- **File attachments** — attach files and clipboard content to messages
+- **Resizable width** — drag the left edge to resize (320–900px, persisted)
 
 Chat connections are proxied through the Flight Deck backend to avoid browser CORS restrictions.
 
-### File Transfer
+### Director Panel
 
-Click **Files** on an agent card to browse its workspace files. Select files and click a destination agent button to transfer:
+The Director panel (Cmd+D to toggle) provides a unified overview of all agents:
 
-1. Flight Deck downloads the file from the source agent via `GET /api/files/download`
-2. Uploads it to the destination agent via `POST /api/file/upload`
-3. Shows per-file transfer status and a completion summary
+- **Agents tab** — all agents listed with status, current activity, last interaction time. Filter by status, sort by name/status/activity/type. Expandable rows show description, host, created time, and recent message previews.
+- **Activity Feed tab** — real-time feed of agent events
+- **Broadcast** — send a message to all running agents simultaneously
+- **Quick actions** — Stop All, Restart All
+- **Resizable** — drag the right edge (220–500px, persisted)
+
+### Operations Dashboard
+
+A dedicated view (Cmd+2) for monitoring agent usage and costs:
+
+- **Summary cards** — total tokens, estimated cost, API calls, average latency, data transferred, cache hit rate
+- **Token distribution** — visual bar showing input/output/cache breakdown
+- **Per-agent usage table** — sortable by tokens, cost, calls, latency
+- **Model breakdown table** — usage grouped by LLM model
+- **Agent health grid** — status cards for all agents
+- **Period filter** — last hour, today, yesterday, this week, this month, all time
+
+Cost estimates use published pricing for Claude, GPT, and Gemini models.
+
+### Agent Pipelines
+
+Pipelines chain agents together so output from one automatically flows to the next. Located in the Workflows view (Cmd+3):
+
+- **Visual pipeline builder** — create named pipelines with step-by-step agent chains
+- **Step editor** — add agents, set optional prompt prefixes per step, reorder steps
+- **Enable/disable** — toggle pipelines on/off without deleting
+- **Contextual forwarding** — forwarded messages include pipeline name, source agent name, and instructions to process based on the receiving agent's playbooks, instructions, and persona
+- **Auto-trigger** — when an agent in step N responds, step N+1 receives the output automatically
+
+### Pinned Messages
+
+Pin important chat messages for quick reference:
+
+- **Pin from chat** — hover any message and click the pin icon
+- **Tag system** — add tags to pins for filtering
+- **Filter** — by tag, agent name, or content
+- **Copy** — copy pin content to clipboard
+- **Expand/collapse** — long messages shown as previews with expand toggle
+
+### Shared Clipboard
+
+Cross-agent clipboard for sharing text snippets:
+
+- **Add entries** — manual entry or copy from chat messages
+- **Pin entries** — mark important clipboard items
+- **Send to agent** — forward clipboard content to any online agent
+- **Edit** — modify clipboard entries inline
+
+### Notification Center
+
+Bell icon in the top bar with notification management:
+
+- **Unread badge** — count of unread notifications
+- **Type filters** — info, success, warning, error
+- **Auto-notifications** — agent connect/disconnect, pipeline forwarding events
+- **Mark read / clear** — individual or bulk actions
+
+### File Browser & Transfer
+
+Click **Files** on an agent card to browse its workspace files. The file browser includes:
+
+- **File viewer** — click any file to view with syntax highlighting, image preview, or text rendering
+- **Multi-select** — checkbox selection with select-all support
+- **Agent-to-agent transfer** — select files and choose a destination agent
+- **Transfer status** — per-file progress and completion summary
 
 ### Context Transfer
 
@@ -3663,7 +3754,26 @@ Click the forward arrow (↗) in the chat panel tab bar to send conversation con
 3. **Task** — Write what the receiving agent should do with the context
 4. **Destination** — Choose which agent receives the context + task
 
-The context is formatted as a single message with the conversation history and task appended.
+Full message content is forwarded without truncation.
+
+### Keyboard Shortcuts
+
+| Shortcut | Action |
+|---|---|
+| Cmd/Ctrl+1 | Agent Desktop |
+| Cmd/Ctrl+2 | Operations |
+| Cmd/Ctrl+3 | Workflows |
+| Cmd/Ctrl+4 | Spawn Agent |
+| Cmd/Ctrl+D | Toggle Director |
+| Cmd/Ctrl+J | Toggle Chat Panel |
+| Cmd/Ctrl+K | Toggle Shortcuts Help |
+| Cmd/Ctrl+[ | Previous Chat Tab |
+| Cmd/Ctrl+] | Next Chat Tab |
+| Escape | Close Modals / Panels |
+
+### Theme
+
+Toggle between dark and light theme using the sun/moon button in the top bar. Theme preference is persisted to localStorage. Light mode includes full overrides for the zinc color palette, scrollbars, and markdown rendering.
 
 ### Development Mode
 
