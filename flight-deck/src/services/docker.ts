@@ -39,6 +39,7 @@ export interface ContainerActionResult {
   ok: boolean
   container_id: string
   message: string
+  old_container_id?: string
 }
 
 export interface SpawnConfig {
@@ -95,6 +96,12 @@ export const startContainer = (id: string) =>
 
 export const restartContainer = (id: string) =>
   fdFetch<ContainerActionResult>(`/containers/${id}/restart`, { method: 'POST' })
+
+export const rebuildContainer = (id: string, description?: string) =>
+  fdFetch<ContainerActionResult>(`/containers/${id}/rebuild`, {
+    method: 'POST',
+    body: JSON.stringify({ description: description || '' }),
+  })
 
 export const removeContainer = (id: string, force = false) =>
   fdFetch<ContainerActionResult>(`/containers/${id}?force=${force}`, { method: 'DELETE' })

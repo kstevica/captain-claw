@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { ContainerInfo } from '../services/docker'
 import * as dockerApi from '../services/docker'
+import { usePipelineStore } from './pipelineStore'
 
 const DESC_OVERRIDES_KEY = 'fd:container-descriptions'
 
@@ -24,6 +25,7 @@ interface ContainerStore {
   startContainer: (id: string) => Promise<void>
   restartContainer: (id: string) => Promise<void>
   removeContainer: (id: string) => Promise<void>
+  rebuildContainer: (id: string) => Promise<void>
   checkHealth: () => Promise<void>
   setDescription: (id: string, description: string) => void
 }
@@ -70,6 +72,49 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
   removeContainer: async (id) => {
     await dockerApi.removeContainer(id, true)
     if (get().selectedContainerId === id) set({ selectedContainerId: null })
+    get().fetchContainers()
+  },
+
+  rebuildContainer: async (id) => {
+    // Send current description to preserve it
+    const desc = get().descriptionOverrides[id] || get().containers.find(c => c.id === id)?.description || ''
+    const result = await dockerApi.rebuildContainer(id, desc)
+
+    // Migrate description override from old ID to new ID
+    if (result.old_container_id && result.container_id !== result.old_container_id) {
+      const oldId = result.old_container_id
+      const newId = result.container_id
+      const overrides = { ...get().descriptionOverrides }
+      if (overrides[oldId]) {
+        overrides[newId] = overrides[oldId]
+        delete overrides[oldId]
+        saveDescOverrides(overrides)
+        set({ descriptionOverrides: overrides })
+      }
+
+      // Migrate pipeline step references from old ID to new ID
+      const pipelineStore = usePipelineStore.getState()
+      for (const pipeline of pipelineStore.pipelines) {
+        const hasOldRef = pipeline.steps.some(s => s.agentId === oldId)
+        if (hasOldRef) {
+          const newSteps = pipeline.steps.map(s =>
+            s.agentId === oldId ? { ...s, agentId: newId } : s
+          )
+          pipelineStore.updatePipeline(pipeline.id, { steps: newSteps })
+        }
+      }
+
+      // Migrate agent card positions
+      try {
+        const posData = JSON.parse(localStorage.getItem('fd:agent-positions') || '{}')
+        if (posData[oldId]) {
+          posData[newId] = posData[oldId]
+          delete posData[oldId]
+          localStorage.setItem('fd:agent-positions', JSON.stringify(posData))
+        }
+      } catch { /* ignore */ }
+    }
+
     get().fetchContainers()
   },
 

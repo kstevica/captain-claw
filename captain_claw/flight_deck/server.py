@@ -123,6 +123,7 @@ class ContainerActionResult(BaseModel):
     ok: bool
     container_id: str
     message: str = ""
+    old_container_id: str = ""
 
 
 # ── Helpers ──
@@ -441,6 +442,122 @@ def remove_container(container_id: str, force: bool = False):
     name = c.name
     c.remove(force=force)
     return ContainerActionResult(ok=True, container_id=container_id, message=f"Removed '{name}'")
+
+
+class RebuildRequest(BaseModel):
+    description: str = ""  # Frontend sends current description override
+
+
+@app.post("/fd/containers/{container_id}/rebuild", response_model=ContainerActionResult)
+def rebuild_container(container_id: str, req: RebuildRequest | None = None):
+    """Rebuild a container: stop, remove, pull latest image, re-spawn with same config."""
+    import platform
+
+    c = _find_container(container_id)
+    old_short_id = c.short_id
+    labels = c.labels or {}
+
+    # If frontend sent a description override, update the label
+    if req and req.description:
+        labels["flight-deck.description"] = req.description
+
+    # Read the original spawn config from labels + container inspection
+    agent_name = labels.get("flight-deck.agent-name", c.name)
+    slug = _slug(agent_name)
+    image = labels.get("flight-deck.image", CC_IMAGE_DEFAULT)
+    web_port_str = labels.get("flight-deck.web-port", "")
+    web_port = int(web_port_str) if web_port_str else None
+    web_auth = labels.get("flight-deck.web-auth", "")
+    description = labels.get("flight-deck.description", "")
+
+    # Read environment from the running container
+    env_list = c.attrs.get("Config", {}).get("Env", [])
+    environment: dict[str, str] = {}
+    for e in env_list:
+        if "=" in e:
+            k, v = e.split("=", 1)
+            environment[k] = v
+
+    # Read mounts from container
+    mounts = c.attrs.get("Mounts", [])
+    volumes: dict[str, dict] = {}
+    for m in mounts:
+        src = m.get("Source", "")
+        dst = m.get("Destination", "")
+        mode = m.get("Mode", "rw")
+        if src and dst:
+            volumes[src] = {"bind": dst, "mode": mode}
+
+    # Read restart policy
+    host_config = c.attrs.get("HostConfig", {})
+    restart_policy = host_config.get("RestartPolicy", {"Name": "unless-stopped"})
+
+    # Read security opts, cap_drop, cap_add
+    security_opt = host_config.get("SecurityOpt", ["no-new-privileges:true", "seccomp:unconfined"])
+    cap_drop = host_config.get("CapDrop", ["ALL"])
+    cap_add = host_config.get("CapAdd", ["CHOWN", "SETUID", "SETGID", "SYS_CHROOT"])
+
+    # Read tmpfs
+    tmpfs = host_config.get("Tmpfs", {"/tmp": "", "/run": ""})
+
+    # Read network mode
+    network_mode = host_config.get("NetworkMode", "host")
+
+    # Read hostname
+    hostname = c.attrs.get("Config", {}).get("Hostname", slug)
+
+    # Port publishing
+    ports: dict[str, int] = {}
+    network_mode_use: str | None = network_mode
+    if platform.system() == "Darwin" and network_mode == "host":
+        network_mode_use = None
+        if web_port:
+            ports[f"{web_port}/tcp"] = web_port
+    elif network_mode != "host":
+        if web_port:
+            ports[f"{web_port}/tcp"] = web_port
+
+    # Stop and remove old container
+    if c.status == "running":
+        c.stop(timeout=5)
+    c.remove(force=True)
+
+    # Pull latest image
+    client = get_docker()
+    try:
+        client.images.pull(image)
+    except docker.errors.APIError:
+        pass  # If pull fails, use whatever's cached locally
+
+    # Re-create with same config
+    try:
+        new_container = client.containers.run(
+            image=image,
+            name=slug,
+            hostname=hostname,
+            detach=True,
+            network_mode=network_mode_use,
+            ports=ports or None,
+            volumes=volumes,
+            environment=environment,
+            labels=labels,
+            security_opt=security_opt,
+            cap_drop=cap_drop,
+            cap_add=cap_add,
+            tmpfs=tmpfs,
+            restart_policy=restart_policy,
+            stop_signal="SIGTERM",
+        )
+        return ContainerActionResult(
+            ok=True,
+            container_id=new_container.short_id,
+            old_container_id=old_short_id,
+            message=f"Agent '{agent_name}' rebuilt with latest image",
+        )
+    except docker.errors.ImageNotFound:
+        raise HTTPException(404, f"Docker image '{image}' not found.")
+    except docker.errors.APIError as exc:
+        raise HTTPException(500, f"Docker error: {exc.explanation or str(exc)}")
 
 
 @app.get("/fd/containers/{container_id}/logs")

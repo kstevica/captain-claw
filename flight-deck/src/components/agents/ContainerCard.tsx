@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, ExternalLink, Loader2, FolderOpen, Pencil, Check, X } from 'lucide-react'
+import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, ExternalLink, Loader2, FolderOpen, Pencil, Check, X, RefreshCw } from 'lucide-react'
 import type { ContainerInfo } from '../../services/docker'
 import { getContainerLogs } from '../../services/docker'
 import { useContainerStore } from '../../stores/containerStore'
@@ -16,7 +16,7 @@ const statusColors: Record<string, string> = {
 }
 
 export function ContainerCard({ container, onBrowseFiles }: { container: ContainerInfo; onBrowseFiles?: () => void }) {
-  const { stopContainer, startContainer, restartContainer, removeContainer, setDescription } = useContainerStore()
+  const { stopContainer, startContainer, restartContainer, removeContainer, rebuildContainer, setDescription } = useContainerStore()
   const openChat = useChatStore((s) => s.openChat)
   const session = useChatStore((s) => s.sessions.get(container.id))
   const busy = session?.busy ?? false
@@ -222,6 +222,11 @@ export function ContainerCard({ container, onBrowseFiles }: { container: Contain
           )}
           <ActionBtn icon={ScrollText} label={showLogs ? 'Hide Logs' : 'Logs'} loading={logsLoading}
             onClick={toggleLogs} />
+          <ActionBtn icon={RefreshCw} label="Rebuild" loading={actionLoading === 'rebuild'}
+            onClick={() => {
+              if (confirm(`This will stop and remove the current container '${container.name}', pull the latest image, and create a new container with the same configuration.\n\nAgent data (workspace, sessions, skills) will be preserved.\n\nContinue?`))
+                doAction('rebuild', () => rebuildContainer(container.id))
+            }} />
           <div className="flex-1" />
           <ActionBtn icon={Trash2} label="Remove" loading={actionLoading === 'remove'} danger
             onClick={() => {
