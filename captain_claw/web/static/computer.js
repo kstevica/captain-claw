@@ -36,6 +36,24 @@ let selectedPersona = localStorage.getItem("computer-persona") || "";
 let availablePlaybooks = [];
 let selectedPlaybookId = localStorage.getItem("computer-playbook") || ""; // '' = auto, '__none__' = disabled
 
+// Session settings (persisted in session metadata).
+let _sessionSettings = { name: "", description: "", instructions: "" };
+let _publicCode = "";
+
+function _updateSessionBadge(displayName, fallback) {
+  const name = (displayName || "").trim();
+  const code = _publicCode;
+  if (name && code) {
+    $("#session-badge").textContent = name + " (" + code + ")";
+  } else if (name) {
+    $("#session-badge").textContent = name;
+  } else if (code) {
+    $("#session-badge").textContent = code;
+  } else if (fallback) {
+    $("#session-badge").textContent = fallback;
+  }
+}
+
 // BYOK (Bring Your Own Key) state.
 let isPublicSession = false;
 let byokProvider = localStorage.getItem("computer-byok-provider") || "";
@@ -1260,18 +1278,40 @@ function handleMessage(data) {
     case "byok_status":
       handleByokStatus(data);
       break;
+
+    case "session_settings_saved":
+      // Update local state after server confirms save.
+      _sessionSettings.name = data.session_name || "";
+      _sessionSettings.description = data.session_description || "";
+      _sessionSettings.instructions = data.session_instructions || "";
+      _updateSessionBadge(_sessionSettings.name);
+      logEntry("system", "Session settings saved");
+      break;
   }
 }
 
 function handleWelcome(data) {
   // Session info is nested under data.session (from ws_handler).
   const sess = data.session || {};
-  if (sess.name || data.session_name) {
-    $("#session-badge").textContent = sess.name || data.session_name;
-  }
+  _publicCode = data.public_code || "";
+  const _ssName = (data.session_settings && data.session_settings.session_name) || "";
+  _updateSessionBadge(_ssName, sess.name || data.session_name || "");
   // Capture session id for exploration persistence and file scoping.
   sessionId = sess.id || data.session_id || data.id || null;
   logEntry("system", `Session ready${sessionId ? ' (' + sessionId.slice(0, 8) + '\u2026)' : ''}`);
+
+  // Restore session settings from welcome payload.
+  if (data.session_settings) {
+    _sessionSettings.name = data.session_settings.session_name || "";
+    _sessionSettings.description = data.session_settings.session_description || "";
+    _sessionSettings.instructions = data.session_settings.session_instructions || "";
+    _sessionSettings.locked = !!data.session_settings.locked;
+  }
+  // Hide session settings button when locked for public users.
+  const _ssBtn = $("#session-settings-btn");
+  if (_ssBtn) {
+    _ssBtn.style.display = (_sessionSettings.locked && data.is_public) ? "none" : "";
+  }
 
   // BYOK: detect public mode and show/hide BYOK button.
   isPublicSession = !!data.is_public;
@@ -4675,6 +4715,51 @@ function initClearSession() {
   });
 }
 
+/* ── Session settings modal ─────────────────────────────────── */
+
+function initSessionSettings() {
+  const btn = $("#session-settings-btn");
+  const modal = $("#session-settings-modal");
+  if (!btn || !modal) return;
+
+  const backdrop = modal.querySelector(".modal-backdrop");
+  const closeBtn = modal.querySelector(".modal-close");
+  const cancelBtn = $("#ss-cancel");
+  const saveBtn = $("#ss-save");
+  const nameInput = $("#ss-name");
+  const descInput = $("#ss-description");
+  const instInput = $("#ss-instructions");
+
+  function openModal() {
+    // Populate fields from current state.
+    nameInput.value = _sessionSettings.name;
+    descInput.value = _sessionSettings.description;
+    instInput.value = _sessionSettings.instructions;
+    modal.classList.add("active");
+  }
+
+  function closeModal() {
+    modal.classList.remove("active");
+  }
+
+  function saveSettings() {
+    const payload = {
+      type: "session_settings",
+      session_name: nameInput.value.trim(),
+      session_description: descInput.value.trim(),
+      session_instructions: instInput.value.trim(),
+    };
+    send(payload);
+    closeModal();
+  }
+
+  btn.addEventListener("click", openModal);
+  if (backdrop) backdrop.addEventListener("click", closeModal);
+  if (closeBtn) closeBtn.addEventListener("click", closeModal);
+  if (cancelBtn) cancelBtn.addEventListener("click", closeModal);
+  if (saveBtn) saveBtn.addEventListener("click", saveSettings);
+}
+
 function showConfirmDialog(message, onYes) {
   const overlay = document.createElement("div");
   overlay.className = "confirm-overlay";
@@ -6381,6 +6466,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   initResize();
   initClearLog();
   initClearSession();
+  initSessionSettings();
   initSpinner();
   initFullscreen();
   initStreamPanel();

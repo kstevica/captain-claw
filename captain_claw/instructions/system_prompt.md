@@ -1,5 +1,6 @@
 {personality_block}
 {user_context_block}
+{session_context_block}
 {visualization_style_block}
 {reflection_block}
 {cognitive_self_awareness_block}

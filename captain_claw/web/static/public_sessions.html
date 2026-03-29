@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Public Sessions — Admin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Silkscreen:wght@400;700&display=swap">
+  <link rel="icon" href="/static/favicon.svg">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Share Tech Mono', monospace;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      padding: 20px;
+    }
+    h1 {
+      font-family: 'Silkscreen', monospace;
+      font-size: 18px;
+      color: #7af;
+      margin-bottom: 16px;
+    }
+    .toolbar {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .btn {
+      padding: 8px 16px;
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 13px;
+      border: 1px solid #7af;
+      background: #335;
+      color: #fff;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all .15s;
+    }
+    .btn:hover { background: #447; }
+    .btn-green { border-color: #5b5; background: #253; }
+    .btn-green:hover { background: #364; }
+    .btn-red { border-color: #e55; background: #422; }
+    .btn-red:hover { background: #533; }
+    .btn-small { padding: 4px 10px; font-size: 11px; }
+    .stats {
+      font-size: 12px;
+      color: #888;
+      margin-left: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    th {
+      font-family: 'Silkscreen', monospace;
+      font-size: 10px;
+      color: #888;
+      text-align: left;
+      padding: 8px 10px;
+      border-bottom: 1px solid #333;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      white-space: nowrap;
+    }
+    td {
+      padding: 8px 10px;
+      border-bottom: 1px solid #282840;
+      vertical-align: top;
+    }
+    tr:hover td { background: rgba(119,170,255,.05); }
+    .code {
+      font-size: 14px;
+      font-weight: bold;
+      color: #5b5;
+      letter-spacing: 2px;
+      user-select: all;
+    }
+    .name { color: #7af; font-weight: bold; }
+    .desc { color: #999; font-size: 11px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .instr { color: #a9a; font-size: 11px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lock-badge {
+      display: inline-block;
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 3px;
+      border: 1px solid;
+    }
+    .lock-badge.locked { color: #5b5; border-color: #5b5; }
+    .lock-badge.unlocked { color: #e55; border-color: #e55; }
+    .msgs { color: #eb5; }
+    .ts { color: #888; font-size: 11px; white-space: nowrap; }
+    .actions { white-space: nowrap; display: flex; gap: 4px; }
+    .empty { text-align: center; color: #666; padding: 40px; }
+
+    /* ── Modal ── */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.6);
+      z-index: 9000;
+      justify-content: center;
+      align-items: center;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal-box {
+      background: #222;
+      border: 2px solid #555;
+      border-radius: 4px;
+      padding: 20px;
+      width: 460px;
+      max-width: 90vw;
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+    .modal-box h2 {
+      font-family: 'Silkscreen', monospace;
+      font-size: 14px;
+      color: #7af;
+      margin-bottom: 14px;
+    }
+    .modal-box label {
+      display: block;
+      font-size: 10px;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 4px;
+      margin-top: 10px;
+    }
+    .modal-box label:first-of-type { margin-top: 0; }
+    .modal-box input[type="text"],
+    .modal-box textarea {
+      width: 100%;
+      padding: 8px 10px;
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 13px;
+      background: #111;
+      border: 1px solid #444;
+      color: #e0e0e0;
+      border-radius: 3px;
+      outline: none;
+    }
+    .modal-box input:focus, .modal-box textarea:focus {
+      border-color: #7af;
+    }
+    .modal-box textarea { resize: vertical; min-height: 40px; }
+    .modal-box .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+      font-size: 13px;
+    }
+    .modal-box .checkbox-row input[type="checkbox"] {
+      width: 16px; height: 16px; accent-color: #7af;
+    }
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    /* ── Bulk modal ── */
+    .modal-box .bulk-hint {
+      font-size: 11px;
+      color: #888;
+      margin-bottom: 10px;
+      line-height: 1.5;
+    }
+    .bulk-results {
+      margin-top: 12px;
+      max-height: 200px;
+      overflow-y: auto;
+      font-size: 12px;
+    }
+    .bulk-results .row {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      border-bottom: 1px solid #282840;
+    }
+    .bulk-results .row .code { font-size: 12px; }
+  </style>
+</head>
+<body>
+
+<h1>Public Sessions Admin</h1>
+
+<div class="toolbar">
+  <button class="btn btn-green" onclick="openCreateModal()">+ New Session</button>
+  <button class="btn" onclick="openBulkModal()">Bulk Create</button>
+  <button class="btn" onclick="loadSessions()">Refresh</button>
+  <a href="/computer" class="btn" style="text-decoration:none">← Computer (Admin)</a>
+  <button class="btn btn-red" onclick="exitAdmin()">Exit Admin → Public Landing</button>
+  <span class="stats" id="stats"></span>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Code</th>
+      <th>Name</th>
+      <th>Description</th>
+      <th>Instructions</th>
+      <th>Lock</th>
+      <th>Messages</th>
+      <th>Last Active</th>
+      <th>Created</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody id="tbody"></tbody>
+</table>
+
+<div class="empty" id="empty" style="display:none">No public sessions found.</div>
+
+<!-- ── Create / Edit modal ── -->
+<div class="modal-overlay" id="edit-modal">
+  <div class="modal-box">
+    <h2 id="modal-title">New Session</h2>
+    <input type="hidden" id="m-id">
+    <label>Session Name</label>
+    <input type="text" id="m-name" placeholder="e.g. Team Alpha Workspace">
+    <label>Description</label>
+    <textarea id="m-desc" rows="2" placeholder="What is this session for?"></textarea>
+    <label>Instructions</label>
+    <textarea id="m-instr" rows="4" placeholder="Custom instructions for every response..."></textarea>
+    <div class="checkbox-row">
+      <input type="checkbox" id="m-locked" checked>
+      <span>Lock settings (users cannot change name/description/instructions)</span>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeEditModal()">Cancel</button>
+      <button class="btn btn-green" id="m-save-btn" onclick="saveSession()">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Bulk create modal ── -->
+<div class="modal-overlay" id="bulk-modal">
+  <div class="modal-box">
+    <h2>Bulk Create Sessions</h2>
+    <div class="bulk-hint">
+      Paste JSON array. Each item: <code>{"session_name", "session_description", "session_instructions"}</code>.<br>
+      All will be created with settings locked. Or enter a count to create identical sessions.
+    </div>
+    <label>Count (identical sessions)</label>
+    <input type="text" id="b-count" placeholder="e.g. 75">
+    <label>Shared Name Prefix</label>
+    <input type="text" id="b-prefix" placeholder="e.g. Workshop">
+    <label>Shared Instructions</label>
+    <textarea id="b-instr" rows="3" placeholder="Instructions applied to all sessions..."></textarea>
+    <label>— OR paste JSON array —</label>
+    <textarea id="b-json" rows="4" placeholder='[{"session_name":"Team 1","session_instructions":"..."},...]'></textarea>
+    <div class="bulk-results" id="b-results" style="display:none"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeBulkModal()">Close</button>
+      <button class="btn btn-green" id="b-go-btn" onclick="doBulkCreate()">Create</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '/api/public/admin/sessions';
+let sessions = [];
+
+async function loadSessions() {
+  try {
+    const r = await fetch(API, { credentials: 'same-origin' });
+    if (r.status === 403) {
+      document.getElementById('empty').textContent = 'Admin access required.';
+      document.getElementById('empty').style.display = 'block';
+      return;
+    }
+    sessions = await r.json();
+    render();
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function fmtTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  const now = new Date();
+  const diff = now - d;
+  if (diff < 60000) return 'just now';
+  if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
+  if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
+  if (diff < 604800000) return Math.floor(diff / 86400000) + 'd ago';
+  return d.toLocaleDateString();
+}
+
+function esc(s) {
+  const el = document.createElement('span');
+  el.textContent = s;
+  return el.innerHTML;
+}
+
+function render() {
+  const tbody = document.getElementById('tbody');
+  const empty = document.getElementById('empty');
+  const stats = document.getElementById('stats');
+
+  if (!sessions.length) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    stats.textContent = '';
+    return;
+  }
+  empty.style.display = 'none';
+  const totalMsgs = sessions.reduce((a, s) => a + s.message_count, 0);
+  const active = sessions.filter(s => s.message_count > 0).length;
+  stats.textContent = `${sessions.length} sessions · ${active} active · ${totalMsgs} total messages`;
+
+  tbody.innerHTML = sessions.map(s => `
+    <tr>
+      <td><span class="code">${esc(s.code)}</span></td>
+      <td><span class="name">${esc(s.session_name || '—')}</span></td>
+      <td><span class="desc" title="${esc(s.session_description)}">${esc(s.session_description || '—')}</span></td>
+      <td><span class="instr" title="${esc(s.session_instructions)}">${esc(s.session_instructions || '—')}</span></td>
+      <td><span class="lock-badge ${s.locked ? 'locked' : 'unlocked'}">${s.locked ? 'Locked' : 'Open'}</span></td>
+      <td><span class="msgs">${s.user_messages}↑ ${s.assistant_messages}↓</span></td>
+      <td><span class="ts">${fmtTime(s.last_active)}</span></td>
+      <td><span class="ts">${fmtTime(s.created_at)}</span></td>
+      <td class="actions">
+        <button class="btn btn-small" onclick="openEditModal('${s.id}')">Edit</button>
+        <button class="btn btn-small" onclick="toggleLock('${s.id}', ${!s.locked})">${s.locked ? 'Unlock' : 'Lock'}</button>
+        <button class="btn btn-small btn-red" onclick="deleteSession('${s.id}', '${esc(s.code)}')">Del</button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+// ── Create / Edit ──
+
+function openCreateModal() {
+  document.getElementById('modal-title').textContent = 'New Session';
+  document.getElementById('m-id').value = '';
+  document.getElementById('m-name').value = '';
+  document.getElementById('m-desc').value = '';
+  document.getElementById('m-instr').value = '';
+  document.getElementById('m-locked').checked = true;
+  document.getElementById('m-save-btn').textContent = 'Create';
+  document.getElementById('edit-modal').classList.add('active');
+}
+
+function openEditModal(id) {
+  const s = sessions.find(x => x.id === id);
+  if (!s) return;
+  document.getElementById('modal-title').textContent = 'Edit Session — ' + s.code;
+  document.getElementById('m-id').value = s.id;
+  document.getElementById('m-name').value = s.session_name || '';
+  document.getElementById('m-desc').value = s.session_description || '';
+  document.getElementById('m-instr').value = s.session_instructions || '';
+  document.getElementById('m-locked').checked = s.locked;
+  document.getElementById('m-save-btn').textContent = 'Save';
+  document.getElementById('edit-modal').classList.add('active');
+}
+
+function closeEditModal() {
+  document.getElementById('edit-modal').classList.remove('active');
+}
+
+async function saveSession() {
+  const id = document.getElementById('m-id').value;
+  const body = {
+    session_name: document.getElementById('m-name').value.trim(),
+    session_description: document.getElementById('m-desc').value.trim(),
+    session_instructions: document.getElementById('m-instr').value.trim(),
+    locked: document.getElementById('m-locked').checked,
+  };
+  try {
+    if (id) {
+      await fetch(API + '/' + id, { method: 'PATCH', headers: {'Content-Type':'application/json'}, credentials: 'same-origin', body: JSON.stringify(body) });
+    } else {
+      await fetch(API, { method: 'POST', headers: {'Content-Type':'application/json'}, credentials: 'same-origin', body: JSON.stringify(body) });
+    }
+    closeEditModal();
+    await loadSessions();
+  } catch (e) { alert('Error: ' + e); }
+}
+
+async function toggleLock(id, locked) {
+  await fetch(API + '/' + id, { method: 'PATCH', headers: {'Content-Type':'application/json'}, credentials: 'same-origin', body: JSON.stringify({ locked }) });
+  await loadSessions();
+}
+
+async function deleteSession(id, code) {
+  if (!confirm('Delete session ' + code + '? This cannot be undone.')) return;
+  await fetch(API + '/' + id, { method: 'DELETE', credentials: 'same-origin' });
+  await loadSessions();
+}
+
+// ── Bulk create ──
+
+function openBulkModal() {
+  document.getElementById('b-count').value = '';
+  document.getElementById('b-prefix').value = '';
+  document.getElementById('b-instr').value = '';
+  document.getElementById('b-json').value = '';
+  document.getElementById('b-results').style.display = 'none';
+  document.getElementById('b-results').innerHTML = '';
+  document.getElementById('b-go-btn').disabled = false;
+  document.getElementById('bulk-modal').classList.add('active');
+}
+
+function closeBulkModal() {
+  document.getElementById('bulk-modal').classList.remove('active');
+}
+
+async function doBulkCreate() {
+  const btn = document.getElementById('b-go-btn');
+  btn.disabled = true;
+  btn.textContent = 'Creating...';
+
+  let items = [];
+  const jsonVal = document.getElementById('b-json').value.trim();
+  if (jsonVal) {
+    try {
+      items = JSON.parse(jsonVal);
+      if (!Array.isArray(items)) throw new Error('Must be an array');
+    } catch (e) {
+      alert('Invalid JSON: ' + e.message);
+      btn.disabled = false;
+      btn.textContent = 'Create';
+      return;
+    }
+  } else {
+    const count = parseInt(document.getElementById('b-count').value) || 0;
+    if (count < 1 || count > 500) {
+      alert('Count must be between 1 and 500.');
+      btn.disabled = false;
+      btn.textContent = 'Create';
+      return;
+    }
+    const prefix = document.getElementById('b-prefix').value.trim();
+    const instr = document.getElementById('b-instr').value.trim();
+    for (let i = 1; i <= count; i++) {
+      items.push({
+        session_name: prefix ? prefix + ' ' + i : '',
+        session_instructions: instr,
+      });
+    }
+  }
+
+  try {
+    const r = await fetch(API + '/bulk', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      credentials: 'same-origin',
+      body: JSON.stringify({ sessions: items }),
+    });
+    const data = await r.json();
+    const results = document.getElementById('b-results');
+    results.style.display = 'block';
+    results.innerHTML = '<strong>' + (data.count || 0) + ' sessions created:</strong>' +
+      (data.created || []).map(s =>
+        '<div class="row"><span>' + esc(s.session_name || '(unnamed)') + '</span><span class="code">' + esc(s.code) + '</span></div>'
+      ).join('');
+    btn.textContent = 'Done';
+    await loadSessions();
+  } catch (e) {
+    alert('Error: ' + e);
+    btn.disabled = false;
+    btn.textContent = 'Create';
+  }
+}
+
+function exitAdmin() {
+  // Clear the admin cookie so we're back to public user mode.
+  document.cookie = 'claw_session=; path=/; max-age=0';
+  window.location.href = '/computer';
+}
+
+// Init
+loadSessions();
+</script>
+
+</body>
+</html>

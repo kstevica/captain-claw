@@ -21,6 +21,7 @@ import {
 import { useContainerStore } from '../../stores/containerStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useChatStore } from '../../stores/chatStore'
+import { GroupManager } from '../common/AgentGroups'
 
 // ── Types ──
 
@@ -265,7 +266,7 @@ export function DirectorPanel() {
     return items.slice(0, 30)
   }, [agents, chatSessions])
 
-  const [activeTab, setActiveTab] = useState<'agents' | 'activity'>('agents')
+  const [activeTab, setActiveTab] = useState<'agents' | 'activity' | 'groups'>('agents')
 
   return (
     <div className="flex h-full flex-col border-r border-zinc-800 bg-zinc-950/60">
@@ -406,7 +407,15 @@ export function DirectorPanel() {
             activeTab === 'activity' ? 'border-b-2 border-violet-500 text-violet-400' : 'text-zinc-500 hover:text-zinc-300'
           }`}
         >
-          Activity Feed
+          Activity
+        </button>
+        <button
+          onClick={() => setActiveTab('groups')}
+          className={`flex-1 py-1.5 text-[11px] font-medium transition-colors ${
+            activeTab === 'groups' ? 'border-b-2 border-violet-500 text-violet-400' : 'text-zinc-500 hover:text-zinc-300'
+          }`}
+        >
+          Groups
         </button>
       </div>
 
@@ -428,8 +437,12 @@ export function DirectorPanel() {
               />
             ))}
           </div>
-        ) : (
+        ) : activeTab === 'activity' ? (
           <ActivityFeed items={activityFeed} />
+        ) : (
+          <div className="p-3">
+            <GroupManager />
+          </div>
         )}
       </div>
     </div>

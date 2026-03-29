@@ -91,3 +91,25 @@ html.light .fd-markdown hr { border-top-color: #e4e4e7; }
 html.light .fd-markdown a { color: #7c3aed; }
 /* Chat panel top bar in light mode */
 html.light .bg-zinc-900\/60 { background-color: rgba(244,244,245,0.85) !important; }
+html.light .bg-zinc-900\/80 { background-color: rgba(244,244,245,0.9) !important; }
+/* Border opacity variants */
+html.light .border-zinc-800\/20 { border-color: rgba(212,212,216,0.25) !important; }
+html.light .border-zinc-800\/50 { border-color: rgba(212,212,216,0.5) !important; }
+html.light .border-zinc-700\/50 { border-color: rgba(212,212,216,0.5) !important; }
+/* Hover states */
+html.light .hover\:bg-zinc-900:hover { background-color: #f4f4f5 !important; }
+html.light .hover\:bg-zinc-900\/50:hover { background-color: rgba(244,244,245,0.7) !important; }
+html.light .hover\:bg-zinc-900\/20:hover { background-color: rgba(244,244,245,0.3) !important; }
+html.light .hover\:bg-zinc-800:hover { background-color: #e4e4e7 !important; }
+/* Modal backdrop — lighter in light mode */
+html.light .bg-black\/60 { background-color: rgba(0,0,0,0.3) !important; }
+/* Checkbox borders */
+html.light .border-zinc-600 { border-color: #a1a1aa !important; }
+/* Focus borders */
+html.light .focus\:border-violet-500\/50:focus { border-color: rgba(139,92,246,0.5) !important; }
+/* Dividers */
+html.light .divide-zinc-800\/60 > * + * { border-color: rgba(212,212,216,0.6) !important; }
+html.light .divide-zinc-800 > * + * { border-color: #d4d4d8 !important; }
+/* Active button backgrounds */
+html.light .bg-zinc-700 { background-color: #d4d4d8 !important; }
+html.light .bg-zinc-700\/30 { background-color: rgba(212,212,216,0.4) !important; }

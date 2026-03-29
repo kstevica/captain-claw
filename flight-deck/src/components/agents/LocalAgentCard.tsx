@@ -4,6 +4,7 @@ import type { LocalAgent } from '../../stores/localAgentStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useChatStore } from '../../stores/chatStore'
 import { EmbeddedChat } from './EmbeddedChat'
+import { AgentGroupBadges } from '../common/AgentGroups'
 
 const statusStyles: Record<string, string> = {
   online: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
@@ -106,6 +107,11 @@ export function LocalAgentCard({ agent, onBrowseFiles }: { agent: LocalAgent; on
             </button>
           </div>
         )}
+      </div>
+
+      {/* Group badges */}
+      <div className="mb-3">
+        <AgentGroupBadges agentId={agent.id} />
       </div>
 
       {/* Persona / Model override (visible when chat connected) */}

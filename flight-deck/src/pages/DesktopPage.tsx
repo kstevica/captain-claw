@@ -9,6 +9,8 @@ import { LocalAgentCard } from '../components/agents/LocalAgentCard'
 import { FileBrowser } from '../components/agents/FileBrowser'
 import { Radio, Plus, Server, LayoutGrid, Move } from 'lucide-react'
 import type { AgentEndpoint } from '../services/fileTransfer'
+import { useGroupStore } from '../stores/groupStore'
+import { GroupFilter } from '../components/common/AgentGroups'
 
 // ── Unified agent item ──
 
@@ -55,6 +57,8 @@ export function DesktopPage() {
   const [browsingAgent, setBrowsingAgent] = useState<AgentEndpoint | null>(null)
   const [positions, setPositions] = useState<Record<string, Position>>(loadPositions)
   const [layoutMode, setLayoutMode] = useState<'grid' | 'free'>(loadLayoutMode)
+  const [groupFilter, setGroupFilter] = useState<string | null>(null)
+  const groups = useGroupStore((s) => s.groups)
 
   // Drag state
   const [dragId, setDragId] = useState<string | null>(null)
@@ -79,11 +83,17 @@ export function DesktopPage() {
     return () => clearInterval(interval)
   }, [checkHealth, fetchContainers, probeAll])
 
-  // Build unified agent list
-  const unifiedAgents: UnifiedAgent[] = useMemo(() => [
-    ...containers.map((c) => ({ kind: 'docker' as const, id: c.id, data: c })),
-    ...localAgents.map((a) => ({ kind: 'local' as const, id: a.id, data: a })),
-  ], [containers, localAgents])
+  // Build unified agent list (with optional group filter)
+  const unifiedAgents: UnifiedAgent[] = useMemo(() => {
+    const all = [
+      ...containers.map((c) => ({ kind: 'docker' as const, id: c.id, data: c })),
+      ...localAgents.map((a) => ({ kind: 'local' as const, id: a.id, data: a })),
+    ]
+    if (!groupFilter) return all
+    const group = groups.find((g) => g.id === groupFilter)
+    if (!group) return all
+    return all.filter((a) => group.agentIds.includes(a.id))
+  }, [containers, localAgents, groupFilter, groups])
 
   // Assign initial positions for new agents
   useEffect(() => {
@@ -207,7 +217,8 @@ export function DesktopPage() {
             <h1 className="text-lg font-semibold">Agent Desktop</h1>
             <p className="text-sm text-zinc-500">Monitor and control your personal assistants</p>
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-2">
+            <GroupFilter selected={groupFilter} onChange={setGroupFilter} />
             {layoutMode === 'free' && (
               <button
                 onClick={resetPositions}
@@ -365,7 +376,7 @@ function AddAgentForm({ onAdd, onCancel }: {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [host, setHost] = useState('localhost')
-  const [port, setPort] = useState('24080')
+  const [port, setPort] = useState('23080')
   const [auth, setAuth] = useState('')
 
   const handleSubmit = (e: React.FormEvent) => {

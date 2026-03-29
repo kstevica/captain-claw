@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type { ContainerInfo } from '../services/docker'
 import * as dockerApi from '../services/docker'
 import { usePipelineStore } from './pipelineStore'
+import { useGroupStore } from './groupStore'
 
 const DESC_OVERRIDES_KEY = 'fd:container-descriptions'
 
@@ -101,6 +102,15 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
             s.agentId === oldId ? { ...s, agentId: newId } : s
           )
           pipelineStore.updatePipeline(pipeline.id, { steps: newSteps })
+        }
+      }
+
+      // Migrate group memberships from old ID to new ID
+      const groupStore = useGroupStore.getState()
+      for (const group of groupStore.groups) {
+        if (group.agentIds.includes(oldId)) {
+          groupStore.removeFromGroup(group.id, oldId)
+          groupStore.addToGroup(group.id, newId)
         }
       }
 

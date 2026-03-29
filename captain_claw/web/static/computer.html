@@ -56,6 +56,7 @@
         <button class="textsize-opt" data-size="laaaarger">Aa Laaaarger</button>
       </div>
       <button id="playbook-btn" title="Select playbook" data-label="Playbook">📋 <span id="playbook-btn-label">Auto</span></button>
+      <button id="session-settings-btn" title="Session settings" data-label="Session">📝 Session</button>
       <button id="clear-session-btn" title="Clear session" data-label="Session">🗑 Clear</button>
     </div>
   </header>
@@ -443,6 +444,31 @@
       <div class="window-body">
         <div class="model-grid" id="playbook-grid">
           <div class="model-loading">Loading playbooks...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Session settings modal ── -->
+  <div id="session-settings-modal">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content window" style="max-width:520px">
+      <div class="window-title">
+        <span class="window-title-text">Session Settings</span>
+        <div class="window-controls">
+          <button class="win-btn modal-close" title="Close">✕</button>
+        </div>
+      </div>
+      <div class="window-body" style="padding:12px;display:flex;flex-direction:column;gap:10px">
+        <label style="font-size:12px;font-weight:600">Session Name</label>
+        <input id="ss-name" type="text" placeholder="e.g. Marketing Q2 Analysis" style="width:100%;padding:6px 8px;font-family:inherit;font-size:13px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text);border-radius:4px;box-sizing:border-box">
+        <label style="font-size:12px;font-weight:600">Description</label>
+        <textarea id="ss-description" rows="2" placeholder="What is this session about?" style="width:100%;padding:6px 8px;font-family:inherit;font-size:13px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text);border-radius:4px;resize:vertical;box-sizing:border-box"></textarea>
+        <label style="font-size:12px;font-weight:600">Instructions</label>
+        <textarea id="ss-instructions" rows="5" placeholder="Custom instructions for every response in this session..." style="width:100%;padding:6px 8px;font-family:inherit;font-size:13px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text);border-radius:4px;resize:vertical;box-sizing:border-box"></textarea>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:4px">
+          <button id="ss-cancel" class="btn-secondary" style="padding:6px 16px;font-size:13px;cursor:pointer">Cancel</button>
+          <button id="ss-save" class="btn-primary" style="padding:6px 16px;font-size:13px;cursor:pointer">Save</button>
         </div>
       </div>
     </div>

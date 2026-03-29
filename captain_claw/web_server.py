@@ -1307,7 +1307,15 @@ class WebServer:
         from captain_claw.web.public_session import create_public_session, set_public_cookie
         from captain_claw.web.auth import _is_behind_tls
         session, code = await create_public_session(self)
-        resp = web.json_response({"ok": True, "session_id": session.id, "code": code})
+        meta = session.metadata or {}
+        resp = web.json_response({
+            "ok": True, "session_id": session.id, "code": code,
+            "session_settings": {
+                "session_name": meta.get("session_display_name", ""),
+                "session_description": meta.get("session_description", ""),
+                "session_instructions": meta.get("session_instructions", ""),
+            },
+        })
         set_public_cookie(resp, session.id, code, self.config.web.auth_token, secure=_is_behind_tls(request))
         return resp
 
@@ -1324,7 +1332,15 @@ class WebServer:
         session = await load_session_by_code(code)
         if session is None:
             return web.json_response({"error": "not_found", "message": "No session found for this code."}, status=404)
-        resp = web.json_response({"ok": True, "session_id": session.id})
+        meta = session.metadata or {}
+        resp = web.json_response({
+            "ok": True, "session_id": session.id,
+            "session_settings": {
+                "session_name": meta.get("session_display_name", ""),
+                "session_description": meta.get("session_description", ""),
+                "session_instructions": meta.get("session_instructions", ""),
+            },
+        })
         set_public_cookie(resp, session.id, code, self.config.web.auth_token, secure=_is_behind_tls(request))
         return resp
 
@@ -1342,11 +1358,83 @@ class WebServer:
         set_public_cookie(resp, session.id, code, self.config.web.auth_token, secure=_is_behind_tls(request))
         return resp
 
+    async def _public_session_settings(self, request: web.Request) -> web.Response:
+        """PATCH /api/public/session/settings — save session name/description/instructions."""
+        from captain_claw.web.public_session import read_public_cookie
+        from captain_claw.web.public_auth import _is_admin
+        from captain_claw.session import get_session_manager
+        is_admin = _is_admin(request, self.config.web)
+        identity = read_public_cookie(request, self.config.web.auth_token)
+        if identity is None and not is_admin:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        session_id = identity[0] if identity else None
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "bad_request"}, status=400)
+        # Admin can target any session by id.
+        if is_admin and "session_id" in body:
+            session_id = body["session_id"]
+        if not session_id:
+            return web.json_response({"error": "no_session"}, status=400)
+        sm = get_session_manager()
+        session = await sm.load_session(session_id)
+        if session is None:
+            return web.json_response({"error": "not_found"}, status=404)
+        # Enforce lock for non-admin users.
+        if not is_admin and (session.metadata or {}).get("session_settings_locked", False):
+            return web.json_response({"error": "locked", "message": "Session settings are locked."}, status=403)
+        if session.metadata is None:
+            session.metadata = {}
+        changed = False
+        if "session_name" in body and isinstance(body["session_name"], str):
+            session.metadata["session_display_name"] = body["session_name"].strip()
+            changed = True
+        if "session_description" in body and isinstance(body["session_description"], str):
+            session.metadata["session_description"] = body["session_description"].strip()
+            changed = True
+        if "session_instructions" in body and isinstance(body["session_instructions"], str):
+            session.metadata["session_instructions"] = body["session_instructions"].strip()
+            changed = True
+        # Admin-only: lock/unlock settings.
+        if is_admin and "locked" in body:
+            session.metadata["session_settings_locked"] = bool(body["locked"])
+            changed = True
+        if changed:
+            await sm.save_session(session)
+        return web.json_response({"ok": True})
+
     async def _public_session_logout(self, request: web.Request) -> web.Response:
         from captain_claw.web.public_session import COOKIE_NAME
         resp = web.json_response({"ok": True})
         resp.del_cookie(COOKIE_NAME, path="/")
         return resp
+
+    # ── Admin session management ──────────────────────────────────
+
+    async def _serve_public_sessions(self, request: web.Request) -> web.StreamResponse:
+        static_dir = Path(__file__).parent / "web" / "static"
+        return web.FileResponse(static_dir / "public_sessions.html")
+
+    async def _admin_list_sessions(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_public_admin import list_public_sessions
+        return await list_public_sessions(self, request)
+
+    async def _admin_create_session(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_public_admin import create_public_session
+        return await create_public_session(self, request)
+
+    async def _admin_bulk_create(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_public_admin import bulk_create_sessions
+        return await bulk_create_sessions(self, request)
+
+    async def _admin_update_session(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_public_admin import update_public_session
+        return await update_public_session(self, request)
+
+    async def _admin_delete_session(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_public_admin import delete_public_session
+        return await delete_public_session(self, request)
 
     async def _computer_visualize(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_computer import computer_visualize
@@ -2103,6 +2191,7 @@ class WebServer:
             app.router.add_get("/usage", self._serve_usage)
             app.router.add_get("/reflections", self._serve_reflections)
             app.router.add_get("/computer", self._serve_computer)
+            app.router.add_get("/public-sessions", self._serve_public_sessions)
             app.router.add_get("/personality", self._serve_personality)
             app.router.add_get("/semantic-memory", self._serve_semantic_memory)
             app.router.add_get("/briefings", self._serve_briefings)
@@ -2124,7 +2213,14 @@ class WebServer:
         app.router.add_post("/api/public/session/new", self._public_session_new)
         app.router.add_post("/api/public/session/resume", self._public_session_resume)
         app.router.add_get("/api/public/session/enter", self._public_session_enter)
+        app.router.add_patch("/api/public/session/settings", self._public_session_settings)
         app.router.add_post("/api/public/session/logout", self._public_session_logout)
+        # Admin session management endpoints (admin auth enforced inside handlers).
+        app.router.add_get("/api/public/admin/sessions", self._admin_list_sessions)
+        app.router.add_post("/api/public/admin/sessions", self._admin_create_session)
+        app.router.add_post("/api/public/admin/sessions/bulk", self._admin_bulk_create)
+        app.router.add_patch("/api/public/admin/sessions/{id}", self._admin_update_session)
+        app.router.add_delete("/api/public/admin/sessions/{id}", self._admin_delete_session)
         return app
 
 

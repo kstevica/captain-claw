@@ -5,6 +5,7 @@ import { getContainerLogs } from '../../services/docker'
 import { useContainerStore } from '../../stores/containerStore'
 import { useChatStore } from '../../stores/chatStore'
 import { EmbeddedChat } from './EmbeddedChat'
+import { AgentGroupBadges } from '../common/AgentGroups'
 
 const statusColors: Record<string, string> = {
   running: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
@@ -160,6 +161,11 @@ export function ContainerCard({ container, onBrowseFiles }: { container: Contain
               </button>
             </div>
           )}
+        </div>
+
+        {/* Group badges */}
+        <div className="mb-3">
+          <AgentGroupBadges agentId={container.id} />
         </div>
 
         <div className="mb-4 text-xs text-zinc-500">

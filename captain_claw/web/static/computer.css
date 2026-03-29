@@ -3587,6 +3587,53 @@ body.textsize-laaaarger .modal-content { height: 50vh; max-height: 50vh; }
   border-color: #c44;
 }
 
+/* ── Session settings modal ─────────────────────────────────── */
+
+#session-settings-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+}
+#session-settings-modal.active {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#session-settings-modal .modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,.55);
+}
+#session-settings-modal .modal-content {
+  position: relative;
+  width: min(520px, 90vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+#session-settings-modal .window-body {
+  overflow-y: auto;
+}
+#session-settings-modal .btn-primary {
+  background: var(--accent, #07f);
+  color: #fff;
+  border: 1px solid var(--accent, #07f);
+  border-radius: 4px;
+}
+#session-settings-modal .btn-primary:hover {
+  filter: brightness(1.15);
+}
+#session-settings-modal .btn-secondary {
+  background: var(--bg-secondary, #333);
+  color: var(--text, #ccc);
+  border: 1px solid var(--border, #555);
+  border-radius: 4px;
+}
+#session-settings-modal .btn-secondary:hover {
+  filter: brightness(1.15);
+}
+
 /* ── Model modal ────────────────────────────────────────────── */
 
 #model-modal {

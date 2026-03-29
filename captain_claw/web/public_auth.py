@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 # Routes (prefixes) allowed per public section.
 _SECTION_ROUTES: dict[str, dict[str, list[str]]] = {
     "computer": {
-        "pages": ["/computer", "/brain-graph"],
+        "pages": ["/computer", "/brain-graph", "/public-sessions"],
         "api": [
             "/api/computer/",
             "/api/public/",
@@ -136,6 +136,36 @@ def create_public_middleware(config: "WebConfig") -> Callable:
     ) -> web.StreamResponse:
         # Admin bypass
         if _is_admin(request, config):
+            # If admin authenticated via ?token= query param (no cookie yet),
+            # set the admin cookie and redirect so subsequent requests are
+            # authenticated automatically.
+            import hmac as _hmac
+            token_param = request.query.get("token", "")
+            cookie = request.cookies.get(ADMIN_COOKIE, "")
+            has_cookie = bool(cookie and _validate_admin_cookie(cookie, config.auth_token, config.auth_cookie_max_age))
+            if token_param and not has_cookie:
+                from captain_claw.web.auth import _make_cookie_value, _is_behind_tls
+                cookie_val = _make_cookie_value(config.auth_token)
+                # Redirect to same path without the token param.
+                from urllib.parse import urlparse, urlencode, parse_qs
+                parsed = urlparse(request.url.human_repr())
+                params = parse_qs(parsed.query)
+                params.pop("token", None)
+                clean_qs = urlencode(params, doseq=True)
+                location = parsed.path
+                if clean_qs:
+                    location += "?" + clean_qs
+                resp = web.HTTPFound(location=location)
+                resp.set_cookie(
+                    ADMIN_COOKIE,
+                    cookie_val,
+                    max_age=config.auth_cookie_max_age * 86400,
+                    httponly=True,
+                    samesite="Lax",
+                    path="/",
+                    secure=_is_behind_tls(request),
+                )
+                return resp
             return await handler(request)
 
         path = request.path

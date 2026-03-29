@@ -77,8 +77,12 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
             "id": public_session_id,
             "name": pub_session.name if pub_session else "Public",
         }
+        _sess_meta = (pub_session.metadata if pub_session else {}) or {}
     else:
         session_info = server._session_info()
+        _sess_meta = {}
+        if server.agent and server.agent.session:
+            _sess_meta = server.agent.session.metadata or {}
 
     await server._send(ws, {
         "type": "welcome",
@@ -88,6 +92,13 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
         "personalities": personalities,
         "playbooks": _playbook_list,
         "is_public": bool(public_session_id),
+        "public_code": _sess_meta.get("public_code", ""),
+        "session_settings": {
+            "session_name": _sess_meta.get("session_display_name", ""),
+            "session_description": _sess_meta.get("session_description", ""),
+            "session_instructions": _sess_meta.get("session_instructions", ""),
+            "locked": bool(_sess_meta.get("session_settings_locked", False)),
+        },
     })
 
     # Replay existing session messages for the connecting client.
@@ -404,6 +415,56 @@ async def handle_ws_message(
         if _cancel_agent and hasattr(_cancel_agent, "cancel_event"):
             _cancel_agent.cancel_event.set()
             log.info("Cancel signal received via WebSocket", public=bool(_pub_sid))
+
+    elif msg_type == "session_settings":
+        # Update session name, description, and/or instructions.
+        # Works for both public and admin sessions.
+        _pub_sid = getattr(ws, "_public_session_id", None)
+        _is_ws_admin = getattr(ws, "_is_admin", False)
+        _target_agent = server._public_agents.get(_pub_sid) if _pub_sid else server.agent
+        if not _target_agent:
+            _target_agent = server.agent
+        if _target_agent and _target_agent.session:
+            from captain_claw.session import get_session_manager
+            session = _target_agent.session
+            # Enforce lock: public users cannot edit locked sessions.
+            _locked = (session.metadata or {}).get("session_settings_locked", False)
+            if _locked and not _is_ws_admin:
+                await server._send(ws, {
+                    "type": "error",
+                    "message": "Session settings are locked by the administrator.",
+                })
+                return
+            changed = False
+            if "session_name" in data and isinstance(data["session_name"], str):
+                val = data["session_name"].strip()
+                if val:
+                    session.metadata["session_display_name"] = val
+                    changed = True
+            if "session_description" in data and isinstance(data["session_description"], str):
+                session.metadata["session_description"] = data["session_description"].strip()
+                changed = True
+            if "session_instructions" in data and isinstance(data["session_instructions"], str):
+                session.metadata["session_instructions"] = data["session_instructions"].strip()
+                changed = True
+            if changed:
+                sm = get_session_manager()
+                await sm.save_session(session)
+                # Clear instruction cache so the system prompt rebuilds with new settings.
+                if hasattr(_target_agent, "instructions") and hasattr(_target_agent.instructions, "_cache"):
+                    _target_agent.instructions._cache.pop("system_prompt.md", None)
+                    _target_agent.instructions._cache.pop("micro_system_prompt.md", None)
+                log.info(
+                    "Session settings updated",
+                    session_id=session.id,
+                    public=bool(_pub_sid),
+                )
+            await server._send(ws, {
+                "type": "session_settings_saved",
+                "session_name": session.metadata.get("session_display_name", ""),
+                "session_description": session.metadata.get("session_description", ""),
+                "session_instructions": session.metadata.get("session_instructions", ""),
+            })
 
     elif msg_type == "approval_response":
         request_id = str(data.get("id", ""))

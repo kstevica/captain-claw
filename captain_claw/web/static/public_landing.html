@@ -23,15 +23,8 @@
     }
 
     .container {
-      width: 460px;
+      width: 900px;
       max-width: 100%;
-    }
-
-    /* Landscape / short viewports: allow scroll, don't force vertical center */
-    @media (max-height: 700px) {
-      body {
-        align-items: flex-start;
-      }
     }
 
     .window {
@@ -58,27 +51,136 @@
     .dot-green { background: #5b5; }
 
     .window-body {
-      padding: 24px 20px;
+      padding: 20px;
     }
 
-    h2 {
-      font-family: 'Silkscreen', monospace;
-      font-size: 15px;
-      margin-bottom: 16px;
-      color: #7af;
+    /* ── Hero (full width) ── */
+    .hero {
       text-align: center;
+      margin-bottom: 18px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid #333;
+    }
+    .hero-logo {
+      font-family: 'Silkscreen', monospace;
+      font-size: 22px;
+      color: #7af;
+      margin-bottom: 4px;
+      letter-spacing: 1px;
+    }
+    .hero-logo .claw { color: #f8c; }
+    .hero-tagline {
+      font-size: 13px;
+      color: #999;
     }
 
+    /* ── Two-column layout ── */
+    .columns {
+      display: flex;
+      gap: 20px;
+      align-items: flex-start;
+    }
+    .col-left {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .col-right {
+      flex: 1;
+      min-width: 0;
+    }
+
+    /* ── Notice ── */
+    .notice {
+      background: rgba(119,170,255,.07);
+      border: 1px solid #335;
+      border-radius: 4px;
+      padding: 12px 14px;
+      font-size: 11px;
+      color: #aab;
+      line-height: 1.6;
+      text-align: left;
+    }
+    .notice strong { color: #eb5; }
+    .notice a { color: #7af; text-decoration: none; }
+    .notice a:hover { text-decoration: underline; }
+    .gh-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      margin-top: 8px;
+      font-size: 11px;
+    }
+    .gh-link svg { width: 13px; height: 13px; fill: #999; }
+    .author {
+      margin-top: 6px;
+      font-size: 10px;
+      color: #777;
+    }
+    .author a { color: #99b; text-decoration: none; }
+    .author a:hover { text-decoration: underline; color: #7af; }
+
+    /* ── Session settings (left column) ── */
+    .session-settings {
+      background: #1a1a2e;
+      border: 1px solid #335;
+      border-radius: 4px;
+      padding: 12px;
+    }
+    .session-settings .ss-heading {
+      font-family: 'Silkscreen', monospace;
+      font-size: 11px;
+      color: #7af;
+      margin-bottom: 8px;
+    }
+    .session-settings label {
+      display: block;
+      font-size: 10px;
+      color: #888;
+      margin-bottom: 4px;
+      margin-top: 8px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .session-settings label:first-of-type { margin-top: 0; }
+    .session-settings input[type="text"],
+    .session-settings textarea {
+      width: 100%;
+      padding: 6px 8px;
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 12px;
+      letter-spacing: 0;
+      text-align: left;
+      text-transform: none;
+      background: #111;
+      border: 1px solid #444;
+      color: #e0e0e0;
+      border-radius: 3px;
+      outline: none;
+    }
+    .session-settings input[type="text"]:focus,
+    .session-settings textarea:focus {
+      border-color: #7af;
+      box-shadow: 0 0 6px rgba(119,170,255,.2);
+    }
+    .session-settings textarea {
+      resize: vertical;
+      min-height: 36px;
+    }
+
+    /* ── Right column: tabs & panels ── */
     .tab-row {
       display: flex;
       gap: 0;
-      margin-bottom: 20px;
+      margin-bottom: 14px;
     }
     .tab-row button {
       flex: 1;
-      padding: 10px;
+      padding: 8px;
       font-family: 'Share Tech Mono', monospace;
-      font-size: 14px;
+      font-size: 13px;
       border: 1px solid #555;
       background: #1a1a2e;
       color: #999;
@@ -98,18 +200,18 @@
 
     label {
       display: block;
-      font-size: 12px;
+      font-size: 11px;
       color: #999;
-      margin-bottom: 6px;
+      margin-bottom: 4px;
       text-transform: uppercase;
       letter-spacing: 1px;
     }
 
     input[type="text"] {
       width: 100%;
-      padding: 12px 14px;
+      padding: 10px 12px;
       font-family: 'Share Tech Mono', monospace;
-      font-size: 22px;
+      font-size: 20px;
       letter-spacing: 6px;
       text-align: center;
       text-transform: uppercase;
@@ -126,16 +228,16 @@
     input[type="text"]::placeholder {
       color: #444;
       letter-spacing: 4px;
-      font-size: 16px;
+      font-size: 15px;
     }
 
     .btn {
       display: block;
       width: 100%;
-      margin-top: 16px;
-      padding: 12px;
+      margin-top: 10px;
+      padding: 10px;
       font-family: 'Share Tech Mono', monospace;
-      font-size: 14px;
+      font-size: 13px;
       border: 1px solid #7af;
       background: #335;
       color: #fff;
@@ -145,126 +247,61 @@
     }
     .btn:hover { background: #447; }
     .btn:disabled { opacity: .4; cursor: not-allowed; }
-
-    .btn-new {
-      border-color: #5b5;
-      background: #253;
+    .btn-skip {
+      margin-top: 6px;
+      border-color: #555;
+      background: #222;
     }
+    .btn-skip:hover { background: #333; }
+
+    .btn-new { border-color: #5b5; background: #253; }
     .btn-new:hover { background: #364; }
 
     .error {
-      margin-top: 12px;
-      padding: 8px 12px;
+      margin-top: 10px;
+      padding: 6px 10px;
       background: rgba(255,80,80,.15);
       border: 1px solid #e55;
       border-radius: 4px;
       color: #f88;
-      font-size: 13px;
+      font-size: 12px;
       display: none;
     }
 
     .code-display {
       display: none;
-      margin-top: 16px;
-      padding: 16px;
+      margin-top: 12px;
+      padding: 12px;
       background: #111;
       border: 1px solid #5b5;
       border-radius: 4px;
       text-align: center;
     }
     .code-display .code-value {
-      font-size: 28px;
-      letter-spacing: 8px;
+      font-size: 24px;
+      letter-spacing: 6px;
       color: #5b5;
       font-weight: bold;
-      margin: 8px 0;
+      margin: 6px 0;
       user-select: all;
     }
     .code-display .code-hint {
-      font-size: 11px;
+      font-size: 10px;
       color: #888;
     }
 
     .info-text {
-      margin-top: 14px;
-      font-size: 12px;
+      margin-top: 10px;
+      font-size: 11px;
       color: #666;
       text-align: center;
       line-height: 1.5;
     }
 
-    .hero {
-      text-align: center;
-      margin-bottom: 22px;
-      padding-bottom: 18px;
-      border-bottom: 1px solid #333;
-    }
-
-    .hero-logo {
-      font-family: 'Silkscreen', monospace;
-      font-size: 22px;
-      color: #7af;
-      margin-bottom: 6px;
-      letter-spacing: 1px;
-    }
-    .hero-logo .claw { color: #f8c; }
-
-    .hero-tagline {
-      font-size: 13px;
-      color: #999;
-      margin-bottom: 14px;
-    }
-
-    .notice {
-      background: rgba(119,170,255,.07);
-      border: 1px solid #335;
-      border-radius: 4px;
-      padding: 12px 14px;
-      font-size: 12px;
-      color: #aab;
-      line-height: 1.6;
-      text-align: left;
-    }
-
-    .notice strong {
-      color: #eb5;
-    }
-
-    .notice a {
-      color: #7af;
-      text-decoration: none;
-    }
-    .notice a:hover {
-      text-decoration: underline;
-    }
-
-    .gh-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      margin-top: 10px;
-      font-size: 12px;
-    }
-
-    .gh-link svg {
-      width: 14px;
-      height: 14px;
-      fill: #999;
-      vertical-align: middle;
-    }
-
-    .author {
-      margin-top: 10px;
-      font-size: 11px;
-      color: #777;
-    }
-    .author a {
-      color: #99b;
-      text-decoration: none;
-    }
-    .author a:hover {
-      text-decoration: underline;
-      color: #7af;
+    /* ── Mobile: stack columns ── */
+    @media (max-width: 700px) {
+      .container { width: 460px; }
+      .columns { flex-direction: column; }
     }
   </style>
 </head>
@@ -282,47 +319,67 @@
       <div class="hero">
         <div class="hero-logo">Captain <span class="claw">Claw</span></div>
         <div class="hero-tagline">AI-Powered Research Workspace</div>
-        <div class="notice">
-          <strong>Public Mode</strong> — This instance is running in public
-          Computer mode with restricted access. Resources are shared and LLM
-          usage and web search may be limited by speed or availability.<br>
-          For unrestricted access and full features, visit the project on GitHub
-          and run Captain Claw yourself.
-          <div class="gh-link">
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-            <a href="https://github.com/kstevica/captain-claw" target="_blank" rel="noopener">github.com/kstevica/captain-claw</a>
+      </div>
+
+      <div class="columns">
+        <!-- ── Left: Notice + Session Settings ── -->
+        <div class="col-left">
+          <div class="notice">
+            <strong>Public Mode</strong> — This instance is running in public
+            Computer mode with restricted access. Resources are shared and LLM
+            usage and web search may be limited by speed or availability.<br>
+            For unrestricted access and full features, visit the project on GitHub
+            and run Captain Claw yourself.
+            <div class="gh-link">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+              <a href="https://github.com/kstevica/captain-claw" target="_blank" rel="noopener">github.com/kstevica/captain-claw</a>
+            </div>
+            <div class="author">A project by Stevica Kuharski · <a href="https://github.com/kstevica" target="_blank" rel="noopener">@kstevica</a></div>
           </div>
-          <div class="author">A project by Stevica Kuharski · <a href="https://github.com/kstevica" target="_blank" rel="noopener">@kstevica</a></div>
+
+          <div class="session-settings" id="settings-panel" style="display:none">
+            <div class="ss-heading">Session Settings</div>
+            <label>Session Name</label>
+            <input type="text" id="ss-name" placeholder="e.g. Marketing Q2 Analysis">
+            <label>Description</label>
+            <textarea id="ss-description" rows="2" placeholder="What is this session about?"></textarea>
+            <label>Instructions</label>
+            <textarea id="ss-instructions" rows="3" placeholder="Custom instructions for every response..."></textarea>
+          </div>
         </div>
-      </div>
 
-      <div class="tab-row">
-        <button id="tab-resume" class="active" onclick="switchTab('resume')">Resume Session</button>
-        <button id="tab-new" onclick="switchTab('new')">New Session</button>
-      </div>
+        <!-- ── Right: Session access ── -->
+        <div class="col-right">
+          <div class="tab-row">
+            <button id="tab-resume" class="active" onclick="switchTab('resume')">Resume Session</button>
+            <button id="tab-new" onclick="switchTab('new')">New Session</button>
+          </div>
 
-      <!-- Resume panel -->
-      <div id="panel-resume" class="panel active">
-        <label for="code-input">Enter your access code</label>
-        <input type="text" id="code-input" maxlength="6" placeholder="------" autocomplete="off" spellcheck="false">
-        <button class="btn" id="resume-btn" onclick="resumeSession()">Resume</button>
-        <div class="error" id="resume-error"></div>
-      </div>
+          <!-- Resume panel -->
+          <div id="panel-resume" class="panel active">
+            <label for="code-input">Enter your access code</label>
+            <input type="text" id="code-input" maxlength="6" placeholder="------" autocomplete="off" spellcheck="false">
+            <button class="btn" id="resume-btn" onclick="resumeSession()">Resume</button>
+            <div class="error" id="resume-error"></div>
+          </div>
 
-      <!-- New session panel -->
-      <div id="panel-new" class="panel">
-        <p class="info-text" style="margin-top:0; margin-bottom:16px;">
-          Start a fresh research session. You'll receive a unique access code
-          to resume your work later.
-        </p>
-        <button class="btn btn-new" id="new-btn" onclick="newSession()">Start New Session</button>
-        <div class="code-display" id="new-code-display">
-          <div class="code-hint">Your access code — save it!</div>
-          <div class="code-value" id="new-code-value"></div>
-          <div class="code-hint">You need this code to return to your session.</div>
-          <button class="btn" style="margin-top:14px" onclick="enterSession()">Enter Workspace</button>
+          <!-- New session panel -->
+          <div id="panel-new" class="panel">
+            <p class="info-text" style="margin-top:0; margin-bottom:12px;">
+              Start a fresh research session. You'll receive a unique access code
+              to resume your work later.
+            </p>
+            <button class="btn btn-new" id="new-btn" onclick="newSession()">Start New Session</button>
+            <div class="code-display" id="new-code-display">
+              <div class="code-hint">Your access code — save it!</div>
+              <div class="code-value" id="new-code-value"></div>
+              <div class="code-hint">You need this code to return to your session.</div>
+              <button class="btn" style="margin-top:10px" onclick="saveAndEnter()">Save &amp; Enter Workspace</button>
+              <button class="btn btn-skip" onclick="enterWorkspace()">Enter Workspace</button>
+            </div>
+            <div class="error" id="new-error"></div>
+          </div>
         </div>
-        <div class="error" id="new-error"></div>
       </div>
 
     </div>
@@ -335,11 +392,9 @@ function switchTab(tab) {
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
   document.getElementById('tab-' + tab).classList.add('active');
   document.getElementById('panel-' + tab).classList.add('active');
-  // Clear errors
   document.querySelectorAll('.error').forEach(e => { e.style.display = 'none'; e.textContent = ''; });
 }
 
-// Auto-uppercase and focus management for code input
 const codeInput = document.getElementById('code-input');
 codeInput.addEventListener('input', function() {
   this.value = this.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
@@ -357,12 +412,8 @@ function resumeSession() {
   const btn = document.getElementById('resume-btn');
   btn.disabled = true;
   btn.textContent = 'Connecting...';
-  // Navigate to the enter endpoint — it validates the code, sets the
-  // cookie via Set-Cookie on a redirect response (reliable across browsers).
   window.location.href = '/api/public/session/enter?code=' + encodeURIComponent(code);
 }
-
-let _newCode = null;
 
 async function newSession() {
   const btn = document.getElementById('new-btn');
@@ -381,8 +432,8 @@ async function newSession() {
       btn.textContent = 'Start New Session';
       return;
     }
-    _newCode = data.code;
-    // Show the code
+    _sessionReady = true;
+    document.getElementById('settings-panel').style.display = '';
     document.getElementById('new-code-value').textContent = data.code;
     document.getElementById('new-code-display').style.display = 'block';
     btn.style.display = 'none';
@@ -393,11 +444,25 @@ async function newSession() {
   }
 }
 
-function enterSession() {
-  // Use the enter endpoint to set the cookie via redirect (bulletproof).
-  if (_newCode) {
-    window.location.href = '/api/public/session/enter?code=' + encodeURIComponent(_newCode);
+async function saveAndEnter() {
+  const name = document.getElementById('ss-name').value.trim();
+  const description = document.getElementById('ss-description').value.trim();
+  const instructions = document.getElementById('ss-instructions').value.trim();
+  if (name || description || instructions) {
+    try {
+      await fetch('/api/public/session/settings', {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify({ session_name: name, session_description: description, session_instructions: instructions }),
+      });
+    } catch (e) { /* best-effort */ }
   }
+  window.location.href = '/computer';
+}
+
+function enterWorkspace() {
+  window.location.href = '/computer';
 }
 
 function showError(id, msg) {

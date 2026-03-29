@@ -2184,6 +2184,23 @@ class AgentContextMixin:
             if user_p is not None:
                 user_context_block = user_context_to_prompt_block(user_p)
 
+        # Session-level settings: name, description, and custom instructions
+        # stored in session metadata (persisted across reconnects).
+        session_context_block = ""
+        if self.session and isinstance(self.session.metadata, dict):
+            _s_name = self.session.metadata.get("session_display_name", "").strip()
+            _s_desc = self.session.metadata.get("session_description", "").strip()
+            _s_inst = self.session.metadata.get("session_instructions", "").strip()
+            _parts: list[str] = []
+            if _s_name:
+                _parts.append(f"Session name: {_s_name}")
+            if _s_desc:
+                _parts.append(f"Session description: {_s_desc}")
+            if _s_inst:
+                _parts.append(f"Session instructions (follow these for every response):\n{_s_inst}")
+            if _parts:
+                session_context_block = "\n\n## Session Context\n" + "\n".join(_parts)
+
         # Visualization style: brand-aware chart/dashboard generation.
         visualization_style_block = ""
         try:
@@ -2348,6 +2365,7 @@ class AgentContextMixin:
             planning_block=planning_block,
             personality_block=personality_block,
             user_context_block=user_context_block,
+            session_context_block=session_context_block,
             visualization_style_block=visualization_style_block,
             reflection_block=reflection_block,
             cognitive_self_awareness_block=cognitive_self_awareness_block,
