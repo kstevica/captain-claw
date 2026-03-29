@@ -8,6 +8,7 @@ import {
   Settings,
   Check,
   MessageSquare,
+  BarChart3,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { useAgentStore } from '../../stores/agentStore'
@@ -19,6 +20,7 @@ import type { ViewMode } from '../../types'
 
 const navItems: { id: ViewMode; icon: typeof Monitor; label: string }[] = [
   { id: 'desktop', icon: Monitor, label: 'Agent Desktop' },
+  { id: 'operations', icon: BarChart3, label: 'Operations' },
   { id: 'workflow', icon: GitBranch, label: 'Workflows' },
   { id: 'spawner', icon: Plus, label: 'Spawn Agent' },
 ]

@@ -41,3 +41,53 @@
 .fd-markdown td { padding: 0.35em 0.6em; border-bottom: 1px solid #27272a; }
 .fd-markdown tr:last-child td { border-bottom: none; }
 .fd-markdown tbody tr:hover { background: rgba(63,63,70,0.2); }
+
+/* ── Light theme overrides ── */
+html.light {
+  color-scheme: light;
+}
+html.light body {
+  background: #fafafa;
+  color: #18181b;
+}
+/* Zinc palette swaps for light mode */
+html.light .bg-zinc-950 { background-color: #ffffff !important; }
+html.light .bg-zinc-950\/80 { background-color: rgba(255,255,255,0.9) !important; }
+html.light .bg-zinc-950\/60 { background-color: rgba(255,255,255,0.8) !important; }
+html.light .bg-zinc-950\/50 { background-color: rgba(250,250,250,0.8) !important; }
+html.light .bg-zinc-900 { background-color: #f4f4f5 !important; }
+html.light .bg-zinc-900\/50 { background-color: rgba(244,244,245,0.7) !important; }
+html.light .bg-zinc-900\/40 { background-color: rgba(244,244,245,0.5) !important; }
+html.light .bg-zinc-900\/30 { background-color: rgba(244,244,245,0.4) !important; }
+html.light .bg-zinc-900\/20 { background-color: rgba(244,244,245,0.3) !important; }
+html.light .bg-zinc-800 { background-color: #e4e4e7 !important; }
+html.light .bg-zinc-800\/60 { background-color: rgba(228,228,231,0.6) !important; }
+html.light .bg-zinc-800\/50 { background-color: rgba(228,228,231,0.5) !important; }
+html.light .bg-zinc-800\/40 { background-color: rgba(228,228,231,0.4) !important; }
+html.light .border-zinc-800 { border-color: #d4d4d8 !important; }
+html.light .border-zinc-800\/60 { border-color: rgba(212,212,216,0.6) !important; }
+html.light .border-zinc-800\/40 { border-color: rgba(212,212,216,0.4) !important; }
+html.light .border-zinc-700 { border-color: #d4d4d8 !important; }
+html.light .text-zinc-200 { color: #27272a !important; }
+html.light .text-zinc-300 { color: #3f3f46 !important; }
+html.light .text-zinc-400 { color: #52525b !important; }
+html.light .text-zinc-500 { color: #71717a !important; }
+html.light .text-zinc-600 { color: #a1a1aa !important; }
+html.light .text-zinc-100 { color: #18181b !important; }
+html.light .placeholder-zinc-600::placeholder { color: #a1a1aa !important; }
+/* Scrollbar in light mode */
+html.light ::-webkit-scrollbar-thumb { background: #d4d4d8; }
+html.light ::-webkit-scrollbar-thumb:hover { background: #a1a1aa; }
+/* Markdown in light mode */
+html.light .fd-markdown strong { color: #18181b; }
+html.light .fd-markdown em { color: #52525b; }
+html.light .fd-markdown code { background: rgba(228,228,231,0.5); }
+html.light .fd-markdown pre { background: rgba(244,244,245,0.8); border-color: #d4d4d8; }
+html.light .fd-markdown h1, html.light .fd-markdown h2, html.light .fd-markdown h3 { color: #18181b; }
+html.light .fd-markdown th { color: #18181b; border-bottom-color: #d4d4d8; }
+html.light .fd-markdown td { border-bottom-color: #e4e4e7; }
+html.light .fd-markdown blockquote { border-left-color: #d4d4d8; color: #52525b; }
+html.light .fd-markdown hr { border-top-color: #e4e4e7; }
+html.light .fd-markdown a { color: #7c3aed; }
+/* Chat panel top bar in light mode */
+html.light .bg-zinc-900\/60 { background-color: rgba(244,244,245,0.85) !important; }

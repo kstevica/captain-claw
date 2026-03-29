@@ -164,6 +164,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     })
 
     ws.on('command_result', (data) => {
+      const command = (data.command as string || '').trim().toLowerCase()
+      // If /clear was executed, wipe local messages first
+      if (command === '/clear') {
+        clearMessages(containerId)
+      }
       const msg: ChatMessage = {
         id: nextId(),
         role: 'system',
@@ -249,6 +254,17 @@ function updateSession(containerId: string, patch: Partial<ChatSession>) {
     const session = state.sessions.get(containerId)
     if (!session) return state
     const updated = { ...session, ...patch }
+    const sessions = new Map(state.sessions)
+    sessions.set(containerId, updated)
+    return { sessions }
+  })
+}
+
+function clearMessages(containerId: string) {
+  useChatStore.setState((state) => {
+    const session = state.sessions.get(containerId)
+    if (!session) return state
+    const updated = { ...session, messages: [] }
     const sessions = new Map(state.sessions)
     sessions.set(containerId, updated)
     return { sessions }

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import {
   X,
   Send,
@@ -16,12 +16,18 @@ import {
   ImageIcon,
   Clipboard,
   XCircle,
+  Copy,
+  Check,
+  Pin,
+  ClipboardList,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useChatStore } from '../../stores/chatStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useContainerStore } from '../../stores/containerStore'
+import { usePinnedStore } from '../../stores/pinnedStore'
+import { useClipboardStore } from '../../stores/clipboardStore'
 import { SendContextModal } from './SendContextModal'
 import { uploadFileToAgent, formatSize } from '../../services/fileTransfer'
 import type { ChatMessage } from '../../services/agentChat'
@@ -144,7 +150,7 @@ function ChatContent({
   onSend,
   onCancel,
 }: {
-  session: { containerId: string; messages: ChatMessage[]; connected: boolean; busy: boolean; statusText: string }
+  session: { containerId: string; containerName: string; messages: ChatMessage[]; connected: boolean; busy: boolean; statusText: string }
   onSend: (content: string) => void
   onCancel: () => void
 }) {
@@ -374,7 +380,7 @@ function ChatContent({
         )}
 
         {visibleMessages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} />
+          <MessageBubble key={msg.id} message={msg} sourceName={session.containerName} agentId={session.containerId} />
         ))}
 
         {/* Busy indicator */}
@@ -517,12 +523,124 @@ function AttachmentChip({ attachment, onRemove }: { attachment: Attachment; onRe
   )
 }
 
-function MessageBubble({ message }: { message: ChatMessage }) {
+function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage; sourceName?: string; agentId?: string }) {
   const [toolExpanded, setToolExpanded] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [showForward, setShowForward] = useState(false)
+
+  const containers = useContainerStore((s) => s.containers)
+  const localAgents = useLocalAgentStore((s) => s.agents)
+  const { pin, isPinned } = usePinnedStore()
+  const addClipEntry = useClipboardStore((s) => s.addEntry)
+  const pinned = agentId ? isPinned(agentId, message.content) : false
+  const openChat = useChatStore((s) => s.openChat)
+  const sendMessageToAgent = useChatStore((s) => s.sendMessage)
+
+  const handleCopy = useCallback(() => {
+    navigator.clipboard.writeText(message.content || '')
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1500)
+  }, [message.content])
+
+  const forwardTargets = useMemo(() => {
+    const targets: { id: string; name: string; host: string; port: number; auth: string }[] = []
+    for (const c of containers) {
+      if (c.status === 'running' && c.web_port) {
+        targets.push({ id: c.id, name: c.agent_name || c.name, host: 'localhost', port: c.web_port, auth: c.web_auth || '' })
+      }
+    }
+    for (const a of localAgents) {
+      if (a.status === 'online') {
+        targets.push({ id: a.id, name: a.name, host: a.host, port: a.port, auth: a.authToken || '' })
+      }
+    }
+    return targets
+  }, [containers, localAgents])
+
+  const handleForward = useCallback(async (target: typeof forwardTargets[0]) => {
+    const src = sourceName || 'another agent'
+    const role = message.role === 'user' ? 'User' : 'Assistant'
+    const composed = `--- Context from "${src}" ---\n\n**${role}:**\n${message.content}\n\n--- End of context ---\n\ncheck this and tell me did the agent do a good job`
+    openChat(target.id, target.name, target.host, target.port, target.auth)
+    await new Promise((r) => setTimeout(r, 1000))
+    sendMessageToAgent(target.id, composed)
+    setShowForward(false)
+  }, [message, sourceName, openChat, sendMessageToAgent])
+
+  const handlePin = useCallback(() => {
+    if (!agentId || pinned) return
+    pin({ agentId, agentName: sourceName || 'Agent', content: message.content, role: message.role, model: message.model })
+  }, [agentId, pinned, pin, sourceName, message])
+
+  const handleClip = useCallback(() => {
+    addClipEntry(message.content || '', sourceName || 'Agent')
+  }, [addClipEntry, message.content, sourceName])
+
+  // Action buttons (copy + pin + clipboard + forward)
+  const actionButtons = (align: 'left' | 'right') => (
+    <div className={`flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity ${
+      align === 'right' ? 'justify-end' : ''
+    }`}>
+      <button
+        onClick={handleCopy}
+        className="rounded p-0.5 text-zinc-600 hover:bg-zinc-700/50 hover:text-zinc-400"
+        title="Copy"
+      >
+        {copied ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+      </button>
+      {agentId && !pinned && (
+        <button
+          onClick={handlePin}
+          className="rounded p-0.5 text-zinc-600 hover:bg-zinc-700/50 hover:text-amber-400"
+          title="Pin message"
+        >
+          <Pin className="h-3 w-3" />
+        </button>
+      )}
+      {agentId && pinned && (
+        <Pin className="h-3 w-3 text-amber-400 mx-0.5" />
+      )}
+      <button
+        onClick={handleClip}
+        className="rounded p-0.5 text-zinc-600 hover:bg-zinc-700/50 hover:text-cyan-400"
+        title="Add to shared clipboard"
+      >
+        <ClipboardList className="h-3 w-3" />
+      </button>
+      {forwardTargets.length > 0 && (
+        <div className="relative">
+          <button
+            onClick={() => setShowForward(!showForward)}
+            className="rounded p-0.5 text-zinc-600 hover:bg-zinc-700/50 hover:text-zinc-400"
+            title="Send to another agent"
+          >
+            <Forward className="h-3 w-3" />
+          </button>
+          {showForward && (
+            <div className={`absolute ${align === 'right' ? 'right-0' : 'left-0'} top-full mt-1 z-30 min-w-[160px] rounded-lg border border-zinc-700 bg-zinc-900 py-1 shadow-xl`}>
+              <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+                Send to
+              </div>
+              {forwardTargets.map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => handleForward(t)}
+                  className="flex w-full items-center gap-2 px-2 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
+                >
+                  <Send className="h-3 w-3 text-zinc-500" />
+                  {t.name}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
 
   if (message.role === 'user') {
     return (
-      <div className="mb-3 flex justify-end">
+      <div className="group mb-3 flex flex-col items-end gap-0.5">
         <div className="max-w-[85%] rounded-xl rounded-br-sm bg-violet-600/20 px-3.5 py-2.5">
           <div className="fd-markdown text-sm text-zinc-200">
             <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown>
@@ -531,6 +649,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
             {formatTime(message.timestamp)}
           </span>
         </div>
+        {actionButtons('right')}
       </div>
     )
   }
@@ -570,7 +689,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   const cleanContent = stripSuggestions(message.content)
 
   return (
-    <div className="mb-3">
+    <div className="group mb-3 flex flex-col items-start gap-0.5">
       <div className={`max-w-[85%] rounded-xl rounded-bl-sm bg-zinc-800/60 px-3.5 py-2.5 ${message.replay ? 'opacity-60' : ''}`}>
         <div className="fd-markdown text-sm text-zinc-300">
           <Markdown remarkPlugins={[remarkGfm]}>{cleanContent}</Markdown>
@@ -581,6 +700,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
           {message.replay && <span className="text-zinc-700">(history)</span>}
         </div>
       </div>
+      {actionButtons('left')}
     </div>
   )
 }

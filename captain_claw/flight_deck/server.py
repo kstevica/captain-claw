@@ -660,6 +660,33 @@ async def agent_file_upload(host: str, port: int, token: str = "", file: UploadF
         raise HTTPException(502, "Cannot connect to agent")
 
 
+@app.get("/fd/agent-usage/{host}/{port}")
+async def agent_usage(host: str, port: int, token: str = "", period: str = "today"):
+    """Proxy /api/usage from a CC agent."""
+    import httpx
+    params = f"?period={period}"
+    if token:
+        params += f"&token={token}"
+    url = f"http://{host}:{port}/api/usage{params}"
+    try:
+        # First request with token may return a 302 redirect that sets a cookie.
+        # Use follow_redirects=False to capture the cookie, then retry.
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, follow_redirects=False)
+
+            if resp.status_code in (301, 302, 303, 307, 308):
+                # Token was accepted and a cookie was set — retry with the cookie
+                cookies = resp.cookies
+                retry_url = f"http://{host}:{port}/api/usage?period={period}"
+                resp = await client.get(retry_url, cookies=cookies)
+
+            if resp.status_code != 200:
+                raise HTTPException(resp.status_code, f"Agent returned {resp.status_code}")
+            return resp.json()
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
 @app.get("/fd/health")
 def health():
     try:
