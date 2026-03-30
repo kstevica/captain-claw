@@ -195,7 +195,7 @@ export function FileViewer({ file, host, port, auth, onClose, onPrev, onNext, ha
           )}
 
           {!loading && !error && content !== null && group === 'markdown' && (
-            <div className="p-6 prose prose-invert prose-sm max-w-none prose-headings:text-zinc-200 prose-p:text-zinc-300 prose-a:text-violet-400 prose-code:text-emerald-300 prose-code:bg-zinc-800 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-zinc-900 prose-pre:border prose-pre:border-zinc-800 prose-strong:text-zinc-200 prose-table:text-zinc-300 prose-th:text-zinc-200 prose-td:border-zinc-800 prose-th:border-zinc-800 prose-hr:border-zinc-800">
+            <div className="fd-file-markdown p-6">
               <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
             </div>
           )}

@@ -759,6 +759,13 @@ export function SpawnerPage() {
             }
             .input::placeholder { color: #52525b; }
             .input:focus { outline: none; border-color: rgba(139, 92, 246, 0.5); }
+            html.light .input {
+              background: #ffffff;
+              border-color: #d4d4d8;
+              color: #18181b;
+            }
+            html.light .input::placeholder { color: #a1a1aa; }
+            html.light .input:focus { border-color: rgba(139, 92, 246, 0.5); }
           `}</style>
         </div>
       </div>

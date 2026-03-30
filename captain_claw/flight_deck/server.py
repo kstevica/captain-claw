@@ -448,6 +448,10 @@ class RebuildRequest(BaseModel):
     description: str = ""  # Frontend sends current description override
 
 
+class CloneRequest(BaseModel):
+    new_name: str  # Name for the cloned agent
+
+
 @app.post("/fd/containers/{container_id}/rebuild", response_model=ContainerActionResult)
 def rebuild_container(container_id: str, req: RebuildRequest | None = None):
     """Rebuild a container: stop, remove, pull latest image, re-spawn with same config."""
@@ -553,6 +557,216 @@ def rebuild_container(container_id: str, req: RebuildRequest | None = None):
             container_id=new_container.short_id,
             old_container_id=old_short_id,
             message=f"Agent '{agent_name}' rebuilt with latest image",
+        )
+    except docker.errors.ImageNotFound:
+        raise HTTPException(404, f"Docker image '{image}' not found.")
+    except docker.errors.APIError as exc:
+        raise HTTPException(500, f"Docker error: {exc.explanation or str(exc)}")
+
+
+def _find_available_port(start: int) -> int:
+    """Find first available TCP port starting from `start`, checking both
+    running containers and the host's listening sockets."""
+    import socket
+
+    # Collect ports already used by Flight Deck containers
+    client = get_docker()
+    used_ports: set[int] = set()
+    for c in client.containers.list(all=True, filters={"label": CONTAINER_LABEL}):
+        lbl_port = (c.labels or {}).get("flight-deck.web-port", "")
+        if lbl_port:
+            try:
+                used_ports.add(int(lbl_port))
+            except ValueError:
+                pass
+        # Also check Docker port bindings
+        docker_ports = c.attrs.get("NetworkSettings", {}).get("Ports", {}) or {}
+        for _cp, bindings in docker_ports.items():
+            if bindings:
+                for b in bindings:
+                    try:
+                        used_ports.add(int(b.get("HostPort", 0)))
+                    except (ValueError, TypeError):
+                        pass
+
+    port = start
+    while port < start + 100:  # search up to 100 ports
+        if port not in used_ports:
+            # Also check if host port is free
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind(("127.0.0.1", port))
+                    return port
+                except OSError:
+                    pass
+        port += 1
+    # Fallback — return start + 100 and hope for the best
+    return start + 100
+
+
+@app.post("/fd/containers/{container_id}/clone", response_model=ContainerActionResult)
+def clone_container(container_id: str, req: CloneRequest):
+    """Clone a container: create a new agent with same config but its own data folder."""
+    import platform
+    import shutil
+
+    c = _find_container(container_id)
+    labels = dict(c.labels or {})
+
+    # Read the original config
+    image = labels.get("flight-deck.image", CC_IMAGE_DEFAULT)
+    web_port_str = labels.get("flight-deck.web-port", "")
+    old_web_port = int(web_port_str) if web_port_str else None
+    web_auth = labels.get("flight-deck.web-auth", "")
+    old_agent_name = labels.get("flight-deck.agent-name", c.name)
+
+    new_name = req.new_name.strip()
+    if not new_name:
+        raise HTTPException(400, "Name is required")
+    new_slug = _slug(new_name)
+
+    # Check name collision
+    client = get_docker()
+    try:
+        existing = client.containers.get(new_slug)
+        if existing.status == "running":
+            raise HTTPException(400, f"Container '{new_slug}' already running.")
+        existing.remove()
+    except docker.errors.NotFound:
+        pass
+
+    # Determine old agent directory from the actual mount sources
+    old_slug = _slug(old_agent_name)
+    old_agent_dir = DATA_DIR / old_slug
+    new_agent_dir = DATA_DIR / new_slug
+
+    # Create new data directory structure
+    new_agent_dir.mkdir(parents=True, exist_ok=True)
+    (new_agent_dir / "data" / "workspace").mkdir(parents=True, exist_ok=True)
+    (new_agent_dir / "data" / "sessions").mkdir(parents=True, exist_ok=True)
+    (new_agent_dir / "data" / "skills").mkdir(parents=True, exist_ok=True)
+    (new_agent_dir / "data" / "home-config").mkdir(parents=True, exist_ok=True)
+
+    # Copy config.yaml and .env from original if they exist
+    for fname in ("config.yaml", ".env"):
+        src_file = old_agent_dir / fname
+        if src_file.is_file():
+            shutil.copy2(str(src_file), str(new_agent_dir / fname))
+    # Copy home-config/config.yaml too
+    src_hc = old_agent_dir / "data" / "home-config" / "config.yaml"
+    if src_hc.is_file():
+        shutil.copy2(str(src_hc), str(new_agent_dir / "data" / "home-config" / "config.yaml"))
+
+    # Read environment from the source container
+    env_list = c.attrs.get("Config", {}).get("Env", [])
+    environment: dict[str, str] = {}
+    for e in env_list:
+        if "=" in e:
+            k, v = e.split("=", 1)
+            environment[k] = v
+
+    # Build volume mounts for the clone — use the known structure
+    # instead of trying to remap arbitrary paths from the old container.
+    old_agent_dir_str = str(old_agent_dir)
+    new_agent_dir_str = str(new_agent_dir)
+    config_file = str(new_agent_dir / "config.yaml")
+    env_file = str(new_agent_dir / ".env")
+
+    # Start with the standard CC mounts pointing to new data dir
+    volumes: dict[str, dict] = {
+        config_file: {"bind": "/app/config.yaml", "mode": "ro"},
+        env_file: {"bind": "/app/.env", "mode": "ro"},
+        str(new_agent_dir / "data" / "home-config"): {"bind": "/home/claw/.captain-claw", "mode": "rw"},
+        str(new_agent_dir / "data" / "workspace"): {"bind": "/data/workspace", "mode": "rw"},
+        str(new_agent_dir / "data" / "sessions"): {"bind": "/data/sessions", "mode": "rw"},
+        str(new_agent_dir / "data" / "skills"): {"bind": "/data/skills", "mode": "rw"},
+    }
+    # Carry over any extra volumes that weren't part of the agent data dir
+    mounts = c.attrs.get("Mounts", [])
+    known_dests = {"/app/config.yaml", "/app/.env", "/home/claw/.captain-claw",
+                   "/data/workspace", "/data/sessions", "/data/skills"}
+    for m in mounts:
+        src = m.get("Source", "")
+        dst = m.get("Destination", "")
+        mode = m.get("Mode", "rw")
+        if src and dst and dst not in known_dests:
+            volumes[src] = {"bind": dst, "mode": mode}
+
+    # Read host config
+    host_config = c.attrs.get("HostConfig", {})
+    restart_policy = host_config.get("RestartPolicy", {"Name": "unless-stopped"})
+    security_opt = host_config.get("SecurityOpt", ["no-new-privileges:true", "seccomp:unconfined"])
+    cap_drop = host_config.get("CapDrop", ["ALL"])
+    cap_add = host_config.get("CapAdd", ["CHOWN", "SETUID", "SETGID", "SYS_CHROOT"])
+    tmpfs = host_config.get("Tmpfs", {"/tmp": "", "/run": ""})
+    network_mode = host_config.get("NetworkMode", "host")
+
+    # Find first available port starting from original
+    new_web_port: int | None = None
+    if old_web_port:
+        new_web_port = _find_available_port(old_web_port + 1)
+
+    # Update labels for the clone
+    labels["flight-deck.agent-name"] = new_name
+    labels["flight-deck.description"] = ""
+    if new_web_port:
+        labels["flight-deck.web-port"] = str(new_web_port)
+
+    # Update config.yaml with new web port and botport instance name
+    cfg_path = new_agent_dir / "config.yaml"
+    if cfg_path.is_file() and new_web_port and old_web_port:
+        cfg_text = cfg_path.read_text()
+        cfg_text = cfg_text.replace(f"port: {old_web_port}", f"port: {new_web_port}")
+        # Update botport instance name
+        if old_agent_name:
+            cfg_text = cfg_text.replace(f"instance_name: {old_agent_name}", f"instance_name: {new_name}")
+            cfg_text = cfg_text.replace(f"instance_name: '{old_agent_name}'", f"instance_name: '{new_name}'")
+        cfg_path.write_text(cfg_text)
+        # Also update home-config copy
+        hc_path = new_agent_dir / "data" / "home-config" / "config.yaml"
+        if hc_path.is_file():
+            hc_path.write_text(cfg_text)
+
+    # Make sure .env file exists (even if empty) so Docker doesn't create a directory
+    env_path = new_agent_dir / ".env"
+    if not env_path.is_file():
+        env_path.write_text("")
+
+    hostname = new_slug
+
+    # Port publishing
+    ports: dict[str, int] = {}
+    network_mode_use: str | None = network_mode
+    if platform.system() == "Darwin" and network_mode == "host":
+        network_mode_use = None
+        if new_web_port:
+            ports[f"{new_web_port}/tcp"] = new_web_port
+    elif network_mode != "host":
+        if new_web_port:
+            ports[f"{new_web_port}/tcp"] = new_web_port
+
+    try:
+        new_container = client.containers.run(
+            image=image,
+            name=new_slug,
+            hostname=hostname,
+            detach=True,
+            network_mode=network_mode_use,
+            ports=ports or None,
+            volumes=volumes,
+            environment=environment,
+            labels=labels,
+            security_opt=security_opt,
+            cap_drop=cap_drop,
+            cap_add=cap_add,
+            tmpfs=tmpfs,
+            restart_policy=restart_policy,
+            stop_signal="SIGTERM",
+        )
+        return ContainerActionResult(
+            ok=True,
+            container_id=new_container.short_id,
+            message=f"Agent '{new_name}' cloned from '{old_agent_name}' (port {new_web_port})",
         )
     except docker.errors.ImageNotFound:
         raise HTTPException(404, f"Docker image '{image}' not found.")

@@ -4,6 +4,7 @@ import { TopBar } from './components/layout/TopBar'
 import { ChatPanel } from './components/agents/ChatPanel'
 import { DirectorPanel } from './components/agents/DirectorPanel'
 import { PinnedMessages } from './components/common/PinnedMessages'
+import { PinnedFiles } from './components/common/PinnedFiles'
 import { SharedClipboard } from './components/common/SharedClipboard'
 import { ShortcutsOverlay, useKeyboardShortcuts } from './components/common/KeyboardShortcuts'
 import { DesktopPage } from './pages/DesktopPage'
@@ -94,7 +95,7 @@ function useResizable(
 
 // ── Tool panel type ──
 
-type ToolPanel = 'pinned' | 'clipboard' | null
+type ToolPanel = 'pinned' | 'pinned-files' | 'clipboard' | null
 
 function App() {
   const view = useUIStore((s) => s.view)
@@ -237,9 +238,11 @@ function App() {
           directorOpen={directorOpen}
           onToggleDirector={toggleDirector}
           onTogglePinned={() => toggleToolPanel('pinned')}
+          onTogglePinnedFiles={() => toggleToolPanel('pinned-files')}
           onToggleClipboard={() => toggleToolPanel('clipboard')}
           onToggleShortcuts={() => setShortcutsOpen(!shortcutsOpen)}
           pinnedOpen={toolPanel === 'pinned'}
+          pinnedFilesOpen={toolPanel === 'pinned-files'}
           clipboardOpen={toolPanel === 'clipboard'}
         />
         <main className="flex-1 overflow-hidden">
@@ -271,6 +274,7 @@ function App() {
                   className="absolute left-0 top-0 h-full w-1.5 cursor-col-resize z-20 hover:bg-violet-500/30 active:bg-violet-500/40 transition-colors"
                 />
                 {toolPanel === 'pinned' && <PinnedMessages onClose={() => setToolPanel(null)} />}
+                {toolPanel === 'pinned-files' && <PinnedFiles onClose={() => setToolPanel(null)} />}
                 {toolPanel === 'clipboard' && <SharedClipboard onClose={() => setToolPanel(null)} />}
               </div>
             )}

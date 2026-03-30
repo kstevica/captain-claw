@@ -184,7 +184,7 @@ export function DesktopPage() {
     return `${maxY}px`
   }, [layoutMode, unifiedAgents, positions])
 
-  const renderAgentCard = (agent: UnifiedAgent) => {
+  const renderAgentCard = (agent: UnifiedAgent, onDragStart?: (e: React.PointerEvent) => void, isDragging?: boolean) => {
     if (agent.kind === 'docker') {
       return (
         <ContainerCard
@@ -194,6 +194,8 @@ export function DesktopPage() {
               ? () => setBrowsingAgent({ id: agent.data.id, name: agent.data.agent_name || agent.data.name, host: 'localhost', port: agent.data.web_port!, auth: agent.data.web_auth })
               : undefined
           }
+          onDragStart={onDragStart}
+          isDragging={isDragging}
         />
       )
     }
@@ -308,18 +310,7 @@ export function DesktopPage() {
                         transition: isDragging ? 'none' : 'box-shadow 0.2s',
                       }}
                     >
-                      {/* Drag handle bar */}
-                      <div
-                        onPointerDown={(e) => handlePointerDown(e, agent.id)}
-                        className={`flex items-center justify-center h-5 -mb-1 rounded-t-xl cursor-grab active:cursor-grabbing select-none transition-colors ${
-                          isDragging ? 'bg-violet-500/20' : 'bg-zinc-800/60 hover:bg-zinc-700/60'
-                        }`}
-                      >
-                        <div className="flex gap-0.5">
-                          <span className="block h-0.5 w-5 rounded-full bg-zinc-600" />
-                        </div>
-                      </div>
-                      {renderAgentCard(agent)}
+                      {renderAgentCard(agent, (e: React.PointerEvent) => handlePointerDown(e, agent.id), isDragging)}
                     </div>
                   )
                 })}

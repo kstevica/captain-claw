@@ -478,6 +478,26 @@ def _build_schema() -> list[dict[str, Any]]:
                                hint="Speech-to-text provider. Leave empty for auto-detect."),
                     ],
                 },
+                {
+                    "id": "tools_mcp_servers",
+                    "title": "MCP Connectors",
+                    "description": "Connect to remote MCP (Model Context Protocol) servers. Tools exposed by each server become available to the agent.",
+                    "type": "array",
+                    "layout": "cards",
+                    "array_key": "tools.mcp_servers",
+                    "item_fields": [
+                        _field("name", "Name", type="text",
+                               hint="Short identifier for this server (e.g. fric, crm)"),
+                        _field("url", "Server URL", type="text",
+                               hint="MCP server endpoint (e.g. https://api.example.com/mcp)"),
+                        _field("client_id", "OAuth Client ID", type="text",
+                               hint="OAuth2 client_credentials client ID"),
+                        _field("client_secret", "OAuth Client Secret", type="secret",
+                               hint="OAuth2 client_credentials client secret"),
+                        _field("token_endpoint", "Token Endpoint", type="text",
+                               hint="OAuth token URL (absolute or relative to server, e.g. /api/mcp/oauth/token)"),
+                    ],
+                },
             ],
         },
         # ── 4. Email ─────────────────────────────────────────────
@@ -1020,13 +1040,26 @@ def _flatten_values(cfg: Config, schema: list[dict[str, Any]]) -> dict[str, Any]
                 arr_key = section["array_key"]
                 arr_val = _get_nested(cfg, arr_key)
                 if arr_val is not None:
+                    # Collect secret field keys within this array section
+                    secret_item_keys = {
+                        f["key"]
+                        for f in section.get("item_fields", [])
+                        if f.get("type") == "secret"
+                    }
                     # Convert list of Pydantic models / dicts to plain dicts
                     items = []
                     for item in arr_val:
                         if hasattr(item, "model_dump"):
-                            items.append(item.model_dump(mode="json"))
+                            d = item.model_dump(mode="json")
                         elif isinstance(item, dict):
-                            items.append(item)
+                            d = dict(item)
+                        else:
+                            d = item
+                        # Mask secret fields within array items
+                        for sk in secret_item_keys:
+                            if d.get(sk):
+                                d[sk] = SECRET_MASK
+                        items.append(d)
                     values[arr_key] = items
             else:
                 for field in section.get("fields", []):
@@ -1079,6 +1112,19 @@ async def put_settings(server: WebServer, request: web.Request) -> web.Response:
         data = {}
 
     # ── Merge changes ─────────────────────────────────────
+    # Build a lookup of secret keys within array sections for unmask logic.
+    _array_secret_keys: dict[str, set[str]] = {}
+    for group in _build_schema():
+        for section in group.get("sections", []):
+            if section.get("type") == "array":
+                skeys = {
+                    f["key"]
+                    for f in section.get("item_fields", [])
+                    if f.get("type") == "secret"
+                }
+                if skeys:
+                    _array_secret_keys[section["array_key"]] = skeys
+
     for dotted_key, value in changes.items():
         # Skip readonly fields
         if dotted_key in _READONLY_FIELDS:
@@ -1086,6 +1132,20 @@ async def put_settings(server: WebServer, request: web.Request) -> web.Response:
         # Skip secrets that weren't actually changed
         if dotted_key in _SECRET_FIELDS and value == SECRET_MASK:
             continue
+        # For array sections with secret fields, restore masked values
+        # from existing config so we don't overwrite secrets with the mask.
+        if dotted_key in _array_secret_keys and isinstance(value, list):
+            existing_arr = _get_nested(data, dotted_key) or []
+            secret_keys = _array_secret_keys[dotted_key]
+            for i, item in enumerate(value):
+                if not isinstance(item, dict):
+                    continue
+                for sk in secret_keys:
+                    if item.get(sk) == SECRET_MASK and i < len(existing_arr):
+                        old_item = existing_arr[i]
+                        old_val = old_item.get(sk) if isinstance(old_item, dict) else None
+                        if old_val:
+                            item[sk] = old_val
         _set_nested(data, dotted_key, value)
 
     # Always-on tools — re-inject if the user removed them.

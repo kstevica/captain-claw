@@ -5,12 +5,19 @@ import { usePipelineStore } from './pipelineStore'
 import { useGroupStore } from './groupStore'
 
 const DESC_OVERRIDES_KEY = 'fd:container-descriptions'
+const NAME_OVERRIDES_KEY = 'fd:container-names'
 
 function loadDescOverrides(): Record<string, string> {
   try { return JSON.parse(localStorage.getItem(DESC_OVERRIDES_KEY) || '{}') } catch { return {} }
 }
 function saveDescOverrides(m: Record<string, string>) {
   localStorage.setItem(DESC_OVERRIDES_KEY, JSON.stringify(m))
+}
+function loadNameOverrides(): Record<string, string> {
+  try { return JSON.parse(localStorage.getItem(NAME_OVERRIDES_KEY) || '{}') } catch { return {} }
+}
+function saveNameOverrides(m: Record<string, string>) {
+  localStorage.setItem(NAME_OVERRIDES_KEY, JSON.stringify(m))
 }
 
 interface ContainerStore {
@@ -19,6 +26,7 @@ interface ContainerStore {
   dockerAvailable: boolean
   loading: boolean
   descriptionOverrides: Record<string, string>
+  nameOverrides: Record<string, string>
 
   fetchContainers: () => Promise<void>
   selectContainer: (id: string | null) => void
@@ -27,6 +35,8 @@ interface ContainerStore {
   restartContainer: (id: string) => Promise<void>
   removeContainer: (id: string) => Promise<void>
   rebuildContainer: (id: string) => Promise<void>
+  cloneContainer: (id: string, newName: string) => Promise<void>
+  setNameOverride: (id: string, name: string) => void
   checkHealth: () => Promise<void>
   setDescription: (id: string, description: string) => void
 }
@@ -37,15 +47,22 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
   dockerAvailable: false,
   loading: false,
   descriptionOverrides: loadDescOverrides(),
+  nameOverrides: loadNameOverrides(),
 
   fetchContainers: async () => {
     try {
       const containers = await dockerApi.listContainers()
-      // Merge in local description overrides
-      const overrides = get().descriptionOverrides
+      // Merge in local description and name overrides
+      const descOverrides = get().descriptionOverrides
+      const nameOverrides = get().nameOverrides
       const merged = containers.map((c) => {
-        const override = overrides[c.id] ?? overrides[c.name]
-        return override != null ? { ...c, description: override } : c
+        const descOverride = descOverrides[c.id] ?? descOverrides[c.name]
+        const nameOverride = nameOverrides[c.id] ?? nameOverrides[c.name]
+        return {
+          ...c,
+          ...(descOverride != null ? { description: descOverride } : {}),
+          ...(nameOverride != null ? { agent_name: nameOverride } : {}),
+        }
       })
       set({ containers: merged, dockerAvailable: true })
     } catch {
@@ -93,6 +110,15 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
         set({ descriptionOverrides: overrides })
       }
 
+      // Migrate name override from old ID to new ID
+      const nameOverrides = { ...get().nameOverrides }
+      if (nameOverrides[oldId]) {
+        nameOverrides[newId] = nameOverrides[oldId]
+        delete nameOverrides[oldId]
+        saveNameOverrides(nameOverrides)
+        set({ nameOverrides })
+      }
+
       // Migrate pipeline step references from old ID to new ID
       const pipelineStore = usePipelineStore.getState()
       for (const pipeline of pipelineStore.pipelines) {
@@ -126,6 +152,18 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
     }
 
     get().fetchContainers()
+  },
+
+  cloneContainer: async (id, newName) => {
+    await dockerApi.cloneContainer(id, newName)
+    get().fetchContainers()
+  },
+
+  setNameOverride: (id, name) => {
+    const overrides = { ...get().nameOverrides, [id]: name }
+    saveNameOverrides(overrides)
+    const containers = get().containers.map((c) => c.id === id ? { ...c, agent_name: name } : c)
+    set({ nameOverrides: overrides, containers })
   },
 
   checkHealth: async () => {

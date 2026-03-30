@@ -1660,6 +1660,15 @@ class WebServer:
         from captain_claw.web.rest_direct_api import execute_call
         return await execute_call(self, request)
 
+    # MCP Connectors page
+    async def _serve_mcp_connectors(self, request: web.Request) -> web.FileResponse:
+        from captain_claw.web.static_pages import serve_mcp_connectors
+        return await serve_mcp_connectors(self, request)
+
+    async def _mcp_test(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_mcp import test_connection
+        return await test_connection(self, request)
+
     # Datastore REST
     async def _ds_list_tables(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_datastore import list_tables
@@ -2187,6 +2196,8 @@ class WebServer:
             app.router.add_get("/playbook-wizard", self._serve_playbook_wizard)
             app.router.add_get("/browser-workflows", self._serve_browser_workflows)
             app.router.add_get("/direct-api-calls", self._serve_direct_api_calls)
+            app.router.add_get("/mcp-connectors", self._serve_mcp_connectors)
+            app.router.add_post("/api/mcp/test", self._mcp_test)
             app.router.add_get("/skills", self._serve_skills)
             app.router.add_get("/usage", self._serve_usage)
             app.router.add_get("/reflections", self._serve_reflections)

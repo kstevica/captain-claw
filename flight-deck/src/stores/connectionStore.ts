@@ -55,8 +55,9 @@ export function getApiBase(): string {
 export function getWsUrl(): string {
   const { botportUrl } = useConnectionStore.getState()
   if (!botportUrl) {
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    return `${proto}//${window.location.host}/ws/dashboard`
+    // No BotPort URL configured — return empty to skip connection.
+    // The Flight Deck server doesn't have /ws/dashboard.
+    return ''
   }
   const wsBase = botportUrl
     .replace(/^http:/, 'ws:')

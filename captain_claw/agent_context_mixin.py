@@ -1,5 +1,6 @@
 """Prompt/message context assembly helpers for Agent."""
 
+import asyncio
 import importlib.util
 import inspect
 import json
@@ -1727,6 +1728,9 @@ class AgentContextMixin:
         # Register default tools
         self._register_default_tools()
 
+        # Register MCP tools (requires async for HTTP calls)
+        await self._register_mcp_tools_async_init()
+
         # Initialize file registry for single-agent mode.
         # Orchestration mode creates its own shared registry per run.
         if getattr(self, "_file_registry", None) is None:
@@ -2115,6 +2119,23 @@ class AgentContextMixin:
                     count=registered_count,
                 )
 
+    async def _register_mcp_tools_async_init(self) -> None:
+        """Connect to configured MCP servers and register their tools."""
+        config = get_config()
+        servers = getattr(config.tools, "mcp_servers", None)
+        if not servers:
+            return
+
+        from captain_claw.tools.mcp_connector import register_mcp_tools
+
+        srv_configs = [s.model_dump() for s in servers]
+        try:
+            registered = await register_mcp_tools(self.tools, srv_configs)
+            if registered:
+                log.info("MCP tools registered", tools=registered)
+        except Exception as exc:
+            log.error("Failed to register MCP tools", error=str(exc))
+
     # ------------------------------------------------------------------
     # Conditional system-prompt helpers
     # ------------------------------------------------------------------
@@ -2129,6 +2150,9 @@ class AgentContextMixin:
             parts = []
             for name in registered:
                 desc = descs.get(name)
+                if not desc and name.startswith("mcp_"):
+                    tool = self.tools.get(name)
+                    desc = getattr(tool, "description", name) if tool else None
                 if desc:
                     parts.append(f"{name} ({desc})")
             return "Tools: " + ", ".join(parts) + "." if parts else ""
@@ -2136,6 +2160,9 @@ class AgentContextMixin:
             lines = ["Available tools:"]
             for name in registered:
                 desc = descs.get(name)
+                if not desc and name.startswith("mcp_"):
+                    tool = self.tools.get(name)
+                    desc = getattr(tool, "description", name) if tool else None
                 if desc:
                     lines.append(f"- {name}: {desc}")
             return "\n".join(lines)

@@ -1387,10 +1387,10 @@
         if (!file) return;
         var ext = file.name.split('.').pop().toLowerCase();
         var isImage = _IMAGE_EXTS.indexOf(ext) !== -1;
-        var isData = (ext === 'csv' || ext === 'xlsx');
+        var isData = (ext === 'csv' || ext === 'xlsx' || ext === 'zip');
 
         if (!isImage && !isData) {
-            addChatMessage('assistant', '**Error:** Supported files: images (.png, .jpg, .jpeg, .webp, .gif, .bmp) and data (.csv, .xlsx).');
+            addChatMessage('assistant', '**Error:** Supported files: images (.png, .jpg, .jpeg, .webp, .gif, .bmp) and data (.csv, .xlsx, .zip).');
             return;
         }
 

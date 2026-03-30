@@ -159,3 +159,7 @@ async def serve_briefings(server: WebServer, request: web.Request) -> web.FileRe
 
 async def serve_brain_graph(server: WebServer, request: web.Request) -> web.Response:
     return _cache_bust(STATIC_DIR / "brain-graph.html")
+
+
+async def serve_mcp_connectors(server: WebServer, request: web.Request) -> web.FileResponse:
+    return web.FileResponse(STATIC_DIR / "mcp-connectors.html")

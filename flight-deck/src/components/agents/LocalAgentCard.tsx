@@ -20,6 +20,8 @@ export function LocalAgentCard({ agent, onBrowseFiles }: { agent: LocalAgent; on
   const statusText = session?.statusText ?? ''
   const [editingDesc, setEditingDesc] = useState(false)
   const [descDraft, setDescDraft] = useState('')
+  const [editingName, setEditingName] = useState(false)
+  const [nameDraft, setNameDraft] = useState('')
 
   return (
     <div className={`rounded-xl border bg-zinc-900/50 overflow-hidden ${busy ? 'border-violet-500/40' : 'border-zinc-800'}`}>
@@ -30,8 +32,35 @@ export function LocalAgentCard({ agent, onBrowseFiles }: { agent: LocalAgent; on
           <div className="rounded-lg bg-zinc-800 p-2">
             <Cpu className="h-5 w-5 text-zinc-400" />
           </div>
-          <div>
-            <h3 className="text-base font-semibold">{agent.name}</h3>
+          <div className="min-w-0 flex-1">
+            <div className="group/name flex items-center gap-1">
+              {editingName ? (
+                <div className="flex items-center gap-1">
+                  <input
+                    value={nameDraft}
+                    onChange={(e) => setNameDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && nameDraft.trim()) { updateAgent(agent.id, { name: nameDraft.trim() }); setEditingName(false) }
+                      if (e.key === 'Escape') setEditingName(false)
+                    }}
+                    className="w-40 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-0.5 text-base font-semibold text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                    autoFocus
+                  />
+                  <button onClick={() => { if (nameDraft.trim()) { updateAgent(agent.id, { name: nameDraft.trim() }); setEditingName(false) } }} className="rounded p-0.5 text-emerald-400 hover:bg-zinc-800"><Check className="h-3.5 w-3.5" /></button>
+                  <button onClick={() => setEditingName(false)} className="rounded p-0.5 text-zinc-500 hover:bg-zinc-800"><X className="h-3.5 w-3.5" /></button>
+                </div>
+              ) : (
+                <>
+                  <h3 className="text-base font-semibold truncate">{agent.name}</h3>
+                  <button
+                    onClick={() => { setNameDraft(agent.name); setEditingName(true) }}
+                    className="rounded p-0.5 text-zinc-600 opacity-0 transition-opacity group-hover/name:opacity-100 hover:bg-zinc-800 hover:text-zinc-300"
+                  >
+                    <Pencil className="h-3 w-3" />
+                  </button>
+                </>
+              )}
+            </div>
             <span className="text-xs text-zinc-500 font-mono">{agent.host}:{agent.port}</span>
           </div>
         </div>

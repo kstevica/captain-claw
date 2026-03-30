@@ -66,7 +66,7 @@ let byokActive = false; // server-confirmed active state
 let pendingImages = [];   // [{path, name}, ...]
 let pendingFiles = [];    // [{path, name}, ...]
 const _IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
-const _DATA_EXTS = ["csv", "xlsx", "xls", "pdf", "docx", "doc", "pptx", "ppt", "md", "txt"];
+const _DATA_EXTS = ["csv", "xlsx", "xls", "pdf", "docx", "doc", "pptx", "ppt", "md", "txt", "zip"];
 
 // Folder browser state.
 let folderCurrentPath = null;
@@ -4839,7 +4839,7 @@ async function uploadFile(file) {
   const isData = _DATA_EXTS.indexOf(ext) !== -1;
 
   if (!isImage && !isData) {
-    logEntry("error", "Supported: images (.png, .jpg, .jpeg, .webp, .gif, .bmp), documents (.pdf, .docx, .pptx, .md, .txt), and data (.csv, .xlsx).");
+    logEntry("error", "Supported: images (.png, .jpg, .jpeg, .webp, .gif, .bmp), documents (.pdf, .docx, .pptx, .md, .txt), data (.csv, .xlsx), and archives (.zip).");
     return;
   }
 

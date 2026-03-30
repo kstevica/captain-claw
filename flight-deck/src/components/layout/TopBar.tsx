@@ -1,4 +1,4 @@
-import { RefreshCw, PanelLeft, Pin, ClipboardList, Sun, Moon, Keyboard } from 'lucide-react'
+import { RefreshCw, PanelLeft, Pin, FileText, ClipboardList, Sun, Moon, Keyboard } from 'lucide-react'
 import { useAgentStore } from '../../stores/agentStore'
 import { useThemeStore } from '../../stores/themeStore'
 import { NotificationBell } from '../common/NotificationCenter'
@@ -7,16 +7,18 @@ interface TopBarProps {
   directorOpen?: boolean
   onToggleDirector?: () => void
   onTogglePinned?: () => void
+  onTogglePinnedFiles?: () => void
   onToggleClipboard?: () => void
   onToggleShortcuts?: () => void
   pinnedOpen?: boolean
+  pinnedFilesOpen?: boolean
   clipboardOpen?: boolean
 }
 
 export function TopBar({
   directorOpen, onToggleDirector,
-  onTogglePinned, onToggleClipboard, onToggleShortcuts,
-  pinnedOpen, clipboardOpen,
+  onTogglePinned, onTogglePinnedFiles, onToggleClipboard, onToggleShortcuts,
+  pinnedOpen, pinnedFilesOpen, clipboardOpen,
 }: TopBarProps) {
   const { stats, fetchInstances, fetchStats, fetchConcerns } = useAgentStore()
   const { theme, toggle: toggleTheme } = useThemeStore()
@@ -66,6 +68,15 @@ export function TopBar({
             title="Pinned Messages"
           >
             <Pin className="h-3.5 w-3.5" />
+          </button>
+        )}
+        {onTogglePinnedFiles && (
+          <button
+            onClick={onTogglePinnedFiles}
+            className={`rounded p-1.5 transition-colors ${pinnedFilesOpen ? 'bg-blue-600/20 text-blue-400' : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'}`}
+            title="Pinned Files"
+          >
+            <FileText className="h-3.5 w-3.5" />
           </button>
         )}
         {onToggleClipboard && (

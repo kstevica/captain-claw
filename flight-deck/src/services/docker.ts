@@ -103,6 +103,12 @@ export const rebuildContainer = (id: string, description?: string) =>
     body: JSON.stringify({ description: description || '' }),
   })
 
+export const cloneContainer = (id: string, newName: string) =>
+  fdFetch<ContainerActionResult>(`/containers/${id}/clone`, {
+    method: 'POST',
+    body: JSON.stringify({ new_name: newName }),
+  })
+
 export const removeContainer = (id: string, force = false) =>
   fdFetch<ContainerActionResult>(`/containers/${id}?force=${force}`, { method: 'DELETE' })
 

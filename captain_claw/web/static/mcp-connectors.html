@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MCP Connectors - Captain Claw</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --bg-hover: #30363d;
+            --border: #30363d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --text-muted: #6e7681;
+            --accent: #58a6ff;
+            --accent-hover: #79c0ff;
+            --green: #3fb950;
+            --red: #f85149;
+            --orange: #f78166;
+            --purple: #bc8cff;
+            --radius: 6px;
+            --radius-lg: 12px;
+            --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            --header-height: 48px;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: var(--font);
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+        }
+
+        /* Header */
+        .mc-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            height: var(--header-height);
+            padding: 0 16px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        .mc-header-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .mc-header-left h1 {
+            font-size: 15px;
+            font-weight: 600;
+        }
+        .mc-header-right {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .mc-nav-link {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 13px;
+        }
+        .mc-nav-link:hover { color: var(--accent); }
+        .mc-logo-link img { vertical-align: middle; }
+
+        /* Main layout */
+        .mc-main {
+            max-width: 960px;
+            margin: 0 auto;
+            padding: 24px 16px;
+        }
+
+        /* Add button */
+        .mc-toolbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .mc-toolbar-title {
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+        .mc-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 14px;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            font-size: 13px;
+            cursor: pointer;
+            transition: background 0.15s, border-color 0.15s;
+        }
+        .mc-btn:hover { background: var(--bg-hover); border-color: var(--text-muted); }
+        .mc-btn.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+        .mc-btn.primary:hover { background: #388bfd; }
+        .mc-btn.danger { color: var(--red); }
+        .mc-btn.danger:hover { background: rgba(248,81,73,.1); border-color: var(--red); }
+        .mc-btn.sm { padding: 4px 10px; font-size: 12px; }
+        .mc-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* Server cards */
+        .mc-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            margin-bottom: 16px;
+            overflow: hidden;
+        }
+        .mc-card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 16px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .mc-card-header:hover { background: var(--bg-tertiary); }
+        .mc-card-title {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .mc-card-name {
+            font-weight: 600;
+            font-size: 14px;
+        }
+        .mc-card-url {
+            font-size: 12px;
+            color: var(--text-muted);
+            font-family: monospace;
+        }
+        .mc-status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--text-muted);
+            flex-shrink: 0;
+        }
+        .mc-status-dot.connected { background: var(--green); }
+        .mc-status-dot.error { background: var(--red); }
+        .mc-status-dot.testing { background: var(--orange); animation: pulse 1s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+        .mc-card-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .mc-card-chevron {
+            color: var(--text-muted);
+            font-size: 12px;
+            transition: transform 0.2s;
+        }
+        .mc-card.expanded .mc-card-chevron { transform: rotate(180deg); }
+
+        .mc-card-body {
+            display: none;
+            padding: 0 16px 16px;
+            border-top: 1px solid var(--border);
+        }
+        .mc-card.expanded .mc-card-body { display: block; }
+
+        /* Form fields */
+        .mc-form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-top: 14px;
+        }
+        .mc-form-grid .mc-field.full { grid-column: 1 / -1; }
+        .mc-field label {
+            display: block;
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+            font-weight: 500;
+        }
+        .mc-field input {
+            width: 100%;
+            padding: 7px 10px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            color: var(--text-primary);
+            font-size: 13px;
+            font-family: inherit;
+        }
+        .mc-field input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px rgba(88,166,255,.15);
+        }
+        .mc-field input::placeholder { color: var(--text-muted); }
+
+        /* Card footer with actions */
+        .mc-card-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 16px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border);
+        }
+
+        /* Tools list */
+        .mc-tools-section {
+            margin-top: 16px;
+        }
+        .mc-tools-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+        .mc-tools-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .mc-tool-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 4px 10px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 99px;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        .mc-tool-chip .mc-tool-icon { color: var(--accent); }
+
+        /* Test result */
+        .mc-test-result {
+            margin-top: 12px;
+            padding: 10px 12px;
+            border-radius: var(--radius);
+            font-size: 12px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            display: none;
+        }
+        .mc-test-result.success {
+            display: block;
+            background: rgba(63,185,80,.08);
+            border: 1px solid rgba(63,185,80,.3);
+            color: var(--green);
+        }
+        .mc-test-result.error {
+            display: block;
+            background: rgba(248,81,73,.08);
+            border: 1px solid rgba(248,81,73,.3);
+            color: var(--red);
+        }
+
+        /* Empty state */
+        .mc-empty {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-muted);
+        }
+        .mc-empty-icon { font-size: 48px; margin-bottom: 12px; }
+        .mc-empty-text { font-size: 14px; margin-bottom: 16px; }
+
+        /* Add form (collapsible) */
+        .mc-add-form {
+            background: var(--bg-secondary);
+            border: 1px solid var(--accent);
+            border-radius: var(--radius-lg);
+            padding: 16px;
+            margin-bottom: 16px;
+            display: none;
+        }
+        .mc-add-form.visible { display: block; }
+        .mc-add-form h3 {
+            font-size: 14px;
+            margin-bottom: 12px;
+            color: var(--accent);
+        }
+
+        /* Toast */
+        .mc-toast-container {
+            position: fixed;
+            top: 60px;
+            right: 16px;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .mc-toast {
+            padding: 10px 16px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            font-size: 13px;
+            animation: slideIn 0.3s ease;
+            max-width: 360px;
+        }
+        .mc-toast.success { border-color: var(--green); color: var(--green); }
+        .mc-toast.error { border-color: var(--red); color: var(--red); }
+        @keyframes slideIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+
+        /* Responsive */
+        @media (max-width: 640px) {
+            .mc-form-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+<header class="mc-header">
+    <div class="mc-header-left">
+        <a href="/" class="mc-logo-link"><img src="/static/logo.svg" width="28" height="28"></a>
+        <h1>MCP Connectors</h1>
+    </div>
+    <div class="mc-header-right">
+        <a href="/settings" class="mc-nav-link">Settings</a>
+        <a href="/chat" class="mc-nav-link">&larr; Chat</a>
+    </div>
+</header>
+
+<div class="mc-main">
+    <div class="mc-toolbar">
+        <span class="mc-toolbar-title" id="serverCount">0 servers</span>
+        <button class="mc-btn primary" id="addBtn">+ Add MCP Server</button>
+    </div>
+
+    <!-- Add new server form -->
+    <div class="mc-add-form" id="addForm">
+        <h3>Add MCP Server</h3>
+        <div class="mc-form-grid">
+            <div class="mc-field">
+                <label>Name</label>
+                <input type="text" id="addName" placeholder="e.g. fric, crm, erp">
+            </div>
+            <div class="mc-field">
+                <label>Server URL</label>
+                <input type="text" id="addUrl" placeholder="https://api.example.com/mcp">
+            </div>
+            <div class="mc-field">
+                <label>OAuth Client ID</label>
+                <input type="text" id="addClientId" placeholder="Optional">
+            </div>
+            <div class="mc-field">
+                <label>OAuth Client Secret</label>
+                <input type="password" id="addClientSecret" placeholder="Optional">
+            </div>
+            <div class="mc-field full">
+                <label>Token Endpoint</label>
+                <input type="text" id="addTokenEndpoint" placeholder="e.g. /api/mcp/oauth/token (relative or absolute URL)">
+            </div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end;">
+            <button class="mc-btn" id="addCancelBtn">Cancel</button>
+            <button class="mc-btn primary" id="addSaveBtn">Add Server</button>
+        </div>
+    </div>
+
+    <!-- Server list -->
+    <div id="serverList"></div>
+
+    <!-- Empty state -->
+    <div class="mc-empty" id="emptyState" style="display:none;">
+        <div class="mc-empty-icon">&#x1F50C;</div>
+        <div class="mc-empty-text">No MCP servers configured yet</div>
+        <button class="mc-btn primary" id="emptyAddBtn">+ Add your first server</button>
+    </div>
+</div>
+
+<div class="mc-toast-container" id="toastContainer"></div>
+
+<script>
+(function() {
+    const SECRET_MASK = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
+    let servers = [];
+    let dirty = false;
+
+    const $ = id => document.getElementById(id);
+    const esc = s => {
+        const d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+    };
+
+    function toast(msg, type) {
+        const el = document.createElement('div');
+        el.className = 'mc-toast ' + (type || '');
+        el.textContent = msg;
+        $('toastContainer').appendChild(el);
+        setTimeout(() => el.remove(), 4000);
+    }
+
+    // ── Load servers from config ──
+    async function load() {
+        try {
+            const res = await fetch('/api/settings');
+            const data = await res.json();
+            servers = data.values['tools.mcp_servers'] || [];
+        } catch (e) {
+            servers = [];
+        }
+        render();
+    }
+
+    // ── Save servers to config ──
+    async function save() {
+        try {
+            const res = await fetch('/api/settings', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ changes: { 'tools.mcp_servers': servers } }),
+            });
+            const data = await res.json();
+            if (data.ok) {
+                dirty = false;
+                toast('Saved successfully', 'success');
+                // Reload to get fresh masked values
+                await load();
+            } else {
+                toast('Save failed: ' + (data.error || 'Unknown error'), 'error');
+            }
+        } catch (e) {
+            toast('Network error: ' + e.message, 'error');
+        }
+    }
+
+    // ── Render all server cards ──
+    function render() {
+        const list = $('serverList');
+        const empty = $('emptyState');
+        const count = $('serverCount');
+
+        count.textContent = servers.length + ' server' + (servers.length !== 1 ? 's' : '');
+
+        if (!servers.length) {
+            list.innerHTML = '';
+            empty.style.display = '';
+            return;
+        }
+        empty.style.display = 'none';
+
+        list.innerHTML = servers.map((srv, i) => `
+            <div class="mc-card" data-idx="${i}" id="card-${i}">
+                <div class="mc-card-header" onclick="window._mcToggle(${i})">
+                    <div class="mc-card-title">
+                        <div class="mc-status-dot" id="dot-${i}"></div>
+                        <span class="mc-card-name">${esc(srv.name || 'Unnamed')}</span>
+                        <span class="mc-card-url">${esc(srv.url || '')}</span>
+                    </div>
+                    <div class="mc-card-actions">
+                        <span class="mc-card-chevron">&#x25BE;</span>
+                    </div>
+                </div>
+                <div class="mc-card-body">
+                    <div class="mc-form-grid">
+                        <div class="mc-field">
+                            <label>Name</label>
+                            <input type="text" value="${esc(srv.name || '')}" data-idx="${i}" data-key="name" onchange="window._mcUpdate(this)">
+                        </div>
+                        <div class="mc-field">
+                            <label>Server URL</label>
+                            <input type="text" value="${esc(srv.url || '')}" data-idx="${i}" data-key="url" onchange="window._mcUpdate(this)">
+                        </div>
+                        <div class="mc-field">
+                            <label>OAuth Client ID</label>
+                            <input type="text" value="${esc(srv.client_id || '')}" data-idx="${i}" data-key="client_id" onchange="window._mcUpdate(this)">
+                        </div>
+                        <div class="mc-field">
+                            <label>OAuth Client Secret</label>
+                            <input type="password" value="${esc(srv.client_secret || '')}" data-idx="${i}" data-key="client_secret" onchange="window._mcUpdate(this)">
+                        </div>
+                        <div class="mc-field full">
+                            <label>Token Endpoint</label>
+                            <input type="text" value="${esc(srv.token_endpoint || '')}" data-idx="${i}" data-key="token_endpoint" onchange="window._mcUpdate(this)">
+                        </div>
+                    </div>
+                    <div class="mc-test-result" id="result-${i}"></div>
+                    <div class="mc-tools-section" id="tools-${i}" style="display:none;">
+                        <div class="mc-tools-title">Discovered Tools</div>
+                        <div class="mc-tools-list" id="toolsList-${i}"></div>
+                    </div>
+                    <div class="mc-card-footer">
+                        <div style="display:flex;gap:8px;">
+                            <button class="mc-btn sm" onclick="window._mcTest(${i})">Test Connection</button>
+                            <button class="mc-btn sm" onclick="window._mcSaveOne(${i})">Save Changes</button>
+                        </div>
+                        <button class="mc-btn sm danger" onclick="window._mcRemove(${i})">Remove</button>
+                    </div>
+                </div>
+            </div>
+        `).join('');
+    }
+
+    // ── Toggle card expand ──
+    window._mcToggle = function(idx) {
+        const card = $('card-' + idx);
+        card.classList.toggle('expanded');
+    };
+
+    // ── Update field value ──
+    window._mcUpdate = function(el) {
+        const idx = parseInt(el.dataset.idx);
+        const key = el.dataset.key;
+        servers[idx][key] = el.value;
+        dirty = true;
+    };
+
+    // ── Save one card (save all to config) ──
+    window._mcSaveOne = async function(idx) {
+        await save();
+    };
+
+    // ── Remove server ──
+    window._mcRemove = function(idx) {
+        if (!confirm('Remove server "' + (servers[idx].name || 'Unnamed') + '"?')) return;
+        servers.splice(idx, 1);
+        save();
+    };
+
+    // ── Test connection ──
+    window._mcTest = async function(idx) {
+        const srv = servers[idx];
+        const dot = $('dot-' + idx);
+        const result = $('result-' + idx);
+        const toolsSection = $('tools-' + idx);
+        const toolsList = $('toolsList-' + idx);
+
+        dot.className = 'mc-status-dot testing';
+        result.className = 'mc-test-result';
+        result.style.display = 'none';
+        toolsSection.style.display = 'none';
+
+        try {
+            const res = await fetch('/api/mcp/test', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(srv),
+            });
+            const data = await res.json();
+
+            if (data.ok) {
+                dot.className = 'mc-status-dot connected';
+                result.className = 'mc-test-result success';
+                result.textContent = 'Connected to ' + (data.server_info?.name || 'MCP server') +
+                    ' v' + (data.server_info?.version || '?') +
+                    '\n' + (data.tools?.length || 0) + ' tools available';
+                result.style.display = 'block';
+
+                // Show discovered tools
+                if (data.tools && data.tools.length) {
+                    toolsList.innerHTML = data.tools.map(t =>
+                        '<span class="mc-tool-chip"><span class="mc-tool-icon">&#x2699;</span>' +
+                        esc(t.name) + '</span>'
+                    ).join('');
+                    toolsSection.style.display = '';
+                }
+            } else {
+                dot.className = 'mc-status-dot error';
+                result.className = 'mc-test-result error';
+                result.textContent = data.error || 'Connection failed';
+                result.style.display = 'block';
+            }
+        } catch (e) {
+            dot.className = 'mc-status-dot error';
+            result.className = 'mc-test-result error';
+            result.textContent = 'Network error: ' + e.message;
+            result.style.display = 'block';
+        }
+    };
+
+    // ── Add form toggle ──
+    $('addBtn').onclick = () => $('addForm').classList.toggle('visible');
+    $('emptyAddBtn').onclick = () => $('addForm').classList.toggle('visible');
+    $('addCancelBtn').onclick = () => {
+        $('addForm').classList.remove('visible');
+        $('addName').value = '';
+        $('addUrl').value = '';
+        $('addClientId').value = '';
+        $('addClientSecret').value = '';
+        $('addTokenEndpoint').value = '';
+    };
+
+    $('addSaveBtn').onclick = async () => {
+        const name = $('addName').value.trim();
+        const url = $('addUrl').value.trim();
+        if (!name || !url) {
+            toast('Name and URL are required', 'error');
+            return;
+        }
+        servers.push({
+            name: name,
+            url: url,
+            client_id: $('addClientId').value.trim(),
+            client_secret: $('addClientSecret').value.trim(),
+            token_endpoint: $('addTokenEndpoint').value.trim(),
+            headers: {},
+        });
+        $('addCancelBtn').click();
+        await save();
+    };
+
+    // Init
+    load();
+})();
+</script>
+
+</body>
+</html>

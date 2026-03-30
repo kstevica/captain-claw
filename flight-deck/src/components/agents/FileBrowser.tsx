@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import {
   X, FileText, Send, Loader2, Check, AlertCircle, FolderOpen, RefreshCw,
   Download, Eye, Search, ChevronDown, ChevronRight, Image, FileCode,
-  FileSpreadsheet, Film, Music, Archive, Filter,
+  FileSpreadsheet, Film, Music, Archive, Filter, Pin,
 } from 'lucide-react'
 import type { AgentFile, AgentEndpoint } from '../../services/fileTransfer'
 import {
@@ -10,6 +10,7 @@ import {
   getFileCategory, getFileTypeGroup, isViewable,
 } from '../../services/fileTransfer'
 import { FileViewer } from './FileViewer'
+import { usePinnedFilesStore } from '../../stores/pinnedFilesStore'
 
 interface FileBrowserProps {
   agent: AgentEndpoint
@@ -78,6 +79,7 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
   const [showFilters, setShowFilters] = useState(false)
   const [viewingFile, setViewingFile] = useState<AgentFile | null>(null)
 
+  const { pin: pinFile, isPinned: isFilePinned } = usePinnedFilesStore()
   const otherAgents = allAgents.filter((a) => a.id !== agent.id)
 
   const loadFiles = async () => {
@@ -345,7 +347,7 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
             <SortHeader label="Date" field="date" current={sortField} dir={sortDir} onClick={handleSort} className="w-28 text-right" />
             <SortHeader label="Type" field="type" current={sortField} dir={sortDir} onClick={handleSort} className="w-16 text-right" />
             <SortHeader label="Size" field="size" current={sortField} dir={sortDir} onClick={handleSort} className="w-16 text-right" />
-            <div className="w-16" /> {/* actions column */}
+            <div className="w-20" /> {/* actions column */}
           </div>
         )}
 
@@ -428,7 +430,34 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
                       {/* Size */}
                       <span className="w-16 text-right text-[11px] text-zinc-600 shrink-0">{formatSize(f.size)}</span>
                       {/* Actions */}
-                      <div className="w-16 flex items-center justify-end gap-0.5 shrink-0">
+                      <div className="w-20 flex items-center justify-end gap-0.5 shrink-0">
+                        <button
+                          onClick={() => {
+                            if (!isFilePinned(agent.id, f.physical)) {
+                              pinFile({
+                                agentId: agent.id,
+                                agentName: agent.name,
+                                host: agent.host,
+                                port: agent.port,
+                                auth: agent.auth,
+                                filename: f.filename,
+                                extension: f.extension,
+                                physical: f.physical,
+                                logical: f.logical,
+                                size: f.size,
+                                mime_type: f.mime_type,
+                              })
+                            }
+                          }}
+                          className={`rounded p-1 transition-colors ${
+                            isFilePinned(agent.id, f.physical)
+                              ? 'text-amber-400'
+                              : 'text-zinc-600 hover:bg-zinc-800 hover:text-amber-400'
+                          }`}
+                          title={isFilePinned(agent.id, f.physical) ? 'Pinned' : 'Pin file'}
+                        >
+                          <Pin className="h-3 w-3" />
+                        </button>
                         {isViewable(f) && (
                           <button
                             onClick={() => handleView(f)}

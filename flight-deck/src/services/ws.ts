@@ -15,6 +15,10 @@ class BotPortSocket {
   connect() {
     const url = getWsUrl()
 
+    // Don't connect if no BotPort URL is configured — the Flight Deck
+    // server doesn't have a /ws/dashboard endpoint and would just 403.
+    if (!url) return
+
     // If URL changed, close old connection first
     if (this.ws && this.currentUrl !== url) {
       this.disconnect()

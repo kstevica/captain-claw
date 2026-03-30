@@ -392,6 +392,17 @@ class ClipboardToolConfig(BaseModel):
     timeout_seconds: int = 10
 
 
+class MCPServerConfig(BaseModel):
+    """Configuration for a single remote MCP server."""
+
+    name: str = ""
+    url: str = ""
+    client_id: str = ""
+    client_secret: str = ""
+    token_endpoint: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
 
@@ -448,6 +459,7 @@ class ToolsConfig(BaseModel):
     clipboard: ClipboardToolConfig = Field(default_factory=ClipboardToolConfig)
     screen_capture: ScreenCaptureToolConfig = Field(default_factory=ScreenCaptureToolConfig)
     twitter: TwitterToolConfig = Field(default_factory=TwitterToolConfig)
+    mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
     require_confirmation: list[str] = ["shell", "write", "edit"]
     plugin_dirs: list[str] = ["skills/tools"]
 

@@ -49,6 +49,7 @@ from captain_claw.tools.summarize_files import SummarizeFilesTool
 from captain_claw.tools.insights import InsightsTool
 from captain_claw.tools.cron_tool import CronTool
 from captain_claw.tools.twitter import TwitterTool
+from captain_claw.tools.mcp_connector import MCPConnector, MCPProxyTool
 
 __all__ = [
     "Tool",
@@ -98,4 +99,6 @@ __all__ = [
     "InsightsTool",
     "CronTool",
     "TwitterTool",
+    "MCPConnector",
+    "MCPProxyTool",
 ]
