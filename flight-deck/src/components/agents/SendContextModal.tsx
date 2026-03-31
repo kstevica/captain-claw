@@ -2,6 +2,8 @@ import { useState, useMemo } from 'react'
 import { X, Send, ChevronDown, ChevronUp, MessageSquare } from 'lucide-react'
 import type { ChatMessage } from '../../services/agentChat'
 import { useChatStore } from '../../stores/chatStore'
+import { useContainerStore } from '../../stores/containerStore'
+import { useLocalAgentStore } from '../../stores/localAgentStore'
 
 interface AgentTarget {
   id: string
@@ -28,12 +30,23 @@ export function SendContextModal({ sourceId: _sourceId, sourceName, messages, ta
 
   const [messageCount, setMessageCount] = useState(Math.min(10, contextMessages.length))
   const [task, setTask] = useState('')
+  const [taskTouched, setTaskTouched] = useState(false)
   const [showPreview, setShowPreview] = useState(false)
   const [sending, setSending] = useState(false)
   const [sent, setSent] = useState<string | null>(null)
 
   const openChat = useChatStore((s) => s.openChat)
   const sendMessage = useChatStore((s) => s.sendMessage)
+  const getContainerFwdTask = useContainerStore((s) => s.getForwardingTask)
+  const localAgents = useLocalAgentStore((s) => s.agents)
+
+  // Look up forwarding task for a given target
+  const getTargetFwdTask = (targetId: string): string => {
+    const containerTask = getContainerFwdTask(targetId)
+    if (containerTask) return containerTask
+    const localAgent = localAgents.find((a) => a.id === targetId)
+    return localAgent?.forwardingTask || ''
+  }
 
   const selectedMessages = contextMessages.slice(-messageCount)
 
@@ -145,8 +158,8 @@ export function SendContextModal({ sourceId: _sourceId, sourceName, messages, ta
             <label className="mb-1.5 block text-xs font-medium text-zinc-400">Task / Prompt</label>
             <textarea
               value={task}
-              onChange={(e) => setTask(e.target.value)}
-              placeholder="What should the receiving agent do with this context?"
+              onChange={(e) => { setTask(e.target.value); setTaskTouched(true) }}
+              placeholder="What should the receiving agent do with this context? (hover a target to see its suggested task)"
               rows={4}
               className="w-full resize-none rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
               autoFocus
@@ -169,17 +182,27 @@ export function SendContextModal({ sourceId: _sourceId, sourceName, messages, ta
             <div className="flex items-center gap-2">
               <span className="text-xs text-zinc-400">Send to:</span>
               <div className="flex flex-wrap gap-1.5">
-                {targets.map((t) => (
-                  <button
-                    key={t.id}
-                    onClick={() => handleSend(t)}
-                    disabled={sending || !task.trim()}
-                    className="flex items-center gap-1 rounded-md bg-violet-600/20 px-2.5 py-1.5 text-xs font-medium text-violet-300 hover:bg-violet-600/30 disabled:opacity-40"
-                  >
-                    <Send className="h-3 w-3" />
-                    {t.name}
-                  </button>
-                ))}
+                {targets.map((t) => {
+                  const fwdTask = getTargetFwdTask(t.id)
+                  return (
+                    <button
+                      key={t.id}
+                      onClick={() => handleSend(t)}
+                      onMouseEnter={() => {
+                        if (!taskTouched && fwdTask) setTask(fwdTask)
+                      }}
+                      onMouseLeave={() => {
+                        if (!taskTouched && fwdTask) setTask('')
+                      }}
+                      disabled={sending || !task.trim()}
+                      className="flex items-center gap-1 rounded-md bg-violet-600/20 px-2.5 py-1.5 text-xs font-medium text-violet-300 hover:bg-violet-600/30 disabled:opacity-40"
+                      title={fwdTask ? `Suggested task: ${fwdTask}` : undefined}
+                    >
+                      <Send className="h-3 w-3" />
+                      {t.name}
+                    </button>
+                  )
+                })}
               </div>
             </div>
           )}

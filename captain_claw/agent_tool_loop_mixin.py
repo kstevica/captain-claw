@@ -1137,6 +1137,7 @@ class AgentToolLoopMixin:
                     tool_call_id=tc.id,
                     tool_name=tc.name,
                     tool_arguments=arguments if isinstance(arguments, dict) else None,
+                    system_hint=result.system_hint if result.success else None,
                 )
                 self._emit_tool_output(
                     tc.name,

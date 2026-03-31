@@ -6,6 +6,8 @@ import { useGroupStore } from './groupStore'
 
 const DESC_OVERRIDES_KEY = 'fd:container-descriptions'
 const NAME_OVERRIDES_KEY = 'fd:container-names'
+const FWD_TASK_OVERRIDES_KEY = 'fd:container-forwarding-tasks'
+const CONSULT_APPROVAL_KEY = 'fd:container-consult-approval'
 
 function loadDescOverrides(): Record<string, string> {
   try { return JSON.parse(localStorage.getItem(DESC_OVERRIDES_KEY) || '{}') } catch { return {} }
@@ -19,6 +21,18 @@ function loadNameOverrides(): Record<string, string> {
 function saveNameOverrides(m: Record<string, string>) {
   localStorage.setItem(NAME_OVERRIDES_KEY, JSON.stringify(m))
 }
+function loadFwdTaskOverrides(): Record<string, string> {
+  try { return JSON.parse(localStorage.getItem(FWD_TASK_OVERRIDES_KEY) || '{}') } catch { return {} }
+}
+function saveFwdTaskOverrides(m: Record<string, string>) {
+  localStorage.setItem(FWD_TASK_OVERRIDES_KEY, JSON.stringify(m))
+}
+function loadConsultApproval(): Record<string, boolean> {
+  try { return JSON.parse(localStorage.getItem(CONSULT_APPROVAL_KEY) || '{}') } catch { return {} }
+}
+function saveConsultApproval(m: Record<string, boolean>) {
+  localStorage.setItem(CONSULT_APPROVAL_KEY, JSON.stringify(m))
+}
 
 interface ContainerStore {
   containers: ContainerInfo[]
@@ -27,6 +41,8 @@ interface ContainerStore {
   loading: boolean
   descriptionOverrides: Record<string, string>
   nameOverrides: Record<string, string>
+  forwardingTaskOverrides: Record<string, string>
+  consultApprovalOverrides: Record<string, boolean>
 
   fetchContainers: () => Promise<void>
   selectContainer: (id: string | null) => void
@@ -39,6 +55,10 @@ interface ContainerStore {
   setNameOverride: (id: string, name: string) => void
   checkHealth: () => Promise<void>
   setDescription: (id: string, description: string) => void
+  setForwardingTask: (id: string, task: string) => void
+  getForwardingTask: (id: string) => string
+  setConsultApproval: (id: string, required: boolean) => void
+  getConsultApproval: (id: string) => boolean
 }
 
 export const useContainerStore = create<ContainerStore>((set, get) => ({
@@ -48,6 +68,8 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
   loading: false,
   descriptionOverrides: loadDescOverrides(),
   nameOverrides: loadNameOverrides(),
+  forwardingTaskOverrides: loadFwdTaskOverrides(),
+  consultApprovalOverrides: loadConsultApproval(),
 
   fetchContainers: async () => {
     try {
@@ -119,6 +141,15 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
         set({ nameOverrides })
       }
 
+      // Migrate forwarding task override from old ID to new ID
+      const fwdTaskOverrides = { ...get().forwardingTaskOverrides }
+      if (fwdTaskOverrides[oldId]) {
+        fwdTaskOverrides[newId] = fwdTaskOverrides[oldId]
+        delete fwdTaskOverrides[oldId]
+        saveFwdTaskOverrides(fwdTaskOverrides)
+        set({ forwardingTaskOverrides: fwdTaskOverrides })
+      }
+
       // Migrate pipeline step references from old ID to new ID
       const pipelineStore = usePipelineStore.getState()
       for (const pipeline of pipelineStore.pipelines) {
@@ -180,5 +211,25 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
     saveDescOverrides(overrides)
     const containers = get().containers.map((c) => c.id === id ? { ...c, description } : c)
     set({ descriptionOverrides: overrides, containers })
+  },
+
+  setForwardingTask: (id, task) => {
+    const overrides = { ...get().forwardingTaskOverrides, [id]: task }
+    saveFwdTaskOverrides(overrides)
+    set({ forwardingTaskOverrides: overrides })
+  },
+
+  getForwardingTask: (id) => {
+    return get().forwardingTaskOverrides[id] || ''
+  },
+
+  setConsultApproval: (id, required) => {
+    const overrides = { ...get().consultApprovalOverrides, [id]: required }
+    saveConsultApproval(overrides)
+    set({ consultApprovalOverrides: overrides })
+  },
+
+  getConsultApproval: (id) => {
+    return get().consultApprovalOverrides[id] ?? false
   },
 }))

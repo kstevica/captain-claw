@@ -207,6 +207,8 @@ export function DesktopPage() {
             ? () => setBrowsingAgent({ id: agent.data.id, name: agent.data.name, host: agent.data.host, port: agent.data.port, auth: agent.data.authToken })
             : undefined
         }
+        onDragStart={onDragStart}
+        isDragging={isDragging}
       />
     )
   }

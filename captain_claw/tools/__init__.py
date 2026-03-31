@@ -50,6 +50,7 @@ from captain_claw.tools.insights import InsightsTool
 from captain_claw.tools.cron_tool import CronTool
 from captain_claw.tools.twitter import TwitterTool
 from captain_claw.tools.mcp_connector import MCPConnector, MCPProxyTool
+from captain_claw.tools.consult_peer import ConsultPeerTool
 
 __all__ = [
     "Tool",
@@ -101,4 +102,5 @@ __all__ = [
     "TwitterTool",
     "MCPConnector",
     "MCPProxyTool",
+    "ConsultPeerTool",
 ]

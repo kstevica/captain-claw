@@ -140,6 +140,7 @@ class ToolResult(BaseModel):
     success: bool = True
     content: str = ""
     error: str | None = None
+    system_hint: str | None = None
 
     @model_validator(mode="after")
     def _normalize_failure_error(self) -> "ToolResult":
@@ -625,6 +626,7 @@ class ToolRegistry:
                     _workflow_started_at=_workflow_started_at,
                     _workflow_run_dir=_workflow_run_dir,
                     _stream_callback=stream_callback,
+                    _approval_callback=effective_approval,
                 )
             )
             abort_wait_task = asyncio.create_task(tool_abort_event.wait())

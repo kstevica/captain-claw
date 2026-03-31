@@ -68,7 +68,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   onDragStart?: (e: React.PointerEvent) => void
   isDragging?: boolean
 }) {
-  const { stopContainer, startContainer, restartContainer, removeContainer, rebuildContainer, cloneContainer, setDescription, setNameOverride } = useContainerStore()
+  const { stopContainer, startContainer, restartContainer, removeContainer, rebuildContainer, cloneContainer, setDescription, setNameOverride, setForwardingTask, getForwardingTask, setConsultApproval, getConsultApproval } = useContainerStore()
   const openChat = useChatStore((s) => s.openChat)
   const session = useChatStore((s) => s.sessions.get(container.id))
   const busy = session?.busy ?? false
@@ -83,6 +83,8 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   const [descDraft, setDescDraft] = useState('')
   const [editingName, setEditingName] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
+  const [editingFwdTask, setEditingFwdTask] = useState(false)
+  const [fwdTaskDraft, setFwdTaskDraft] = useState('')
   const [compact, setCompact] = useState(() => loadCompactSet().has(container.id))
 
   const isRunning = container.status === 'running'
@@ -436,6 +438,65 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
               </button>
             </div>
           )}
+        </div>
+
+        {/* Forwarding Task (editable) */}
+        <div className="mb-3 group/fwd">
+          {editingFwdTask ? (
+            <div className="flex items-start gap-1.5">
+              <textarea
+                value={fwdTaskDraft}
+                onChange={(e) => setFwdTaskDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); setForwardingTask(container.id, fwdTaskDraft.trim()); setEditingFwdTask(false) }
+                  if (e.key === 'Escape') setEditingFwdTask(false)
+                }}
+                placeholder="Task to suggest when forwarding context to this agent..."
+                rows={2}
+                className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-300 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none resize-none"
+                autoFocus
+              />
+              <button
+                onClick={() => { setForwardingTask(container.id, fwdTaskDraft.trim()); setEditingFwdTask(false) }}
+                className="rounded p-1 text-emerald-400 hover:bg-zinc-800"
+              >
+                <Check className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={() => setEditingFwdTask(false)}
+                className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5">
+              <p className="text-xs text-zinc-500 flex-1">
+                {getForwardingTask(container.id)
+                  ? <><span className="text-zinc-600">Forwarding task:</span> <span className="text-zinc-400">{getForwardingTask(container.id)}</span></>
+                  : <span className="text-zinc-600 italic">No forwarding task</span>}
+              </p>
+              <button
+                onClick={() => { setFwdTaskDraft(getForwardingTask(container.id)); setEditingFwdTask(true) }}
+                className="rounded p-1 text-zinc-600 opacity-0 transition-opacity group-hover/fwd:opacity-100 hover:bg-zinc-800 hover:text-zinc-300"
+              >
+                <Pencil className="h-3 w-3" />
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Peer consultation approval toggle */}
+        <div className="mb-3 flex items-center gap-2">
+          <label className="flex items-center gap-1.5 cursor-pointer text-xs text-zinc-500">
+            <input
+              type="checkbox"
+              checked={getConsultApproval(container.id)}
+              onChange={(e) => setConsultApproval(container.id, e.target.checked)}
+              className="accent-violet-500 h-3 w-3"
+            />
+            Require approval for peer consultations
+          </label>
         </div>
 
         {/* Group badges */}

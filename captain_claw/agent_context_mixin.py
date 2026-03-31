@@ -1955,6 +1955,10 @@ class AgentContextMixin:
         # Always-on tools (registered regardless of tools.enabled).
         from captain_claw.tools.clipboard import ClipboardTool
         self.tools.register(ClipboardTool())
+        # Peer consultation — always registered; the tool itself returns a
+        # clear error when no peers are available or Flight Deck URL is missing.
+        from captain_claw.tools.consult_peer import ConsultPeerTool
+        self.tools.register(ConsultPeerTool())
         sft = SummarizeFilesTool()
         uid = getattr(self, "_active_personality_id", None) or getattr(self, "_user_id", None)
         if uid:
@@ -2228,6 +2232,39 @@ class AgentContextMixin:
             if _parts:
                 session_context_block = "\n\n## Session Context\n" + "\n".join(_parts)
 
+        # Peer agents: other agents available in the Flight Deck that the
+        # user may want to hand off tasks to.
+        peer_agents_block = ""
+        _peers = []
+        if self.session and isinstance(self.session.metadata, dict):
+            _peers = self.session.metadata.get("peer_agents", [])
+        if not _peers:
+            _peers = getattr(self, "_peer_agents", []) or []
+        if isinstance(_peers, list) and _peers:
+                _lines = []
+                for p in _peers:
+                    if not isinstance(p, dict):
+                        continue
+                    name = p.get("name", "").strip()
+                    if not name:
+                        continue
+                    desc = p.get("description", "").strip()
+                    fwd = p.get("forwardingTask", "").strip()
+                    entry = f"- **{name}**"
+                    if desc:
+                        entry += f": {desc}"
+                    if fwd:
+                        entry += f" (speciality: {fwd})"
+                    _lines.append(entry)
+                if _lines:
+                    peer_agents_block = (
+                        "\n\n## Other Available Agents\n"
+                        "The following peer agents are available. If a user's request "
+                        "would be better handled by one of them, suggest that the user "
+                        "forwards the task or context to the appropriate agent.\n"
+                        + "\n".join(_lines)
+                    )
+
         # Visualization style: brand-aware chart/dashboard generation.
         visualization_style_block = ""
         try:
@@ -2393,6 +2430,7 @@ class AgentContextMixin:
             personality_block=personality_block,
             user_context_block=user_context_block,
             session_context_block=session_context_block,
+            peer_agents_block=peer_agents_block,
             visualization_style_block=visualization_style_block,
             reflection_block=reflection_block,
             cognitive_self_awareness_block=cognitive_self_awareness_block,
@@ -3017,10 +3055,16 @@ class AgentContextMixin:
         selected_messages = list(reversed(selected_reversed))
         selected_messages = self._normalize_selected_messages_for_provider(selected_messages)
         for msg in selected_messages:
+            # Append system_hint to content for the LLM (not stored in
+            # the visible content field, so users don't see it in chat).
+            _content = msg["content"]
+            _hint = msg.get("system_hint")
+            if _hint:
+                _content = f"{_content}\n{_hint}"
             messages.append(
                 Message(
                     role=msg["role"],
-                    content=msg["content"],
+                    content=_content,
                     tool_call_id=msg.get("tool_call_id"),
                     tool_name=msg.get("tool_name"),
                     tool_calls=msg.get("tool_calls"),

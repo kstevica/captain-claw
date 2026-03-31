@@ -490,6 +490,17 @@ class AgentGuardMixin:
         )
         if not allowed:
             raise GuardBlockedError("script_tool", guard_error)
+        # Inject session object and peer-consult approval callback into
+        # arguments for tools that need them (e.g. consult_peer).
+        _session = getattr(self, "session", None)
+        if _session is not None:
+            arguments = {**arguments, "_session": _session}
+        # Pass agent ref so tools can access fallback attributes (e.g. _fd_url)
+        arguments = {**arguments, "_agent": self}
+        _pcac = getattr(self, "peer_consult_approval_callback", None)
+        if _pcac is not None:
+            arguments = {**arguments, "_peer_consult_approval_callback": _pcac}
+
         return await self.tools.execute(
             name=name,
             arguments=arguments,

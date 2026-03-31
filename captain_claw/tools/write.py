@@ -227,15 +227,15 @@ class WriteTool(Tool):
             result_msg = f"Written {len(content)} chars ({_line_count} lines) to {file_path}{redirect_note}"
             if _overwrite_info:
                 result_msg = f"{result_msg}\n{_overwrite_info}"
-            # Hint: prevent read-after-write waste (LLM sometimes reads
-            # back a file it just wrote, wasting an iteration).
-            result_msg += (
-                "\nDo NOT read this file back — you already know its "
-                "contents. Proceed to the next file."
-            )
             return ToolResult(
                 success=True,
                 content=result_msg,
+                # Hint: prevent read-after-write waste (LLM sometimes reads
+                # back a file it just wrote, wasting an iteration).
+                system_hint=(
+                    "Do NOT read this file back — you already know its "
+                    "contents. Proceed to the next file."
+                ),
             )
             
         except Exception as e:

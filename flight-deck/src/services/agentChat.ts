@@ -13,6 +13,10 @@ export interface ChatMessage {
   tool_arguments?: Record<string, unknown>
   tool_output?: string
   model?: string
+  approval_request_id?: string
+  approval_category?: string
+  approval_resolved?: boolean
+  peer_name?: string
 }
 
 type EventHandler = (data: Record<string, unknown>) => void

@@ -56,6 +56,7 @@ class Session:
         tool_arguments: dict[str, Any] | None = None,
         token_count: int | None = None,
         model: str = "",
+        system_hint: str | None = None,
     ) -> str:
         """Add a message to the session.  Returns the generated message_id."""
         message_id = uuid.uuid4().hex[:12]
@@ -72,6 +73,8 @@ class Session:
         }
         if model:
             msg["model"] = model
+        if system_hint:
+            msg["system_hint"] = system_hint
         self.messages.append(msg)
         self.updated_at = _utcnow_iso()
         return message_id

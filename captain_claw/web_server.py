@@ -257,6 +257,8 @@ class WebServer:
         )
         self.agent.response_stream_callback = self._response_stream_callback
         self.agent.playbook_approval_callback = self._playbook_approval_callback
+        self.agent.peer_consult_approval_callback = self._peer_consult_approval_callback
+        self.agent.ws_broadcast = self._broadcast
         await self.agent.initialize()
 
         # Initialize orchestrator (shares provider and callbacks with main agent).
@@ -568,6 +570,35 @@ class WebServer:
             await asyncio.wait_for(event.wait(), timeout=15.0)
         except asyncio.TimeoutError:
             # Auto-approve on timeout so automated tasks don't hang forever.
+            result_holder[0] = True
+        finally:
+            self._pending_playbook_approvals.pop(request_id, None)
+
+        return result_holder[0]
+
+    async def _peer_consult_approval_callback(self, message: str) -> bool:
+        """Async blocking approval for peer agent consultation.
+
+        Broadcasts an ``approval_request`` message with category ``peer_consult``
+        to all clients and waits for a response.  Falls back to auto-approve
+        after 60 s timeout.
+        """
+        import uuid
+        request_id = str(uuid.uuid4())
+        event = asyncio.Event()
+        result_holder: list[bool] = [True]  # default: approve on timeout
+        self._pending_playbook_approvals[request_id] = (event, result_holder)
+
+        self._broadcast({
+            "type": "approval_request",
+            "id": request_id,
+            "message": message,
+            "category": "peer_consult",
+        })
+
+        try:
+            await asyncio.wait_for(event.wait(), timeout=60.0)
+        except asyncio.TimeoutError:
             result_holder[0] = True
         finally:
             self._pending_playbook_approvals.pop(request_id, None)

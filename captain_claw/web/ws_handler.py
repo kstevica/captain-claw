@@ -466,6 +466,44 @@ async def handle_ws_message(
                 "session_instructions": session.metadata.get("session_instructions", ""),
             })
 
+    elif msg_type == "peer_agents":
+        # Flight Deck sends info about other available agents so this
+        # agent can be aware of its peers and recommend handoffs.
+        _pub_sid = getattr(ws, "_public_session_id", None)
+        _target_agent = server._public_agents.get(_pub_sid) if _pub_sid else server.agent
+        if not _target_agent:
+            _target_agent = server.agent
+        if _target_agent:
+            agents_list = data.get("agents", [])
+            fd_url = data.get("fd_url", "")
+            if isinstance(agents_list, list):
+                if fd_url:
+                    # Rewrite localhost to host.docker.internal only when
+                    # the agent is running inside a Docker container.
+                    import os as _os
+                    _in_docker = _os.path.exists("/.dockerenv") or _os.environ.get("CAPTAIN_CLAW_DOCKER")
+                    if _in_docker:
+                        import re as _re
+                        fd_url = _re.sub(
+                            r"(https?://)localhost(:\d+)?",
+                            r"\1host.docker.internal\2",
+                            fd_url,
+                        )
+                # Store on session metadata if session exists
+                if _target_agent.session:
+                    _target_agent.session.metadata["peer_agents"] = agents_list
+                    if fd_url:
+                        _target_agent.session.metadata["fd_url"] = fd_url
+                # Also store directly on agent as fallback (session may
+                # not exist yet at welcome time or may be swapped later)
+                _target_agent._peer_agents = agents_list
+                _target_agent._fd_url = fd_url
+                # Clear instruction cache so system prompt rebuilds
+                if hasattr(_target_agent, "instructions") and hasattr(_target_agent.instructions, "_cache"):
+                    _target_agent.instructions._cache.pop("system_prompt.md", None)
+                    _target_agent.instructions._cache.pop("micro_system_prompt.md", None)
+                log.info("Peer agents updated", count=len(agents_list), fd_url=fd_url, has_session=bool(_target_agent.session), public=bool(_pub_sid))
+
     elif msg_type == "approval_response":
         request_id = str(data.get("id", ""))
         approved = bool(data.get("approved", False))

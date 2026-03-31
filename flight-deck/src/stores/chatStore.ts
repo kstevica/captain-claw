@@ -1,5 +1,7 @@
 import { create } from 'zustand'
 import { AgentChatWS, type ChatMessage } from '../services/agentChat'
+import { useContainerStore } from './containerStore'
+import { useLocalAgentStore } from './localAgentStore'
 
 interface AgentModelInfo {
   id: string
@@ -44,6 +46,7 @@ interface ChatStore {
   cancelTask: (containerId: string) => void
   setModel: (containerId: string, selector: string) => void
   setPersonality: (containerId: string, personalityId: string) => void
+  respondToApproval: (containerId: string, requestId: string, approved: boolean) => void
 }
 
 let msgCounter = 0
@@ -104,6 +107,41 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const patch: Partial<ChatSession> = { models, personalities }
       if (name) patch.statusText = `Session: ${name}`
       updateSession(containerId, patch)
+
+      // Send peer agent awareness to the connected agent
+      const containers = useContainerStore.getState().containers
+      const localAgents = useLocalAgentStore.getState().agents
+      const { getForwardingTask: getFwd, getConsultApproval } = useContainerStore.getState()
+      const peers: { name: string; description: string; forwardingTask: string; host: string; port: number; auth: string; requireApproval: boolean }[] = []
+      for (const c of containers) {
+        if (c.id === containerId || c.status !== 'running' || !c.web_port) continue
+        peers.push({
+          name: c.agent_name || c.name,
+          description: c.description || '',
+          forwardingTask: getFwd(c.id),
+          host: 'localhost',
+          port: c.web_port,
+          auth: c.web_auth || '',
+          requireApproval: getConsultApproval(c.id),
+        })
+      }
+      for (const a of localAgents) {
+        if (a.id === containerId || a.status !== 'online') continue
+        peers.push({
+          name: a.name,
+          description: a.description || '',
+          forwardingTask: a.forwardingTask || '',
+          host: a.host,
+          port: a.port,
+          auth: a.authToken || '',
+          requireApproval: a.consultApproval ?? false,
+        })
+      }
+      if (peers.length > 0) {
+        // Derive the FD base URL so the agent can call back to consult peers
+        const fdUrl = `${window.location.protocol}//${window.location.host}`
+        ws.sendJSON({ type: 'peer_agents', agents: peers, fd_url: fdUrl })
+      }
     })
 
     ws.on('chat_message', (data) => {
@@ -150,6 +188,42 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         addMessage(containerId, msg)
       }
       updateSession(containerId, { busy: true, statusText: `Using ${toolName}...` })
+    })
+
+    ws.on('approval_request', (data) => {
+      const msg: ChatMessage = {
+        id: nextId(),
+        role: 'system',
+        content: data.message as string || 'Approval requested',
+        timestamp: new Date().toISOString(),
+        approval_request_id: data.id as string,
+        approval_category: data.category as string || '',
+      }
+      addMessage(containerId, msg)
+    })
+
+    ws.on('peer_activity', (data) => {
+      const peerName = (data.peer_name as string) || 'Peer agent'
+      const activityType = (data.activity_type as string) || ''
+      const detail = (data.detail as string) || ''
+
+      // Only show tool usage — skip status, connecting, done, errors
+      if (activityType !== 'tool' && activityType !== 'thinking') return
+      // For thinking, only show if it mentions a tool
+      if (activityType === 'thinking' && !detail.startsWith('Using ')) return
+
+      const toolName = activityType === 'tool' ? detail : detail.replace('Using ', '')
+      if (!toolName) return
+
+      const msg: ChatMessage = {
+        id: nextId(),
+        role: 'tool',
+        content: '',
+        timestamp: new Date().toISOString(),
+        tool_name: toolName,
+        peer_name: peerName,
+      }
+      addMessage(containerId, msg)
     })
 
     ws.on('error', (data) => {
@@ -244,6 +318,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (session) {
       session.ws.sendJSON({ type: 'set_personality', personality_id: personalityId })
       updateSession(containerId, { activePersonality: personalityId })
+    }
+  },
+
+  respondToApproval: (containerId, requestId, approved) => {
+    const session = get().sessions.get(containerId)
+    if (session) {
+      session.ws.sendJSON({ type: 'approval_response', id: requestId, approved })
+      // Mark the approval message as resolved
+      const messages = session.messages.map((m) =>
+        m.approval_request_id === requestId ? { ...m, approval_resolved: true } : m
+      )
+      updateSession(containerId, { messages })
     }
   },
 }))

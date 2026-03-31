@@ -10,13 +10,15 @@ export interface LocalAgent {
   port: number
   authToken: string
   status: 'unknown' | 'online' | 'offline'
+  forwardingTask?: string
+  consultApproval?: boolean
 }
 
 interface LocalAgentStore {
   agents: LocalAgent[]
   addAgent: (name: string, description: string, host: string, port: number, authToken: string) => void
   removeAgent: (id: string) => void
-  updateAgent: (id: string, patch: Partial<Pick<LocalAgent, 'name' | 'description' | 'host' | 'port' | 'authToken'>>) => void
+  updateAgent: (id: string, patch: Partial<Pick<LocalAgent, 'name' | 'description' | 'host' | 'port' | 'authToken' | 'forwardingTask' | 'consultApproval'>>) => void
   probeAgent: (id: string) => Promise<void>
   probeAll: () => Promise<void>
 }

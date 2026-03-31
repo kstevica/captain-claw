@@ -814,6 +814,7 @@ class AgentSessionMixin:
         tool_name: str | None = None,
         tool_calls: list[dict[str, Any]] | None = None,
         tool_arguments: dict[str, Any] | None = None,
+        system_hint: str | None = None,
     ) -> None:
         """Append message to session with per-message token metadata."""
         if not self.session:
@@ -843,6 +844,7 @@ class AgentSessionMixin:
             tool_arguments=tool_arguments,
             token_count=self._count_tokens(_token_text),
             model=model_label,
+            system_hint=system_hint,
         )
         memory = getattr(self, "memory", None)
         if memory is not None:

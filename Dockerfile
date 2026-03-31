@@ -11,7 +11,7 @@ COPY pyproject.toml .
 COPY captain_claw/ captain_claw/
 COPY skills/ skills/
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir --timeout=120 .
 
 RUN playwright install --with-deps chromium
 
@@ -31,6 +31,8 @@ COPY docker-entrypoint.sh /usr/local/bin/
 USER claw
 
 ENTRYPOINT ["docker-entrypoint.sh"]
+
+ENV CAPTAIN_CLAW_DOCKER=1
 
 EXPOSE 23080
 

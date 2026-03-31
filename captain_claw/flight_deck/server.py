@@ -856,6 +856,88 @@ async def probe_agent(host: str = "localhost", port: int = 23080):
         return {"ok": False, "status": 0}
 
 
+class ConsultPeerRequest(BaseModel):
+    host: str = "localhost"
+    port: int
+    auth: str = ""
+    message: str
+    source_name: str = "another agent"
+    timeout: float = Field(default=480.0, le=600.0)
+
+
+@app.post("/fd/consult-peer")
+async def consult_peer(req: ConsultPeerRequest):
+    """Send a message to a peer agent and stream back intermediate events + final response as ndjson."""
+    import websockets
+    import json
+
+    # Event types we forward as peer activity so the caller can show progress
+    _FORWARD_TYPES = {"status", "thinking", "monitor", "tool_stream"}
+
+    params = f"?token={req.auth}" if req.auth else ""
+    agent_url = f"ws://{req.host}:{req.port}/ws{params}"
+
+    async def _event_stream():
+        try:
+            async with websockets.connect(agent_url, max_size=4 * 1024 * 1024) as ws:
+                # Wait for welcome
+                welcome = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                if welcome.get("type") != "welcome":
+                    yield json.dumps({"ok": False, "error": "Unexpected handshake"}) + "\n"
+                    return
+
+                # Skip replay messages
+                while True:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=10)
+                    msg = json.loads(raw)
+                    if msg.get("type") == "replay_done":
+                        break
+                    if msg.get("type") not in ("chat_message",) or not msg.get("replay"):
+                        break
+
+                # Send the chat message
+                await ws.send(json.dumps({"type": "chat", "content": req.message}))
+
+                # Stream events until we get the final assistant response
+                response_parts: list[str] = []
+                try:
+                    deadline = asyncio.get_event_loop().time() + req.timeout
+                    while True:
+                        remaining = deadline - asyncio.get_event_loop().time()
+                        if remaining <= 0:
+                            break
+                        raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, 30))
+                        msg = json.loads(raw)
+                        msg_type = msg.get("type", "")
+
+                        # Forward interesting intermediate events
+                        if msg_type in _FORWARD_TYPES:
+                            yield json.dumps({"event": msg_type, "data": msg}) + "\n"
+
+                        if msg_type == "chat_message" and msg.get("role") == "assistant" and not msg.get("replay"):
+                            content = msg.get("content", "")
+                            if content:
+                                response_parts.append(content)
+                            break
+                        elif msg_type == "error":
+                            yield json.dumps({"ok": False, "error": msg.get("message", "Agent error")}) + "\n"
+                            return
+                except asyncio.TimeoutError:
+                    if not response_parts:
+                        yield json.dumps({"ok": False, "error": "Timed out waiting for response"}) + "\n"
+                        return
+
+            yield json.dumps({
+                "ok": True,
+                "done": True,
+                "response": "\n".join(response_parts) if response_parts else "(no response)",
+            }) + "\n"
+        except Exception as exc:
+            yield json.dumps({"ok": False, "error": f"Connection failed: {exc}"}) + "\n"
+
+    return StreamingResponse(_event_stream(), media_type="application/x-ndjson")
+
+
 @app.get("/fd/agent-files/{host}/{port}")
 async def agent_files(host: str, port: int, token: str = ""):
     """List files from a CC agent (proxied to avoid CORS)."""

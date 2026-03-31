@@ -404,7 +404,6 @@ web:
   api_enabled: true
   api_pool_max_agents: 50
   api_pool_idle_seconds: 600.0
-  auth_token: 'sktoken'
 google_oauth:
   enabled: false
   client_id: ''

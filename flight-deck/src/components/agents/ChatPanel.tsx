@@ -560,12 +560,16 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
   const handleForward = useCallback(async (target: typeof forwardTargets[0]) => {
     const src = sourceName || 'another agent'
     const role = message.role === 'user' ? 'User' : 'Assistant'
-    const composed = `--- Context from "${src}" ---\n\n**${role}:**\n${message.content}\n\n--- End of context ---\n\ncheck this and tell me did the agent do a good job`
+    // Look up forwarding task from target agent's card config
+    const container = containers.find((c) => c.id === target.id)
+    const localAgent = localAgents.find((a) => a.id === target.id)
+    const fwdTask = (container ? useContainerStore.getState().getForwardingTask(target.id) : localAgent?.forwardingTask) || 'Review the context above and provide your analysis.'
+    const composed = `--- Context from "${src}" ---\n\n**${role}:**\n${message.content}\n\n--- End of context ---\n\n${fwdTask}`
     openChat(target.id, target.name, target.host, target.port, target.auth)
     await new Promise((r) => setTimeout(r, 1000))
     sendMessageToAgent(target.id, composed)
     setShowForward(false)
-  }, [message, sourceName, openChat, sendMessageToAgent])
+  }, [message, sourceName, containers, localAgents, openChat, sendMessageToAgent])
 
   const handlePin = useCallback(() => {
     if (!agentId || pinned) return
@@ -662,6 +666,9 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
           className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-800/50 hover:text-zinc-400"
         >
           <Wrench className="h-3 w-3" />
+          {message.peer_name && (
+            <span className="font-medium text-sky-600 dark:text-sky-400">{message.peer_name}</span>
+          )}
           <span className="font-medium">{message.tool_name}</span>
           {toolExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
         </button>
@@ -676,10 +683,46 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
   }
 
   if (message.role === 'system') {
+    // Approval request with approve/deny buttons
+    if (message.approval_request_id && !message.approval_resolved) {
+      const respondToApproval = useChatStore.getState().respondToApproval
+      return (
+        <div className="mb-3 flex justify-center">
+          <div className="max-w-[85%] rounded-lg border border-amber-600/30 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/10 px-4 py-3 shadow-sm">
+            <p className="whitespace-pre-wrap text-xs text-amber-900 dark:text-amber-200 mb-2.5">{message.content}</p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => agentId && respondToApproval(agentId, message.approval_request_id!, true)}
+                className="rounded-md bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700 dark:bg-emerald-600/80 dark:hover:bg-emerald-600"
+              >
+                Approve
+              </button>
+              <button
+                onClick={() => agentId && respondToApproval(agentId, message.approval_request_id!, false)}
+                className="rounded-md bg-zinc-200 px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
+              >
+                Deny
+              </button>
+            </div>
+          </div>
+        </div>
+      )
+    }
+    // Resolved approval
+    if (message.approval_request_id && message.approval_resolved) {
+      return (
+        <div className="mb-3 flex justify-center">
+          <div className="max-w-[85%] rounded-lg bg-zinc-100 dark:bg-zinc-800/40 px-3 py-2">
+            <p className="whitespace-pre-wrap text-xs text-zinc-500 dark:text-zinc-500">{message.content}</p>
+            <span className="text-[10px] text-zinc-400 dark:text-zinc-600 italic">Responded</span>
+          </div>
+        </div>
+      )
+    }
     return (
       <div className="mb-3 flex justify-center">
-        <div className="max-w-[85%] rounded-lg bg-zinc-800/40 px-3 py-2">
-          <p className="whitespace-pre-wrap text-xs text-zinc-500">{message.content}</p>
+        <div className="max-w-[85%] rounded-lg bg-zinc-100 dark:bg-zinc-800/40 px-3 py-2">
+          <p className="whitespace-pre-wrap text-xs text-zinc-600 dark:text-zinc-500">{message.content}</p>
         </div>
       </div>
     )

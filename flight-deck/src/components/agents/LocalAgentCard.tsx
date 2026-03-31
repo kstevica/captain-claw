@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { MessageSquare, Trash2, RefreshCw, Cpu, ExternalLink, Loader2, FolderOpen, Pencil, Check, X } from 'lucide-react'
+import { MessageSquare, Trash2, RefreshCw, Cpu, ExternalLink, Loader2, FolderOpen, Pencil, Check, X, Minimize2, Maximize2 } from 'lucide-react'
 import type { LocalAgent } from '../../stores/localAgentStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useChatStore } from '../../stores/chatStore'
@@ -12,7 +12,16 @@ const statusStyles: Record<string, string> = {
   unknown: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
 }
 
-export function LocalAgentCard({ agent, onBrowseFiles }: { agent: LocalAgent; onBrowseFiles?: () => void }) {
+// ── Compact mode persistence ──
+const COMPACT_KEY = 'fd:local-agent-compact'
+function loadCompactSet(): Set<string> {
+  try { return new Set(JSON.parse(localStorage.getItem(COMPACT_KEY) || '[]')) } catch { return new Set() }
+}
+function saveCompactSet(s: Set<string>) {
+  localStorage.setItem(COMPACT_KEY, JSON.stringify([...s]))
+}
+
+export function LocalAgentCard({ agent, onBrowseFiles, onDragStart, isDragging }: { agent: LocalAgent; onBrowseFiles?: () => void; onDragStart?: (e: React.PointerEvent) => void; isDragging?: boolean }) {
   const { removeAgent, probeAgent, updateAgent } = useLocalAgentStore()
   const openChat = useChatStore((s) => s.openChat)
   const session = useChatStore((s) => s.sessions.get(agent.id))
@@ -22,10 +31,144 @@ export function LocalAgentCard({ agent, onBrowseFiles }: { agent: LocalAgent; on
   const [descDraft, setDescDraft] = useState('')
   const [editingName, setEditingName] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
+  const [editingFwdTask, setEditingFwdTask] = useState(false)
+  const [fwdTaskDraft, setFwdTaskDraft] = useState('')
+  const [compact, setCompact] = useState(() => loadCompactSet().has(agent.id))
 
+  const toggleCompact = () => {
+    const next = !compact
+    setCompact(next)
+    const s = loadCompactSet()
+    if (next) s.add(agent.id); else s.delete(agent.id)
+    saveCompactSet(s)
+  }
+
+  // ── Compact view ──
+  if (compact) {
+    return (
+      <div className={`rounded-xl border bg-zinc-900/50 overflow-hidden ${busy ? 'border-violet-500/40' : 'border-zinc-800'}`}>
+        {/* Drag handle area with compact toggle */}
+        <div
+          onPointerDown={onDragStart}
+          className={`flex items-center justify-end px-2 py-0.5 bg-zinc-800/30 ${onDragStart ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'bg-violet-500/10' : ''}`}
+        >
+          <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleCompact} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 relative z-10" title="Expand card">
+            <Maximize2 className="h-3 w-3" />
+          </button>
+        </div>
+
+        <div className="px-4 py-2.5 space-y-2">
+          {/* Line 1: icon, name, chat button, status */}
+          <div className="flex items-center gap-2">
+            <Cpu className="h-4 w-4 text-zinc-500 shrink-0" />
+            <div className="group/name flex items-center gap-1 min-w-0 flex-1">
+              {editingName ? (
+                <div className="flex items-center gap-1">
+                  <input
+                    value={nameDraft}
+                    onChange={(e) => setNameDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && nameDraft.trim()) { updateAgent(agent.id, { name: nameDraft.trim() }); setEditingName(false) }
+                      if (e.key === 'Escape') setEditingName(false)
+                    }}
+                    className="w-32 rounded border border-zinc-700 bg-zinc-950 px-1.5 py-0.5 text-sm font-semibold text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                    autoFocus
+                  />
+                  <button onClick={() => { if (nameDraft.trim()) { updateAgent(agent.id, { name: nameDraft.trim() }); setEditingName(false) } }} className="rounded p-0.5 text-emerald-400 hover:bg-zinc-800"><Check className="h-3 w-3" /></button>
+                  <button onClick={() => setEditingName(false)} className="rounded p-0.5 text-zinc-500 hover:bg-zinc-800"><X className="h-3 w-3" /></button>
+                </div>
+              ) : (
+                <>
+                  <span className="text-sm font-semibold truncate">{agent.name}</span>
+                  <button
+                    onClick={() => { setNameDraft(agent.name); setEditingName(true) }}
+                    className="rounded p-0.5 text-zinc-600 opacity-0 transition-opacity group-hover/name:opacity-100 hover:text-zinc-300"
+                  >
+                    <Pencil className="h-2.5 w-2.5" />
+                  </button>
+                </>
+              )}
+            </div>
+            <span className="rounded bg-zinc-800 px-1 py-0.5 text-[10px] font-mono text-zinc-500 shrink-0">
+              {agent.host}:{agent.port}
+            </span>
+            {agent.status === 'online' && (
+              <button
+                onClick={() => openChat(agent.id, agent.name, agent.host, agent.port, agent.authToken)}
+                className="flex items-center gap-1 rounded bg-violet-600/20 px-1.5 py-0.5 text-[11px] font-medium text-violet-300 hover:bg-violet-600/30 shrink-0"
+              >
+                <MessageSquare className="h-3 w-3" />
+                Chat
+              </button>
+            )}
+            <span className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium shrink-0 ${statusStyles[agent.status]}`}>
+              {agent.status === 'online' && (
+                <span className="relative flex h-1 w-1">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-current opacity-75" />
+                  <span className="relative inline-flex h-1 w-1 rounded-full bg-current" />
+                </span>
+              )}
+              {agent.status}
+            </span>
+          </div>
+
+          {/* Line 2: groups + status text */}
+          <div className="flex items-center gap-2 min-h-[20px]">
+            <div className="flex-1 min-w-0">
+              <AgentGroupBadges agentId={agent.id} />
+            </div>
+            {busy ? (
+              <div className="flex items-center gap-1.5 shrink-0">
+                <Loader2 className="h-3 w-3 animate-spin text-violet-400" />
+                <span className="text-[11px] text-violet-300 truncate max-w-[160px]">{statusText || 'Working...'}</span>
+              </div>
+            ) : agent.status === 'online' ? (
+              <span className="text-[11px] text-zinc-600 shrink-0">Idle</span>
+            ) : null}
+          </div>
+
+          {/* Line 3: files, probe, remove */}
+          <div className="flex items-center gap-1 -mx-1">
+            {onBrowseFiles && (
+              <button onClick={onBrowseFiles} className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                <FolderOpen className="h-3 w-3" /> Files
+              </button>
+            )}
+            <button onClick={() => probeAgent(agent.id)} className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+              <RefreshCw className="h-3 w-3" /> Probe
+            </button>
+            <div className="flex-1" />
+            <button
+              onClick={() => { if (confirm(`Remove '${agent.name}'?`)) removeAgent(agent.id) }}
+              className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-red-400/60 hover:bg-red-500/10 hover:text-red-400"
+            >
+              <Trash2 className="h-3 w-3" /> Remove
+            </button>
+          </div>
+        </div>
+
+        {/* Embedded Chat */}
+        {agent.status === 'online' && (
+          <EmbeddedChat containerId={agent.id} containerName={agent.name} host={agent.host} port={agent.port} auth={agent.authToken} />
+        )}
+      </div>
+    )
+  }
+
+  // ── Normal (expanded) view ──
   return (
     <div className={`rounded-xl border bg-zinc-900/50 overflow-hidden ${busy ? 'border-violet-500/40' : 'border-zinc-800'}`}>
-      <div className="p-5">
+      {/* Drag handle area with compact toggle */}
+      <div
+        onPointerDown={onDragStart}
+        className={`flex items-center justify-end px-2 py-0.5 bg-zinc-800/30 ${onDragStart ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'bg-violet-500/10' : ''}`}
+      >
+        <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleCompact} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 relative z-10" title="Compact card">
+          <Minimize2 className="h-3 w-3" />
+        </button>
+      </div>
+
+      <div className="px-5 pb-5 pt-3">
       {/* Header */}
       <div className="mb-3 flex items-start justify-between">
         <div className="flex items-center gap-3">
@@ -136,6 +279,65 @@ export function LocalAgentCard({ agent, onBrowseFiles }: { agent: LocalAgent; on
             </button>
           </div>
         )}
+      </div>
+
+      {/* Forwarding Task (editable) */}
+      <div className="mb-3 group/fwd">
+        {editingFwdTask ? (
+          <div className="flex items-start gap-1.5">
+            <textarea
+              value={fwdTaskDraft}
+              onChange={(e) => setFwdTaskDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); updateAgent(agent.id, { forwardingTask: fwdTaskDraft.trim() }); setEditingFwdTask(false) }
+                if (e.key === 'Escape') setEditingFwdTask(false)
+              }}
+              placeholder="Task to suggest when forwarding context to this agent..."
+              rows={2}
+              className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-300 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none resize-none"
+              autoFocus
+            />
+            <button
+              onClick={() => { updateAgent(agent.id, { forwardingTask: fwdTaskDraft.trim() }); setEditingFwdTask(false) }}
+              className="rounded p-1 text-emerald-400 hover:bg-zinc-800"
+            >
+              <Check className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={() => setEditingFwdTask(false)}
+              className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5">
+            <p className="text-xs text-zinc-500 flex-1">
+              {agent.forwardingTask
+                ? <><span className="text-zinc-600">Forwarding task:</span> <span className="text-zinc-400">{agent.forwardingTask}</span></>
+                : <span className="text-zinc-600 italic">No forwarding task</span>}
+            </p>
+            <button
+              onClick={() => { setFwdTaskDraft(agent.forwardingTask || ''); setEditingFwdTask(true) }}
+              className="rounded p-1 text-zinc-600 opacity-0 transition-opacity group-hover/fwd:opacity-100 hover:bg-zinc-800 hover:text-zinc-300"
+            >
+              <Pencil className="h-3 w-3" />
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Peer consultation approval toggle */}
+      <div className="mb-3 flex items-center gap-2">
+        <label className="flex items-center gap-1.5 cursor-pointer text-xs text-zinc-500">
+          <input
+            type="checkbox"
+            checked={agent.consultApproval ?? false}
+            onChange={(e) => updateAgent(agent.id, { consultApproval: e.target.checked })}
+            className="accent-violet-500 h-3 w-3"
+          />
+          Require approval for peer consultations
+        </label>
       </div>
 
       {/* Group badges */}
