@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react'
-import { Server, Plus, Trash2, Save, FolderOpen, Copy, X, FileDown, ClipboardCopy, ChevronDown, ChevronRight, Rocket } from 'lucide-react'
+import { Server, Plus, Trash2, Save, FolderOpen, Copy, X, FileDown, ClipboardCopy, ChevronDown, ChevronRight, Rocket, Cpu } from 'lucide-react'
 import { useConnectionStore } from '../stores/connectionStore'
 import { useContainerStore } from '../stores/containerStore'
-import { spawnAgent, type SpawnConfig } from '../services/docker'
+import { useProcessStore } from '../stores/processStore'
+import { spawnAgent, spawnProcess, type SpawnConfig } from '../services/docker'
 
 // ── Agent config model ──
 
@@ -257,6 +258,8 @@ function generateEnvFile(c: AgentConfig): string {
 export function SpawnerPage() {
   const globalBotportUrl = useConnectionStore((s) => s.botportUrl)
   const { fetchContainers, dockerAvailable, checkHealth } = useContainerStore()
+  const { fetchProcesses } = useProcessStore()
+  const [spawnMode, setSpawnMode] = useState<'docker' | 'process'>('docker')
   const [config, setConfig] = useState<AgentConfig>(() => ({
     ...defaultConfig,
     botportUrl: globalBotportUrl ? globalBotportUrl.replace(/^http/, 'ws') + '/ws' : '',
@@ -401,10 +404,36 @@ export function SpawnerPage() {
               <h1 className="text-lg font-semibold">
                 {activePresetId ? presets.find((p) => p.id === activePresetId)?.label || 'Edit Agent' : 'New Agent'}
               </h1>
-              <p className="text-sm text-zinc-500">Configure a Captain Claw instance — generates docker-compose.yml + config.yaml</p>
+              <p className="text-sm text-zinc-500">
+                Configure a Captain Claw instance — {spawnMode === 'docker' ? 'Docker container' : 'local process (pip)'}
+              </p>
             </div>
             <button onClick={openSaveDialog} className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800 transition-colors">
               <Save className="h-3.5 w-3.5" /> {activePresetId ? 'Update' : 'Save'}
+            </button>
+          </div>
+
+          {/* Spawn mode toggle */}
+          <div className="mb-5 flex rounded-lg border border-zinc-800 overflow-hidden">
+            <button
+              onClick={() => setSpawnMode('docker')}
+              className={`flex flex-1 items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
+                spawnMode === 'docker'
+                  ? 'bg-violet-600/20 text-violet-300 border-r border-violet-500/30'
+                  : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50 border-r border-zinc-800'
+              }`}
+            >
+              <Server className="h-3.5 w-3.5" /> Docker Container
+            </button>
+            <button
+              onClick={() => setSpawnMode('process')}
+              className={`flex flex-1 items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
+                spawnMode === 'process'
+                  ? 'bg-emerald-600/20 text-emerald-300'
+                  : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
+              }`}
+            >
+              <Cpu className="h-3.5 w-3.5" /> Local Process (pip)
             </button>
           </div>
 
@@ -449,9 +478,11 @@ export function SpawnerPage() {
               <Field label="Description">
                 <input value={config.description} onChange={(e) => update('description', e.target.value)} placeholder="What this agent does..." className="input" />
               </Field>
-              <Field label="Docker Image">
-                <input value={config.image} onChange={(e) => update('image', e.target.value)} className="input" />
-              </Field>
+              {spawnMode === 'docker' && (
+                <Field label="Docker Image">
+                  <input value={config.image} onChange={(e) => update('image', e.target.value)} className="input" />
+                </Field>
+              )}
             </Section>
 
             {/* LLM */}
@@ -563,41 +594,43 @@ export function SpawnerPage() {
               <PlatformToggle label="Slack" enabled={config.slackEnabled} onToggle={(v) => update('slackEnabled', v)} tokenValue={config.slackBotToken} onTokenChange={(v) => update('slackBotToken', v)} />
             </Section>
 
-            {/* Docker */}
-            <Section title="Docker Settings" expanded={expandedSections.docker} onToggle={() => toggleSection('docker')}>
-              <div className="grid grid-cols-2 gap-4">
-                <Field label="Network Mode">
-                  <select value={config.networkMode} onChange={(e) => update('networkMode', e.target.value)} className="input">
-                    <option value="host">host</option>
-                    <option value="bridge">bridge</option>
-                  </select>
-                </Field>
-                <Field label="Restart Policy">
-                  <select value={config.restartPolicy} onChange={(e) => update('restartPolicy', e.target.value)} className="input">
-                    <option value="unless-stopped">unless-stopped</option>
-                    <option value="always">always</option>
-                    <option value="on-failure">on-failure</option>
-                    <option value="no">no</option>
-                  </select>
-                </Field>
-              </div>
-              <div>
-                <div className="mb-2 flex items-center justify-between">
-                  <label className="text-sm font-medium text-zinc-300">Extra Volumes</label>
-                  <button onClick={() => update('extraVolumes', [...config.extraVolumes, { host: '', container: '' }])} className="flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
-                    <Plus className="h-3 w-3" /> Add
-                  </button>
+            {/* Docker — only shown in docker mode */}
+            {spawnMode === 'docker' && (
+              <Section title="Docker Settings" expanded={expandedSections.docker} onToggle={() => toggleSection('docker')}>
+                <div className="grid grid-cols-2 gap-4">
+                  <Field label="Network Mode">
+                    <select value={config.networkMode} onChange={(e) => update('networkMode', e.target.value)} className="input">
+                      <option value="host">host</option>
+                      <option value="bridge">bridge</option>
+                    </select>
+                  </Field>
+                  <Field label="Restart Policy">
+                    <select value={config.restartPolicy} onChange={(e) => update('restartPolicy', e.target.value)} className="input">
+                      <option value="unless-stopped">unless-stopped</option>
+                      <option value="always">always</option>
+                      <option value="on-failure">on-failure</option>
+                      <option value="no">no</option>
+                    </select>
+                  </Field>
                 </div>
-                {config.extraVolumes.map((vol, idx) => (
-                  <div key={idx} className="mb-1.5 flex gap-2">
-                    <input value={vol.host} onChange={(e) => update('extraVolumes', config.extraVolumes.map((v, i) => i === idx ? { ...v, host: e.target.value } : v))} placeholder="./host/path" className="input flex-1 font-mono text-xs" />
-                    <span className="self-center text-zinc-600">:</span>
-                    <input value={vol.container} onChange={(e) => update('extraVolumes', config.extraVolumes.map((v, i) => i === idx ? { ...v, container: e.target.value } : v))} placeholder="/container/path" className="input flex-1 font-mono text-xs" />
-                    <button onClick={() => update('extraVolumes', config.extraVolumes.filter((_, i) => i !== idx))} className="rounded p-1.5 text-zinc-600 hover:bg-zinc-800 hover:text-red-400"><Trash2 className="h-3.5 w-3.5" /></button>
+                <div>
+                  <div className="mb-2 flex items-center justify-between">
+                    <label className="text-sm font-medium text-zinc-300">Extra Volumes</label>
+                    <button onClick={() => update('extraVolumes', [...config.extraVolumes, { host: '', container: '' }])} className="flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                      <Plus className="h-3 w-3" /> Add
+                    </button>
                   </div>
-                ))}
-              </div>
-            </Section>
+                  {config.extraVolumes.map((vol, idx) => (
+                    <div key={idx} className="mb-1.5 flex gap-2">
+                      <input value={vol.host} onChange={(e) => update('extraVolumes', config.extraVolumes.map((v, i) => i === idx ? { ...v, host: e.target.value } : v))} placeholder="./host/path" className="input flex-1 font-mono text-xs" />
+                      <span className="self-center text-zinc-600">:</span>
+                      <input value={vol.container} onChange={(e) => update('extraVolumes', config.extraVolumes.map((v, i) => i === idx ? { ...v, container: e.target.value } : v))} placeholder="/container/path" className="input flex-1 font-mono text-xs" />
+                      <button onClick={() => update('extraVolumes', config.extraVolumes.filter((_, i) => i !== idx))} className="rounded p-1.5 text-zinc-600 hover:bg-zinc-800 hover:text-red-400"><Trash2 className="h-3.5 w-3.5" /></button>
+                    </div>
+                  ))}
+                </div>
+              </Section>
+            )}
 
             {/* Env vars */}
             <Section title="Environment Variables" expanded={expandedSections.env} onToggle={() => toggleSection('env')}>
@@ -617,8 +650,10 @@ export function SpawnerPage() {
           </div>
 
           {/* ── Generate buttons ── */}
-          <div className="mt-6 grid grid-cols-3 gap-3">
-            <OutputButton label="docker-compose.yml" active={showOutput === 'compose'} onClick={() => setShowOutput(showOutput === 'compose' ? null : 'compose')} />
+          <div className={`mt-6 grid gap-3 ${spawnMode === 'docker' ? 'grid-cols-3' : 'grid-cols-2'}`}>
+            {spawnMode === 'docker' && (
+              <OutputButton label="docker-compose.yml" active={showOutput === 'compose'} onClick={() => setShowOutput(showOutput === 'compose' ? null : 'compose')} />
+            )}
             <OutputButton label="config.yaml" active={showOutput === 'config'} onClick={() => setShowOutput(showOutput === 'config' ? null : 'config')} />
             <OutputButton label=".env" active={showOutput === 'env'} onClick={() => setShowOutput(showOutput === 'env' ? null : 'env')} />
           </div>
@@ -676,8 +711,10 @@ export function SpawnerPage() {
           {/* Spawn + Download buttons */}
           <div className="mt-6 flex gap-3">
             <button
-              className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-violet-600 py-3 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-50 transition-colors"
-              disabled={spawning || !dockerAvailable}
+              className={`flex flex-1 items-center justify-center gap-2 rounded-xl py-3 text-sm font-semibold text-white disabled:opacity-50 transition-colors ${
+                spawnMode === 'process' ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-violet-600 hover:bg-violet-500'
+              }`}
+              disabled={spawning || (spawnMode === 'docker' && !dockerAvailable)}
               onClick={async () => {
                 setSpawning(true)
                 setSpawnResult(null)
@@ -713,9 +750,15 @@ export function SpawnerPage() {
                     extra_volumes: config.extraVolumes,
                     env_vars: config.envVars,
                   }
-                  const result = await spawnAgent(payload)
-                  setSpawnResult({ ok: result.ok, message: `${result.message} (${result.container_id})` })
-                  fetchContainers()
+                  if (spawnMode === 'process') {
+                    const result = await spawnProcess(payload)
+                    setSpawnResult({ ok: result.ok, message: result.message })
+                    fetchProcesses()
+                  } else {
+                    const result = await spawnAgent(payload)
+                    setSpawnResult({ ok: result.ok, message: `${result.message} (${result.container_id})` })
+                    fetchContainers()
+                  }
                 } catch (e) {
                   setSpawnResult({ ok: false, message: `Failed: ${e instanceof Error ? e.message : String(e)}` })
                 } finally {
@@ -724,26 +767,35 @@ export function SpawnerPage() {
               }}
             >
               {spawning ? (
-                <><Server className="h-4 w-4 animate-pulse" /> Spawning...</>
+                <>{spawnMode === 'process' ? <Cpu className="h-4 w-4 animate-pulse" /> : <Server className="h-4 w-4 animate-pulse" />} Spawning...</>
+              ) : spawnMode === 'process' ? (
+                <><Rocket className="h-4 w-4" /> Spawn Process</>
               ) : (
-                <><Rocket className="h-4 w-4" /> {dockerAvailable ? 'Spawn Container' : 'Backend not available'}</>
+                <><Rocket className="h-4 w-4" /> {dockerAvailable ? 'Spawn Container' : 'Docker not available'}</>
               )}
             </button>
             <button
               className="flex items-center gap-2 rounded-xl border border-zinc-700 px-4 py-3 text-sm font-medium text-zinc-300 hover:bg-zinc-800 transition-colors"
               onClick={() => {
                 const slug = (config.name || 'captain-claw').replace(/[^a-z0-9-]/gi, '-').toLowerCase()
-                downloadFile(`${slug}-docker-compose.yml`, generateDockerCompose(config))
-                setTimeout(() => downloadFile(`${slug}-config.yaml`, generateConfigYaml(config)), 100)
-                setTimeout(() => downloadFile(`${slug}-.env`, generateEnvFile(config)), 200)
+                if (spawnMode === 'docker') {
+                  downloadFile(`${slug}-docker-compose.yml`, generateDockerCompose(config))
+                }
+                setTimeout(() => downloadFile(`${slug}-config.yaml`, generateConfigYaml(config)), spawnMode === 'docker' ? 100 : 0)
+                setTimeout(() => downloadFile(`${slug}-.env`, generateEnvFile(config)), spawnMode === 'docker' ? 200 : 100)
               }}
             >
               <FileDown className="h-4 w-4" /> Download Files
             </button>
           </div>
-          {!dockerAvailable && (
+          {spawnMode === 'docker' && !dockerAvailable && (
             <p className="mt-2 text-xs text-zinc-600 text-center">
-              Start the Flight Deck backend to spawn containers: <code className="text-zinc-500">cd server && pip install -r requirements.txt && python main.py</code>
+              Docker is not available. Switch to <button onClick={() => setSpawnMode('process')} className="text-emerald-500 hover:text-emerald-400 underline">Process mode</button> to spawn without Docker.
+            </p>
+          )}
+          {spawnMode === 'process' && (
+            <p className="mt-2 text-xs text-zinc-600 text-center">
+              Requires <code className="text-zinc-500">captain-claw</code> installed via pip. Agent data stored in <code className="text-zinc-500">fd-data/{(config.name || 'agent').replace(/[^a-z0-9-]/gi, '-').toLowerCase()}/</code>
             </p>
           )}
 

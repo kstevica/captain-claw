@@ -931,6 +931,22 @@ Consult specialist agents through the BotPort agent-to-agent network. Use this t
 
 Requires `botport_client.enabled: true` and a valid BotPort server URL in config. See [BotPort](#botport) for setup details.
 
+### flight_deck
+
+Discover and communicate with peer agents in the Flight Deck environment. Always available when running under Flight Deck — no configuration needed.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `list_agents` or `consult` |
+| `agent_name` | string | for consult | Name of the peer agent to message |
+| `message` | string | for consult | Message to send to the peer agent |
+
+**Actions:**
+- **`list_agents`** — queries `GET /fd/fleet` for a live list of all running agents (Docker, process, local) with name, kind, status, port, and description. Marks the calling agent in the output.
+- **`consult`** — looks up the target agent from the live fleet, then sends a message via `/fd/consult-peer` and streams the response. Supports peer activity broadcasting for real-time UI updates.
+
+Unlike `consult_peer` (which uses the static peer list pushed at connect time), `flight_deck` always queries the live fleet — so newly spawned agents are immediately discoverable.
+
 ### screen_capture
 
 Capture a screenshot of the user's screen and optionally analyze it with a vision model. Requires `pip install captain-claw[screen]`.
@@ -3606,7 +3622,10 @@ Flight Deck serves both the React frontend and the FastAPI backend from a single
 
 | Feature | Description |
 |---|---|
-| Docker container management | Spawn, stop, restart, remove Captain Claw containers with full config (provider, model, tools, platforms) |
+| Docker container management | Spawn, stop, restart, remove, rebuild, clone Captain Claw containers with full config (provider, model, tools, platforms) |
+| Process agent management | Spawn pip-based agents as local subprocesses — no Docker required. Full lifecycle (start/stop/restart/clone/remove), auto-restart on FD startup, clean shutdown |
+| Fleet discovery | `GET /fd/fleet` returns all running agents (Docker, process, local). The `flight_deck` tool gives every agent live fleet awareness |
+| Agent-to-agent communication | `consult_peer` and `flight_deck` tools let agents discover and message each other directly |
 | Local agent management | Register any CC instance by host:port, probe status, connect for chat |
 | Multi-agent chat | WebSocket-based chat with multiple agents simultaneously via tabbed interface, resizable panel (320–900px) |
 | File browser & transfer | Browse agent files with file viewer (syntax highlighting, image preview), select files, and send them to another agent |
@@ -3628,36 +3647,59 @@ Flight Deck serves both the React frontend and the FastAPI backend from a single
 
 ### Agent Types
 
-**Docker containers** — Spawned from Flight Deck's Spawn Agent page. Full lifecycle management (start/stop/restart/remove), logs, and auto-configured networking.
+**Docker containers** — Spawned from Flight Deck's Spawn Agent page. Full lifecycle management (start/stop/restart/remove/rebuild/clone), logs, and auto-configured networking.
 
-**Local agents** — Any Captain Claw instance reachable via HTTP. Register with name, host, port, and optional auth token. Useful for pip-installed instances or remote agents.
+**Process agents** — Spawned as local `captain-claw-web` subprocesses. No Docker required — uses the pip-installed Captain Claw directly. Each agent gets an isolated directory under `fd-data/<agent-slug>/` with its own config.yaml, workspace, database, and skills. Process agents are automatically restarted when Flight Deck starts and cleanly stopped on shutdown.
 
-### Spawning Docker Agents
+**Local agents** — Any Captain Claw instance reachable via HTTP. Register with name, host, port, and optional auth token. Useful for remote agents or instances managed outside Flight Deck.
 
-The Spawn Agent page lets you configure:
+### Spawning Agents
+
+The Spawn Agent page has a **Docker/Process mode toggle** at the top:
+
+- **Docker mode** (violet) — spawns a Docker container with the Captain Claw image
+- **Process mode** (emerald) — spawns a local subprocess using `captain-claw-web`
+
+Both modes configure:
 
 - **LLM provider and model** — OpenAI, Anthropic, Gemini, Ollama, OpenRouter
 - **Tools** — Select which tools the agent has access to
 - **Platforms** — Enable Telegram, Discord, or Slack bots
 - **Web UI** — Port and auth token for the agent's own web interface
 - **BotPort** — Connect to a BotPort hub for multi-agent routing
-- **Docker settings** — Image, network mode, extra volumes, environment variables
 
-Spawned containers are managed under `fd-data/<agent-slug>/` with isolated config, workspace, sessions, and skills directories.
+Docker mode additionally offers image selection, network mode, extra volumes, and environment variables.
+
+Before spawning, Flight Deck checks if the requested port is in use. If it is, a free port is automatically selected.
+
+Spawned agents are managed under `fd-data/<agent-slug>/` with isolated config, workspace, sessions, and skills directories.
+
+### Fleet Discovery & Agent Communication
+
+Agents can discover and communicate with each other through two mechanisms:
+
+**`flight_deck` tool** (always available) — queries `GET /fd/fleet` for a live list of all running agents. Actions:
+- `list_agents` — returns all agents with name, kind, status, port, and description
+- `consult` — send a message to a peer agent by name and receive their response
+
+**`consult_peer` tool** (always available) — uses the peer list pushed by the Flight Deck frontend at WebSocket connect time. Supports forwarding tasks and approval-gated consultations.
+
+The fleet endpoint returns Docker containers, process agents, and local agents in a unified list.
 
 ### Agent Desktop
 
-The Agent Desktop combines Docker and local agents into a unified view with two layout modes:
+The Agent Desktop combines Docker containers, process agents, and local agents into a unified view with two layout modes:
 
 - **Grid layout** — traditional card grid
 - **Free-form layout** — drag agent cards anywhere on the canvas, positions saved to localStorage
 
-Agent cards show status, description (editable), model/persona info, and quick action buttons. Each card has:
+Agent cards cycle through three view modes with a single toggle button:
 
-- **Embedded chat** — collapsible chat panel directly on the card
-- **Chat button** — opens the full chat panel on the right
-- **Files button** — opens the file browser
-- **Remove button** — with confirmation dialog (Docker containers are also removed)
+- **Expanded** — full card with description, forwarding task, approval settings, model/persona selectors, groups, files, logs, actions, and embedded chat
+- **Compact** — name, port, status badge, activity indicator, groups, action buttons, and embedded chat on a smaller card
+- **Icon** — single-row pill showing agent icon, name, activity status (Working.../Idle), and status badge. Toggle button appears on hover.
+
+View mode per agent is persisted to localStorage. All three card types (Docker with violet accent, Process with emerald accent, Local) support all three modes.
 
 ### Chat
 

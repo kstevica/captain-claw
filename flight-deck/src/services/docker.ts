@@ -118,4 +118,59 @@ export const getContainerLogs = async (id: string, tail = 200): Promise<string> 
 }
 
 export const healthCheck = () =>
-  fdFetch<{ ok: boolean; docker: boolean; error?: string }>('/health')
+  fdFetch<{ ok: boolean; docker: boolean; processes?: boolean; error?: string }>('/health')
+
+
+// ── Process agent types ──
+
+export interface ProcessInfo {
+  slug: string
+  name: string
+  description: string
+  status: string  // running | stopped
+  web_port: number
+  web_auth: string
+  pid: number | null
+  provider: string
+  model: string
+}
+
+export interface ProcessActionResult {
+  ok: boolean
+  slug: string
+  message: string
+}
+
+// ── Process agent endpoints ──
+
+export const listProcesses = () =>
+  fdFetch<ProcessInfo[]>('/processes')
+
+export const spawnProcess = (config: SpawnConfig) =>
+  fdFetch<ProcessActionResult>('/spawn-process', {
+    method: 'POST',
+    body: JSON.stringify(config),
+  })
+
+export const stopProcess = (slug: string) =>
+  fdFetch<ProcessActionResult>(`/processes/${slug}/stop`, { method: 'POST' })
+
+export const startProcess = (slug: string) =>
+  fdFetch<ProcessActionResult>(`/processes/${slug}/start`, { method: 'POST' })
+
+export const restartProcess = (slug: string) =>
+  fdFetch<ProcessActionResult>(`/processes/${slug}/restart`, { method: 'POST' })
+
+export const removeProcess = (slug: string) =>
+  fdFetch<ProcessActionResult>(`/processes/${slug}`, { method: 'DELETE' })
+
+export const getProcessLogs = async (slug: string, tail = 200): Promise<string> => {
+  const data = await fdFetch<{ logs: string }>(`/processes/${slug}/logs?tail=${tail}`)
+  return data.logs
+}
+
+export const cloneProcess = (slug: string, newName: string) =>
+  fdFetch<ProcessActionResult>(`/processes/${slug}/clone`, {
+    method: 'POST',
+    body: JSON.stringify({ new_name: newName }),
+  })

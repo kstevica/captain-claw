@@ -12,13 +12,19 @@ const statusStyles: Record<string, string> = {
   unknown: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
 }
 
-// ── Compact mode persistence ──
-const COMPACT_KEY = 'fd:local-agent-compact'
-function loadCompactSet(): Set<string> {
-  try { return new Set(JSON.parse(localStorage.getItem(COMPACT_KEY) || '[]')) } catch { return new Set() }
+// ── Card view mode persistence (expanded / compact / icon) ──
+type ViewMode = 'expanded' | 'compact' | 'icon'
+const VIEW_KEY = 'fd:local-agent-view'
+function loadViewModes(): Record<string, ViewMode> {
+  try { return JSON.parse(localStorage.getItem(VIEW_KEY) || '{}') } catch { return {} }
 }
-function saveCompactSet(s: Set<string>) {
-  localStorage.setItem(COMPACT_KEY, JSON.stringify([...s]))
+function saveViewModes(m: Record<string, ViewMode>) {
+  localStorage.setItem(VIEW_KEY, JSON.stringify(m))
+}
+function cycleMode(current: ViewMode): ViewMode {
+  if (current === 'expanded') return 'compact'
+  if (current === 'compact') return 'icon'
+  return 'expanded'
 }
 
 export function LocalAgentCard({ agent, onBrowseFiles, onDragStart, isDragging }: { agent: LocalAgent; onBrowseFiles?: () => void; onDragStart?: (e: React.PointerEvent) => void; isDragging?: boolean }) {
@@ -33,18 +39,53 @@ export function LocalAgentCard({ agent, onBrowseFiles, onDragStart, isDragging }
   const [nameDraft, setNameDraft] = useState('')
   const [editingFwdTask, setEditingFwdTask] = useState(false)
   const [fwdTaskDraft, setFwdTaskDraft] = useState('')
-  const [compact, setCompact] = useState(() => loadCompactSet().has(agent.id))
+  const [viewMode, setViewMode] = useState<ViewMode>(() => loadViewModes()[agent.id] || 'expanded')
 
-  const toggleCompact = () => {
-    const next = !compact
-    setCompact(next)
-    const s = loadCompactSet()
-    if (next) s.add(agent.id); else s.delete(agent.id)
-    saveCompactSet(s)
+  const toggleViewMode = () => {
+    const next = cycleMode(viewMode)
+    setViewMode(next)
+    const m = loadViewModes()
+    if (next === 'expanded') delete m[agent.id]; else m[agent.id] = next
+    saveViewModes(m)
+  }
+
+  const isOnline = agent.status === 'online'
+
+  // ── Icon view (ultra-compact single row) ──
+  if (viewMode === 'icon') {
+    return (
+      <div
+        onPointerDown={onDragStart}
+        className={`group flex items-center gap-2 rounded-lg border bg-zinc-900/50 px-3 py-1.5 ${busy ? 'border-violet-500/40' : 'border-zinc-800'} ${onDragStart ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'bg-violet-500/10' : ''}`}
+      >
+        <Cpu className="h-3.5 w-3.5 text-zinc-500 shrink-0" />
+        <span className="text-xs font-medium truncate min-w-0 flex-1">{agent.name}</span>
+        {busy ? (
+          <div className="flex items-center gap-1 shrink-0">
+            <Loader2 className="h-3 w-3 animate-spin text-violet-400" />
+            <span className="text-[10px] text-violet-300 truncate max-w-[100px]">{statusText || 'Working...'}</span>
+          </div>
+        ) : isOnline ? (
+          <span className="text-[10px] text-zinc-600 shrink-0">Idle</span>
+        ) : null}
+        <span className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium shrink-0 ${statusStyles[agent.status]}`}>
+          {isOnline && (
+            <span className="relative flex h-1 w-1">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-current opacity-75" />
+              <span className="relative inline-flex h-1 w-1 rounded-full bg-current" />
+            </span>
+          )}
+          {agent.status}
+        </span>
+        <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleViewMode} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Expand card">
+          <Maximize2 className="h-3 w-3" />
+        </button>
+      </div>
+    )
   }
 
   // ── Compact view ──
-  if (compact) {
+  if (viewMode === 'compact') {
     return (
       <div className={`rounded-xl border bg-zinc-900/50 overflow-hidden ${busy ? 'border-violet-500/40' : 'border-zinc-800'}`}>
         {/* Drag handle area with compact toggle */}
@@ -52,8 +93,8 @@ export function LocalAgentCard({ agent, onBrowseFiles, onDragStart, isDragging }
           onPointerDown={onDragStart}
           className={`flex items-center justify-end px-2 py-0.5 bg-zinc-800/30 ${onDragStart ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'bg-violet-500/10' : ''}`}
         >
-          <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleCompact} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 relative z-10" title="Expand card">
-            <Maximize2 className="h-3 w-3" />
+          <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleViewMode} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 relative z-10" title="Shrink to icon">
+            <Minimize2 className="h-3 w-3" />
           </button>
         </div>
 
@@ -163,7 +204,7 @@ export function LocalAgentCard({ agent, onBrowseFiles, onDragStart, isDragging }
         onPointerDown={onDragStart}
         className={`flex items-center justify-end px-2 py-0.5 bg-zinc-800/30 ${onDragStart ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'bg-violet-500/10' : ''}`}
       >
-        <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleCompact} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 relative z-10" title="Compact card">
+        <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleViewMode} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 relative z-10" title="Compact card">
           <Minimize2 className="h-3 w-3" />
         </button>
       </div>

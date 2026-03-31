@@ -2,10 +2,12 @@ import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import { useAgentStore } from '../stores/agentStore'
 import { useContainerStore } from '../stores/containerStore'
 import { useLocalAgentStore } from '../stores/localAgentStore'
+import { useProcessStore } from '../stores/processStore'
 import { AgentCard } from '../components/agents/AgentCard'
 import { AgentDetail } from '../components/agents/AgentDetail'
 import { ContainerCard } from '../components/agents/ContainerCard'
 import { LocalAgentCard } from '../components/agents/LocalAgentCard'
+import { ProcessCard } from '../components/agents/ProcessCard'
 import { FileBrowser } from '../components/agents/FileBrowser'
 import { Radio, Plus, Server, LayoutGrid, Move } from 'lucide-react'
 import type { AgentEndpoint } from '../services/fileTransfer'
@@ -17,6 +19,7 @@ import { GroupFilter } from '../components/common/AgentGroups'
 type UnifiedAgent =
   | { kind: 'docker'; id: string; data: ReturnType<typeof useContainerStore.getState>['containers'][number] }
   | { kind: 'local'; id: string; data: ReturnType<typeof useLocalAgentStore.getState>['agents'][number] }
+  | { kind: 'process'; id: string; data: ReturnType<typeof useProcessStore.getState>['processes'][number] }
 
 // ── Position persistence ──
 
@@ -52,6 +55,7 @@ export function DesktopPage() {
   const { instances, concerns, selectedInstanceId, selectInstance } = useAgentStore()
   const { containers, fetchContainers, dockerAvailable, checkHealth } = useContainerStore()
   const { agents: localAgents, addAgent, probeAll } = useLocalAgentStore()
+  const { processes, fetchProcesses } = useProcessStore()
   const selectedInstance = instances.find((i) => i.id === selectedInstanceId)
   const [showAddAgent, setShowAddAgent] = useState(false)
   const [browsingAgent, setBrowsingAgent] = useState<AgentEndpoint | null>(null)
@@ -70,6 +74,9 @@ export function DesktopPage() {
     ...containers
       .filter((c) => c.status === 'running' && c.web_port)
       .map((c) => ({ id: c.id, name: c.agent_name || c.name, host: 'localhost', port: c.web_port!, auth: c.web_auth })),
+    ...processes
+      .filter((p) => p.status === 'running')
+      .map((p) => ({ id: `proc-${p.slug}`, name: p.name, host: 'localhost', port: p.web_port, auth: p.web_auth })),
     ...localAgents
       .filter((a) => a.status === 'online')
       .map((a) => ({ id: a.id, name: a.name, host: a.host, port: a.port, auth: a.authToken })),
@@ -78,22 +85,24 @@ export function DesktopPage() {
   useEffect(() => {
     checkHealth()
     fetchContainers()
+    fetchProcesses()
     probeAll()
-    const interval = setInterval(fetchContainers, 10000)
+    const interval = setInterval(() => { fetchContainers(); fetchProcesses() }, 10000)
     return () => clearInterval(interval)
-  }, [checkHealth, fetchContainers, probeAll])
+  }, [checkHealth, fetchContainers, fetchProcesses, probeAll])
 
   // Build unified agent list (with optional group filter)
   const unifiedAgents: UnifiedAgent[] = useMemo(() => {
-    const all = [
+    const all: UnifiedAgent[] = [
       ...containers.map((c) => ({ kind: 'docker' as const, id: c.id, data: c })),
+      ...processes.map((p) => ({ kind: 'process' as const, id: `proc-${p.slug}`, data: p })),
       ...localAgents.map((a) => ({ kind: 'local' as const, id: a.id, data: a })),
     ]
     if (!groupFilter) return all
     const group = groups.find((g) => g.id === groupFilter)
     if (!group) return all
     return all.filter((a) => group.agentIds.includes(a.id))
-  }, [containers, localAgents, groupFilter, groups])
+  }, [containers, processes, localAgents, groupFilter, groups])
 
   // Assign initial positions for new agents
   useEffect(() => {
@@ -170,8 +179,8 @@ export function DesktopPage() {
     setPositions(updated)
   }
 
-  const hasContent = instances.length > 0 || containers.length > 0 || localAgents.length > 0
-  const agentCount = containers.length + localAgents.length
+  const hasContent = instances.length > 0 || containers.length > 0 || processes.length > 0 || localAgents.length > 0
+  const agentCount = containers.length + processes.length + localAgents.length
 
   // Calculate canvas height for free mode
   const canvasHeight = useMemo(() => {
@@ -192,6 +201,20 @@ export function DesktopPage() {
           onBrowseFiles={
             agent.data.status === 'running' && agent.data.web_port
               ? () => setBrowsingAgent({ id: agent.data.id, name: agent.data.agent_name || agent.data.name, host: 'localhost', port: agent.data.web_port!, auth: agent.data.web_auth })
+              : undefined
+          }
+          onDragStart={onDragStart}
+          isDragging={isDragging}
+        />
+      )
+    }
+    if (agent.kind === 'process') {
+      return (
+        <ProcessCard
+          process={agent.data}
+          onBrowseFiles={
+            agent.data.status === 'running'
+              ? () => setBrowsingAgent({ id: `proc-${agent.data.slug}`, name: agent.data.name, host: 'localhost', port: agent.data.web_port, auth: agent.data.web_auth })
               : undefined
           }
           onDragStart={onDragStart}

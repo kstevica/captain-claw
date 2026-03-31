@@ -1,11 +1,16 @@
-"""Flight Deck backend — Docker container management for Captain Claw agents."""
+"""Flight Deck backend — Docker container & process management for Captain Claw agents."""
 
 from __future__ import annotations
 
 import os
+import json
+import signal
 import asyncio
+import subprocess
+import shutil
 from pathlib import Path
 from contextlib import asynccontextmanager
+from typing import Any
 
 import docker
 import yaml
@@ -36,12 +41,162 @@ def get_docker() -> docker.DockerClient:
     return _client
 
 
+# ── Process registry ──
+
+PROCESS_REGISTRY_FILE = DATA_DIR / ".processes.json"
+_processes: dict[str, subprocess.Popen] = {}  # slug -> Popen
+
+
+class ProcessEntry(BaseModel):
+    """Persisted metadata for a managed process agent."""
+    slug: str
+    name: str
+    description: str = ""
+    web_port: int
+    web_auth: str = ""
+    pid: int | None = None
+    provider: str = ""
+    model: str = ""
+
+
+def _load_process_registry() -> dict[str, dict]:
+    """Load process registry from disk."""
+    if PROCESS_REGISTRY_FILE.is_file():
+        try:
+            return json.loads(PROCESS_REGISTRY_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_process_registry(registry: dict[str, dict]):
+    """Persist process registry to disk."""
+    PROCESS_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PROCESS_REGISTRY_FILE.write_text(json.dumps(registry, indent=2))
+
+
+def _process_is_alive(slug: str) -> bool:
+    """Check if a managed process is still running."""
+    proc = _processes.get(slug)
+    if proc and proc.poll() is None:
+        return True
+    # Also check by PID from registry
+    registry = _load_process_registry()
+    entry = registry.get(slug)
+    if entry and entry.get("pid"):
+        try:
+            os.kill(entry["pid"], 0)
+            return True
+        except (OSError, ProcessLookupError):
+            pass
+    return False
+
+
+def _kill_pid(pid: int, timeout: float = 5.0):
+    """Send SIGTERM to a PID and wait for it to die; SIGKILL if needed."""
+    import time
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+            time.sleep(0.3)
+        except (OSError, ProcessLookupError):
+            return
+    # Still alive — force kill
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        pass
+
+
+def _stop_all_processes():
+    """Stop all managed process agents (called on FD shutdown)."""
+    registry = _load_process_registry()
+    for slug, entry in registry.items():
+        pid = entry.get("pid")
+        if pid and _process_is_alive(slug):
+            _kill_pid(pid)
+            entry["pid"] = None
+    _save_process_registry(registry)
+    _processes.clear()
+
+
+def _start_registered_process(slug: str, entry: dict) -> bool:
+    """Start a single process agent from its registry entry. Returns True on success."""
+    agent_dir = DATA_DIR / slug
+    if not agent_dir.is_dir():
+        return False
+
+    web_port = entry.get("web_port", 24080)
+
+    # Rebuild environment from .env file
+    environment = dict(os.environ)
+    env_file = agent_dir / ".env"
+    if env_file.is_file():
+        content = env_file.read_text().strip()
+        if content:
+            for line in content.split("\n"):
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    environment[k] = v
+
+    environment["HOME"] = str(agent_dir / "data" / "home-config-parent")
+
+    log_file = agent_dir / "process.log"
+    try:
+        log_fh = open(log_file, "a")
+        proc = subprocess.Popen(
+            ["captain-claw-web", "--port", str(web_port)],
+            cwd=str(agent_dir),
+            env=environment,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        _processes[slug] = proc
+        entry["pid"] = proc.pid
+        return True
+    except Exception:
+        return False
+
+
+def _reattach_processes():
+    """On startup, check registered processes and restart any that were running."""
+    registry = _load_process_registry()
+    restarted = []
+    for slug, entry in registry.items():
+        pid = entry.get("pid")
+        if pid:
+            try:
+                os.kill(pid, 0)  # Still alive — just track it
+                continue
+            except (OSError, ProcessLookupError):
+                pass
+        # Process was registered but is dead — restart it
+        if entry.get("web_port"):
+            if _start_registered_process(slug, entry):
+                restarted.append(slug)
+            else:
+                entry["pid"] = None
+    _save_process_registry(registry)
+    if restarted:
+        print(f"Flight Deck: restarted {len(restarted)} process agent(s): {', '.join(restarted)}")
+
+
 # ── App ──
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _reattach_processes()
     yield
+    # Shutdown: stop all managed process agents
+    print("Flight Deck: stopping managed process agents...")
+    _stop_all_processes()
     if _client:
         _client.close()
 
@@ -232,6 +387,83 @@ def _build_env(c: AgentConfig) -> str:
     return "\n".join(lines) + "\n" if lines else ""
 
 
+def _localize_url(url: str) -> str:
+    """Rewrite Docker-internal hostnames to localhost for process agents."""
+    return url.replace("host.docker.internal", "localhost").replace("host.docker.internal", "127.0.0.1") if url else url
+
+
+def _build_process_config_yaml(c: AgentConfig, agent_dir: Path) -> str:
+    """Generate config.yaml for a pip-installed process agent (local paths)."""
+    home_config = agent_dir / "data" / "home-config"
+    # For process agents, rewrite Docker-internal URLs to localhost
+    botport_url = _localize_url(c.botport_url)
+    cfg: dict = {
+        "model": {
+            "provider": c.provider,
+            "model": c.model,
+            "temperature": c.temperature,
+            "max_tokens": c.max_tokens,
+            "api_key": "",  # Key goes in .env
+            "base_url": "http://127.0.0.1:11434" if c.provider == "ollama" else "",
+        },
+        "context": {
+            "max_tokens": 160000,
+            "compaction_threshold": 0.8,
+            "compaction_ratio": 0.4,
+        },
+        "memory": {
+            "enabled": True,
+            "path": str(home_config / "memory.db"),
+            "index_workspace": True,
+            "index_sessions": True,
+            "embeddings": {
+                "provider": "auto",
+                "ollama_model": "nomic-embed-text",
+                "ollama_base_url": "http://127.0.0.1:11434",
+                "fallback_to_local_hash": True,
+            },
+        },
+        "tools": {
+            "enabled": c.tools,
+            "shell": {"timeout": 120, "default_policy": "ask"},
+            "browser": {"headless": True, "viewport_width": 1280, "viewport_height": 720},
+            "web_search": {"provider": "brave", "max_results": 5},
+            "require_confirmation": ["shell", "write", "edit"],
+        },
+        "session": {
+            "storage": "sqlite",
+            "path": str(agent_dir / "data" / "sessions" / "sessions.db"),
+            "auto_save": True,
+        },
+        "workspace": {"path": str(agent_dir / "data" / "workspace")},
+        "web": {
+            "enabled": c.web_enabled,
+            "host": "127.0.0.1",
+            "port": c.web_port,
+            "api_enabled": True,
+            "auth_token": c.web_auth_token,
+        },
+        "botport": {
+            "enabled": c.botport_enabled,
+            "url": botport_url,
+            "instance_name": c.botport_instance_name or c.name or "default",
+            "key": c.botport_key,
+            "secret": c.botport_secret,
+            "advertise_personas": True,
+            "advertise_tools": True,
+            "advertise_models": True,
+            "max_concurrent": c.botport_max_concurrent,
+            "reconnect_delay_seconds": 5.0,
+            "heartbeat_interval_seconds": 30.0,
+        },
+        "telegram": {"enabled": c.telegram_enabled, "bot_token": c.telegram_bot_token},
+        "discord": {"enabled": c.discord_enabled, "bot_token": c.discord_bot_token},
+        "slack": {"enabled": c.slack_enabled, "bot_token": c.slack_bot_token},
+        "logging": {"level": "INFO", "format": "console"},
+    }
+    return yaml.dump(cfg, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+
 def _container_info(c: docker.models.containers.Container) -> ContainerInfo:
     labels = c.labels or {}
     web_port_str = labels.get("flight-deck.web-port", "")
@@ -281,11 +513,42 @@ def list_containers():
     return [_container_info(c) for c in containers]
 
 
+def _is_port_available(port: int) -> bool:
+    """Check if a TCP port is available on localhost."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+def _schedule_fleet_notify(name: str, port: int, event: str = "joined"):
+    """Schedule a fleet notification as a background async task."""
+    async def _run():
+        # Give the new agent a moment to start up before notifying peers
+        await asyncio.sleep(5)
+        await _notify_fleet_change(name, port, event)
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(_run())
+        else:
+            asyncio.run(_run())
+    except RuntimeError:
+        pass  # Best-effort
+
+
 @app.post("/fd/spawn", response_model=ContainerActionResult)
 def spawn_agent(config: AgentConfig):
     """Spawn a new Captain Claw container."""
     client = get_docker()
     slug = _slug(config.name)
+
+    # Ensure port is available; find a free one if not
+    if config.web_enabled and not _is_port_available(config.web_port):
+        config.web_port = _find_available_port(config.web_port)
 
     # Check for name collision
     try:
@@ -400,7 +663,11 @@ def spawn_agent(config: AgentConfig):
             restart_policy=restart,
             stop_signal="SIGTERM",
         )
-        return ContainerActionResult(ok=True, container_id=container.short_id, message=f"Agent '{slug}' spawned")
+        port_info = f" on port {config.web_port}" if config.web_enabled else ""
+        # Notify other agents about the new peer
+        if config.web_enabled:
+            _schedule_fleet_notify(config.name or slug, config.web_port)
+        return ContainerActionResult(ok=True, container_id=container.short_id, message=f"Agent '{slug}' spawned{port_info}")
     except docker.errors.ImageNotFound:
         raise HTTPException(404, f"Docker image '{config.image}' not found. Pull it first.")
     except docker.errors.APIError as exc:
@@ -565,29 +832,39 @@ def rebuild_container(container_id: str, req: RebuildRequest | None = None):
 
 
 def _find_available_port(start: int) -> int:
-    """Find first available TCP port starting from `start`, checking both
-    running containers and the host's listening sockets."""
+    """Find first available TCP port starting from `start`, checking
+    running containers, managed processes, and the host's listening sockets."""
     import socket
 
-    # Collect ports already used by Flight Deck containers
-    client = get_docker()
     used_ports: set[int] = set()
-    for c in client.containers.list(all=True, filters={"label": CONTAINER_LABEL}):
-        lbl_port = (c.labels or {}).get("flight-deck.web-port", "")
-        if lbl_port:
-            try:
-                used_ports.add(int(lbl_port))
-            except ValueError:
-                pass
-        # Also check Docker port bindings
-        docker_ports = c.attrs.get("NetworkSettings", {}).get("Ports", {}) or {}
-        for _cp, bindings in docker_ports.items():
-            if bindings:
-                for b in bindings:
-                    try:
-                        used_ports.add(int(b.get("HostPort", 0)))
-                    except (ValueError, TypeError):
-                        pass
+
+    # Collect ports from Docker containers
+    try:
+        client = get_docker()
+        for c in client.containers.list(all=True, filters={"label": CONTAINER_LABEL}):
+            lbl_port = (c.labels or {}).get("flight-deck.web-port", "")
+            if lbl_port:
+                try:
+                    used_ports.add(int(lbl_port))
+                except ValueError:
+                    pass
+            docker_ports = c.attrs.get("NetworkSettings", {}).get("Ports", {}) or {}
+            for _cp, bindings in docker_ports.items():
+                if bindings:
+                    for b in bindings:
+                        try:
+                            used_ports.add(int(b.get("HostPort", 0)))
+                        except (ValueError, TypeError):
+                            pass
+    except Exception:
+        pass  # Docker may not be available
+
+    # Collect ports from managed processes
+    registry = _load_process_registry()
+    for entry in registry.values():
+        wp = entry.get("web_port")
+        if wp:
+            used_ports.add(wp)
 
     port = start
     while port < start + 100:  # search up to 100 ports
@@ -856,6 +1133,116 @@ async def probe_agent(host: str = "localhost", port: int = 23080):
         return {"ok": False, "status": 0}
 
 
+class FleetAgent(BaseModel):
+    name: str
+    kind: str  # docker | process | local
+    host: str = "localhost"
+    port: int
+    status: str
+    description: str = ""
+
+
+@app.get("/fd/fleet", response_model=list[FleetAgent])
+def get_fleet():
+    """Return all running/known agents across docker, process, and local stores."""
+    fleet: list[FleetAgent] = []
+
+    # Docker containers
+    try:
+        client = get_docker()
+        for c in client.containers.list(all=True, filters={"label": CONTAINER_LABEL}):
+            labels = c.labels or {}
+            wp = labels.get("flight-deck.web-port", "")
+            fleet.append(FleetAgent(
+                name=labels.get("flight-deck.agent-name", c.name),
+                kind="docker",
+                host="localhost",
+                port=int(wp) if wp else 0,
+                status=c.status,
+                description=labels.get("flight-deck.description", ""),
+            ))
+    except Exception:
+        pass
+
+    # Process agents
+    registry = _load_process_registry()
+    for slug, entry in registry.items():
+        alive = _process_is_alive(slug)
+        fleet.append(FleetAgent(
+            name=entry.get("name", slug),
+            kind="process",
+            host="localhost",
+            port=entry.get("web_port", 0),
+            status="running" if alive else "stopped",
+            description=entry.get("description", ""),
+        ))
+
+    return fleet
+
+
+async def _notify_fleet_change(new_agent_name: str, new_agent_port: int, event: str = "joined"):
+    """Notify all running agents about a fleet change by sending a system message via WebSocket."""
+    import websockets as _ws
+    import json as _json
+
+    # Build list of all running agent WebSocket endpoints (excluding the new one)
+    targets: list[tuple[str, int, str]] = []  # (host, port, auth)
+
+    try:
+        client = get_docker()
+        for c in client.containers.list(filters={"label": CONTAINER_LABEL}):
+            labels = c.labels or {}
+            wp = labels.get("flight-deck.web-port", "")
+            if wp and int(wp) != new_agent_port:
+                targets.append(("localhost", int(wp), labels.get("flight-deck.web-auth", "")))
+    except Exception:
+        pass
+
+    registry = _load_process_registry()
+    for slug, entry in registry.items():
+        wp = entry.get("web_port", 0)
+        if wp and wp != new_agent_port and _process_is_alive(slug):
+            targets.append(("localhost", wp, entry.get("web_auth", "")))
+
+    if not targets:
+        return
+
+    fleet = [a.model_dump() for a in get_fleet()]
+    notification = (
+        f"[Flight Deck] Agent '{new_agent_name}' has {event} the fleet on port {new_agent_port}. "
+        f"Current fleet: {', '.join(a['name'] + ' (' + a['status'] + ', :' + str(a['port']) + ')' for a in fleet)}"
+    )
+
+    async def _send_to(host: str, port: int, auth: str):
+        params = f"?token={auth}" if auth else ""
+        url = f"ws://{host}:{port}/ws{params}"
+        try:
+            async with _ws.connect(url, open_timeout=5, close_timeout=3) as ws:
+                # Wait for welcome
+                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                welcome = _json.loads(raw)
+                if welcome.get("type") != "welcome":
+                    return
+                # Skip replay
+                while True:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                    msg = _json.loads(raw)
+                    if msg.get("type") == "replay_done":
+                        break
+                # Send the fleet notification as a chat message
+                await ws.send(_json.dumps({"type": "chat", "content": notification}))
+                # Wait briefly for acknowledgment then disconnect
+                try:
+                    await asyncio.wait_for(ws.recv(), timeout=15)
+                except asyncio.TimeoutError:
+                    pass
+        except Exception:
+            pass  # Best-effort; don't fail spawn if notification fails
+
+    # Fire all notifications concurrently
+    await asyncio.gather(*[_send_to(h, p, a) for h, p, a in targets], return_exceptions=True)
+
+
 class ConsultPeerRequest(BaseModel):
     host: str = "localhost"
     port: int
@@ -1100,14 +1487,306 @@ async def agent_usage(host: str, port: int, token: str = "", period: str = "toda
         raise HTTPException(502, "Cannot connect to agent")
 
 
+# ── Process agent endpoints ──
+
+
+class ProcessInfo(BaseModel):
+    slug: str
+    name: str
+    description: str = ""
+    status: str  # running | stopped
+    web_port: int
+    web_auth: str = ""
+    pid: int | None = None
+    provider: str = ""
+    model: str = ""
+
+
+class ProcessActionResult(BaseModel):
+    ok: bool
+    slug: str
+    message: str = ""
+
+
+@app.get("/fd/processes", response_model=list[ProcessInfo])
+def list_processes():
+    """List all Flight Deck managed process agents."""
+    registry = _load_process_registry()
+    result = []
+    for slug, entry in registry.items():
+        alive = _process_is_alive(slug)
+        result.append(ProcessInfo(
+            slug=slug,
+            name=entry.get("name", slug),
+            description=entry.get("description", ""),
+            status="running" if alive else "stopped",
+            web_port=entry.get("web_port", 0),
+            web_auth=entry.get("web_auth", ""),
+            pid=entry.get("pid") if alive else None,
+            provider=entry.get("provider", ""),
+            model=entry.get("model", ""),
+        ))
+    return result
+
+
+@app.post("/fd/spawn-process", response_model=ProcessActionResult)
+def spawn_process(config: AgentConfig):
+    """Spawn a new Captain Claw process agent (pip-installed, no Docker)."""
+    slug = _slug(config.name)
+
+    # Check if already running
+    if _process_is_alive(slug):
+        raise HTTPException(400, f"Process '{slug}' is already running. Stop it first or use a different name.")
+
+    # Ensure port is available; find a free one if not
+    if config.web_enabled and not _is_port_available(config.web_port):
+        config.web_port = _find_available_port(config.web_port)
+
+    # Prepare data directory
+    agent_dir = DATA_DIR / slug
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "data" / "workspace").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "data" / "sessions").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "data" / "skills").mkdir(parents=True, exist_ok=True)
+    (agent_dir / "data" / "home-config").mkdir(parents=True, exist_ok=True)
+
+    # Write config files with local paths
+    config_yaml = _build_process_config_yaml(config, agent_dir)
+    (agent_dir / "config.yaml").write_text(config_yaml)
+    (agent_dir / "data" / "home-config" / "config.yaml").write_text(config_yaml)
+
+    env_content = _build_env(config)
+    (agent_dir / ".env").write_text(env_content)
+
+    # Build environment variables
+    environment = dict(os.environ)
+    if env_content:
+        for line in env_content.strip().split("\n"):
+            if "=" in line:
+                k, v = line.split("=", 1)
+                environment[k] = v
+    for ev in config.env_vars:
+        if ev.get("key"):
+            environment[ev["key"]] = ev.get("value", "")
+
+    # Set HOME to the agent's home-config directory so captain-claw
+    # picks up ~/.captain-claw/config.yaml from there
+    environment["HOME"] = str(agent_dir / "data" / "home-config-parent")
+    home_cc_dir = agent_dir / "data" / "home-config-parent" / ".captain-claw"
+    home_cc_dir.mkdir(parents=True, exist_ok=True)
+    # Symlink or copy home-config -> ~/.captain-claw
+    hc_config = agent_dir / "data" / "home-config" / "config.yaml"
+    hc_target = home_cc_dir / "config.yaml"
+    if hc_target.exists() or hc_target.is_symlink():
+        hc_target.unlink()
+    shutil.copy2(str(hc_config), str(hc_target))
+
+    # Open log file
+    log_file = agent_dir / "process.log"
+    log_fh = open(log_file, "a")
+
+    try:
+        proc = subprocess.Popen(
+            ["captain-claw-web", "--port", str(config.web_port)],
+            cwd=str(agent_dir),
+            env=environment,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,  # Detach from parent
+        )
+    except FileNotFoundError:
+        log_fh.close()
+        raise HTTPException(500, "captain-claw-web not found. Install captain-claw via pip first.")
+    except Exception as exc:
+        log_fh.close()
+        raise HTTPException(500, f"Failed to start process: {exc}")
+
+    _processes[slug] = proc
+
+    # Save to registry
+    registry = _load_process_registry()
+    registry[slug] = {
+        "slug": slug,
+        "name": config.name or slug,
+        "description": config.description,
+        "web_port": config.web_port,
+        "web_auth": config.web_auth_token,
+        "pid": proc.pid,
+        "provider": config.provider,
+        "model": config.model,
+    }
+    _save_process_registry(registry)
+
+    # Notify other agents about the new peer
+    if config.web_enabled:
+        _schedule_fleet_notify(config.name or slug, config.web_port)
+
+    return ProcessActionResult(ok=True, slug=slug, message=f"Process agent '{slug}' spawned (PID {proc.pid}, port {config.web_port})")
+
+
+@app.post("/fd/processes/{slug}/stop", response_model=ProcessActionResult)
+def stop_process(slug: str):
+    """Stop a running process agent."""
+    if not _process_is_alive(slug):
+        return ProcessActionResult(ok=True, slug=slug, message="Already stopped")
+
+    proc = _processes.get(slug)
+    registry = _load_process_registry()
+    pid = proc.pid if proc else registry.get(slug, {}).get("pid")
+
+    if pid:
+        _kill_pid(pid)
+
+    # Update registry
+    if slug in registry:
+        registry[slug]["pid"] = None
+        _save_process_registry(registry)
+
+    _processes.pop(slug, None)
+    return ProcessActionResult(ok=True, slug=slug, message="Stopped")
+
+
+@app.post("/fd/processes/{slug}/start", response_model=ProcessActionResult)
+def start_process(slug: str):
+    """Start a stopped process agent."""
+    registry = _load_process_registry()
+    entry = registry.get(slug)
+    if not entry:
+        raise HTTPException(404, f"Process '{slug}' not found in registry")
+
+    if _process_is_alive(slug):
+        return ProcessActionResult(ok=True, slug=slug, message="Already running")
+
+    if not (DATA_DIR / slug).is_dir():
+        raise HTTPException(404, f"Agent directory not found: {DATA_DIR / slug}")
+
+    if not _start_registered_process(slug, entry):
+        raise HTTPException(500, "Failed to start process (captain-claw-web not found?)")
+
+    _save_process_registry(registry)
+
+    return ProcessActionResult(ok=True, slug=slug, message=f"Started (PID {entry.get('pid', '?')})")
+
+
+@app.post("/fd/processes/{slug}/restart", response_model=ProcessActionResult)
+def restart_process(slug: str):
+    """Restart a process agent."""
+    stop_process(slug)
+    import time
+    time.sleep(1)
+    return start_process(slug)
+
+
+@app.delete("/fd/processes/{slug}", response_model=ProcessActionResult)
+def remove_process(slug: str, force: bool = False):
+    """Remove a process agent from the registry. Stops it first if running."""
+    if _process_is_alive(slug):
+        stop_process(slug)
+
+    registry = _load_process_registry()
+    registry.pop(slug, None)
+    _save_process_registry(registry)
+    _processes.pop(slug, None)
+
+    return ProcessActionResult(ok=True, slug=slug, message=f"Removed '{slug}' from registry")
+
+
+@app.get("/fd/processes/{slug}/logs")
+def process_logs(slug: str, tail: int = 200):
+    """Read logs from a process agent's log file."""
+    log_file = DATA_DIR / slug / "process.log"
+    if not log_file.is_file():
+        return {"logs": "(no logs yet)"}
+    try:
+        lines = log_file.read_text().splitlines()
+        tail_lines = lines[-tail:] if len(lines) > tail else lines
+        return {"logs": "\n".join(tail_lines)}
+    except Exception as exc:
+        return {"logs": f"(error reading logs: {exc})"}
+
+
+@app.post("/fd/processes/{slug}/clone", response_model=ProcessActionResult)
+def clone_process(slug: str, req: CloneRequest):
+    """Clone a process agent with a new name and port."""
+    registry = _load_process_registry()
+    entry = registry.get(slug)
+    if not entry:
+        raise HTTPException(404, f"Process '{slug}' not found")
+
+    new_name = req.new_name.strip()
+    if not new_name:
+        raise HTTPException(400, "Name is required")
+    new_slug = _slug(new_name)
+
+    if new_slug in registry:
+        if _process_is_alive(new_slug):
+            raise HTTPException(400, f"Process '{new_slug}' already running.")
+
+    old_agent_dir = DATA_DIR / slug
+    new_agent_dir = DATA_DIR / new_slug
+
+    # Create new data directory
+    new_agent_dir.mkdir(parents=True, exist_ok=True)
+    (new_agent_dir / "data" / "workspace").mkdir(parents=True, exist_ok=True)
+    (new_agent_dir / "data" / "sessions").mkdir(parents=True, exist_ok=True)
+    (new_agent_dir / "data" / "skills").mkdir(parents=True, exist_ok=True)
+    (new_agent_dir / "data" / "home-config").mkdir(parents=True, exist_ok=True)
+
+    # Copy config files
+    for fname in ("config.yaml", ".env"):
+        src = old_agent_dir / fname
+        if src.is_file():
+            shutil.copy2(str(src), str(new_agent_dir / fname))
+    src_hc = old_agent_dir / "data" / "home-config" / "config.yaml"
+    if src_hc.is_file():
+        shutil.copy2(str(src_hc), str(new_agent_dir / "data" / "home-config" / "config.yaml"))
+
+    # Find available port
+    old_port = entry.get("web_port", 24080)
+    new_port = _find_available_port(old_port + 1)
+
+    # Update config.yaml with new port and name
+    cfg_path = new_agent_dir / "config.yaml"
+    if cfg_path.is_file():
+        cfg_text = cfg_path.read_text()
+        cfg_text = cfg_text.replace(f"port: {old_port}", f"port: {new_port}")
+        old_name = entry.get("name", slug)
+        if old_name:
+            cfg_text = cfg_text.replace(f"instance_name: {old_name}", f"instance_name: {new_name}")
+        # Update local paths to point to new agent dir
+        cfg_text = cfg_text.replace(str(old_agent_dir), str(new_agent_dir))
+        cfg_path.write_text(cfg_text)
+        hc_path = new_agent_dir / "data" / "home-config" / "config.yaml"
+        if hc_path.is_file():
+            hc_path.write_text(cfg_text)
+
+    # Register clone (but don't start it)
+    registry[new_slug] = {
+        "slug": new_slug,
+        "name": new_name,
+        "description": "",
+        "web_port": new_port,
+        "web_auth": entry.get("web_auth", ""),
+        "pid": None,
+        "provider": entry.get("provider", ""),
+        "model": entry.get("model", ""),
+    }
+    _save_process_registry(registry)
+
+    return ProcessActionResult(ok=True, slug=new_slug, message=f"Cloned '{slug}' → '{new_slug}' (port {new_port})")
+
+
 @app.get("/fd/health")
 def health():
     try:
         client = get_docker()
         client.ping()
-        return {"ok": True, "docker": True}
-    except Exception as exc:
-        return {"ok": False, "docker": False, "error": str(exc)}
+        docker_ok = True
+    except Exception:
+        docker_ok = False
+    # Always report ok if at least the server is running
+    # (processes don't need Docker)
+    return {"ok": True, "docker": docker_ok, "processes": True}
 
 
 # ── Static frontend serving ──

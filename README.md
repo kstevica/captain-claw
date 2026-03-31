@@ -22,7 +22,7 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Per-session model selection | Keep one session on Claude, another on GPT, another on Ollama |
 | Persistent multi-session workflows | Resume any session exactly where you left off |
 | Built-in safety guards | Input, output, and script/tool checks before anything runs |
-| 30 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, STT, image gen/OCR/vision, screen capture + voice commands, desktop automation, Google Workspace CLI (gws — Drive, Docs, Calendar, Gmail), todo, contacts, scripts, APIs, datastore, deep memory, playbooks, personality, BotPort, Termux (Android) |
+| 31 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, STT, image gen/OCR/vision, screen capture + voice commands, desktop automation, Google Workspace CLI (gws — Drive, Docs, Calendar, Gmail), todo, contacts, scripts, APIs, datastore, deep memory, playbooks, personality, BotPort, Flight Deck fleet discovery, Termux (Android) |
 | Personality system | Dual-profile system — global agent identity plus per-user profiles for tailored responses |
 | Self-reflection | Periodic self-assessment — reviews recent interactions, memory, and tasks to generate improvement directives injected into the system prompt |
 | Insights | Persistent knowledge base auto-extracted from conversations — facts, contacts, decisions, deadlines — with FTS search, dedup, and context injection |
@@ -43,7 +43,7 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Cross-session script memory | Persistent script/file tracking with auto-capture from write tool |
 | Cross-session API memory | Persistent API endpoint tracking with auto-capture from web_fetch |
 | Cross-session playbook memory | Rate sessions to auto-distill reusable orchestration patterns (do/don't pseudo-code) with auto-injection |
-| Flight Deck | Multi-agent management dashboard — spawn Docker agents, chat with multiple agents, transfer files and context between agents, monitor status, Director panel, operations analytics, agent pipelines, pinned messages, shared clipboard, notifications, keyboard shortcuts, dark/light theme |
+| Flight Deck | Multi-agent management dashboard — spawn Docker or pip process agents, fleet discovery and agent-to-agent communication, chat with multiple agents, transfer files and context, Director panel, operations analytics, agent pipelines, three card view modes (expanded/compact/icon), pinned messages, shared clipboard, notifications, keyboard shortcuts, dark/light theme |
 | Datastore | SQLite-backed relational tables managed by the agent, with protection rules, import/export, web dashboard, and table export via UI |
 | Chunked processing pipeline | Run small-context models (20k–32k tokens) on large content via automatic content chunking |
 | Cron scheduling | Interval, daily, and weekly tasks inside the runtime |
@@ -239,7 +239,7 @@ Sessions are first-class. Create named sessions for separate projects, switch in
 
 ### Tools
 
-Captain Claw ships with 30 built-in tools. The agent picks the right tool for each task automatically.
+Captain Claw ships with 31 built-in tools. The agent picks the right tool for each task automatically.
 
 | Tool | What it does |
 |---|---|
@@ -268,6 +268,7 @@ Captain Claw ships with 30 built-in tools. The agent picks the right tool for ea
 | `typesense` | Index, search, and manage documents in deep memory (Typesense) |
 | `playbooks` | Persistent cross-session orchestration pattern memory with auto-distillation |
 | `botport` | Consult specialist agents through the BotPort agent-to-agent network |
+| `flight_deck` | Discover and communicate with peer agents in the Flight Deck fleet (list agents, consult peers) |
 | `screen_capture` | Capture screenshots and analyze with vision; opt-in global hotkey with voice commands and selected-text detection |
 | `desktop_action` | Desktop GUI automation — click, type, scroll, press keys, open apps/URLs; pairs with screen_capture for coordinate-based interaction |
 | `termux` | Interact with Android device via Termux API (camera, battery, GPS, torch) |
@@ -327,7 +328,7 @@ For the full configuration reference (23 sections, every field), see [USAGE.md](
 
 Each of these is documented in detail in [USAGE.md](USAGE.md).
 
-- **[Flight Deck](USAGE.md#flight-deck)** — Multi-agent management dashboard. Spawn and manage Captain Claw agents in Docker containers, register local/remote agents by host:port, chat with multiple agents simultaneously via WebSocket, browse and transfer files between agents, forward conversation context with tasks to other agents. Includes Director panel with unified agent overview and broadcast, Operations dashboard with per-agent token/cost analytics, agent pipelines for chaining agent outputs automatically, pinned messages, shared clipboard, notification center, keyboard shortcuts, resizable panels, free-form draggable agent cards, file viewer with syntax highlighting, dark/light theme, and embedded chat on agent cards. Run with `captain-claw-fd`.
+- **[Flight Deck](USAGE.md#flight-deck)** — Multi-agent management dashboard. Spawn and manage Captain Claw agents in Docker containers or as local pip processes (no Docker required), register local/remote agents by host:port, chat with multiple agents simultaneously via WebSocket, browse and transfer files between agents, forward conversation context with tasks to other agents. Agents discover and communicate with peers via the `flight_deck` tool and live fleet API. Includes Director panel with unified agent overview and broadcast, Operations dashboard with per-agent token/cost analytics, agent pipelines for chaining agent outputs automatically, pinned messages, shared clipboard, notification center, keyboard shortcuts, resizable panels, free-form draggable agent cards with three view modes (expanded/compact/icon), file viewer with syntax highlighting, dark/light theme, and embedded chat on agent cards. Run with `captain-claw-fd`.
 
 - **[Computer](USAGE.md#computer)** — A retro-themed research workspace at `/computer`. Three-panel layout with input area, activity log, and tabbed output (Answer, Blueprint, Files, Visual, Map). Features themed HTML visual generation via LLM, interactive exploration trees for multi-turn research, model selector modal, persona selector, token tier control, folder browser (local filesystem + Google Drive), file attachments (images, PDF, DOCX, XLSX, PPTX, MD, TXT, CSV), PDF export via WeasyPrint (preserves full CSS styling), suggested next-step buttons after each response, and 14 built-in themes (Amiga Workbench, Atari ST, C64, Classic Mac, Windows 3.1, Hacker Terminal, and more) plus a custom theme engine. Each theme includes unique boot sequences and CSS variable styling. Supports **public mode** (`web.public_run: "computer"`) with per-session isolation, access codes, route lockdown, and **BYOK (Bring Your Own Key)** — public users can provide their own LLM API credentials (OpenAI, Anthropic, Gemini, xAI, OpenRouter) stored only in the browser.
 

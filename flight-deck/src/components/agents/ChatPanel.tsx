@@ -26,6 +26,7 @@ import remarkGfm from 'remark-gfm'
 import { useChatStore } from '../../stores/chatStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useContainerStore } from '../../stores/containerStore'
+import { useProcessStore } from '../../stores/processStore'
 import { usePinnedStore } from '../../stores/pinnedStore'
 import { useClipboardStore } from '../../stores/clipboardStore'
 import { SendContextModal } from './SendContextModal'
@@ -133,6 +134,7 @@ export function ChatPanel() {
 function useAgentConnection(containerId: string) {
   const containers = useContainerStore((s) => s.containers)
   const localAgents = useLocalAgentStore((s) => s.agents)
+  const processes = useProcessStore((s) => s.processes)
 
   const container = containers.find((c) => c.id === containerId)
   if (container && container.web_port) {
@@ -141,6 +143,11 @@ function useAgentConnection(containerId: string) {
   const local = localAgents.find((a) => a.id === containerId)
   if (local) {
     return { host: local.host, port: local.port, auth: local.authToken }
+  }
+  // Process agents use chatId = `proc-${slug}`
+  const proc = processes.find((p) => `proc-${p.slug}` === containerId)
+  if (proc && proc.web_port) {
+    return { host: 'localhost', port: proc.web_port, auth: proc.web_auth }
   }
   return null
 }

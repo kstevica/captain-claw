@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { AgentChatWS, type ChatMessage } from '../services/agentChat'
 import { useContainerStore } from './containerStore'
 import { useLocalAgentStore } from './localAgentStore'
+import { useProcessStore } from './processStore'
 
 interface AgentModelInfo {
   id: string
@@ -135,6 +136,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           port: a.port,
           auth: a.authToken || '',
           requireApproval: a.consultApproval ?? false,
+        })
+      }
+      const processes = useProcessStore.getState().processes
+      const { getForwardingTask: getProcFwd, getConsultApproval: getProcApproval } = useProcessStore.getState()
+      for (const p of processes) {
+        if (p.slug === containerId || p.status !== 'running' || !p.web_port) continue
+        peers.push({
+          name: p.name || p.slug,
+          description: p.description || '',
+          forwardingTask: getProcFwd(p.slug),
+          host: 'localhost',
+          port: p.web_port,
+          auth: '',
+          requireApproval: getProcApproval(p.slug),
         })
       }
       if (peers.length > 0) {
