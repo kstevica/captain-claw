@@ -54,13 +54,16 @@ class FlightDeckTool(Tool):
     }
 
     def _get_fd_url(self, **kwargs: Any) -> str:
-        """Resolve the Flight Deck URL from session metadata or agent attributes."""
+        """Resolve the Flight Deck URL from session metadata, agent attributes, or env."""
+        import os
         session = kwargs.get("_session")
         agent = kwargs.get("_agent")
         metadata = getattr(session, "metadata", {}) or {} if session else {}
         fd_url = metadata.get("fd_url", "")
         if not fd_url and agent:
             fd_url = getattr(agent, "_fd_url", "") or ""
+        if not fd_url:
+            fd_url = os.environ.get("FD_URL", "") or os.environ.get("FD_INTERNAL_URL", "")
         return fd_url
 
     async def _list_agents(self, fd_url: str, **kwargs: Any) -> ToolResult:

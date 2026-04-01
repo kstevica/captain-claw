@@ -127,6 +127,35 @@ async def get_current_user(
     return user
 
 
+async def get_optional_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> dict | None:
+    """Like get_current_user but returns None instead of 401 when no token is provided.
+    Used for endpoints that should work both authenticated and from internal agent calls."""
+    token_str: str | None = None
+    if credentials is not None:
+        token_str = credentials.credentials
+    else:
+        token_str = request.query_params.get("fd_token")
+    if not token_str:
+        return None
+    try:
+        payload = decode_access_token(token_str)
+        user_id = payload.get("sub")
+        if not user_id:
+            return None
+        db = get_db()
+        user = await db.get_user_by_id(user_id)
+        if not user:
+            return None
+        request.state.user_id = user_id
+        request.state.user_role = user.get("role", "user")
+        return user
+    except HTTPException:
+        return None
+
+
 async def get_ws_user(websocket: WebSocket) -> dict:
     """Validate JWT from WebSocket query param."""
     token = websocket.query_params.get("token", "")

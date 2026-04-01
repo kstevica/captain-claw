@@ -22,6 +22,7 @@ import { useLocalAgentStore } from './stores/localAgentStore'
 import { useNotificationStore } from './stores/notificationStore'
 import { usePipelineStore } from './stores/pipelineStore'
 import { hydrateAllStores } from './services/settingsSync'
+import { useConnectionStore } from './stores/connectionStore'
 import { botportWS } from './services/ws'
 import type { InstanceInfo } from './types'
 
@@ -198,8 +199,11 @@ function AppContent() {
     return unsub
   }, [addNotification])
 
-  // Initial data load
+  // Initial data load (only poll BotPort when configured)
   useEffect(() => {
+    const { botportUrl } = useConnectionStore.getState()
+    if (!botportUrl) return  // No BotPort — skip polling
+
     fetchInstances()
     fetchStats()
     fetchConcerns(true)
@@ -213,8 +217,11 @@ function AppContent() {
     return () => clearInterval(interval)
   }, [fetchInstances, fetchStats, fetchConcerns])
 
-  // WebSocket connection for real-time updates
+  // WebSocket connection for real-time updates (only when BotPort configured)
   useEffect(() => {
+    const { botportUrl } = useConnectionStore.getState()
+    if (!botportUrl) return  // No BotPort — skip WS
+
     botportWS.connect()
 
     const unsubs = [

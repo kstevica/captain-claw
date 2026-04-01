@@ -67,6 +67,9 @@ class ConsultPeerTool(Tool):
             peers = getattr(agent, "_peer_agents", []) or []
         if not fd_url and agent:
             fd_url = getattr(agent, "_fd_url", "") or ""
+        if not fd_url:
+            import os
+            fd_url = os.environ.get("FD_URL", "") or os.environ.get("FD_INTERNAL_URL", "")
 
         if not fd_url:
             return ToolResult(

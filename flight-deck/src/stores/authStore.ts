@@ -13,11 +13,13 @@ interface AuthStore {
   isAuthenticated: boolean
   authEnabled: boolean | null  // null = not yet checked
   dockerSpawnEnabled: boolean
+  internalFdUrl: string  // Internal URL for agent-to-FD calls (e.g. http://localhost:25080)
 
   setAuth: (user: User, token: string) => void
   clearAuth: () => void
   setAuthEnabled: (enabled: boolean) => void
   setDockerSpawnEnabled: (enabled: boolean) => void
+  setInternalFdUrl: (url: string) => void
   setToken: (token: string) => void
 }
 
@@ -27,11 +29,13 @@ export const useAuthStore = create<AuthStore>((set) => ({
   isAuthenticated: false,
   authEnabled: null,
   dockerSpawnEnabled: true,
+  internalFdUrl: '',
 
   setAuth: (user, token) => set({ user, token, isAuthenticated: true }),
   clearAuth: () => set({ user: null, token: '', isAuthenticated: false }),
   setAuthEnabled: (enabled) => set({ authEnabled: enabled }),
   setDockerSpawnEnabled: (enabled) => set({ dockerSpawnEnabled: enabled }),
+  setInternalFdUrl: (url) => set({ internalFdUrl: url }),
   setToken: (token) => set({ token }),
 }))
 
@@ -46,6 +50,7 @@ export async function checkAuthStatus(): Promise<boolean> {
     const enabled = data.auth_enabled === true
     useAuthStore.getState().setAuthEnabled(enabled)
     useAuthStore.getState().setDockerSpawnEnabled(data.docker_spawn_enabled !== false)
+    if (data.internal_fd_url) useAuthStore.getState().setInternalFdUrl(data.internal_fd_url)
     return enabled
   } catch {
     useAuthStore.getState().setAuthEnabled(false)

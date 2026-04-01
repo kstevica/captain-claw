@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from captain_claw.flight_deck.auth import get_current_user, get_ws_user, set_auth_db
+from captain_claw.flight_deck.auth import get_current_user, get_optional_user, get_ws_user, set_auth_db
 from captain_claw.flight_deck.db import FlightDeckDB
 from captain_claw.flight_deck.rate_limiter import (
     check_api_rate_limit, check_spawn_rate_limit, check_agent_count_limit,
@@ -1333,7 +1333,7 @@ class FleetAgent(BaseModel):
 
 
 @app.get("/fd/fleet", response_model=list[FleetAgent])
-async def get_fleet(request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def get_fleet(request: Request, user: dict | None = Depends(get_optional_user) if AUTH_ENABLED else None):
     """Return all running/known agents across docker, process, and local stores."""
     fleet: list[FleetAgent] = []
     user_id = getattr(request.state, "user_id", "")
@@ -1461,7 +1461,7 @@ class ConsultPeerRequest(BaseModel):
 
 
 @app.post("/fd/consult-peer")
-async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | None = Depends(get_optional_user) if AUTH_ENABLED else None):
     """Send a message to a peer agent and stream back intermediate events + final response as ndjson."""
     import websockets
     import json
@@ -1885,6 +1885,11 @@ async def spawn_process(config: AgentConfig, request: Request, user: dict | None
         if ev.get("key"):
             environment[ev["key"]] = ev.get("value", "")
 
+    # Tell agents how to reach Flight Deck internally (for Telegram, Discord, etc.)
+    if "FD_URL" not in environment:
+        fd_port = os.environ.get("FD_PORT", "25080")
+        environment["FD_URL"] = f"http://localhost:{fd_port}"
+
     # Set HOME to the agent's home-config directory so captain-claw
     # picks up ~/.captain-claw/config.yaml from there
     environment["HOME"] = str(agent_dir / "data" / "home-config-parent")
@@ -2140,7 +2145,15 @@ async def auth_status():
     cfg = await _get_system_config()
     # When running inside a container, default docker spawn to False (no Docker socket)
     docker_default = not os.environ.get("CAPTAIN_CLAW_DOCKER")
-    return {"auth_enabled": AUTH_ENABLED, "docker_spawn_enabled": cfg.get("docker_spawn_enabled", docker_default)}
+    # Provide internal FD URL for agent-to-FD calls (inside container, use localhost)
+    internal_fd_url = os.environ.get("FD_INTERNAL_URL", "")
+    if not internal_fd_url and os.environ.get("CAPTAIN_CLAW_DOCKER"):
+        internal_fd_url = "http://localhost:25080"
+    return {
+        "auth_enabled": AUTH_ENABLED,
+        "docker_spawn_enabled": cfg.get("docker_spawn_enabled", docker_default),
+        "internal_fd_url": internal_fd_url,
+    }
 
 
 @app.get("/fd/health")

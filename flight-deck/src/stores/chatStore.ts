@@ -263,8 +263,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         })
       }
       if (peers.length > 0) {
-        // Derive the FD base URL so the agent can call back to consult peers
-        const fdUrl = `${window.location.protocol}//${window.location.host}`
+        // Use internal FD URL if available (container mode), otherwise derive from browser
+        const { internalFdUrl } = useAuthStore.getState()
+        const fdUrl = internalFdUrl || `${window.location.protocol}//${window.location.host}`
         ws.sendJSON({ type: 'peer_agents', agents: peers, fd_url: fdUrl })
       }
     })
