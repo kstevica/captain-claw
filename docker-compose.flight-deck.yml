@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  flight-deck:
+    image: kstevica/captain-claw:latest
+    container_name: flight-deck
+    command: ["captain-claw-fd", "--host", "0.0.0.0", "--port", "25080"]
+    ports:
+      - "25080:25080"       # Flight Deck UI + API (all traffic goes through here)
+    volumes:
+      - fd-data:/fd-data
+    environment:
+      - FD_DATA_DIR=/fd-data
+      - FD_AUTH_ENABLED=true
+      - FD_JWT_SECRET=${FD_JWT_SECRET:-}  # Set for stable tokens across restarts
+      - CAPTAIN_CLAW_DOCKER=1
+      # Pass API keys so spawned agents inherit them
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - BRAVE_API_KEY=${BRAVE_API_KEY:-}
+    restart: unless-stopped
+
+volumes:
+  fd-data:

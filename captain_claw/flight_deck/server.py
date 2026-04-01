@@ -639,7 +639,8 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
     """Spawn a new Captain Claw container."""
     # Check if docker spawn is allowed
     sys_cfg = await _get_system_config()
-    if not sys_cfg.get("docker_spawn_enabled", True):
+    docker_default = not os.environ.get("CAPTAIN_CLAW_DOCKER")
+    if not sys_cfg.get("docker_spawn_enabled", docker_default):
         raise HTTPException(403, "Docker container spawning is disabled by the administrator.")
     # Rate limiting & agent count check
     if AUTH_ENABLED and user:
@@ -981,8 +982,9 @@ def _find_available_port(start: int) -> int:
         if wp:
             used_ports.add(wp)
 
+    max_search = int(os.environ.get("FD_PORT_RANGE", "500"))
     port = start
-    while port < start + 100:  # search up to 100 ports
+    while port < start + max_search:
         if port not in used_ports:
             # Also check if host port is free
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -992,8 +994,7 @@ def _find_available_port(start: int) -> int:
                 except OSError:
                     pass
         port += 1
-    # Fallback — return start + 100 and hope for the best
-    return start + 100
+    raise HTTPException(500, f"No available port found in range {start}-{start + max_search}")
 
 
 @app.post("/fd/containers/{container_id}/clone", response_model=ContainerActionResult)
@@ -2134,7 +2135,9 @@ async def _get_system_config() -> dict:
 async def auth_status():
     """Check if auth is enabled and return system config flags (public endpoint)."""
     cfg = await _get_system_config()
-    return {"auth_enabled": AUTH_ENABLED, "docker_spawn_enabled": cfg.get("docker_spawn_enabled", True)}
+    # When running inside a container, default docker spawn to False (no Docker socket)
+    docker_default = not os.environ.get("CAPTAIN_CLAW_DOCKER")
+    return {"auth_enabled": AUTH_ENABLED, "docker_spawn_enabled": cfg.get("docker_spawn_enabled", docker_default)}
 
 
 @app.get("/fd/health")

@@ -1,0 +1,37 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml .
+COPY captain_claw/ captain_claw/
+COPY skills/ skills/
+
+RUN pip install --no-cache-dir --timeout=120 .
+
+RUN playwright install --with-deps chromium
+
+# Create non-root user with home directory
+RUN groupadd -r claw && useradd -r -g claw -m -d /home/claw claw
+
+# Flight Deck data directory (agents, DB, configs)
+RUN mkdir -p /fd-data && chown -R claw:claw /fd-data /app /home/claw
+
+VOLUME ["/fd-data"]
+
+USER claw
+
+ENV FD_DATA_DIR=/fd-data \
+    FD_AUTH_ENABLED=true \
+    CAPTAIN_CLAW_DOCKER=1
+
+# Flight Deck port
+EXPOSE 25080
+# Agent ports range (spawned process agents)
+EXPOSE 24080-24099
+
+CMD ["captain-claw-fd", "--host", "0.0.0.0", "--port", "25080"]
