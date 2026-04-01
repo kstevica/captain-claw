@@ -1,4 +1,28 @@
+import { useAuthStore, refreshAccessToken } from '../stores/authStore'
+
 const BASE = '/fd'
+
+function _authHeaders(): Record<string, string> {
+  const { token, authEnabled } = useAuthStore.getState()
+  const headers: Record<string, string> = {}
+  if (authEnabled && token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+  return headers
+}
+
+async function fdFileFetch(url: string, init?: RequestInit): Promise<Response> {
+  const headers = { ..._authHeaders(), ...(init?.headers || {}) }
+  let res = await fetch(url, { ...init, headers, credentials: 'include' })
+  if (res.status === 401 && useAuthStore.getState().authEnabled) {
+    const ok = await refreshAccessToken()
+    if (ok) {
+      const h2 = { ..._authHeaders(), ...(init?.headers || {}) }
+      res = await fetch(url, { ...init, headers: h2, credentials: 'include' })
+    }
+  }
+  return res
+}
 
 export interface AgentFile {
   logical: string
@@ -24,7 +48,7 @@ export interface AgentEndpoint {
 export async function listAgentFiles(host: string, port: number, auth: string): Promise<AgentFile[]> {
   const params = new URLSearchParams({ host, port: String(port) })
   if (auth) params.set('token', auth)
-  const resp = await fetch(`${BASE}/agent-files/${encodeURIComponent(host)}/${port}?${auth ? `token=${encodeURIComponent(auth)}` : ''}`)
+  const resp = await fdFileFetch(`${BASE}/agent-files/${encodeURIComponent(host)}/${port}?${auth ? `token=${encodeURIComponent(auth)}` : ''}`)
   if (!resp.ok) throw new Error(`Failed to list files: ${resp.status}`)
   return resp.json()
 }
@@ -34,7 +58,7 @@ export async function transferFile(
   dst: AgentEndpoint,
   srcPath: string,
 ): Promise<{ ok: boolean; filename: string; dest_path: string; size: number }> {
-  const resp = await fetch(`${BASE}/transfer`, {
+  const resp = await fdFileFetch(`${BASE}/transfer`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -63,12 +87,18 @@ export function formatSize(bytes: number): string {
 export function getDownloadUrl(host: string, port: number, path: string, auth: string): string {
   const params = new URLSearchParams({ path })
   if (auth) params.set('token', auth)
+  // Note: download URLs are used directly in <a href> or window.open, so we append
+  // the JWT as a query param for auth since we can't set headers on direct navigation
+  const { token, authEnabled } = useAuthStore.getState()
+  if (authEnabled && token) params.set('fd_token', token)
   return `${BASE}/agent-file-download/${encodeURIComponent(host)}/${port}?${params}`
 }
 
 export function getViewUrl(host: string, port: number, path: string, auth: string): string {
   const params = new URLSearchParams({ path })
   if (auth) params.set('token', auth)
+  const { token, authEnabled } = useAuthStore.getState()
+  if (authEnabled && token) params.set('fd_token', token)
   return `${BASE}/agent-file-view/${encodeURIComponent(host)}/${port}?${params}`
 }
 
@@ -84,7 +114,7 @@ export async function uploadFileToAgent(
   const qs = params.toString() ? `?${params}` : ''
   const form = new FormData()
   form.append('file', file)
-  const resp = await fetch(`${BASE}/agent-file-upload/${encodeURIComponent(host)}/${port}${qs}`, {
+  const resp = await fdFileFetch(`${BASE}/agent-file-upload/${encodeURIComponent(host)}/${port}${qs}`, {
     method: 'POST',
     body: form,
   })

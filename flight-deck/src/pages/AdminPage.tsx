@@ -101,6 +101,22 @@ async function fetchUsageLogs(userId?: string, eventType?: string, limit = 50): 
   return data.logs
 }
 
+async function fetchConfig(): Promise<Record<string, boolean>> {
+  const res = await fetch('/fd/admin/config', {
+    headers: _headers(), credentials: 'include',
+  })
+  if (!res.ok) return { docker_spawn_enabled: true }
+  return res.json()
+}
+
+async function saveConfig(cfg: Record<string, boolean>): Promise<void> {
+  const res = await fetch('/fd/admin/config', {
+    method: 'PUT', headers: _headers(), credentials: 'include',
+    body: JSON.stringify(cfg),
+  })
+  if (!res.ok) throw new Error('Failed to save config')
+}
+
 async function fetchPlans(): Promise<Record<string, PlanLimits>> {
   const res = await fetch('/fd/admin/plans', {
     headers: _headers(), credentials: 'include',
@@ -290,10 +306,11 @@ function PlanCard({
 
 export function AdminPage() {
   const currentUser = useAuthStore((s) => s.user)
-  const [tab, setTab] = useState<'users' | 'usage' | 'plans'>('users')
+  const [tab, setTab] = useState<'users' | 'usage' | 'plans' | 'settings'>('users')
   const [users, setUsers] = useState<UserInfo[]>([])
   const [totalUsers, setTotalUsers] = useState(0)
   const [plans, setPlans] = useState<Record<string, PlanLimits>>({})
+  const [config, setConfig] = useState<Record<string, boolean>>({ docker_spawn_enabled: true })
   const [usageSummary, setUsageSummary] = useState<Record<string, number>>({})
   const [usageLogs, setUsageLogs] = useState<UsageLog[]>([])
   const [loading, setLoading] = useState(true)
@@ -301,10 +318,11 @@ export function AdminPage() {
 
   const loadUsers = useCallback(async () => {
     try {
-      const [usersData, plansData] = await Promise.all([fetchUsers(), fetchPlans()])
+      const [usersData, plansData, cfgData] = await Promise.all([fetchUsers(), fetchPlans(), fetchConfig()])
       setUsers(usersData.users)
       setTotalUsers(usersData.total)
       setPlans(plansData)
+      setConfig(cfgData)
       setError('')
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load users')
@@ -409,6 +427,17 @@ export function AdminPage() {
             <Settings2 className="h-4 w-4" />
             Plans
           </button>
+          <button
+            onClick={() => setTab('settings')}
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm border-b-2 transition-colors ${
+              tab === 'settings'
+                ? 'border-violet-500 text-zinc-100'
+                : 'border-transparent text-zinc-500 hover:text-zinc-300'
+            }`}
+          >
+            <Settings2 className="h-4 w-4" />
+            Settings
+          </button>
         </div>
 
         {loading && (
@@ -481,6 +510,39 @@ export function AdminPage() {
                   <p className="text-center text-sm text-zinc-500 py-4">No activity logs yet</p>
                 )}
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Settings tab */}
+        {!loading && tab === 'settings' && (
+          <div className="space-y-4">
+            <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4 space-y-4">
+              <h3 className="text-sm font-semibold text-zinc-200">Spawn Settings</h3>
+              <label className="flex items-center justify-between cursor-pointer">
+                <div>
+                  <div className="text-sm text-zinc-300">Docker container spawning</div>
+                  <div className="text-xs text-zinc-500 mt-0.5">Allow users to spawn agents as Docker containers. When disabled, only local process agents are available.</div>
+                </div>
+                <button
+                  onClick={async () => {
+                    const next = !config.docker_spawn_enabled
+                    try {
+                      await saveConfig({ docker_spawn_enabled: next })
+                      setConfig({ ...config, docker_spawn_enabled: next })
+                      // Update the auth store so the spawner page reacts immediately
+                      useAuthStore.getState().setDockerSpawnEnabled(next)
+                    } catch { setError('Failed to save config') }
+                  }}
+                  className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors ${
+                    config.docker_spawn_enabled ? 'bg-violet-600' : 'bg-zinc-700'
+                  }`}
+                >
+                  <span className={`inline-block h-5 w-5 rounded-full bg-white transition-transform ${
+                    config.docker_spawn_enabled ? 'translate-x-5' : 'translate-x-0'
+                  }`} />
+                </button>
+              </label>
             </div>
           </div>
         )}

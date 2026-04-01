@@ -1,12 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Cpu, Play, Square, RotateCcw, Trash2, ScrollText, ChevronUp, MessageSquare, ExternalLink, Loader2, FolderOpen, Pencil, Check, X, Copy, MoreVertical, Minimize2, Maximize2 } from 'lucide-react'
+import { Cpu, Play, Square, RotateCcw, Trash2, ScrollText, ChevronUp, MessageSquare, ExternalLink, Loader2, FolderOpen, Pencil, Check, X, Copy, MoreVertical, Minimize2, Maximize2, Settings } from 'lucide-react'
 import type { ProcessInfo } from '../../services/docker'
 import { getProcessLogs } from '../../services/docker'
 import { useProcessStore } from '../../stores/processStore'
 import { useChatStore } from '../../stores/chatStore'
 import { EmbeddedChat } from './EmbeddedChat'
 import { AgentGroupBadges } from '../common/AgentGroups'
+import { AgentConfigEditor } from './AgentConfigEditor'
 
 // ── Card view mode persistence (expanded / compact / icon) ──
 type ViewMode = 'expanded' | 'compact' | 'icon'
@@ -73,6 +74,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   const [showLogs, setShowLogs] = useState(false)
   const [logs, setLogs] = useState('')
   const [logsLoading, setLogsLoading] = useState(false)
+  const logsRef = useRef<HTMLPreElement>(null)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
   const [editingDesc, setEditingDesc] = useState(false)
   const [descDraft, setDescDraft] = useState('')
@@ -81,6 +83,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   const [editingFwdTask, setEditingFwdTask] = useState(false)
   const [fwdTaskDraft, setFwdTaskDraft] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>(() => loadViewModes()[proc.slug] || 'expanded')
+  const [showConfig, setShowConfig] = useState(false)
 
   const isRunning = proc.status === 'running'
   const agentName = proc.name || proc.slug
@@ -113,6 +116,25 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
     } finally { setLogsLoading(false) }
   }
 
+  // Live log polling while logs are visible
+  useEffect(() => {
+    if (!showLogs || !isRunning) return
+    const interval = setInterval(async () => {
+      try {
+        const text = await getProcessLogs(proc.slug, 100)
+        setLogs(text)
+      } catch { /* ignore polling errors */ }
+    }, 3000)
+    return () => clearInterval(interval)
+  }, [showLogs, isRunning, proc.slug])
+
+  // Auto-scroll logs to bottom on update
+  useEffect(() => {
+    if (logsRef.current) {
+      logsRef.current.scrollTop = logsRef.current.scrollHeight
+    }
+  }, [logs])
+
   const badgeCls = statusColors[proc.status] ?? statusColors.stopped
 
   const actionProps = {
@@ -130,6 +152,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
       if (confirm(`Remove process agent '${agentName}' from the registry?\n\nThe agent data in fd-data/${proc.slug}/ will be preserved.`))
         doAction('remove', () => removeProcess(proc.slug))
     },
+    onConfig: () => setShowConfig(true),
   }
 
   // ── Icon view (ultra-compact single row) ──
@@ -250,7 +273,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
               <span className="text-[11px] text-zinc-500">Logs (last 100 lines)</span>
               <button onClick={() => toggleLogs()} className="text-zinc-500 hover:text-zinc-300"><ChevronUp className="h-3 w-3" /></button>
             </div>
-            <pre className="max-h-40 overflow-auto px-3 py-1.5 text-[11px] text-zinc-400 font-mono leading-relaxed bg-zinc-950/30"
+            <pre ref={logsRef} className="max-h-40 overflow-auto px-3 py-1.5 text-[11px] text-zinc-400 font-mono leading-relaxed bg-zinc-950/30"
               dangerouslySetInnerHTML={{ __html: logs ? ansiToHtml(logs) : '(empty)' }} />
           </div>
         )}
@@ -436,7 +459,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
             <span className="text-xs text-zinc-500">Logs (last 100 lines)</span>
             <button onClick={() => toggleLogs()} className="text-xs text-zinc-500 hover:text-zinc-300"><ChevronUp className="h-3.5 w-3.5" /></button>
           </div>
-          <pre className="max-h-60 overflow-auto px-4 py-2 text-xs text-zinc-400 font-mono leading-relaxed bg-zinc-950/30"
+          <pre ref={logsRef} className="max-h-60 overflow-auto px-4 py-2 text-xs text-zinc-400 font-mono leading-relaxed bg-zinc-950/30"
             dangerouslySetInnerHTML={{ __html: logs ? ansiToHtml(logs) : '(empty)' }} />
         </div>
       )}
@@ -445,11 +468,16 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
       {isRunning && (
         <EmbeddedChat containerId={chatId} containerName={agentName} host="localhost" port={proc.web_port} auth={proc.web_auth} />
       )}
+
+      {/* Config Editor Modal */}
+      {showConfig && (
+        <AgentConfigEditor kind="process" identifier={proc.slug} agentName={agentName} onClose={() => setShowConfig(false)} />
+      )}
     </div>
   )
 }
 
-function ProcessActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart, onClone, onRemove }: {
+function ProcessActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart, onClone, onRemove, onConfig }: {
   isRunning: boolean
   actionLoading: string | null
   onStart: () => void
@@ -457,6 +485,7 @@ function ProcessActionsDropdown({ isRunning, actionLoading, onStart, onStop, onR
   onRestart: () => void
   onClone: () => void
   onRemove: () => void
+  onConfig: () => void
 }) {
   const [open, setOpen] = useState(false)
   const btnRef = useRef<HTMLButtonElement>(null)
@@ -489,6 +518,7 @@ function ProcessActionsDropdown({ isRunning, actionLoading, onStart, onStop, onR
     { icon: Play,      label: 'Start',   onClick: onStart,   loading: actionLoading === 'start',   accent: true, show: !isRunning },
     { icon: Square,    label: 'Stop',    onClick: onStop,    loading: actionLoading === 'stop',    show: isRunning },
     { icon: RotateCcw, label: 'Restart', onClick: onRestart, loading: actionLoading === 'restart', show: isRunning },
+    { icon: Settings,  label: 'Config',  onClick: onConfig },
     { icon: Copy,      label: 'Clone',   onClick: onClone,   loading: actionLoading === 'clone' },
     { icon: Trash2,    label: 'Remove',  onClick: onRemove,  loading: actionLoading === 'remove',  danger: true },
   ]

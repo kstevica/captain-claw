@@ -12,7 +12,9 @@ import { FileBrowser } from '../components/agents/FileBrowser'
 import { Radio, Plus, Server, LayoutGrid, Move } from 'lucide-react'
 import type { AgentEndpoint } from '../services/fileTransfer'
 import { useGroupStore } from '../stores/groupStore'
+import { useAuthStore } from '../stores/authStore'
 import { GroupFilter } from '../components/common/AgentGroups'
+import { queueSave, registerHydrator } from '../services/settingsSync'
 
 // ── Unified agent item ──
 
@@ -30,18 +32,38 @@ const LAYOUT_KEY = 'fd:agent-layout-mode'
 const CARD_W = 480
 const CARD_GAP = 24
 
+function _persist(key: string, value: string) {
+  localStorage.setItem(key, value)
+  if (useAuthStore.getState().authEnabled) queueSave(key, value)
+}
+
 function loadPositions(): Record<string, Position> {
   try { return JSON.parse(localStorage.getItem(POS_KEY) || '{}') } catch { return {} }
 }
 function savePositions(pos: Record<string, Position>) {
-  localStorage.setItem(POS_KEY, JSON.stringify(pos))
+  _persist(POS_KEY, JSON.stringify(pos))
 }
 function loadLayoutMode(): 'grid' | 'free' {
   return (localStorage.getItem(LAYOUT_KEY) as 'grid' | 'free') || 'grid'
 }
 function saveLayoutMode(mode: 'grid' | 'free') {
-  localStorage.setItem(LAYOUT_KEY, mode)
+  _persist(LAYOUT_KEY, mode)
 }
+
+// Hydrate from server settings on login — notify mounted component to re-read
+type DesktopHydrateListener = () => void
+const _hydrateListeners = new Set<DesktopHydrateListener>()
+
+registerHydrator((settings) => {
+  let changed = false
+  const posVal = settings[POS_KEY]
+  if (posVal) { localStorage.setItem(POS_KEY, posVal); changed = true }
+  const layoutVal = settings[LAYOUT_KEY]
+  if (layoutVal) { localStorage.setItem(LAYOUT_KEY, layoutVal); changed = true }
+  if (changed) {
+    for (const fn of _hydrateListeners) fn()
+  }
+})
 
 // Auto-layout: arrange cards in a grid pattern for initial positions
 function autoPosition(index: number, containerWidth: number): Position {
@@ -62,6 +84,16 @@ export function DesktopPage() {
   const [positions, setPositions] = useState<Record<string, Position>>(loadPositions)
   const [layoutMode, setLayoutMode] = useState<'grid' | 'free'>(loadLayoutMode)
   const [groupFilter, setGroupFilter] = useState<string | null>(null)
+
+  // Re-read from localStorage when server settings hydrate
+  useEffect(() => {
+    const onHydrate = () => {
+      setPositions(loadPositions())
+      setLayoutMode(loadLayoutMode())
+    }
+    _hydrateListeners.add(onHydrate)
+    return () => { _hydrateListeners.delete(onHydrate) }
+  }, [])
   const groups = useGroupStore((s) => s.groups)
 
   // Drag state

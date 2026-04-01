@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Server, Plus, Trash2, Save, FolderOpen, Copy, X, FileDown, ClipboardCopy, ChevronDown, ChevronRight, Rocket, Cpu } from 'lucide-react'
+import { useAuthStore } from '../stores/authStore'
 import { useConnectionStore } from '../stores/connectionStore'
 import { useContainerStore } from '../stores/containerStore'
 import { useProcessStore } from '../stores/processStore'
@@ -420,28 +421,34 @@ export function SpawnerPage() {
           </div>
 
           {/* Spawn mode toggle */}
-          <div className="mb-5 flex rounded-lg border border-zinc-700 overflow-hidden">
-            <button
-              onClick={() => setSpawnMode('process')}
-              className={`flex flex-1 items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
-                spawnMode === 'process'
-                  ? 'bg-violet-600 text-white'
-                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
-              }`}
-            >
-              <Cpu className="h-3.5 w-3.5" /> Local Process (pip)
-            </button>
-            <button
-              onClick={() => setSpawnMode('docker')}
-              className={`flex flex-1 items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
-                spawnMode === 'docker'
-                  ? 'bg-violet-600 text-white'
-                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
-              }`}
-            >
-              <Server className="h-3.5 w-3.5" /> Docker Container
-            </button>
-          </div>
+          {useAuthStore.getState().dockerSpawnEnabled ? (
+            <div className="mb-5 flex rounded-lg border border-zinc-700 overflow-hidden">
+              <button
+                onClick={() => setSpawnMode('process')}
+                className={`flex flex-1 items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
+                  spawnMode === 'process'
+                    ? 'bg-violet-600 text-white'
+                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
+                }`}
+              >
+                <Cpu className="h-3.5 w-3.5" /> Local Process (pip)
+              </button>
+              <button
+                onClick={() => setSpawnMode('docker')}
+                className={`flex flex-1 items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
+                  spawnMode === 'docker'
+                    ? 'bg-violet-600 text-white'
+                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
+                }`}
+              >
+                <Server className="h-3.5 w-3.5" /> Docker Container
+              </button>
+            </div>
+          ) : (
+            <div className="mb-5 rounded-lg border border-zinc-700 px-4 py-2.5 text-center text-sm text-zinc-500">
+              <Cpu className="h-3.5 w-3.5 inline mr-1.5" />Local Process (pip) — Docker spawning is disabled by admin
+            </div>
+          )}
 
           {/* Save dialog */}
           {showSaveDialog && (

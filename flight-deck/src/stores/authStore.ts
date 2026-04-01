@@ -12,10 +12,12 @@ interface AuthStore {
   token: string
   isAuthenticated: boolean
   authEnabled: boolean | null  // null = not yet checked
+  dockerSpawnEnabled: boolean
 
   setAuth: (user: User, token: string) => void
   clearAuth: () => void
   setAuthEnabled: (enabled: boolean) => void
+  setDockerSpawnEnabled: (enabled: boolean) => void
   setToken: (token: string) => void
 }
 
@@ -24,10 +26,12 @@ export const useAuthStore = create<AuthStore>((set) => ({
   token: '',
   isAuthenticated: false,
   authEnabled: null,
+  dockerSpawnEnabled: true,
 
   setAuth: (user, token) => set({ user, token, isAuthenticated: true }),
   clearAuth: () => set({ user: null, token: '', isAuthenticated: false }),
   setAuthEnabled: (enabled) => set({ authEnabled: enabled }),
+  setDockerSpawnEnabled: (enabled) => set({ dockerSpawnEnabled: enabled }),
   setToken: (token) => set({ token }),
 }))
 
@@ -41,6 +45,7 @@ export async function checkAuthStatus(): Promise<boolean> {
     const data = await res.json()
     const enabled = data.auth_enabled === true
     useAuthStore.getState().setAuthEnabled(enabled)
+    useAuthStore.getState().setDockerSpawnEnabled(data.docker_spawn_enabled !== false)
     return enabled
   } catch {
     useAuthStore.getState().setAuthEnabled(false)

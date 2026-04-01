@@ -155,10 +155,52 @@ class UpdatePlanRequest(BaseModel):
     spawns_per_hour: int | None = None
 
 
+class UpdateConfigRequest(BaseModel):
+    docker_spawn_enabled: bool | None = None
+
+
+# System config defaults
+SYSTEM_CONFIG_DEFAULTS = {
+    "docker_spawn_enabled": True,
+}
+
+
+def _load_system_config(raw: str | None) -> dict:
+    """Parse system config from DB, merge with defaults."""
+    cfg = {**SYSTEM_CONFIG_DEFAULTS}
+    if raw:
+        try:
+            stored = json.loads(raw)
+            cfg.update(stored)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return cfg
+
+
 @router.get("/plans")
 async def list_plans(admin: dict = Depends(require_admin)):
     """List available plan tiers and their limits (admin only)."""
     return {"plans": PLAN_LIMITS}
+
+
+@router.get("/config")
+async def get_config(admin: dict = Depends(require_admin)):
+    """Get system configuration (admin only)."""
+    db = get_db()
+    raw = await db.get_system_setting("fd:system-config")
+    return _load_system_config(raw)
+
+
+@router.put("/config")
+async def update_config(body: UpdateConfigRequest, admin: dict = Depends(require_admin)):
+    """Update system configuration (admin only)."""
+    db = get_db()
+    raw = await db.get_system_setting("fd:system-config")
+    cfg = _load_system_config(raw)
+    for key, val in body.model_dump(exclude_none=True).items():
+        cfg[key] = val
+    await db.set_system_setting("fd:system-config", json.dumps(cfg))
+    return cfg
 
 
 @router.put("/plans/{plan}")
@@ -172,5 +214,5 @@ async def update_plan(plan: str, body: UpdatePlanRequest, admin: dict = Depends(
     update_plan_limits(plan, changes)
     # Persist to DB as a system setting
     db = get_db()
-    await db.set_settings("__system__", {"fd:plan-limits": get_plan_limits_json()})
+    await db.set_system_setting("fd:plan-limits", get_plan_limits_json())
     return {"ok": True, "plan": plan, "limits": PLAN_LIMITS[plan]}

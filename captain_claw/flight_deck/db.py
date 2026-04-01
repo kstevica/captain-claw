@@ -91,6 +91,12 @@ class FlightDeckDB:
             CREATE INDEX IF NOT EXISTS idx_chat_messages_session
                 ON chat_messages(session_id);
 
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS usage_logs (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id    TEXT NOT NULL,
@@ -223,6 +229,34 @@ class FlightDeckDB:
                 (user_id, key, value, now),
             )
         await self._db.commit()
+
+    # ── System settings (no FK, for global config) ────────────────
+
+    async def get_system_setting(self, key: str) -> str | None:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT value FROM system_settings WHERE key = ?", (key,)
+        ) as cur:
+            row = await cur.fetchone()
+            return row["value"] if row else None
+
+    async def set_system_setting(self, key: str, value: str) -> None:
+        assert self._db is not None
+        now = _utcnow()
+        await self._db.execute(
+            "INSERT INTO system_settings (key, value, updated_at)"
+            " VALUES (?, ?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
+            " updated_at = excluded.updated_at",
+            (key, value, now),
+        )
+        await self._db.commit()
+
+    async def get_all_system_settings(self) -> dict[str, str]:
+        assert self._db is not None
+        async with self._db.execute("SELECT key, value FROM system_settings") as cur:
+            rows = await cur.fetchall()
+            return {r["key"]: r["value"] for r in rows}
 
     async def delete_setting(self, user_id: str, key: str) -> bool:
         assert self._db is not None

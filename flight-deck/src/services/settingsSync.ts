@@ -156,9 +156,12 @@ export async function hydrateAllStores(): Promise<void> {
     }
   }
 
-  // Clear all fd:* localStorage keys so stale data from previous
-  // sessions doesn't bleed into the authenticated session
+  // Clear stale fd:* localStorage keys that have no server-side value,
+  // so data from previous sessions doesn't bleed through.
+  // Keys that DO exist on the server were just written by hydrators — keep them.
   for (const key of MIGRATEABLE_KEYS) {
-    localStorage.removeItem(key)
+    if (!(key in settings)) {
+      localStorage.removeItem(key)
+    }
   }
 }

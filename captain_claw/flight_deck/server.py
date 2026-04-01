@@ -241,8 +241,8 @@ async def lifespan(app: FastAPI):
         set_auth_db(_fd_db)
         app.state.fd_db = _fd_db
         # Load admin-configured plan limits from DB
-        sys_settings = await _fd_db.get_all_settings("__system__")
-        load_plan_limits_from_db_sync(sys_settings.get("fd:plan-limits"))
+        plan_limits_raw = await _fd_db.get_system_setting("fd:plan-limits")
+        load_plan_limits_from_db_sync(plan_limits_raw)
     yield
     # Shutdown: stop all managed process agents
     print("Flight Deck: stopping managed process agents...")
@@ -637,6 +637,10 @@ def _schedule_fleet_notify(name: str, port: int, event: str = "joined"):
 @app.post("/fd/spawn", response_model=ContainerActionResult)
 async def spawn_agent(config: AgentConfig, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
     """Spawn a new Captain Claw container."""
+    # Check if docker spawn is allowed
+    sys_cfg = await _get_system_config()
+    if not sys_cfg.get("docker_spawn_enabled", True):
+        raise HTTPException(403, "Docker container spawning is disabled by the administrator.")
     # Rate limiting & agent count check
     if AUTH_ENABLED and user:
         check_api_rate_limit(user)
@@ -1175,6 +1179,77 @@ async def container_logs(container_id: str, tail: int = 200, follow: bool = Fals
         return {"logs": logs}
 
 
+# ── Agent config editing ──
+
+class AgentConfigUpdate(BaseModel):
+    config_yaml: str | None = None
+    env: str | None = None
+
+
+def _resolve_agent_dir(identifier: str, kind: str, user_id: str) -> Path:
+    """Resolve the on-disk data directory for a container or process agent."""
+    if kind == "docker":
+        c = _find_container(identifier, user_id)
+        slug = c.name
+    else:
+        entry = _verify_process_owner(identifier, user_id)
+        slug = identifier
+    agent_dir = DATA_DIR / slug
+    if not agent_dir.is_dir():
+        raise HTTPException(404, f"Agent data directory not found for '{slug}'")
+    return agent_dir
+
+
+@app.get("/fd/agent-config/{kind}/{identifier}")
+async def get_agent_config(
+    kind: str, identifier: str, request: Request,
+    user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None,
+):
+    """Read an agent's config.yaml and .env files."""
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+
+    config_yaml = ""
+    env = ""
+    config_file = agent_dir / "config.yaml"
+    env_file = agent_dir / ".env"
+    if config_file.is_file():
+        config_yaml = config_file.read_text()
+    if env_file.is_file():
+        env = env_file.read_text()
+    return {"config_yaml": config_yaml, "env": env}
+
+
+@app.put("/fd/agent-config/{kind}/{identifier}")
+async def update_agent_config(
+    kind: str, identifier: str, body: AgentConfigUpdate, request: Request,
+    user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None,
+):
+    """Update an agent's config.yaml and/or .env files. Agent must be restarted for changes to take effect."""
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+
+    updated = []
+    if body.config_yaml is not None:
+        config_file = agent_dir / "config.yaml"
+        config_file.write_text(body.config_yaml)
+        # Also update home-config copy so it takes precedence on restart
+        home_config = agent_dir / "data" / "home-config" / "config.yaml"
+        if home_config.parent.is_dir():
+            home_config.write_text(body.config_yaml)
+        updated.append("config.yaml")
+    if body.env is not None:
+        env_file = agent_dir / ".env"
+        env_file.write_text(body.env)
+        updated.append(".env")
+
+    return {"ok": True, "updated": updated, "message": "Restart the agent for changes to take effect."}
+
+
 @app.get("/fd/containers/{container_id}")
 async def get_container(container_id: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
@@ -1454,20 +1529,111 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
     return StreamingResponse(_event_stream(), media_type="application/x-ndjson")
 
 
+_WORKSPACE_ALLOWED_EXTS: set[str] = {
+    # Documents
+    ".txt", ".md", ".markdown", ".rst", ".html", ".htm", ".pdf",
+    ".doc", ".docx", ".odt", ".rtf",
+    # Presentations & spreadsheets
+    ".ppt", ".pptx", ".xls", ".xlsx", ".ods", ".odp",
+    # Data
+    ".csv", ".tsv", ".json", ".jsonl", ".yaml", ".yml", ".toml", ".xml",
+    # Scripts & code
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".sh", ".bash", ".sql",
+    ".rb", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".css", ".scss",
+    # Images
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico",
+    # Audio / video
+    ".mp3", ".wav", ".ogg", ".mp4", ".webm",
+    # Archives
+    ".zip", ".tar", ".gz",
+    # Config / misc text
+    ".env", ".ini", ".cfg", ".conf", ".log",
+}
+
+_TEXT_EXTS: set[str] = {
+    ".txt", ".md", ".markdown", ".rst", ".json", ".jsonl",
+    ".yaml", ".yml", ".csv", ".tsv", ".toml", ".xml",
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".htm",
+    ".css", ".scss", ".sh", ".bash", ".sql", ".log",
+    ".env", ".ini", ".cfg", ".conf", ".rb", ".go", ".rs",
+    ".java", ".c", ".cpp", ".h",
+}
+
+
+def _scan_workspace_files(agent_dir: Path) -> list[dict]:
+    """Scan an agent's workspace directory for user-facing files."""
+    import mimetypes
+    results: list[dict] = []
+    workspace = agent_dir / "data" / "workspace"
+    if not workspace.is_dir():
+        return results
+    for f in workspace.rglob("*"):
+        if not f.is_file():
+            continue
+        ext = f.suffix.lower()
+        if ext not in _WORKSPACE_ALLOWED_EXTS:
+            continue
+        try:
+            stat = f.stat()
+            mt, _ = mimetypes.guess_type(f.name)
+            results.append({
+                "logical": "workspace/" + str(f.relative_to(workspace)),
+                "physical": str(f),
+                "filename": f.name,
+                "extension": ext,
+                "exists": True,
+                "size": stat.st_size,
+                "modified": stat.st_mtime,
+                "mime_type": mt or "application/octet-stream",
+                "is_text": ext in _TEXT_EXTS,
+                "source": "workspace",
+            })
+        except OSError:
+            continue
+    return results
+
+
 @app.get("/fd/agent-files/{host}/{port}")
 async def agent_files(host: str, port: int, token: str = "", request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
-    """List files from a CC agent (proxied to avoid CORS)."""
+    """List files from a CC agent (proxied to avoid CORS), merged with workspace scan."""
     import httpx
+    registered: list[dict] = []
     params = f"?token={token}" if token else ""
     url = f"http://{host}:{port}/api/files{params}"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(url)
-            if resp.status_code != 200:
-                raise HTTPException(resp.status_code, f"Agent returned {resp.status_code}")
-            return resp.json()
-    except httpx.ConnectError:
-        raise HTTPException(502, "Cannot connect to agent")
+            if resp.status_code == 200:
+                registered = resp.json()
+    except (httpx.ConnectError, Exception):
+        pass
+
+    # Also scan the workspace directory for any unregistered files
+    workspace_files: list[dict] = []
+    user_id = getattr(request.state, "user_id", "") if request else ""
+    # Try to find the agent directory by matching port to a process or container
+    registry = _load_process_registry()
+    for slug, entry in registry.items():
+        if entry.get("web_port") == port:
+            if AUTH_ENABLED and user_id and entry.get("owner", "") != user_id:
+                continue
+            agent_dir = DATA_DIR / slug
+            if agent_dir.is_dir():
+                workspace_files = _scan_workspace_files(agent_dir)
+            break
+
+    if not workspace_files:
+        if not registered:
+            raise HTTPException(502, "Cannot connect to agent")
+        return registered
+
+    # Merge: use registered files as base, add workspace files not already listed
+    registered_physicals = {f.get("physical", "") for f in registered}
+    registered_filenames = {f.get("filename", "") for f in registered}
+    for wf in workspace_files:
+        if wf["physical"] not in registered_physicals and wf["filename"] not in registered_filenames:
+            registered.append(wf)
+    return registered
 
 
 class TransferRequest(BaseModel):
@@ -1787,10 +1953,8 @@ def _verify_process_owner(slug: str, user_id: str) -> dict:
     return entry
 
 
-@app.post("/fd/processes/{slug}/stop", response_model=ProcessActionResult)
-async def stop_process(slug: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
-    _verify_process_owner(slug, getattr(request.state, "user_id", ""))
-    """Stop a running process agent."""
+def _do_stop_process(slug: str) -> ProcessActionResult:
+    """Internal helper to stop a process agent (no auth check)."""
     if not _process_is_alive(slug):
         return ProcessActionResult(ok=True, slug=slug, message="Already stopped")
 
@@ -1810,10 +1974,8 @@ async def stop_process(slug: str, request: Request, user: dict | None = Depends(
     return ProcessActionResult(ok=True, slug=slug, message="Stopped")
 
 
-@app.post("/fd/processes/{slug}/start", response_model=ProcessActionResult)
-async def start_process(slug: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
-    _verify_process_owner(slug, getattr(request.state, "user_id", ""))
-    """Start a stopped process agent."""
+def _do_start_process(slug: str) -> ProcessActionResult:
+    """Internal helper to start a process agent (no auth check)."""
     registry = _load_process_registry()
     entry = registry.get(slug)
     if not entry:
@@ -1833,14 +1995,28 @@ async def start_process(slug: str, request: Request, user: dict | None = Depends
     return ProcessActionResult(ok=True, slug=slug, message=f"Started (PID {entry.get('pid', '?')})")
 
 
+@app.post("/fd/processes/{slug}/stop", response_model=ProcessActionResult)
+async def stop_process(slug: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+    """Stop a running process agent."""
+    _verify_process_owner(slug, getattr(request.state, "user_id", ""))
+    return _do_stop_process(slug)
+
+
+@app.post("/fd/processes/{slug}/start", response_model=ProcessActionResult)
+async def start_process(slug: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+    """Start a stopped process agent."""
+    _verify_process_owner(slug, getattr(request.state, "user_id", ""))
+    return _do_start_process(slug)
+
+
 @app.post("/fd/processes/{slug}/restart", response_model=ProcessActionResult)
 async def restart_process(slug: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
-    _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     """Restart a process agent."""
-    stop_process(slug)
+    _verify_process_owner(slug, getattr(request.state, "user_id", ""))
+    _do_stop_process(slug)
     import time
     time.sleep(1)
-    return start_process(slug)
+    return _do_start_process(slug)
 
 
 @app.delete("/fd/processes/{slug}", response_model=ProcessActionResult)
@@ -1848,7 +2024,7 @@ async def remove_process(slug: str, force: bool = False, request: Request = None
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     """Remove a process agent from the registry. Stops it first if running."""
     if _process_is_alive(slug):
-        stop_process(slug)
+        _do_stop_process(slug)
 
     registry = _load_process_registry()
     registry.pop(slug, None)
@@ -1945,10 +2121,20 @@ async def clone_process(slug: str, req: CloneRequest, request: Request, user: di
     return ProcessActionResult(ok=True, slug=new_slug, message=f"Cloned '{slug}' → '{new_slug}' (port {new_port})")
 
 
+async def _get_system_config() -> dict:
+    """Load system config from DB. Returns defaults when auth disabled."""
+    from captain_claw.flight_deck.admin_routes import _load_system_config, SYSTEM_CONFIG_DEFAULTS
+    if not AUTH_ENABLED or not hasattr(app.state, "fd_db"):
+        return {**SYSTEM_CONFIG_DEFAULTS}
+    raw = await app.state.fd_db.get_system_setting("fd:system-config")
+    return _load_system_config(raw)
+
+
 @app.get("/fd/auth/status")
-def auth_status():
-    """Check if auth is enabled (public endpoint, no auth required)."""
-    return {"auth_enabled": AUTH_ENABLED}
+async def auth_status():
+    """Check if auth is enabled and return system config flags (public endpoint)."""
+    cfg = await _get_system_config()
+    return {"auth_enabled": AUTH_ENABLED, "docker_spawn_enabled": cfg.get("docker_spawn_enabled", True)}
 
 
 @app.get("/fd/health")

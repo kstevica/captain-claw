@@ -103,10 +103,18 @@ async def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
 ) -> dict:
-    """FastAPI dependency — extracts and validates JWT, returns user dict."""
-    if credentials is None:
+    """FastAPI dependency — extracts and validates JWT, returns user dict.
+    Falls back to ?fd_token= query param for direct-URL access (file downloads).
+    """
+    token_str: str | None = None
+    if credentials is not None:
+        token_str = credentials.credentials
+    else:
+        # Fallback: check for fd_token query parameter (used by file download/view URLs)
+        token_str = request.query_params.get("fd_token")
+    if not token_str:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
-    payload = decode_access_token(credentials.credentials)
+    payload = decode_access_token(token_str)
     user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
