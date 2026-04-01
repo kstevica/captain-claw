@@ -599,8 +599,11 @@ def _find_container(container_id: str, owner_id: str = "") -> docker.models.cont
 @app.get("/fd/containers", response_model=list[ContainerInfo])
 async def list_containers(request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
     """List all Flight Deck managed containers (filtered by owner when auth enabled)."""
-    client = get_docker()
-    containers = client.containers.list(all=True, filters={"label": CONTAINER_LABEL})
+    try:
+        client = get_docker()
+        containers = client.containers.list(all=True, filters={"label": CONTAINER_LABEL})
+    except Exception:
+        return []  # Docker not available (e.g. running inside a container)
     user_id = getattr(request.state, "user_id", "")
     if AUTH_ENABLED and user_id:
         containers = [c for c in containers if (c.labels or {}).get(OWNER_LABEL, "") == user_id]

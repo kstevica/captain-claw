@@ -4,11 +4,11 @@ services:
   flight-deck:
     image: kstevica/captain-claw:latest
     container_name: flight-deck
-    command: ["captain-claw-fd", "--host", "0.0.0.0", "--port", "25080"]
-    ports:
-      - "25080:25080"       # Flight Deck UI + API (all traffic goes through here)
+    user: root
+    command: ["sh", "-c", "pip install -q python-multipart 2>/dev/null; exec captain-claw-fd --host 0.0.0.0 --port 25080"]
+    network_mode: host
     volumes:
-      - fd-data:/fd-data
+      - ./fd-data:/fd-data
     environment:
       - FD_DATA_DIR=/fd-data
       - FD_AUTH_ENABLED=true
@@ -20,6 +20,3 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - BRAVE_API_KEY=${BRAVE_API_KEY:-}
     restart: unless-stopped
-
-volumes:
-  fd-data:
