@@ -1,8 +1,97 @@
 import { create } from 'zustand'
 import { AgentChatWS, type ChatMessage } from '../services/agentChat'
+import { useAuthStore } from './authStore'
 import { useContainerStore } from './containerStore'
 import { useLocalAgentStore } from './localAgentStore'
 import { useProcessStore } from './processStore'
+
+// ── Chat persistence helpers ──
+
+function _chatHeaders(): Record<string, string> {
+  const { token, authEnabled } = useAuthStore.getState()
+  const h: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (authEnabled && token) h['Authorization'] = `Bearer ${token}`
+  return h
+}
+
+async function serverUpsertSession(id: string, agentId: string, agentName: string): Promise<void> {
+  try {
+    await fetch('/fd/chat/sessions', {
+      method: 'POST',
+      headers: _chatHeaders(),
+      credentials: 'include',
+      body: JSON.stringify({ id, agent_id: agentId, agent_name: agentName }),
+    })
+  } catch { /* ignore */ }
+}
+
+async function serverLoadMessages(sessionId: string): Promise<ChatMessage[]> {
+  try {
+    const res = await fetch(`/fd/chat/sessions/${encodeURIComponent(sessionId)}/messages?limit=500`, {
+      headers: _chatHeaders(),
+      credentials: 'include',
+    })
+    if (!res.ok) return []
+    const rows = await res.json() as { role: string; content: string; metadata: string; created_at: string }[]
+    return rows.map((r, i) => {
+      let meta: Record<string, unknown> = {}
+      try { meta = JSON.parse(r.metadata || '{}') } catch { /* ignore */ }
+      return {
+        id: `hist-${i}-${Date.now()}`,
+        role: r.role as ChatMessage['role'],
+        content: r.content,
+        timestamp: r.created_at,
+        replay: true,
+        tool_name: meta.tool_name as string | undefined,
+        tool_arguments: meta.tool_arguments as Record<string, unknown> | undefined,
+        tool_output: meta.tool_output as string | undefined,
+        model: meta.model as string | undefined,
+        peer_name: meta.peer_name as string | undefined,
+      }
+    })
+  } catch { return [] }
+}
+
+// Debounced batch persist
+const _msgQueue: Map<string, ChatMessage[]> = new Map()
+let _msgTimer: ReturnType<typeof setTimeout> | null = null
+
+function queueMessagePersist(sessionId: string, msg: ChatMessage) {
+  if (!useAuthStore.getState().authEnabled) return
+  const q = _msgQueue.get(sessionId) || []
+  q.push(msg)
+  _msgQueue.set(sessionId, q)
+  if (_msgTimer) clearTimeout(_msgTimer)
+  _msgTimer = setTimeout(_flushMessages, 500)
+}
+
+async function _flushMessages() {
+  _msgTimer = null
+  const batches = new Map(_msgQueue)
+  _msgQueue.clear()
+  for (const [sessionId, msgs] of batches) {
+    try {
+      await fetch(`/fd/chat/sessions/${encodeURIComponent(sessionId)}/messages`, {
+        method: 'POST',
+        headers: _chatHeaders(),
+        credentials: 'include',
+        body: JSON.stringify({
+          messages: msgs.map((m) => ({
+            role: m.role,
+            content: m.content,
+            metadata: JSON.stringify({
+              ...(m.tool_name ? { tool_name: m.tool_name } : {}),
+              ...(m.tool_arguments ? { tool_arguments: m.tool_arguments } : {}),
+              ...(m.tool_output ? { tool_output: m.tool_output } : {}),
+              ...(m.model ? { model: m.model } : {}),
+              ...(m.peer_name ? { peer_name: m.peer_name } : {}),
+            }),
+          })),
+        }),
+      })
+    } catch { /* ignore */ }
+  }
+}
 
 interface AgentModelInfo {
   id: string
@@ -90,6 +179,27 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const sessions = new Map(get().sessions)
     sessions.set(containerId, session)
     set({ sessions, activeChatId: containerId, chatOpen: true })
+
+    // Server-side chat persistence: upsert session & load history
+    if (useAuthStore.getState().authEnabled) {
+      serverUpsertSession(containerId, containerId, containerName).then(() =>
+        serverLoadMessages(containerId).then((history) => {
+          if (history.length > 0) {
+            useChatStore.setState((state) => {
+              const s = state.sessions.get(containerId)
+              if (!s) return state
+              // Only prepend history if session still has no real messages (avoid duplication)
+              if (s.messages.length > 0 && !s.messages[0].replay) return state
+              const merged = [...history, ...s.messages.filter((m) => !m.replay)]
+              const updated = { ...s, messages: merged }
+              const newSessions = new Map(state.sessions)
+              newSessions.set(containerId, updated)
+              return { sessions: newSessions }
+            })
+          }
+        })
+      )
+    }
 
     // Wire up event handlers
     ws.on('_connected', () => {
@@ -381,4 +491,8 @@ function addMessage(containerId: string, msg: ChatMessage) {
     sessions.set(containerId, updated)
     return { sessions }
   })
+  // Persist to server (skip replayed messages — they're already on the server)
+  if (!msg.replay) {
+    queueMessagePersist(containerId, msg)
+  }
 }

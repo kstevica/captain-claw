@@ -1,4 +1,6 @@
 import { create } from 'zustand'
+import { queueSave, registerHydrator } from '../services/settingsSync'
+import { useAuthStore } from './authStore'
 
 export interface PipelineStep {
   agentId: string
@@ -19,7 +21,9 @@ function load(): Pipeline[] {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]') } catch { return [] }
 }
 function save(pipelines: Pipeline[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(pipelines))
+  const val = JSON.stringify(pipelines)
+  if (useAuthStore.getState().authEnabled) queueSave(STORAGE_KEY, val)
+  else localStorage.setItem(STORAGE_KEY, val)
 }
 
 interface PipelineStore {
@@ -103,3 +107,10 @@ export const usePipelineStore = create<PipelineStore>((set, get) => ({
     return get().pipelines.filter((p) => p.enabled && p.steps.some((s) => s.agentId === agentId))
   },
 }))
+
+registerHydrator((settings) => {
+  const raw = settings[STORAGE_KEY]
+  if (raw) {
+    try { usePipelineStore.setState({ pipelines: JSON.parse(raw) }) } catch { /* ignore */ }
+  }
+})

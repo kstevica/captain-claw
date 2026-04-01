@@ -1,12 +1,38 @@
 // REST client for the Flight Deck backend (Docker management)
 
+import { useAuthStore, refreshAccessToken } from '../stores/authStore'
+
 const FD_BASE = '/fd'
+
+function _authHeaders(): Record<string, string> {
+  const { token, authEnabled } = useAuthStore.getState()
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (authEnabled && token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+  return headers
+}
 
 async function fdFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${FD_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: _authHeaders(),
+    credentials: 'include',
     ...init,
   })
+  // On 401 try to refresh the token once
+  if (res.status === 401 && useAuthStore.getState().authEnabled) {
+    const refreshed = await refreshAccessToken()
+    if (refreshed) {
+      const retry = await fetch(`${FD_BASE}${path}`, {
+        headers: _authHeaders(),
+        credentials: 'include',
+        ...init,
+      })
+      if (retry.ok) return retry.json()
+    }
+    useAuthStore.getState().clearAuth()
+    throw new Error('Session expired')
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(body.detail || `${res.status}`)

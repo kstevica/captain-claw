@@ -14,11 +14,18 @@ from typing import Any
 
 import docker
 import yaml
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+from captain_claw.flight_deck.auth import get_current_user, get_ws_user, set_auth_db
+from captain_claw.flight_deck.db import FlightDeckDB
+from captain_claw.flight_deck.rate_limiter import (
+    check_api_rate_limit, check_spawn_rate_limit, check_agent_count_limit,
+    load_plan_limits_from_db_sync,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -26,7 +33,9 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 DATA_DIR = Path(os.environ.get("FD_DATA_DIR", "./fd-data")).resolve()
 CONTAINER_LABEL = "flight-deck.managed"
+OWNER_LABEL = "flight-deck.owner"
 CC_IMAGE_DEFAULT = "kstevica/captain-claw:latest"
+AUTH_ENABLED = os.environ.get("FD_AUTH_ENABLED", "true").lower() in ("true", "1", "yes")
 
 
 # ── Docker client ──
@@ -114,13 +123,45 @@ def _kill_pid(pid: int, timeout: float = 5.0):
 
 
 def _stop_all_processes():
-    """Stop all managed process agents (called on FD shutdown)."""
+    """Stop all managed process agents in parallel (called on FD shutdown)."""
+    import threading
     registry = _load_process_registry()
+    pids_to_kill: list[int] = []
     for slug, entry in registry.items():
         pid = entry.get("pid")
         if pid and _process_is_alive(slug):
-            _kill_pid(pid)
+            pids_to_kill.append(pid)
             entry["pid"] = None
+
+    if pids_to_kill:
+        # Send SIGTERM to all at once
+        for pid in pids_to_kill:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                pass
+
+        # Wait for all in parallel threads
+        def _wait_and_kill(pid: int, timeout: float = 5.0):
+            import time
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                    time.sleep(0.2)
+                except (OSError, ProcessLookupError):
+                    return
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    pass
+
+        threads = [threading.Thread(target=_wait_and_kill, args=(pid,)) for pid in pids_to_kill]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=6)
+
     _save_process_registry(registry)
     _processes.clear()
 
@@ -193,10 +234,21 @@ def _reattach_processes():
 async def lifespan(app: FastAPI):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     _reattach_processes()
+    # Initialize database for auth & settings
+    if AUTH_ENABLED:
+        _fd_db = FlightDeckDB(DATA_DIR / "flight-deck.db")
+        await _fd_db.init()
+        set_auth_db(_fd_db)
+        app.state.fd_db = _fd_db
+        # Load admin-configured plan limits from DB
+        sys_settings = await _fd_db.get_all_settings("__system__")
+        load_plan_limits_from_db_sync(sys_settings.get("fd:plan-limits"))
     yield
     # Shutdown: stop all managed process agents
     print("Flight Deck: stopping managed process agents...")
     _stop_all_processes()
+    if AUTH_ENABLED and hasattr(app.state, "fd_db"):
+        await app.state.fd_db.close()
     if _client:
         _client.close()
 
@@ -205,9 +257,45 @@ app = FastAPI(title="Flight Deck", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Auth & user routes ──
+
+from captain_claw.flight_deck.auth_routes import router as auth_router
+from captain_claw.flight_deck.settings_routes import router as settings_router
+from captain_claw.flight_deck.chat_routes import router as chat_router
+from captain_claw.flight_deck.admin_routes import router as admin_router
+
+app.include_router(auth_router)
+app.include_router(settings_router)
+app.include_router(chat_router)
+app.include_router(admin_router)
+
+
+# ── Auth dependency helper ──
+
+def _optional_user():
+    """Return a dependency that requires auth when enabled, skips when disabled."""
+    if AUTH_ENABLED:
+        return Depends(get_current_user)
+    return None
+
+
+async def _get_user_id(request: Request) -> str:
+    """Extract user_id from request state (set by auth middleware). Returns '' when auth disabled."""
+    return getattr(request.state, "user_id", "")
+
+
+def _require_auth():
+    """FastAPI dependency that enforces auth when FD_AUTH_ENABLED=true."""
+    async def _dep(user: dict = Depends(get_current_user)):
+        return user
+    if AUTH_ENABLED:
+        return Depends(_dep)
+    return None
 
 
 # ── Models ──
@@ -494,11 +582,14 @@ def _container_info(c: docker.models.containers.Container) -> ContainerInfo:
     )
 
 
-def _find_container(container_id: str) -> docker.models.containers.Container:
+def _find_container(container_id: str, owner_id: str = "") -> docker.models.containers.Container:
     client = get_docker()
     # Try by short ID, full ID, or name
     for c in client.containers.list(all=True, filters={"label": CONTAINER_LABEL}):
         if c.short_id == container_id or c.id == container_id or c.name == container_id:
+            if AUTH_ENABLED and owner_id:
+                if (c.labels or {}).get(OWNER_LABEL, "") != owner_id:
+                    raise HTTPException(status_code=404, detail=f"Container {container_id} not found")
             return c
     raise HTTPException(status_code=404, detail=f"Container {container_id} not found")
 
@@ -506,10 +597,13 @@ def _find_container(container_id: str) -> docker.models.containers.Container:
 # ── Endpoints ──
 
 @app.get("/fd/containers", response_model=list[ContainerInfo])
-def list_containers():
-    """List all Flight Deck managed containers."""
+async def list_containers(request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+    """List all Flight Deck managed containers (filtered by owner when auth enabled)."""
     client = get_docker()
     containers = client.containers.list(all=True, filters={"label": CONTAINER_LABEL})
+    user_id = getattr(request.state, "user_id", "")
+    if AUTH_ENABLED and user_id:
+        containers = [c for c in containers if (c.labels or {}).get(OWNER_LABEL, "") == user_id]
     return [_container_info(c) for c in containers]
 
 
@@ -541,8 +635,19 @@ def _schedule_fleet_notify(name: str, port: int, event: str = "joined"):
 
 
 @app.post("/fd/spawn", response_model=ContainerActionResult)
-def spawn_agent(config: AgentConfig):
+async def spawn_agent(config: AgentConfig, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
     """Spawn a new Captain Claw container."""
+    # Rate limiting & agent count check
+    if AUTH_ENABLED and user:
+        check_api_rate_limit(user)
+        check_spawn_rate_limit(user)
+        # Count existing containers for this user
+        client_tmp = get_docker()
+        user_id = user["id"]
+        owned = [c for c in client_tmp.containers.list(all=True, filters={"label": CONTAINER_LABEL})
+                 if (c.labels or {}).get(OWNER_LABEL, "") == user_id]
+        await check_agent_count_limit(user, len(owned))
+
     client = get_docker()
     slug = _slug(config.name)
 
@@ -610,8 +715,10 @@ def spawn_agent(config: AgentConfig):
             environment[ev["key"]] = ev.get("value", "")
 
     # Labels for tracking
+    user_id = getattr(request.state, "user_id", "")
     labels = {
         CONTAINER_LABEL: "true",
+        OWNER_LABEL: user_id,
         "flight-deck.agent-name": config.name or slug,
         "flight-deck.description": config.description or "",
         "flight-deck.image": config.image,
@@ -664,6 +771,10 @@ def spawn_agent(config: AgentConfig):
             stop_signal="SIGTERM",
         )
         port_info = f" on port {config.web_port}" if config.web_enabled else ""
+        # Log usage
+        if AUTH_ENABLED and user:
+            db = app.state.fd_db
+            await db.log_usage(user["id"], "agent_spawn", json.dumps({"agent": slug, "type": "container", "image": config.image}))
         # Notify other agents about the new peer
         if config.web_enabled:
             _schedule_fleet_notify(config.name or slug, config.web_port)
@@ -675,8 +786,8 @@ def spawn_agent(config: AgentConfig):
 
 
 @app.post("/fd/containers/{container_id}/stop", response_model=ContainerActionResult)
-def stop_container(container_id: str):
-    c = _find_container(container_id)
+async def stop_container(container_id: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+    c = _find_container(container_id, getattr(request.state, "user_id", ""))
     if c.status != "running":
         return ContainerActionResult(ok=True, container_id=c.short_id, message="Already stopped")
     c.stop(timeout=5)
@@ -684,8 +795,8 @@ def stop_container(container_id: str):
 
 
 @app.post("/fd/containers/{container_id}/start", response_model=ContainerActionResult)
-def start_container(container_id: str):
-    c = _find_container(container_id)
+async def start_container(container_id: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+    c = _find_container(container_id, getattr(request.state, "user_id", ""))
     if c.status == "running":
         return ContainerActionResult(ok=True, container_id=c.short_id, message="Already running")
     try:
@@ -697,15 +808,15 @@ def start_container(container_id: str):
 
 
 @app.post("/fd/containers/{container_id}/restart", response_model=ContainerActionResult)
-def restart_container(container_id: str):
-    c = _find_container(container_id)
+async def restart_container(container_id: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+    c = _find_container(container_id, getattr(request.state, "user_id", ""))
     c.restart(timeout=5)
     return ContainerActionResult(ok=True, container_id=c.short_id, message="Restarted")
 
 
 @app.delete("/fd/containers/{container_id}", response_model=ContainerActionResult)
-def remove_container(container_id: str, force: bool = False):
-    c = _find_container(container_id)
+async def remove_container(container_id: str, force: bool = False, request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+    c = _find_container(container_id, getattr(request.state, "user_id", ""))
     name = c.name
     c.remove(force=force)
     return ContainerActionResult(ok=True, container_id=container_id, message=f"Removed '{name}'")
@@ -720,11 +831,11 @@ class CloneRequest(BaseModel):
 
 
 @app.post("/fd/containers/{container_id}/rebuild", response_model=ContainerActionResult)
-def rebuild_container(container_id: str, req: RebuildRequest | None = None):
+async def rebuild_container(container_id: str, request: Request, req: RebuildRequest | None = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
     """Rebuild a container: stop, remove, pull latest image, re-spawn with same config."""
     import platform
 
-    c = _find_container(container_id)
+    c = _find_container(container_id, getattr(request.state, "user_id", ""))
     old_short_id = c.short_id
     labels = c.labels or {}
 
@@ -882,12 +993,12 @@ def _find_available_port(start: int) -> int:
 
 
 @app.post("/fd/containers/{container_id}/clone", response_model=ContainerActionResult)
-def clone_container(container_id: str, req: CloneRequest):
+async def clone_container(container_id: str, req: CloneRequest, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
     """Clone a container: create a new agent with same config but its own data folder."""
     import platform
     import shutil
 
-    c = _find_container(container_id)
+    c = _find_container(container_id, getattr(request.state, "user_id", ""))
     labels = dict(c.labels or {})
 
     # Read the original config
@@ -1052,8 +1163,8 @@ def clone_container(container_id: str, req: CloneRequest):
 
 
 @app.get("/fd/containers/{container_id}/logs")
-def container_logs(container_id: str, tail: int = 200, follow: bool = False):
-    c = _find_container(container_id)
+async def container_logs(container_id: str, tail: int = 200, follow: bool = False, request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+    c = _find_container(container_id, getattr(request.state, "user_id", ""))
     if follow:
         def stream():
             for chunk in c.logs(stream=True, follow=True, tail=tail):
@@ -1065,8 +1176,8 @@ def container_logs(container_id: str, tail: int = 200, follow: bool = False):
 
 
 @app.get("/fd/containers/{container_id}")
-def get_container(container_id: str):
-    c = _find_container(container_id)
+async def get_container(container_id: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+    c = _find_container(container_id, getattr(request.state, "user_id", ""))
     info = _container_info(c)
     # Add extra details
     return {
@@ -1143,15 +1254,18 @@ class FleetAgent(BaseModel):
 
 
 @app.get("/fd/fleet", response_model=list[FleetAgent])
-def get_fleet():
+async def get_fleet(request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
     """Return all running/known agents across docker, process, and local stores."""
     fleet: list[FleetAgent] = []
+    user_id = getattr(request.state, "user_id", "")
 
     # Docker containers
     try:
         client = get_docker()
         for c in client.containers.list(all=True, filters={"label": CONTAINER_LABEL}):
             labels = c.labels or {}
+            if AUTH_ENABLED and user_id and labels.get(OWNER_LABEL, "") != user_id:
+                continue
             wp = labels.get("flight-deck.web-port", "")
             fleet.append(FleetAgent(
                 name=labels.get("flight-deck.agent-name", c.name),
@@ -1167,6 +1281,8 @@ def get_fleet():
     # Process agents
     registry = _load_process_registry()
     for slug, entry in registry.items():
+        if AUTH_ENABLED and user_id and entry.get("owner", "") != user_id:
+            continue
         alive = _process_is_alive(slug)
         fleet.append(FleetAgent(
             name=entry.get("name", slug),
@@ -1207,7 +1323,20 @@ async def _notify_fleet_change(new_agent_name: str, new_agent_port: int, event: 
     if not targets:
         return
 
-    fleet = [a.model_dump() for a in get_fleet()]
+    # Build fleet list directly (can't call get_fleet — it's a FastAPI endpoint with dependencies)
+    fleet: list[dict] = []
+    try:
+        client = get_docker()
+        for c in client.containers.list(all=True, filters={"label": CONTAINER_LABEL}):
+            labels = c.labels or {}
+            wp = labels.get("flight-deck.web-port", "")
+            fleet.append({"name": labels.get("flight-deck.agent-name", c.name), "status": c.status, "port": int(wp) if wp else 0})
+    except Exception:
+        pass
+    reg = _load_process_registry()
+    for slug, entry in reg.items():
+        fleet.append({"name": entry.get("name", slug), "status": "running" if _process_is_alive(slug) else "stopped", "port": entry.get("web_port", 0)})
+
     notification = (
         f"[Flight Deck] Agent '{new_agent_name}' has {event} the fleet on port {new_agent_port}. "
         f"Current fleet: {', '.join(a['name'] + ' (' + a['status'] + ', :' + str(a['port']) + ')' for a in fleet)}"
@@ -1253,7 +1382,7 @@ class ConsultPeerRequest(BaseModel):
 
 
 @app.post("/fd/consult-peer")
-async def consult_peer(req: ConsultPeerRequest):
+async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
     """Send a message to a peer agent and stream back intermediate events + final response as ndjson."""
     import websockets
     import json
@@ -1326,7 +1455,7 @@ async def consult_peer(req: ConsultPeerRequest):
 
 
 @app.get("/fd/agent-files/{host}/{port}")
-async def agent_files(host: str, port: int, token: str = ""):
+async def agent_files(host: str, port: int, token: str = "", request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
     """List files from a CC agent (proxied to avoid CORS)."""
     import httpx
     params = f"?token={token}" if token else ""
@@ -1352,7 +1481,7 @@ class TransferRequest(BaseModel):
 
 
 @app.post("/fd/transfer")
-async def transfer_file(req: TransferRequest):
+async def transfer_file(req: TransferRequest, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
     """Download a file from one agent and upload it to another."""
     import httpx
 
@@ -1385,7 +1514,7 @@ async def transfer_file(req: TransferRequest):
 
 
 @app.get("/fd/agent-file-download/{host}/{port}")
-async def agent_file_download(host: str, port: int, path: str, token: str = ""):
+async def agent_file_download(host: str, port: int, path: str, token: str = "", request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
     """Proxy file download from a CC agent."""
     import httpx
     import urllib.parse
@@ -1413,7 +1542,7 @@ async def agent_file_download(host: str, port: int, path: str, token: str = ""):
 
 
 @app.get("/fd/agent-file-view/{host}/{port}")
-async def agent_file_view(host: str, port: int, path: str, token: str = ""):
+async def agent_file_view(host: str, port: int, path: str, token: str = "", request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
     """Proxy file view from a CC agent (inline, no download header)."""
     import httpx
     import urllib.parse
@@ -1442,7 +1571,7 @@ async def agent_file_view(host: str, port: int, path: str, token: str = ""):
 
 
 @app.post("/fd/agent-file-upload/{host}/{port}")
-async def agent_file_upload(host: str, port: int, token: str = "", file: UploadFile = File(...)):
+async def agent_file_upload(host: str, port: int, token: str = "", file: UploadFile = File(...), request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
     """Proxy file upload to a CC agent."""
     import httpx
 
@@ -1455,13 +1584,17 @@ async def agent_file_upload(host: str, port: int, token: str = "", file: UploadF
             resp = await client.post(url, files=files)
             if resp.status_code != 200:
                 raise HTTPException(resp.status_code, f"Agent upload failed: {resp.status_code}")
+            # Log usage
+            if AUTH_ENABLED and user:
+                db = app.state.fd_db
+                await db.log_usage(user["id"], "file_upload", json.dumps({"filename": file.filename, "size": len(content), "agent_port": port}))
             return resp.json()
     except httpx.ConnectError:
         raise HTTPException(502, "Cannot connect to agent")
 
 
 @app.get("/fd/agent-usage/{host}/{port}")
-async def agent_usage(host: str, port: int, token: str = "", period: str = "today"):
+async def agent_usage(host: str, port: int, token: str = "", period: str = "today", request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
     """Proxy /api/usage from a CC agent."""
     import httpx
     params = f"?period={period}"
@@ -1509,11 +1642,14 @@ class ProcessActionResult(BaseModel):
 
 
 @app.get("/fd/processes", response_model=list[ProcessInfo])
-def list_processes():
+async def list_processes(request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
     """List all Flight Deck managed process agents."""
     registry = _load_process_registry()
+    user_id = getattr(request.state, "user_id", "")
     result = []
     for slug, entry in registry.items():
+        if AUTH_ENABLED and user_id and entry.get("owner", "") != user_id:
+            continue
         alive = _process_is_alive(slug)
         result.append(ProcessInfo(
             slug=slug,
@@ -1530,8 +1666,18 @@ def list_processes():
 
 
 @app.post("/fd/spawn-process", response_model=ProcessActionResult)
-def spawn_process(config: AgentConfig):
+async def spawn_process(config: AgentConfig, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
     """Spawn a new Captain Claw process agent (pip-installed, no Docker)."""
+    # Rate limiting & agent count check
+    if AUTH_ENABLED and user:
+        check_api_rate_limit(user)
+        check_spawn_rate_limit(user)
+        # Count existing processes for this user
+        registry = _load_process_registry()
+        user_id = user["id"]
+        owned = [e for e in registry.values() if e.get("owner") == user_id]
+        await check_agent_count_limit(user, len(owned))
+
     slug = _slug(config.name)
 
     # Check if already running
@@ -1614,8 +1760,14 @@ def spawn_process(config: AgentConfig):
         "pid": proc.pid,
         "provider": config.provider,
         "model": config.model,
+        "owner": getattr(request.state, "user_id", ""),
     }
     _save_process_registry(registry)
+
+    # Log usage
+    if AUTH_ENABLED and user:
+        db = app.state.fd_db
+        await db.log_usage(user["id"], "agent_spawn", json.dumps({"agent": slug, "type": "process", "provider": config.provider, "model": config.model}))
 
     # Notify other agents about the new peer
     if config.web_enabled:
@@ -1624,8 +1776,20 @@ def spawn_process(config: AgentConfig):
     return ProcessActionResult(ok=True, slug=slug, message=f"Process agent '{slug}' spawned (PID {proc.pid}, port {config.web_port})")
 
 
+def _verify_process_owner(slug: str, user_id: str) -> dict:
+    """Check that a process exists and belongs to the user. Returns the registry entry."""
+    registry = _load_process_registry()
+    entry = registry.get(slug)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Process '{slug}' not found")
+    if AUTH_ENABLED and user_id and entry.get("owner", "") != user_id:
+        raise HTTPException(status_code=404, detail=f"Process '{slug}' not found")
+    return entry
+
+
 @app.post("/fd/processes/{slug}/stop", response_model=ProcessActionResult)
-def stop_process(slug: str):
+async def stop_process(slug: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+    _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     """Stop a running process agent."""
     if not _process_is_alive(slug):
         return ProcessActionResult(ok=True, slug=slug, message="Already stopped")
@@ -1647,7 +1811,8 @@ def stop_process(slug: str):
 
 
 @app.post("/fd/processes/{slug}/start", response_model=ProcessActionResult)
-def start_process(slug: str):
+async def start_process(slug: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+    _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     """Start a stopped process agent."""
     registry = _load_process_registry()
     entry = registry.get(slug)
@@ -1669,7 +1834,8 @@ def start_process(slug: str):
 
 
 @app.post("/fd/processes/{slug}/restart", response_model=ProcessActionResult)
-def restart_process(slug: str):
+async def restart_process(slug: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+    _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     """Restart a process agent."""
     stop_process(slug)
     import time
@@ -1678,7 +1844,8 @@ def restart_process(slug: str):
 
 
 @app.delete("/fd/processes/{slug}", response_model=ProcessActionResult)
-def remove_process(slug: str, force: bool = False):
+async def remove_process(slug: str, force: bool = False, request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+    _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     """Remove a process agent from the registry. Stops it first if running."""
     if _process_is_alive(slug):
         stop_process(slug)
@@ -1692,7 +1859,8 @@ def remove_process(slug: str, force: bool = False):
 
 
 @app.get("/fd/processes/{slug}/logs")
-def process_logs(slug: str, tail: int = 200):
+async def process_logs(slug: str, tail: int = 200, request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+    _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     """Read logs from a process agent's log file."""
     log_file = DATA_DIR / slug / "process.log"
     if not log_file.is_file():
@@ -1706,7 +1874,8 @@ def process_logs(slug: str, tail: int = 200):
 
 
 @app.post("/fd/processes/{slug}/clone", response_model=ProcessActionResult)
-def clone_process(slug: str, req: CloneRequest):
+async def clone_process(slug: str, req: CloneRequest, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+    _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     """Clone a process agent with a new name and port."""
     registry = _load_process_registry()
     entry = registry.get(slug)
@@ -1774,6 +1943,12 @@ def clone_process(slug: str, req: CloneRequest):
     _save_process_registry(registry)
 
     return ProcessActionResult(ok=True, slug=new_slug, message=f"Cloned '{slug}' → '{new_slug}' (port {new_port})")
+
+
+@app.get("/fd/auth/status")
+def auth_status():
+    """Check if auth is enabled (public endpoint, no auth required)."""
+    return {"auth_enabled": AUTH_ENABLED}
 
 
 @app.get("/fd/health")

@@ -1,4 +1,6 @@
 import { create } from 'zustand'
+import { queueSave, registerHydrator } from '../services/settingsSync'
+import { useAuthStore } from './authStore'
 
 export interface PinnedFile {
   id: string
@@ -27,7 +29,9 @@ function load(): PinnedFile[] {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]') } catch { return [] }
 }
 function save(pins: PinnedFile[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(pins))
+  const val = JSON.stringify(pins)
+  if (useAuthStore.getState().authEnabled) queueSave(STORAGE_KEY, val)
+  else localStorage.setItem(STORAGE_KEY, val)
 }
 
 interface PinnedFilesStore {
@@ -65,3 +69,10 @@ export const usePinnedFilesStore = create<PinnedFilesStore>((set, get) => ({
     return get().pins.some((p) => p.agentId === agentId && p.physical === physical)
   },
 }))
+
+registerHydrator((settings) => {
+  const raw = settings[STORAGE_KEY]
+  if (raw) {
+    try { usePinnedFilesStore.setState({ pins: JSON.parse(raw) }) } catch { /* ignore */ }
+  }
+})

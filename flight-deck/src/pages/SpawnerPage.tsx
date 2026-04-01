@@ -69,8 +69,10 @@ const ALL_TOOLS = [
   'pocket_tts', 'send_mail',
   'google_drive', 'google_calendar', 'google_mail',
   'todo', 'contacts', 'scripts', 'apis', 'playbooks',
-  'typesense', 'datastore', 'personality',
-  'screen_capture', 'desktop_action', 'direct_api', 'botport',
+  'typesense', 'datastore', 'personality', 'insights',
+  'screen_capture', 'desktop_action', 'direct_api',
+  'cron', 'twitter', 'summarize_files', 'termux', 'pinchtab', 'gws',
+  'botport',
 ]
 
 const defaultConfig: AgentConfig = {
@@ -83,13 +85,17 @@ const defaultConfig: AgentConfig = {
   temperature: 0.7,
   maxTokens: 32768,
   providerApiKey: '',
-  botportEnabled: true,
+  botportEnabled: false,
   botportUrl: '',
   botportInstanceName: '',
   botportKey: '',
   botportSecret: '',
   botportMaxConcurrent: 5,
-  tools: ['shell', 'read', 'write', 'glob', 'edit', 'web_fetch', 'web_search', 'browser', 'botport'],
+  tools: [
+    'shell', 'read', 'write', 'glob', 'edit', 'web_fetch', 'web_search', 'browser',
+    'pdf_extract', 'docx_extract', 'xlsx_extract', 'pptx_extract',
+    'scripts', 'playbooks', 'personality',
+  ],
   webEnabled: true,
   webPort: 24080,
   webAuthToken: '',
@@ -259,7 +265,7 @@ export function SpawnerPage() {
   const globalBotportUrl = useConnectionStore((s) => s.botportUrl)
   const { fetchContainers, dockerAvailable, checkHealth } = useContainerStore()
   const { fetchProcesses } = useProcessStore()
-  const [spawnMode, setSpawnMode] = useState<'docker' | 'process'>('docker')
+  const [spawnMode, setSpawnMode] = useState<'docker' | 'process'>('process')
   const [config, setConfig] = useState<AgentConfig>(() => ({
     ...defaultConfig,
     botportUrl: globalBotportUrl ? globalBotportUrl.replace(/^http/, 'ws') + '/ws' : '',
@@ -272,7 +278,7 @@ export function SpawnerPage() {
   const [spawning, setSpawning] = useState(false)
   const [spawnResult, setSpawnResult] = useState<{ ok: boolean; message: string } | null>(null)
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
-    identity: true, llm: true, botport: true, tools: false, web: false, platforms: false, docker: false, env: false,
+    identity: true, llm: true, botport: false, tools: false, web: false, platforms: false, docker: false, env: false,
   })
 
   useEffect(() => { checkHealth() }, [checkHealth])
@@ -414,26 +420,26 @@ export function SpawnerPage() {
           </div>
 
           {/* Spawn mode toggle */}
-          <div className="mb-5 flex rounded-lg border border-zinc-800 overflow-hidden">
-            <button
-              onClick={() => setSpawnMode('docker')}
-              className={`flex flex-1 items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
-                spawnMode === 'docker'
-                  ? 'bg-violet-600/20 text-violet-300 border-r border-violet-500/30'
-                  : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50 border-r border-zinc-800'
-              }`}
-            >
-              <Server className="h-3.5 w-3.5" /> Docker Container
-            </button>
+          <div className="mb-5 flex rounded-lg border border-zinc-700 overflow-hidden">
             <button
               onClick={() => setSpawnMode('process')}
               className={`flex flex-1 items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
                 spawnMode === 'process'
-                  ? 'bg-emerald-600/20 text-emerald-300'
-                  : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900/50'
+                  ? 'bg-violet-600 text-white'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
               }`}
             >
               <Cpu className="h-3.5 w-3.5" /> Local Process (pip)
+            </button>
+            <button
+              onClick={() => setSpawnMode('docker')}
+              className={`flex flex-1 items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors ${
+                spawnMode === 'docker'
+                  ? 'bg-violet-600 text-white'
+                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
+              }`}
+            >
+              <Server className="h-3.5 w-3.5" /> Docker Container
             </button>
           </div>
 

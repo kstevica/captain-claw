@@ -1,4 +1,6 @@
 import { create } from 'zustand'
+import { queueSave, registerHydrator } from '../services/settingsSync'
+import { useAuthStore } from './authStore'
 
 const STORAGE_KEY = 'fd:local-agents'
 
@@ -32,7 +34,9 @@ function load(): LocalAgent[] {
 }
 
 function save(agents: LocalAgent[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(agents))
+  const val = JSON.stringify(agents)
+  if (useAuthStore.getState().authEnabled) queueSave(STORAGE_KEY, val)
+  else localStorage.setItem(STORAGE_KEY, val)
 }
 
 export const useLocalAgentStore = create<LocalAgentStore>((set, get) => ({
@@ -85,3 +89,10 @@ export const useLocalAgentStore = create<LocalAgentStore>((set, get) => ({
     await Promise.all(agents.map((a) => get().probeAgent(a.id)))
   },
 }))
+
+registerHydrator((settings) => {
+  const raw = settings[STORAGE_KEY]
+  if (raw) {
+    try { useLocalAgentStore.setState({ agents: JSON.parse(raw) }) } catch { /* ignore */ }
+  }
+})

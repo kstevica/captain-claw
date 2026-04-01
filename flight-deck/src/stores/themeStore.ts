@@ -1,4 +1,6 @@
 import { create } from 'zustand'
+import { queueSave, registerHydrator } from '../services/settingsSync'
+import { useAuthStore } from './authStore'
 
 type Theme = 'dark' | 'light'
 
@@ -6,6 +8,14 @@ const STORAGE_KEY = 'fd:theme'
 
 function load(): Theme {
   return (localStorage.getItem(STORAGE_KEY) as Theme) || 'dark'
+}
+
+function persist(theme: Theme) {
+  if (useAuthStore.getState().authEnabled) {
+    queueSave(STORAGE_KEY, theme)
+  } else {
+    localStorage.setItem(STORAGE_KEY, theme)
+  }
 }
 
 interface ThemeStore {
@@ -18,7 +28,7 @@ export const useThemeStore = create<ThemeStore>((set, get) => ({
   theme: load(),
 
   setTheme: (theme) => {
-    localStorage.setItem(STORAGE_KEY, theme)
+    persist(theme)
     applyTheme(theme)
     set({ theme })
   },
@@ -42,3 +52,12 @@ function applyTheme(theme: Theme) {
 
 // Apply on load
 applyTheme(load())
+
+// Register hydrator for server-side settings
+registerHydrator((settings) => {
+  const theme = settings[STORAGE_KEY] as Theme
+  if (theme && (theme === 'dark' || theme === 'light')) {
+    applyTheme(theme)
+    useThemeStore.setState({ theme })
+  }
+})

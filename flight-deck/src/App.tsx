@@ -11,15 +11,21 @@ import { DesktopPage } from './pages/DesktopPage'
 import { OperationsPage } from './pages/OperationsPage'
 import { WorkflowPage } from './pages/WorkflowPage'
 import { SpawnerPage } from './pages/SpawnerPage'
+import { LoginPage } from './pages/LoginPage'
+import { AdminPage } from './pages/AdminPage'
 import { useUIStore } from './stores/uiStore'
 import { useAgentStore } from './stores/agentStore'
+import { useAuthStore, checkAuthStatus, refreshAccessToken } from './stores/authStore'
 import { useChatStore } from './stores/chatStore'
 import { useContainerStore } from './stores/containerStore'
 import { useLocalAgentStore } from './stores/localAgentStore'
 import { useNotificationStore } from './stores/notificationStore'
 import { usePipelineStore } from './stores/pipelineStore'
+import { hydrateAllStores } from './services/settingsSync'
 import { botportWS } from './services/ws'
 import type { InstanceInfo } from './types'
+
+import { queueSave, registerHydrator } from './services/settingsSync'
 
 // ── Persisted width helpers ──
 
@@ -47,6 +53,10 @@ function loadBool(key: string, fallback: boolean): boolean {
   const v = localStorage.getItem(key)
   if (v === null) return fallback
   return v === 'true'
+}
+function persistVal(key: string, val: string) {
+  if (useAuthStore.getState().authEnabled) queueSave(key, val)
+  else localStorage.setItem(key, val)
 }
 
 // ── Reusable resize hook ──
@@ -84,7 +94,7 @@ function useResizable(
       document.body.style.userSelect = ''
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
-      setWidth((w) => { localStorage.setItem(key, String(w)); return w })
+      setWidth((w) => { persistVal(key, String(w)); return w })
     }
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
@@ -97,7 +107,18 @@ function useResizable(
 
 type ToolPanel = 'pinned' | 'pinned-files' | 'clipboard' | null
 
-function App() {
+// Register hydrator for panel widths
+registerHydrator((settings) => {
+  // Panel widths will be picked up on next load since they use loadNum()
+  // We persist them to localStorage so the existing load functions work
+  for (const key of [CHAT_WIDTH_KEY, DIRECTOR_WIDTH_KEY, TOOL_PANEL_WIDTH_KEY, DIRECTOR_OPEN_KEY]) {
+    if (settings[key] !== undefined) {
+      localStorage.setItem(key, settings[key])
+    }
+  }
+})
+
+function AppContent() {
   const view = useUIStore((s) => s.view)
   const chatOpen = useChatStore((s) => s.chatOpen)
   const { fetchInstances, fetchStats, fetchConcerns, setWsConnected, upsertInstance, removeInstance, updateInstanceActivity } = useAgentStore()
@@ -107,7 +128,7 @@ function App() {
   const [directorOpen, setDirectorOpen] = useState(() => loadBool(DIRECTOR_OPEN_KEY, false))
   const toggleDirector = useCallback(() => {
     setDirectorOpen((v) => {
-      localStorage.setItem(DIRECTOR_OPEN_KEY, String(!v))
+      persistVal(DIRECTOR_OPEN_KEY, String(!v))
       return !v
     })
   }, [])
@@ -264,6 +285,7 @@ function App() {
               {view === 'operations' && <OperationsPage />}
               {view === 'workflow' && <WorkflowPage />}
               {view === 'spawner' && <SpawnerPage />}
+              {view === 'admin' && <AdminPage />}
             </div>
 
             {/* Tool panel (pinned / clipboard / pipelines) */}
@@ -297,6 +319,55 @@ function App() {
       {shortcutsOpen && <ShortcutsOverlay onClose={() => setShortcutsOpen(false)} />}
     </div>
   )
+}
+
+function App() {
+  const authEnabled = useAuthStore((s) => s.authEnabled)
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
+  const [authChecked, setAuthChecked] = useState(false)
+
+  // On mount: check if auth is enabled, try to refresh token
+  useEffect(() => {
+    async function init() {
+      const enabled = await checkAuthStatus()
+      if (enabled) {
+        // Try refreshing an existing session
+        const ok = await refreshAccessToken()
+        if (ok) {
+          // Hydrate stores from server-side settings
+          await hydrateAllStores()
+        }
+      }
+      setAuthChecked(true)
+    }
+    init()
+  }, [])
+
+  // After login, hydrate stores
+  const prevAuth = useRef(false)
+  useEffect(() => {
+    if (isAuthenticated && !prevAuth.current) {
+      hydrateAllStores()
+    }
+    prevAuth.current = isAuthenticated
+  }, [isAuthenticated])
+
+  // Still checking auth status
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen bg-[#0a0a1a] flex items-center justify-center">
+        <div className="text-zinc-500 text-sm">Loading...</div>
+      </div>
+    )
+  }
+
+  // Auth enabled but not logged in → show login page
+  if (authEnabled && !isAuthenticated) {
+    return <LoginPage />
+  }
+
+  // Auth disabled or authenticated → show main app
+  return <AppContent />
 }
 
 export default App

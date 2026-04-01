@@ -1,4 +1,6 @@
 import { create } from 'zustand'
+import { queueSave, registerHydrator } from '../services/settingsSync'
+import { useAuthStore } from './authStore'
 
 const STORAGE_KEY = 'fd:botport-connection'
 
@@ -20,7 +22,11 @@ function loadConfig(): ConnectionConfig {
 }
 
 function persist(config: ConnectionConfig) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(config))
+  if (useAuthStore.getState().authEnabled) {
+    queueSave(STORAGE_KEY, JSON.stringify(config))
+  } else {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(config))
+  }
 }
 
 const initial = loadConfig()
@@ -33,6 +39,18 @@ export const useConnectionStore = create<ConnectionStore>((set) => ({
     set({ botportUrl })
   },
 }))
+
+registerHydrator((settings) => {
+  const raw = settings[STORAGE_KEY]
+  if (raw) {
+    try {
+      const config = JSON.parse(raw)
+      if (config.botportUrl !== undefined) {
+        useConnectionStore.setState({ botportUrl: config.botportUrl })
+      }
+    } catch { /* ignore */ }
+  }
+})
 
 /**
  * Get the base URL for REST API calls.

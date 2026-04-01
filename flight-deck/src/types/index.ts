@@ -139,4 +139,4 @@ export interface BotPortStats {
 
 // ── UI types ──
 
-export type ViewMode = 'desktop' | 'workflow' | 'spawner' | 'operations'
+export type ViewMode = 'desktop' | 'workflow' | 'spawner' | 'operations' | 'admin'

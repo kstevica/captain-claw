@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import type { ContainerInfo } from '../services/docker'
 import * as dockerApi from '../services/docker'
+import { queueSave, registerHydrator } from '../services/settingsSync'
+import { useAuthStore } from './authStore'
 import { usePipelineStore } from './pipelineStore'
 import { useGroupStore } from './groupStore'
 
@@ -9,29 +11,16 @@ const NAME_OVERRIDES_KEY = 'fd:container-names'
 const FWD_TASK_OVERRIDES_KEY = 'fd:container-forwarding-tasks'
 const CONSULT_APPROVAL_KEY = 'fd:container-consult-approval'
 
-function loadDescOverrides(): Record<string, string> {
-  try { return JSON.parse(localStorage.getItem(DESC_OVERRIDES_KEY) || '{}') } catch { return {} }
+function loadMap(key: string): Record<string, string> {
+  try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} }
 }
-function saveDescOverrides(m: Record<string, string>) {
-  localStorage.setItem(DESC_OVERRIDES_KEY, JSON.stringify(m))
+function loadBoolMap(key: string): Record<string, boolean> {
+  try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} }
 }
-function loadNameOverrides(): Record<string, string> {
-  try { return JSON.parse(localStorage.getItem(NAME_OVERRIDES_KEY) || '{}') } catch { return {} }
-}
-function saveNameOverrides(m: Record<string, string>) {
-  localStorage.setItem(NAME_OVERRIDES_KEY, JSON.stringify(m))
-}
-function loadFwdTaskOverrides(): Record<string, string> {
-  try { return JSON.parse(localStorage.getItem(FWD_TASK_OVERRIDES_KEY) || '{}') } catch { return {} }
-}
-function saveFwdTaskOverrides(m: Record<string, string>) {
-  localStorage.setItem(FWD_TASK_OVERRIDES_KEY, JSON.stringify(m))
-}
-function loadConsultApproval(): Record<string, boolean> {
-  try { return JSON.parse(localStorage.getItem(CONSULT_APPROVAL_KEY) || '{}') } catch { return {} }
-}
-function saveConsultApproval(m: Record<string, boolean>) {
-  localStorage.setItem(CONSULT_APPROVAL_KEY, JSON.stringify(m))
+function saveMap(key: string, m: Record<string, string | boolean>) {
+  const val = JSON.stringify(m)
+  if (useAuthStore.getState().authEnabled) queueSave(key, val)
+  else localStorage.setItem(key, val)
 }
 
 interface ContainerStore {
@@ -66,10 +55,10 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
   selectedContainerId: null,
   dockerAvailable: false,
   loading: false,
-  descriptionOverrides: loadDescOverrides(),
-  nameOverrides: loadNameOverrides(),
-  forwardingTaskOverrides: loadFwdTaskOverrides(),
-  consultApprovalOverrides: loadConsultApproval(),
+  descriptionOverrides: loadMap(DESC_OVERRIDES_KEY),
+  nameOverrides: loadMap(NAME_OVERRIDES_KEY),
+  forwardingTaskOverrides: loadMap(FWD_TASK_OVERRIDES_KEY),
+  consultApprovalOverrides: loadBoolMap(CONSULT_APPROVAL_KEY),
 
   fetchContainers: async () => {
     try {
@@ -128,7 +117,7 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
       if (overrides[oldId]) {
         overrides[newId] = overrides[oldId]
         delete overrides[oldId]
-        saveDescOverrides(overrides)
+        saveMap(DESC_OVERRIDES_KEY, overrides)
         set({ descriptionOverrides: overrides })
       }
 
@@ -137,7 +126,7 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
       if (nameOverrides[oldId]) {
         nameOverrides[newId] = nameOverrides[oldId]
         delete nameOverrides[oldId]
-        saveNameOverrides(nameOverrides)
+        saveMap(NAME_OVERRIDES_KEY, nameOverrides)
         set({ nameOverrides })
       }
 
@@ -146,7 +135,7 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
       if (fwdTaskOverrides[oldId]) {
         fwdTaskOverrides[newId] = fwdTaskOverrides[oldId]
         delete fwdTaskOverrides[oldId]
-        saveFwdTaskOverrides(fwdTaskOverrides)
+        saveMap(FWD_TASK_OVERRIDES_KEY, fwdTaskOverrides)
         set({ forwardingTaskOverrides: fwdTaskOverrides })
       }
 
@@ -192,7 +181,7 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
 
   setNameOverride: (id, name) => {
     const overrides = { ...get().nameOverrides, [id]: name }
-    saveNameOverrides(overrides)
+    saveMap(NAME_OVERRIDES_KEY, overrides)
     const containers = get().containers.map((c) => c.id === id ? { ...c, agent_name: name } : c)
     set({ nameOverrides: overrides, containers })
   },
@@ -208,14 +197,14 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
 
   setDescription: (id, description) => {
     const overrides = { ...get().descriptionOverrides, [id]: description }
-    saveDescOverrides(overrides)
+    saveMap(DESC_OVERRIDES_KEY, overrides)
     const containers = get().containers.map((c) => c.id === id ? { ...c, description } : c)
     set({ descriptionOverrides: overrides, containers })
   },
 
   setForwardingTask: (id, task) => {
     const overrides = { ...get().forwardingTaskOverrides, [id]: task }
-    saveFwdTaskOverrides(overrides)
+    saveMap(FWD_TASK_OVERRIDES_KEY, overrides)
     set({ forwardingTaskOverrides: overrides })
   },
 
@@ -225,7 +214,7 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
 
   setConsultApproval: (id, required) => {
     const overrides = { ...get().consultApprovalOverrides, [id]: required }
-    saveConsultApproval(overrides)
+    saveMap(CONSULT_APPROVAL_KEY, overrides)
     set({ consultApprovalOverrides: overrides })
   },
 
@@ -233,3 +222,21 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
     return get().consultApprovalOverrides[id] ?? false
   },
 }))
+
+registerHydrator((settings) => {
+  const updates: Partial<Record<string, any>> = {}
+  for (const [key, field] of [
+    [DESC_OVERRIDES_KEY, 'descriptionOverrides'],
+    [NAME_OVERRIDES_KEY, 'nameOverrides'],
+    [FWD_TASK_OVERRIDES_KEY, 'forwardingTaskOverrides'],
+    [CONSULT_APPROVAL_KEY, 'consultApprovalOverrides'],
+  ] as const) {
+    const raw = settings[key]
+    if (raw) {
+      try { updates[field] = JSON.parse(raw) } catch { /* ignore */ }
+    }
+  }
+  if (Object.keys(updates).length > 0) {
+    useContainerStore.setState(updates as any)
+  }
+})

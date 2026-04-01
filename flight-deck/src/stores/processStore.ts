@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import type { ProcessInfo } from '../services/docker'
 import * as dockerApi from '../services/docker'
+import { queueSave, registerHydrator } from '../services/settingsSync'
+import { useAuthStore } from './authStore'
 
 const DESC_KEY = 'fd:process-descriptions'
 const NAME_KEY = 'fd:process-names'
@@ -10,14 +12,13 @@ const APPROVAL_KEY = 'fd:process-consult-approval'
 function loadMap(key: string): Record<string, string> {
   try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} }
 }
-function saveMap(key: string, m: Record<string, string>) {
-  localStorage.setItem(key, JSON.stringify(m))
+function persistMap(key: string, m: Record<string, string | boolean>) {
+  const val = JSON.stringify(m)
+  if (useAuthStore.getState().authEnabled) queueSave(key, val)
+  else localStorage.setItem(key, val)
 }
 function loadBoolMap(key: string): Record<string, boolean> {
   try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} }
-}
-function saveBoolMap(key: string, m: Record<string, boolean>) {
-  localStorage.setItem(key, JSON.stringify(m))
 }
 
 interface ProcessStore {
@@ -93,21 +94,21 @@ export const useProcessStore = create<ProcessStore>((set, get) => ({
 
   setDescription: (slug, description) => {
     const overrides = { ...get().descriptionOverrides, [slug]: description }
-    saveMap(DESC_KEY, overrides)
+    persistMap(DESC_KEY, overrides)
     const processes = get().processes.map((p) => p.slug === slug ? { ...p, description } : p)
     set({ descriptionOverrides: overrides, processes })
   },
 
   setNameOverride: (slug, name) => {
     const overrides = { ...get().nameOverrides, [slug]: name }
-    saveMap(NAME_KEY, overrides)
+    persistMap(NAME_KEY, overrides)
     const processes = get().processes.map((p) => p.slug === slug ? { ...p, name } : p)
     set({ nameOverrides: overrides, processes })
   },
 
   setForwardingTask: (slug, task) => {
     const overrides = { ...get().forwardingTaskOverrides, [slug]: task }
-    saveMap(FWD_KEY, overrides)
+    persistMap(FWD_KEY, overrides)
     set({ forwardingTaskOverrides: overrides })
   },
 
@@ -115,9 +116,27 @@ export const useProcessStore = create<ProcessStore>((set, get) => ({
 
   setConsultApproval: (slug, required) => {
     const overrides = { ...get().consultApprovalOverrides, [slug]: required }
-    saveBoolMap(APPROVAL_KEY, overrides)
+    persistMap(APPROVAL_KEY, overrides)
     set({ consultApprovalOverrides: overrides })
   },
 
   getConsultApproval: (slug) => get().consultApprovalOverrides[slug] ?? false,
 }))
+
+registerHydrator((settings) => {
+  const updates: Record<string, any> = {}
+  for (const [key, field] of [
+    [DESC_KEY, 'descriptionOverrides'],
+    [NAME_KEY, 'nameOverrides'],
+    [FWD_KEY, 'forwardingTaskOverrides'],
+    [APPROVAL_KEY, 'consultApprovalOverrides'],
+  ] as const) {
+    const raw = settings[key]
+    if (raw) {
+      try { updates[field] = JSON.parse(raw) } catch { /* ignore */ }
+    }
+  }
+  if (Object.keys(updates).length > 0) {
+    useProcessStore.setState(updates)
+  }
+})

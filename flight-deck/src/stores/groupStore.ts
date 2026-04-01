@@ -1,4 +1,6 @@
 import { create } from 'zustand'
+import { queueSave, registerHydrator } from '../services/settingsSync'
+import { useAuthStore } from './authStore'
 
 export interface AgentGroup {
   id: string
@@ -14,7 +16,12 @@ function load(): AgentGroup[] {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]') } catch { return [] }
 }
 function save(groups: AgentGroup[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(groups))
+  const val = JSON.stringify(groups)
+  if (useAuthStore.getState().authEnabled) {
+    queueSave(STORAGE_KEY, val)
+  } else {
+    localStorage.setItem(STORAGE_KEY, val)
+  }
 }
 
 interface GroupStore {
@@ -74,3 +81,10 @@ export const useGroupStore = create<GroupStore>((set, get) => ({
     return get().groups.filter((g) => g.agentIds.includes(agentId))
   },
 }))
+
+registerHydrator((settings) => {
+  const raw = settings[STORAGE_KEY]
+  if (raw) {
+    try { useGroupStore.setState({ groups: JSON.parse(raw) }) } catch { /* ignore */ }
+  }
+})

@@ -1,4 +1,6 @@
 import { create } from 'zustand'
+import { queueSave, registerHydrator } from '../services/settingsSync'
+import { useAuthStore } from './authStore'
 
 export interface ClipboardEntry {
   id: string
@@ -14,7 +16,9 @@ function load(): ClipboardEntry[] {
   try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]') } catch { return [] }
 }
 function save(entries: ClipboardEntry[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(entries))
+  const val = JSON.stringify(entries)
+  if (useAuthStore.getState().authEnabled) queueSave(STORAGE_KEY, val)
+  else localStorage.setItem(STORAGE_KEY, val)
 }
 
 interface ClipboardStore {
@@ -61,3 +65,10 @@ export const useClipboardStore = create<ClipboardStore>((set, get) => ({
     set({ entries })
   },
 }))
+
+registerHydrator((settings) => {
+  const raw = settings[STORAGE_KEY]
+  if (raw) {
+    try { useClipboardStore.setState({ entries: JSON.parse(raw) }) } catch { /* ignore */ }
+  }
+})

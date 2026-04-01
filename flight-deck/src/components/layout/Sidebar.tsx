@@ -9,25 +9,29 @@ import {
   Check,
   MessageSquare,
   BarChart3,
+  Shield,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { useAgentStore } from '../../stores/agentStore'
+import { useAuthStore } from '../../stores/authStore'
 import { useConnectionStore } from '../../stores/connectionStore'
 import { useChatStore } from '../../stores/chatStore'
 import { botportWS } from '../../services/ws'
 import { StatusBadge } from '../common/StatusBadge'
 import type { ViewMode } from '../../types'
 
-const navItems: { id: ViewMode; icon: typeof Monitor; label: string }[] = [
+const navItems: { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?: boolean }[] = [
   { id: 'desktop', icon: Monitor, label: 'Agent Desktop' },
   { id: 'operations', icon: BarChart3, label: 'Operations' },
   { id: 'workflow', icon: GitBranch, label: 'Workflows' },
   { id: 'spawner', icon: Plus, label: 'Spawn Agent' },
+  { id: 'admin', icon: Shield, label: 'Admin', adminOnly: true },
 ]
 
 export function Sidebar() {
   const { view, setView, sidebarOpen, toggleSidebar } = useUIStore()
   const { instances, wsConnected, selectInstance, selectedInstanceId, fetchInstances, fetchStats, fetchConcerns } = useAgentStore()
+  const { authEnabled, user: authUser } = useAuthStore()
   const { botportUrl, setBotportUrl } = useConnectionStore()
   const { sessions, chatOpen, switchChat } = useChatStore()
   const [showSettings, setShowSettings] = useState(false)
@@ -115,7 +119,10 @@ export function Sidebar() {
 
       {/* Nav */}
       <nav className="flex flex-col gap-0.5 p-2">
-        {navItems.map(({ id, icon: Icon, label }) => (
+        {navItems.filter((item) => {
+          if (item.adminOnly) return authEnabled && authUser?.role === 'admin'
+          return true
+        }).map(({ id, icon: Icon, label }) => (
           <button
             key={id}
             onClick={() => setView(id)}
