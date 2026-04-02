@@ -3,6 +3,7 @@ import { useAgentStore } from '../../stores/agentStore'
 import { useAuthStore, logoutUser } from '../../stores/authStore'
 import { useThemeStore } from '../../stores/themeStore'
 import { useUIStore } from '../../stores/uiStore'
+import { APP_VERSION } from '../../version'
 import { useChatStore } from '../../stores/chatStore'
 import { NotificationBell } from '../common/NotificationCenter'
 
@@ -45,6 +46,11 @@ export function TopBar({
   return (
     <header className="flex h-12 items-center justify-between border-b border-zinc-800 bg-zinc-900/30 px-3 md:px-4">
       <div className="flex items-center gap-2 md:gap-3">
+        {/* Mobile: version label (sidebar not visible) */}
+        {isMobile && (
+          <span className="text-[9px] text-zinc-600 font-medium">v{APP_VERSION}</span>
+        )}
+
         {/* Tablet: hamburger for sidebar drawer */}
         {isTablet && onToggleSidebarDrawer && (
           <button

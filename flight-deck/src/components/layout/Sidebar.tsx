@@ -12,6 +12,7 @@ import {
   Shield,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
+import { APP_VERSION, BUILD_DATE } from '../../version'
 import { useAgentStore } from '../../stores/agentStore'
 import { useAuthStore } from '../../stores/authStore'
 import { useConnectionStore } from '../../stores/connectionStore'
@@ -61,7 +62,10 @@ export function Sidebar() {
         {sidebarOpen && (
           <div className="flex items-center gap-2">
             <Radio className={`h-4 w-4 ${wsConnected ? 'text-emerald-400' : 'text-zinc-600'}`} />
-            <span className="text-sm font-semibold tracking-tight">Flight Deck</span>
+            <div>
+              <span className="text-sm font-semibold tracking-tight">Flight Deck</span>
+              <div className="text-[9px] text-zinc-600 leading-none">v{APP_VERSION} &middot; {BUILD_DATE}</div>
+            </div>
           </div>
         )}
         <div className="flex items-center gap-0.5">

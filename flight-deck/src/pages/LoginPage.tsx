@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { loginUser, registerUser } from '../stores/authStore'
+import { APP_VERSION, BUILD_DATE } from '../version'
 
 export function LoginPage() {
   const [mode, setMode] = useState<'login' | 'register'>('login')
@@ -32,6 +33,7 @@ export function LoginPage() {
         <div className="text-center mb-8">
           <h1 className="text-2xl font-bold text-white tracking-tight">Flight Deck</h1>
           <p className="text-zinc-500 text-sm mt-1">Agent Management Console</p>
+          <p className="text-zinc-600 text-xs mt-1">v{APP_VERSION} &middot; {BUILD_DATE}</p>
         </div>
 
         <form onSubmit={handleSubmit} className="bg-[#12122a] border border-zinc-800 rounded-lg p-6 space-y-4">
