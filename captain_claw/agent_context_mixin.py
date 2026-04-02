@@ -2236,6 +2236,31 @@ class AgentContextMixin:
             if _parts:
                 session_context_block = "\n\n## Session Context\n" + "\n".join(_parts)
 
+        # Fleet identity: this agent's own name/details as known by Flight Deck.
+        fleet_identity_block = ""
+        _identity = None
+        if self.session and isinstance(self.session.metadata, dict):
+            _identity = self.session.metadata.get("fleet_identity")
+        if not _identity:
+            _identity = getattr(self, "_fleet_identity", None)
+        if isinstance(_identity, dict) and _identity.get("name"):
+            _fi_name = _identity["name"]
+            _fi_desc = _identity.get("description", "").strip()
+            _fi_model = _identity.get("model", "").strip()
+            _fi_provider = _identity.get("provider", "").strip()
+            fleet_identity_block = (
+                f"\n\n## Your Fleet Identity\n"
+                f"In the Flight Deck fleet, you are known as **{_fi_name}**."
+            )
+            if _fi_desc:
+                fleet_identity_block += f" Description: {_fi_desc}"
+            if _fi_provider and _fi_model:
+                fleet_identity_block += f" You are running on {_fi_provider}/{_fi_model}."
+            fleet_identity_block += (
+                " When other agents or the user refer to you by this name, "
+                "they mean you specifically."
+            )
+
         # Peer agents: other agents available in the Flight Deck that the
         # user may want to hand off tasks to.
         peer_agents_block = ""
@@ -2434,6 +2459,7 @@ class AgentContextMixin:
             personality_block=personality_block,
             user_context_block=user_context_block,
             session_context_block=session_context_block,
+            fleet_identity_block=fleet_identity_block,
             peer_agents_block=peer_agents_block,
             visualization_style_block=visualization_style_block,
             reflection_block=reflection_block,

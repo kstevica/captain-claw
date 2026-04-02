@@ -1,6 +1,7 @@
 {personality_block}
 {user_context_block}
 {session_context_block}
+{fleet_identity_block}
 {peer_agents_block}
 {visualization_style_block}
 {reflection_block}

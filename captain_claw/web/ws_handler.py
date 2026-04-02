@@ -605,6 +605,13 @@ async def handle_ws_message(
                             r"\1host.docker.internal\2",
                             fd_url,
                         )
+                # Store self identity so agent knows its fleet name
+                self_identity = data.get("self", None)
+                if isinstance(self_identity, dict):
+                    if _target_agent.session:
+                        _target_agent.session.metadata["fleet_identity"] = self_identity
+                    _target_agent._fleet_identity = self_identity
+
                 # Store on session metadata if session exists
                 if _target_agent.session:
                     _target_agent.session.metadata["peer_agents"] = agents_list

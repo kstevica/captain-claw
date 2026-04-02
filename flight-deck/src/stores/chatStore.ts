@@ -262,12 +262,43 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           requireApproval: getProcApproval(p.slug),
         })
       }
-      if (peers.length > 0) {
-        // Use internal FD URL if available (container mode), otherwise derive from browser
-        const { internalFdUrl } = useAuthStore.getState()
-        const fdUrl = internalFdUrl || `${window.location.protocol}//${window.location.host}`
-        ws.sendJSON({ type: 'peer_agents', agents: peers, fd_url: fdUrl })
+      // Build self identity so the agent knows who it is in the fleet
+      let selfIdentity: { name: string; description: string; port: number; model?: string; provider?: string } | null = null
+      const selfContainer = containers.find((c) => c.id === containerId)
+      if (selfContainer) {
+        selfIdentity = {
+          name: selfContainer.agent_name || selfContainer.name,
+          description: selfContainer.description || '',
+          port: selfContainer.web_port || 0,
+        }
       }
+      if (!selfIdentity) {
+        const selfProcess = processes.find((p) => `proc-${p.slug}` === containerId || p.slug === containerId)
+        if (selfProcess) {
+          selfIdentity = {
+            name: selfProcess.name || selfProcess.slug,
+            description: selfProcess.description || '',
+            port: selfProcess.web_port || 0,
+            model: selfProcess.model || '',
+            provider: selfProcess.provider || '',
+          }
+        }
+      }
+      if (!selfIdentity) {
+        const selfLocal = localAgents.find((a) => a.id === containerId)
+        if (selfLocal) {
+          selfIdentity = {
+            name: selfLocal.name,
+            description: selfLocal.description || '',
+            port: selfLocal.port || 0,
+          }
+        }
+      }
+
+      // Use internal FD URL if available (container mode), otherwise derive from browser
+      const { internalFdUrl } = useAuthStore.getState()
+      const fdUrl = internalFdUrl || `${window.location.protocol}//${window.location.host}`
+      ws.sendJSON({ type: 'peer_agents', agents: peers, self: selfIdentity, fd_url: fdUrl })
     })
 
     ws.on('chat_message', (data) => {
