@@ -1,74 +1,144 @@
-# Captain Claw v0.4.8 Release Notes
+# Captain Claw v0.4.9 Release Notes
 
-**Release title:** Process Agents, Fleet Discovery & Desktop Declutter
+**Release title:** Multi-User Flight Deck, Agent Delegation & Docker Deployment
 
-**Release date:** 2026-03-31
+**Release date:** 2026-04-02
 
 ## Highlights
 
-This release adds **process-based agents** to Flight Deck — spawn and manage Captain Claw agents as local pip processes, no Docker required. Agents can now **discover and communicate with each other** through a new `flight_deck` tool that queries live fleet status. The Agent Desktop gets a third **icon view mode** for managing many agents without clutter.
+Flight Deck gains **multi-user authentication** with JWT, an **admin dashboard** for managing users and plan tiers, and **server-side chat persistence**. Agents can now **delegate tasks** to each other with fire-and-forget semantics — the calling agent sends work and moves on, while the peer delivers results back automatically. Flight Deck also gets its own **Dockerfile and Docker Compose** for standalone deployment, plus an **agent config editor** for modifying agent settings in-flight.
 
 ## New Features
 
-### Process Agents (pip-based, no Docker required)
+### Multi-User Authentication
 
-Spawn Captain Claw agents as local subprocesses directly from Flight Deck. Each agent runs in an isolated directory under `fd-data/` with its own config, workspace, database, and skills — the same isolation model as Docker agents, without the Docker dependency.
+Flight Deck now supports multi-user deployment with JWT-based authentication:
 
-- **Spawn from UI** — the Spawn Agent page now has a Docker/Process mode toggle (violet for Docker, emerald for Process)
-- **Full lifecycle** — start, stop, restart, clone, and remove process agents
-- **Port collision prevention** — spawner checks if the requested port is in use and auto-finds a free one
-- **Auto-restart on FD startup** — previously-running process agents are automatically restarted when Flight Deck starts
-- **Clean shutdown** — all process agents are stopped when Flight Deck shuts down
-- **Process registry** — persistent JSON registry at `fd-data/.processes.json` tracks all managed processes
-- **Logs** — view last N lines of process agent stdout/stderr
-- **Clone** — duplicate an agent's config into a new process agent with one click
+- **Registration & login** — first user becomes admin, subsequent users get the `user` role
+- **JWT tokens** — 15-minute access tokens with 7-day refresh token rotation via HttpOnly cookies
+- **WebSocket auth** — agent connections authenticated via token query parameter
+- **Login page** — sign in / register UI with error handling
+- **Profile management** — update display name and password via `/fd/auth/me`
+- Enable with `FD_AUTH_ENABLED=true` environment variable
 
-### Fleet Discovery Tool (`flight_deck`)
+### Admin Dashboard
 
-A new always-available tool that gives every agent live awareness of the fleet:
+Full admin panel for managing the Flight Deck deployment:
 
-- **`list_agents`** — queries `GET /fd/fleet` for a real-time list of all running agents (Docker, process, and local) with name, kind, status, port, and description
-- **`consult`** — send a message to any peer agent by name and receive their response, using live fleet lookup instead of the static peer list pushed at connect time
-- **Always available** — registered unconditionally alongside `consult_peer`, no config needed
-- **Self-aware** — marks the calling agent in the fleet list so it knows which one is itself
+- **User management** — list, search, edit roles (admin/user), delete users
+- **Plan tiers** — free/pro/enterprise with configurable limits per tier
+- **Per-user quotas** — override agent count, storage, rate limits for individual users
+- **Usage analytics** — event-based logging with type filtering and visualization
+- **System config** — enable/disable Docker spawning from the admin UI
 
-### Three-Level Card View Modes
+### Rate Limiting & Quotas
 
-Agent cards on the Desktop now cycle through three view modes with a single button:
+Tiered plan system with per-user enforcement:
 
-- **Expanded** — full card with description, forwarding task, approval settings, model/persona selectors, groups, files, logs, actions, and embedded chat
-- **Compact** — name, status badge, activity indicator, groups, files/logs buttons, and embedded chat on a smaller card
-- **Icon** — single-row pill showing only the agent icon, name, activity status (Working.../Idle), and running status badge. The toggle button appears on hover.
+- **Free tier** — 2 agents, 500MB storage, 60 requests/min, 5 spawns/hour
+- **Pro/Enterprise** — configurable higher limits
+- **Sliding-window** rate limiting for requests and spawn operations
+- **Agent count limits** with real-time quota tracking
+- Admin-configurable plan limits persisted to database
 
-All three card types (Docker, Process, Local) support all three view modes. View mode per agent is persisted to localStorage.
+### Fire-and-Forget Task Delegation
 
-### Peer List Includes Process Agents
+Agents can now delegate tasks to peers without blocking:
 
-The `peer_agents` WebSocket message sent to agents on connect now includes process agents alongside Docker containers and local agents. This fixes peer discovery for the existing `consult_peer` tool when process agents are running.
+- **`delegate` action** on the `flight_deck` tool — sends a task to a peer and returns immediately
+- **Background execution** — the peer agent works independently on the delegated task
+- **Automatic result delivery** — results are sent back to the source agent as a notification
+- **Busy-aware queuing** — if the source agent is busy, results are queued and processed when it becomes free
+- **`/fd/delegate-peer` endpoint** — two-phase background task: send to target, then deliver result to source
+- Strong task references prevent garbage collection of in-flight delegations
+
+### Consultation Improvements
+
+- **Heartbeat streaming** — 15-second heartbeat events during peer consultation so the requesting agent knows work is happening (replaces the hard 30s timeout that caused premature failures)
+- **Deduplication** — prevents hammering a peer with duplicate consultation requests
+- **Notification message type** — fleet notifications no longer block the agent (previously set `_busy=True` and triggered full LLM responses)
+
+### Chat Persistence
+
+Server-side chat session and message storage:
+
+- **Per-user isolation** — chat sessions and messages scoped by user ownership
+- **Session management** — create, list, load, and delete chat sessions
+- **Message history** — up to 500 messages per session with metadata (tool calls, model info, peer interactions)
+- **Debounced batching** — message persistence batched for performance
+
+### Settings Sync
+
+Per-user settings persisted server-side:
+
+- **Automatic migration** — localStorage settings migrated to server on login
+- **Hydration** — settings loaded from server on login
+- **24 synced keys** — theme, layout, panel sizes, view modes, and more
+- **Debounced persistence** — 300ms batching for settings updates
+
+### Agent Config Editor
+
+Edit agent configuration directly from the Flight Deck UI:
+
+- **config.yaml editing** — modify agent configuration in-flight
+- **.env editing** — update environment variables
+- **Restart warning** — indicates when agent restart is required for changes to take effect
+
+### Docker Deployment
+
+Flight Deck can now be deployed as a standalone Docker container:
+
+- **`Dockerfile.flight-deck`** — Python 3.11 slim base with FFmpeg, Git, and Playwright
+- **`docker-compose.flight-deck.yml`** — ready-to-run compose file with volume mounts and API key forwarding
+- **Non-root user** — runs as `claw` user for security
+- **Port range** — exposes 25080 (Flight Deck) + 24080–24099 (spawned agents)
+- **Persistent data** — `fd-data` volume for agent data, settings, and chat history
 
 ## Backend Changes
 
-- **`GET /fd/fleet`** — new endpoint returning all agents across Docker, process, and local registries as a unified list
-- **`GET /fd/processes`** — list all registered process agents with status
-- **`POST /fd/spawn-process`** — spawn a new process agent with auto-generated config.yaml
-- **`POST /fd/processes/{slug}/stop|start|restart`** — lifecycle management
-- **`POST /fd/processes/{slug}/clone`** — clone an agent's configuration
-- **`DELETE /fd/processes/{slug}`** — remove from registry (preserves data directory)
-- **`GET /fd/processes/{slug}/logs`** — tail process logs
-- **Port availability check** — both Docker and process spawn endpoints now verify port availability before starting
-- **URL localization** — process agents rewrite `host.docker.internal` URLs to `localhost` automatically
-- **Fleet change notifications** — running agents receive a system chat message when new agents join or leave
+- **`POST /fd/delegate-peer`** — fire-and-forget task delegation with two-phase background execution
+- **`POST /fd/auth/register`** — user registration (first user becomes admin)
+- **`POST /fd/auth/login`** — login with JWT access + refresh token
+- **`POST /fd/auth/refresh`** — refresh access tokens with automatic rotation
+- **`POST /fd/auth/logout`** — clear refresh sessions
+- **`GET /fd/auth/me`**, **`PUT /fd/auth/me`** — user profile management
+- **`GET /fd/auth/status`** — public endpoint for checking auth status and Docker spawn availability
+- **`GET /fd/admin/users`**, **`PUT /fd/admin/users/{id}`**, **`DELETE /fd/admin/users/{id}`** — user management
+- **`GET /fd/admin/usage`** — usage analytics with event type filtering
+- **`GET/PUT /fd/admin/config`** — system configuration
+- **`GET/PUT/DELETE /fd/settings`** — per-user settings CRUD
+- **`GET/POST/DELETE /fd/chat/sessions`** — chat session management
+- **`GET/POST /fd/chat/sessions/{id}/messages`** — chat message persistence
+- **SQLite database** (`fd-data/flight_deck.db`) — users, sessions, settings, chat, usage logs with WAL mode
+- **Heartbeat streaming** on `/fd/consult-peer` — 15s interval heartbeat events
+- **Consultation deduplication** — `_active_consults` tracking prevents duplicate peer consultations
+- **`notification` WebSocket message type** — injects content into agent sessions without triggering _busy state
+- **`trigger_response` flag** — notifications can trigger agent LLM response, with queuing when agent is busy
 
 ## New Files
 
 | File | Description |
 |---|---|
-| `captain_claw/tools/flight_deck.py` | Fleet discovery and peer consultation tool |
-| `flight-deck/src/components/agents/ProcessCard.tsx` | Process agent card component with emerald accent |
-| `flight-deck/src/stores/processStore.ts` | Zustand store for process agent state and overrides |
+| `captain_claw/flight_deck/auth.py` | JWT authentication with bcrypt password hashing and refresh token rotation |
+| `captain_claw/flight_deck/auth_routes.py` | Auth endpoints (register, login, refresh, logout, profile) |
+| `captain_claw/flight_deck/admin_routes.py` | Admin endpoints (user management, plans, quotas, usage, config) |
+| `captain_claw/flight_deck/db.py` | SQLite database with async support for users, sessions, settings, chat, usage |
+| `captain_claw/flight_deck/rate_limiter.py` | Tiered rate limiting and quota enforcement |
+| `captain_claw/flight_deck/settings_routes.py` | Per-user settings CRUD endpoints |
+| `captain_claw/flight_deck/chat_routes.py` | Chat session and message persistence endpoints |
+| `captain_claw/tools/consult_peer.py` | Peer consultation tool with approval gates and activity broadcasting |
+| `Dockerfile.flight-deck` | Docker image for standalone Flight Deck deployment |
+| `docker-compose.flight-deck.yml` | Docker Compose for Flight Deck with volume mounts |
+| `flight-deck/src/pages/AdminPage.tsx` | Admin dashboard UI (users, plans, usage, config) |
+| `flight-deck/src/pages/LoginPage.tsx` | Login/registration page |
+| `flight-deck/src/stores/authStore.ts` | Authentication state management |
+| `flight-deck/src/stores/chatStore.ts` | Chat persistence state management |
+| `flight-deck/src/services/settingsSync.ts` | Settings sync service with localStorage migration |
+| `flight-deck/src/components/agents/AgentConfigEditor.tsx` | In-flight agent config editor |
 
 ## Stats
 
-- **~1,200 lines added** across 15 files
-- 1 new tool, 1 new component, 1 new store
-- 7 new backend endpoints
+- **~7,200 lines added** across 73 files
+- 16 new files, 10 new backend endpoints
+- 1 new tool action (`delegate`), 1 new tool (`consult_peer`)
+- 1 new Dockerfile, 1 new Docker Compose file

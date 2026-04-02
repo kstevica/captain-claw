@@ -937,13 +937,14 @@ Discover and communicate with peer agents in the Flight Deck environment. Always
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `action` | string | yes | `list_agents` or `consult` |
-| `agent_name` | string | for consult | Name of the peer agent to message |
-| `message` | string | for consult | Message to send to the peer agent |
+| `action` | string | yes | `list_agents`, `consult`, or `delegate` |
+| `agent_name` | string | for consult/delegate | Name of the peer agent to message |
+| `message` | string | for consult/delegate | Message or task to send to the peer agent |
 
 **Actions:**
 - **`list_agents`** — queries `GET /fd/fleet` for a live list of all running agents (Docker, process, local) with name, kind, status, port, and description. Marks the calling agent in the output.
-- **`consult`** — looks up the target agent from the live fleet, then sends a message via `/fd/consult-peer` and streams the response. Supports peer activity broadcasting for real-time UI updates.
+- **`consult`** — synchronous peer consultation. Looks up the target agent from the live fleet, sends a message via `/fd/consult-peer`, and streams the response with heartbeat monitoring. Use for quick questions where you need the answer immediately. Includes deduplication to prevent hammering a peer with identical requests.
+- **`delegate`** — fire-and-forget task delegation. Sends a task to a peer agent via `/fd/delegate-peer` and returns immediately, freeing the calling agent. The peer works independently and delivers results back as a notification when finished. Use for large/long-running tasks like research, scraping, analysis, or file creation.
 
 Unlike `consult_peer` (which uses the static peer list pushed at connect time), `flight_deck` always queries the live fleet — so newly spawned agents are immediately discoverable.
 
@@ -3625,7 +3626,13 @@ Flight Deck serves both the React frontend and the FastAPI backend from a single
 | Docker container management | Spawn, stop, restart, remove, rebuild, clone Captain Claw containers with full config (provider, model, tools, platforms) |
 | Process agent management | Spawn pip-based agents as local subprocesses — no Docker required. Full lifecycle (start/stop/restart/clone/remove), auto-restart on FD startup, clean shutdown |
 | Fleet discovery | `GET /fd/fleet` returns all running agents (Docker, process, local). The `flight_deck` tool gives every agent live fleet awareness |
-| Agent-to-agent communication | `consult_peer` and `flight_deck` tools let agents discover and message each other directly |
+| Agent-to-agent communication | `consult_peer` and `flight_deck` tools let agents discover, consult, and delegate tasks to each other. Synchronous (consult) and fire-and-forget (delegate) modes |
+| Multi-user authentication | JWT-based auth with registration, login, refresh tokens, and role-based access (admin/user). First user becomes admin |
+| Admin dashboard | User management, plan tier assignment (free/pro/enterprise), per-user quota overrides, usage analytics, and system configuration |
+| Rate limiting & quotas | Tiered plan system with per-user limits on agents, requests/minute, spawns/hour, and storage |
+| Chat persistence | Server-side chat session and message storage with per-user isolation |
+| Settings sync | Per-user settings persisted server-side with automatic localStorage migration |
+| Agent config editor | Edit agent config.yaml and .env files in-flight from the UI |
 | Local agent management | Register any CC instance by host:port, probe status, connect for chat |
 | Multi-agent chat | WebSocket-based chat with multiple agents simultaneously via tabbed interface, resizable panel (320–900px) |
 | File browser & transfer | Browse agent files with file viewer (syntax highlighting, image preview), select files, and send them to another agent |
@@ -3680,7 +3687,8 @@ Agents can discover and communicate with each other through two mechanisms:
 
 **`flight_deck` tool** (always available) — queries `GET /fd/fleet` for a live list of all running agents. Actions:
 - `list_agents` — returns all agents with name, kind, status, port, and description
-- `consult` — send a message to a peer agent by name and receive their response
+- `consult` — synchronous Q&A with a peer agent. Streams the response with heartbeat monitoring (15s intervals) so the calling agent knows work is happening. Includes deduplication to prevent duplicate consultations to the same peer.
+- `delegate` — fire-and-forget task delegation. The calling agent sends the task and immediately frees itself. The peer works independently and delivers results back as a notification when done. If the calling agent is busy when results arrive, they are queued and processed when the agent becomes free.
 
 **`consult_peer` tool** (always available) — uses the peer list pushed by the Flight Deck frontend at WebSocket connect time. Supports forwarding tasks and approval-gated consultations.
 
@@ -3849,6 +3857,9 @@ Flight Deck uses environment variables:
 | Variable | Default | Description |
 |---|---|---|
 | `FD_DATA_DIR` | `./fd-data` | Directory for agent data (config, workspace, sessions) |
+| `FD_AUTH_ENABLED` | `false` | Enable JWT-based multi-user authentication |
+| `FD_JWT_SECRET` | (auto-generated) | Secret key for JWT token signing |
+| `FD_DOCKER_SPAWN` | `true` | Allow Docker container spawning (can be disabled by admin) |
 
 ### Connection Settings
 

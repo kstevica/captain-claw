@@ -1,3 +1,3 @@
 """BotPort - Agent-to-agent task routing hub for Captain Claw instances."""
 
-__version__ = "0.4.8.1"
+__version__ = "0.4.9"
