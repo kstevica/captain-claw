@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import json
+import secrets
 import signal
 import asyncio
 import subprocess
@@ -621,12 +622,12 @@ def _is_port_available(port: int) -> bool:
             return False
 
 
-def _schedule_fleet_notify(name: str, port: int, event: str = "joined"):
+def _schedule_fleet_notify(name: str, port: int, event: str = "joined", owner_id: str = ""):
     """Schedule a fleet notification as a background async task."""
     async def _run():
         # Give the new agent a moment to start up before notifying peers
         await asyncio.sleep(5)
-        await _notify_fleet_change(name, port, event)
+        await _notify_fleet_change(name, port, event, owner_id=owner_id)
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
@@ -662,6 +663,11 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
     # Ensure port is available; find a free one if not
     if config.web_enabled and not _is_port_available(config.web_port):
         config.web_port = _find_available_port(config.web_port)
+
+    # Auto-generate auth token if none provided — prevents unauthenticated
+    # direct access to agent ports bypassing Flight Deck.
+    if config.web_enabled and not config.web_auth_token:
+        config.web_auth_token = secrets.token_urlsafe(32)
 
     # Check for name collision
     try:
@@ -783,9 +789,9 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
         if AUTH_ENABLED and user:
             db = app.state.fd_db
             await db.log_usage(user["id"], "agent_spawn", json.dumps({"agent": slug, "type": "container", "image": config.image}))
-        # Notify other agents about the new peer
+        # Notify other agents about the new peer (scoped to same owner)
         if config.web_enabled:
-            _schedule_fleet_notify(config.name or slug, config.web_port)
+            _schedule_fleet_notify(config.name or slug, config.web_port, owner_id=user_id)
         return ContainerActionResult(ok=True, container_id=container.short_id, message=f"Agent '{slug}' spawned{port_info}")
     except docker.errors.ImageNotFound:
         raise HTTPException(404, f"Docker image '{config.image}' not found. Pull it first.")
@@ -1276,7 +1282,9 @@ async def agent_ws_proxy(ws: WebSocket, host: str, port: int, token: str = ""):
     import websockets
 
     await ws.accept()
-    params = f"?token={token}" if token else ""
+    # Auto-resolve auth token if the caller didn't provide one
+    auth = token or _resolve_agent_auth(port)
+    params = f"?token={auth}" if auth else ""
     agent_url = f"ws://{host}:{port}/ws{params}"
 
     try:
@@ -1375,18 +1383,43 @@ async def get_fleet(request: Request, user: dict | None = Depends(get_optional_u
     return fleet
 
 
-async def _notify_fleet_change(new_agent_name: str, new_agent_port: int, event: str = "joined"):
-    """Notify all running agents about a fleet change by sending a system message via WebSocket."""
+def _resolve_agent_auth(port: int) -> str:
+    """Look up the auth token for an agent by its web port from Docker labels or process registry."""
+    # Check Docker containers
+    try:
+        client = get_docker()
+        for c in client.containers.list(filters={"label": CONTAINER_LABEL}):
+            labels = c.labels or {}
+            wp = labels.get("flight-deck.web-port", "")
+            if wp and int(wp) == port:
+                return labels.get("flight-deck.web-auth", "")
+    except Exception:
+        pass
+
+    # Check process registry
+    registry = _load_process_registry()
+    for entry in registry.values():
+        if entry.get("web_port") == port:
+            return entry.get("web_auth", "")
+
+    return ""
+
+
+async def _notify_fleet_change(new_agent_name: str, new_agent_port: int, event: str = "joined", owner_id: str = ""):
+    """Notify running agents about a fleet change. When auth is enabled, only notify agents owned by the same user."""
     import websockets as _ws
     import json as _json
 
-    # Build list of all running agent WebSocket endpoints (excluding the new one)
+    # Build list of running agent WebSocket endpoints (excluding the new one),
+    # scoped to the same owner when auth is enabled.
     targets: list[tuple[str, int, str]] = []  # (host, port, auth)
 
     try:
         client = get_docker()
         for c in client.containers.list(filters={"label": CONTAINER_LABEL}):
             labels = c.labels or {}
+            if AUTH_ENABLED and owner_id and labels.get(OWNER_LABEL, "") != owner_id:
+                continue
             wp = labels.get("flight-deck.web-port", "")
             if wp and int(wp) != new_agent_port:
                 targets.append(("localhost", int(wp), labels.get("flight-deck.web-auth", "")))
@@ -1395,6 +1428,8 @@ async def _notify_fleet_change(new_agent_name: str, new_agent_port: int, event: 
 
     registry = _load_process_registry()
     for slug, entry in registry.items():
+        if AUTH_ENABLED and owner_id and entry.get("owner", "") != owner_id:
+            continue
         wp = entry.get("web_port", 0)
         if wp and wp != new_agent_port and _process_is_alive(slug):
             targets.append(("localhost", wp, entry.get("web_auth", "")))
@@ -1402,18 +1437,22 @@ async def _notify_fleet_change(new_agent_name: str, new_agent_port: int, event: 
     if not targets:
         return
 
-    # Build fleet list directly (can't call get_fleet — it's a FastAPI endpoint with dependencies)
+    # Build fleet list scoped to the same owner
     fleet: list[dict] = []
     try:
         client = get_docker()
         for c in client.containers.list(all=True, filters={"label": CONTAINER_LABEL}):
             labels = c.labels or {}
+            if AUTH_ENABLED and owner_id and labels.get(OWNER_LABEL, "") != owner_id:
+                continue
             wp = labels.get("flight-deck.web-port", "")
             fleet.append({"name": labels.get("flight-deck.agent-name", c.name), "status": c.status, "port": int(wp) if wp else 0})
     except Exception:
         pass
     reg = _load_process_registry()
     for slug, entry in reg.items():
+        if AUTH_ENABLED and owner_id and entry.get("owner", "") != owner_id:
+            continue
         fleet.append({"name": entry.get("name", slug), "status": "running" if _process_is_alive(slug) else "stopped", "port": entry.get("web_port", 0)})
 
     notification = (
@@ -1469,7 +1508,12 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
     # Event types we forward as peer activity so the caller can show progress
     _FORWARD_TYPES = {"status", "thinking", "monitor", "tool_stream"}
 
-    params = f"?token={req.auth}" if req.auth else ""
+    # Resolve auth token from Fleet Deck records if not provided by caller.
+    auth = req.auth
+    if not auth:
+        auth = _resolve_agent_auth(req.port)
+
+    params = f"?token={auth}" if auth else ""
     agent_url = f"ws://{req.host}:{req.port}/ws{params}"
 
     async def _event_stream():
@@ -1858,6 +1902,11 @@ async def spawn_process(config: AgentConfig, request: Request, user: dict | None
     if config.web_enabled and not _is_port_available(config.web_port):
         config.web_port = _find_available_port(config.web_port)
 
+    # Auto-generate auth token if none provided — prevents unauthenticated
+    # direct access to agent ports bypassing Flight Deck.
+    if config.web_enabled and not config.web_auth_token:
+        config.web_auth_token = secrets.token_urlsafe(32)
+
     # Prepare data directory
     agent_dir = DATA_DIR / slug
     agent_dir.mkdir(parents=True, exist_ok=True)
@@ -1944,9 +1993,9 @@ async def spawn_process(config: AgentConfig, request: Request, user: dict | None
         db = app.state.fd_db
         await db.log_usage(user["id"], "agent_spawn", json.dumps({"agent": slug, "type": "process", "provider": config.provider, "model": config.model}))
 
-    # Notify other agents about the new peer
+    # Notify other agents about the new peer (scoped to same owner)
     if config.web_enabled:
-        _schedule_fleet_notify(config.name or slug, config.web_port)
+        _schedule_fleet_notify(config.name or slug, config.web_port, owner_id=getattr(request.state, "user_id", ""))
 
     return ProcessActionResult(ok=True, slug=slug, message=f"Process agent '{slug}' spawned (PID {proc.pid}, port {config.web_port})")
 
