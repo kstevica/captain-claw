@@ -353,6 +353,10 @@ class AgentConfig(BaseModel):
     extra_volumes: list[dict] = Field(default_factory=list)
     env_vars: list[dict] = Field(default_factory=list)
 
+    # Ownership hint — used by internal callers (e.g. Old Man) that cannot
+    # authenticate via JWT but need the spawned agent to inherit the owner.
+    owner_hint: str = ""
+
 
 class ContainerInfo(BaseModel):
     id: str
@@ -643,7 +647,7 @@ def _schedule_fleet_notify(name: str, port: int, event: str = "joined", owner_id
 
 
 @app.post("/fd/spawn", response_model=ContainerActionResult)
-async def spawn_agent(config: AgentConfig, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def spawn_agent(config: AgentConfig, request: Request, user: dict | None = Depends(get_optional_user) if AUTH_ENABLED else None):
     """Spawn a new Captain Claw container."""
     # Check if docker spawn is allowed
     sys_cfg = await _get_system_config()
@@ -732,11 +736,34 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
         if ev.get("key"):
             environment[ev["key"]] = ev.get("value", "")
 
+    # Resolve owner: authenticated user > owner_hint > infer from existing agents
+    owner_id = getattr(request.state, "user_id", "") or config.owner_hint
+    if not owner_id:
+        # Fallback: inherit owner from an existing agent in the registry.
+        registry = _load_process_registry()
+        for _entry in registry.values():
+            if _entry.get("owner"):
+                owner_id = _entry["owner"]
+                break
+        if not owner_id:
+            # Try Docker containers
+            try:
+                for c in client.containers.list(all=True, filters={"label": CONTAINER_LABEL}):
+                    o = (c.labels or {}).get(OWNER_LABEL, "")
+                    if o:
+                        owner_id = o
+                        break
+            except Exception:
+                pass
+
+    # Pass owner ID so child agents can propagate ownership when spawning
+    if owner_id:
+        environment["FD_OWNER_ID"] = owner_id
+
     # Labels for tracking
-    user_id = getattr(request.state, "user_id", "")
     labels = {
         CONTAINER_LABEL: "true",
-        OWNER_LABEL: user_id,
+        OWNER_LABEL: owner_id,
         "flight-deck.agent-name": config.name or slug,
         "flight-deck.description": config.description or "",
         "flight-deck.image": config.image,
@@ -795,7 +822,7 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
             await db.log_usage(user["id"], "agent_spawn", json.dumps({"agent": slug, "type": "container", "image": config.image}))
         # Notify other agents about the new peer (scoped to same owner)
         if config.web_enabled:
-            _schedule_fleet_notify(config.name or slug, config.web_port, owner_id=user_id)
+            _schedule_fleet_notify(config.name or slug, config.web_port, owner_id=owner_id)
         return ContainerActionResult(ok=True, container_id=container.short_id, message=f"Agent '{slug}' spawned{port_info}")
     except docker.errors.ImageNotFound:
         raise HTTPException(404, f"Docker image '{config.image}' not found. Pull it first.")
@@ -2049,7 +2076,7 @@ async def list_processes(request: Request, user: dict | None = Depends(get_curre
 
 
 @app.post("/fd/spawn-process", response_model=ProcessActionResult)
-async def spawn_process(config: AgentConfig, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def spawn_process(config: AgentConfig, request: Request, user: dict | None = Depends(get_optional_user) if AUTH_ENABLED else None):
     """Spawn a new Captain Claw process agent (pip-installed, no Docker)."""
     # Rate limiting & agent count check
     if AUTH_ENABLED and user:
@@ -2103,10 +2130,25 @@ async def spawn_process(config: AgentConfig, request: Request, user: dict | None
         if ev.get("key"):
             environment[ev["key"]] = ev.get("value", "")
 
+    # Resolve owner: authenticated user > owner_hint > infer from existing registry
+    owner_id = getattr(request.state, "user_id", "") or config.owner_hint
+    if not owner_id:
+        # Fallback: inherit owner from an existing agent in the registry.
+        # Covers the case where an internal caller (e.g. Old Man spawned before
+        # the FD_OWNER_ID env var was added) doesn't have owner info.
+        for _entry in registry.values():
+            if _entry.get("owner"):
+                owner_id = _entry["owner"]
+                break
+
     # Tell agents how to reach Flight Deck internally (for Telegram, Discord, etc.)
     if "FD_URL" not in environment:
         fd_port = os.environ.get("FD_PORT", "25080")
         environment["FD_URL"] = f"http://localhost:{fd_port}"
+
+    # Pass owner ID so child agents can propagate ownership when spawning
+    if owner_id:
+        environment["FD_OWNER_ID"] = owner_id
 
     # Set HOME to the agent's home-config directory so captain-claw
     # picks up ~/.captain-claw/config.yaml from there
@@ -2153,7 +2195,7 @@ async def spawn_process(config: AgentConfig, request: Request, user: dict | None
         "pid": proc.pid,
         "provider": config.provider,
         "model": config.model,
-        "owner": getattr(request.state, "user_id", ""),
+        "owner": owner_id,
     }
     _save_process_registry(registry)
 
@@ -2164,7 +2206,7 @@ async def spawn_process(config: AgentConfig, request: Request, user: dict | None
 
     # Notify other agents about the new peer (scoped to same owner)
     if config.web_enabled:
-        _schedule_fleet_notify(config.name or slug, config.web_port, owner_id=getattr(request.state, "user_id", ""))
+        _schedule_fleet_notify(config.name or slug, config.web_port, owner_id=owner_id)
 
     return ProcessActionResult(ok=True, slug=slug, message=f"Process agent '{slug}' spawned (PID {proc.pid}, port {config.web_port})")
 
@@ -2421,6 +2463,7 @@ def _build_old_man_config(
         env_vars=[
             {"key": "CLAW_OLD_MAN__ENABLED", "value": "true"},
             {"key": "CLAW_TOOLS__SCREEN_CAPTURE__HOTKEY_ENABLED", "value": "true"},
+            {"key": "FD_URL", "value": f"http://localhost:{os.environ.get('FD_PORT', '25080')}"},
         ],
     )
 
@@ -2438,7 +2481,7 @@ class OldManSpawnRequest(BaseModel):
 async def spawn_old_man(
     body: OldManSpawnRequest,
     request: Request,
-    user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None,
+    user: dict | None = Depends(get_optional_user) if AUTH_ENABLED else None,
 ):
     """One-click Old Man spawn — creates a supervisor agent with sane defaults.
 

@@ -408,6 +408,10 @@ class FlightDeckTool(Tool):
             except json.JSONDecodeError:
                 pass
 
+        # Propagate owner so the spawned agent belongs to the same user.
+        import os
+        owner_hint = os.environ.get("FD_OWNER_ID", "")
+
         spawn_body = {
             "name": agent_name,
             "description": overrides.get("description", f"Agent spawned by Old Man"),
@@ -422,9 +426,11 @@ class FlightDeckTool(Tool):
             ]),
             "web_enabled": True,
             "web_port": overrides.get("web_port", 0),  # 0 = auto-assign
+            "owner_hint": owner_hint,
         }
 
         # Try process spawn first (no Docker needed), fall back to docker.
+        last_error = ""
         for endpoint in ["/fd/spawn-process", "/fd/spawn"]:
             try:
                 async with httpx.AsyncClient(timeout=30.0) as client:
@@ -441,14 +447,19 @@ class FlightDeckTool(Tool):
                                     f"Use list_agents to check when it's running."
                                 ),
                             )
+                        else:
+                            last_error = f"{endpoint} returned 200 but ok=false: {result}"
                     # If process spawn fails with 400 (already exists), don't retry with docker
-                    if resp.status_code == 400:
+                    elif resp.status_code == 400:
                         detail = resp.json().get("detail", "")
                         return ToolResult(success=False, error=f"Spawn failed: {detail}")
-            except Exception:
+                    else:
+                        last_error = f"{endpoint} returned {resp.status_code}: {resp.text[:300]}"
+            except Exception as exc:
+                last_error = f"{endpoint} exception: {exc}"
                 continue
 
-        return ToolResult(success=False, error="Failed to spawn agent via Flight Deck. Neither process nor Docker spawn succeeded.")
+        return ToolResult(success=False, error=f"Failed to spawn agent via Flight Deck. {last_error}")
 
     async def execute(self, action: str, agent_name: str = "", message: str = "", **kwargs: Any) -> ToolResult:
         fd_url = self._get_fd_url(**kwargs)
