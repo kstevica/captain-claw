@@ -424,6 +424,15 @@ apis_memory:
   auto_capture: true
   inject_on_mention: true
   max_items_in_prompt: 5
+old_man:
+  enabled: false
+  hotkey_enabled: true
+  hotkey_trigger_key: shift
+  auto_orchestrate: true
+  triage_model: ''
+  max_delegated_sessions: 5
+  voice_response: true
+  idle_greeting: false
 orchestrator:
   max_parallel: 5
   max_agents: 50

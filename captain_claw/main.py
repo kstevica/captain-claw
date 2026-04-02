@@ -55,6 +55,11 @@ def _build_runtime_arg_parser() -> argparse.ArgumentParser:
         metavar="SECTION",
         help="Run in public mode exposing only SECTION (e.g. 'computer')",
     )
+    parser.add_argument(
+        "--old-man",
+        action="store_true",
+        help="Start in Old Man supervisor mode (hotkey on, auto-delegation)",
+    )
     parser.add_argument("-h", "--help", action="store_true", help="Show this help message and exit")
 
     # Orchestrate subcommand (headless workflow execution for cron/scripts).
@@ -101,6 +106,7 @@ def main(
     port: int = 0,
     tui: bool = False,
     public_run: str = "",
+    old_man: bool = False,
 ) -> None:
     """Start Captain Claw interactive session."""
     if _should_parse_runtime_cli_from_argv(
@@ -177,6 +183,7 @@ def main(
         port = int(parsed.port or 0)
         tui = bool(parsed.tui)
         public_run = str(getattr(parsed, "public_run", "") or "")
+        old_man = bool(getattr(parsed, "old_man", False))
         if unknown:
             print(f"Warning: ignoring unsupported arguments: {' '.join(unknown)}")
 
@@ -228,6 +235,8 @@ def main(
         cfg.web.port = port
     if public_run:
         cfg.web.public_run = public_run
+    if old_man:
+        cfg.old_man.enabled = True
 
     # Set global config
     set_config(cfg)
@@ -474,8 +483,13 @@ if __name__ == "__main__":
             "--tui",
             help="Start the terminal UI instead of the web UI",
         ),
+        old_man: bool = typer.Option(
+            False,
+            "--old-man",
+            help="Start in Old Man supervisor mode (hotkey on, auto-delegation)",
+        ),
     ) -> None:
-        main(config, model, provider, no_stream, verbose, onboarding, tui=tui)
+        main(config, model, provider, no_stream, verbose, onboarding, tui=tui, old_man=old_man)
 
     @cli.command()
     def ver() -> None:

@@ -836,6 +836,24 @@ class BotPortClientConfig(BaseModel):
     heartbeat_interval_seconds: float = 30.0
 
 
+class OldManConfig(BaseModel):
+    """Old Man — desktop supervisor agent that triages and delegates.
+
+    When enabled, the agent starts in supervisor mode: hotkey listening
+    is activated by default, incoming requests are triaged, and complex
+    tasks are delegated to worker sessions via the orchestrator.
+    """
+
+    enabled: bool = False
+    hotkey_enabled: bool = True
+    hotkey_trigger_key: str = "shift"
+    auto_orchestrate: bool = True  # auto-delegate complex tasks to orchestrator
+    triage_model: str = ""  # model for triage classification; empty = use default
+    max_delegated_sessions: int = 5
+    voice_response: bool = True  # speak answers aloud via pocket_tts
+    idle_greeting: bool = False  # greet the user on startup
+
+
 class OrchestratorConfig(BaseModel):
     """Parallel session orchestration settings."""
 
@@ -940,6 +958,7 @@ class Config(BaseSettings):
     addressbook: AddressBookConfig = Field(default_factory=AddressBookConfig)
     scripts_memory: ScriptsMemoryConfig = Field(default_factory=ScriptsMemoryConfig)
     apis_memory: ApisMemoryConfig = Field(default_factory=ApisMemoryConfig)
+    old_man: OldManConfig = Field(default_factory=OldManConfig)
     orchestrator: OrchestratorConfig = Field(default_factory=OrchestratorConfig)
     botport: BotPortClientConfig = Field(default_factory=BotPortClientConfig)
     scale: ScaleConfig = Field(default_factory=ScaleConfig)

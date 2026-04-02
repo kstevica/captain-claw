@@ -2284,8 +2284,22 @@ async def _run_server(config: Config) -> None:
         except (NotImplementedError, OSError):
             pass
 
+    # Apply Old Man config overrides before anything else initializes.
+    from captain_claw.old_man import (
+        apply_old_man_config_overrides,
+        is_old_man_enabled,
+        print_old_man_banner,
+        setup_old_man_session,
+    )
+    apply_old_man_config_overrides(config)
+
     print("Initializing Captain Claw agent...")
     await server._init_agent()
+
+    # Set up Old Man supervisor session (tags metadata + injects instructions).
+    if is_old_man_enabled(config):
+        await setup_old_man_session(server.agent)
+        print_old_man_banner(config)
 
     from captain_claw.web.telegram import start_telegram, stop_telegram
     await start_telegram(server)
