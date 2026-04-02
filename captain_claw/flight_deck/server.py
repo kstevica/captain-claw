@@ -1612,6 +1612,10 @@ class DelegatePeerRequest(BaseModel):
     source_name: str = "another agent"
     message: str
     timeout: float = Field(default=600.0, le=1800.0)
+    # Origin platform tracking — so results are delivered to the correct session
+    origin_platform: str = "web"       # "web" or "telegram"
+    origin_user_id: str = ""           # telegram user id
+    origin_chat_id: int = 0            # telegram chat id
 
 
 @app.post("/fd/delegate-peer")
@@ -1703,8 +1707,19 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
                     msg = json.loads(raw)
                     if msg.get("type") == "replay_done":
                         break
-                await ws.send(json.dumps({"type": "notification", "content": callback_msg, "trigger_response": True}))
-                log.info("delegate_callback: result delivered to source", source=req.source_name)
+                notification_payload = {
+                    "type": "notification",
+                    "content": callback_msg,
+                    "trigger_response": True,
+                }
+                # Include origin platform info so the agent routes the result correctly
+                if req.origin_platform and req.origin_platform != "web":
+                    notification_payload["origin_platform"] = req.origin_platform
+                    notification_payload["origin_user_id"] = req.origin_user_id
+                    notification_payload["origin_chat_id"] = req.origin_chat_id
+                await ws.send(json.dumps(notification_payload))
+                log.info("delegate_callback: result delivered to source", source=req.source_name,
+                         origin_platform=req.origin_platform)
                 # Wait briefly for acknowledgment
                 try:
                     await asyncio.wait_for(ws.recv(), timeout=30)

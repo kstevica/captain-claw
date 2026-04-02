@@ -379,6 +379,9 @@ async def _handle_telegram_message(server: WebServer, message: TelegramMessage) 
             "content": f"[TG {user_label}] {effective_text}",
         })
 
+        # Store the chat_id on the agent so delegate callbacks can route back here
+        user_agent._telegram_chat_id = message.chat_id  # type: ignore[attr-defined]
+
         await _tg_process_with_typing(
             server, message.chat_id, effective_text, message.message_id,
             user_agent=user_agent,

@@ -163,6 +163,49 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
     return ws
 
 
+async def _handle_telegram_delegate_result(
+    server: WebServer,
+    tg_agent: Agent,
+    user_id: str,
+    chat_id: int,
+    content: str,
+) -> None:
+    """Process a delegate result that originated from a Telegram session.
+
+    Runs the content through the telegram user's agent and sends the
+    response back to the Telegram chat (not the web UI).
+    """
+    import asyncio
+
+    from captain_claw.web.telegram import _tg_send, _tg_get_user_lock
+
+    lock = _tg_get_user_lock(server, user_id)
+
+    async def _run() -> None:
+        async with lock:
+            try:
+                response = await tg_agent.complete(content)
+                if response and chat_id:
+                    await _tg_send(server, chat_id, response)
+                    log.info("Telegram delegate result sent to chat",
+                             user_id=user_id, chat_id=chat_id, response_len=len(response))
+                # Broadcast the assistant response to FD UI for visibility
+                if response:
+                    from datetime import datetime, timezone
+                    server._broadcast({
+                        "type": "chat_message",
+                        "role": "assistant",
+                        "content": response,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "notification": True,
+                    })
+            except Exception as exc:
+                log.error("Failed to process telegram delegate result",
+                          user_id=user_id, error=str(exc))
+
+    asyncio.ensure_future(_run())
+
+
 async def handle_ws_message(
     server: WebServer, ws: web.WebSocketResponse, data: dict
 ) -> None:
@@ -225,6 +268,37 @@ async def handle_ws_message(
             return
         trigger = data.get("trigger_response", False)
         _pub_sid = getattr(ws, "_public_session_id", None)
+        origin_platform = data.get("origin_platform", "web")
+        origin_user_id = str(data.get("origin_user_id", ""))
+        origin_chat_id = int(data.get("origin_chat_id", 0))
+
+        # ── Telegram-origin delegate results → route to the telegram session ──
+        if trigger and origin_platform == "telegram" and origin_user_id:
+            log.info("Telegram-origin delegate result, routing to telegram session",
+                     user_id=origin_user_id, chat_id=origin_chat_id,
+                     content_len=len(notif_content))
+            tg_agent = server._telegram_agents.get(origin_user_id)
+            if tg_agent:
+                # Inject into the telegram user's session
+                if tg_agent.session:
+                    tg_agent.session.add_message("user", notif_content)
+                # Process with the telegram agent and send result to telegram
+                await _handle_telegram_delegate_result(
+                    server, tg_agent, origin_user_id, origin_chat_id, notif_content,
+                )
+            else:
+                log.warning("Telegram agent not found for delegate result, falling through to web",
+                            user_id=origin_user_id)
+            # Also broadcast to FD UI for visibility
+            from datetime import datetime, timezone
+            server._broadcast({
+                "type": "chat_message",
+                "role": "user",
+                "content": notif_content,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "notification": True,
+            })
+            return
 
         if trigger and not server._busy and not _pub_sid:
             # Agent is free — process as a regular chat so it triggers an LLM response

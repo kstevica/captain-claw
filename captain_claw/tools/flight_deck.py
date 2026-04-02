@@ -327,8 +327,19 @@ class FlightDeckTool(Tool):
                 error="Cannot delegate: could not determine own port. Use 'consult' (synchronous) instead.",
             )
 
+        # Detect originating platform (telegram, web, etc.) so delegate results
+        # are delivered back to the correct session/channel.
+        origin_platform = "web"
+        origin_user_id = ""
+        origin_chat_id = 0
+        if agent and hasattr(agent, "_user_id") and hasattr(agent, "_telegram_chat_id"):
+            origin_platform = "telegram"
+            origin_user_id = str(getattr(agent, "_user_id", ""))
+            origin_chat_id = int(getattr(agent, "_telegram_chat_id", 0))
+
         log.info("Delegating task to peer", target=peer_display, source=source_name,
-                 target_port=target.get("port"), source_port=source_port)
+                 target_port=target.get("port"), source_port=source_port,
+                 origin_platform=origin_platform)
 
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -343,6 +354,9 @@ class FlightDeckTool(Tool):
                         "source_name": source_name,
                         "message": message,
                         "timeout": 600.0,
+                        "origin_platform": origin_platform,
+                        "origin_user_id": origin_user_id,
+                        "origin_chat_id": origin_chat_id,
                     },
                 )
                 if resp.status_code != 200:
