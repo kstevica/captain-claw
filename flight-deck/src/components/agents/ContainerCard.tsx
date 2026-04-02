@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, ExternalLink, Loader2, FolderOpen, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings } from 'lucide-react'
+import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, Loader2, FolderOpen, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings } from 'lucide-react'
 import type { ContainerInfo } from '../../services/docker'
 import { getContainerLogs } from '../../services/docker'
 import { useContainerStore } from '../../stores/containerStore'
@@ -8,6 +8,7 @@ import { useChatStore } from '../../stores/chatStore'
 import { EmbeddedChat } from './EmbeddedChat'
 import { AgentGroupBadges } from '../common/AgentGroups'
 import { AgentConfigEditor } from './AgentConfigEditor'
+import { OpenDropdown } from '../common/OpenDropdown'
 
 // ── Card view mode persistence (expanded / compact / icon) ──
 type ViewMode = 'expanded' | 'compact' | 'icon'
@@ -429,13 +430,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
                   <MessageSquare className="h-3 w-3" />
                   Chat
                 </button>
-                <button
-                  onClick={() => window.open(`http://localhost:${container.web_port}/chat${container.web_auth ? `?token=${encodeURIComponent(container.web_auth)}` : ''}`, '_blank')}
-                  className="flex items-center gap-1 rounded-lg px-2 py-0.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-                >
-                  <ExternalLink className="h-3 w-3" />
-                  Open
-                </button>
+                <OpenDropdown host="localhost" port={container.web_port} auth={container.web_auth} />
               </>
             )}
             {isRunning && !container.web_port && (

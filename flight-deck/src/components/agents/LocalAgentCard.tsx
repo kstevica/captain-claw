@@ -1,10 +1,11 @@
 import { useState } from 'react'
-import { MessageSquare, Trash2, RefreshCw, Cpu, ExternalLink, Loader2, FolderOpen, Pencil, Check, X, Minimize2, Maximize2 } from 'lucide-react'
+import { MessageSquare, Trash2, RefreshCw, Cpu, Loader2, FolderOpen, Pencil, Check, X, Minimize2, Maximize2 } from 'lucide-react'
 import type { LocalAgent } from '../../stores/localAgentStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useChatStore } from '../../stores/chatStore'
 import { EmbeddedChat } from './EmbeddedChat'
 import { AgentGroupBadges } from '../common/AgentGroups'
+import { OpenDropdown } from '../common/OpenDropdown'
 
 const statusStyles: Record<string, string> = {
   online: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
@@ -258,13 +259,7 @@ export function LocalAgentCard({ agent, onBrowseFiles, onDragStart, isDragging }
                 <MessageSquare className="h-3 w-3" />
                 Chat
               </button>
-              <button
-                onClick={() => window.open(`http://${agent.host}:${agent.port}/chat`, '_blank')}
-                className="flex items-center gap-1 rounded-lg px-2 py-0.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-              >
-                <ExternalLink className="h-3 w-3" />
-                Open
-              </button>
+              <OpenDropdown host={agent.host} port={agent.port} />
             </>
           )}
           <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${statusStyles[agent.status]}`}>

@@ -1811,11 +1811,13 @@ async def agent_files(host: str, port: int, token: str = "", request: Request = 
     auth = token or _resolve_agent_auth(port)
     params = f"?token={auth}" if auth else ""
     url = f"http://{host}:{port}/api/files{params}"
+    agent_reachable = False
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(url)
             if resp.status_code == 200:
                 registered = resp.json()
+                agent_reachable = True
     except (httpx.ConnectError, Exception):
         pass
 
@@ -1834,7 +1836,7 @@ async def agent_files(host: str, port: int, token: str = "", request: Request = 
             break
 
     if not workspace_files:
-        if not registered:
+        if not registered and not agent_reachable:
             raise HTTPException(502, "Cannot connect to agent")
         return registered
 
