@@ -530,6 +530,18 @@ function AttachmentChip({ attachment, onRemove }: { attachment: Attachment; onRe
   )
 }
 
+/** Convert bare image file paths in message content to markdown images proxied through Flight Deck. */
+function processImagePaths(content: string, agentHost?: string, agentPort?: number, agentAuth?: string): string {
+  if (!agentPort) return content
+  const imagePathRe = /^([`*]*)(\/?(?:\/[\w.@: -]+)+\.(?:png|jpg|jpeg|gif|webp|bmp|svg))([`*]*)$/gm
+  return content.replace(imagePathRe, (_match, _pre, filePath, _post) => {
+    const params = new URLSearchParams({ path: filePath })
+    if (agentAuth) params.set('token', agentAuth)
+    const url = `/fd/agent-file-view/${encodeURIComponent(agentHost || 'localhost')}/${agentPort}?${params}`
+    return `![](${url})`
+  })
+}
+
 function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage; sourceName?: string; agentId?: string }) {
   const [toolExpanded, setToolExpanded] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -537,11 +549,24 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
 
   const containers = useContainerStore((s) => s.containers)
   const localAgents = useLocalAgentStore((s) => s.agents)
+  const processes = useProcessStore((s) => s.processes)
   const { pin, isPinned } = usePinnedStore()
   const addClipEntry = useClipboardStore((s) => s.addEntry)
   const pinned = agentId ? isPinned(agentId, message.content) : false
   const openChat = useChatStore((s) => s.openChat)
   const sendMessageToAgent = useChatStore((s) => s.sendMessage)
+
+  // Resolve agent connection for image proxying
+  const agentConn = useMemo(() => {
+    if (!agentId) return null
+    const c = containers.find((x) => x.id === agentId)
+    if (c?.web_port) return { host: 'localhost', port: c.web_port, auth: c.web_auth || '' }
+    const l = localAgents.find((x) => x.id === agentId)
+    if (l) return { host: l.host, port: l.port, auth: l.authToken || '' }
+    const p = processes.find((x) => `proc-${x.slug}` === agentId)
+    if (p?.web_port) return { host: 'localhost', port: p.web_port, auth: p.web_auth || '' }
+    return null
+  }, [agentId, containers, localAgents, processes])
 
   const handleCopy = useCallback(() => {
     navigator.clipboard.writeText(message.content || '')
@@ -654,7 +679,7 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
       <div className="group mb-3 flex flex-col items-end gap-0.5">
         <div className="max-w-[85%] rounded-xl rounded-br-sm bg-violet-600/20 px-3.5 py-2.5">
           <div className="fd-markdown text-sm text-zinc-200">
-            <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown>
+            <Markdown remarkPlugins={[remarkGfm]}>{processImagePaths(message.content, agentConn?.host, agentConn?.port, agentConn?.auth)}</Markdown>
           </div>
           <span className="mt-1 block text-right text-[10px] text-zinc-500">
             {formatTime(message.timestamp)}
@@ -742,7 +767,7 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
     <div className="group mb-3 flex flex-col items-start gap-0.5">
       <div className={`max-w-[85%] rounded-xl rounded-bl-sm bg-zinc-800/60 px-3.5 py-2.5 ${message.replay ? 'opacity-60' : ''}`}>
         <div className="fd-markdown text-sm text-zinc-300">
-          <Markdown remarkPlugins={[remarkGfm]}>{cleanContent}</Markdown>
+          <Markdown remarkPlugins={[remarkGfm]}>{processImagePaths(cleanContent, agentConn?.host, agentConn?.port, agentConn?.auth)}</Markdown>
         </div>
         <div className="mt-1 flex items-center gap-2 text-[10px] text-zinc-600">
           <span>{formatTime(message.timestamp)}</span>

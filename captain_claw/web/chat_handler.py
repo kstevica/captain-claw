@@ -438,3 +438,19 @@ async def _run_agent(
         if hasattr(agent, "_btw_instructions"):
             agent._btw_instructions = []
         send({"type": "status", "status": "ready"})
+        # Process any triggered notifications that arrived while we were busy
+        if not is_public and hasattr(server, "_pending_triggered_notifications") and server._pending_triggered_notifications:
+            pending = server._pending_triggered_notifications.pop(0)
+            log.info("Processing queued triggered notification", content_len=len(pending),
+                     remaining=len(server._pending_triggered_notifications))
+            # Schedule as a new task so this finally block completes first
+            import asyncio as _asyncio_pending
+            async def _process_pending():
+                await _asyncio_pending.sleep(0.5)  # small delay for clean state
+                from captain_claw.web.chat_handler import handle_chat as _hc
+                # Pick any connected admin WS client to use for the response
+                for client_ws in server.clients:
+                    if not getattr(client_ws, "_public_session_id", None):
+                        await _hc(server, client_ws, pending)
+                        return
+            _asyncio_pending.ensure_future(_process_pending())

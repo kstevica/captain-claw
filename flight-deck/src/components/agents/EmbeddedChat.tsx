@@ -31,6 +31,18 @@ interface Attachment {
   error?: string
 }
 
+/** Convert bare image file paths in message content to markdown images proxied through Flight Deck. */
+function processImagePaths(content: string, agentHost?: string, agentPort?: number, agentAuth?: string): string {
+  if (!agentPort) return content
+  const imagePathRe = /^([`*]*)(\/?(?:\/[\w.@: -]+)+\.(?:png|jpg|jpeg|gif|webp|bmp|svg))([`*]*)$/gm
+  return content.replace(imagePathRe, (_match, _pre, filePath, _post) => {
+    const params = new URLSearchParams({ path: filePath })
+    if (agentAuth) params.set('token', agentAuth)
+    const url = `/fd/agent-file-view/${encodeURIComponent(agentHost || 'localhost')}/${agentPort}?${params}`
+    return `![](${url})`
+  })
+}
+
 let attachId = 0
 function nextAttachId() { return `emb-attach-${Date.now()}-${++attachId}` }
 
@@ -234,7 +246,7 @@ function EmbeddedChatBody({
         )}
 
         {visibleMessages.map((msg) => (
-          <EmbeddedMessage key={msg.id} message={msg} />
+          <EmbeddedMessage key={msg.id} message={msg} agentHost={host} agentPort={port} agentAuth={auth} />
         ))}
 
         {busy && (
@@ -340,7 +352,7 @@ function EmbeddedChatBody({
   )
 }
 
-function EmbeddedMessage({ message }: { message: ChatMessage }) {
+function EmbeddedMessage({ message, agentHost, agentPort, agentAuth }: { message: ChatMessage; agentHost?: string; agentPort?: number; agentAuth?: string }) {
   const [toolExpanded, setToolExpanded] = useState(false)
 
   if (message.role === 'user') {
@@ -348,7 +360,7 @@ function EmbeddedMessage({ message }: { message: ChatMessage }) {
       <div className="mb-2 flex justify-end">
         <div className="max-w-[90%] rounded-lg rounded-br-sm bg-violet-600/20 px-2.5 py-1.5">
           <div className="fd-markdown text-xs text-zinc-200">
-            <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown>
+            <Markdown remarkPlugins={[remarkGfm]}>{processImagePaths(message.content, agentHost, agentPort, agentAuth)}</Markdown>
           </div>
           <span className="mt-0.5 block text-right text-[9px] text-zinc-600">{formatTime(message.timestamp)}</span>
         </div>
@@ -393,7 +405,7 @@ function EmbeddedMessage({ message }: { message: ChatMessage }) {
     <div className="mb-2">
       <div className={`max-w-[90%] rounded-lg rounded-bl-sm bg-zinc-800/60 px-2.5 py-1.5 ${message.replay ? 'opacity-60' : ''}`}>
         <div className="fd-markdown text-xs text-zinc-300">
-          <Markdown remarkPlugins={[remarkGfm]}>{cleanContent}</Markdown>
+          <Markdown remarkPlugins={[remarkGfm]}>{processImagePaths(cleanContent, agentHost, agentPort, agentAuth)}</Markdown>
         </div>
         <div className="mt-0.5 flex items-center gap-1.5 text-[9px] text-zinc-600">
           <span>{formatTime(message.timestamp)}</span>

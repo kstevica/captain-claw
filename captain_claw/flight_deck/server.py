@@ -21,8 +21,12 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+import logging
+
 from captain_claw.flight_deck.auth import get_current_user, get_optional_user, get_ws_user, set_auth_db
 from captain_claw.flight_deck.db import FlightDeckDB
+
+log = logging.getLogger("flight_deck")
 from captain_claw.flight_deck.rate_limiter import (
     check_api_rate_limit, check_spawn_rate_limit, check_agent_count_limit,
     load_plan_limits_from_db_sync,
@@ -1476,11 +1480,11 @@ async def _notify_fleet_change(new_agent_name: str, new_agent_port: int, event: 
                     msg = _json.loads(raw)
                     if msg.get("type") == "replay_done":
                         break
-                # Send the fleet notification as a chat message
-                await ws.send(_json.dumps({"type": "chat", "content": notification}))
-                # Wait briefly for acknowledgment then disconnect
+                # Send as notification (injected into session, no LLM response triggered)
+                await ws.send(_json.dumps({"type": "notification", "content": notification}))
+                # Wait briefly then disconnect
                 try:
-                    await asyncio.wait_for(ws.recv(), timeout=15)
+                    await asyncio.wait_for(ws.recv(), timeout=5)
                 except asyncio.TimeoutError:
                     pass
         except Exception:
@@ -1499,11 +1503,25 @@ class ConsultPeerRequest(BaseModel):
     timeout: float = Field(default=480.0, le=600.0)
 
 
+# Track active consultations to prevent duplicate requests to the same target
+_active_consults: dict[int, str] = {}  # target_port -> source_name
+
+
 @app.post("/fd/consult-peer")
 async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | None = Depends(get_optional_user) if AUTH_ENABLED else None):
     """Send a message to a peer agent and stream back intermediate events + final response as ndjson."""
     import websockets
     import json
+
+    # Prevent duplicate consultations to the same agent
+    existing = _active_consults.get(req.port)
+    if existing:
+        async def _busy_stream():
+            yield json.dumps({
+                "ok": False,
+                "error": f"Agent on port {req.port} is already being consulted by '{existing}'. Wait for that consultation to finish, or use 'delegate' for fire-and-forget tasks.",
+            }) + "\n"
+        return StreamingResponse(_busy_stream(), media_type="application/x-ndjson")
 
     # Event types we forward as peer activity so the caller can show progress
     _FORWARD_TYPES = {"status", "thinking", "monitor", "tool_stream"}
@@ -1517,6 +1535,7 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
     agent_url = f"ws://{req.host}:{req.port}/ws{params}"
 
     async def _event_stream():
+        _active_consults[req.port] = req.source_name
         try:
             async with websockets.connect(agent_url, max_size=4 * 1024 * 1024) as ws:
                 # Wait for welcome
@@ -1539,31 +1558,36 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
 
                 # Stream events until we get the final assistant response
                 response_parts: list[str] = []
-                try:
-                    deadline = asyncio.get_event_loop().time() + req.timeout
-                    while True:
-                        remaining = deadline - asyncio.get_event_loop().time()
-                        if remaining <= 0:
-                            break
-                        raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, 30))
-                        msg = json.loads(raw)
-                        msg_type = msg.get("type", "")
-
-                        # Forward interesting intermediate events
-                        if msg_type in _FORWARD_TYPES:
-                            yield json.dumps({"event": msg_type, "data": msg}) + "\n"
-
-                        if msg_type == "chat_message" and msg.get("role") == "assistant" and not msg.get("replay"):
-                            content = msg.get("content", "")
-                            if content:
-                                response_parts.append(content)
-                            break
-                        elif msg_type == "error":
-                            yield json.dumps({"ok": False, "error": msg.get("message", "Agent error")}) + "\n"
+                deadline = asyncio.get_event_loop().time() + req.timeout
+                recv_interval = 15.0  # heartbeat every 15s of silence
+                while True:
+                    remaining = deadline - asyncio.get_event_loop().time()
+                    if remaining <= 0:
+                        if not response_parts:
+                            yield json.dumps({"ok": False, "error": "Timed out waiting for response"}) + "\n"
                             return
-                except asyncio.TimeoutError:
-                    if not response_parts:
-                        yield json.dumps({"ok": False, "error": "Timed out waiting for response"}) + "\n"
+                        break
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, recv_interval))
+                    except asyncio.TimeoutError:
+                        # No message in recv_interval — send heartbeat and keep waiting
+                        elapsed = int(req.timeout - remaining)
+                        yield json.dumps({"event": "heartbeat", "data": {"elapsed": elapsed, "timeout": int(req.timeout)}}) + "\n"
+                        continue
+                    msg = json.loads(raw)
+                    msg_type = msg.get("type", "")
+
+                    # Forward interesting intermediate events
+                    if msg_type in _FORWARD_TYPES:
+                        yield json.dumps({"event": msg_type, "data": msg}) + "\n"
+
+                    if msg_type == "chat_message" and msg.get("role") == "assistant" and not msg.get("replay"):
+                        content = msg.get("content", "")
+                        if content:
+                            response_parts.append(content)
+                        break
+                    elif msg_type == "error":
+                        yield json.dumps({"ok": False, "error": msg.get("message", "Agent error")}) + "\n"
                         return
 
             yield json.dumps({
@@ -1573,8 +1597,130 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
             }) + "\n"
         except Exception as exc:
             yield json.dumps({"ok": False, "error": f"Connection failed: {exc}"}) + "\n"
+        finally:
+            _active_consults.pop(req.port, None)
 
     return StreamingResponse(_event_stream(), media_type="application/x-ndjson")
+
+
+class DelegatePeerRequest(BaseModel):
+    target_host: str = "localhost"
+    target_port: int
+    target_name: str = ""
+    source_host: str = "localhost"
+    source_port: int
+    source_name: str = "another agent"
+    message: str
+    timeout: float = Field(default=600.0, le=1800.0)
+
+
+@app.post("/fd/delegate-peer")
+async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict | None = Depends(get_optional_user) if AUTH_ENABLED else None):
+    """Fire-and-forget: send a task to a peer agent. When the peer finishes, deliver the result back to the source agent as a chat message."""
+    import websockets
+    import json
+
+    _FORWARD_TYPES = {"status", "thinking", "monitor", "tool_stream"}
+
+    target_auth = _resolve_agent_auth(req.target_port)
+    source_auth = _resolve_agent_auth(req.source_port)
+
+    peer_display = req.target_name or f"agent@{req.target_port}"
+
+    async def _background():
+        log.info("delegate_background: started", target=peer_display, source=req.source_name,
+                 target_port=req.target_port, source_port=req.source_port)
+
+        # Phase 1: send task to target agent and wait for response
+        t_params = f"?token={target_auth}" if target_auth else ""
+        target_url = f"ws://{req.target_host}:{req.target_port}/ws{t_params}"
+        response_text = ""
+        try:
+            async with websockets.connect(target_url, max_size=4 * 1024 * 1024) as ws:
+                welcome = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                if welcome.get("type") != "welcome":
+                    response_text = f"[Error] Unexpected handshake from {peer_display}"
+                    log.error("delegate_background: bad handshake from target", target=peer_display)
+                else:
+                    # Skip replay
+                    while True:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=10)
+                        msg = json.loads(raw)
+                        if msg.get("type") == "replay_done":
+                            break
+                        if msg.get("type") not in ("chat_message",) or not msg.get("replay"):
+                            break
+
+                    await ws.send(json.dumps({"type": "chat", "content": req.message}))
+                    log.info("delegate_background: task sent to target", target=peer_display)
+
+                    # Wait for the final response
+                    deadline = asyncio.get_event_loop().time() + req.timeout
+                    recv_interval = 30.0
+                    while True:
+                        remaining = deadline - asyncio.get_event_loop().time()
+                        if remaining <= 0:
+                            response_text = f"[Timeout] {peer_display} did not finish within {int(req.timeout)}s"
+                            log.warning("delegate_background: target timed out", target=peer_display, timeout=req.timeout)
+                            break
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, recv_interval))
+                        except asyncio.TimeoutError:
+                            continue
+                        msg = json.loads(raw)
+                        msg_type = msg.get("type", "")
+                        if msg_type == "chat_message" and msg.get("role") == "assistant" and not msg.get("replay"):
+                            response_text = msg.get("content", "(no response)")
+                            log.info("delegate_background: got response from target",
+                                     target=peer_display, response_len=len(response_text))
+                            break
+                        elif msg_type == "error":
+                            response_text = f"[Error from {peer_display}] {msg.get('message', 'Unknown error')}"
+                            log.error("delegate_background: target returned error", target=peer_display, error=msg.get("message"))
+                            break
+        except Exception as exc:
+            response_text = f"[Error] Could not reach {peer_display}: {exc}"
+            log.error("delegate_background: phase 1 failed", target=peer_display, error=str(exc))
+
+        if not response_text:
+            response_text = "(no response received)"
+
+        # Phase 2: deliver the result back to the source agent
+        s_params = f"?token={source_auth}" if source_auth else ""
+        source_url = f"ws://{req.source_host}:{req.source_port}/ws{s_params}"
+        callback_msg = f"[Delegated result from {peer_display}]\n\n{response_text}"
+        log.info("delegate_background: delivering result to source",
+                 source=req.source_name, source_port=req.source_port, result_len=len(response_text))
+        try:
+            async with websockets.connect(source_url, open_timeout=10, close_timeout=5) as ws:
+                welcome = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                if welcome.get("type") != "welcome":
+                    log.error("delegate_callback: unexpected handshake from source", source=req.source_name)
+                    return
+                # Skip replay
+                while True:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=10)
+                    msg = json.loads(raw)
+                    if msg.get("type") == "replay_done":
+                        break
+                await ws.send(json.dumps({"type": "notification", "content": callback_msg, "trigger_response": True}))
+                log.info("delegate_callback: result delivered to source", source=req.source_name)
+                # Wait briefly for acknowledgment
+                try:
+                    await asyncio.wait_for(ws.recv(), timeout=30)
+                except asyncio.TimeoutError:
+                    pass
+        except Exception as exc:
+            log.error("delegate_callback: failed to deliver result to source", source=req.source_name, error=str(exc))
+
+    # Keep a strong reference so the task doesn't get garbage-collected
+    task = asyncio.create_task(_background())
+    if not hasattr(app.state, "_delegate_tasks"):
+        app.state._delegate_tasks = set()
+    app.state._delegate_tasks.add(task)
+    task.add_done_callback(app.state._delegate_tasks.discard)
+
+    return {"ok": True, "message": f"Task delegated to {peer_display}. Results will be delivered to {req.source_name} when ready."}
 
 
 _WORKSPACE_ALLOWED_EXTS: set[str] = {

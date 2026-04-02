@@ -20,8 +20,11 @@ class FlightDeckTool(Tool):
     name = "flight_deck"
     description = (
         "Discover and communicate with peer agents in the Flight Deck environment. "
-        "Use 'list_agents' to get a live list of all running agents, or 'consult' "
-        "to send a message to a specific peer agent and receive their response."
+        "Actions: 'list_agents' to discover peers, 'consult' for quick synchronous Q&A, "
+        "'delegate' for tasks the peer should do independently. "
+        "IMPORTANT: When the user says 'delegate', or the task is large/long-running "
+        "(scraping, research, analysis, file creation), ALWAYS use action='delegate'. "
+        "Only use 'consult' for quick questions where you need the answer immediately to continue."
     )
     timeout_seconds = 600.0
 
@@ -30,23 +33,28 @@ class FlightDeckTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["list_agents", "consult"],
+                "enum": ["list_agents", "consult", "delegate"],
                 "description": (
                     "'list_agents' — get all agents currently in the fleet. "
-                    "'consult' — send a message to a peer agent."
+                    "'consult' — ONLY for quick questions where you need the answer right now to continue your work (synchronous, blocks until response). "
+                    "'delegate' — for ANY task the peer should handle: research, scraping, analysis, summarization, file creation, etc. "
+                    "You send the task and immediately free yourself. The peer works independently and delivers results back to you when done. "
+                    "RULE: If the user says 'delegate' or the task involves work (not just a question), use 'delegate'."
                 ),
             },
             "agent_name": {
                 "type": "string",
                 "description": (
-                    "Name of the peer agent to consult (required for 'consult' action). "
+                    "Name of the peer agent to consult or delegate to "
+                    "(required for 'consult' and 'delegate' actions). "
                     "Use list_agents first to see available agents."
                 ),
             },
             "message": {
                 "type": "string",
                 "description": (
-                    "The message to send to the peer agent (required for 'consult' action)."
+                    "The message/task to send to the peer agent "
+                    "(required for 'consult' and 'delegate' actions)."
                 ),
             },
         },
@@ -118,47 +126,12 @@ class FlightDeckTool(Tool):
         except ImportError:
             return ToolResult(success=False, error="httpx is required")
 
-        # First, get the live fleet to find the target agent
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(f"{fd_url}/fd/fleet")
-                if resp.status_code != 200:
-                    return ToolResult(success=False, error=f"Fleet query failed: HTTP {resp.status_code}")
-                agents = resp.json()
-        except Exception as e:
-            return ToolResult(success=False, error=f"Cannot reach Flight Deck: {e}")
-
-        # Find matching agent (exact, then case-insensitive substring)
-        target = None
-        query = agent_name.lower()
-        for a in agents:
-            if a.get("name", "").lower() == query:
-                target = a
-                break
-        if not target:
-            for a in agents:
-                aname = a.get("name", "").lower()
-                if query in aname or aname in query:
-                    target = a
-                    break
-
-        if not target:
-            available = ", ".join(a.get("name", "?") for a in agents)
-            return ToolResult(
-                success=False,
-                error=f"Agent '{agent_name}' not found in fleet. Available: {available}",
-            )
-
-        if target.get("status") != "running":
-            return ToolResult(
-                success=False,
-                error=f"Agent '{agent_name}' is not running (status: {target.get('status')}).",
-            )
+        target, agents, error = await self._resolve_target(fd_url, agent_name, **kwargs)
+        if error:
+            return ToolResult(success=False, error=error)
 
         host = target.get("host", "localhost")
         port = target.get("port", 0)
-        if not port:
-            return ToolResult(success=False, error=f"No port info for agent '{agent_name}'.")
 
         # Check approval requirement
         agent = kwargs.get("_agent")
@@ -229,7 +202,11 @@ class FlightDeckTool(Tool):
 
                         evt_type = event.get("event", "")
                         data = event.get("data", {})
-                        if evt_type == "status":
+                        if evt_type == "heartbeat":
+                            elapsed = data.get("elapsed", 0)
+                            timeout = data.get("timeout", 0)
+                            _emit("status", f"Still working... ({elapsed}s / {timeout}s)")
+                        elif evt_type == "status":
                             _emit("status", data.get("status", ""))
                         elif evt_type == "thinking":
                             tool = data.get("tool", "")
@@ -256,6 +233,135 @@ class FlightDeckTool(Tool):
             _emit("error", str(e)[:100])
             return ToolResult(success=False, error=str(e))
 
+    async def _resolve_target(self, fd_url: str, agent_name: str, **kwargs: Any):
+        """Look up a target agent from the fleet. Returns (target_dict, agents_list) or raises."""
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(f"{fd_url}/fd/fleet")
+                if resp.status_code != 200:
+                    return None, None, f"Fleet query failed: HTTP {resp.status_code}"
+                agents = resp.json()
+        except Exception as e:
+            return None, None, f"Cannot reach Flight Deck: {e}"
+
+        target = None
+        query = agent_name.lower()
+        for a in agents:
+            if a.get("name", "").lower() == query:
+                target = a
+                break
+        if not target:
+            for a in agents:
+                aname = a.get("name", "").lower()
+                if query in aname or aname in query:
+                    target = a
+                    break
+
+        if not target:
+            available = ", ".join(a.get("name", "?") for a in agents)
+            return None, agents, f"Agent '{agent_name}' not found in fleet. Available: {available}"
+
+        if target.get("status") != "running":
+            return None, agents, f"Agent '{agent_name}' is not running (status: {target.get('status')})."
+
+        if not target.get("port"):
+            return None, agents, f"No port info for agent '{agent_name}'."
+
+        return target, agents, None
+
+    async def _delegate(self, fd_url: str, agent_name: str, message: str, **kwargs: Any) -> ToolResult:
+        """Delegate a task to a peer agent (fire-and-forget). Results are delivered back as a message."""
+        try:
+            import httpx
+        except ImportError:
+            return ToolResult(success=False, error="httpx is required")
+
+        target, agents, error = await self._resolve_target(fd_url, agent_name, **kwargs)
+        if error:
+            return ToolResult(success=False, error=error)
+
+        agent = kwargs.get("_agent")
+        session = kwargs.get("_session")
+        metadata = getattr(session, "metadata", {}) or {} if session else {}
+        source_name = metadata.get("session_display_name", "")
+        peer_display = target.get("name", agent_name)
+
+        # Find source agent's port — try multiple strategies
+        source_port = 0
+        source_host = "localhost"
+
+        # Strategy 1: match by session_display_name in fleet
+        if source_name:
+            for a in agents:
+                if a.get("name", "").lower() == source_name.lower():
+                    source_port = a.get("port", 0)
+                    source_host = a.get("host", "localhost")
+                    break
+
+        # Strategy 2: match by config web port in fleet
+        if not source_port:
+            try:
+                from captain_claw.config import get_config
+                cfg_port = get_config().web.port
+                if cfg_port:
+                    for a in agents:
+                        if a.get("port") == cfg_port:
+                            source_port = cfg_port
+                            source_host = a.get("host", "localhost")
+                            if not source_name:
+                                source_name = a.get("name", "this agent")
+                            break
+                # Strategy 3: use config port directly as last resort
+                if not source_port:
+                    source_port = cfg_port
+                    if not source_name:
+                        source_name = "this agent"
+            except Exception:
+                pass
+
+        if not source_port:
+            return ToolResult(
+                success=False,
+                error="Cannot delegate: could not determine own port. Use 'consult' (synchronous) instead.",
+            )
+
+        log.info("Delegating task to peer", target=peer_display, source=source_name,
+                 target_port=target.get("port"), source_port=source_port)
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    f"{fd_url}/fd/delegate-peer",
+                    json={
+                        "target_host": target.get("host", "localhost"),
+                        "target_port": target.get("port"),
+                        "target_name": peer_display,
+                        "source_host": "localhost",
+                        "source_port": source_port,
+                        "source_name": source_name,
+                        "message": message,
+                        "timeout": 600.0,
+                    },
+                )
+                if resp.status_code != 200:
+                    return ToolResult(success=False, error=f"Flight Deck returned HTTP {resp.status_code}")
+                result = resp.json()
+        except Exception as e:
+            return ToolResult(success=False, error=f"Failed to delegate: {e}")
+
+        return ToolResult(
+            success=True,
+            content=(
+                f"Task delegated to **{peer_display}**. The task is now {peer_display}'s responsibility.\n\n"
+                f"IMPORTANT: Do NOT attempt to do this task yourself. Do NOT use your own tools "
+                f"(browser, web_search, shell, etc.) to work on the delegated task. "
+                f"{peer_display} will deliver results back to you as a message when finished. "
+                f"Tell the user the task has been delegated and move on."
+            ),
+        )
+
     async def execute(self, action: str, agent_name: str = "", message: str = "", **kwargs: Any) -> ToolResult:
         fd_url = self._get_fd_url(**kwargs)
         if not fd_url:
@@ -272,5 +378,11 @@ class FlightDeckTool(Tool):
             if not message:
                 return ToolResult(success=False, error="message is required for consult action.")
             return await self._consult(fd_url, agent_name, message, **kwargs)
+        elif action == "delegate":
+            if not agent_name:
+                return ToolResult(success=False, error="agent_name is required for delegate action.")
+            if not message:
+                return ToolResult(success=False, error="message is required for delegate action.")
+            return await self._delegate(fd_url, agent_name, message, **kwargs)
         else:
-            return ToolResult(success=False, error=f"Unknown action: {action}. Use 'list_agents' or 'consult'.")
+            return ToolResult(success=False, error=f"Unknown action: {action}. Use 'list_agents', 'consult', or 'delegate'.")

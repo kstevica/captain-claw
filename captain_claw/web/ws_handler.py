@@ -215,6 +215,48 @@ async def handle_ws_message(
             from captain_claw.web.slash_commands import handle_command
             await handle_command(server, ws, command)
 
+    elif msg_type == "notification":
+        # System notification — inject into session history without triggering LLM.
+        # Used for fleet events, delegated results, etc. Does NOT set _busy.
+        # If trigger_response=true AND the agent is free, process as a chat message
+        # so the agent can act on it (e.g. relay delegated results to the user).
+        notif_content = str(data.get("content", "")).strip()
+        if not notif_content:
+            return
+        trigger = data.get("trigger_response", False)
+        _pub_sid = getattr(ws, "_public_session_id", None)
+
+        if trigger and not server._busy and not _pub_sid:
+            # Agent is free — process as a regular chat so it triggers an LLM response
+            log.info("Notification with trigger_response, agent is free — routing to chat handler",
+                     content_len=len(notif_content))
+            from captain_claw.web.chat_handler import handle_chat
+            await handle_chat(server, ws, notif_content)
+            return
+
+        # Agent is busy or no trigger requested — inject silently into session
+        _target_agent = server._public_agents.get(_pub_sid) if _pub_sid else server.agent
+        if _target_agent and _target_agent.session:
+            _target_agent.session.add_message("user", notif_content)
+            log.info("Notification injected into session", content_len=len(notif_content),
+                     agent_busy=server._busy, trigger=trigger)
+        # Broadcast to UI so it appears in the chat
+        from datetime import datetime, timezone
+        server._broadcast({
+            "type": "chat_message",
+            "role": "user",
+            "content": notif_content,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "notification": True,
+        })
+        # If trigger requested but agent is busy, queue for processing when agent finishes
+        if trigger and server._busy and not _pub_sid:
+            if not hasattr(server, "_pending_triggered_notifications"):
+                server._pending_triggered_notifications = []
+            server._pending_triggered_notifications.append(notif_content)
+            log.info("Triggered notification queued for when agent is free",
+                     queue_size=len(server._pending_triggered_notifications))
+
     elif msg_type == "btw":
         # Inject additional instructions while a task is running.
         btw_content = str(data.get("content", "")).strip()
