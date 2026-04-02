@@ -50,7 +50,7 @@ export function NotificationBell() {
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full z-50 mt-1 w-[360px] rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl">
+          <div className="fixed left-2 right-2 top-14 z-50 sm:absolute sm:left-auto sm:top-full sm:right-0 sm:mt-1 sm:w-[360px] rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl">
             <NotificationDropdown onClose={() => setOpen(false)} />
           </div>
         </>

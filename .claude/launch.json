@@ -10,7 +10,7 @@
     {
       "name": "flight-deck",
       "runtimeExecutable": "/bin/bash",
-      "runtimeArgs": ["-c", "source ~/.nvm/nvm.sh && nvm use 20 && cd /Users/kstevica/captain-claw/captain-claw/flight-deck && npx vite --port 5173"],
+      "runtimeArgs": ["-c", "source ~/.nvm/nvm.sh && cd /Users/kstevica/Dev/captain-claw/flight-deck && npx vite --port 5173"],
       "port": 5173
     }
   ]

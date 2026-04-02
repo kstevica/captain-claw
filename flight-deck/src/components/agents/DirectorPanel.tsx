@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import { useContainerStore } from '../../stores/containerStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
+import { useProcessStore } from '../../stores/processStore'
 import { useChatStore } from '../../stores/chatStore'
 import { GroupManager } from '../common/AgentGroups'
 
@@ -27,7 +28,7 @@ import { GroupManager } from '../common/AgentGroups'
 
 interface UnifiedAgentRow {
   id: string
-  kind: 'docker' | 'local'
+  kind: 'docker' | 'local' | 'process'
   name: string
   description: string
   status: string
@@ -84,6 +85,7 @@ export function DirectorPanel() {
   const { stopContainer, restartContainer } = useContainerStore()
   const localAgents = useLocalAgentStore((s) => s.agents)
   const { probeAll } = useLocalAgentStore()
+  const processes = useProcessStore((s) => s.processes)
   const chatSessions = useChatStore((s) => s.sessions)
   const { openChat, sendMessage } = useChatStore()
 
@@ -123,6 +125,30 @@ export function DirectorPanel() {
       })
     }
 
+    for (const p of processes) {
+      const procId = `proc-${p.slug}`
+      const session = chatSessions.get(procId)
+      const lastMsg = session?.messages?.length
+        ? session.messages[session.messages.length - 1]
+        : null
+      rows.push({
+        id: procId,
+        kind: 'process',
+        name: p.name,
+        description: p.description || '',
+        status: p.status,
+        port: p.web_port,
+        host: 'localhost',
+        auth: p.web_auth || '',
+        chatConnected: session?.connected ?? false,
+        busy: session?.busy ?? false,
+        statusText: session?.statusText ?? '',
+        lastMessageTime: lastMsg?.timestamp ?? null,
+        messageCount: session?.messages?.length ?? 0,
+        created: '',
+      })
+    }
+
     for (const a of localAgents) {
       const session = chatSessions.get(a.id)
       const lastMsg = session?.messages?.length
@@ -147,7 +173,7 @@ export function DirectorPanel() {
     }
 
     return rows
-  }, [containers, localAgents, chatSessions])
+  }, [containers, processes, localAgents, chatSessions])
 
   // Filter
   const filtered = useMemo(() => {

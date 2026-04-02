@@ -16,6 +16,7 @@ import { useGroupStore } from '../stores/groupStore'
 import { useAuthStore } from '../stores/authStore'
 import { GroupFilter } from '../components/common/AgentGroups'
 import { queueSave, registerHydrator } from '../services/settingsSync'
+import { useIsMobile } from '../hooks/useMediaQuery'
 
 // ── Unified agent item ──
 
@@ -97,6 +98,10 @@ export function DesktopPage() {
     return () => { _hydrateListeners.delete(onHydrate) }
   }, [])
   const groups = useGroupStore((s) => s.groups)
+  const { isMobile, isTablet } = useIsMobile()
+  const compact = isMobile || isTablet
+  // Force grid mode on mobile/tablet
+  const effectiveLayout = compact ? 'grid' : layoutMode
 
   // Drag state
   const [dragId, setDragId] = useState<string | null>(null)
@@ -276,11 +281,11 @@ export function DesktopPage() {
 
   return (
     <div className="flex h-full">
-      <div className="flex-1 overflow-auto p-6">
-        <div className="mb-6 flex items-center justify-between">
+      <div className="flex-1 overflow-auto p-4 md:p-6">
+        <div className="mb-4 flex flex-col gap-3 sm:mb-6 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h1 className="text-lg font-semibold">Agent Desktop</h1>
-            <p className="text-sm text-zinc-500">Monitor and control your personal assistants</p>
+            <p className="text-xs text-zinc-500 sm:text-sm">Monitor and control your personal assistants</p>
           </div>
           <div className="flex items-center gap-2">
             {!hasOldMan && (
@@ -289,11 +294,11 @@ export function DesktopPage() {
                 className="flex items-center gap-1.5 rounded-md bg-violet-600/20 px-2.5 py-1.5 text-xs font-medium text-violet-300 hover:bg-violet-600/30 border border-violet-600/30"
               >
                 <Zap className="h-3.5 w-3.5" />
-                Spawn Old Man
+                {!isMobile && 'Spawn Old Man'}
               </button>
             )}
             <GroupFilter selected={groupFilter} onChange={setGroupFilter} />
-            {layoutMode === 'free' && (
+            {!compact && layoutMode === 'free' && (
               <button
                 onClick={resetPositions}
                 className="rounded-md px-2 py-1 text-xs font-medium text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
@@ -302,14 +307,16 @@ export function DesktopPage() {
                 Reset
               </button>
             )}
-            <button
-              onClick={toggleLayout}
-              className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 border border-zinc-800"
-              title={layoutMode === 'grid' ? 'Switch to free layout' : 'Switch to grid layout'}
-            >
-              {layoutMode === 'grid' ? <Move className="h-3.5 w-3.5" /> : <LayoutGrid className="h-3.5 w-3.5" />}
-              {layoutMode === 'grid' ? 'Free Layout' : 'Grid Layout'}
-            </button>
+            {!compact && (
+              <button
+                onClick={toggleLayout}
+                className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 border border-zinc-800"
+                title={layoutMode === 'grid' ? 'Switch to free layout' : 'Switch to grid layout'}
+              >
+                {layoutMode === 'grid' ? <Move className="h-3.5 w-3.5" /> : <LayoutGrid className="h-3.5 w-3.5" />}
+                {layoutMode === 'grid' ? 'Free Layout' : 'Grid Layout'}
+              </button>
+            )}
           </div>
         </div>
 
@@ -320,7 +327,7 @@ export function DesktopPage() {
               <Radio className="h-3.5 w-3.5" />
               BotPort Agents ({instances.length})
             </div>
-            <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-5 xl:grid-cols-3">
               {instances.map((inst) => (
                 <AgentCard key={inst.id} instance={inst} />
               ))}
@@ -352,9 +359,9 @@ export function DesktopPage() {
           )}
 
           {agentCount > 0 ? (
-            layoutMode === 'grid' ? (
+            effectiveLayout === 'grid' ? (
               /* ── Grid layout ── */
-              <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-5 xl:grid-cols-3">
                 {unifiedAgents.map((agent) => (
                   <div key={agent.id}>{renderAgentCard(agent)}</div>
                 ))}

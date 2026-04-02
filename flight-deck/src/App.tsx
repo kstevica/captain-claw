@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { Sidebar } from './components/layout/Sidebar'
 import { TopBar } from './components/layout/TopBar'
+import { MobileNav } from './components/layout/MobileNav'
 import { ChatPanel } from './components/agents/ChatPanel'
 import { DirectorPanel } from './components/agents/DirectorPanel'
 import { PinnedMessages } from './components/common/PinnedMessages'
@@ -23,6 +24,7 @@ import { useNotificationStore } from './stores/notificationStore'
 import { usePipelineStore } from './stores/pipelineStore'
 import { hydrateAllStores } from './services/settingsSync'
 import { useConnectionStore } from './stores/connectionStore'
+import { useIsMobile } from './hooks/useMediaQuery'
 import { botportWS } from './services/ws'
 import type { InstanceInfo } from './types'
 
@@ -258,6 +260,121 @@ function AppContent() {
     }
   }, [setWsConnected, upsertInstance, removeInstance, updateInstanceActivity, fetchConcerns, fetchStats, addNotification])
 
+  const { isMobile, isTablet, isDesktop } = useIsMobile()
+  const mobilePanel = useUIStore((s) => s.mobilePanel)
+  const setMobilePanel = useUIStore((s) => s.setMobilePanel)
+  const sidebarDrawerOpen = useUIStore((s) => s.sidebarDrawerOpen)
+  const setSidebarDrawerOpen = useUIStore((s) => s.setSidebarDrawerOpen)
+
+  // On mobile, Director/Chat/Tool open via mobilePanel overlay instead of side-by-side
+  const mobilePanelToggleDirector = useCallback(() => {
+    if (isMobile || isTablet) {
+      useUIStore.getState().toggleMobilePanel('director')
+    } else {
+      toggleDirector()
+    }
+  }, [isMobile, isTablet, toggleDirector])
+
+  const mainContent = (
+    <>
+      {view === 'desktop' && <DesktopPage />}
+      {view === 'operations' && <OperationsPage />}
+      {view === 'workflow' && <WorkflowPage />}
+      {view === 'spawner' && <SpawnerPage />}
+      {view === 'admin' && <AdminPage />}
+    </>
+  )
+
+  // ── Mobile / Tablet overlay panels ──
+  const mobilePanelOverlay = (isMobile || isTablet) && mobilePanel !== 'none' && (
+    <div className="fixed inset-0 z-50 flex flex-col bg-zinc-950">
+      <div className="flex h-12 items-center justify-between border-b border-zinc-800 px-4">
+        <span className="text-sm font-semibold capitalize">{mobilePanel}</span>
+        <button
+          onClick={() => setMobilePanel('none')}
+          className="rounded p-2 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </button>
+      </div>
+      <div className="flex-1 overflow-hidden">
+        {mobilePanel === 'director' && <DirectorPanel />}
+        {mobilePanel === 'chat' && <ChatPanel />}
+        {mobilePanel === 'tool' && (
+          <>
+            {toolPanel === 'pinned' && <PinnedMessages onClose={() => { setToolPanel(null); setMobilePanel('none') }} />}
+            {toolPanel === 'pinned-files' && <PinnedFiles onClose={() => { setToolPanel(null); setMobilePanel('none') }} />}
+            {toolPanel === 'clipboard' && <SharedClipboard onClose={() => { setToolPanel(null); setMobilePanel('none') }} />}
+          </>
+        )}
+      </div>
+    </div>
+  )
+
+  // ── Tablet sidebar drawer ──
+  const tabletSidebarDrawer = isTablet && sidebarDrawerOpen && (
+    <>
+      <div className="fixed inset-0 z-40 bg-black/50" onClick={() => setSidebarDrawerOpen(false)} />
+      <div className="fixed left-0 top-0 bottom-0 z-50 w-[260px]">
+        <Sidebar />
+      </div>
+    </>
+  )
+
+  // ── Mobile layout ──
+  if (isMobile) {
+    return (
+      <div className="flex h-screen flex-col overflow-hidden">
+        <TopBar
+          directorOpen={false}
+          onToggleDirector={mobilePanelToggleDirector}
+          onTogglePinned={() => { toggleToolPanel('pinned'); setMobilePanel('tool') }}
+          onTogglePinnedFiles={() => { toggleToolPanel('pinned-files'); setMobilePanel('tool') }}
+          onToggleClipboard={() => { toggleToolPanel('clipboard'); setMobilePanel('tool') }}
+          onToggleShortcuts={() => setShortcutsOpen(!shortcutsOpen)}
+          pinnedOpen={toolPanel === 'pinned'}
+          pinnedFilesOpen={toolPanel === 'pinned-files'}
+          clipboardOpen={toolPanel === 'clipboard'}
+          isMobile
+        />
+        <main className="flex-1 overflow-hidden pb-14">
+          {mainContent}
+        </main>
+        <MobileNav />
+        {mobilePanelOverlay}
+        {shortcutsOpen && <ShortcutsOverlay onClose={() => setShortcutsOpen(false)} />}
+      </div>
+    )
+  }
+
+  // ── Tablet layout ──
+  if (isTablet) {
+    return (
+      <div className="flex h-screen flex-col overflow-hidden">
+        <TopBar
+          directorOpen={false}
+          onToggleDirector={mobilePanelToggleDirector}
+          onTogglePinned={() => { toggleToolPanel('pinned'); setMobilePanel('tool') }}
+          onTogglePinnedFiles={() => { toggleToolPanel('pinned-files'); setMobilePanel('tool') }}
+          onToggleClipboard={() => { toggleToolPanel('clipboard'); setMobilePanel('tool') }}
+          onToggleShortcuts={() => setShortcutsOpen(!shortcutsOpen)}
+          pinnedOpen={toolPanel === 'pinned'}
+          pinnedFilesOpen={toolPanel === 'pinned-files'}
+          clipboardOpen={toolPanel === 'clipboard'}
+          isTablet
+          onToggleSidebarDrawer={() => setSidebarDrawerOpen(!sidebarDrawerOpen)}
+        />
+        <main className="flex-1 overflow-hidden">
+          {mainContent}
+        </main>
+        {tabletSidebarDrawer}
+        {mobilePanelOverlay}
+        {shortcutsOpen && <ShortcutsOverlay onClose={() => setShortcutsOpen(false)} />}
+      </div>
+    )
+  }
+
+  // ── Desktop layout (unchanged) ──
   return (
     <div className="flex h-screen overflow-hidden">
       <Sidebar />
