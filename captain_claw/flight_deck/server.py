@@ -2387,6 +2387,90 @@ def health():
     return {"ok": True, "docker": docker_ok, "processes": True}
 
 
+# ── Old Man preset ──
+
+OLD_MAN_TOOLS = [
+    "shell", "read", "write", "glob", "edit",
+    "web_fetch", "web_search", "browser",
+    "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract",
+    "pocket_tts", "send_mail", "clipboard",
+    "screen_capture", "desktop_action",
+    "scripts", "playbooks", "personality", "datastore", "insights",
+    "cron", "summarize_files", "gws", "direct_api",
+    "flight_deck",
+]
+
+
+def _build_old_man_config(
+    *,
+    provider: str = "ollama",
+    model: str = "minimax-m2.7:cloud",
+    api_key: str = "",
+    web_port: int = 24080,
+) -> AgentConfig:
+    """Return an AgentConfig pre-filled for Old Man supervisor mode."""
+    return AgentConfig(
+        name="Old Man",
+        description="Desktop supervisor — triages requests, delegates to fleet agents",
+        provider=provider,
+        model=model,
+        provider_api_key=api_key,
+        tools=OLD_MAN_TOOLS,
+        web_port=web_port,
+        # Old Man adds old_man.enabled + hotkey overrides via env var
+        env_vars=[
+            {"key": "CLAW_OLD_MAN__ENABLED", "value": "true"},
+            {"key": "CLAW_TOOLS__SCREEN_CAPTURE__HOTKEY_ENABLED", "value": "true"},
+        ],
+    )
+
+
+class OldManSpawnRequest(BaseModel):
+    """Minimal request body for the Old Man quick-spawn endpoint."""
+    provider: str = "ollama"
+    model: str = "minimax-m2.7:cloud"
+    api_key: str = ""
+    web_port: int = 24080
+    mode: str = "auto"  # "docker", "process", or "auto" (try docker first)
+
+
+@app.post("/fd/spawn-old-man")
+async def spawn_old_man(
+    body: OldManSpawnRequest,
+    request: Request,
+    user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None,
+):
+    """One-click Old Man spawn — creates a supervisor agent with sane defaults.
+
+    Tries Docker first (if available), falls back to process spawn.
+    """
+    config = _build_old_man_config(
+        provider=body.provider,
+        model=body.model,
+        api_key=body.api_key,
+        web_port=body.web_port,
+    )
+
+    use_docker = body.mode == "docker"
+    use_process = body.mode == "process"
+
+    if body.mode == "auto":
+        # Prefer docker if available
+        try:
+            get_docker()
+            sys_cfg = await _get_system_config()
+            docker_default = not os.environ.get("CAPTAIN_CLAW_DOCKER")
+            use_docker = sys_cfg.get("docker_spawn_enabled", docker_default)
+            use_process = not use_docker
+        except Exception:
+            use_process = True
+
+    if use_docker:
+        return await spawn_agent(config, request, user)
+    else:
+        return await spawn_process(config, request, user)
+
+
 # ── Static frontend serving ──
 
 if STATIC_DIR.is_dir():

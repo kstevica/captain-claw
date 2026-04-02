@@ -19,9 +19,10 @@ log = structlog.get_logger(__name__)
 class FlightDeckTool(Tool):
     name = "flight_deck"
     description = (
-        "Discover and communicate with peer agents in the Flight Deck environment. "
+        "Discover, communicate with, and spawn peer agents in the Flight Deck environment. "
         "Actions: 'list_agents' to discover peers, 'consult' for quick synchronous Q&A, "
-        "'delegate' for tasks the peer should do independently. "
+        "'delegate' for tasks the peer should do independently, "
+        "'spawn_agent' to create a new agent in the fleet. "
         "IMPORTANT: When the user says 'delegate', or the task is large/long-running "
         "(scraping, research, analysis, file creation), ALWAYS use action='delegate'. "
         "Only use 'consult' for quick questions where you need the answer immediately to continue."
@@ -33,12 +34,15 @@ class FlightDeckTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["list_agents", "consult", "delegate"],
+                "enum": ["list_agents", "consult", "delegate", "spawn_agent"],
                 "description": (
                     "'list_agents' — get all agents currently in the fleet. "
                     "'consult' — ONLY for quick questions where you need the answer right now to continue your work (synchronous, blocks until response). "
                     "'delegate' — for ANY task the peer should handle: research, scraping, analysis, summarization, file creation, etc. "
                     "You send the task and immediately free yourself. The peer works independently and delivers results back to you when done. "
+                    "'spawn_agent' — create a new agent in the fleet. Provide agent_name (required), and optionally "
+                    "spawn_provider, spawn_model, spawn_description via the message field as JSON. "
+                    "Uses your own model/key as defaults. "
                     "RULE: If the user says 'delegate' or the task involves work (not just a question), use 'delegate'."
                 ),
             },
@@ -376,6 +380,76 @@ class FlightDeckTool(Tool):
             ),
         )
 
+    async def _spawn_agent(self, fd_url: str, agent_name: str, message: str = "", **kwargs: Any) -> ToolResult:
+        """Spawn a new agent in the Flight Deck fleet.
+
+        Uses the caller's own provider/model/api_key as defaults so that
+        Old Man can spawn agents that inherit its configuration.
+        The *message* field can optionally contain a JSON object with overrides:
+        ``{"provider": "...", "model": "...", "description": "..."}``.
+        """
+        try:
+            import httpx
+        except ImportError:
+            return ToolResult(success=False, error="httpx is required")
+
+        # Resolve caller's own model config as defaults for the new agent.
+        agent = kwargs.get("_agent")
+        provider_obj = getattr(agent, "provider", None) if agent else None
+        default_provider = str(getattr(provider_obj, "provider", "ollama") or "ollama")
+        default_model = str(getattr(provider_obj, "model", "") or "")
+        default_api_key = str(getattr(provider_obj, "api_key", "") or "")
+
+        # Parse optional overrides from message.
+        overrides: dict[str, Any] = {}
+        if message.strip().startswith("{"):
+            try:
+                overrides = json.loads(message)
+            except json.JSONDecodeError:
+                pass
+
+        spawn_body = {
+            "name": agent_name,
+            "description": overrides.get("description", f"Agent spawned by Old Man"),
+            "provider": overrides.get("provider", default_provider),
+            "model": overrides.get("model", default_model),
+            "provider_api_key": overrides.get("api_key", default_api_key),
+            "tools": overrides.get("tools", [
+                "shell", "read", "write", "glob", "edit",
+                "web_fetch", "web_search", "browser",
+                "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract",
+                "scripts", "playbooks", "personality", "flight_deck",
+            ]),
+            "web_enabled": True,
+            "web_port": overrides.get("web_port", 0),  # 0 = auto-assign
+        }
+
+        # Try process spawn first (no Docker needed), fall back to docker.
+        for endpoint in ["/fd/spawn-process", "/fd/spawn"]:
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(f"{fd_url}{endpoint}", json=spawn_body)
+                    if resp.status_code == 200:
+                        result = resp.json()
+                        if result.get("ok"):
+                            return ToolResult(
+                                success=True,
+                                content=(
+                                    f"Agent **{agent_name}** spawned successfully.\n"
+                                    f"Provider: {spawn_body['provider']}, Model: {spawn_body['model']}\n"
+                                    f"The agent will be available in the fleet shortly. "
+                                    f"Use list_agents to check when it's running."
+                                ),
+                            )
+                    # If process spawn fails with 400 (already exists), don't retry with docker
+                    if resp.status_code == 400:
+                        detail = resp.json().get("detail", "")
+                        return ToolResult(success=False, error=f"Spawn failed: {detail}")
+            except Exception:
+                continue
+
+        return ToolResult(success=False, error="Failed to spawn agent via Flight Deck. Neither process nor Docker spawn succeeded.")
+
     async def execute(self, action: str, agent_name: str = "", message: str = "", **kwargs: Any) -> ToolResult:
         fd_url = self._get_fd_url(**kwargs)
         if not fd_url:
@@ -398,5 +472,9 @@ class FlightDeckTool(Tool):
             if not message:
                 return ToolResult(success=False, error="message is required for delegate action.")
             return await self._delegate(fd_url, agent_name, message, **kwargs)
+        elif action == "spawn_agent":
+            if not agent_name:
+                return ToolResult(success=False, error="agent_name is required for spawn_agent action.")
+            return await self._spawn_agent(fd_url, agent_name, message, **kwargs)
         else:
-            return ToolResult(success=False, error=f"Unknown action: {action}. Use 'list_agents', 'consult', or 'delegate'.")
+            return ToolResult(success=False, error=f"Unknown action: {action}. Use 'list_agents', 'consult', 'delegate', or 'spawn_agent'.")

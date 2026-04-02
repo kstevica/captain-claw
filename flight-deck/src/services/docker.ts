@@ -167,6 +167,22 @@ export interface ProcessActionResult {
   message: string
 }
 
+// ── Old Man quick-spawn ──
+
+export interface OldManSpawnRequest {
+  provider: string
+  model: string
+  api_key: string
+  web_port?: number
+  mode?: string  // "auto" | "docker" | "process"
+}
+
+export const spawnOldMan = (config: OldManSpawnRequest) =>
+  fdFetch<ContainerActionResult | ProcessActionResult>('/spawn-old-man', {
+    method: 'POST',
+    body: JSON.stringify(config),
+  })
+
 // ── Process agent endpoints ──
 
 export const listProcesses = () =>

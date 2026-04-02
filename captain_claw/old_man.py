@@ -1,9 +1,9 @@
 """Old Man — lightweight desktop supervisor agent.
 
 Runs as a persistent session that triages user requests and delegates
-complex tasks to the orchestrator.  Designed for desktop use (hotkey
-enabled by default) but works equally well from a git-clone/pip-install
-server start.
+complex tasks to the orchestrator or peer agents in Flight Deck.
+Designed for desktop use (hotkey enabled by default) but works equally
+well from a git-clone/pip-install server start.
 
 Integration:
     Called from ``web_server._run_server()`` and ``main.main()`` to apply
@@ -12,6 +12,7 @@ Integration:
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from captain_claw.config import get_config
@@ -33,6 +34,11 @@ def is_old_man_enabled(cfg: "Config | None" = None) -> bool:
     if cfg is None:
         cfg = get_config()
     return bool(cfg.old_man.enabled)
+
+
+def _detect_fd_url() -> str:
+    """Return the Flight Deck URL if we're running inside FD, else ''."""
+    return os.environ.get("FD_URL", "") or os.environ.get("FD_INTERNAL_URL", "")
 
 
 def apply_old_man_config_overrides(cfg: "Config") -> None:
@@ -58,12 +64,18 @@ def apply_old_man_config_overrides(cfg: "Config") -> None:
             om.max_delegated_sessions,
         )
 
+    # Ensure flight_deck tool is enabled when FD is available.
+    fd_url = _detect_fd_url()
+    if fd_url and "flight_deck" not in cfg.tools.enabled:
+        cfg.tools.enabled.append("flight_deck")
+
     log.info(
         "old_man_config_applied",
         hotkey=om.hotkey_enabled,
         trigger_key=cfg.tools.screen_capture.hotkey_trigger_key,
         auto_orchestrate=om.auto_orchestrate,
         voice_response=om.voice_response,
+        fd_url=fd_url or "(not in Flight Deck)",
     )
 
 
@@ -129,6 +141,12 @@ async def setup_old_man_session(agent: "Agent") -> None:
         or "Desktop supervisor — triages and delegates tasks."
     )
     meta["session_instructions"] = build_old_man_session_instructions(cfg)
+
+    # Store FD URL so the flight_deck tool can find it from session metadata.
+    fd_url = _detect_fd_url()
+    if fd_url:
+        meta["fd_url"] = fd_url
+
     session.metadata = meta
 
     # Persist so it survives restarts.
@@ -138,18 +156,23 @@ async def setup_old_man_session(agent: "Agent") -> None:
     except Exception as exc:
         log.warning("old_man_session_save_failed", error=str(exc))
 
-    log.info("old_man_session_tagged", session_id=session.id)
+    log.info(
+        "old_man_session_tagged",
+        session_id=session.id,
+        fd_url=fd_url or "(standalone)",
+    )
 
     # Optionally greet the user on startup.
     if cfg.old_man.idle_greeting and not session.messages:
-        # Inject a soft greeting as the first assistant message so the
-        # user sees something when they open the UI.
-        from captain_claw.llm import Message
-
         greeting = (
             "Old Man supervisor is active. "
             "I'm listening — use the hotkey to talk, or type here."
         )
+        if fd_url:
+            greeting += (
+                " I'm connected to Flight Deck and can spawn or delegate "
+                "to other agents in the fleet."
+            )
         agent._add_session_message(role="assistant", content=greeting)
 
 
@@ -159,12 +182,15 @@ def print_old_man_banner(cfg: "Config") -> None:
         return
     om = cfg.old_man
     trigger = cfg.tools.screen_capture.hotkey_trigger_key
+    fd_url = _detect_fd_url()
     lines = [
         "  Old Man supervisor active",
         f"    hotkey: {trigger} (2x=voice, 3x=screen+voice)",
         f"    auto-orchestrate: {'yes' if om.auto_orchestrate else 'no'}",
         f"    voice response: {'yes' if om.voice_response else 'no'}",
     ]
+    if fd_url:
+        lines.append(f"    flight deck: {fd_url}")
     if om.triage_model:
         lines.append(f"    triage model: {om.triage_model}")
     print("\n".join(lines))
