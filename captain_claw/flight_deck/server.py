@@ -1807,7 +1807,9 @@ async def agent_files(host: str, port: int, token: str = "", request: Request = 
     """List files from a CC agent (proxied to avoid CORS), merged with workspace scan."""
     import httpx
     registered: list[dict] = []
-    params = f"?token={token}" if token else ""
+    # Auto-resolve auth token if the caller didn't provide one
+    auth = token or _resolve_agent_auth(port)
+    params = f"?token={auth}" if auth else ""
     url = f"http://{host}:{port}/api/files{params}"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -1893,12 +1895,13 @@ async def agent_file_download(host: str, port: int, path: str, token: str = "", 
     """Proxy file download from a CC agent."""
     import httpx
     import urllib.parse
+    auth = token or _resolve_agent_auth(port)
     params = f"path={urllib.parse.quote(path)}"
-    if token:
-        params += f"&token={urllib.parse.quote(token)}"
+    if auth:
+        params += f"&token={urllib.parse.quote(auth)}"
     url = f"http://{host}:{port}/api/files/download?{params}"
     try:
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.get(url)
             if resp.status_code != 200:
                 raise HTTPException(resp.status_code, f"Agent returned {resp.status_code}")
@@ -1921,13 +1924,14 @@ async def agent_file_view(host: str, port: int, path: str, token: str = "", requ
     """Proxy file view from a CC agent (inline, no download header)."""
     import httpx
     import urllib.parse
+    auth = token or _resolve_agent_auth(port)
     params = f"path={urllib.parse.quote(path)}"
-    if token:
-        params += f"&token={urllib.parse.quote(token)}"
+    if auth:
+        params += f"&token={urllib.parse.quote(auth)}"
     # Try the /api/files/view endpoint first, fall back to /download
     url = f"http://{host}:{port}/api/files/view?{params}"
     try:
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.get(url)
             if resp.status_code != 200:
                 # Fallback to download endpoint
@@ -1950,7 +1954,8 @@ async def agent_file_upload(host: str, port: int, token: str = "", file: UploadF
     """Proxy file upload to a CC agent."""
     import httpx
 
-    params = f"?token={token}" if token else ""
+    auth = token or _resolve_agent_auth(port)
+    params = f"?token={auth}" if auth else ""
     url = f"http://{host}:{port}/api/file/upload{params}"
     content = await file.read()
     try:
@@ -1972,9 +1977,10 @@ async def agent_file_upload(host: str, port: int, token: str = "", file: UploadF
 async def agent_usage(host: str, port: int, token: str = "", period: str = "today", request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
     """Proxy /api/usage from a CC agent."""
     import httpx
+    auth = token or _resolve_agent_auth(port)
     params = f"?period={period}"
-    if token:
-        params += f"&token={token}"
+    if auth:
+        params += f"&token={auth}"
     url = f"http://{host}:{port}/api/usage{params}"
     try:
         # First request with token may return a 302 redirect that sets a cookie.

@@ -430,7 +430,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
                   Chat
                 </button>
                 <button
-                  onClick={() => window.open(`http://localhost:${container.web_port}/chat`, '_blank')}
+                  onClick={() => window.open(`http://localhost:${container.web_port}/chat${container.web_auth ? `?token=${encodeURIComponent(container.web_auth)}` : ''}`, '_blank')}
                   className="flex items-center gap-1 rounded-lg px-2 py-0.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
                 >
                   <ExternalLink className="h-3 w-3" />

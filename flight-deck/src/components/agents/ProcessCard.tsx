@@ -339,7 +339,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
                   className="flex items-center gap-1 rounded-lg bg-emerald-600/20 px-2 py-0.5 text-xs font-medium text-emerald-300 hover:bg-emerald-600/30">
                   <MessageSquare className="h-3 w-3" /> Chat
                 </button>
-                <button onClick={() => window.open(`http://localhost:${proc.web_port}/chat`, '_blank')}
+                <button onClick={() => window.open(`http://localhost:${proc.web_port}/chat${proc.web_auth ? `?token=${encodeURIComponent(proc.web_auth)}` : ''}`, '_blank')}
                   className="flex items-center gap-1 rounded-lg px-2 py-0.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
                   <ExternalLink className="h-3 w-3" /> Open
                 </button>

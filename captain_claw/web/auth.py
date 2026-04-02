@@ -105,8 +105,8 @@ def create_auth_middleware(config: WebConfig) -> Callable:
         # ── 2. Token in query string? → set cookie + redirect ────────
         token_param = request.query.get("token", "")
         if token_param and hmac.compare_digest(token_param, auth_token):
-            # WebSocket upgrades can't follow redirects — pass through directly.
-            if request.path == "/ws" or request.headers.get("Upgrade", "").lower() == "websocket":
+            # WebSocket and API requests can't follow redirects — pass through directly.
+            if request.path == "/ws" or request.headers.get("Upgrade", "").lower() == "websocket" or request.path.startswith("/api/"):
                 return await handler(request)
 
             cookie_val = _make_cookie_value(auth_token)

@@ -144,6 +144,9 @@ def create_public_middleware(config: "WebConfig") -> Callable:
             cookie = request.cookies.get(ADMIN_COOKIE, "")
             has_cookie = bool(cookie and _validate_admin_cookie(cookie, config.auth_token, config.auth_cookie_max_age))
             if token_param and not has_cookie:
+                # API requests can't follow redirects — pass through directly.
+                if request.path.startswith("/api/"):
+                    return await handler(request)
                 from captain_claw.web.auth import _make_cookie_value, _is_behind_tls
                 cookie_val = _make_cookie_value(config.auth_token)
                 # Redirect to same path without the token param.
