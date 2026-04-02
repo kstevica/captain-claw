@@ -6,6 +6,8 @@ import { useChatStore } from '../../stores/chatStore'
 import { EmbeddedChat } from './EmbeddedChat'
 import { AgentGroupBadges } from '../common/AgentGroups'
 import { OpenDropdown } from '../common/OpenDropdown'
+import { useAuthStore } from '../../stores/authStore'
+import { queueSave, registerHydrator } from '../../services/settingsSync'
 
 const statusStyles: Record<string, string> = {
   online: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
@@ -20,8 +22,13 @@ function loadViewModes(): Record<string, ViewMode> {
   try { return JSON.parse(localStorage.getItem(VIEW_KEY) || '{}') } catch { return {} }
 }
 function saveViewModes(m: Record<string, ViewMode>) {
-  localStorage.setItem(VIEW_KEY, JSON.stringify(m))
+  const val = JSON.stringify(m)
+  localStorage.setItem(VIEW_KEY, val)
+  if (useAuthStore.getState().authEnabled) queueSave(VIEW_KEY, val)
 }
+registerHydrator((settings) => {
+  if (settings[VIEW_KEY]) localStorage.setItem(VIEW_KEY, settings[VIEW_KEY])
+})
 function cycleMode(current: ViewMode): ViewMode {
   if (current === 'expanded') return 'compact'
   if (current === 'compact') return 'icon'

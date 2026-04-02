@@ -17,7 +17,9 @@ import {
 } from 'lucide-react'
 import { useContainerStore } from '../stores/containerStore'
 import { useLocalAgentStore } from '../stores/localAgentStore'
+import { useProcessStore } from '../stores/processStore'
 import { useChatStore } from '../stores/chatStore'
+import { useAuthStore } from '../stores/authStore'
 
 // ── Types ──
 
@@ -54,7 +56,7 @@ interface UsageRecord {
 interface AgentUsage {
   agentId: string
   agentName: string
-  kind: 'docker' | 'local'
+  kind: 'docker' | 'local' | 'process'
   status: string
   host: string
   port: number
@@ -121,10 +123,20 @@ function relativeTime(iso: string): string {
 
 // ── Fetch usage ──
 
+function _authHeaders(): Record<string, string> {
+  const { token, authEnabled } = useAuthStore.getState()
+  const h: Record<string, string> = {}
+  if (authEnabled && token) h['Authorization'] = `Bearer ${token}`
+  return h
+}
+
 async function fetchAgentUsage(host: string, port: number, auth: string, period: Period): Promise<{ totals: UsageTotals; records: UsageRecord[] }> {
   const params = new URLSearchParams({ period })
   if (auth) params.set('token', auth)
-  const resp = await fetch(`/fd/agent-usage/${host}/${port}?${params}`)
+  const resp = await fetch(`/fd/agent-usage/${host}/${port}?${params}`, {
+    headers: _authHeaders(),
+    credentials: 'include',
+  })
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
   const data = await resp.json()
   return { totals: data.totals, records: data.records || [] }
@@ -135,6 +147,7 @@ async function fetchAgentUsage(host: string, port: number, auth: string, period:
 export function OperationsPage() {
   const containers = useContainerStore((s) => s.containers)
   const localAgents = useLocalAgentStore((s) => s.agents)
+  const processes = useProcessStore((s) => s.processes)
   const chatSessions = useChatStore((s) => s.sessions)
 
   const [period, setPeriod] = useState<Period>('today')
@@ -145,17 +158,22 @@ export function OperationsPage() {
 
   // Build agent list
   const agents = useMemo(() => {
-    const list: { id: string; name: string; kind: 'docker' | 'local'; status: string; host: string; port: number; auth: string }[] = []
+    const list: { id: string; name: string; kind: 'docker' | 'local' | 'process'; status: string; host: string; port: number; auth: string }[] = []
     for (const c of containers) {
       if (c.web_port) {
         list.push({ id: c.id, name: c.agent_name || c.name, kind: 'docker', status: c.status, host: 'localhost', port: c.web_port, auth: c.web_auth || '' })
+      }
+    }
+    for (const p of processes) {
+      if (p.web_port) {
+        list.push({ id: p.slug, name: p.name, kind: 'process', status: p.status, host: 'localhost', port: p.web_port, auth: p.web_auth || '' })
       }
     }
     for (const a of localAgents) {
       list.push({ id: a.id, name: a.name, kind: 'local', status: a.status === 'online' ? 'running' : a.status, host: a.host, port: a.port, auth: a.authToken || '' })
     }
     return list
-  }, [containers, localAgents])
+  }, [containers, processes, localAgents])
 
   // Fetch all usage
   const fetchAll = useCallback(async () => {
