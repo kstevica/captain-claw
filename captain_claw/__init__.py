@@ -1,6 +1,6 @@
 """Captain Claw - A powerful console-based AI agent."""
 
-__version__ = "0.4.8"
+__version__ = "0.4.8.1"
 __build_date__ = "2026-03-31"
 __author__ = "Stevica Kuharski"
 
