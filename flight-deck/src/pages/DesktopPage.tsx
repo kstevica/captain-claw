@@ -9,7 +9,7 @@ import { ContainerCard } from '../components/agents/ContainerCard'
 import { LocalAgentCard } from '../components/agents/LocalAgentCard'
 import { ProcessCard } from '../components/agents/ProcessCard'
 import { FileBrowser } from '../components/agents/FileBrowser'
-import { Radio, Plus, Server, LayoutGrid, Move, Zap } from 'lucide-react'
+import { Radio, Plus, Server, LayoutGrid, Move, Zap, X } from 'lucide-react'
 import { spawnOldMan } from '../services/docker'
 import type { AgentEndpoint } from '../services/fileTransfer'
 import { useGroupStore } from '../stores/groupStore'
@@ -81,6 +81,7 @@ export function DesktopPage() {
   const { processes, fetchProcesses } = useProcessStore()
   const selectedInstance = instances.find((i) => i.id === selectedInstanceId)
   const [showAddAgent, setShowAddAgent] = useState(false)
+  const [showOldManWizard, setShowOldManWizard] = useState(false)
   const [browsingAgent, setBrowsingAgent] = useState<AgentEndpoint | null>(null)
   const [positions, setPositions] = useState<Record<string, Position>>(loadPositions)
   const [layoutMode, setLayoutMode] = useState<'grid' | 'free'>(loadLayoutMode)
@@ -215,6 +216,10 @@ export function DesktopPage() {
   const hasContent = instances.length > 0 || containers.length > 0 || processes.length > 0 || localAgents.length > 0
   const agentCount = containers.length + processes.length + localAgents.length
 
+  // Check if Old Man is already in the fleet
+  const hasOldMan = containers.some((c) => (c.agent_name || c.name || '').toLowerCase().includes('old-man') || (c.agent_name || c.name || '').toLowerCase().includes('old man'))
+    || processes.some((p) => (p.name || p.slug || '').toLowerCase().includes('old-man') || (p.name || p.slug || '').toLowerCase().includes('old man'))
+
   // Calculate canvas height for free mode
   const canvasHeight = useMemo(() => {
     if (layoutMode !== 'free') return 'auto'
@@ -278,6 +283,15 @@ export function DesktopPage() {
             <p className="text-sm text-zinc-500">Monitor and control your personal assistants</p>
           </div>
           <div className="flex items-center gap-2">
+            {!hasOldMan && (
+              <button
+                onClick={() => setShowOldManWizard(true)}
+                className="flex items-center gap-1.5 rounded-md bg-violet-600/20 px-2.5 py-1.5 text-xs font-medium text-violet-300 hover:bg-violet-600/30 border border-violet-600/30"
+              >
+                <Zap className="h-3.5 w-3.5" />
+                Spawn Old Man
+              </button>
+            )}
             <GroupFilter selected={groupFilter} onChange={setGroupFilter} />
             {layoutMode === 'free' && (
               <button
@@ -405,6 +419,21 @@ export function DesktopPage() {
           onClose={() => setBrowsingAgent(null)}
         />
       )}
+
+      {/* Old Man spawn wizard modal */}
+      {showOldManWizard && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="relative">
+            <button
+              onClick={() => setShowOldManWizard(false)}
+              className="absolute -top-2 -right-2 z-10 rounded-full bg-zinc-800 p-1 text-zinc-400 hover:text-zinc-200"
+            >
+              <X className="h-4 w-4" />
+            </button>
+            <OldManOnboarding onSpawned={() => { setShowOldManWizard(false); fetchContainers(); fetchProcesses() }} />
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -525,7 +554,7 @@ function OldManOnboarding({ onSpawned }: { onSpawned: () => void }) {
   }
 
   return (
-    <div className="mx-auto mt-16 max-w-md">
+    <div className="mx-auto max-w-md pt-16">
       <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-6">
         <div className="mb-4 flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-violet-600/20 text-violet-400">
