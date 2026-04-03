@@ -1120,9 +1120,17 @@ class AgentContextMixin:
             else:
                 limit = base_limit
 
+            # Cognitive mode intuition type weights (Layer 2).
+            _mode_params = getattr(self, "_cognitive_mode_params", None)
+            _type_weights = (
+                _mode_params.intuition_type_weights
+                if _mode_params and _mode_params.intuition_type_weights
+                else None
+            )
             self._nervous_system_cache = await mgr.get_for_context(
                 limit=limit,
                 session_id=session_id,
+                type_weights=_type_weights,
             )
             # Cache live stats for the self-awareness block.
             try:
@@ -1351,6 +1359,20 @@ class AgentContextMixin:
                 tempo_desc += f" Current mode: {tempo.mode} ({tempo.combined_tempo:.2f})."
             parts.append(tempo_desc)
 
+        # Cognitive mode
+        if cfg.cognitive_mode.enabled:
+            mode = getattr(self, "_cognitive_mode", None)
+            if mode and mode.name != "neutra":
+                parts.append("")
+                parts.append(
+                    f"COGNITIVE MODE: Your current mode is {mode.name.upper()} "
+                    f"({mode.label}). {mode.character}. This mode shapes your "
+                    f"reasoning approach — how you prioritize, what you look for, "
+                    f"and how you structure your thinking. It operates independently "
+                    f"of cognitive tempo (speed). The mode instructions are injected "
+                    f"separately in your context."
+                )
+
         # ── Live operational status ──────────────────────────────────
         if has_nervous:
             stats = getattr(self, "_nervous_system_stats", None)
@@ -1413,6 +1435,41 @@ class AgentContextMixin:
         )
 
         return "\n".join(parts)
+
+    # ── Cognitive mode block ─────────────────────────────────────────
+
+    def _build_cognitive_mode_block(self) -> str:
+        """Build the ``{cognitive_mode_block}`` for the system prompt.
+
+        Loads the active cognitive mode, stores its params on the agent
+        instance for Layer 2 consumers (nervous system, completion gate),
+        and returns the Layer 1 prompt text.
+
+        Returns empty string when cognitive mode is disabled or set to
+        neutra (the no-op default).
+        """
+        cfg = get_config()
+        if not cfg.cognitive_mode.enabled:
+            self._cognitive_mode = None
+            self._cognitive_mode_params = None
+            return ""
+
+        from captain_claw.cognitive_mode import (
+            cognitive_mode_to_prompt_block,
+            get_mode,
+            load_agent_mode,
+        )
+
+        mode_name = load_agent_mode()
+        mode = get_mode(mode_name)
+
+        # Store on agent instance for Layer 2 consumers.
+        self._cognitive_mode = mode
+        self._cognitive_mode_params = mode.params
+
+        # Build Layer 1 prompt text using the agent's instruction loader.
+        loader = getattr(self, "instructions", None)
+        return cognitive_mode_to_prompt_block(mode, instruction_loader=loader)
 
     # ── Sister session briefing context ──────────────────────────────
 
@@ -2460,6 +2517,7 @@ class AgentContextMixin:
         nervous_system_block = self._build_nervous_system_block()
         briefing_block = self._build_briefing_block()
         cognitive_self_awareness_block = self._build_cognitive_self_awareness_block()
+        cognitive_mode_block = self._build_cognitive_mode_block()
 
         from captain_claw import __version__, __build_date__
 
@@ -2479,6 +2537,7 @@ class AgentContextMixin:
             visualization_style_block=visualization_style_block,
             reflection_block=reflection_block,
             cognitive_self_awareness_block=cognitive_self_awareness_block,
+            cognitive_mode_block=cognitive_mode_block,
             system_info_block=system_info_block,
             extra_read_dirs_block=extra_read_dirs_block,
             tool_list_block=tool_list_block,

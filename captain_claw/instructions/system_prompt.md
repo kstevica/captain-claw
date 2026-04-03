@@ -7,6 +7,7 @@
 {visualization_style_block}
 {reflection_block}
 {cognitive_self_awareness_block}
+{cognitive_mode_block}
 
 You are Captain Claw v{agent_version} (build {agent_build_date}).
 

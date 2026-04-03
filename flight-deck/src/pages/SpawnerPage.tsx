@@ -47,6 +47,9 @@ interface AgentConfig {
   slackEnabled: boolean
   slackBotToken: string
 
+  // Cognitive mode
+  cognitiveMode: string
+
   // Docker
   networkMode: string
   restartPolicy: string
@@ -107,6 +110,7 @@ const defaultConfig: AgentConfig = {
   discordBotToken: '',
   slackEnabled: false,
   slackBotToken: '',
+  cognitiveMode: 'neutra',
   networkMode: 'host',
   restartPolicy: 'unless-stopped',
   extraVolumes: [],
@@ -581,6 +585,18 @@ export function SpawnerPage() {
               <Field label="API Key" hint="Stored in .env file, not in config.yaml">
                 <input type="password" value={config.providerApiKey} onChange={(e) => update('providerApiKey', e.target.value)} placeholder="sk-..." className="input font-mono text-xs" />
               </Field>
+              <Field label="Cognitive Mode" hint="How the agent thinks — reasoning strategy">
+                <select value={config.cognitiveMode} onChange={(e) => update('cognitiveMode', e.target.value)} className="input">
+                  <option value="neutra">Neutra — Default (balanced)</option>
+                  <option value="ionian">Ionian — The Resolver (convergent, decisive)</option>
+                  <option value="dorian">Dorian — The Pragmatic Empath (tradeoff-aware)</option>
+                  <option value="phrygian">Phrygian — The Adversarial Analyst (threat modeling)</option>
+                  <option value="lydian">Lydian — The Visionary Explorer (creative, divergent)</option>
+                  <option value="mixolydian">Mixolydian — The Iterative Builder (ship & improve)</option>
+                  <option value="aeolian">Aeolian — The Depth Researcher (thorough analysis)</option>
+                  <option value="locrian">Locrian — The Deconstructionist (challenges premises)</option>
+                </select>
+              </Field>
             </Section>
 
             {/* BotPort */}
@@ -813,6 +829,7 @@ export function SpawnerPage() {
                     discord_bot_token: config.discordBotToken,
                     slack_enabled: config.slackEnabled,
                     slack_bot_token: config.slackBotToken,
+                    cognitive_mode: config.cognitiveMode,
                     network_mode: config.networkMode,
                     restart_policy: config.restartPolicy,
                     extra_volumes: config.extraVolumes,

@@ -103,6 +103,45 @@ def _build_schema() -> list[dict[str, Any]]:
                 },
             ],
         },
+        # ── 0a. Cognitive Mode ──────────────────────────────────
+        {
+            "id": "cognitive_mode",
+            "title": "Cognitive Mode",
+            "icon": "\U0001F3B5",
+            "sections": [
+                {
+                    "id": "cognitive_mode_toggle",
+                    "title": "Cognitive Mode",
+                    "description": "Musical-mode-inspired reasoning strategy. Shapes HOW the agent thinks — independently of personality (who) and tempo (speed).",
+                    "fields": [
+                        _field("cognitive_mode.enabled", "Enable cognitive modes", type="toggle"),
+                    ],
+                },
+                {
+                    "id": "cognitive_mode_selector",
+                    "title": "Active Mode",
+                    "description": "Select a reasoning strategy for this agent.",
+                    "show_when": {"key": "cognitive_mode.enabled", "value": True},
+                    "fields": [
+                        _field("cognitive_mode.default_mode", "Mode", type="select",
+                               options=[
+                                   "neutra", "ionian", "dorian", "phrygian",
+                                   "lydian", "mixolydian", "aeolian", "locrian",
+                               ],
+                               labels={
+                                   "neutra": "Neutra \u2014 Default (balanced)",
+                                   "ionian": "Ionian \u2014 The Resolver (convergent, decisive)",
+                                   "dorian": "Dorian \u2014 The Pragmatic Empath (tradeoff-aware)",
+                                   "phrygian": "Phrygian \u2014 The Adversarial Analyst (threat modeling)",
+                                   "lydian": "Lydian \u2014 The Visionary Explorer (creative, divergent)",
+                                   "mixolydian": "Mixolydian \u2014 The Iterative Builder (ship & improve)",
+                                   "aeolian": "Aeolian \u2014 The Depth Researcher (thorough analysis)",
+                                   "locrian": "Locrian \u2014 The Deconstructionist (challenges premises)",
+                               }),
+                    ],
+                },
+            ],
+        },
         # ── 0b. Visualization Style ──────────────────────────────────
         {
             "id": "visualization_style",

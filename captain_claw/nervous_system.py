@@ -417,10 +417,15 @@ class NervousSystemManager:
         *,
         limit: int = 4,
         session_id: str | None = None,
+        type_weights: dict[str, float] | None = None,
     ) -> list[dict[str, Any]]:
         """Retrieve intuitions for context injection.
 
         Ranks by (confidence * importance) with session and recency bonuses.
+
+        *type_weights* is an optional mapping of thread_type → multiplier
+        used by cognitive modes (Layer 2) to boost or suppress certain
+        intuition types.  Types not in the dict default to 1.0.
         """
         if query:
             return await self.search(query, limit=limit)
@@ -443,7 +448,7 @@ class NervousSystemManager:
 
         items = [self._row_to_dict(r) for r in rows]
 
-        # Apply session and recency bonuses for ranking.
+        # Apply session, recency, and cognitive mode type weight bonuses.
         now = datetime.now(UTC)
         for item in items:
             score = (item.get("confidence", 0.5) * item.get("importance", 5))
@@ -459,6 +464,11 @@ class NervousSystemManager:
                         score += 1.0
                 except (ValueError, TypeError):
                     pass
+            # Cognitive mode intuition type weighting (Layer 2).
+            if type_weights:
+                thread_type = item.get("thread_type", "")
+                weight = type_weights.get(thread_type, 1.0)
+                score *= weight
             item["_score"] = score
 
         items.sort(key=lambda x: x.get("_score", 0), reverse=True)
@@ -669,18 +679,21 @@ class NervousSystemManager:
 
     # ── maturation pipeline ──────────────────────────────────────────
 
-    async def advance_maturation(self) -> int:
+    async def advance_maturation(self, *, cycles_override: int | None = None) -> int:
         """Advance the maturation pipeline — called after each dream cycle.
 
         Increments dream_cycles_seen for all raw/maturing intuitions.
         Transitions to 'mature' when cycles_required is reached.
         Returns count of newly matured intuitions.
+
+        *cycles_override* allows cognitive modes to adjust the threshold
+        (e.g. Lydian surfaces faster with fewer cycles, Aeolian requires more).
         """
         await self._ensure_db()
         assert self._db is not None
 
         cfg = get_config()
-        cycles_required = cfg.nervous_system.maturation_cycles_required
+        cycles_required = cycles_override if cycles_override is not None else cfg.nervous_system.maturation_cycles_required
         now = datetime.now(UTC).isoformat(timespec="seconds")
 
         # Increment cycle count for all non-mature intuitions.
@@ -1049,9 +1062,15 @@ async def dream(agent: Agent, *, source_trigger: str = "dream") -> list[dict[str
         pass
 
     # 12b. Advance maturation pipeline.
+    # Apply cognitive mode maturation delta (Layer 2).
+    maturation_override = None
+    _mode_params = getattr(agent, "_cognitive_mode_params", None)
+    if _mode_params and _mode_params.maturation_cycles_delta != 0:
+        cfg_cycles = get_config().nervous_system.maturation_cycles_required
+        maturation_override = max(1, cfg_cycles + _mode_params.maturation_cycles_delta)
     matured_count = 0
     try:
-        matured_count = await mgr.advance_maturation()
+        matured_count = await mgr.advance_maturation(cycles_override=maturation_override)
     except Exception:
         pass
 
@@ -1137,6 +1156,10 @@ async def maybe_dream(
         # Cooldown check.
         last_time = getattr(agent, _ATTR_LAST_TIME, 0.0)
         cooldown = cfg.nervous_system.dream_cooldown_seconds or _DEFAULT_COOLDOWN_SECONDS
+        # Apply cognitive mode modifier (Layer 2).
+        _mode_params = getattr(agent, "_cognitive_mode_params", None)
+        if _mode_params and _mode_params.dream_cooldown_modifier != 1.0:
+            cooldown = int(cooldown * _mode_params.dream_cooldown_modifier)
         if time.time() - last_time < cooldown:
             setattr(agent, _ATTR_RUNNING, False)
             return None
@@ -1147,6 +1170,9 @@ async def maybe_dream(
             return None
         last_idx = getattr(agent, _ATTR_LAST_MSG_IDX, 0)
         interval = cfg.nervous_system.dream_interval_messages or _DEFAULT_INTERVAL_MESSAGES
+        # Apply cognitive mode modifier (Layer 2).
+        if _mode_params and _mode_params.dream_interval_modifier != 1.0:
+            interval = max(1, int(interval * _mode_params.dream_interval_modifier))
         if len(agent.session.messages) - last_idx < interval:
             setattr(agent, _ATTR_RUNNING, False)
             return None

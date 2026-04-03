@@ -53,6 +53,7 @@ interface AgentProposal {
   description: string
   fleet_instructions: string
   tools: string[]
+  cognitive_mode: string
   type: 'process' | 'docker'
   provider: string
   model: string
@@ -168,6 +169,7 @@ export function ForgePage() {
         description: a.description || '',
         fleet_instructions: a.fleet_instructions || '',
         tools: a.tools || DEFAULT_TOOLS,
+        cognitive_mode: a.cognitive_mode || 'neutra',
         type: 'process' as const,
         provider: llmConfig.provider,
         model: llmConfig.model,
@@ -203,6 +205,7 @@ export function ForgePage() {
       description: '',
       fleet_instructions: '',
       tools: DEFAULT_TOOLS,
+      cognitive_mode: 'neutra',
       type: 'process',
       provider: llmConfig.provider,
       model: llmConfig.model,
@@ -254,6 +257,7 @@ export function ForgePage() {
         botport_secret: '',
         botport_max_concurrent: 5,
         tools: agent.tools,
+        cognitive_mode: agent.cognitive_mode || 'neutra',
         web_enabled: true,
         web_port: 0,
         web_auth_token: '',

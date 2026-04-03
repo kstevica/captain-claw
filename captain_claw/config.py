@@ -766,6 +766,19 @@ class CognitiveTempoConfig(BaseModel):
     adjust_response_guidance: bool = True       # Let tempo affect system prompt guidance
 
 
+class CognitiveModeConfig(BaseModel):
+    """Musical-mode-inspired cognitive reasoning strategies.
+
+    Maps musical modes (Ionian through Locrian) to distinct thinking
+    approaches.  When enabled, the active mode injects reasoning
+    instructions into the system prompt and modifies subsystem parameters
+    (dreaming frequency, completion strictness, etc.).
+    """
+
+    enabled: bool = False
+    default_mode: str = "neutra"                # Default mode when no file on disk
+
+
 class ScaleConfig(BaseModel):
     """Scale loop thresholds for list processing tasks."""
 
@@ -969,6 +982,7 @@ class Config(BaseSettings):
     sister_session: SisterSessionConfig = Field(default_factory=SisterSessionConfig)
     cognitive_metrics: CognitiveMetricsConfig = Field(default_factory=CognitiveMetricsConfig)
     cognitive_tempo: CognitiveTempoConfig = Field(default_factory=CognitiveTempoConfig)
+    cognitive_mode: CognitiveModeConfig = Field(default_factory=CognitiveModeConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="CLAW_",

@@ -10,6 +10,7 @@ import { AgentGroupBadges } from '../common/AgentGroups'
 import { AgentConfigEditor } from './AgentConfigEditor'
 import { DatastoreBrowser } from './DatastoreBrowser'
 import { OpenDropdown } from '../common/OpenDropdown'
+import { CognitiveModeSelector } from '../common/CognitiveModeSelector'
 import { useAuthStore } from '../../stores/authStore'
 import { queueSave, registerHydrator } from '../../services/settingsSync'
 
@@ -105,6 +106,8 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   const [viewMode, setViewMode] = useState<ViewMode>(() => loadViewModes()[container.id] || 'expanded')
   const [showConfig, setShowConfig] = useState(false)
   const [showDatastore, setShowDatastore] = useState(false)
+  const [cognitiveMode, setCognitiveMode] = useState('neutra')
+  const [modeSaved, setModeSaved] = useState(false)
 
   const isRunning = container.status === 'running'
   const agentName = container.agent_name || container.name
@@ -521,6 +524,25 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
             </div>
           )}
         </div>
+
+        {/* Cognitive Mode (runtime switch) */}
+        <CognitiveModeSelector
+          value={cognitiveMode}
+          saved={modeSaved}
+          onChange={async (newMode) => {
+            setCognitiveMode(newMode)
+            try {
+              const { token, authEnabled } = useAuthStore.getState()
+              const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+              if (authEnabled && token) headers['Authorization'] = `Bearer ${token}`
+              const res = await fetch(`/fd/agent-mode/docker/${container.id}`, {
+                method: 'PUT', headers, credentials: 'include',
+                body: JSON.stringify({ mode: newMode }),
+              })
+              if (res.ok) { setModeSaved(true); setTimeout(() => setModeSaved(false), 2000) }
+            } catch (err) { console.error('Failed to update cognitive mode:', err) }
+          }}
+        />
 
         {/* Forwarding Task (editable) */}
         <div className="mb-3 group/fwd">

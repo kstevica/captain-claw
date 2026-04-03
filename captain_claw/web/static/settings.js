@@ -168,7 +168,7 @@
                 ctrl.appendChild(makeToggle(field.key, val));
                 break;
             case 'select':
-                ctrl.appendChild(makeSelect(field.key, field.options || [], val));
+                ctrl.appendChild(makeSelect(field.key, field.options || [], val, field.labels));
                 break;
             case 'range':
                 ctrl.appendChild(makeRange(field.key, field, val));
@@ -217,13 +217,13 @@
         return inp;
     }
 
-    function makeSelect(key, options, val) {
+    function makeSelect(key, options, val, labels) {
         const sel = document.createElement('select');
         sel.className = 'st-select';
         for (const opt of options) {
             const o = document.createElement('option');
             o.value = opt;
-            o.textContent = opt;
+            o.textContent = (labels && labels[opt]) ? labels[opt] : opt;
             if (String(val) === String(opt)) o.selected = true;
             sel.appendChild(o);
         }

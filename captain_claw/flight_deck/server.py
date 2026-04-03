@@ -347,6 +347,9 @@ class AgentConfig(BaseModel):
     slack_enabled: bool = False
     slack_bot_token: str = ""
 
+    # Cognitive mode
+    cognitive_mode: str = "neutra"
+
     # Docker
     network_mode: str = "host"
     restart_policy: str = "unless-stopped"
@@ -457,6 +460,10 @@ def _build_config_yaml(c: AgentConfig) -> str:
         "discord": {"enabled": c.discord_enabled, "bot_token": c.discord_bot_token},
         "slack": {"enabled": c.slack_enabled, "bot_token": c.slack_bot_token},
         "logging": {"level": "INFO", "format": "console"},
+        "cognitive_mode": {
+            "enabled": c.cognitive_mode != "neutra",
+            "default_mode": c.cognitive_mode,
+        },
     }
     return yaml.dump(cfg, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
@@ -704,6 +711,11 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
 
     env_content = _build_env(config)
     (agent_dir / ".env").write_text(env_content)
+
+    # Write cognitive mode file for the agent (Docker spawn).
+    if config.cognitive_mode and config.cognitive_mode != "neutra":
+        mode_file = agent_dir / "data" / "home-config" / "cognitive_mode.txt"
+        mode_file.write_text(config.cognitive_mode, encoding="utf-8")
 
     # Build volume mounts
     # CC WORKDIR is /app — it loads ./config.yaml from CWD (/app/config.yaml)
@@ -1289,6 +1301,53 @@ async def update_agent_config(
         updated.append(".env")
 
     return {"ok": True, "updated": updated, "message": "Restart the agent for changes to take effect."}
+
+
+class AgentModeUpdate(BaseModel):
+    mode: str = "neutra"
+
+
+@app.put("/fd/agent-mode/{kind}/{identifier}")
+async def update_agent_mode(
+    kind: str, identifier: str, body: AgentModeUpdate, request: Request,
+    user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None,
+):
+    """Update an agent's cognitive mode at runtime (no restart needed).
+
+    Writes the mode to cognitive_mode.txt — the agent picks it up
+    on the next system prompt build via mtime-based cache invalidation.
+    """
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+
+    # Validate mode name.
+    from captain_claw.cognitive_mode import MODES
+    mode_name = body.mode.lower().strip()
+    if mode_name not in MODES:
+        raise HTTPException(400, f"Unknown cognitive mode: {mode_name!r}. Valid: {', '.join(MODES)}")
+
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+
+    # Write to all potential home config locations.
+    for subdir in ("home-config", "home-config-parent"):
+        cc_dir = agent_dir / "data" / subdir / ".captain-claw"
+        if cc_dir.is_dir():
+            mode_file = cc_dir / "cognitive_mode.txt"
+            if mode_name == "neutra":
+                # Remove file for neutra (default no-op).
+                mode_file.unlink(missing_ok=True)
+            else:
+                mode_file.write_text(mode_name, encoding="utf-8")
+
+    return {"ok": True, "mode": mode_name, "message": "Mode updated. Takes effect on the agent's next response."}
+
+
+@app.get("/fd/cognitive-modes")
+async def list_cognitive_modes():
+    """Return all available cognitive modes for UI dropdowns."""
+    from captain_claw.cognitive_mode import list_modes, mode_to_dict
+    return {"modes": [mode_to_dict(m) for m in list_modes()]}
 
 
 @app.get("/fd/containers/{container_id}")
@@ -2209,6 +2268,11 @@ async def spawn_process(config: AgentConfig, request: Request, user: dict | None
     if hc_target.exists() or hc_target.is_symlink():
         hc_target.unlink()
     shutil.copy2(str(hc_config), str(hc_target))
+
+    # Write cognitive mode file for the agent.
+    if config.cognitive_mode and config.cognitive_mode != "neutra":
+        mode_file = home_cc_dir / "cognitive_mode.txt"
+        mode_file.write_text(config.cognitive_mode, encoding="utf-8")
 
     # Open log file
     log_file = agent_dir / "process.log"

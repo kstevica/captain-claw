@@ -625,6 +625,19 @@ class AgentCompletionMixin:
                 # validation is advisory — blocking indefinitely causes
                 # pipeline timeouts for straightforward requests.
                 _general_retry_cap = 2
+
+                # Cognitive mode completion strictness modifier (Layer 2).
+                # High strictness (>0.7) → more retries allowed.
+                # Low strictness (<0.3) → fewer retries, accept sooner.
+                _mode_params = getattr(self, "_cognitive_mode_params", None)
+                if _mode_params and _mode_params.completion_strictness != 0.5:
+                    cs = _mode_params.completion_strictness
+                    if cs > 0.7:
+                        _post_scale_retry_cap = 2
+                        _general_retry_cap = 3
+                    elif cs < 0.3:
+                        _post_scale_retry_cap = 0
+                        _general_retry_cap = 1
                 if _scale_completed and iteration >= _post_scale_retry_cap:
                     log.info(
                         "Post-scale validation retry cap reached — accepting response",
