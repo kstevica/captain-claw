@@ -9,6 +9,7 @@ const NAME_KEY = 'fd:process-names'
 const FWD_KEY = 'fd:process-forwarding-tasks'
 const APPROVAL_KEY = 'fd:process-consult-approval'
 const FLEET_INSTRUCTIONS_KEY = 'fd:process-fleet-instructions'
+const COGNITIVE_MODE_KEY = 'fd:process-cognitive-modes'
 
 function loadMap(key: string): Record<string, string> {
   try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} }
@@ -30,6 +31,7 @@ interface ProcessStore {
   forwardingTaskOverrides: Record<string, string>
   consultApprovalOverrides: Record<string, boolean>
   fleetInstructionsOverrides: Record<string, string>
+  cognitiveModeOverrides: Record<string, string>
 
   fetchProcesses: () => Promise<void>
   stopProcess: (slug: string) => Promise<void>
@@ -45,6 +47,8 @@ interface ProcessStore {
   getConsultApproval: (slug: string) => boolean
   setFleetInstructions: (slug: string, instructions: string) => void
   getFleetInstructions: (slug: string) => string
+  setCognitiveMode: (slug: string, mode: string) => void
+  getCognitiveMode: (slug: string) => string
 }
 
 export const useProcessStore = create<ProcessStore>((set, get) => ({
@@ -55,6 +59,7 @@ export const useProcessStore = create<ProcessStore>((set, get) => ({
   forwardingTaskOverrides: loadMap(FWD_KEY),
   consultApprovalOverrides: loadBoolMap(APPROVAL_KEY),
   fleetInstructionsOverrides: loadMap(FLEET_INSTRUCTIONS_KEY),
+  cognitiveModeOverrides: loadMap(COGNITIVE_MODE_KEY),
 
   fetchProcesses: async () => {
     try {
@@ -134,6 +139,14 @@ export const useProcessStore = create<ProcessStore>((set, get) => ({
   },
 
   getFleetInstructions: (slug) => get().fleetInstructionsOverrides[slug] || '',
+
+  setCognitiveMode: (slug, mode) => {
+    const overrides = { ...get().cognitiveModeOverrides, [slug]: mode }
+    persistMap(COGNITIVE_MODE_KEY, overrides)
+    set({ cognitiveModeOverrides: overrides })
+  },
+
+  getCognitiveMode: (slug) => get().cognitiveModeOverrides[slug] || 'neutra',
 }))
 
 registerHydrator((settings) => {
@@ -144,6 +157,7 @@ registerHydrator((settings) => {
     [FWD_KEY, 'forwardingTaskOverrides'],
     [APPROVAL_KEY, 'consultApprovalOverrides'],
     [FLEET_INSTRUCTIONS_KEY, 'fleetInstructionsOverrides'],
+    [COGNITIVE_MODE_KEY, 'cognitiveModeOverrides'],
   ] as const) {
     const raw = settings[key]
     if (raw) {

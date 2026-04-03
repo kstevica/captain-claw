@@ -11,6 +11,7 @@ const NAME_OVERRIDES_KEY = 'fd:container-names'
 const FWD_TASK_OVERRIDES_KEY = 'fd:container-forwarding-tasks'
 const CONSULT_APPROVAL_KEY = 'fd:container-consult-approval'
 const FLEET_INSTRUCTIONS_KEY = 'fd:container-fleet-instructions'
+const COGNITIVE_MODE_KEY = 'fd:container-cognitive-modes'
 
 function loadMap(key: string): Record<string, string> {
   try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} }
@@ -34,6 +35,7 @@ interface ContainerStore {
   forwardingTaskOverrides: Record<string, string>
   consultApprovalOverrides: Record<string, boolean>
   fleetInstructionsOverrides: Record<string, string>
+  cognitiveModeOverrides: Record<string, string>
 
   fetchContainers: () => Promise<void>
   selectContainer: (id: string | null) => void
@@ -52,6 +54,8 @@ interface ContainerStore {
   getConsultApproval: (id: string) => boolean
   setFleetInstructions: (id: string, instructions: string) => void
   getFleetInstructions: (id: string) => string
+  setCognitiveMode: (id: string, mode: string) => void
+  getCognitiveMode: (id: string) => string
 }
 
 export const useContainerStore = create<ContainerStore>((set, get) => ({
@@ -64,6 +68,7 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
   forwardingTaskOverrides: loadMap(FWD_TASK_OVERRIDES_KEY),
   consultApprovalOverrides: loadBoolMap(CONSULT_APPROVAL_KEY),
   fleetInstructionsOverrides: loadMap(FLEET_INSTRUCTIONS_KEY),
+  cognitiveModeOverrides: loadMap(COGNITIVE_MODE_KEY),
 
   fetchContainers: async () => {
     try {
@@ -245,6 +250,16 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
   getFleetInstructions: (id) => {
     return get().fleetInstructionsOverrides[id] || ''
   },
+
+  setCognitiveMode: (id, mode) => {
+    const overrides = { ...get().cognitiveModeOverrides, [id]: mode }
+    saveMap(COGNITIVE_MODE_KEY, overrides)
+    set({ cognitiveModeOverrides: overrides })
+  },
+
+  getCognitiveMode: (id) => {
+    return get().cognitiveModeOverrides[id] || 'neutra'
+  },
 }))
 
 registerHydrator((settings) => {
@@ -255,6 +270,7 @@ registerHydrator((settings) => {
     [FWD_TASK_OVERRIDES_KEY, 'forwardingTaskOverrides'],
     [CONSULT_APPROVAL_KEY, 'consultApprovalOverrides'],
     [FLEET_INSTRUCTIONS_KEY, 'fleetInstructionsOverrides'],
+    [COGNITIVE_MODE_KEY, 'cognitiveModeOverrides'],
   ] as const) {
     const raw = settings[key]
     if (raw) {

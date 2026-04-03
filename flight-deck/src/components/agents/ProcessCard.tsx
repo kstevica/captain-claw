@@ -76,7 +76,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   onDragStart?: (e: React.PointerEvent) => void
   isDragging?: boolean
 }) {
-  const { stopProcess, startProcess, restartProcess, removeProcess, cloneProcess, setDescription, setNameOverride, setForwardingTask, getForwardingTask, setConsultApproval, getConsultApproval } = useProcessStore()
+  const { stopProcess, startProcess, restartProcess, removeProcess, cloneProcess, setDescription, setNameOverride, setForwardingTask, getForwardingTask, setConsultApproval, getConsultApproval, setCognitiveMode: storeCognitiveMode, getCognitiveMode } = useProcessStore()
   const openChat = useChatStore((s) => s.openChat)
   const session = useChatStore((s) => s.sessions.get(`proc-${proc.slug}`))
   const busy = session?.busy ?? false
@@ -95,7 +95,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   const [viewMode, setViewMode] = useState<ViewMode>(() => loadViewModes()[proc.slug] || 'expanded')
   const [showConfig, setShowConfig] = useState(false)
   const [showDatastore, setShowDatastore] = useState(false)
-  const [cognitiveMode, setCognitiveMode] = useState('neutra')
+  const cognitiveMode = getCognitiveMode(proc.slug)
   const [modeSaved, setModeSaved] = useState(false)
 
   const isRunning = proc.status === 'running'
@@ -412,7 +412,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
           value={cognitiveMode}
           saved={modeSaved}
           onChange={async (newMode) => {
-            setCognitiveMode(newMode)
+            storeCognitiveMode(proc.slug, newMode)
             try {
               const { token, authEnabled } = useAuthStore.getState()
               const headers: Record<string, string> = { 'Content-Type': 'application/json' }

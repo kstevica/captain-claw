@@ -213,7 +213,7 @@ class MCPConnector:
             "capabilities": {},
             "clientInfo": {
                 "name": "captain-claw",
-                "version": "0.4.11",
+                "version": "0.4.12.5",
             },
         })
         log.info(

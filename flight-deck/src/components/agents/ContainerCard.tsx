@@ -85,7 +85,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   onDragStart?: (e: React.PointerEvent) => void
   isDragging?: boolean
 }) {
-  const { stopContainer, startContainer, restartContainer, removeContainer, rebuildContainer, cloneContainer, setDescription, setNameOverride, setForwardingTask, getForwardingTask, setConsultApproval, getConsultApproval } = useContainerStore()
+  const { stopContainer, startContainer, restartContainer, removeContainer, rebuildContainer, cloneContainer, setDescription, setNameOverride, setForwardingTask, getForwardingTask, setConsultApproval, getConsultApproval, setCognitiveMode: storeCognitiveMode, getCognitiveMode } = useContainerStore()
   const openChat = useChatStore((s) => s.openChat)
   const session = useChatStore((s) => s.sessions.get(container.id))
   const busy = session?.busy ?? false
@@ -106,7 +106,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   const [viewMode, setViewMode] = useState<ViewMode>(() => loadViewModes()[container.id] || 'expanded')
   const [showConfig, setShowConfig] = useState(false)
   const [showDatastore, setShowDatastore] = useState(false)
-  const [cognitiveMode, setCognitiveMode] = useState('neutra')
+  const cognitiveMode = getCognitiveMode(container.id)
   const [modeSaved, setModeSaved] = useState(false)
 
   const isRunning = container.status === 'running'
@@ -530,7 +530,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
           value={cognitiveMode}
           saved={modeSaved}
           onChange={async (newMode) => {
-            setCognitiveMode(newMode)
+            storeCognitiveMode(container.id, newMode)
             try {
               const { token, authEnabled } = useAuthStore.getState()
               const headers: Record<string, string> = { 'Content-Type': 'application/json' }
