@@ -177,10 +177,16 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
     onConfig: () => setShowConfig(true),
   }
 
+  // ── Config modal (rendered in all view modes via portal) ──
+  const configModal = showConfig && createPortal(
+    <AgentConfigEditor kind="docker" identifier={container.id} agentName={agentName} onClose={() => setShowConfig(false)} />,
+    document.body
+  )
+
   // ── Icon view (ultra-compact single row) ──
   if (viewMode === 'icon') {
     return (
-      <div
+      <><div
         onPointerDown={onDragStart}
         className={`group flex items-center gap-2 rounded-lg border bg-zinc-900/50 px-3 py-1.5 ${busy ? 'border-violet-500/40' : 'border-zinc-800'} ${onDragStart ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'bg-violet-500/10' : ''}`}
       >
@@ -206,14 +212,14 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
         <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleViewMode} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Expand card">
           <Maximize2 className="h-3 w-3" />
         </button>
-      </div>
+      </div>{configModal}</>
     )
   }
 
   // ── Compact view ──
   if (viewMode === 'compact') {
     return (
-      <div className={`rounded-xl border bg-zinc-900/50 overflow-hidden ${busy ? 'border-violet-500/40' : 'border-zinc-800'}`}>
+      <><div className={`rounded-xl border bg-zinc-900/50 overflow-hidden ${busy ? 'border-violet-500/40' : 'border-zinc-800'}`}>
         {/* Drag handle area with compact toggle */}
         <div
           onPointerDown={onDragStart}
@@ -364,7 +370,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
         {isRunning && container.web_port && (
           <EmbeddedChat containerId={container.id} containerName={agentName} host="localhost" port={container.web_port} auth={container.web_auth} />
         )}
-      </div>
+      </div>{configModal}</>
     )
   }
 
@@ -686,10 +692,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
         <EmbeddedChat containerId={container.id} containerName={agentName} host="localhost" port={container.web_port} auth={container.web_auth} />
       )}
 
-      {/* Config Editor Modal */}
-      {showConfig && (
-        <AgentConfigEditor kind="docker" identifier={container.id} agentName={agentName} onClose={() => setShowConfig(false)} />
-      )}
+      {configModal}
     </div>
   )
 }

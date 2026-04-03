@@ -163,10 +163,16 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
     onConfig: () => setShowConfig(true),
   }
 
+  // ── Config modal (rendered in all view modes via portal) ──
+  const configModal = showConfig && createPortal(
+    <AgentConfigEditor kind="process" identifier={proc.slug} agentName={agentName} onClose={() => setShowConfig(false)} />,
+    document.body
+  )
+
   // ── Icon view (ultra-compact single row) ──
   if (viewMode === 'icon') {
     return (
-      <div
+      <><div
         onPointerDown={onDragStart}
         className={`group flex items-center gap-2 rounded-lg border bg-zinc-900/50 px-3 py-1.5 ${busy ? 'border-emerald-500/40' : 'border-zinc-800'} ${onDragStart ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'bg-emerald-500/10' : ''}`}
       >
@@ -192,14 +198,14 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
         <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleViewMode} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Expand card">
           <Maximize2 className="h-3 w-3" />
         </button>
-      </div>
+      </div>{configModal}</>
     )
   }
 
   // ── Compact view ──
   if (viewMode === 'compact') {
     return (
-      <div className={`rounded-xl border bg-zinc-900/50 overflow-hidden ${busy ? 'border-emerald-500/40' : 'border-zinc-800'}`}>
+      <><div className={`rounded-xl border bg-zinc-900/50 overflow-hidden ${busy ? 'border-emerald-500/40' : 'border-zinc-800'}`}>
         <div
           onPointerDown={onDragStart}
           className={`flex items-center justify-end px-2 py-0.5 bg-emerald-900/10 ${onDragStart ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'bg-emerald-500/10' : ''}`}
@@ -288,7 +294,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
         {isRunning && (
           <EmbeddedChat containerId={chatId} containerName={agentName} host="localhost" port={proc.web_port} auth={proc.web_auth} />
         )}
-      </div>
+      </div>{configModal}</>
     )
   }
 
@@ -474,10 +480,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
         <EmbeddedChat containerId={chatId} containerName={agentName} host="localhost" port={proc.web_port} auth={proc.web_auth} />
       )}
 
-      {/* Config Editor Modal */}
-      {showConfig && (
-        <AgentConfigEditor kind="process" identifier={proc.slug} agentName={agentName} onClose={() => setShowConfig(false)} />
-      )}
+      {configModal}
     </div>
   )
 }

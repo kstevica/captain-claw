@@ -260,7 +260,7 @@ function AppContent() {
     }
   }, [setWsConnected, upsertInstance, removeInstance, updateInstanceActivity, fetchConcerns, fetchStats, addNotification])
 
-  const { isMobile, isTablet, isDesktop } = useIsMobile()
+  const { isMobile, isTablet } = useIsMobile()
   const mobilePanel = useUIStore((s) => s.mobilePanel)
   const setMobilePanel = useUIStore((s) => s.setMobilePanel)
   const sidebarDrawerOpen = useUIStore((s) => s.sidebarDrawerOpen)

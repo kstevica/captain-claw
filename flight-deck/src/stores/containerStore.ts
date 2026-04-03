@@ -10,6 +10,7 @@ const DESC_OVERRIDES_KEY = 'fd:container-descriptions'
 const NAME_OVERRIDES_KEY = 'fd:container-names'
 const FWD_TASK_OVERRIDES_KEY = 'fd:container-forwarding-tasks'
 const CONSULT_APPROVAL_KEY = 'fd:container-consult-approval'
+const FLEET_INSTRUCTIONS_KEY = 'fd:container-fleet-instructions'
 
 function loadMap(key: string): Record<string, string> {
   try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} }
@@ -32,6 +33,7 @@ interface ContainerStore {
   nameOverrides: Record<string, string>
   forwardingTaskOverrides: Record<string, string>
   consultApprovalOverrides: Record<string, boolean>
+  fleetInstructionsOverrides: Record<string, string>
 
   fetchContainers: () => Promise<void>
   selectContainer: (id: string | null) => void
@@ -48,6 +50,8 @@ interface ContainerStore {
   getForwardingTask: (id: string) => string
   setConsultApproval: (id: string, required: boolean) => void
   getConsultApproval: (id: string) => boolean
+  setFleetInstructions: (id: string, instructions: string) => void
+  getFleetInstructions: (id: string) => string
 }
 
 export const useContainerStore = create<ContainerStore>((set, get) => ({
@@ -59,6 +63,7 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
   nameOverrides: loadMap(NAME_OVERRIDES_KEY),
   forwardingTaskOverrides: loadMap(FWD_TASK_OVERRIDES_KEY),
   consultApprovalOverrides: loadBoolMap(CONSULT_APPROVAL_KEY),
+  fleetInstructionsOverrides: loadMap(FLEET_INSTRUCTIONS_KEY),
 
   fetchContainers: async () => {
     try {
@@ -137,6 +142,15 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
         delete fwdTaskOverrides[oldId]
         saveMap(FWD_TASK_OVERRIDES_KEY, fwdTaskOverrides)
         set({ forwardingTaskOverrides: fwdTaskOverrides })
+      }
+
+      // Migrate fleet instructions override from old ID to new ID
+      const fleetInstOverrides = { ...get().fleetInstructionsOverrides }
+      if (fleetInstOverrides[oldId]) {
+        fleetInstOverrides[newId] = fleetInstOverrides[oldId]
+        delete fleetInstOverrides[oldId]
+        saveMap(FLEET_INSTRUCTIONS_KEY, fleetInstOverrides)
+        set({ fleetInstructionsOverrides: fleetInstOverrides })
       }
 
       // Migrate pipeline step references from old ID to new ID
@@ -221,6 +235,16 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
   getConsultApproval: (id) => {
     return get().consultApprovalOverrides[id] ?? false
   },
+
+  setFleetInstructions: (id, instructions) => {
+    const overrides = { ...get().fleetInstructionsOverrides, [id]: instructions }
+    saveMap(FLEET_INSTRUCTIONS_KEY, overrides)
+    set({ fleetInstructionsOverrides: overrides })
+  },
+
+  getFleetInstructions: (id) => {
+    return get().fleetInstructionsOverrides[id] || ''
+  },
 }))
 
 registerHydrator((settings) => {
@@ -230,6 +254,7 @@ registerHydrator((settings) => {
     [NAME_OVERRIDES_KEY, 'nameOverrides'],
     [FWD_TASK_OVERRIDES_KEY, 'forwardingTaskOverrides'],
     [CONSULT_APPROVAL_KEY, 'consultApprovalOverrides'],
+    [FLEET_INSTRUCTIONS_KEY, 'fleetInstructionsOverrides'],
   ] as const) {
     const raw = settings[key]
     if (raw) {

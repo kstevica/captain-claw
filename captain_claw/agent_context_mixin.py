@@ -2261,6 +2261,20 @@ class AgentContextMixin:
                 "they mean you specifically."
             )
 
+        # Fleet-level instructions: set by the fleet operator via Flight Deck.
+        fleet_instructions_block = ""
+        _fleet_inst = ""
+        if self.session and isinstance(self.session.metadata, dict):
+            _fleet_inst = self.session.metadata.get("fleet_instructions", "").strip()
+        if not _fleet_inst:
+            _fleet_inst = getattr(self, "_fleet_instructions", "").strip() if hasattr(self, "_fleet_instructions") else ""
+        if _fleet_inst:
+            fleet_instructions_block = (
+                "\n\n## Fleet-Level Instructions\n"
+                "The following instructions come from the fleet operator via Flight Deck. "
+                "Follow these for every response:\n" + _fleet_inst
+            )
+
         # Peer agents: other agents available in the Flight Deck that the
         # user may want to hand off tasks to.
         peer_agents_block = ""
@@ -2460,6 +2474,7 @@ class AgentContextMixin:
             user_context_block=user_context_block,
             session_context_block=session_context_block,
             fleet_identity_block=fleet_identity_block,
+            fleet_instructions_block=fleet_instructions_block,
             peer_agents_block=peer_agents_block,
             visualization_style_block=visualization_style_block,
             reflection_block=reflection_block,

@@ -263,13 +263,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         })
       }
       // Build self identity so the agent knows who it is in the fleet
-      let selfIdentity: { name: string; description: string; port: number; model?: string; provider?: string } | null = null
+      const { getFleetInstructions: getContainerFleetInst } = useContainerStore.getState()
+      const { getFleetInstructions: getProcFleetInst } = useProcessStore.getState()
+      let selfIdentity: { name: string; description: string; port: number; model?: string; provider?: string; fleet_instructions?: string } | null = null
       const selfContainer = containers.find((c) => c.id === containerId)
       if (selfContainer) {
         selfIdentity = {
           name: selfContainer.agent_name || selfContainer.name,
           description: selfContainer.description || '',
           port: selfContainer.web_port || 0,
+          fleet_instructions: getContainerFleetInst(selfContainer.id),
         }
       }
       if (!selfIdentity) {
@@ -281,6 +284,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             port: selfProcess.web_port || 0,
             model: selfProcess.model || '',
             provider: selfProcess.provider || '',
+            fleet_instructions: getProcFleetInst(selfProcess.slug),
           }
         }
       }

@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
-import { X, Save, Loader2, AlertTriangle, FileText, KeyRound } from 'lucide-react'
+import { X, Save, Loader2, AlertTriangle, FileText, KeyRound, BookOpen } from 'lucide-react'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
+import { useContainerStore } from '../../stores/containerStore'
+import { useProcessStore } from '../../stores/processStore'
 
 interface AgentConfigEditorProps {
   kind: 'docker' | 'process'
@@ -38,7 +40,14 @@ export function AgentConfigEditor({ kind, identifier, agentName, onClose }: Agen
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
-  const [activeTab, setActiveTab] = useState<'config' | 'env'>('config')
+  const [activeTab, setActiveTab] = useState<'config' | 'env' | 'instructions'>('config')
+
+  // Fleet instructions from stores
+  const containerStore = useContainerStore()
+  const processStore = useProcessStore()
+  const getFleetInstructions = kind === 'docker' ? containerStore.getFleetInstructions : processStore.getFleetInstructions
+  const setFleetInstructionsStore = kind === 'docker' ? containerStore.setFleetInstructions : processStore.setFleetInstructions
+  const [fleetInstructions, setFleetInstructions] = useState(() => getFleetInstructions(identifier))
 
   useEffect(() => {
     let cancelled = false
@@ -63,6 +72,10 @@ export function AgentConfigEditor({ kind, identifier, agentName, onClose }: Agen
     setError('')
     setSuccess('')
     try {
+      // Save fleet instructions to store (immediate, no restart needed)
+      setFleetInstructionsStore(identifier, fleetInstructions)
+
+      // Save config.yaml and .env to backend
       const body: Record<string, string> = {}
       body.config_yaml = configYaml
       body.env = env
@@ -122,11 +135,23 @@ export function AgentConfigEditor({ kind, identifier, agentName, onClose }: Agen
               <KeyRound className="h-3 w-3" /> .env
             </span>
           </button>
+          <button
+            onClick={() => setActiveTab('instructions')}
+            className={`px-4 py-2 text-xs font-medium transition-colors ${
+              activeTab === 'instructions'
+                ? 'text-violet-400 border-b-2 border-violet-400 bg-zinc-800/30'
+                : 'text-zinc-500 hover:text-zinc-300'
+            }`}
+          >
+            <span className="flex items-center gap-1.5">
+              <BookOpen className="h-3 w-3" /> Instructions
+            </span>
+          </button>
         </div>
 
         {/* Content */}
         <div className="flex-1 overflow-hidden">
-          {loading ? (
+          {loading && activeTab !== 'instructions' ? (
             <div className="flex items-center justify-center py-16">
               <Loader2 className="h-5 w-5 animate-spin text-zinc-500" />
               <span className="ml-2 text-sm text-zinc-500">Loading config...</span>
@@ -141,7 +166,7 @@ export function AgentConfigEditor({ kind, identifier, agentName, onClose }: Agen
                   className="w-full h-full resize-none bg-zinc-950/50 px-4 py-3 text-[13px] font-mono text-zinc-300 leading-relaxed focus:outline-none placeholder-zinc-700"
                   placeholder="# config.yaml — agent configuration&#10;provider: anthropic&#10;model: claude-sonnet-4-20250514&#10;..."
                 />
-              ) : (
+              ) : activeTab === 'env' ? (
                 <textarea
                   value={env}
                   onChange={(e) => setEnv(e.target.value)}
@@ -149,6 +174,21 @@ export function AgentConfigEditor({ kind, identifier, agentName, onClose }: Agen
                   className="w-full h-full resize-none bg-zinc-950/50 px-4 py-3 text-[13px] font-mono text-zinc-300 leading-relaxed focus:outline-none placeholder-zinc-700"
                   placeholder="# .env — environment variables&#10;BRAVE_API_KEY=...&#10;ANTHROPIC_API_KEY=...&#10;..."
                 />
+              ) : (
+                <div className="h-full flex flex-col">
+                  <div className="px-4 pt-3 pb-2">
+                    <p className="text-[11px] text-zinc-500 leading-relaxed">
+                      Fleet-level instructions are injected into the agent's system prompt. They apply to every conversation and take effect immediately when the agent's chat is opened.
+                    </p>
+                  </div>
+                  <textarea
+                    value={fleetInstructions}
+                    onChange={(e) => setFleetInstructions(e.target.value)}
+                    spellCheck={false}
+                    className="flex-1 w-full resize-none bg-zinc-950/50 px-4 py-3 text-[13px] font-mono text-zinc-300 leading-relaxed focus:outline-none placeholder-zinc-700"
+                    placeholder="Enter fleet-level instructions for this agent...&#10;&#10;Examples:&#10;- Always respond in a specific language&#10;- Follow specific formatting guidelines&#10;- Prioritize certain types of tasks&#10;- Include specific context in responses"
+                  />
+                </div>
               )}
             </div>
           )}

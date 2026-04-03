@@ -8,6 +8,7 @@ const DESC_KEY = 'fd:process-descriptions'
 const NAME_KEY = 'fd:process-names'
 const FWD_KEY = 'fd:process-forwarding-tasks'
 const APPROVAL_KEY = 'fd:process-consult-approval'
+const FLEET_INSTRUCTIONS_KEY = 'fd:process-fleet-instructions'
 
 function loadMap(key: string): Record<string, string> {
   try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} }
@@ -28,6 +29,7 @@ interface ProcessStore {
   nameOverrides: Record<string, string>
   forwardingTaskOverrides: Record<string, string>
   consultApprovalOverrides: Record<string, boolean>
+  fleetInstructionsOverrides: Record<string, string>
 
   fetchProcesses: () => Promise<void>
   stopProcess: (slug: string) => Promise<void>
@@ -41,6 +43,8 @@ interface ProcessStore {
   getForwardingTask: (slug: string) => string
   setConsultApproval: (slug: string, required: boolean) => void
   getConsultApproval: (slug: string) => boolean
+  setFleetInstructions: (slug: string, instructions: string) => void
+  getFleetInstructions: (slug: string) => string
 }
 
 export const useProcessStore = create<ProcessStore>((set, get) => ({
@@ -50,6 +54,7 @@ export const useProcessStore = create<ProcessStore>((set, get) => ({
   nameOverrides: loadMap(NAME_KEY),
   forwardingTaskOverrides: loadMap(FWD_KEY),
   consultApprovalOverrides: loadBoolMap(APPROVAL_KEY),
+  fleetInstructionsOverrides: loadMap(FLEET_INSTRUCTIONS_KEY),
 
   fetchProcesses: async () => {
     try {
@@ -121,6 +126,14 @@ export const useProcessStore = create<ProcessStore>((set, get) => ({
   },
 
   getConsultApproval: (slug) => get().consultApprovalOverrides[slug] ?? false,
+
+  setFleetInstructions: (slug, instructions) => {
+    const overrides = { ...get().fleetInstructionsOverrides, [slug]: instructions }
+    persistMap(FLEET_INSTRUCTIONS_KEY, overrides)
+    set({ fleetInstructionsOverrides: overrides })
+  },
+
+  getFleetInstructions: (slug) => get().fleetInstructionsOverrides[slug] || '',
 }))
 
 registerHydrator((settings) => {
@@ -130,6 +143,7 @@ registerHydrator((settings) => {
     [NAME_KEY, 'nameOverrides'],
     [FWD_KEY, 'forwardingTaskOverrides'],
     [APPROVAL_KEY, 'consultApprovalOverrides'],
+    [FLEET_INSTRUCTIONS_KEY, 'fleetInstructionsOverrides'],
   ] as const) {
     const raw = settings[key]
     if (raw) {
