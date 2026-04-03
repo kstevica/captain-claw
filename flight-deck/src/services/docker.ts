@@ -35,7 +35,14 @@ async function fdFetch<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }))
-    throw new Error(body.detail || `${res.status}`)
+    let msg = body.detail
+    if (Array.isArray(msg)) {
+      // FastAPI validation errors: [{loc: [...], msg: "...", type: "..."}, ...]
+      msg = msg.map((e: { loc?: string[]; msg?: string }) =>
+        `${(e.loc || []).join('.')}: ${e.msg}`
+      ).join('; ')
+    }
+    throw new Error(msg || `${res.status}`)
   }
   return res.json()
 }

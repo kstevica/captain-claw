@@ -20,6 +20,8 @@ const log = require("electron-log/main");
 const BACKEND_PORT = 23080;
 const BACKEND_HOST = "127.0.0.1";
 const BACKEND_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}`;
+const FD_PORT = 25080;
+const FD_HOST = "127.0.0.1";
 const HEALTH_POLL_MS = 300;
 const HEALTH_TIMEOUT_MS = 30_000;
 const DEV_MODE = process.argv.includes("--dev");
@@ -28,8 +30,11 @@ const DEV_MODE = process.argv.includes("--dev");
 
 let mainWindow = null;
 let backendProcess = null;
+let fdProcess = null;
 let backendReady = false;
+let fdReady = false;
 let actualPort = BACKEND_PORT;
+let actualFdPort = FD_PORT;
 
 // ── Paths ──────────────────────────────────────────────────────
 
@@ -47,6 +52,22 @@ function getBackendBinary() {
   }
 
   // In production: binary is in resources/backend/
+  const prodPath = path.join(process.resourcesPath, "backend", exeName);
+  if (fs.existsSync(prodPath)) return prodPath;
+
+  return null;
+}
+
+function getFdBinary() {
+  const exeName =
+    process.platform === "win32" ? "captain-claw-fd.exe" : "captain-claw-fd";
+
+  if (DEV_MODE) {
+    const devPath = path.join(__dirname, "..", "dist", "captain-claw", exeName);
+    if (fs.existsSync(devPath)) return devPath;
+    return null;
+  }
+
   const prodPath = path.join(process.resourcesPath, "backend", exeName);
   if (fs.existsSync(prodPath)) return prodPath;
 
@@ -202,6 +223,125 @@ function stopBackend() {
   }
 }
 
+// ── Flight Deck management ─────────────────────────────────────
+
+function spawnFlightDeck() {
+  const binary = getFdBinary();
+
+  let cmd, args, env;
+
+  env = {
+    ...process.env,
+    FD_DATA_DIR: path.join(getUserDataDir(), "fd-data"),
+    FD_AUTH_ENABLED: "false",
+  };
+
+  if (binary) {
+    cmd = binary;
+    args = ["--host", FD_HOST, "--port", String(FD_PORT)];
+    log.info(`Starting Flight Deck: ${binary}`);
+  } else if (DEV_MODE) {
+    cmd = process.platform === "win32" ? "python" : "python3";
+    args = ["-m", "captain_claw.flight_deck.server", "--host", FD_HOST, "--port", String(FD_PORT)];
+    env.PYTHONPATH = path.join(__dirname, "..");
+    log.info("Starting Flight Deck from source (dev mode)");
+  } else {
+    log.error("Flight Deck binary not found");
+    return;
+  }
+
+  fdProcess = spawn(cmd, args, {
+    env,
+    cwd: getUserDataDir(),
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+
+  fdProcess.stdout.on("data", (data) => {
+    const text = data.toString().trim();
+    if (text) log.info(`[flight-deck] ${text}`);
+
+    const portMatch = text.match(/running on http:\/\/[^:]+:(\d+)/i) ||
+                      text.match(/Uvicorn running on http:\/\/[^:]+:(\d+)/i);
+    if (portMatch) {
+      actualFdPort = parseInt(portMatch[1], 10);
+      log.info(`Flight Deck port detected: ${actualFdPort}`);
+    }
+  });
+
+  fdProcess.stderr.on("data", (data) => {
+    const text = data.toString().trim();
+    if (text) log.warn(`[flight-deck:err] ${text}`);
+
+    // uvicorn logs to stderr
+    const portMatch = text.match(/Uvicorn running on http:\/\/[^:]+:(\d+)/i);
+    if (portMatch) {
+      actualFdPort = parseInt(portMatch[1], 10);
+      log.info(`Flight Deck port detected: ${actualFdPort}`);
+    }
+  });
+
+  fdProcess.on("exit", (code, signal) => {
+    log.info(`Flight Deck exited: code=${code} signal=${signal}`);
+    fdProcess = null;
+  });
+}
+
+function getFdUrl() {
+  return `http://${FD_HOST}:${actualFdPort}`;
+}
+
+function waitForFlightDeck() {
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+
+    function poll() {
+      const url = `http://${FD_HOST}:${actualFdPort}/api/health`;
+      http
+        .get(url, (res) => {
+          if (res.statusCode === 200 || res.statusCode === 404) {
+            // 404 is OK — means server is up, just no /api/health route
+            fdReady = true;
+            log.info("Flight Deck is ready");
+            resolve();
+          } else {
+            retry();
+          }
+        })
+        .on("error", () => retry());
+    }
+
+    function retry() {
+      if (Date.now() - start > HEALTH_TIMEOUT_MS) {
+        reject(new Error("Flight Deck did not start within timeout"));
+        return;
+      }
+      setTimeout(poll, HEALTH_POLL_MS);
+    }
+
+    poll();
+  });
+}
+
+function stopFlightDeck() {
+  if (!fdProcess) return;
+
+  log.info("Stopping Flight Deck...");
+
+  if (process.platform === "win32") {
+    spawn("taskkill", ["/pid", fdProcess.pid.toString(), "/f", "/t"]);
+  } else {
+    fdProcess.kill("SIGTERM");
+
+    setTimeout(() => {
+      if (fdProcess) {
+        log.warn("Flight Deck did not exit gracefully, force killing");
+        fdProcess.kill("SIGKILL");
+      }
+    }, 5000);
+  }
+}
+
 // ── Window management ──────────────────────────────────────────
 
 function createWindow() {
@@ -315,33 +455,42 @@ app.whenReady().then(async () => {
   );
 
   try {
+    // Backend is optional — start it but don't block on it
     spawnBackend();
-    await waitForBackend();
-    mainWindow.loadURL(getBackendUrl());
+    waitForBackend()
+      .then(() => log.info("Backend ready (background)"))
+      .catch((err) => log.warn("Backend failed to start (non-fatal):", err.message));
+
+    // Flight Deck is the primary UI — must start
+    spawnFlightDeck();
+    await waitForFlightDeck();
+    mainWindow.loadURL(getFdUrl());
   } catch (err) {
-    log.error("Failed to start backend:", err);
+    log.error("Failed to start Flight Deck:", err);
     dialog.showErrorBox(
       "Captain Claw",
-      `Failed to start the backend server:\n\n${err.message}\n\nCheck the logs at: ${log.transports.file.getFile().path}`
+      `Failed to start Flight Deck:\n\n${err.message}\n\nCheck the logs at: ${log.transports.file.getFile().path}`
     );
     app.quit();
   }
 });
 
 app.on("window-all-closed", () => {
+  stopFlightDeck();
   stopBackend();
   app.quit();
 });
 
 app.on("before-quit", () => {
+  stopFlightDeck();
   stopBackend();
 });
 
 app.on("activate", () => {
   // macOS: re-create window when dock icon is clicked
-  if (BrowserWindow.getAllWindows().length === 0 && backendReady) {
+  if (BrowserWindow.getAllWindows().length === 0 && fdReady) {
     createWindow();
-    mainWindow.loadURL(getBackendUrl());
+    mainWindow.loadURL(getFdUrl());
   }
 });
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import json
 import secrets
 import signal
@@ -32,11 +33,29 @@ from captain_claw.flight_deck.rate_limiter import (
     load_plan_limits_from_db_sync,
 )
 
-STATIC_DIR = Path(__file__).parent / "static"
+def _resolve_static_dir() -> Path:
+    """Resolve static dir, handling PyInstaller bundles where __file__ is at _internal/ root."""
+    normal = Path(__file__).parent / "static"
+    if normal.is_dir():
+        return normal
+    # PyInstaller: entry script lands in _internal/, data is in _internal/captain_claw/flight_deck/static/
+    if getattr(sys, "_MEIPASS", None):
+        bundled = Path(sys._MEIPASS) / "captain_claw" / "flight_deck" / "static"
+        if bundled.is_dir():
+            return bundled
+    return normal
+
+STATIC_DIR = _resolve_static_dir()
 
 # ── Config ──
 
-DATA_DIR = Path(os.environ.get("FD_DATA_DIR", "./fd-data")).resolve()
+def _default_data_dir() -> str:
+    """Use ~/.captain-claw/fd-data for standalone builds, ./fd-data otherwise."""
+    if getattr(sys, "_MEIPASS", None):
+        return str(Path.home() / ".captain-claw" / "fd-data")
+    return "./fd-data"
+
+DATA_DIR = Path(os.environ.get("FD_DATA_DIR", _default_data_dir())).resolve()
 CONTAINER_LABEL = "flight-deck.managed"
 OWNER_LABEL = "flight-deck.owner"
 CC_IMAGE_DEFAULT = "kstevica/captain-claw:latest"
@@ -266,6 +285,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Log validation errors with full detail for debugging
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    log.error("Validation error on %s %s: %s", request.method, request.url.path, exc.errors())
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
+# ── Auth dependency that always uses Depends ──
+# When AUTH_ENABLED is False, using `= None` instead of `= Depends(...)` causes
+# FastAPI to treat the parameter as a body field, breaking request parsing.
+# This wrapper ensures we always use Depends regardless of auth state.
+
+async def _no_user() -> None:
+    return None
+
+_optional_user_dep = Depends(get_optional_user) if AUTH_ENABLED else Depends(_no_user)
+_required_user_dep = Depends(get_current_user) if AUTH_ENABLED else Depends(_no_user)
 
 # ── Auth & user routes ──
 
@@ -613,7 +653,7 @@ def _find_container(container_id: str, owner_id: str = "") -> docker.models.cont
 # ── Endpoints ──
 
 @app.get("/fd/containers", response_model=list[ContainerInfo])
-async def list_containers(request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def list_containers(request: Request, user: dict | None = _required_user_dep):
     """List all Flight Deck managed containers (filtered by owner when auth enabled)."""
     try:
         client = get_docker()
@@ -654,7 +694,7 @@ def _schedule_fleet_notify(name: str, port: int, event: str = "joined", owner_id
 
 
 @app.post("/fd/spawn", response_model=ContainerActionResult)
-async def spawn_agent(config: AgentConfig, request: Request, user: dict | None = Depends(get_optional_user) if AUTH_ENABLED else None):
+async def spawn_agent(config: AgentConfig, request: Request, user: dict | None = _optional_user_dep):
     """Spawn a new Captain Claw container."""
     # Check if docker spawn is allowed
     sys_cfg = await _get_system_config()
@@ -843,7 +883,7 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
 
 
 @app.post("/fd/containers/{container_id}/stop", response_model=ContainerActionResult)
-async def stop_container(container_id: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def stop_container(container_id: str, request: Request, user: dict | None = _required_user_dep):
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
     if c.status != "running":
         return ContainerActionResult(ok=True, container_id=c.short_id, message="Already stopped")
@@ -852,7 +892,7 @@ async def stop_container(container_id: str, request: Request, user: dict | None 
 
 
 @app.post("/fd/containers/{container_id}/start", response_model=ContainerActionResult)
-async def start_container(container_id: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def start_container(container_id: str, request: Request, user: dict | None = _required_user_dep):
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
     if c.status == "running":
         return ContainerActionResult(ok=True, container_id=c.short_id, message="Already running")
@@ -865,14 +905,14 @@ async def start_container(container_id: str, request: Request, user: dict | None
 
 
 @app.post("/fd/containers/{container_id}/restart", response_model=ContainerActionResult)
-async def restart_container(container_id: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def restart_container(container_id: str, request: Request, user: dict | None = _required_user_dep):
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
     c.restart(timeout=5)
     return ContainerActionResult(ok=True, container_id=c.short_id, message="Restarted")
 
 
 @app.delete("/fd/containers/{container_id}", response_model=ContainerActionResult)
-async def remove_container(container_id: str, force: bool = False, request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def remove_container(container_id: str, force: bool = False, request: Request = None, user: dict | None = _required_user_dep):
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
     name = c.name
     c.remove(force=force)
@@ -888,7 +928,7 @@ class CloneRequest(BaseModel):
 
 
 @app.post("/fd/containers/{container_id}/rebuild", response_model=ContainerActionResult)
-async def rebuild_container(container_id: str, request: Request, req: RebuildRequest | None = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def rebuild_container(container_id: str, request: Request, req: RebuildRequest | None = None, user: dict | None = _required_user_dep):
     """Rebuild a container: stop, remove, pull latest image, re-spawn with same config."""
     import platform
 
@@ -1050,7 +1090,7 @@ def _find_available_port(start: int) -> int:
 
 
 @app.post("/fd/containers/{container_id}/clone", response_model=ContainerActionResult)
-async def clone_container(container_id: str, req: CloneRequest, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def clone_container(container_id: str, req: CloneRequest, request: Request, user: dict | None = _required_user_dep):
     """Clone a container: create a new agent with same config but its own data folder."""
     import platform
     import shutil
@@ -1220,7 +1260,7 @@ async def clone_container(container_id: str, req: CloneRequest, request: Request
 
 
 @app.get("/fd/containers/{container_id}/logs")
-async def container_logs(container_id: str, tail: int = 200, follow: bool = False, request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def container_logs(container_id: str, tail: int = 200, follow: bool = False, request: Request = None, user: dict | None = _required_user_dep):
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
     if follow:
         def stream():
@@ -1256,7 +1296,7 @@ def _resolve_agent_dir(identifier: str, kind: str, user_id: str) -> Path:
 @app.get("/fd/agent-config/{kind}/{identifier}")
 async def get_agent_config(
     kind: str, identifier: str, request: Request,
-    user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None,
+    user: dict | None = _required_user_dep,
 ):
     """Read an agent's config.yaml and .env files."""
     if kind not in ("docker", "process"):
@@ -1278,7 +1318,7 @@ async def get_agent_config(
 @app.put("/fd/agent-config/{kind}/{identifier}")
 async def update_agent_config(
     kind: str, identifier: str, body: AgentConfigUpdate, request: Request,
-    user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None,
+    user: dict | None = _required_user_dep,
 ):
     """Update an agent's config.yaml and/or .env files. Agent must be restarted for changes to take effect."""
     if kind not in ("docker", "process"):
@@ -1310,7 +1350,7 @@ class AgentModeUpdate(BaseModel):
 @app.put("/fd/agent-mode/{kind}/{identifier}")
 async def update_agent_mode(
     kind: str, identifier: str, body: AgentModeUpdate, request: Request,
-    user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None,
+    user: dict | None = _required_user_dep,
 ):
     """Update an agent's cognitive mode at runtime (no restart needed).
 
@@ -1351,7 +1391,7 @@ async def list_cognitive_modes():
 
 
 @app.get("/fd/containers/{container_id}")
-async def get_container(container_id: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def get_container(container_id: str, request: Request, user: dict | None = _required_user_dep):
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
     info = _container_info(c)
     # Add extra details
@@ -1431,7 +1471,7 @@ class FleetAgent(BaseModel):
 
 
 @app.get("/fd/fleet", response_model=list[FleetAgent])
-async def get_fleet(request: Request, user: dict | None = Depends(get_optional_user) if AUTH_ENABLED else None):
+async def get_fleet(request: Request, user: dict | None = _optional_user_dep):
     """Return all running/known agents across docker, process, and local stores."""
     fleet: list[FleetAgent] = []
     user_id = getattr(request.state, "user_id", "")
@@ -1594,7 +1634,7 @@ _active_consults: dict[int, str] = {}  # target_port -> source_name
 
 
 @app.post("/fd/consult-peer")
-async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | None = Depends(get_optional_user) if AUTH_ENABLED else None):
+async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | None = _optional_user_dep):
     """Send a message to a peer agent and stream back intermediate events + final response as ndjson."""
     import websockets
     import json
@@ -1705,7 +1745,7 @@ class DelegatePeerRequest(BaseModel):
 
 
 @app.post("/fd/delegate-peer")
-async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict | None = Depends(get_optional_user) if AUTH_ENABLED else None):
+async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict | None = _optional_user_dep):
     """Fire-and-forget: send a task to a peer agent. When the peer finishes, deliver the result back to the source agent as a chat message."""
     import websockets
     import json
@@ -1893,7 +1933,7 @@ def _scan_workspace_files(agent_dir: Path) -> list[dict]:
 @app.get("/fd/agent-datastore/{host}/{port}/tables")
 async def agent_datastore_tables(
     host: str, port: int, token: str = "",
-    user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None,
+    user: dict | None = _required_user_dep,
 ):
     """List datastore tables from a CC agent (proxied)."""
     import httpx
@@ -1916,7 +1956,7 @@ async def agent_datastore_rows(
     limit: int = 100, offset: int = 0,
     order_by: str = "", order_dir: str = "asc",
     token: str = "",
-    user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None,
+    user: dict | None = _required_user_dep,
 ):
     """Query rows from a datastore table on a CC agent (proxied)."""
     import httpx
@@ -1937,7 +1977,7 @@ async def agent_datastore_rows(
 
 
 @app.get("/fd/agent-files/{host}/{port}")
-async def agent_files(host: str, port: int, token: str = "", request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def agent_files(host: str, port: int, token: str = "", request: Request = None, user: dict | None = _required_user_dep):
     """List files from a CC agent (proxied to avoid CORS), merged with workspace scan."""
     import httpx
     registered: list[dict] = []
@@ -1994,7 +2034,7 @@ class TransferRequest(BaseModel):
 
 
 @app.post("/fd/transfer")
-async def transfer_file(req: TransferRequest, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def transfer_file(req: TransferRequest, request: Request, user: dict | None = _required_user_dep):
     """Download a file from one agent and upload it to another."""
     import httpx
 
@@ -2027,7 +2067,7 @@ async def transfer_file(req: TransferRequest, request: Request, user: dict | Non
 
 
 @app.get("/fd/agent-file-download/{host}/{port}")
-async def agent_file_download(host: str, port: int, path: str, token: str = "", request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def agent_file_download(host: str, port: int, path: str, token: str = "", request: Request = None, user: dict | None = _required_user_dep):
     """Proxy file download from a CC agent."""
     import httpx
     import urllib.parse
@@ -2056,7 +2096,7 @@ async def agent_file_download(host: str, port: int, path: str, token: str = "", 
 
 
 @app.get("/fd/agent-file-view/{host}/{port}")
-async def agent_file_view(host: str, port: int, path: str, token: str = "", request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def agent_file_view(host: str, port: int, path: str, token: str = "", request: Request = None, user: dict | None = _required_user_dep):
     """Proxy file view from a CC agent (inline, no download header)."""
     import httpx
     import urllib.parse
@@ -2086,7 +2126,7 @@ async def agent_file_view(host: str, port: int, path: str, token: str = "", requ
 
 
 @app.post("/fd/agent-file-upload/{host}/{port}")
-async def agent_file_upload(host: str, port: int, token: str = "", file: UploadFile = File(...), request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def agent_file_upload(host: str, port: int, token: str = "", file: UploadFile = File(...), request: Request = None, user: dict | None = _required_user_dep):
     """Proxy file upload to a CC agent."""
     import httpx
 
@@ -2110,7 +2150,7 @@ async def agent_file_upload(host: str, port: int, token: str = "", file: UploadF
 
 
 @app.get("/fd/agent-usage/{host}/{port}")
-async def agent_usage(host: str, port: int, token: str = "", period: str = "today", request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def agent_usage(host: str, port: int, token: str = "", period: str = "today", request: Request = None, user: dict | None = _required_user_dep):
     """Proxy /api/usage from a CC agent."""
     import httpx
     auth = token or _resolve_agent_auth(port)
@@ -2159,7 +2199,7 @@ class ProcessActionResult(BaseModel):
 
 
 @app.get("/fd/processes", response_model=list[ProcessInfo])
-async def list_processes(request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def list_processes(request: Request, user: dict | None = _required_user_dep):
     """List all Flight Deck managed process agents."""
     registry = _load_process_registry()
     user_id = getattr(request.state, "user_id", "")
@@ -2183,7 +2223,7 @@ async def list_processes(request: Request, user: dict | None = Depends(get_curre
 
 
 @app.post("/fd/spawn-process", response_model=ProcessActionResult)
-async def spawn_process(config: AgentConfig, request: Request, user: dict | None = Depends(get_optional_user) if AUTH_ENABLED else None):
+async def spawn_process(config: AgentConfig, request: Request, user: dict | None = _optional_user_dep):
     """Spawn a new Captain Claw process agent (pip-installed, no Docker)."""
     # Rate limiting & agent count check
     if AUTH_ENABLED and user:
@@ -2243,7 +2283,8 @@ async def spawn_process(config: AgentConfig, request: Request, user: dict | None
         # Fallback: inherit owner from an existing agent in the registry.
         # Covers the case where an internal caller (e.g. Old Man spawned before
         # the FD_OWNER_ID env var was added) doesn't have owner info.
-        for _entry in registry.values():
+        _reg = _load_process_registry()
+        for _entry in _reg.values():
             if _entry.get("owner"):
                 owner_id = _entry["owner"]
                 break
@@ -2278,9 +2319,17 @@ async def spawn_process(config: AgentConfig, request: Request, user: dict | None
     log_file = agent_dir / "process.log"
     log_fh = open(log_file, "a")
 
+    # Resolve captain-claw-web binary: bundled (PyInstaller) or PATH
+    cc_web_bin = "captain-claw-web"
+    if getattr(sys, "_MEIPASS", None):
+        # In standalone build, the binary is next to this executable
+        bundled = Path(sys._MEIPASS).parent / "captain-claw-web"
+        if bundled.exists():
+            cc_web_bin = str(bundled)
+
     try:
         proc = subprocess.Popen(
-            ["captain-claw-web", "--port", str(config.web_port)],
+            [cc_web_bin, "--port", str(config.web_port)],
             cwd=str(agent_dir),
             env=environment,
             stdout=log_fh,
@@ -2289,7 +2338,7 @@ async def spawn_process(config: AgentConfig, request: Request, user: dict | None
         )
     except FileNotFoundError:
         log_fh.close()
-        raise HTTPException(500, "captain-claw-web not found. Install captain-claw via pip first.")
+        raise HTTPException(500, f"captain-claw-web not found at '{cc_web_bin}'. Install captain-claw via pip first.")
     except Exception as exc:
         log_fh.close()
         raise HTTPException(500, f"Failed to start process: {exc}")
@@ -2377,21 +2426,21 @@ def _do_start_process(slug: str) -> ProcessActionResult:
 
 
 @app.post("/fd/processes/{slug}/stop", response_model=ProcessActionResult)
-async def stop_process(slug: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def stop_process(slug: str, request: Request, user: dict | None = _required_user_dep):
     """Stop a running process agent."""
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     return _do_stop_process(slug)
 
 
 @app.post("/fd/processes/{slug}/start", response_model=ProcessActionResult)
-async def start_process(slug: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def start_process(slug: str, request: Request, user: dict | None = _required_user_dep):
     """Start a stopped process agent."""
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     return _do_start_process(slug)
 
 
 @app.post("/fd/processes/{slug}/restart", response_model=ProcessActionResult)
-async def restart_process(slug: str, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def restart_process(slug: str, request: Request, user: dict | None = _required_user_dep):
     """Restart a process agent."""
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     _do_stop_process(slug)
@@ -2401,7 +2450,7 @@ async def restart_process(slug: str, request: Request, user: dict | None = Depen
 
 
 @app.delete("/fd/processes/{slug}", response_model=ProcessActionResult)
-async def remove_process(slug: str, force: bool = False, request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def remove_process(slug: str, force: bool = False, request: Request = None, user: dict | None = _required_user_dep):
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     """Remove a process agent from the registry. Stops it first if running."""
     if _process_is_alive(slug):
@@ -2416,7 +2465,7 @@ async def remove_process(slug: str, force: bool = False, request: Request = None
 
 
 @app.get("/fd/processes/{slug}/logs")
-async def process_logs(slug: str, tail: int = 200, request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def process_logs(slug: str, tail: int = 200, request: Request = None, user: dict | None = _required_user_dep):
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     """Read logs from a process agent's log file."""
     log_file = DATA_DIR / slug / "process.log"
@@ -2431,7 +2480,7 @@ async def process_logs(slug: str, tail: int = 200, request: Request = None, user
 
 
 @app.post("/fd/processes/{slug}/clone", response_model=ProcessActionResult)
-async def clone_process(slug: str, req: CloneRequest, request: Request, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
+async def clone_process(slug: str, req: CloneRequest, request: Request, user: dict | None = _required_user_dep):
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     """Clone a process agent with a new name and port."""
     registry = _load_process_registry()
@@ -2540,7 +2589,7 @@ class ForgeRequest(BaseModel):
 @app.post("/fd/forge")
 async def forge_decompose(
     body: ForgeRequest, request: Request,
-    user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None,
+    user: dict | None = _required_user_dep,
 ):
     """Use an LLM to decompose a user objective into a team of specialized agents."""
     if not body.prompt.strip():
@@ -2655,7 +2704,7 @@ class OldManSpawnRequest(BaseModel):
 async def spawn_old_man(
     body: OldManSpawnRequest,
     request: Request,
-    user: dict | None = Depends(get_optional_user) if AUTH_ENABLED else None,
+    user: dict | None = _optional_user_dep,
 ):
     """One-click Old Man spawn — creates a supervisor agent with sane defaults.
 

@@ -24,12 +24,14 @@ block_cipher = None
 PROJECT_ROOT = os.path.abspath(".")
 PKG_DIR = os.path.join(PROJECT_ROOT, "captain_claw")
 STATIC_DIR = os.path.join(PKG_DIR, "web", "static")
+FD_STATIC_DIR = os.path.join(PKG_DIR, "flight_deck", "static")
 INSTRUCTIONS_DIR = os.path.join(PKG_DIR, "instructions")
 
 # ── Data files to bundle ────────────────────────────────────────
 # (source, dest_in_bundle)
 datas = [
     (STATIC_DIR, os.path.join("captain_claw", "web", "static")),
+    (FD_STATIC_DIR, os.path.join("captain_claw", "flight_deck", "static")),
     (INSTRUCTIONS_DIR, os.path.join("captain_claw", "instructions")),
 ] + collect_data_files("litellm") + collect_data_files("playwright")
 
@@ -124,6 +126,47 @@ hidden_imports = [
     "playwright._impl",
     "playwright._impl._driver",
 
+    # ── flight_deck (FastAPI server + sub-modules) ──
+    "captain_claw.flight_deck",
+    "captain_claw.flight_deck.server",
+    "captain_claw.flight_deck.auth",
+    "captain_claw.flight_deck.auth_routes",
+    "captain_claw.flight_deck.db",
+    "captain_claw.flight_deck.rate_limiter",
+    "captain_claw.flight_deck.settings_routes",
+    "captain_claw.flight_deck.chat_routes",
+    "captain_claw.flight_deck.admin_routes",
+    "fastapi",
+    "fastapi.middleware",
+    "fastapi.middleware.cors",
+    "fastapi.staticfiles",
+    "fastapi.responses",
+    "uvicorn",
+    "uvicorn.main",
+    "uvicorn.config",
+    "uvicorn.lifespan",
+    "uvicorn.lifespan.on",
+    "uvicorn.protocols",
+    "uvicorn.protocols.http",
+    "uvicorn.protocols.http.auto",
+    "uvicorn.protocols.http.h11_impl",
+    "uvicorn.protocols.http.httptools_impl",
+    "uvicorn.protocols.websockets",
+    "uvicorn.protocols.websockets.auto",
+    "uvicorn.protocols.websockets.websockets_impl",
+    "uvicorn.loops",
+    "uvicorn.loops.auto",
+    "uvicorn.logging",
+    "starlette",
+    "starlette.routing",
+    "starlette.middleware",
+    "starlette.staticfiles",
+    "starlette.responses",
+    "starlette.websockets",
+    "docker",
+    "docker.models",
+    "docker.models.containers",
+
     # ── other deps ──
     "httpx",
     "httpx._transports",
@@ -189,17 +232,24 @@ a_orchestrate = Analysis(
     **common_kwargs,
 )
 
+a_fd = Analysis(
+    [os.path.join(PKG_DIR, "flight_deck", "server.py")],
+    **common_kwargs,
+)
+
 # ── Merge to share common modules ──────────────────────────────
 MERGE(
     (a_main, "captain-claw", "captain-claw"),
     (a_web, "captain-claw-web", "captain-claw-web"),
     (a_orchestrate, "captain-claw-orchestrate", "captain-claw-orchestrate"),
+    (a_fd, "captain-claw-fd", "captain-claw-fd"),
 )
 
 # ── PYZ (bytecode archive) ─────────────────────────────────────
 pyz_main = PYZ(a_main.pure, cipher=block_cipher)
 pyz_web = PYZ(a_web.pure, cipher=block_cipher)
 pyz_orchestrate = PYZ(a_orchestrate.pure, cipher=block_cipher)
+pyz_fd = PYZ(a_fd.pure, cipher=block_cipher)
 
 # ── EXE definitions ────────────────────────────────────────────
 exe_main = EXE(
@@ -241,11 +291,25 @@ exe_orchestrate = EXE(
     console=True,
 )
 
+exe_fd = EXE(
+    pyz_fd,
+    a_fd.scripts,
+    [],
+    exclude_binaries=True,
+    name="captain-claw-fd",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=True,
+)
+
 # ── COLLECT into one dist folder ────────────────────────────────
 coll = COLLECT(
     exe_main, a_main.binaries, a_main.datas,
     exe_web, a_web.binaries, a_web.datas,
     exe_orchestrate, a_orchestrate.binaries, a_orchestrate.datas,
+    exe_fd, a_fd.binaries, a_fd.datas,
     strip=False,
     upx=True,
     upx_exclude=[],

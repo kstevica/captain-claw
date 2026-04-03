@@ -98,7 +98,7 @@ fi
 
 # Check executables
 OK=true
-for name in captain-claw captain-claw-web captain-claw-orchestrate; do
+for name in captain-claw captain-claw-web captain-claw-orchestrate captain-claw-fd; do
     if [[ -f "$DIST_DIR/$name" ]] || [[ -f "$DIST_DIR/$name.exe" ]]; then
         echo "  ✓ $name"
     else
@@ -175,3 +175,4 @@ echo ""
 echo "  dist/captain-claw/captain-claw            # CLI + Web UI"
 echo "  dist/captain-claw/captain-claw-web         # Web UI only"
 echo "  dist/captain-claw/captain-claw-orchestrate  # Headless orchestrator"
+echo "  dist/captain-claw/captain-claw-fd           # Flight Deck server"

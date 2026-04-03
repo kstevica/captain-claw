@@ -1,13 +1,20 @@
-"""Per-user rate limiting for Flight Deck SaaS."""
+"""Per-user rate limiting for Flight Deck SaaS.
+
+In standalone (PyInstaller) builds, all limits are bypassed.
+"""
 
 from __future__ import annotations
 
+import sys
 import json
 import time
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException, Request, status
+
+# Standalone binary mode — no rate limiting or plan restrictions
+STANDALONE_MODE = getattr(sys, "_MEIPASS", None) is not None
 
 if TYPE_CHECKING:
     from captain_claw.flight_deck.db import FlightDeckDB
@@ -137,6 +144,8 @@ _spawn_limiter = _SlidingWindow()
 
 def check_api_rate_limit(user: dict) -> None:
     """Check per-minute API rate limit. Raises 429 if exceeded."""
+    if STANDALONE_MODE:
+        return
     limits = get_user_limits(user)
     rpm = limits["requests_per_minute"]
     if not _api_limiter.check(user["id"], rpm, 60.0):
@@ -148,6 +157,8 @@ def check_api_rate_limit(user: dict) -> None:
 
 def check_spawn_rate_limit(user: dict) -> None:
     """Check per-hour agent spawn rate limit. Raises 429 if exceeded."""
+    if STANDALONE_MODE:
+        return
     limits = get_user_limits(user)
     sph = limits["spawns_per_hour"]
     if not _spawn_limiter.check(user["id"], sph, 3600.0):
@@ -159,6 +170,8 @@ def check_spawn_rate_limit(user: dict) -> None:
 
 async def check_agent_count_limit(user: dict, current_count: int) -> None:
     """Check if user has reached their max agent count. Raises 403 if exceeded."""
+    if STANDALONE_MODE:
+        return
     limits = get_user_limits(user)
     max_agents = limits["max_agents"]
     if current_count >= max_agents:

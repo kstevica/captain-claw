@@ -29,7 +29,9 @@ try:
     pyautogui.FAILSAFE = True  # move mouse to top-left corner to abort
     pyautogui.PAUSE = 0.1  # small delay between actions
     _HAS_PYAUTOGUI = True
-except ImportError:
+except (ImportError, AttributeError, OSError):
+    # AttributeError: rubicon/objc fails on arm64→x64 Rosetta (missing objc_msgSendSuper_stret)
+    # OSError: ctypes library loading failures on some platforms
     _HAS_PYAUTOGUI = False
 
 _IS_MACOS = sys.platform == "darwin"

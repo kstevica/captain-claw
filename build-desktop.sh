@@ -75,6 +75,27 @@ if ! $ELECTRON_ONLY; then
     fi
 fi
 
+# ── Step 1b: Build Flight Deck frontend ────────────────────────
+echo "Step 1b: Building Flight Deck frontend..."
+echo "─────────────────────────────────"
+
+cd flight-deck
+
+if ! command -v npm &>/dev/null; then
+    echo "Error: npm is required but not found."
+    echo "Install Node.js from https://nodejs.org"
+    exit 1
+fi
+
+npm install
+npm run build
+
+cd "$SCRIPT_DIR"
+
+echo ""
+echo "Flight Deck frontend build complete."
+echo ""
+
 # ── Step 2: Install Electron dependencies ────────────────────────
 echo "Step 2: Installing Electron dependencies..."
 echo "─────────────────────────────────"
@@ -104,8 +125,10 @@ if [[ ! -d "$BACKEND_DIR" ]]; then
 fi
 
 EXE_NAME="captain-claw-web"
+FD_EXE_NAME="captain-claw-fd"
 if [[ "$PLATFORM" == "win" ]]; then
     EXE_NAME="captain-claw-web.exe"
+    FD_EXE_NAME="captain-claw-fd.exe"
 fi
 
 if [[ ! -f "$BACKEND_DIR/$EXE_NAME" ]]; then
@@ -113,7 +136,13 @@ if [[ ! -f "$BACKEND_DIR/$EXE_NAME" ]]; then
     exit 1
 fi
 
+if [[ ! -f "$BACKEND_DIR/$FD_EXE_NAME" ]]; then
+    echo "Error: $FD_EXE_NAME not found in $BACKEND_DIR"
+    exit 1
+fi
+
 echo "  Backend binary: $BACKEND_DIR/$EXE_NAME"
+echo "  Flight Deck binary: $BACKEND_DIR/$FD_EXE_NAME"
 echo ""
 
 # ── Step 4: Package with electron-builder ────────────────────────
