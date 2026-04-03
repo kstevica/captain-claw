@@ -12,6 +12,7 @@ import { DesktopPage } from './pages/DesktopPage'
 import { OperationsPage } from './pages/OperationsPage'
 import { WorkflowPage } from './pages/WorkflowPage'
 import { SpawnerPage } from './pages/SpawnerPage'
+import { ForgePage } from './pages/ForgePage'
 import { LoginPage } from './pages/LoginPage'
 import { AdminPage } from './pages/AdminPage'
 import { useUIStore } from './stores/uiStore'
@@ -281,6 +282,7 @@ function AppContent() {
       {view === 'operations' && <OperationsPage />}
       {view === 'workflow' && <WorkflowPage />}
       {view === 'spawner' && <SpawnerPage />}
+      {view === 'forge' && <ForgePage />}
       {view === 'admin' && <AdminPage />}
     </>
   )
@@ -405,11 +407,7 @@ function AppContent() {
 
             {/* Main content */}
             <div className="flex-1 overflow-hidden">
-              {view === 'desktop' && <DesktopPage />}
-              {view === 'operations' && <OperationsPage />}
-              {view === 'workflow' && <WorkflowPage />}
-              {view === 'spawner' && <SpawnerPage />}
-              {view === 'admin' && <AdminPage />}
+              {mainContent}
             </div>
 
             {/* Tool panel (pinned / clipboard / pipelines) */}

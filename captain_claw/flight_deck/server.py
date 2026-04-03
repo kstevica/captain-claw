@@ -669,8 +669,8 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
     slug = _slug(config.name)
 
     # Ensure port is available; find a free one if not
-    if config.web_enabled and not _is_port_available(config.web_port):
-        config.web_port = _find_available_port(config.web_port)
+    if config.web_enabled and (config.web_port <= 0 or not _is_port_available(config.web_port)):
+        config.web_port = _find_available_port(config.web_port if config.web_port > 0 else 24080)
 
     # Auto-generate auth token if none provided — prevents unauthenticated
     # direct access to agent ports bypassing Flight Deck.
@@ -1829,6 +1829,54 @@ def _scan_workspace_files(agent_dir: Path) -> list[dict]:
     return results
 
 
+# ── Agent Datastore proxy ─────────────────────────────────────────────
+
+@app.get("/fd/agent-datastore/{host}/{port}/tables")
+async def agent_datastore_tables(
+    host: str, port: int, token: str = "",
+    user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None,
+):
+    """List datastore tables from a CC agent (proxied)."""
+    import httpx
+    auth = token or _resolve_agent_auth(port)
+    params = f"?token={auth}" if auth else ""
+    url = f"http://{host}:{port}/api/datastore/tables{params}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.get("/fd/agent-datastore/{host}/{port}/tables/{table_name}/rows")
+async def agent_datastore_rows(
+    host: str, port: int, table_name: str,
+    limit: int = 100, offset: int = 0,
+    order_by: str = "", order_dir: str = "asc",
+    token: str = "",
+    user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None,
+):
+    """Query rows from a datastore table on a CC agent (proxied)."""
+    import httpx
+    auth = token or _resolve_agent_auth(port)
+    qs = f"token={auth}&" if auth else ""
+    qs += f"limit={limit}&offset={offset}"
+    if order_by:
+        qs += f"&order_by={order_by}&order_dir={order_dir}"
+    url = f"http://{host}:{port}/api/datastore/tables/{table_name}/rows?{qs}"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
 @app.get("/fd/agent-files/{host}/{port}")
 async def agent_files(host: str, port: int, token: str = "", request: Request = None, user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None):
     """List files from a CC agent (proxied to avoid CORS), merged with workspace scan."""
@@ -2095,8 +2143,8 @@ async def spawn_process(config: AgentConfig, request: Request, user: dict | None
         raise HTTPException(400, f"Process '{slug}' is already running. Stop it first or use a different name.")
 
     # Ensure port is available; find a free one if not
-    if config.web_enabled and not _is_port_available(config.web_port):
-        config.web_port = _find_available_port(config.web_port)
+    if config.web_enabled and (config.web_port <= 0 or not _is_port_available(config.web_port)):
+        config.web_port = _find_available_port(config.web_port if config.web_port > 0 else 24080)
 
     # Auto-generate auth token if none provided — prevents unauthenticated
     # direct access to agent ports bypassing Flight Deck.
@@ -2414,6 +2462,68 @@ async def auth_status():
         "docker_spawn_enabled": cfg.get("docker_spawn_enabled", docker_default),
         "internal_fd_url": internal_fd_url,
     }
+
+
+# ── Agent Forge: LLM-powered team decomposition ──────────────────────────
+
+class ForgeRequest(BaseModel):
+    prompt: str
+    provider: str = "anthropic"
+    model: str = "claude-sonnet-4-20250514"
+    api_key: str = ""
+
+
+@app.post("/fd/forge")
+async def forge_decompose(
+    body: ForgeRequest, request: Request,
+    user: dict | None = Depends(get_current_user) if AUTH_ENABLED else None,
+):
+    """Use an LLM to decompose a user objective into a team of specialized agents."""
+    if not body.prompt.strip():
+        raise HTTPException(400, "prompt is required")
+
+    # Load the forge system prompt from instructions
+    instructions_dir = Path(__file__).parent.parent / "instructions"
+    system_prompt_file = instructions_dir / "forge_decompose_system_prompt.md"
+    if not system_prompt_file.is_file():
+        raise HTTPException(500, "Forge system prompt not found")
+    system_prompt = system_prompt_file.read_text()
+
+    # Create an LLM provider and make the decomposition call
+    try:
+        from captain_claw.llm import create_provider, Message
+        provider = create_provider(
+            provider=body.provider,
+            model=body.model,
+            api_key=body.api_key or None,
+            temperature=0.7,
+            max_tokens=16384,
+        )
+        response = await provider.complete(
+            messages=[
+                Message(role="system", content=system_prompt),
+                Message(role="user", content=body.prompt.strip()),
+            ],
+            temperature=0.7,
+            max_tokens=16384,
+        )
+    except Exception as e:
+        log.error("Forge LLM call failed", exc_info=True)
+        raise HTTPException(502, f"LLM call failed: {e}")
+
+    # Parse the JSON response
+    content = response.content.strip()
+    # Strip markdown fences if present
+    if content.startswith("```"):
+        lines = content.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        content = "\n".join(lines)
+    try:
+        result = json.loads(content)
+    except json.JSONDecodeError:
+        raise HTTPException(502, f"LLM returned invalid JSON: {content[:500]}")
+
+    return result
 
 
 @app.get("/fd/health")

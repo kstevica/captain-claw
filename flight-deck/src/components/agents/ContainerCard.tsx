@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, Loader2, FolderOpen, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings } from 'lucide-react'
+import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings } from 'lucide-react'
 import type { ContainerInfo } from '../../services/docker'
 import { getContainerLogs } from '../../services/docker'
 import { useContainerStore } from '../../stores/containerStore'
@@ -8,6 +8,7 @@ import { useChatStore } from '../../stores/chatStore'
 import { EmbeddedChat } from './EmbeddedChat'
 import { AgentGroupBadges } from '../common/AgentGroups'
 import { AgentConfigEditor } from './AgentConfigEditor'
+import { DatastoreBrowser } from './DatastoreBrowser'
 import { OpenDropdown } from '../common/OpenDropdown'
 import { useAuthStore } from '../../stores/authStore'
 import { queueSave, registerHydrator } from '../../services/settingsSync'
@@ -103,6 +104,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   const [fwdTaskDraft, setFwdTaskDraft] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>(() => loadViewModes()[container.id] || 'expanded')
   const [showConfig, setShowConfig] = useState(false)
+  const [showDatastore, setShowDatastore] = useState(false)
 
   const isRunning = container.status === 'running'
   const agentName = container.agent_name || container.name
@@ -183,6 +185,11 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
     document.body
   )
 
+  const datastoreModal = showDatastore && isRunning && container.web_port && createPortal(
+    <DatastoreBrowser host="localhost" port={container.web_port} auth={container.web_auth} agentName={agentName} onClose={() => setShowDatastore(false)} />,
+    document.body
+  )
+
   // ── Icon view (ultra-compact single row) ──
   if (viewMode === 'icon') {
     return (
@@ -212,7 +219,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
         <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleViewMode} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Expand card">
           <Maximize2 className="h-3 w-3" />
         </button>
-      </div>{configModal}</>
+      </div>{configModal}{datastoreModal}</>
     )
   }
 
@@ -320,6 +327,11 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
             <button onClick={toggleLogs} disabled={logsLoading} className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40">
               <ScrollText className={`h-3 w-3 ${logsLoading ? 'animate-spin' : ''}`} /> {showLogs ? 'Hide' : 'Logs'}
             </button>
+            {isRunning && container.web_port && (
+              <button onClick={() => setShowDatastore(true)} className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                <Database className="h-3 w-3" /> Data
+              </button>
+            )}
             <div className="flex-1" />
             <ActionsDropdown {...actionProps} />
           </div>
@@ -370,7 +382,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
         {isRunning && container.web_port && (
           <EmbeddedChat containerId={container.id} containerName={agentName} host="localhost" port={container.web_port} auth={container.web_auth} />
         )}
-      </div>{configModal}</>
+      </div>{configModal}{datastoreModal}</>
     )
   }
 
@@ -626,6 +638,11 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
           <button onClick={toggleLogs} disabled={logsLoading} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40">
             <ScrollText className={`h-3.5 w-3.5 ${logsLoading ? 'animate-spin' : ''}`} /> {showLogs ? 'Hide Logs' : 'Logs'}
           </button>
+          {isRunning && container.web_port && (
+            <button onClick={() => setShowDatastore(true)} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+              <Database className="h-3.5 w-3.5" /> Data
+            </button>
+          )}
           <div className="flex-1" />
           <ActionsDropdown {...actionProps} />
         </div>
@@ -693,6 +710,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
       )}
 
       {configModal}
+      {datastoreModal}
     </div>
   )
 }

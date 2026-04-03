@@ -10,6 +10,7 @@ import {
   MessageSquare,
   BarChart3,
   Shield,
+  Wand2,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { APP_VERSION, BUILD_DATE } from '../../version'
@@ -26,6 +27,7 @@ const navItems: { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?:
   { id: 'operations', icon: BarChart3, label: 'Operations' },
   { id: 'workflow', icon: GitBranch, label: 'Workflows' },
   { id: 'spawner', icon: Plus, label: 'Spawn Agent' },
+  { id: 'forge', icon: Wand2, label: 'Agent Forge' },
   { id: 'admin', icon: Shield, label: 'Admin', adminOnly: true },
 ]
 

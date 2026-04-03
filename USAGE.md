@@ -3651,6 +3651,85 @@ Flight Deck serves both the React frontend and the FastAPI backend from a single
 | Free-form layout | Drag agent cards freely on the desktop, positions persisted to localStorage |
 | Embedded chat | Collapsible chat panel directly on agent cards |
 | Resizable panels | Director (220–500px), chat (320–900px), and tool panels (280–500px) are all resizable with drag handles |
+| Agent Forge | AI-powered team decomposition — describe a goal, get a team of agents with roles, instructions, and tools |
+| Fleet-level instructions | Per-agent instructions injected into system prompts, editable from agent config editor |
+| Datastore browser | View agent datastore tables and rows directly from agent cards |
+| Agent groups & tags | Organize agents into teams and roles with color-coded group badges |
+
+### Agent Forge
+
+Agent Forge is a dedicated Flight Deck page that uses an LLM to decompose a business objective into a team of specialized AI agents.
+
+**How it works:**
+
+1. Navigate to **Agent Forge** in the sidebar
+2. Configure the LLM provider, model, and API key (persisted across sessions)
+3. Optionally add environment variables (e.g., `BRAVE_API_KEY`) that will be passed to all spawned agents
+4. Describe your objective in natural language
+5. Click **Decompose into Agents** — the LLM analyzes your goal and proposes a team
+
+**What the LLM generates for each agent:**
+
+- **Name** — kebab-case identifier (e.g., `market-researcher`, `data-analyst`)
+- **Role** — position title (e.g., "Senior Research Analyst", "Data Engineer")
+- **Lead designation** — one agent is marked as lead coordinator
+- **Description** — one-sentence summary of responsibilities
+- **Fleet instructions** — detailed operating procedure including:
+  - Primary responsibilities and focus areas
+  - Tool usage guidance referencing specific Captain Claw tools
+  - Standard Operating Procedure (SOP) as pseudo-code steps
+  - Collaboration patterns with other team members
+  - Output expectations
+- **Tools** — curated selection from 44 available tools based on the agent's role
+
+**Review phase:**
+
+- Edit any field (name, role, description, instructions, tools)
+- Change LLM provider/model per agent
+- Toggle agent type (process or Docker)
+- Designate a different lead agent (crown icon)
+- Add or remove agents
+
+**On spawn:**
+
+- Each agent is created with its fleet-level instructions and tool configuration
+- A team group is created (all agents added)
+- A role group is created per unique role
+- The lead agent's name includes `[Lead]` suffix
+
+The forge system prompt includes the full Captain Claw tool reference (44 tools with descriptions) and guidelines for tool selection per role type (research, content, data, coordination, communication, automation).
+
+### Fleet-Level Instructions
+
+Fleet-level instructions are per-agent directives set from Flight Deck that are injected into the agent's system prompt. They apply to every conversation and take effect when the agent's chat session is opened.
+
+**Setting instructions:**
+
+1. Click **Actions** on any agent card, then **Configure**
+2. Select the **Instructions** tab
+3. Write or paste fleet-level instructions
+4. Click **Save**
+
+Instructions are stored in the Flight Deck frontend and sent to agents via the `peer_agents` WebSocket message when a chat session opens. No agent restart is needed — instructions take effect on the next chat connection.
+
+In the agent's system prompt, fleet instructions appear under the heading **"Fleet-Level Instructions"** with the note that they come from the fleet operator.
+
+### Datastore Browser
+
+The datastore browser provides a read-only view of an agent's SQLite-backed datastore tables directly from Flight Deck.
+
+**Accessing:**
+
+Click the **Data** button on any running agent card (available in both compact and expanded view modes).
+
+**Features:**
+
+- Lists all tables with column schemas, types, and row counts
+- Click a table to browse rows with pagination (50 rows per page)
+- Columns displayed in schema order with monospace font
+- Null values shown as italic "null"
+- Refresh button to reload data
+- 80% viewport modal with back navigation
 
 ### Agent Types
 

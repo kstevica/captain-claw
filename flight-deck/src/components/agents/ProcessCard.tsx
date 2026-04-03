@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Cpu, Play, Square, RotateCcw, Trash2, ScrollText, ChevronUp, MessageSquare, Loader2, FolderOpen, Pencil, Check, X, Copy, MoreVertical, Minimize2, Maximize2, Settings } from 'lucide-react'
+import { Cpu, Play, Square, RotateCcw, Trash2, ScrollText, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Pencil, Check, X, Copy, MoreVertical, Minimize2, Maximize2, Settings } from 'lucide-react'
 import type { ProcessInfo } from '../../services/docker'
 import { getProcessLogs } from '../../services/docker'
 import { useProcessStore } from '../../stores/processStore'
@@ -8,6 +8,7 @@ import { useChatStore } from '../../stores/chatStore'
 import { EmbeddedChat } from './EmbeddedChat'
 import { AgentGroupBadges } from '../common/AgentGroups'
 import { AgentConfigEditor } from './AgentConfigEditor'
+import { DatastoreBrowser } from './DatastoreBrowser'
 import { OpenDropdown } from '../common/OpenDropdown'
 import { useAuthStore } from '../../stores/authStore'
 import { queueSave, registerHydrator } from '../../services/settingsSync'
@@ -92,6 +93,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   const [fwdTaskDraft, setFwdTaskDraft] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>(() => loadViewModes()[proc.slug] || 'expanded')
   const [showConfig, setShowConfig] = useState(false)
+  const [showDatastore, setShowDatastore] = useState(false)
 
   const isRunning = proc.status === 'running'
   const agentName = proc.name || proc.slug
@@ -169,6 +171,11 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
     document.body
   )
 
+  const datastoreModal = showDatastore && isRunning && createPortal(
+    <DatastoreBrowser host="localhost" port={proc.web_port} auth={proc.web_auth} agentName={agentName} onClose={() => setShowDatastore(false)} />,
+    document.body
+  )
+
   // ── Icon view (ultra-compact single row) ──
   if (viewMode === 'icon') {
     return (
@@ -198,7 +205,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
         <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleViewMode} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Expand card">
           <Maximize2 className="h-3 w-3" />
         </button>
-      </div>{configModal}</>
+      </div>{configModal}{datastoreModal}</>
     )
   }
 
@@ -277,6 +284,11 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
             <button onClick={toggleLogs} disabled={logsLoading} className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40">
               <ScrollText className={`h-3 w-3 ${logsLoading ? 'animate-spin' : ''}`} /> {showLogs ? 'Hide' : 'Logs'}
             </button>
+            {isRunning && (
+              <button onClick={() => setShowDatastore(true)} className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                <Database className="h-3 w-3" /> Data
+              </button>
+            )}
             <div className="flex-1" />
             <ProcessActionsDropdown {...actionProps} />
           </div>
@@ -294,7 +306,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
         {isRunning && (
           <EmbeddedChat containerId={chatId} containerName={agentName} host="localhost" port={proc.web_port} auth={proc.web_auth} />
         )}
-      </div>{configModal}</>
+      </div>{configModal}{datastoreModal}</>
     )
   }
 
@@ -343,28 +355,26 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
               <div className="flex items-center gap-2">
                 {proc.pid && <span className="text-xs text-zinc-500 font-mono">PID {proc.pid}</span>}
                 <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-xs font-mono text-emerald-400/80">:{proc.web_port}</span>
+                <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${badgeCls}`}>
+                  {isRunning && (
+                    <span className="relative flex h-1.5 w-1.5">
+                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-current opacity-75" />
+                      <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-current" />
+                    </span>
+                  )}
+                  {proc.status}
+                </span>
+                {isRunning && (
+                  <>
+                    <button onClick={() => openChat(chatId, agentName, 'localhost', proc.web_port, proc.web_auth)}
+                      className="flex items-center gap-1 rounded-lg px-2 py-0.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                      <MessageSquare className="h-3 w-3" /> Chat
+                    </button>
+                    <OpenDropdown host="localhost" port={proc.web_port} auth={proc.web_auth} />
+                  </>
+                )}
               </div>
             </div>
-          </div>
-          <div className="flex items-center gap-1.5">
-            {isRunning && (
-              <>
-                <button onClick={() => openChat(chatId, agentName, 'localhost', proc.web_port, proc.web_auth)}
-                  className="flex items-center gap-1 rounded-lg bg-emerald-600/20 px-2 py-0.5 text-xs font-medium text-emerald-300 hover:bg-emerald-600/30">
-                  <MessageSquare className="h-3 w-3" /> Chat
-                </button>
-                <OpenDropdown host="localhost" port={proc.web_port} auth={proc.web_auth} />
-              </>
-            )}
-            <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${badgeCls}`}>
-              {isRunning && (
-                <span className="relative flex h-1.5 w-1.5">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-current opacity-75" />
-                  <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-current" />
-                </span>
-              )}
-              {proc.status}
-            </span>
           </div>
         </div>
 
@@ -458,6 +468,11 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
           <button onClick={toggleLogs} disabled={logsLoading} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40">
             <ScrollText className={`h-3.5 w-3.5 ${logsLoading ? 'animate-spin' : ''}`} /> {showLogs ? 'Hide Logs' : 'Logs'}
           </button>
+          {isRunning && (
+            <button onClick={() => setShowDatastore(true)} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+              <Database className="h-3.5 w-3.5" /> Data
+            </button>
+          )}
           <div className="flex-1" />
           <ProcessActionsDropdown {...actionProps} />
         </div>
@@ -481,6 +496,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
       )}
 
       {configModal}
+      {datastoreModal}
     </div>
   )
 }

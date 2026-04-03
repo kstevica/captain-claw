@@ -14,6 +14,56 @@
 
 An open-source AI agent that runs locally, supports multiple LLM providers, and gets work done — coding, research, automation, document processing, orchestration — through persistent sessions with built-in safety guards.
 
+## Flight Deck — Multi-Agent Management
+
+Flight Deck is Captain Claw's command center for running teams of AI agents. Spawn, monitor, and coordinate multiple agents from a single dashboard.
+
+### Agent Forge (NEW in 0.4.10)
+
+Describe a business objective and let AI design a specialized team of agents automatically:
+
+```bash
+captain-claw-fd    # Start Flight Deck at http://0.0.0.0:25080
+```
+
+1. **Describe your goal** — "I need a team to scout startups in Croatia, research founders, and build an investment pipeline"
+2. **AI decomposes it** — Agent Forge uses an LLM to design a team with roles, responsibilities, tools, and operating procedures
+3. **Review & customize** — Edit agent names, roles, models, instructions, and tools before spawning
+4. **Spawn & go** — Agents are created with fleet-level instructions, group tags, and a designated lead coordinator
+
+Each forged agent receives:
+- A role and group tag (visible on agent cards)
+- Fleet-level instructions with a Standard Operating Procedure
+- Tool selection tailored to their role (from 44 available tools)
+- Per-agent LLM provider/model configuration
+
+### Flight Deck Features
+
+| Feature | Description |
+|---|---|
+| Agent Forge | AI-powered team decomposition — describe a goal, get a team of agents |
+| Multi-agent spawn | Docker containers or pip processes, no Docker required for processes |
+| Fleet discovery | Agents discover peers and communicate via consult (sync) and delegate (async) |
+| Agent cards | Three view modes (expanded/compact/icon) with embedded chat |
+| Fleet instructions | Per-agent instructions injected into system prompts from the dashboard |
+| Agent config editor | Edit config.yaml, .env, and fleet instructions per agent |
+| Datastore browser | View and browse agent datastore tables and rows |
+| File browser | Browse, transfer, and pin files across agents |
+| Director panel | Unified overview with broadcast to all agents |
+| Operations | Per-agent token/cost analytics |
+| Pipelines | Chain agent outputs automatically |
+| Groups & tags | Organize agents into teams and roles |
+| Multi-user auth | JWT authentication, admin dashboard, rate limiting, quotas |
+| Dark/light theme | Full theme support with keyboard shortcuts |
+
+### Why Flight Deck?
+
+- **No-code team setup** — Agent Forge turns a text description into a working team of AI agents
+- **Centralized control** — Monitor, chat with, and configure all agents from one place
+- **Fleet-level instructions** — Push operating procedures to agents without restarting them
+- **Agent-to-agent communication** — Agents can consult peers or delegate tasks automatically
+- **Data visibility** — Browse each agent's datastore tables directly from the dashboard
+
 ## Feature Snapshot
 
 | Capability | What it does |
@@ -43,7 +93,7 @@ An open-source AI agent that runs locally, supports multiple LLM providers, and 
 | Cross-session script memory | Persistent script/file tracking with auto-capture from write tool |
 | Cross-session API memory | Persistent API endpoint tracking with auto-capture from web_fetch |
 | Cross-session playbook memory | Rate sessions to auto-distill reusable orchestration patterns (do/don't pseudo-code) with auto-injection |
-| Flight Deck | Multi-agent management dashboard — spawn Docker or pip process agents, fleet discovery and agent-to-agent communication (synchronous consult + fire-and-forget delegate), chat with multiple agents, transfer files and context, Director panel, operations analytics, agent pipelines, three card view modes (expanded/compact/icon), pinned messages, shared clipboard, notifications, keyboard shortcuts, dark/light theme, multi-user auth with JWT, admin dashboard, rate limiting, chat persistence, agent config editor, Docker deployment |
+| Flight Deck | Multi-agent management dashboard with **Agent Forge** (AI team decomposition), fleet-level instructions, datastore browser, spawn Docker or pip process agents, fleet discovery and agent-to-agent communication, chat with multiple agents, transfer files, Director panel, operations analytics, agent pipelines, groups/tags, three card view modes, multi-user auth with JWT, admin dashboard, dark/light theme |
 | Datastore | SQLite-backed relational tables managed by the agent, with protection rules, import/export, web dashboard, and table export via UI |
 | Chunked processing pipeline | Run small-context models (20k–32k tokens) on large content via automatic content chunking |
 | Cron scheduling | Interval, daily, and weekly tasks inside the runtime |
@@ -328,7 +378,7 @@ For the full configuration reference (23 sections, every field), see [USAGE.md](
 
 Each of these is documented in detail in [USAGE.md](USAGE.md).
 
-- **[Flight Deck](USAGE.md#flight-deck)** — Multi-agent management dashboard. Spawn and manage Captain Claw agents in Docker containers or as local pip processes (no Docker required), register local/remote agents by host:port, chat with multiple agents simultaneously via WebSocket, browse and transfer files between agents, forward conversation context with tasks to other agents. Agents discover and communicate with peers via the `flight_deck` tool and live fleet API — synchronous consultation with heartbeat streaming, and fire-and-forget task delegation with automatic result delivery. Includes Director panel with unified agent overview and broadcast, Operations dashboard with per-agent token/cost analytics, agent pipelines for chaining agent outputs automatically, pinned messages, shared clipboard, notification center, keyboard shortcuts, resizable panels, free-form draggable agent cards with three view modes (expanded/compact/icon), file viewer with syntax highlighting, dark/light theme, embedded chat on agent cards, and agent config editor. Supports multi-user deployment with JWT authentication, admin dashboard (user management, plan tiers, quotas, usage analytics), rate limiting, server-side chat persistence, and settings sync. Deploy with Docker via `Dockerfile.flight-deck` and `docker-compose.flight-deck.yml`. Run with `captain-claw-fd`.
+- **[Flight Deck](USAGE.md#flight-deck)** — Multi-agent management dashboard with **Agent Forge** for AI-powered team decomposition. Describe a business objective and Agent Forge designs a team of specialized agents with roles, fleet-level instructions (including Standard Operating Procedures), tool selection from 44 tools, and a designated lead coordinator. Agents are organized into groups and tagged by role. Fleet-level instructions are injected into each agent's system prompt and take effect immediately. Includes a datastore browser for viewing agent tables and rows, agent config editor with instructions tab, and all existing features: spawn Docker containers or pip processes, fleet discovery with agent-to-agent communication (sync consult + async delegate), embedded chat, Director panel, Operations analytics, agent pipelines, file browser and transfer, three card view modes, pinned messages, shared clipboard, keyboard shortcuts, dark/light theme, multi-user JWT auth, and admin dashboard. Run with `captain-claw-fd`.
 
 - **[Computer](USAGE.md#computer)** — A retro-themed research workspace at `/computer`. Three-panel layout with input area, activity log, and tabbed output (Answer, Blueprint, Files, Visual, Map). Features themed HTML visual generation via LLM, interactive exploration trees for multi-turn research, model selector modal, persona selector, token tier control, folder browser (local filesystem + Google Drive), file attachments (images, PDF, DOCX, XLSX, PPTX, MD, TXT, CSV), PDF export via WeasyPrint (preserves full CSS styling), suggested next-step buttons after each response, and 14 built-in themes (Amiga Workbench, Atari ST, C64, Classic Mac, Windows 3.1, Hacker Terminal, and more) plus a custom theme engine. Each theme includes unique boot sequences and CSS variable styling. Supports **public mode** (`web.public_run: "computer"`) with per-session isolation, access codes, route lockdown, and **BYOK (Bring Your Own Key)** — public users can provide their own LLM API credentials (OpenAI, Anthropic, Gemini, xAI, OpenRouter) stored only in the browser.
 
