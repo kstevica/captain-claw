@@ -775,7 +775,7 @@ class CognitiveModeConfig(BaseModel):
     (dreaming frequency, completion strictness, etc.).
     """
 
-    enabled: bool = False
+    enabled: bool = True
     default_mode: str = "neutra"                # Default mode when no file on disk
 
 

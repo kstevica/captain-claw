@@ -461,7 +461,7 @@ def _build_config_yaml(c: AgentConfig) -> str:
         "slack": {"enabled": c.slack_enabled, "bot_token": c.slack_bot_token},
         "logging": {"level": "INFO", "format": "console"},
         "cognitive_mode": {
-            "enabled": c.cognitive_mode != "neutra",
+            "enabled": True,
             "default_mode": c.cognitive_mode,
         },
     }

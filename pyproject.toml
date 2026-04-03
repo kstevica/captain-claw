@@ -1,6 +1,6 @@
 [project]
 name = "captain-claw"
-version = "0.4.10"
+version = "0.4.11"
 description = "A powerful AI agentic system"
 readme = "README.md"
 requires-python = ">=3.11"
