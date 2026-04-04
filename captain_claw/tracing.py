@@ -35,7 +35,7 @@ class TraceSpan:
                                         # tool_execution | validation |
                                         # workspace_op | decompose | synthesize
     name: str = ""                      # human-readable label
-    started_at: float = 0.0             # monotonic timestamp
+    started_at: float = 0.0             # wall-clock timestamp (time.time())
     ended_at: float = 0.0               # 0 if still running
     status: str = "running"             # running | completed | failed
     attributes: dict[str, Any] = field(default_factory=dict)
@@ -105,7 +105,7 @@ class TraceContext:
             parent_span_id=parent_span_id,
             span_type=span_type,
             name=name,
-            started_at=time.monotonic(),
+            started_at=time.time(),
             status="running",
             attributes=dict(attributes),
         )
@@ -124,7 +124,7 @@ class TraceContext:
         if span is None:
             log.warning("end_span: unknown span_id", span_id=span_id)
             return
-        span.ended_at = time.monotonic()
+        span.ended_at = time.time()
         span.status = status
         if extra_attributes:
             span.attributes.update(extra_attributes)

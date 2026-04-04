@@ -421,7 +421,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (data.event === 'trace_span') {
         const span = data as unknown as TraceSpan
         if (span?.span_id) {
-          useTraceStore.getState().handleSpanEvent(span)
+          useTraceStore.getState().handleSpanEvent(containerId, span)
         }
       }
     })

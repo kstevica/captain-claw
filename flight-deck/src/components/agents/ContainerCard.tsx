@@ -132,7 +132,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
     if (showLogs) { setShowLogs(false); return }
     setLogsLoading(true)
     try {
-      const text = await getContainerLogs(container.id, 100)
+      const text = await getContainerLogs(container.id, 250)
       setLogs(text)
       setShowLogs(true)
     } catch (e) {
@@ -146,7 +146,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
     if (!showLogs || !isRunning) return
     const interval = setInterval(async () => {
       try {
-        const text = await getContainerLogs(container.id, 100)
+        const text = await getContainerLogs(container.id, 250)
         setLogs(text)
       } catch { /* ignore polling errors */ }
     }, 3000)
@@ -375,7 +375,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
         {showLogs && (
           <div className="border-t border-zinc-800">
             <div className="flex items-center justify-between px-3 py-1 bg-zinc-950/50">
-              <span className="text-[11px] text-zinc-500">Logs (last 100 lines)</span>
+              <span className="text-[11px] text-zinc-500">Logs (last 250 lines)</span>
               <div className="flex items-center gap-1">
                 <button onClick={() => navigator.clipboard.writeText(logs)} className="text-zinc-500 hover:text-zinc-300" title="Copy logs"><Copy className="h-3 w-3" /></button>
                 <button onClick={() => toggleLogs()} className="text-zinc-500 hover:text-zinc-300"><ChevronUp className="h-3 w-3" /></button>
@@ -751,7 +751,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
       {showLogs && (
         <div className="border-t border-zinc-800">
           <div className="flex items-center justify-between px-4 py-1.5 bg-zinc-950/50">
-            <span className="text-xs text-zinc-500">Logs (last 100 lines)</span>
+            <span className="text-xs text-zinc-500">Logs (last 250 lines)</span>
             <div className="flex items-center gap-1.5">
               <button onClick={() => navigator.clipboard.writeText(logs)} className="text-xs text-zinc-500 hover:text-zinc-300" title="Copy logs"><Copy className="h-3.5 w-3.5" /></button>
               <button onClick={() => toggleLogs()} className="text-xs text-zinc-500 hover:text-zinc-300">

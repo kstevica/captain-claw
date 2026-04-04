@@ -30,7 +30,7 @@ import { useContainerStore } from '../../stores/containerStore'
 import { useProcessStore } from '../../stores/processStore'
 import { usePinnedStore } from '../../stores/pinnedStore'
 import { useClipboardStore } from '../../stores/clipboardStore'
-import { useTraceStore } from '../../stores/traceStore'
+import { useTraceStore, selectSpanCount } from '../../stores/traceStore'
 import { SendContextModal } from './SendContextModal'
 import TraceTimeline from '../observability/TraceTimeline'
 import { uploadFileToAgent, formatSize } from '../../services/fileTransfer'
@@ -58,7 +58,8 @@ export function ChatPanel() {
   const containers = useContainerStore((s) => s.containers)
   const [showSendContext, setShowSendContext] = useState(false)
   const [showTracePanel, setShowTracePanel] = useState(false)
-  const traceSpanCount = useTraceStore((s) => s.spans.length)
+  const activeId = activeChatId || ''
+  const traceSpanCount = useTraceStore((s) => selectSpanCount(s, activeId))
 
   const session = activeChatId ? sessions.get(activeChatId) : null
 
@@ -143,7 +144,7 @@ export function ChatPanel() {
             )}
           </div>
           <div className="flex-1 overflow-y-auto">
-            <TraceTimeline />
+            <TraceTimeline containerId={activeId} />
           </div>
         </div>
       ) : (

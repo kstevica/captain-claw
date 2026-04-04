@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { useTraceStore } from '../../stores/traceStore'
+import { useTraceStore, selectSpans, selectSummary } from '../../stores/traceStore'
 import type { TraceSpan } from '../../types'
 
 // Colour mapping per span type
@@ -24,7 +24,9 @@ const STATUS_ICON: Record<string, string> = {
 function formatMs(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
-  return `${(ms / 60_000).toFixed(1)}m`
+  const mins = Math.floor(ms / 60_000)
+  const secs = Math.round((ms % 60_000) / 1000)
+  return secs > 0 ? `${mins}:${secs.toString().padStart(2, '0')}m` : `${mins}m`
 }
 
 function SpanBar({ span, minTime, totalRange }: {
@@ -72,8 +74,9 @@ function SpanBar({ span, minTime, totalRange }: {
   )
 }
 
-export default function TraceTimeline() {
-  const { spans, summary } = useTraceStore()
+export default function TraceTimeline({ containerId }: { containerId: string }) {
+  const spans = useTraceStore((s) => selectSpans(s, containerId))
+  const summary = useTraceStore((s) => selectSummary(s, containerId))
 
   // Sort spans by start time
   const sortedSpans = useMemo(
@@ -91,10 +94,30 @@ export default function TraceTimeline() {
     return { minTime: min, totalRange: maxEnd - min || 1 }
   }, [sortedSpans])
 
+  // Compute wall-clock elapsed vs sequential (sum of task durations)
+  const timing = useMemo(() => {
+    if (sortedSpans.length === 0) return null
+    const minStart = sortedSpans[0].started_at
+    const now = Date.now() / 1000
+    const maxEnd = Math.max(...sortedSpans.map((s) =>
+      s.ended_at > 0 ? s.ended_at : now
+    ))
+    const wallClockMs = (maxEnd - minStart) * 1000
+
+    // Sum only task-type span durations for sequential estimate
+    const taskSpans = sortedSpans.filter((s) => s.span_type === 'task')
+    const sequentialMs = taskSpans.reduce((sum, s) => sum + (s.duration_ms || 0), 0)
+
+    const savedMs = sequentialMs - wallClockMs
+    const savedPct = sequentialMs > 0 ? Math.round((savedMs / sequentialMs) * 100) : 0
+
+    return { wallClockMs, sequentialMs, savedMs, savedPct }
+  }, [sortedSpans])
+
   if (spans.length === 0) {
     return (
       <div className="text-xs text-zinc-500 italic p-3">
-        No trace data available. Run an orchestration to see spans.
+        No trace data available. Type <span className="font-mono text-zinc-400">/orchestrate</span> followed by your request to see spans.
       </div>
     )
   }
@@ -108,10 +131,22 @@ export default function TraceTimeline() {
           <span className="text-emerald-500">{summary.completed} done</span>
           {summary.failed > 0 && <span className="text-red-400">{summary.failed} failed</span>}
           {summary.running > 0 && <span className="text-yellow-400">{summary.running} running</span>}
-          <span>{formatMs(summary.total_duration_ms)} total</span>
           {(summary.total_input_tokens > 0 || summary.total_output_tokens > 0) && (
             <span className="text-zinc-600">
               {summary.total_input_tokens.toLocaleString()}+{summary.total_output_tokens.toLocaleString()} tokens
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Timing breakdown */}
+      {timing && (
+        <div className="flex items-center gap-3 text-[10px] text-zinc-500 mb-1 flex-wrap">
+          <span>elapsed <span className="text-zinc-300 font-medium">{formatMs(timing.wallClockMs)}</span></span>
+          <span>sequential <span className="text-zinc-400">{formatMs(timing.sequentialMs)}</span></span>
+          {timing.savedMs > 0 && (
+            <span className="text-emerald-400 font-medium">
+              {formatMs(timing.savedMs)} saved ({timing.savedPct}%)
             </span>
           )}
         </div>

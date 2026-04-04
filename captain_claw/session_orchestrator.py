@@ -92,6 +92,38 @@ _COMPLEXITY_SIGNALS: list[tuple[re.Pattern[str], int]] = [
     (re.compile(r"\b(?:web_fetch|fetch|scrape)\b", re.I), 4),
 ]
 
+# ── Binary file output detection ──
+# Tasks that mention these formats MUST use write+shell (Python script)
+# to produce valid binary output.  Text-only responses for these tasks
+# are always hallucinations.
+_BINARY_OUTPUT_RE = re.compile(
+    r"(?:"
+    r"\.pptx\b|\.xlsx\b|\.xls\b|\.docx\b|\.pdf\b"
+    r"|\.png\b|\.jpg\b|\.jpeg\b|\.gif\b|\.svg\b|\.webp\b"
+    r"|\.mp3\b|\.mp4\b|\.wav\b|\.ogg\b"
+    r"|\.zip\b|\.tar\b|\.gz\b"
+    r"|\bpptx\b|\bpowerpoint\b|\bpresentation\b.*\bslide"
+    r"|\bxlsx\b|\bspreadsheet\b|\bexcel\b.*\b(?:file|workbook)"
+    r"|\bdocx\b|\bword\s+doc"
+    r"|\bpython-pptx\b|\bopenpyxl\b|\bpython-docx\b|\breportlab\b"
+    r"|\bpillow\b|\bmatplotlib\b.*\b(?:save|export|write)"
+    r")",
+    re.IGNORECASE,
+)
+
+_BINARY_SCRIPT_INSTRUCTION = """
+## CRITICAL — Binary File Output Required
+
+This task produces a BINARY file (not plain text). You MUST:
+1. Write a Python script using the appropriate library (e.g., python-pptx, openpyxl, python-docx, reportlab, Pillow, matplotlib)
+2. Execute it via the shell tool: `pip install <library> && python <script.py>`
+3. Verify the file was created
+
+DO NOT respond with text describing what the file would contain.
+DO NOT write plain text to a binary file extension.
+You MUST use the write tool to create the script, then the shell tool to run it.
+"""
+
 
 _AUTO_SELECT_MODEL_ADDENDUM = """\
 CRITICAL — automatic model selection:
@@ -1664,16 +1696,29 @@ class SessionOrchestrator:
                     f"Do not include any other text outside the JSON.\n"
                 )
 
+            # Detect binary file output tasks and inject script-execution
+            # instruction to prevent models from hallucinating text output.
+            requires_binary = bool(_BINARY_OUTPUT_RE.search(task.description))
+            binary_script_section = ""
+            if requires_binary:
+                binary_script_section = _BINARY_SCRIPT_INSTRUCTION
+                log.info("Binary output task detected",
+                         task_id=task.id, title=task.title)
+
             worker_prompt = self._instructions.render(
                 "orchestrator_worker_prompt.md",
                 task_title=task.title,
                 task_description=task.description,
-                file_manifest=file_manifest + dep_outputs_section + workspace_section + shared_workspace_section + output_schema_section,
+                file_manifest=file_manifest + dep_outputs_section + workspace_section + shared_workspace_section + output_schema_section + binary_script_section,
             )
 
             # Bump iteration budget for complex tasks that require
             # many tool calls (find files + read + write + shell …).
+            # Binary file tasks need at minimum: read deps + write script
+            # + pip install + run script + verify = 5 extra iterations.
             estimated = _estimate_task_iterations(task.description)
+            if requires_binary:
+                estimated = max(estimated, _WORKER_DEFAULT_ITERATIONS + 5)
             if estimated > agent.max_iterations:
                 log.info(
                     "Bumping worker max_iterations for complex task",
@@ -1699,6 +1744,43 @@ class SessionOrchestrator:
             response = await agent.complete(worker_prompt)
             worker_success = getattr(agent, "_last_complete_success", True)
             output_text = str(response or "").strip()
+
+            # ── Binary output enforcement ──
+            # If the task requires binary file output but the agent
+            # returned a text-only response (no shell execution), retry
+            # once with a stronger corrective prompt.  This catches
+            # hallucinations where the model describes the file content
+            # instead of actually creating it via script execution.
+            if requires_binary and worker_success:
+                # Check if shell was used successfully during this worker turn.
+                _agent_used_shell = False
+                if hasattr(agent, "session") and agent.session:
+                    for msg in agent.session.messages:
+                        if (msg.get("role") == "tool" and
+                                str(msg.get("tool_name", "")).lower() == "shell" and
+                                msg.get("success", False)):
+                            _agent_used_shell = True
+                            break
+                if not _agent_used_shell:
+                    log.warning(
+                        "Binary task completed without shell execution, retrying",
+                        task_id=task.id, title=task.title,
+                    )
+                    self._broadcast_event("task_binary_retry", {
+                        "task_id": task.id, "title": task.title,
+                    })
+                    retry_prompt = (
+                        "Your previous response did NOT actually create the binary file. "
+                        "You returned plain text instead of executing a script.\n\n"
+                        "You MUST:\n"
+                        "1. Write a Python script that creates the binary file\n"
+                        "2. Run: pip install <needed-library> && python <script.py>\n"
+                        "3. Verify the file exists\n\n"
+                        "Do this NOW. Do NOT describe what the file would contain."
+                    )
+                    response = await agent.complete(retry_prompt)
+                    worker_success = getattr(agent, "_last_complete_success", True)
+                    output_text = str(response or "").strip()
 
             # ── Structured output validation ──
             # If the task declares an output_schema, validate the response
