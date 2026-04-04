@@ -30,6 +30,82 @@ _CONTENT_FETCH_TOOLS: frozenset[str] = frozenset({
     "xlsx_extract", "pocket_tts",
 })
 
+# ── Eco-mode: core tools always sent with full definitions ──
+_ECO_CORE_TOOLS: frozenset[str] = frozenset({
+    "shell", "read", "write", "edit", "glob",
+    "web_fetch", "web_search",
+})
+
+# ── Eco-mode: intent-based keyword → tool mapping ──
+# When eco mode is active, only core tools get full definitions by default.
+# These patterns add extra tools based on keywords detected in the user message.
+import re as _re
+
+_ECO_INTENT_PATTERNS: list[tuple[_re.Pattern[str], frozenset[str]]] = [
+    # Web & URLs
+    (_re.compile(r"https?://|fetch\b|scrape|crawl|web_get", _re.I),
+     frozenset({"web_get", "web_fetch", "web_search", "browser"})),
+    # Search
+    (_re.compile(r"\bsearch\b|\blook\s?up\b|\bfind\s+(?:info|out|about)\b|\bgoogle\b", _re.I),
+     frozenset({"web_search", "web_fetch"})),
+    # Documents
+    (_re.compile(r"\.pdf\b|pdf\b", _re.I),
+     frozenset({"pdf_extract", "summarize_files"})),
+    (_re.compile(r"\.docx?\b|word\s+doc", _re.I),
+     frozenset({"docx_extract", "summarize_files"})),
+    (_re.compile(r"\.xlsx?\b|spreadsheet|excel", _re.I),
+     frozenset({"xlsx_extract", "summarize_files"})),
+    (_re.compile(r"\.pptx?\b|presentation|powerpoint|slides", _re.I),
+     frozenset({"pptx_extract", "summarize_files"})),
+    (_re.compile(r"summar\w+\s+files|review\s+(?:all|the|these)\s+(?:files|documents|docs|folder)", _re.I),
+     frozenset({"summarize_files", "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract"})),
+    # Images
+    (_re.compile(r"\bimage\b|\bphoto\b|\bpicture\b|\bscreenshot\b|\bdraw\b|\bgenerate\s+(?:an?\s+)?image", _re.I),
+     frozenset({"image_gen", "image_ocr", "image_vision", "screen_capture"})),
+    # Email
+    (_re.compile(r"\bemail\b|\bmail\b|\bgmail\b|\bsend\s+(?:a\s+)?message\b", _re.I),
+     frozenset({"send_mail", "google_mail", "gws"})),
+    # Calendar
+    (_re.compile(r"\bcalendar\b|\bschedule\b|\bmeeting\b|\bagenda\b|\bevent\b", _re.I),
+     frozenset({"google_calendar", "gws"})),
+    # Google Drive
+    (_re.compile(r"\bdrive\b|\bgoogle\s+d(oc|rive)\b|\bshared\s+folder\b", _re.I),
+     frozenset({"google_drive", "gws"})),
+    # Data & database
+    (_re.compile(r"\bdatastore\b|\bdatabase\b|\btable\b|\bsql\b|\binsert\b|\bquery\b", _re.I),
+     frozenset({"datastore", "direct_api"})),
+    # Browser automation
+    (_re.compile(r"\bbrowser\b|\blogin\b|\bclick\b|\bnavigate\b|\bweb\s+app\b", _re.I),
+     frozenset({"browser"})),
+    # Audio / TTS
+    (_re.compile(r"\bspeak\b|\bsay\b|\baudio\b|\btts\b|\bvoice\b|\bread\s+aloud\b", _re.I),
+     frozenset({"pocket_tts"})),
+    # API
+    (_re.compile(r"\bapi\b|\bendpoint\b|\brest\b|\bhttp\s+(?:get|post|put)\b", _re.I),
+     frozenset({"direct_api"})),
+    # Desktop
+    (_re.compile(r"\bdesktop\b|\bscreen\b|\bclick\b.*\bbutton\b|\bopen\s+app\b", _re.I),
+     frozenset({"desktop_action", "screen_capture"})),
+    # Twitter / social
+    (_re.compile(r"\btweet\b|\btwitter\b|\bpost\b.*\bsocial\b", _re.I),
+     frozenset({"twitter"})),
+    # Clipboard
+    (_re.compile(r"\bclipboard\b|\bcopy\b|\bpaste\b", _re.I),
+     frozenset({"clipboard"})),
+    # Termux / Android
+    (_re.compile(r"\btermux\b|\bandroid\b|\bphone\b|\btorch\b|\bbattery\b|\bgps\b", _re.I),
+     frozenset({"termux"})),
+]
+
+
+def _eco_select_tools_by_intent(user_input: str) -> frozenset[str]:
+    """Return tool names matched by intent patterns in the user message."""
+    matched: set[str] = set()
+    for pattern, tools in _ECO_INTENT_PATTERNS:
+        if pattern.search(user_input):
+            matched |= tools
+    return frozenset(matched)
+
 
 class AgentOrchestrationMixin:
     """Core request orchestration: complete() and stream()."""
@@ -922,6 +998,32 @@ class AgentOrchestrationMixin:
                     kept=[td["name"] for td in tool_defs],
                     removed=_before - len(tool_defs),
                 )
+
+            # ── Eco mode: lazy tool definitions + intent preselection ──
+            # When eco mode (micro instructions) is active, only send full
+            # definitions for core tools + intent-matched tools.  The rest
+            # are listed by name in the system prompt so the LLM knows they
+            # exist but we save ~1K tokens per call on schema overhead.
+            # The tools remain executable — the registry still has them.
+            _eco_active = getattr(self, "instructions", None) and self.instructions.use_micro
+            if _eco_active and tool_defs and not _force_script:
+                _intent_tools = _eco_select_tools_by_intent(effective_user_input or "")
+                # Also include tools already used in this turn (the LLM may
+                # want to call them again with different args).
+                _turn_used: set[str] = set()
+                if hasattr(self, "_turn_tool_call_counts"):
+                    _turn_used = set(self._turn_tool_call_counts.keys())
+                _keep = _ECO_CORE_TOOLS | _intent_tools | _turn_used
+                _full_count = len(tool_defs)
+                _deferred = [td["name"] for td in tool_defs if td.get("name") not in _keep]
+                tool_defs = [td for td in tool_defs if td.get("name") in _keep]
+                if _deferred:
+                    log.info(
+                        "Eco mode: deferred tool definitions",
+                        core=len(tool_defs),
+                        deferred=len(_deferred),
+                        intent_matched=list(_intent_tools & {td["name"] for td in tool_defs}),
+                    )
             log.debug(
                 "Tool definitions available",
                 count=len(

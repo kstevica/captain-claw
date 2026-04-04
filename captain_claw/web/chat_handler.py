@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
+from captain_claw.config import get_config
 from captain_claw.logging import get_logger
 from captain_claw.next_steps import extract_next_steps, next_steps_to_dicts
 
@@ -360,15 +361,16 @@ async def _run_agent(
             })
 
             # Extract and broadcast suggested next steps.
-            try:
-                steps = await extract_next_steps(agent.provider, response)
-                if steps:
-                    send({
-                        "type": "next_steps",
-                        "options": next_steps_to_dicts(steps),
-                    })
-            except Exception as ns_err:
-                log.debug("Next steps extraction error", error=str(ns_err))
+            if get_config().ui.next_steps:
+                try:
+                    steps = await extract_next_steps(agent.provider, response)
+                    if steps:
+                        send({
+                            "type": "next_steps",
+                            "options": next_steps_to_dicts(steps),
+                        })
+                except Exception as ns_err:
+                    log.debug("Next steps extraction error", error=str(ns_err))
 
         # Send updated usage/session info.
         send({

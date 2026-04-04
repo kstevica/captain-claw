@@ -715,6 +715,8 @@ def _build_schema() -> list[dict[str, Any]]:
                         _field("ui.monitor_trace_llm", "Monitor: trace LLM calls", type="toggle"),
                         _field("ui.monitor_trace_pipeline", "Monitor: trace pipeline", type="toggle"),
                         _field("ui.monitor_full_output", "Monitor: full output", type="toggle"),
+                        _field("ui.next_steps", "Suggest next steps", type="toggle",
+                               hint="After each response, make an extra LLM call to extract suggested next actions. Disable to speed up local models."),
                     ],
                 },
                 {

@@ -10,6 +10,9 @@ import {
   Crown,
   Loader2,
   Settings2,
+  Key,
+  Save,
+  Check,
 } from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
 
@@ -116,6 +119,33 @@ async function saveConfig(cfg: Record<string, boolean>): Promise<void> {
   })
   if (!res.ok) throw new Error('Failed to save config')
 }
+
+async function fetchProviderKeys(): Promise<Record<string, string>> {
+  const res = await fetch('/fd/admin/provider-keys', {
+    headers: _headers(), credentials: 'include',
+  })
+  if (!res.ok) return {}
+  const data = await res.json()
+  return data.keys || {}
+}
+
+async function saveProviderKeysApi(keys: Record<string, string>): Promise<Record<string, string>> {
+  const res = await fetch('/fd/admin/provider-keys', {
+    method: 'PUT', headers: _headers(), credentials: 'include',
+    body: JSON.stringify({ keys }),
+  })
+  if (!res.ok) throw new Error('Failed to save provider keys')
+  const data = await res.json()
+  return data.keys || {}
+}
+
+const LLM_PROVIDERS = [
+  { value: 'anthropic', label: 'Anthropic' },
+  { value: 'openai', label: 'OpenAI' },
+  { value: 'gemini', label: 'Gemini' },
+  { value: 'openrouter', label: 'OpenRouter' },
+  { value: 'xai', label: 'xAI' },
+] as const
 
 async function fetchPlans(): Promise<Record<string, PlanLimits>> {
   const res = await fetch('/fd/admin/plans', {
@@ -311,6 +341,9 @@ export function AdminPage() {
   const [totalUsers, setTotalUsers] = useState(0)
   const [plans, setPlans] = useState<Record<string, PlanLimits>>({})
   const [config, setConfig] = useState<Record<string, boolean>>({ docker_spawn_enabled: true })
+  const [providerKeys, setProviderKeys] = useState<Record<string, string>>({})
+  const [providerKeysDraft, setProviderKeysDraft] = useState<Record<string, string>>({})
+  const [keySaveFlash, setKeySaveFlash] = useState<string | null>(null)
   const [usageSummary, setUsageSummary] = useState<Record<string, number>>({})
   const [usageLogs, setUsageLogs] = useState<UsageLog[]>([])
   const [loading, setLoading] = useState(true)
@@ -318,11 +351,13 @@ export function AdminPage() {
 
   const loadUsers = useCallback(async () => {
     try {
-      const [usersData, plansData, cfgData] = await Promise.all([fetchUsers(), fetchPlans(), fetchConfig()])
+      const [usersData, plansData, cfgData, keys] = await Promise.all([fetchUsers(), fetchPlans(), fetchConfig(), fetchProviderKeys()])
       setUsers(usersData.users)
       setTotalUsers(usersData.total)
       setPlans(plansData)
       setConfig(cfgData)
+      setProviderKeys(keys)
+      setProviderKeysDraft(keys)
       setError('')
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load users')
@@ -543,6 +578,52 @@ export function AdminPage() {
                   }`} />
                 </button>
               </label>
+            </div>
+
+            {/* Provider API Keys */}
+            <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4 space-y-4">
+              <div>
+                <h3 className="text-sm font-semibold text-zinc-200">Provider API Keys</h3>
+                <p className="text-xs text-zinc-500 mt-0.5">System-wide API keys for LLM providers. These are used as defaults when spawning agents.</p>
+              </div>
+              {LLM_PROVIDERS.map((p) => (
+                <div key={p.value}>
+                  <label className="mb-1.5 flex items-center gap-2 text-sm font-medium text-zinc-300">
+                    <Key className="h-3.5 w-3.5 text-zinc-500" />
+                    {p.label}
+                    {providerKeys[p.value] && <span className="text-xs text-emerald-500/70 font-normal">configured</span>}
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="password"
+                      value={providerKeysDraft[p.value] || ''}
+                      onChange={(e) => setProviderKeysDraft({ ...providerKeysDraft, [p.value]: e.target.value })}
+                      placeholder={providerKeys[p.value] ? '••••••••' : `${p.label} API key`}
+                      className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs font-mono text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                    />
+                    <button
+                      onClick={async () => {
+                        try {
+                          const val = providerKeysDraft[p.value] || ''
+                          const updated = await saveProviderKeysApi({ [p.value]: val })
+                          setProviderKeys(updated)
+                          setProviderKeysDraft(updated)
+                          setKeySaveFlash(p.value)
+                          setTimeout(() => setKeySaveFlash(null), 1500)
+                        } catch { setError('Failed to save provider key') }
+                      }}
+                      className={`flex items-center gap-1 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
+                        keySaveFlash === p.value
+                          ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-400'
+                          : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                      }`}
+                    >
+                      {keySaveFlash === p.value ? <Check className="h-3 w-3" /> : <Save className="h-3 w-3" />}
+                      {keySaveFlash === p.value ? 'Saved' : 'Save'}
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         )}

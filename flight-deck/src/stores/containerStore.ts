@@ -12,6 +12,7 @@ const FWD_TASK_OVERRIDES_KEY = 'fd:container-forwarding-tasks'
 const CONSULT_APPROVAL_KEY = 'fd:container-consult-approval'
 const FLEET_INSTRUCTIONS_KEY = 'fd:container-fleet-instructions'
 const COGNITIVE_MODE_KEY = 'fd:container-cognitive-modes'
+const ECO_MODE_KEY = 'fd:container-eco-modes'
 
 function loadMap(key: string): Record<string, string> {
   try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} }
@@ -36,6 +37,7 @@ interface ContainerStore {
   consultApprovalOverrides: Record<string, boolean>
   fleetInstructionsOverrides: Record<string, string>
   cognitiveModeOverrides: Record<string, string>
+  ecoModeOverrides: Record<string, boolean>
 
   fetchContainers: () => Promise<void>
   selectContainer: (id: string | null) => void
@@ -56,6 +58,8 @@ interface ContainerStore {
   getFleetInstructions: (id: string) => string
   setCognitiveMode: (id: string, mode: string) => void
   getCognitiveMode: (id: string) => string
+  setEcoMode: (id: string, enabled: boolean) => void
+  getEcoMode: (id: string) => boolean
 }
 
 export const useContainerStore = create<ContainerStore>((set, get) => ({
@@ -69,6 +73,7 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
   consultApprovalOverrides: loadBoolMap(CONSULT_APPROVAL_KEY),
   fleetInstructionsOverrides: loadMap(FLEET_INSTRUCTIONS_KEY),
   cognitiveModeOverrides: loadMap(COGNITIVE_MODE_KEY),
+  ecoModeOverrides: loadBoolMap(ECO_MODE_KEY),
 
   fetchContainers: async () => {
     try {
@@ -260,6 +265,16 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
   getCognitiveMode: (id) => {
     return get().cognitiveModeOverrides[id] || 'neutra'
   },
+
+  setEcoMode: (id, enabled) => {
+    const overrides = { ...get().ecoModeOverrides, [id]: enabled }
+    saveMap(ECO_MODE_KEY, overrides)
+    set({ ecoModeOverrides: overrides })
+  },
+
+  getEcoMode: (id) => {
+    return get().ecoModeOverrides[id] || false
+  },
 }))
 
 registerHydrator((settings) => {
@@ -271,6 +286,7 @@ registerHydrator((settings) => {
     [CONSULT_APPROVAL_KEY, 'consultApprovalOverrides'],
     [FLEET_INSTRUCTIONS_KEY, 'fleetInstructionsOverrides'],
     [COGNITIVE_MODE_KEY, 'cognitiveModeOverrides'],
+    [ECO_MODE_KEY, 'ecoModeOverrides'],
   ] as const) {
     const raw = settings[key]
     if (raw) {

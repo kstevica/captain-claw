@@ -457,8 +457,9 @@ def _convert_messages_for_openai_style(messages: list[Message]) -> list[dict[str
                 })
             if normalized_calls:
                 entry["tool_calls"] = normalized_calls
-        if role == "tool" and tool_call_id:
-            entry["tool_call_id"] = tool_call_id
+        if role == "tool":
+            # tool_call_id is required by many providers (OpenRouter, OpenAI, etc.)
+            entry["tool_call_id"] = tool_call_id or f"call_{len(result)}"
         if role == "tool" and tool_name:
             entry["name"] = tool_name
         result.append(entry)
@@ -655,7 +656,7 @@ def _convert_messages_for_responses_api(
         if role == "tool":
             items.append({
                 "type": "function_call_output",
-                "call_id": str(tool_call_id or ""),
+                "call_id": str(tool_call_id or f"call_{len(items)}"),
                 "output": content,
             })
             continue

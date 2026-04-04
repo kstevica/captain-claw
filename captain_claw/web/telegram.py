@@ -979,31 +979,33 @@ async def _tg_process_with_typing(
                 })
 
                 # Extract and send suggested next steps as inline keyboard.
-                try:
-                    steps = await extract_next_steps(user_agent.provider, response)
-                    if steps and server._telegram_bridge:
-                        step_dicts = next_steps_to_dicts(steps)
-                        # Cache for callback handler lookup.
-                        cache_key = f"_tg_next_steps_{user_id}"
-                        setattr(server, cache_key, step_dicts)
-                        # Build inline keyboard rows (max 2 buttons per row).
-                        keyboard_rows: list[list[dict[str, str]]] = []
-                        row: list[dict[str, str]] = []
-                        for i, s in enumerate(step_dicts):
-                            row.append({"text": s["label"], "callback_data": f"ns:{i}"})
-                            if len(row) >= 2:
+                from captain_claw.config import get_config
+                if get_config().ui.next_steps:
+                    try:
+                        steps = await extract_next_steps(user_agent.provider, response)
+                        if steps and server._telegram_bridge:
+                            step_dicts = next_steps_to_dicts(steps)
+                            # Cache for callback handler lookup.
+                            cache_key = f"_tg_next_steps_{user_id}"
+                            setattr(server, cache_key, step_dicts)
+                            # Build inline keyboard rows (max 2 buttons per row).
+                            keyboard_rows: list[list[dict[str, str]]] = []
+                            row: list[dict[str, str]] = []
+                            for i, s in enumerate(step_dicts):
+                                row.append({"text": s["label"], "callback_data": f"ns:{i}"})
+                                if len(row) >= 2:
+                                    keyboard_rows.append(row)
+                                    row = []
+                            if row:
                                 keyboard_rows.append(row)
-                                row = []
-                        if row:
-                            keyboard_rows.append(row)
-                        await server._telegram_bridge.send_message_with_inline_keyboard(
-                            chat_id,
-                            "What would you like to do next?",
-                            keyboard_rows,
-                            reply_to_message_id=reply_to_message_id,
-                        )
-                except Exception as ns_err:
-                    log.debug("Telegram next steps extraction error", error=str(ns_err))
+                            await server._telegram_bridge.send_message_with_inline_keyboard(
+                                chat_id,
+                                "What would you like to do next?",
+                                keyboard_rows,
+                                reply_to_message_id=reply_to_message_id,
+                            )
+                    except Exception as ns_err:
+                        log.debug("Telegram next steps extraction error", error=str(ns_err))
 
             server._broadcast({
                 "type": "usage",

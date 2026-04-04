@@ -314,9 +314,9 @@ async def run_prompt_in_active_session(
             if after_turn:
                 await after_turn(turn_start_idx, prompt_text, assistant_text)
 
-            # Extract suggested next steps (skip for cron jobs).
+            # Extract suggested next steps (skip for cron jobs and when disabled).
             ctx.last_next_steps = []
-            if not cron_job_id and assistant_text.strip():
+            if not cron_job_id and assistant_text.strip() and get_config().ui.next_steps:
                 try:
                     from captain_claw.next_steps import extract_next_steps, next_steps_to_dicts
                     steps = await extract_next_steps(agent.provider, assistant_text)

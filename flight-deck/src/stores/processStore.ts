@@ -10,6 +10,7 @@ const FWD_KEY = 'fd:process-forwarding-tasks'
 const APPROVAL_KEY = 'fd:process-consult-approval'
 const FLEET_INSTRUCTIONS_KEY = 'fd:process-fleet-instructions'
 const COGNITIVE_MODE_KEY = 'fd:process-cognitive-modes'
+const ECO_MODE_KEY = 'fd:process-eco-modes'
 
 function loadMap(key: string): Record<string, string> {
   try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} }
@@ -32,6 +33,7 @@ interface ProcessStore {
   consultApprovalOverrides: Record<string, boolean>
   fleetInstructionsOverrides: Record<string, string>
   cognitiveModeOverrides: Record<string, string>
+  ecoModeOverrides: Record<string, boolean>
 
   fetchProcesses: () => Promise<void>
   stopProcess: (slug: string) => Promise<void>
@@ -49,6 +51,8 @@ interface ProcessStore {
   getFleetInstructions: (slug: string) => string
   setCognitiveMode: (slug: string, mode: string) => void
   getCognitiveMode: (slug: string) => string
+  setEcoMode: (slug: string, enabled: boolean) => void
+  getEcoMode: (slug: string) => boolean
 }
 
 export const useProcessStore = create<ProcessStore>((set, get) => ({
@@ -60,6 +64,7 @@ export const useProcessStore = create<ProcessStore>((set, get) => ({
   consultApprovalOverrides: loadBoolMap(APPROVAL_KEY),
   fleetInstructionsOverrides: loadMap(FLEET_INSTRUCTIONS_KEY),
   cognitiveModeOverrides: loadMap(COGNITIVE_MODE_KEY),
+  ecoModeOverrides: loadBoolMap(ECO_MODE_KEY),
 
   fetchProcesses: async () => {
     try {
@@ -147,6 +152,14 @@ export const useProcessStore = create<ProcessStore>((set, get) => ({
   },
 
   getCognitiveMode: (slug) => get().cognitiveModeOverrides[slug] || 'neutra',
+
+  setEcoMode: (slug, enabled) => {
+    const overrides = { ...get().ecoModeOverrides, [slug]: enabled }
+    persistMap(ECO_MODE_KEY, overrides)
+    set({ ecoModeOverrides: overrides })
+  },
+
+  getEcoMode: (slug) => get().ecoModeOverrides[slug] || false,
 }))
 
 registerHydrator((settings) => {
@@ -158,6 +171,7 @@ registerHydrator((settings) => {
     [APPROVAL_KEY, 'consultApprovalOverrides'],
     [FLEET_INSTRUCTIONS_KEY, 'fleetInstructionsOverrides'],
     [COGNITIVE_MODE_KEY, 'cognitiveModeOverrides'],
+    [ECO_MODE_KEY, 'ecoModeOverrides'],
   ] as const) {
     const raw = settings[key]
     if (raw) {

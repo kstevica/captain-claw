@@ -1383,6 +1383,58 @@ async def update_agent_mode(
     return {"ok": True, "mode": mode_name, "message": "Mode updated. Takes effect on the agent's next response."}
 
 
+class AgentEcoModeUpdate(BaseModel):
+    enabled: bool = False
+
+
+@app.put("/fd/agent-eco-mode/{kind}/{identifier}")
+async def update_agent_eco_mode(
+    kind: str, identifier: str, body: AgentEcoModeUpdate, request: Request,
+    user: dict | None = _required_user_dep,
+):
+    """Toggle eco mode (micro instructions + lazy tools) at runtime.
+
+    Writes ``eco_mode.txt`` — the agent picks it up on the next system
+    prompt build, just like cognitive mode.
+    """
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+
+    for subdir in ("home-config", "home-config-parent"):
+        cc_dir = agent_dir / "data" / subdir / ".captain-claw"
+        if cc_dir.is_dir():
+            eco_file = cc_dir / "eco_mode.txt"
+            if body.enabled:
+                eco_file.write_text("on", encoding="utf-8")
+            else:
+                eco_file.unlink(missing_ok=True)
+
+    return {"ok": True, "enabled": body.enabled, "message": "Eco mode updated. Takes effect on the agent's next response."}
+
+
+@app.get("/fd/agent-eco-mode/{kind}/{identifier}")
+async def get_agent_eco_mode(
+    kind: str, identifier: str, request: Request,
+    user: dict | None = _required_user_dep,
+):
+    """Read current eco mode state for an agent."""
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+
+    for subdir in ("home-config", "home-config-parent"):
+        eco_file = agent_dir / "data" / subdir / ".captain-claw" / "eco_mode.txt"
+        if eco_file.is_file():
+            return {"enabled": True}
+
+    return {"enabled": False}
+
+
 @app.get("/fd/cognitive-modes")
 async def list_cognitive_modes():
     """Return all available cognitive modes for UI dropdowns."""

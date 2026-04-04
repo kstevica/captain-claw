@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from captain_claw.flight_deck.auth import get_current_user, get_db
 
 router = APIRouter(prefix="/fd/settings", tags=["settings"])
+
+PROVIDER_KEYS_SETTING = "fd:provider-keys"
 
 
 class SettingsUpdate(BaseModel):
@@ -35,3 +39,16 @@ async def delete_setting(key: str, user: dict = Depends(get_current_user)):
     if not deleted:
         return {"ok": False, "detail": "Setting not found"}
     return {"ok": True}
+
+
+@router.get("/provider-keys")
+async def get_system_provider_keys(user: dict = Depends(get_current_user)):
+    """Get system-level provider API keys (set by admin). Available to all authenticated users."""
+    db = get_db()
+    raw = await db.get_system_setting(PROVIDER_KEYS_SETTING)
+    if not raw:
+        return {"keys": {}}
+    try:
+        return {"keys": json.loads(raw)}
+    except (json.JSONDecodeError, TypeError):
+        return {"keys": {}}

@@ -271,19 +271,33 @@ class DeepMemoryIndex:
     ) -> int:
         """Index a single document (auto-chunked). Returns chunk count."""
         self.ensure_collection()
+
+        text_bytes = len(text.encode("utf-8"))
+        log.info(
+            "Indexing document",
+            doc_id=doc_id,
+            source=source,
+            reference=reference or "(none)",
+            size_bytes=text_bytes,
+        )
+
         chunks = _chunk_text(
             text,
             chunk_chars=self._chunk_chars,
             chunk_overlap_chars=self._chunk_overlap_chars,
         )
         if not chunks:
+            log.info("No chunks produced, skipping", doc_id=doc_id)
             return 0
+
+        total = len(chunks)
+        log.info("Chunked document", doc_id=doc_id, total_chunks=total)
 
         now = int(time.time())
         docs: list[dict[str, Any]] = []
         texts_for_embedding: list[str] = []
 
-        for chunk in chunks:
+        for i, chunk in enumerate(chunks):
             cid = _hash_id(f"{doc_id}:{chunk['chunk_index']}:{chunk['text'][:64]}")
             doc: dict[str, Any] = {
                 "id": cid,
@@ -303,20 +317,41 @@ class DeepMemoryIndex:
                     l1, l2 = self._summarizer(chunk["text"])
                     doc["text_l1"] = str(l1 or "").strip()
                     doc["text_l2"] = str(l2 or "").strip()
+                    log.info(
+                        "Summarized chunk",
+                        doc_id=doc_id,
+                        chunk=f"{i + 1}/{total}",
+                    )
                 except Exception:
-                    pass
+                    log.warning(
+                        "Summarization failed for chunk",
+                        doc_id=doc_id,
+                        chunk=f"{i + 1}/{total}",
+                    )
             if tags:
                 doc["tags"] = tags
             docs.append(doc)
             texts_for_embedding.append(chunk["text"])
 
         # Compute embeddings if available.
+        log.info("Generating embeddings", doc_id=doc_id, chunks=total)
         embeddings = self._embed(texts_for_embedding)
         if embeddings:
             for doc_dict, vec in zip(docs, embeddings):
                 doc_dict["embedding"] = vec
+            log.info("Embeddings complete", doc_id=doc_id, count=len(embeddings))
+        else:
+            log.info("No embeddings generated (BM25 only)", doc_id=doc_id)
 
-        return self._upsert_batch(docs)
+        log.info("Upserting to Typesense", doc_id=doc_id, chunks=total)
+        count = self._upsert_batch(docs)
+        log.info(
+            "Indexing complete",
+            doc_id=doc_id,
+            chunks_indexed=count,
+            size_bytes=text_bytes,
+        )
+        return count
 
     def index_batch(self, documents: list[dict[str, Any]]) -> int:
         """Batch index pre-built documents. Returns count indexed.

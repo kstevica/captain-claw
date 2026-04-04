@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from typing import Any, TYPE_CHECKING
 
@@ -52,7 +53,17 @@ class TypesenseTool(Tool):
                 "type": "string",
                 "description": (
                     "Text content to index (for 'index' action). "
-                    "Will be auto-chunked and embedded."
+                    "Will be auto-chunked and embedded. "
+                    "Use 'file_path' instead for large files."
+                ),
+            },
+            "file_path": {
+                "type": "string",
+                "description": (
+                    "Absolute path to a file to index (for 'index' action). "
+                    "The file is read directly from disk — use this for large "
+                    "files instead of passing text. Supports .txt, .md, .csv, "
+                    ".json, .log, .xml, .html, and other text files."
                 ),
             },
             "source": {
@@ -307,6 +318,7 @@ class TypesenseTool(Tool):
     async def _action_index(
         self,
         text: str = "",
+        file_path: str = "",
         source: str = "manual",
         reference: str = "",
         tags: str = "",
@@ -316,9 +328,44 @@ class TypesenseTool(Tool):
 
         Text is chunked, assigned a doc_id, timestamped, and optionally
         embedded by ``DeepMemoryIndex.index_document()``.
+
+        If ``file_path`` is provided, the file is read directly from disk
+        (bypassing the LLM context window) and its contents are indexed.
         """
+        # Read file from disk if file_path is provided.
+        if file_path and file_path.strip():
+            file_path = file_path.strip()
+            if not os.path.isabs(file_path):
+                return ToolResult(
+                    success=False,
+                    error=f"file_path must be an absolute path, got: {file_path}",
+                )
+            if not os.path.isfile(file_path):
+                return ToolResult(
+                    success=False,
+                    error=f"File not found: {file_path}",
+                )
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+            except OSError as exc:
+                return ToolResult(
+                    success=False,
+                    error=f"Cannot read file {file_path}: {exc}",
+                )
+            if not reference:
+                reference = file_path
+            log.info(
+                "Indexing file from disk",
+                file_path=file_path,
+                size_bytes=len(text.encode("utf-8")),
+            )
+
         if not text or not text.strip():
-            return ToolResult(success=False, error="'text' is required for indexing.")
+            return ToolResult(
+                success=False,
+                error="'text' or 'file_path' is required for indexing.",
+            )
 
         tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
         doc_id = hashlib.sha1(

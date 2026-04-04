@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react'
-import { Server, Plus, Trash2, Save, FolderOpen, Copy, X, FileDown, ClipboardCopy, ChevronDown, ChevronRight, Rocket, Cpu, Menu } from 'lucide-react'
+import { Server, Plus, Trash2, Save, FolderOpen, Copy, X, FileDown, ClipboardCopy, ChevronDown, ChevronRight, Rocket, Cpu, Menu, Key, Check } from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
 import { useIsMobile } from '../hooks/useMediaQuery'
 import { useConnectionStore } from '../stores/connectionStore'
 import { useContainerStore } from '../stores/containerStore'
 import { useProcessStore } from '../stores/processStore'
 import { spawnAgent, spawnProcess, type SpawnConfig } from '../services/docker'
+import { fetchSettings, queueSave } from '../services/settingsSync'
 
 // ── Agent config model ──
 
@@ -65,6 +66,22 @@ interface SavedPreset {
 }
 
 const PRESETS_KEY = 'fd:agent-presets'
+const PROVIDER_KEYS_SETTING = 'fd:provider-keys'
+
+const LLM_PROVIDERS = [
+  { value: 'anthropic', label: 'Anthropic' },
+  { value: 'ollama', label: 'Ollama' },
+  { value: 'openai', label: 'OpenAI' },
+  { value: 'gemini', label: 'Gemini' },
+  { value: 'openrouter', label: 'OpenRouter' },
+  { value: 'xai', label: 'xAI' },
+] as const
+
+type ProviderKeys = Record<string, string>
+
+function loadProviderKeys(): ProviderKeys {
+  try { return JSON.parse(localStorage.getItem(PROVIDER_KEYS_SETTING) || '{}') } catch { return {} }
+}
 
 const ALL_TOOLS = [
   'shell', 'read', 'write', 'glob', 'edit',
@@ -286,16 +303,64 @@ export function SpawnerPage() {
   const [showOutput, setShowOutput] = useState<'compose' | 'config' | 'env' | null>(null)
   const [spawning, setSpawning] = useState(false)
   const [spawnResult, setSpawnResult] = useState<{ ok: boolean; message: string } | null>(null)
+  const [providerKeys, setProviderKeys] = useState<ProviderKeys>(loadProviderKeys)
+  const [keySaveFlash, setKeySaveFlash] = useState<string | null>(null)
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
-    identity: true, llm: true, botport: false, tools: false, web: false, platforms: false, docker: false, env: false,
+    identity: true, llm: true, providerKeys: false, botport: false, tools: false, web: false, platforms: false, docker: false, env: false,
   })
 
   useEffect(() => { checkHealth() }, [checkHealth])
+
+  const [systemKeys, setSystemKeys] = useState<ProviderKeys>({})
+
+  // Load user-level provider keys from server settings on mount
+  useEffect(() => {
+    fetchSettings().then((settings) => {
+      const raw = settings[PROVIDER_KEYS_SETTING]
+      if (raw) {
+        try {
+          const keys = JSON.parse(raw)
+          setProviderKeys(keys)
+          localStorage.setItem(PROVIDER_KEYS_SETTING, raw)
+        } catch { /* ignore */ }
+      }
+    }).catch(() => { /* use local fallback */ })
+  }, [])
+
+  // Load system-level provider keys (set by admin)
+  useEffect(() => {
+    fetch('/fd/settings/provider-keys', {
+      headers: { 'Content-Type': 'application/json', ...(useAuthStore.getState().token ? { Authorization: `Bearer ${useAuthStore.getState().token}` } : {}) },
+      credentials: 'include',
+    })
+      .then((r) => r.ok ? r.json() : { keys: {} })
+      .then((data) => setSystemKeys(data.keys || {}))
+      .catch(() => {})
+  }, [])
 
   useEffect(() => { persistPresets(presets) }, [presets])
 
   const update = <K extends keyof AgentConfig>(key: K, value: AgentConfig[K]) =>
     setConfig((prev) => ({ ...prev, [key]: value }))
+
+  const saveProviderKey = (provider: string, key: string) => {
+    const updated = { ...providerKeys, [provider]: key }
+    if (!key) delete updated[provider]
+    setProviderKeys(updated)
+    localStorage.setItem(PROVIDER_KEYS_SETTING, JSON.stringify(updated))
+    queueSave(PROVIDER_KEYS_SETTING, JSON.stringify(updated))
+    setKeySaveFlash(provider)
+    setTimeout(() => setKeySaveFlash(null), 1500)
+  }
+
+  // Auto-fill API key from saved provider keys when provider changes (user keys override system keys)
+  const updateProvider = (provider: string) => {
+    setConfig((prev) => ({
+      ...prev,
+      provider,
+      providerApiKey: providerKeys[provider] || systemKeys[provider] || prev.providerApiKey,
+    }))
+  }
 
   const toggleSection = (key: string) =>
     setExpandedSections((prev) => ({ ...prev, [key]: !prev[key] }))
@@ -325,7 +390,12 @@ export function SpawnerPage() {
   }
 
   const handleLoadPreset = (preset: SavedPreset) => {
-    setConfig({ ...defaultConfig, ...preset.config })
+    const loaded = { ...defaultConfig, ...preset.config }
+    // Auto-fill API key from saved provider keys if preset has none (user keys > system keys)
+    if (!loaded.providerApiKey) {
+      loaded.providerApiKey = providerKeys[loaded.provider] || systemKeys[loaded.provider] || ''
+    }
+    setConfig(loaded)
     setActivePresetId(preset.id)
   }
 
@@ -561,13 +631,10 @@ export function SpawnerPage() {
             <Section title="LLM Model" expanded={expandedSections.llm} onToggle={() => toggleSection('llm')}>
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <Field label="Provider">
-                  <select value={config.provider} onChange={(e) => update('provider', e.target.value)} className="input">
-                    <option value="anthropic">Anthropic</option>
-                    <option value="ollama">Ollama</option>
-                    <option value="openai">OpenAI</option>
-                    <option value="gemini">Gemini</option>
-                    <option value="openrouter">OpenRouter</option>
-                    <option value="xai">xAI</option>
+                  <select value={config.provider} onChange={(e) => updateProvider(e.target.value)} className="input">
+                    {LLM_PROVIDERS.map((p) => (
+                      <option key={p.value} value={p.value}>{p.label}</option>
+                    ))}
                   </select>
                 </Field>
                 <Field label="Model ID">
@@ -582,7 +649,7 @@ export function SpawnerPage() {
                   <input type="number" value={config.maxTokens} onChange={(e) => update('maxTokens', parseInt(e.target.value) || 0)} className="input" />
                 </Field>
               </div>
-              <Field label="API Key" hint="Stored in .env file, not in config.yaml">
+              <Field label="API Key" hint={providerKeys[config.provider] ? `Auto-filled from your saved ${LLM_PROVIDERS.find((p) => p.value === config.provider)?.label || config.provider} key` : systemKeys[config.provider] ? `Auto-filled from system ${LLM_PROVIDERS.find((p) => p.value === config.provider)?.label || config.provider} key (set by admin)` : 'Save keys in Provider API Keys section below, or ask admin to set system-wide keys.'}>
                 <input type="password" value={config.providerApiKey} onChange={(e) => update('providerApiKey', e.target.value)} placeholder="sk-..." className="input font-mono text-xs" />
               </Field>
               <Field label="Cognitive Mode" hint="How the agent thinks — reasoning strategy">
@@ -597,6 +664,43 @@ export function SpawnerPage() {
                   <option value="locrian">Locrian — The Deconstructionist (challenges premises)</option>
                 </select>
               </Field>
+            </Section>
+
+            {/* Provider API Keys */}
+            <Section title="Provider API Keys" expanded={expandedSections.providerKeys} onToggle={() => toggleSection('providerKeys')}>
+              <p className="text-xs text-zinc-500 mb-3">Save API keys per provider. When you select a provider above, the key is auto-filled into the spawn form.</p>
+              {LLM_PROVIDERS.filter((p) => p.value !== 'ollama').map((p) => (
+                <div key={p.value} className="mb-3">
+                  <label className="mb-1.5 flex items-center gap-2 text-sm font-medium text-zinc-300">
+                    <Key className="h-3.5 w-3.5 text-zinc-500" />
+                    {p.label}
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="password"
+                      value={providerKeys[p.value] || ''}
+                      onChange={(e) => {
+                        const updated = { ...providerKeys, [p.value]: e.target.value }
+                        if (!e.target.value) delete updated[p.value]
+                        setProviderKeys(updated)
+                      }}
+                      placeholder={`${p.label} API key`}
+                      className="input flex-1 font-mono text-xs"
+                    />
+                    <button
+                      onClick={() => saveProviderKey(p.value, providerKeys[p.value] || '')}
+                      className={`flex items-center gap-1 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+                        keySaveFlash === p.value
+                          ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-400'
+                          : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+                      }`}
+                    >
+                      {keySaveFlash === p.value ? <Check className="h-3 w-3" /> : <Save className="h-3 w-3" />}
+                      {keySaveFlash === p.value ? 'Saved' : 'Save'}
+                    </button>
+                  </div>
+                </div>
+              ))}
             </Section>
 
             {/* BotPort */}

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Cpu, Play, Square, RotateCcw, Trash2, ScrollText, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Pencil, Check, X, Copy, MoreVertical, Minimize2, Maximize2, Settings } from 'lucide-react'
+import { Cpu, Play, Square, RotateCcw, Trash2, ScrollText, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Pencil, Check, X, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf } from 'lucide-react'
 import type { ProcessInfo } from '../../services/docker'
 import { getProcessLogs } from '../../services/docker'
 import { useProcessStore } from '../../stores/processStore'
@@ -76,7 +76,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   onDragStart?: (e: React.PointerEvent) => void
   isDragging?: boolean
 }) {
-  const { stopProcess, startProcess, restartProcess, removeProcess, cloneProcess, setDescription, setNameOverride, setForwardingTask, getForwardingTask, setConsultApproval, getConsultApproval, setCognitiveMode: storeCognitiveMode, getCognitiveMode } = useProcessStore()
+  const { stopProcess, startProcess, restartProcess, removeProcess, cloneProcess, setDescription, setNameOverride, setForwardingTask, getForwardingTask, setConsultApproval, getConsultApproval, setCognitiveMode: storeCognitiveMode, getCognitiveMode, setEcoMode: storeEcoMode, getEcoMode } = useProcessStore()
   const openChat = useChatStore((s) => s.openChat)
   const session = useChatStore((s) => s.sessions.get(`proc-${proc.slug}`))
   const busy = session?.busy ?? false
@@ -97,6 +97,8 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   const [showDatastore, setShowDatastore] = useState(false)
   const cognitiveMode = getCognitiveMode(proc.slug)
   const [modeSaved, setModeSaved] = useState(false)
+  const ecoMode = getEcoMode(proc.slug)
+  const [ecoSaved, setEcoSaved] = useState(false)
 
   const isRunning = proc.status === 'running'
   const agentName = proc.name || proc.slug
@@ -250,22 +252,25 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
                 </>
               )}
             </div>
-            <span className="rounded bg-zinc-800 px-1 py-0.5 text-[10px] font-mono text-emerald-400/80 shrink-0">:{proc.web_port}</span>
-            {isRunning && (
-              <button onClick={() => openChat(chatId, agentName, 'localhost', proc.web_port, proc.web_auth)}
-                className="flex items-center gap-1 rounded bg-emerald-600/20 px-1.5 py-0.5 text-[11px] font-medium text-emerald-300 hover:bg-emerald-600/30 shrink-0">
-                <MessageSquare className="h-3 w-3" /> Chat
-              </button>
-            )}
-            <span className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium shrink-0 ${badgeCls}`}>
+            <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-xs font-mono text-emerald-400/80 shrink-0">:{proc.web_port}</span>
+            <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium shrink-0 ${badgeCls}`}>
               {isRunning && (
-                <span className="relative flex h-1 w-1">
+                <span className="relative flex h-1.5 w-1.5">
                   <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-current opacity-75" />
-                  <span className="relative inline-flex h-1 w-1 rounded-full bg-current" />
+                  <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-current" />
                 </span>
               )}
               {proc.status}
             </span>
+            {isRunning && (
+              <>
+                <button onClick={() => openChat(chatId, agentName, 'localhost', proc.web_port, proc.web_auth)}
+                  className="flex items-center gap-1 rounded-lg px-2 py-0.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 shrink-0">
+                  <MessageSquare className="h-3 w-3" /> Chat
+                </button>
+                <OpenDropdown host="localhost" port={proc.web_port} auth={proc.web_auth} />
+              </>
+            )}
           </div>
           <div className="flex items-center gap-2 min-h-[20px]">
             <div className="flex-1 min-w-0"><AgentGroupBadges agentId={chatId} /></div>
@@ -278,18 +283,18 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
               <span className="text-[11px] text-zinc-600 shrink-0">Idle</span>
             ) : null}
           </div>
-          <div className="flex items-center gap-1 -mx-1">
+          <div className="flex items-center gap-1">
             {onBrowseFiles && (
-              <button onClick={onBrowseFiles} className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
-                <FolderOpen className="h-3 w-3" /> Files
+              <button onClick={onBrowseFiles} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                <FolderOpen className="h-3.5 w-3.5" /> Files
               </button>
             )}
-            <button onClick={toggleLogs} disabled={logsLoading} className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40">
-              <ScrollText className={`h-3 w-3 ${logsLoading ? 'animate-spin' : ''}`} /> {showLogs ? 'Hide' : 'Logs'}
+            <button onClick={toggleLogs} disabled={logsLoading} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40">
+              <ScrollText className={`h-3.5 w-3.5 ${logsLoading ? 'animate-spin' : ''}`} /> {showLogs ? 'Hide' : 'Logs'}
             </button>
             {isRunning && (
-              <button onClick={() => setShowDatastore(true)} className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
-                <Database className="h-3 w-3" /> Data
+              <button onClick={() => setShowDatastore(true)} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                <Database className="h-3.5 w-3.5" /> Data
               </button>
             )}
             <div className="flex-1" />
@@ -300,7 +305,10 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
           <div className="border-t border-zinc-800">
             <div className="flex items-center justify-between px-3 py-1 bg-zinc-950/50">
               <span className="text-[11px] text-zinc-500">Logs (last 100 lines)</span>
-              <button onClick={() => toggleLogs()} className="text-zinc-500 hover:text-zinc-300"><ChevronUp className="h-3 w-3" /></button>
+              <div className="flex items-center gap-1">
+                <button onClick={() => navigator.clipboard.writeText(logs)} className="text-zinc-500 hover:text-zinc-300" title="Copy logs"><Copy className="h-3 w-3" /></button>
+                <button onClick={() => toggleLogs()} className="text-zinc-500 hover:text-zinc-300"><ChevronUp className="h-3 w-3" /></button>
+              </div>
             </div>
             <pre ref={logsRef} className="max-h-40 overflow-auto px-3 py-1.5 text-[11px] text-zinc-400 font-mono leading-relaxed bg-zinc-950/30"
               dangerouslySetInnerHTML={{ __html: logs ? ansiToHtml(logs) : '(empty)' }} />
@@ -426,6 +434,36 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
           }}
         />
 
+        {/* Eco Mode toggle */}
+        <div className="mb-3 flex items-center gap-2">
+          <button
+            onClick={async () => {
+              const next = !ecoMode
+              storeEcoMode(proc.slug, next)
+              try {
+                const { token, authEnabled } = useAuthStore.getState()
+                const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+                if (authEnabled && token) headers['Authorization'] = `Bearer ${token}`
+                const res = await fetch(`/fd/agent-eco-mode/process/${proc.slug}`, {
+                  method: 'PUT', headers, credentials: 'include',
+                  body: JSON.stringify({ enabled: next }),
+                })
+                if (res.ok) { setEcoSaved(true); setTimeout(() => setEcoSaved(false), 2000) }
+              } catch (err) { console.error('Failed to update eco mode:', err) }
+            }}
+            className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+              ecoMode
+                ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25'
+                : 'border-zinc-700 bg-zinc-800/50 text-zinc-500 hover:bg-zinc-700/50 hover:text-zinc-400'
+            }`}
+            title="Eco Mode — compact prompts, smart tool selection, lower token usage"
+          >
+            <Leaf className="h-3 w-3" />
+            <span>Eco Mode</span>
+          </button>
+          {ecoSaved && <span className="text-[10px] text-emerald-500">saved</span>}
+        </div>
+
         {/* Forwarding Task */}
         <div className="mb-3 group/fwd">
           {editingFwdTask ? (
@@ -505,7 +543,10 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
         <div className="border-t border-zinc-800">
           <div className="flex items-center justify-between px-4 py-1.5 bg-zinc-950/50">
             <span className="text-xs text-zinc-500">Logs (last 100 lines)</span>
-            <button onClick={() => toggleLogs()} className="text-xs text-zinc-500 hover:text-zinc-300"><ChevronUp className="h-3.5 w-3.5" /></button>
+            <div className="flex items-center gap-1.5">
+              <button onClick={() => navigator.clipboard.writeText(logs)} className="text-xs text-zinc-500 hover:text-zinc-300" title="Copy logs"><Copy className="h-3.5 w-3.5" /></button>
+              <button onClick={() => toggleLogs()} className="text-xs text-zinc-500 hover:text-zinc-300"><ChevronUp className="h-3.5 w-3.5" /></button>
+            </div>
           </div>
           <pre ref={logsRef} className="max-h-60 overflow-auto px-4 py-2 text-xs text-zinc-400 font-mono leading-relaxed bg-zinc-950/30"
             dangerouslySetInnerHTML={{ __html: logs ? ansiToHtml(logs) : '(empty)' }} />

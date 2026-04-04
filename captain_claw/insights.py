@@ -35,7 +35,7 @@ VALID_CATEGORIES = frozenset({
 _DEDUP_RANK_THRESHOLD = -8.0
 
 # Extraction trigger defaults (overridden by config).
-_DEFAULT_INTERVAL_MESSAGES = 8
+_DEFAULT_INTERVAL_MESSAGES = 20
 _DEFAULT_COOLDOWN_SECONDS = 60
 
 
@@ -637,7 +637,8 @@ async def extract_insights(
 
     # Update tracking state.
     if agent.session:
-        setattr(agent, _ATTR_LAST_MSG_IDX, len(agent.session.messages))
+        setattr(agent, _ATTR_LAST_MSG_IDX,
+                sum(1 for m in agent.session.messages if m.get("role") == "user"))
     setattr(agent, _ATTR_LAST_TIME, time.time())
     setattr(agent, _ATTR_RUNNING, False)
 
@@ -675,9 +676,10 @@ async def maybe_extract_insights(
             if not agent.session:
                 setattr(agent, _ATTR_RUNNING, False)
                 return None
-            last_idx = getattr(agent, _ATTR_LAST_MSG_IDX, 0)
+            last_user_count = getattr(agent, _ATTR_LAST_MSG_IDX, 0)
             interval = cfg.insights.extraction_interval_messages or _DEFAULT_INTERVAL_MESSAGES
-            if len(agent.session.messages) - last_idx < interval:
+            user_count = sum(1 for m in agent.session.messages if m.get("role") == "user")
+            if user_count - last_user_count < interval:
                 setattr(agent, _ATTR_RUNNING, False)
                 return None
 

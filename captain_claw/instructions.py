@@ -66,7 +66,43 @@ class InstructionLoader:
         # Auto-detect micro mode from config when not explicitly passed.
         if use_micro is None:
             use_micro = self._detect_micro_from_config()
-        self.use_micro: bool = use_micro
+        self._use_micro_base: bool = use_micro
+
+        # Eco-mode file path (runtime override, checked dynamically).
+        try:
+            self._eco_mode_file: Path = Path("~/.captain-claw/eco_mode.txt").expanduser()
+        except RuntimeError:
+            self._eco_mode_file = Path("/tmp/.captain-claw/eco_mode.txt")
+        self._eco_mode_mtime: float = 0.0
+        self._eco_mode_cached: bool | None = None
+
+    @property
+    def use_micro(self) -> bool:
+        """Return True when micro instructions should be used.
+
+        Checks ``eco_mode.txt`` on disk (mtime-based cache) so Flight Deck
+        can toggle eco mode at runtime without restarting the agent.
+        """
+        if self._use_micro_base:
+            # Config-level micro is ON — always micro, ignore eco file.
+            return True
+        # Check eco_mode.txt (fast mtime guard).
+        try:
+            st = self._eco_mode_file.stat()
+            if st.st_mtime != self._eco_mode_mtime:
+                self._eco_mode_mtime = st.st_mtime
+                text = self._eco_mode_file.read_text(encoding="utf-8").strip().lower()
+                self._eco_mode_cached = text in ("on", "true", "1", "yes")
+            return self._eco_mode_cached or False
+        except FileNotFoundError:
+            self._eco_mode_cached = False
+            return False
+        except Exception:
+            return self._eco_mode_cached or False
+
+    @use_micro.setter
+    def use_micro(self, value: bool) -> None:
+        self._use_micro_base = value
 
     @staticmethod
     def _detect_micro_from_config() -> bool:

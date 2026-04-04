@@ -577,6 +577,7 @@ class UIConfig(BaseModel):
     monitor_trace_llm: bool = False
     monitor_trace_pipeline: bool = True
     monitor_full_output: bool = False
+    next_steps: bool = True
 
 
 class ExecutionQueueConfig(BaseModel):
@@ -686,7 +687,7 @@ class InsightsConfig(BaseModel):
     auto_extract: bool = True
     inject_in_context: bool = True
     max_items_in_prompt: int = 8
-    extraction_interval_messages: int = 8
+    extraction_interval_messages: int = 20
     extraction_cooldown_seconds: int = 60
     max_insights: int = 500
     db_path: str = "~/.captain-claw/insights.db"

@@ -159,6 +159,10 @@ class UpdateConfigRequest(BaseModel):
     docker_spawn_enabled: bool | None = None
 
 
+class ProviderKeysRequest(BaseModel):
+    keys: dict[str, str]
+
+
 # System config defaults
 SYSTEM_CONFIG_DEFAULTS = {
     "docker_spawn_enabled": True,
@@ -201,6 +205,43 @@ async def update_config(body: UpdateConfigRequest, admin: dict = Depends(require
         cfg[key] = val
     await db.set_system_setting("fd:system-config", json.dumps(cfg))
     return cfg
+
+
+PROVIDER_KEYS_SETTING = "fd:provider-keys"
+
+
+@router.get("/provider-keys")
+async def get_provider_keys(admin: dict = Depends(require_admin)):
+    """Get system-level provider API keys (admin only)."""
+    db = get_db()
+    raw = await db.get_system_setting(PROVIDER_KEYS_SETTING)
+    if not raw:
+        return {"keys": {}}
+    try:
+        return {"keys": json.loads(raw)}
+    except (json.JSONDecodeError, TypeError):
+        return {"keys": {}}
+
+
+@router.put("/provider-keys")
+async def update_provider_keys(body: ProviderKeysRequest, admin: dict = Depends(require_admin)):
+    """Save system-level provider API keys (admin only)."""
+    db = get_db()
+    # Merge with existing: allows partial updates, empty string removes key
+    raw = await db.get_system_setting(PROVIDER_KEYS_SETTING)
+    existing: dict[str, str] = {}
+    if raw:
+        try:
+            existing = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    for k, v in body.keys.items():
+        if v:
+            existing[k] = v
+        else:
+            existing.pop(k, None)
+    await db.set_system_setting(PROVIDER_KEYS_SETTING, json.dumps(existing))
+    return {"ok": True, "keys": existing}
 
 
 @router.put("/plans/{plan}")

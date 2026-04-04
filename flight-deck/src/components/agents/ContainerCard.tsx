@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings } from 'lucide-react'
+import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf } from 'lucide-react'
 import type { ContainerInfo } from '../../services/docker'
 import { getContainerLogs } from '../../services/docker'
 import { useContainerStore } from '../../stores/containerStore'
@@ -85,7 +85,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   onDragStart?: (e: React.PointerEvent) => void
   isDragging?: boolean
 }) {
-  const { stopContainer, startContainer, restartContainer, removeContainer, rebuildContainer, cloneContainer, setDescription, setNameOverride, setForwardingTask, getForwardingTask, setConsultApproval, getConsultApproval, setCognitiveMode: storeCognitiveMode, getCognitiveMode } = useContainerStore()
+  const { stopContainer, startContainer, restartContainer, removeContainer, rebuildContainer, cloneContainer, setDescription, setNameOverride, setForwardingTask, getForwardingTask, setConsultApproval, getConsultApproval, setCognitiveMode: storeCognitiveMode, getCognitiveMode, setEcoMode: storeEcoMode, getEcoMode } = useContainerStore()
   const openChat = useChatStore((s) => s.openChat)
   const session = useChatStore((s) => s.sessions.get(container.id))
   const busy = session?.busy ?? false
@@ -108,6 +108,8 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   const [showDatastore, setShowDatastore] = useState(false)
   const cognitiveMode = getCognitiveMode(container.id)
   const [modeSaved, setModeSaved] = useState(false)
+  const ecoMode = getEcoMode(container.id)
+  const [ecoSaved, setEcoSaved] = useState(false)
 
   const isRunning = container.status === 'running'
   const agentName = container.agent_name || container.name
@@ -273,36 +275,40 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
               )}
             </div>
             {container.web_port != null && (
-              <span className="rounded bg-zinc-800 px-1 py-0.5 text-[10px] font-mono text-emerald-400/80 shrink-0">
+              <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-xs font-mono text-emerald-400/80 shrink-0">
                 :{container.web_port}
               </span>
             )}
+            <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium shrink-0 ${badgeCls}`}>
+              {isRunning && (
+                <span className="relative flex h-1.5 w-1.5">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-current opacity-75" />
+                  <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-current" />
+                </span>
+              )}
+              {container.status}
+            </span>
             {isRunning && container.web_port && (
+              <>
+                <button
+                  onClick={() => openChat(container.id, agentName, 'localhost', container.web_port!, container.web_auth)}
+                  className="flex items-center gap-1 rounded-lg bg-violet-600/20 px-2 py-0.5 text-xs font-medium text-violet-300 hover:bg-violet-600/30 shrink-0"
+                >
+                  <MessageSquare className="h-3 w-3" />
+                  Chat
+                </button>
+                <OpenDropdown host="localhost" port={container.web_port} auth={container.web_auth} />
+              </>
+            )}
+            {isRunning && !container.web_port && (
               <button
-                onClick={() => openChat(container.id, agentName, 'localhost', container.web_port!, container.web_auth)}
-                className="flex items-center gap-1 rounded bg-violet-600/20 px-1.5 py-0.5 text-[11px] font-medium text-violet-300 hover:bg-violet-600/30 shrink-0"
+                onClick={() => setShowConnect(!showConnect)}
+                className="flex items-center gap-1 rounded-lg px-2 py-0.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 shrink-0"
               >
                 <MessageSquare className="h-3 w-3" />
                 Chat
               </button>
             )}
-            {isRunning && !container.web_port && (
-              <button
-                onClick={() => setShowConnect(!showConnect)}
-                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 shrink-0"
-              >
-                <MessageSquare className="h-3 w-3" />
-              </button>
-            )}
-            <span className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium shrink-0 ${badgeCls}`}>
-              {isRunning && (
-                <span className="relative flex h-1 w-1">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-current opacity-75" />
-                  <span className="relative inline-flex h-1 w-1 rounded-full bg-current" />
-                </span>
-              )}
-              {container.status}
-            </span>
           </div>
 
           {/* Line 2: groups + status text */}
@@ -321,18 +327,18 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
           </div>
 
           {/* Line 3: files, logs, actions */}
-          <div className="flex items-center gap-1 -mx-1">
+          <div className="flex items-center gap-1">
             {onBrowseFiles && (
-              <button onClick={onBrowseFiles} className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
-                <FolderOpen className="h-3 w-3" /> Files
+              <button onClick={onBrowseFiles} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                <FolderOpen className="h-3.5 w-3.5" /> Files
               </button>
             )}
-            <button onClick={toggleLogs} disabled={logsLoading} className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40">
-              <ScrollText className={`h-3 w-3 ${logsLoading ? 'animate-spin' : ''}`} /> {showLogs ? 'Hide' : 'Logs'}
+            <button onClick={toggleLogs} disabled={logsLoading} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40">
+              <ScrollText className={`h-3.5 w-3.5 ${logsLoading ? 'animate-spin' : ''}`} /> {showLogs ? 'Hide' : 'Logs'}
             </button>
             {isRunning && container.web_port && (
-              <button onClick={() => setShowDatastore(true)} className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
-                <Database className="h-3 w-3" /> Data
+              <button onClick={() => setShowDatastore(true)} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                <Database className="h-3.5 w-3.5" /> Data
               </button>
             )}
             <div className="flex-1" />
@@ -370,9 +376,10 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
           <div className="border-t border-zinc-800">
             <div className="flex items-center justify-between px-3 py-1 bg-zinc-950/50">
               <span className="text-[11px] text-zinc-500">Logs (last 100 lines)</span>
-              <button onClick={() => toggleLogs()} className="text-zinc-500 hover:text-zinc-300">
-                <ChevronUp className="h-3 w-3" />
-              </button>
+              <div className="flex items-center gap-1">
+                <button onClick={() => navigator.clipboard.writeText(logs)} className="text-zinc-500 hover:text-zinc-300" title="Copy logs"><Copy className="h-3 w-3" /></button>
+                <button onClick={() => toggleLogs()} className="text-zinc-500 hover:text-zinc-300"><ChevronUp className="h-3 w-3" /></button>
+              </div>
             </div>
             <pre ref={logsRef}
               className="max-h-40 overflow-auto px-3 py-1.5 text-[11px] text-zinc-400 font-mono leading-relaxed bg-zinc-950/30"
@@ -543,6 +550,36 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
             } catch (err) { console.error('Failed to update cognitive mode:', err) }
           }}
         />
+
+        {/* Eco Mode toggle */}
+        <div className="mb-3 flex items-center gap-2">
+          <button
+            onClick={async () => {
+              const next = !ecoMode
+              storeEcoMode(container.id, next)
+              try {
+                const { token, authEnabled } = useAuthStore.getState()
+                const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+                if (authEnabled && token) headers['Authorization'] = `Bearer ${token}`
+                const res = await fetch(`/fd/agent-eco-mode/docker/${container.id}`, {
+                  method: 'PUT', headers, credentials: 'include',
+                  body: JSON.stringify({ enabled: next }),
+                })
+                if (res.ok) { setEcoSaved(true); setTimeout(() => setEcoSaved(false), 2000) }
+              } catch (err) { console.error('Failed to update eco mode:', err) }
+            }}
+            className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+              ecoMode
+                ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25'
+                : 'border-zinc-700 bg-zinc-800/50 text-zinc-500 hover:bg-zinc-700/50 hover:text-zinc-400'
+            }`}
+            title="Eco Mode — compact prompts, smart tool selection, lower token usage"
+          >
+            <Leaf className="h-3 w-3" />
+            <span>Eco Mode</span>
+          </button>
+          {ecoSaved && <span className="text-[10px] text-emerald-500">saved</span>}
+        </div>
 
         {/* Forwarding Task (editable) */}
         <div className="mb-3 group/fwd">
@@ -715,9 +752,12 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
         <div className="border-t border-zinc-800">
           <div className="flex items-center justify-between px-4 py-1.5 bg-zinc-950/50">
             <span className="text-xs text-zinc-500">Logs (last 100 lines)</span>
-            <button onClick={() => toggleLogs()} className="text-xs text-zinc-500 hover:text-zinc-300">
-              {showLogs ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button onClick={() => navigator.clipboard.writeText(logs)} className="text-xs text-zinc-500 hover:text-zinc-300" title="Copy logs"><Copy className="h-3.5 w-3.5" /></button>
+              <button onClick={() => toggleLogs()} className="text-xs text-zinc-500 hover:text-zinc-300">
+                {showLogs ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+              </button>
+            </div>
           </div>
           <pre ref={logsRef}
             className="max-h-60 overflow-auto px-4 py-2 text-xs text-zinc-400 font-mono leading-relaxed bg-zinc-950/30"
