@@ -65,6 +65,14 @@ class OrchestratorTask:
     model_id: str = ""
     skills: list[str] = field(default_factory=list)
     use_existing_session: bool = False
+    # Shared workspace: keys this task is expected to produce/consume.
+    workspace_outputs: list[str] = field(default_factory=list)
+    workspace_inputs: list[str] = field(default_factory=list)
+    # Structured output validation: JSON Schema for the task output.
+    output_schema: dict[str, Any] | None = None
+    output_schema_name: str = ""
+    _schema_retry_used: bool = field(default=False, repr=False)
+    validated_output: dict[str, Any] | list | None = field(default=None, repr=False)
 
     def is_terminal(self) -> bool:
         return self.status in _TERMINAL_STATES

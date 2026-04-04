@@ -7,6 +7,7 @@ import type {
   Swarm,
   SwarmTask,
   SwarmEdge,
+  TraceData,
 } from '../types'
 import { getApiBase } from '../stores/connectionStore'
 
@@ -99,3 +100,61 @@ export const skipTask = (taskId: string) => post<void>(`/swarm/tasks/${taskId}/s
 export const createEdge = (swarmId: string, data: { from_task_id: string; to_task_id: string; edge_type?: string }) =>
   post<SwarmEdge>(`/swarm/swarms/${swarmId}/edges`, data)
 export const deleteEdge = (edgeId: number) => del(`/swarm/edges/${edgeId}`)
+
+// ── Orchestrator (proxied to agent) ──
+
+export interface RunTasksPayload {
+  tasks: Array<{
+    id: string
+    title: string
+    description: string
+    depends_on?: string[]
+    model_id?: string
+    session_name?: string
+    session_id?: string
+    output_schema?: Record<string, unknown>
+    output_schema_name?: string
+    workspace_outputs?: string[]
+    workspace_inputs?: string[]
+  }>
+  user_input?: string
+  synthesis_instruction?: string
+  workflow_name?: string
+  model?: string
+  variable_values?: Record<string, string>
+  task_overrides?: Record<string, Record<string, unknown>>
+}
+
+interface RunTasksResult {
+  ok: boolean
+  result?: string
+  error?: string
+}
+
+interface PrepareTasksResult {
+  ok: boolean
+  tasks?: Array<Record<string, unknown>>
+  summary?: string
+  error?: string
+}
+
+/**
+ * Prepare explicit tasks on an agent (no LLM decomposition).
+ * Proxied through Flight Deck → agent's /api/orchestrator/prepare-tasks.
+ */
+export const prepareTasksOnAgent = (agentSlug: string, payload: RunTasksPayload) =>
+  post<PrepareTasksResult>(`/fd/orchestrator/${encodeURIComponent(agentSlug)}/prepare-tasks`, payload)
+
+/**
+ * Execute explicit tasks on an agent (prepare + execute in one call).
+ * Proxied through Flight Deck → agent's /api/orchestrator/run-tasks.
+ */
+export const runTasksOnAgent = (agentSlug: string, payload: RunTasksPayload) =>
+  post<RunTasksResult>(`/fd/orchestrator/${encodeURIComponent(agentSlug)}/run-tasks`, payload)
+
+/**
+ * Fetch trace spans from an agent's current orchestration run.
+ * Proxied through Flight Deck → agent's /api/orchestrator/traces.
+ */
+export const getTracesFromAgent = (agentSlug: string) =>
+  fetchJSON<{ traces: TraceData | null }>(`/fd/orchestrator/${encodeURIComponent(agentSlug)}/traces`)

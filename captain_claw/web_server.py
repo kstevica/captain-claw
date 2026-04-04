@@ -877,6 +877,22 @@ class WebServer:
         from captain_claw.web.rest_orchestrator import load_workflow
         return await load_workflow(self, request)
 
+    async def _prepare_tasks(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_orchestrator import prepare_tasks
+        return await prepare_tasks(self, request)
+
+    async def _run_tasks(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_orchestrator import run_tasks
+        return await run_tasks(self, request)
+
+    async def _get_workspace_snapshot(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_orchestrator import get_workspace_snapshot
+        return await get_workspace_snapshot(self, request)
+
+    async def _get_traces(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_orchestrator import get_traces
+        return await get_traces(self, request)
+
     async def _delete_workflow(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_orchestrator import delete_workflow
         return await delete_workflow(self, request)
@@ -2042,6 +2058,10 @@ class WebServer:
         app.router.add_post("/api/orchestrator/workflows/save", self._save_workflow)
         app.router.add_post("/api/orchestrator/workflows/load", self._load_workflow)
         app.router.add_delete("/api/orchestrator/workflows/{name}", self._delete_workflow)
+        app.router.add_post("/api/orchestrator/prepare-tasks", self._prepare_tasks)
+        app.router.add_post("/api/orchestrator/run-tasks", self._run_tasks)
+        app.router.add_get("/api/orchestrator/workspace", self._get_workspace_snapshot)
+        app.router.add_get("/api/orchestrator/traces", self._get_traces)
         app.router.add_get("/api/cron/jobs", self._list_cron_jobs)
         app.router.add_post("/api/cron/jobs", self._create_cron_job)
         app.router.add_post("/api/cron/jobs/{id}/run", self._run_cron_job)

@@ -119,6 +119,60 @@ export interface SwarmTask {
   output_data: Record<string, unknown>
   error_message: string
   metadata: Record<string, unknown>
+  // Shared workspace data flow declarations
+  workspace_outputs?: string[]
+  workspace_inputs?: string[]
+  // Structured output validation
+  output_schema?: Record<string, unknown>
+  output_schema_name?: string
+}
+
+// ── Shared Workspace types ──
+
+export interface WorkspaceEntry {
+  value: unknown
+  task_id: string
+  session_id: string
+  content_type: 'text' | 'json' | 'binary_ref'
+}
+
+export interface WorkspaceSnapshot {
+  orchestration_id: string
+  entry_count: number
+  entries: Record<string, WorkspaceEntry>
+}
+
+// ── Trace / Observability types ──
+
+export interface TraceSpan {
+  span_id: string
+  trace_id: string
+  parent_span_id: string
+  span_type: string       // orchestration | task | llm_call | tool_execution |
+                          // validation | workspace_op | decompose | synthesize | execution
+  name: string
+  started_at: number
+  ended_at: number
+  duration_ms: number
+  status: 'running' | 'completed' | 'failed'
+  attributes: Record<string, unknown>
+}
+
+export interface TraceSummary {
+  trace_id: string
+  span_count: number
+  by_type: Record<string, number>
+  total_duration_ms: number
+  total_input_tokens: number
+  total_output_tokens: number
+  completed: number
+  failed: number
+  running: number
+}
+
+export interface TraceData {
+  spans: TraceSpan[]
+  summary: TraceSummary
 }
 
 export interface SwarmEdge {

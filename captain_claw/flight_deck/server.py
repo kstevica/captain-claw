@@ -2229,6 +2229,99 @@ async def agent_usage(host: str, port: int, token: str = "", period: str = "toda
         raise HTTPException(502, "Cannot connect to agent")
 
 
+# ── Orchestrator proxy endpoints ──
+
+
+@app.post("/fd/orchestrator/{host}/{port}/prepare-tasks")
+async def proxy_prepare_tasks(
+    host: str, port: int, request: Request,
+    user: dict | None = _required_user_dep,
+):
+    """Proxy prepare-tasks to a CC agent's orchestrator."""
+    import httpx
+
+    auth = _resolve_agent_auth(port)
+    params = f"?token={auth}" if auth else ""
+    url = f"http://{host}:{port}/api/orchestrator/prepare-tasks{params}"
+    body = await request.body()
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(url, content=body, headers={"Content-Type": "application/json"})
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.post("/fd/orchestrator/{host}/{port}/run-tasks")
+async def proxy_run_tasks(
+    host: str, port: int, request: Request,
+    user: dict | None = _required_user_dep,
+):
+    """Proxy run-tasks to a CC agent's orchestrator.
+
+    Note: This is a long-running request. Real-time progress comes
+    via the agent WebSocket (orchestrator_event messages).
+    """
+    import httpx
+
+    auth = _resolve_agent_auth(port)
+    params = f"?token={auth}" if auth else ""
+    url = f"http://{host}:{port}/api/orchestrator/run-tasks{params}"
+    body = await request.body()
+    try:
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            resp = await client.post(url, content=body, headers={"Content-Type": "application/json"})
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.get("/fd/orchestrator/{host}/{port}/workspace")
+async def proxy_workspace_snapshot(
+    host: str, port: int, token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Proxy workspace snapshot from a CC agent's orchestrator."""
+    import httpx
+
+    auth = token or _resolve_agent_auth(port)
+    params = f"?token={auth}" if auth else ""
+    url = f"http://{host}:{port}/api/orchestrator/workspace{params}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.get("/fd/orchestrator/{host}/{port}/traces")
+async def proxy_traces(
+    host: str, port: int, token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Proxy trace spans from a CC agent's orchestrator."""
+    import httpx
+
+    auth = token or _resolve_agent_auth(port)
+    params = f"?token={auth}" if auth else ""
+    url = f"http://{host}:{port}/api/orchestrator/traces{params}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
 # ── Process agent endpoints ──
 
 

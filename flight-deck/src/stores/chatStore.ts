@@ -4,6 +4,8 @@ import { useAuthStore } from './authStore'
 import { useContainerStore } from './containerStore'
 import { useLocalAgentStore } from './localAgentStore'
 import { useProcessStore } from './processStore'
+import { useTraceStore } from './traceStore'
+import type { TraceSpan } from '../types'
 
 // ── Chat persistence helpers ──
 
@@ -411,6 +413,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         timestamp: new Date().toISOString(),
       }
       addMessage(containerId, msg)
+    })
+
+    // Forward orchestrator trace spans to the trace store for
+    // real-time observability in the TraceTimeline component.
+    ws.on('orchestrator_event', (data) => {
+      if (data.event === 'trace_span') {
+        const span = data as unknown as TraceSpan
+        if (span?.span_id) {
+          useTraceStore.getState().handleSpanEvent(span)
+        }
+      }
     })
 
     ws.connect()

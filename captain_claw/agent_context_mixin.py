@@ -2025,6 +2025,11 @@ class AgentContextMixin:
         if uid:
             sft.set_user_mode(uid)
         self.tools.register(sft)
+        # Shared workspace tools — always registered; they return a clear
+        # error when invoked outside an orchestration run.
+        from captain_claw.tools.shared_workspace import WorkspaceReadTool, WorkspaceWriteTool
+        self.tools.register(WorkspaceReadTool())
+        self.tools.register(WorkspaceWriteTool())
 
         self._register_plugin_tools()
 

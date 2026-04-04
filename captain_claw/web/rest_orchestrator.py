@@ -364,3 +364,100 @@ async def delete_workflow(server: WebServer, request: web.Request) -> web.Respon
         return web.json_response({"ok": False, "error": "Missing name"}, status=400)
     result = await server._orchestrator.delete_workflow(name)
     return web.json_response(result)
+
+
+# ── Explicit task execution (user-defined DAGs) ──────────────────────
+
+
+async def prepare_tasks(server: WebServer, request: web.Request) -> web.Response:
+    """Build a graph from an explicit task list (no LLM decomposition)."""
+    if not server._orchestrator:
+        return web.json_response({"ok": False, "error": "No orchestrator"}, status=400)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+
+    tasks = body.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        return web.json_response({"ok": False, "error": "Missing or empty 'tasks' array"}, status=400)
+
+    try:
+        result = await server._orchestrator.prepare_tasks(
+            tasks,
+            user_input=str(body.get("user_input", "")).strip(),
+            synthesis_instruction=str(body.get("synthesis_instruction", "")).strip(),
+            workflow_name=str(body.get("workflow_name", "")).strip(),
+            model=str(body.get("model", "")).strip(),
+        )
+    except Exception as e:
+        log.error("prepare_tasks failed", error=str(e))
+        return web.json_response({"ok": False, "error": f"Prepare failed: {e}"}, status=500)
+
+    return web.json_response(result, dumps=lambda obj: json.dumps(obj, default=str))
+
+
+async def run_tasks(server: WebServer, request: web.Request) -> web.Response:
+    """Prepare + execute an explicit task list in one call.
+
+    Accepts the same payload as prepare_tasks but immediately executes.
+    The response streams via WebSocket events; this endpoint returns
+    the final synthesis result.
+    """
+    if not server._orchestrator:
+        return web.json_response({"ok": False, "error": "No orchestrator"}, status=400)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+
+    tasks = body.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        return web.json_response({"ok": False, "error": "Missing or empty 'tasks' array"}, status=400)
+
+    try:
+        result_text = await server._orchestrator.run_tasks(
+            tasks,
+            user_input=str(body.get("user_input", "")).strip(),
+            synthesis_instruction=str(body.get("synthesis_instruction", "")).strip(),
+            workflow_name=str(body.get("workflow_name", "")).strip(),
+            model=str(body.get("model", "")).strip(),
+            variable_values=body.get("variable_values"),
+            task_overrides=body.get("task_overrides"),
+        )
+    except Exception as e:
+        log.error("run_tasks failed", error=str(e))
+        return web.json_response({"ok": False, "error": f"Execution failed: {e}"}, status=500)
+
+    return web.json_response({
+        "ok": True,
+        "result": result_text,
+    })
+
+
+async def get_workspace_snapshot(server: WebServer, request: web.Request) -> web.Response:
+    """Return the current shared workspace state."""
+    if not server._orchestrator:
+        return web.json_response({"workspace": None})
+    ws = getattr(server._orchestrator, "_shared_workspace", None)
+    if ws is None or ws.size == 0:
+        return web.json_response({"workspace": None})
+    return web.json_response(
+        {"workspace": ws.snapshot()},
+        dumps=lambda obj: json.dumps(obj, default=str),
+    )
+
+
+async def get_traces(server: WebServer, request: web.Request) -> web.Response:
+    """Return trace spans and summary for the current orchestration run."""
+    if not server._orchestrator:
+        return web.json_response({"traces": None})
+    trace_ctx = getattr(server._orchestrator, "_trace_ctx", None)
+    if trace_ctx is None:
+        return web.json_response({"traces": None})
+    return web.json_response({
+        "traces": {
+            "spans": trace_ctx.to_list(),
+            "summary": trace_ctx.get_summary(),
+        },
+    }, dumps=lambda obj: json.dumps(obj, default=str))

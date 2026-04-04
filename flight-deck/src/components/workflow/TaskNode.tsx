@@ -2,7 +2,7 @@ import { memo } from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
 import type { SwarmTask } from '../../types'
 import { StatusBadge } from '../common/StatusBadge'
-import { Play, Pause, RotateCcw, SkipForward, CheckCircle } from 'lucide-react'
+import { Play, Pause, RotateCcw, SkipForward, CheckCircle, ArrowDownToLine, ArrowUpFromLine, Braces } from 'lucide-react'
 import { useWorkflowStore } from '../../stores/workflowStore'
 
 type TaskNodeData = {
@@ -43,6 +43,32 @@ export const TaskNode = memo(function TaskNode({ data }: NodeProps & { data: Tas
         {/* Description */}
         {task.description && (
           <p className="text-xs text-zinc-500 line-clamp-2 mb-2">{task.description}</p>
+        )}
+
+        {/* Workspace data flow + schema indicators */}
+        {((task.workspace_inputs && task.workspace_inputs.length > 0) ||
+          (task.workspace_outputs && task.workspace_outputs.length > 0) ||
+          task.output_schema) && (
+          <div className="flex items-center gap-2 mb-2 text-xs text-zinc-500">
+            {task.workspace_inputs && task.workspace_inputs.length > 0 && (
+              <span className="flex items-center gap-0.5 text-cyan-500/70" title={`Reads: ${task.workspace_inputs.join(', ')}`}>
+                <ArrowDownToLine className="h-3 w-3" />
+                {task.workspace_inputs.length}
+              </span>
+            )}
+            {task.workspace_outputs && task.workspace_outputs.length > 0 && (
+              <span className="flex items-center gap-0.5 text-amber-500/70" title={`Writes: ${task.workspace_outputs.join(', ')}`}>
+                <ArrowUpFromLine className="h-3 w-3" />
+                {task.workspace_outputs.length}
+              </span>
+            )}
+            {task.output_schema && (
+              <span className="flex items-center gap-0.5 text-violet-400/70" title={`Output schema: ${task.output_schema_name || 'JSON'}`}>
+                <Braces className="h-3 w-3" />
+                <span>{task.output_schema_name || 'JSON'}</span>
+              </span>
+            )}
+          </div>
         )}
 
         {/* Assigned */}

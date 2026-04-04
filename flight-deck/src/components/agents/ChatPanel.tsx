@@ -20,6 +20,7 @@ import {
   Check,
   Pin,
   ClipboardList,
+  Activity,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -29,7 +30,9 @@ import { useContainerStore } from '../../stores/containerStore'
 import { useProcessStore } from '../../stores/processStore'
 import { usePinnedStore } from '../../stores/pinnedStore'
 import { useClipboardStore } from '../../stores/clipboardStore'
+import { useTraceStore } from '../../stores/traceStore'
 import { SendContextModal } from './SendContextModal'
+import TraceTimeline from '../observability/TraceTimeline'
 import { uploadFileToAgent, formatSize } from '../../services/fileTransfer'
 import type { ChatMessage } from '../../services/agentChat'
 
@@ -54,6 +57,8 @@ export function ChatPanel() {
   const localAgents = useLocalAgentStore((s) => s.agents)
   const containers = useContainerStore((s) => s.containers)
   const [showSendContext, setShowSendContext] = useState(false)
+  const [showTracePanel, setShowTracePanel] = useState(false)
+  const traceSpanCount = useTraceStore((s) => s.spans.length)
 
   const session = activeChatId ? sessions.get(activeChatId) : null
 
@@ -104,17 +109,51 @@ export function ChatPanel() {
         >
           <Forward className="h-4 w-4" />
         </button>
+        <button
+          onClick={() => setShowTracePanel(!showTracePanel)}
+          title={showTracePanel ? 'Hide traces' : 'Show orchestrator traces'}
+          className={`relative mr-1 rounded p-1 transition-colors ${
+            showTracePanel
+              ? 'bg-violet-600/20 text-violet-400'
+              : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
+          }`}
+        >
+          <Activity className="h-4 w-4" />
+          {traceSpanCount > 0 && (
+            <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-violet-600 px-0.5 text-[8px] font-bold text-white">
+              {traceSpanCount > 99 ? '99+' : traceSpanCount}
+            </span>
+          )}
+        </button>
         <button onClick={closeChat} className="mr-2 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300">
           <Minus className="h-4 w-4" />
         </button>
       </div>
 
-      {/* Chat content */}
-      <ChatContent
-        session={session}
-        onSend={(content) => sendMessage(session.containerId, content)}
-        onCancel={() => cancelTask(session.containerId)}
-      />
+      {/* Trace panel (replaces chat when active) */}
+      {showTracePanel ? (
+        <div className="flex flex-1 flex-col overflow-hidden">
+          <div className="flex items-center gap-2 border-b border-zinc-800/50 bg-zinc-900/30 px-3 py-2">
+            <Activity className="h-3.5 w-3.5 text-violet-400" />
+            <span className="text-xs font-medium text-zinc-300">Orchestrator Traces</span>
+            {traceSpanCount > 0 && (
+              <span className="rounded-full bg-violet-600/20 px-1.5 py-0.5 text-[10px] font-medium text-violet-400">
+                {traceSpanCount} spans
+              </span>
+            )}
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            <TraceTimeline />
+          </div>
+        </div>
+      ) : (
+        /* Chat content */
+        <ChatContent
+          session={session}
+          onSend={(content) => sendMessage(session.containerId, content)}
+          onCancel={() => cancelTask(session.containerId)}
+        />
+      )}
 
       {/* Send context modal */}
       {showSendContext && (

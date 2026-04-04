@@ -21,6 +21,12 @@ from captain_claw.agent_pool import AgentPool
 from captain_claw.config import get_config
 from captain_claw.file_registry import FileRegistry
 from captain_claw.instructions import InstructionLoader
+from captain_claw.output_validation import (
+    build_retry_prompt,
+    validate_task_output,
+)
+from captain_claw.shared_workspace import SharedWorkspace
+from captain_claw.tracing import TraceContext, TraceSpan
 from captain_claw.llm import LLMProvider, Message, get_provider
 from captain_claw.llm_session_logger import get_llm_session_logger
 from captain_claw.logging import get_logger
@@ -236,6 +242,10 @@ class SessionOrchestrator:
         self._resume_event = asyncio.Event()
         # Shared file registry for cross-task file resolution within a run.
         self._file_registry: FileRegistry | None = None
+        # Shared workspace for intra-orchestration structured data flow.
+        self._shared_workspace: SharedWorkspace | None = None
+        # Structured tracing for observability.
+        self._trace_ctx: TraceContext | None = None
         # Workflow metadata persisted across prepare() → execute().
         self._workflow_name: str = ""
         self._workflow_model: str = ""          # workflow-level model override
@@ -380,6 +390,35 @@ class SessionOrchestrator:
         except Exception:
             pass
 
+    # ── Tracing helpers ───────────────────────────────────────────────
+
+    def _create_trace_context(self, orch_run_id: str) -> TraceContext:
+        """Create a TraceContext that broadcasts spans to the UI."""
+        def _trace_cb(span: TraceSpan) -> None:
+            self._broadcast_event("trace_span", span.to_dict())
+        return TraceContext(trace_id=orch_run_id, callback=_trace_cb)
+
+    def _trace_start(
+        self,
+        span_type: str,
+        name: str,
+        *,
+        parent: str = "",
+        **attrs: Any,
+    ) -> str:
+        """Start a trace span (no-op if tracing disabled). Returns span_id."""
+        if self._trace_ctx is None:
+            return ""
+        return self._trace_ctx.start_span(
+            span_type, name, parent_span_id=parent, **attrs,
+        )
+
+    def _trace_end(self, span_id: str, status: str = "completed", **attrs: Any) -> None:
+        """End a trace span (no-op if span_id is empty)."""
+        if not span_id or self._trace_ctx is None:
+            return
+        self._trace_ctx.end_span(span_id, status, **attrs)
+
     # ------------------------------------------------------------------
     # Model resolution helper
     # ------------------------------------------------------------------
@@ -482,6 +521,22 @@ class SessionOrchestrator:
             persist_callback=self._make_persist_callback(),
         )
 
+        # Create a shared workspace for structured data flow between tasks.
+        def _workspace_change_cb(event_type: str, entry: Any) -> None:
+            self._broadcast_event("workspace_updated", {
+                "action": event_type,
+                "key": getattr(entry, "key", ""),
+                "task_id": getattr(entry, "task_id", ""),
+                "content_type": getattr(entry, "content_type", "text"),
+            })
+        self._shared_workspace = SharedWorkspace(
+            orchestration_id=orch_run_id,
+            on_change=_workspace_change_cb,
+        )
+
+        # Initialize structured tracing.
+        self._trace_ctx = self._create_trace_context(orch_run_id)
+
         # Create a shared workflow-run directory so all workers write to
         # one flat location instead of per-session scoped paths.
         cfg_ws = get_config().resolved_workspace_path()
@@ -490,7 +545,9 @@ class SessionOrchestrator:
         self._file_registry.workflow_run_dir = workflow_run_dir
 
         # 1. DECOMPOSE
+        decompose_span = self._trace_start("decompose", "Decompose request")
         plan = await self._decompose(user_input, auto_select_model=auto_select_model)
+        self._trace_end(decompose_span, "completed" if plan else "failed")
         if plan is None:
             log.error("prepare() failed: _decompose returned None")
             self._broadcast_event("error", {"message": "Could not decompose the request into tasks."})
@@ -513,6 +570,9 @@ class SessionOrchestrator:
                           timeout_grace_seconds=self._timeout_grace_seconds)
         skipped_tasks = []
         for i, task_data in enumerate(tasks_data):
+            # Parse output_schema if provided (dict or None).
+            raw_schema = task_data.get("output_schema")
+            output_schema = raw_schema if isinstance(raw_schema, dict) else None
             task = OrchestratorTask(
                 id=str(task_data.get("id", "")).strip(),
                 title=str(task_data.get("title", "")).strip(),
@@ -522,6 +582,8 @@ class SessionOrchestrator:
                 model_id=str(task_data.get("model_id", "")).strip(),
                 timeout_seconds=self._worker_timeout,
                 max_retries=self._worker_max_retries,
+                output_schema=output_schema,
+                output_schema_name=str(task_data.get("output_schema_name", "")).strip(),
             )
             if not task.id:
                 log.warning("Skipping task with empty id",
@@ -564,11 +626,15 @@ class SessionOrchestrator:
 
         tasks_out = []
         for tid, t in graph.tasks.items():
-            tasks_out.append({
+            tinfo: dict[str, Any] = {
                 "id": t.id, "title": t.title, "description": t.description,
                 "depends_on": t.depends_on, "session_name": t.session_name,
                 "session_id": t.session_id, "model_id": t.model_id,
-            })
+            }
+            if t.output_schema:
+                tinfo["output_schema"] = t.output_schema
+                tinfo["output_schema_name"] = t.output_schema_name
+            tasks_out.append(tinfo)
 
         # Detect {{variable}} placeholders in the decomposed content.
         all_texts = [user_input, synthesis_instruction]
@@ -663,6 +729,8 @@ class SessionOrchestrator:
             self._file_registry.workflow_started_at = time.time()
 
         # 4. EXECUTE GRAPH
+        exec_span = self._trace_start("execution", "Execute DAG",
+                                       task_count=graph.task_count)
         self._set_status(f"Orchestrator: executing {graph.task_count} tasks...")
         assigned_tasks = []
         for tid, t in graph.tasks.items():
@@ -674,11 +742,16 @@ class SessionOrchestrator:
         self._broadcast_event("assigned", {"tasks": assigned_tasks})
         self._broadcast_event("executing", {"task_count": graph.task_count})
         await self._execute_graph(graph)
+        self._trace_end(exec_span, "completed",
+                        completed=sum(1 for t in graph.tasks.values() if t.status == COMPLETED),
+                        failed=sum(1 for t in graph.tasks.values() if t.status == FAILED))
 
         # 5. SYNTHESIZE
         self._set_status("Orchestrator: synthesizing results...")
         self._broadcast_event("synthesizing")
+        synth_span = self._trace_start("synthesize", "Synthesize results")
         result = await self._synthesize(self._user_input, graph, self._synthesis_instruction)
+        self._trace_end(synth_span, "completed" if result else "failed")
 
         # Save run output to workspace/workflows/.
         output_path = await self._save_run_output(result)
@@ -704,6 +777,160 @@ class SessionOrchestrator:
             return prep.get("error", "Preparation failed.")
         return await self.execute()
 
+    # ------------------------------------------------------------------
+    # Explicit task execution (user-defined DAGs)
+    # ------------------------------------------------------------------
+
+    async def prepare_tasks(
+        self,
+        tasks: list[dict[str, Any]],
+        *,
+        user_input: str = "",
+        synthesis_instruction: str = "",
+        workflow_name: str = "",
+        model: str = "",
+    ) -> dict[str, Any]:
+        """Build a task graph from an explicit task list (no LLM decomposition).
+
+        This is the counterpart to :meth:`prepare` but skips the decomposition
+        step entirely.  Designed for Flight Deck's workflow builder and
+        programmatic pipelines.
+
+        Each task dict should have: ``id``, ``title``, ``description``,
+        ``depends_on`` (list of task IDs), and optionally ``model_id``,
+        ``output_schema``, ``output_schema_name``, ``workspace_outputs``,
+        ``workspace_inputs``, ``session_name``, ``session_id``.
+
+        Returns the same shape as :meth:`prepare` for UI compatibility.
+        """
+        if not tasks:
+            return {"ok": False, "error": "No tasks provided."}
+
+        import uuid
+        orch_run_id = str(uuid.uuid4())
+
+        self._file_registry = FileRegistry(
+            orchestration_id=orch_run_id,
+            persist_callback=self._make_persist_callback(),
+        )
+
+        def _workspace_change_cb(event_type: str, entry: Any) -> None:
+            self._broadcast_event("workspace_updated", {
+                "action": event_type,
+                "key": getattr(entry, "key", ""),
+                "task_id": getattr(entry, "task_id", ""),
+                "content_type": getattr(entry, "content_type", "text"),
+            })
+        self._shared_workspace = SharedWorkspace(
+            orchestration_id=orch_run_id,
+            on_change=_workspace_change_cb,
+        )
+
+        # Initialize structured tracing for explicit pipelines.
+        self._trace_ctx = self._create_trace_context(orch_run_id)
+
+        graph = TaskGraph(
+            max_parallel=self._max_parallel,
+            timeout_grace_seconds=self._timeout_grace_seconds,
+        )
+
+        skipped: list[dict[str, Any]] = []
+        for i, td in enumerate(tasks):
+            raw_schema = td.get("output_schema")
+            task = OrchestratorTask(
+                id=str(td.get("id", "")).strip(),
+                title=str(td.get("title", "")).strip(),
+                description=str(td.get("description", "")).strip(),
+                depends_on=list(td.get("depends_on", [])),
+                session_name=str(td.get("session_name", "")).strip(),
+                session_id=str(td.get("session_id", "")).strip(),
+                model_id=str(td.get("model_id", "")).strip(),
+                skills=list(td.get("skills", [])),
+                workspace_outputs=list(td.get("workspace_outputs", [])),
+                workspace_inputs=list(td.get("workspace_inputs", [])),
+                output_schema=raw_schema if isinstance(raw_schema, dict) else None,
+                output_schema_name=str(td.get("output_schema_name", "")).strip(),
+                timeout_seconds=self._worker_timeout,
+                max_retries=self._worker_max_retries,
+            )
+            if not task.id:
+                skipped.append({"index": i, "reason": "empty_id"})
+                continue
+            graph.add_task(task)
+
+        if graph.task_count == 0:
+            return {"ok": False, "error": "No valid tasks after filtering."}
+
+        self._graph = graph
+        self._user_input = user_input or workflow_name or "User-defined task pipeline"
+        self._synthesis_instruction = synthesis_instruction
+        self._workflow_name = workflow_name or "explicit-pipeline"
+        self._workflow_model = model
+
+        if self._workflow_model:
+            for _tid, t in graph.tasks.items():
+                if not t.model_id:
+                    t.model_id = self._workflow_model
+
+        tasks_out: list[dict[str, Any]] = []
+        for tid, t in graph.tasks.items():
+            tinfo: dict[str, Any] = {
+                "id": t.id, "title": t.title, "description": t.description,
+                "depends_on": t.depends_on, "session_name": t.session_name,
+                "session_id": t.session_id, "model_id": t.model_id,
+            }
+            if t.output_schema:
+                tinfo["output_schema"] = t.output_schema
+                tinfo["output_schema_name"] = t.output_schema_name
+            tasks_out.append(tinfo)
+
+        self._broadcast_event("decomposed", {
+            "summary": f"Explicit pipeline: {self._workflow_name}",
+            "tasks": tasks_out,
+            "workflow_name": self._workflow_name,
+            "model": self._workflow_model,
+        })
+
+        return {
+            "ok": True,
+            "workflow_name": self._workflow_name,
+            "model": self._workflow_model,
+            "summary": f"Explicit pipeline with {graph.task_count} tasks",
+            "tasks": tasks_out,
+            "synthesis_instruction": self._synthesis_instruction,
+        }
+
+    async def run_tasks(
+        self,
+        tasks: list[dict[str, Any]],
+        *,
+        user_input: str = "",
+        synthesis_instruction: str = "",
+        workflow_name: str = "",
+        model: str = "",
+        variable_values: dict[str, str] | None = None,
+        task_overrides: dict[str, dict[str, Any]] | None = None,
+    ) -> str:
+        """Prepare + execute an explicit task list in one call.
+
+        Bypasses LLM decomposition entirely — the caller defines the
+        exact DAG.  This is the primary entry point for Flight Deck
+        workflow execution and programmatic pipelines.
+        """
+        prep = await self.prepare_tasks(
+            tasks,
+            user_input=user_input,
+            synthesis_instruction=synthesis_instruction,
+            workflow_name=workflow_name,
+            model=model,
+        )
+        if not prep.get("ok"):
+            return prep.get("error", "Task preparation failed.")
+        return await self.execute(
+            task_overrides=task_overrides,
+            variable_values=variable_values,
+        )
+
     def get_status(self) -> dict[str, Any] | None:
         """Return current orchestration status for the REST API."""
         if self._graph is None:
@@ -726,12 +953,17 @@ class SessionOrchestrator:
                     if task.result else ""
                 ),
             })
+        workspace_snapshot = None
+        if self._shared_workspace and self._shared_workspace.size > 0:
+            workspace_snapshot = self._shared_workspace.snapshot()
+
         return {
             "summary": graph.get_summary(),
             "tasks": tasks_list,
             "workflow_name": self._workflow_name,
             "model": self._workflow_model,
             "user_input": self._user_input,
+            "workspace": workspace_snapshot,
         }
 
     async def reset(self) -> None:
@@ -767,6 +999,12 @@ class SessionOrchestrator:
         self._workflow_variables = []
         self._execution_done = False
         self._file_registry = None
+        if self._shared_workspace is not None:
+            self._shared_workspace.clear()
+        self._shared_workspace = None
+        if self._trace_ctx is not None:
+            self._trace_ctx.clear()
+        self._trace_ctx = None
         self._resume_event = asyncio.Event()
 
         # Evict idle agents from the pool.
@@ -1298,6 +1536,11 @@ class SessionOrchestrator:
 
     async def _run_worker(self, graph: TaskGraph, task: OrchestratorTask) -> None:
         """Execute a single task via a worker agent."""
+        task_span = self._trace_start(
+            "task", task.title, task_id=task.id,
+            depends_on=task.depends_on,
+            has_output_schema=bool(task.output_schema),
+        )
         self._set_status(f"Worker: {task.title}...")
         self._emit_output(
             "orchestrator",
@@ -1314,6 +1557,11 @@ class SessionOrchestrator:
                 task.session_id,
                 file_registry=self._file_registry,
             )
+
+            # Attach shared workspace so workspace tools are functional.
+            if self._shared_workspace is not None:
+                agent._shared_workspace = self._shared_workspace
+                agent._workspace_task_id = task.id
 
             # Wire a per-task thinking callback so scale-loop progress
             # and other worker steps are broadcast to the web UI with
@@ -1392,11 +1640,35 @@ class SessionOrchestrator:
             if self._workspace_tree:
                 workspace_section = f"\n\n{self._workspace_tree}\n"
 
+            # Inject shared workspace data from upstream tasks so the worker
+            # can access structured data without re-processing files.
+            shared_workspace_section = ""
+            if self._shared_workspace and self._shared_workspace.size > 0:
+                ws_prompt = self._shared_workspace.get_keys_for_task_prompt(
+                    task.id, task.depends_on,
+                )
+                if ws_prompt:
+                    shared_workspace_section = f"\n{ws_prompt}\n"
+
+            # Inject output schema instruction so the agent knows to
+            # produce structured JSON output matching the schema.
+            output_schema_section = ""
+            if task.output_schema:
+                schema_json = json.dumps(task.output_schema, indent=2)
+                schema_label = task.output_schema_name or "required schema"
+                output_schema_section = (
+                    f"\n\n## Required Output Format ({schema_label})\n"
+                    f"Your final response MUST be a valid JSON object matching this schema:\n"
+                    f"```json\n{schema_json}\n```\n"
+                    f"Respond with ONLY the JSON (optionally in a ```json code fence). "
+                    f"Do not include any other text outside the JSON.\n"
+                )
+
             worker_prompt = self._instructions.render(
                 "orchestrator_worker_prompt.md",
                 task_title=task.title,
                 task_description=task.description,
-                file_manifest=file_manifest + dep_outputs_section + workspace_section,
+                file_manifest=file_manifest + dep_outputs_section + workspace_section + shared_workspace_section + output_schema_section,
             )
 
             # Bump iteration budget for complex tasks that require
@@ -1427,10 +1699,83 @@ class SessionOrchestrator:
             response = await agent.complete(worker_prompt)
             worker_success = getattr(agent, "_last_complete_success", True)
             output_text = str(response or "").strip()
+
+            # ── Structured output validation ──
+            # If the task declares an output_schema, validate the response
+            # and optionally retry once with the validation error.
+            validated_data: dict | list | None = None
+            if worker_success and task.output_schema:
+                valid, val_error, parsed = validate_task_output(
+                    output_text, task.output_schema,
+                )
+                if valid:
+                    validated_data = parsed
+                    task.validated_output = parsed
+                    log.info("Output schema validated",
+                             task_id=task.id, schema_name=task.output_schema_name)
+                    self._broadcast_event("task_validation_passed", {
+                        "task_id": task.id, "title": task.title,
+                    })
+                elif not task._schema_retry_used:
+                    # One retry: feed the error back to the agent.
+                    task._schema_retry_used = True
+                    log.warning("Output schema validation failed, retrying",
+                                task_id=task.id, error=val_error)
+                    self._broadcast_event("task_validation_retry", {
+                        "task_id": task.id, "title": task.title,
+                        "error": val_error,
+                    })
+                    retry_prompt = build_retry_prompt(
+                        worker_prompt, output_text, val_error or "",
+                        task.output_schema,
+                    )
+                    response = await agent.complete(retry_prompt)
+                    worker_success = getattr(agent, "_last_complete_success", True)
+                    output_text = str(response or "").strip()
+
+                    if worker_success:
+                        valid2, val_error2, parsed2 = validate_task_output(
+                            output_text, task.output_schema,
+                        )
+                        if valid2:
+                            validated_data = parsed2
+                            task.validated_output = parsed2
+                            log.info("Output schema validated on retry",
+                                     task_id=task.id)
+                            self._broadcast_event("task_validation_passed", {
+                                "task_id": task.id, "title": task.title,
+                                "retry": True,
+                            })
+                        else:
+                            log.warning("Output schema validation failed after retry",
+                                        task_id=task.id, error=val_error2)
+                            worker_success = False
+                            output_text = (
+                                f"Output schema validation failed after retry: {val_error2}\n\n"
+                                f"Raw output:\n{output_text}"
+                            )
+                            self._broadcast_event("task_validation_failed", {
+                                "task_id": task.id, "title": task.title,
+                                "error": val_error2,
+                            })
+                else:
+                    # Already retried — fail the task.
+                    worker_success = False
+                    output_text = (
+                        f"Output schema validation failed: {val_error}\n\n"
+                        f"Raw output:\n{output_text}"
+                    )
+                    self._broadcast_event("task_validation_failed", {
+                        "task_id": task.id, "title": task.title,
+                        "error": val_error,
+                    })
+
             result = {
                 "success": worker_success,
                 "output": output_text,
             }
+            if validated_data is not None:
+                result["validated_output"] = validated_data
 
             # Collect usage metrics from the worker agent.
             usage = getattr(agent, "last_usage", {}) or {}
@@ -1438,6 +1783,31 @@ class SessionOrchestrator:
 
             if worker_success:
                 graph.complete_task(task.id, result)
+
+                # Auto-write task output to shared workspace so downstream
+                # tasks can access it via workspace_read.
+                if self._shared_workspace and output_text:
+                    # If we have validated structured data, write that instead.
+                    if validated_data is not None:
+                        self._shared_workspace.write(
+                            "validated_output",
+                            validated_data,
+                            task_id=task.id,
+                            session_id=task.session_id,
+                            content_type="json",
+                        )
+                    self._shared_workspace.write(
+                        "output",
+                        output_text,
+                        task_id=task.id,
+                        session_id=task.session_id,
+                        content_type="text",
+                    )
+
+                self._trace_end(task_span, "completed",
+                                input_tokens=usage.get("input_tokens", 0),
+                                output_tokens=usage.get("output_tokens", 0))
+
                 self._emit_output(
                     "orchestrator",
                     {"event": "worker_done", "task_id": task.id, "title": task.title},
@@ -1463,6 +1833,12 @@ class SessionOrchestrator:
                     output_preview=output_text[:200],
                 )
                 graph.fail_task(task.id, error=error_msg)
+
+                self._trace_end(task_span, "failed",
+                                error=error_msg[:500],
+                                input_tokens=usage.get("input_tokens", 0),
+                                output_tokens=usage.get("output_tokens", 0))
+
                 self._emit_output(
                     "orchestrator",
                     {"event": "worker_failed", "task_id": task.id, "title": task.title},
@@ -1477,10 +1853,12 @@ class SessionOrchestrator:
             log.info("Worker cancelled", task_id=task.id, title=task.title)
             if task.status == RUNNING:
                 graph.fail_task(task.id, error="cancelled")
+            self._trace_end(task_span, "failed", error="cancelled")
             raise  # Re-raise so the caller knows it was cancelled.
         except asyncio.TimeoutError:
             log.warning("Worker timed out", task_id=task.id, title=task.title)
             graph.fail_task(task.id, error="timeout")
+            self._trace_end(task_span, "failed", error="timeout")
             self._emit_output(
                 "orchestrator",
                 {"event": "worker_timeout", "task_id": task.id},
@@ -1492,6 +1870,7 @@ class SessionOrchestrator:
         except Exception as e:
             log.error("Worker failed", task_id=task.id, error=str(e))
             graph.fail_task(task.id, error=str(e))
+            self._trace_end(task_span, "failed", error=str(e)[:500])
             self._emit_output(
                 "orchestrator",
                 {"event": "worker_error", "task_id": task.id, "error": str(e)},
@@ -1501,10 +1880,11 @@ class SessionOrchestrator:
                 "task_id": task.id, "title": task.title, "error": str(e),
             })
         finally:
-            # Clear per-task thinking callback to avoid stale task_id
-            # references on pooled agents that may be reused later.
+            # Clear per-task thinking callback and workspace task ID to
+            # avoid stale references on pooled agents that may be reused.
             try:
                 agent.thinking_callback = None  # noqa: F821
+                agent._workspace_task_id = ""
             except Exception:
                 pass
             await self._pool.release(task.session_id)
@@ -1838,7 +2218,7 @@ class SessionOrchestrator:
 
         tasks_out: list[dict[str, Any]] = []
         for tid, t in self._graph.tasks.items():
-            tasks_out.append({
+            td: dict[str, Any] = {
                 "id": t.id,
                 "title": t.title,
                 "description": t.description,
@@ -1847,7 +2227,15 @@ class SessionOrchestrator:
                 "session_id": t.session_id,
                 "model_id": t.model_id,
                 "skills": t.skills,
-            })
+            }
+            if t.workspace_outputs:
+                td["workspace_outputs"] = t.workspace_outputs
+            if t.workspace_inputs:
+                td["workspace_inputs"] = t.workspace_inputs
+            if t.output_schema:
+                td["output_schema"] = t.output_schema
+                td["output_schema_name"] = t.output_schema_name
+            tasks_out.append(td)
 
         # Auto-detect {{variable}} placeholders and build metadata.
         all_texts = [self._user_input, self._synthesis_instruction]
@@ -1900,6 +2288,7 @@ class SessionOrchestrator:
         graph = TaskGraph(max_parallel=self._max_parallel,
                           timeout_grace_seconds=self._timeout_grace_seconds)
         for td in tasks_data:
+            raw_schema = td.get("output_schema")
             task = OrchestratorTask(
                 id=str(td.get("id", "")).strip(),
                 title=str(td.get("title", "")).strip(),
@@ -1909,6 +2298,10 @@ class SessionOrchestrator:
                 session_id=str(td.get("session_id", "")).strip(),
                 model_id=str(td.get("model_id", "")).strip(),
                 skills=list(td.get("skills", [])),
+                workspace_outputs=list(td.get("workspace_outputs", [])),
+                workspace_inputs=list(td.get("workspace_inputs", [])),
+                output_schema=raw_schema if isinstance(raw_schema, dict) else None,
+                output_schema_name=str(td.get("output_schema_name", "")).strip(),
                 timeout_seconds=self._worker_timeout,
                 max_retries=self._worker_max_retries,
             )
@@ -1928,9 +2321,23 @@ class SessionOrchestrator:
         self._workflow_variables = data.get("variables", [])
 
         import uuid
+        orch_run_id = str(uuid.uuid4())
         self._file_registry = FileRegistry(
-            orchestration_id=str(uuid.uuid4()),
+            orchestration_id=orch_run_id,
             persist_callback=self._make_persist_callback(),
+        )
+
+        # Create shared workspace for loaded workflow.
+        def _workspace_change_cb(event_type: str, entry: Any) -> None:
+            self._broadcast_event("workspace_updated", {
+                "action": event_type,
+                "key": getattr(entry, "key", ""),
+                "task_id": getattr(entry, "task_id", ""),
+                "content_type": getattr(entry, "content_type", "text"),
+            })
+        self._shared_workspace = SharedWorkspace(
+            orchestration_id=orch_run_id,
+            on_change=_workspace_change_cb,
         )
 
         tasks_out: list[dict[str, Any]] = []

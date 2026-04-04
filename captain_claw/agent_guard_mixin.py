@@ -497,6 +497,13 @@ class AgentGuardMixin:
             arguments = {**arguments, "_session": _session}
         # Pass agent ref so tools can access fallback attributes (e.g. _fd_url)
         arguments = {**arguments, "_agent": self}
+        # Inject shared workspace for orchestration workspace tools.
+        _ws = getattr(self, "_shared_workspace", None)
+        if _ws is not None:
+            arguments = {**arguments, "_shared_workspace": _ws}
+            _ws_task_id = getattr(self, "_workspace_task_id", "")
+            if _ws_task_id:
+                arguments = {**arguments, "_workspace_task_id": _ws_task_id}
         _pcac = getattr(self, "peer_consult_approval_callback", None)
         if _pcac is not None:
             arguments = {**arguments, "_peer_consult_approval_callback": _pcac}
