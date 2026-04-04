@@ -52,6 +52,7 @@ Each forged agent receives:
 | Director panel | Unified overview with broadcast to all agents |
 | Operations | Per-agent token/cost analytics |
 | Pipelines | Chain agent outputs automatically |
+| Trace timeline | Real-time orchestrator observability — Gantt-style span visualization in the chat panel with token usage, phase breakdown, and status tracking |
 | Groups & tags | Organize agents into teams and roles |
 | Multi-user auth | JWT authentication, admin dashboard, rate limiting, quotas |
 | Dark/light theme | Full theme support with keyboard shortcuts |
@@ -72,7 +73,7 @@ Each forged agent receives:
 | Per-session model selection | Keep one session on Claude, another on GPT, another on Ollama |
 | Persistent multi-session workflows | Resume any session exactly where you left off |
 | Built-in safety guards | Input, output, and script/tool checks before anything runs |
-| 31 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, STT, image gen/OCR/vision, screen capture + voice commands, desktop automation, Google Workspace CLI (gws — Drive, Docs, Calendar, Gmail), todo, contacts, scripts, APIs, datastore, deep memory, playbooks, personality, BotPort, Flight Deck fleet discovery, Termux (Android) |
+| 33 built-in tools | Shell, files, web fetch/get/search, docs, email, TTS, STT, image gen/OCR/vision, screen capture + voice commands, desktop automation, Google Workspace CLI (gws — Drive, Docs, Calendar, Gmail), todo, contacts, scripts, APIs, datastore, deep memory, playbooks, personality, BotPort, Flight Deck fleet discovery, Termux (Android) |
 | Personality system | Dual-profile system — global agent identity plus per-user profiles for tailored responses |
 | Self-reflection | Periodic self-assessment — reviews recent interactions, memory, and tasks to generate improvement directives injected into the system prompt |
 | Insights | Persistent knowledge base auto-extracted from conversations — facts, contacts, decisions, deadlines — with FTS search, dedup, and context injection |
@@ -80,7 +81,7 @@ Each forged agent receives:
 | Brain Graph | 3D force-directed visualization of the cognitive topology — insights, intuitions, tasks, contacts, sessions, and their connections rendered as an interactive WebGL graph with live WebSocket updates |
 | Process of Thoughts | Full lineage tracking across cognitive subsystems — every message, insight, intuition, task, and todo is connected via provenance IDs enabling traversal of the entire thought process |
 | Skills system | OpenClaw-compatible skills with auto-discovery and GitHub install |
-| Orchestrator / DAG mode | Decompose complex tasks into parallel multi-session execution |
+| Orchestrator / DAG mode | Decompose complex tasks into parallel multi-session execution with shared workspace, structured output validation, explicit task pipelines, and real-time trace timeline |
 | Memory / RAG | Hybrid vector + text retrieval across workspace and sessions |
 | Computer | Retro-themed research workspace — themed visual generation, exploration trees, multi-model selector, folder browser (local + Google Drive), file attachments (images, PDF, DOCX, XLSX, PPTX, MD, TXT, CSV), PDF export via WeasyPrint, persona selector, suggested next-step buttons, 14 built-in themes + custom theme engine, public mode with session isolation and BYOK (Bring Your Own Key) |
 | Web UI | Chat, Computer, monitor pane, instruction editor, command palette, persona selector, datastore browser, deep memory dashboard, insights browser, nervous system browser, Brain Graph 3D visualization, reflections dashboard, personality editor, LLM usage analytics |
@@ -93,7 +94,7 @@ Each forged agent receives:
 | Cross-session script memory | Persistent script/file tracking with auto-capture from write tool |
 | Cross-session API memory | Persistent API endpoint tracking with auto-capture from web_fetch |
 | Cross-session playbook memory | Rate sessions to auto-distill reusable orchestration patterns (do/don't pseudo-code) with auto-injection |
-| Flight Deck | Multi-agent management dashboard with **Agent Forge** (AI team decomposition), fleet-level instructions, datastore browser, spawn Docker or pip process agents, fleet discovery and agent-to-agent communication, chat with multiple agents, transfer files, Director panel, operations analytics, agent pipelines, groups/tags, three card view modes, multi-user auth with JWT, admin dashboard, dark/light theme |
+| Flight Deck | Multi-agent management dashboard with **Agent Forge** (AI team decomposition), fleet-level instructions, datastore browser, spawn Docker or pip process agents, fleet discovery and agent-to-agent communication, chat with multiple agents, transfer files, Director panel, operations analytics, agent pipelines, trace timeline, groups/tags, three card view modes, multi-user auth with JWT, admin dashboard, dark/light theme |
 | Datastore | SQLite-backed relational tables managed by the agent, with protection rules, import/export, web dashboard, and table export via UI |
 | Chunked processing pipeline | Run small-context models (20k–32k tokens) on large content via automatic content chunking |
 | Cron scheduling | Interval, daily, and weekly tasks inside the runtime |
@@ -289,7 +290,7 @@ Sessions are first-class. Create named sessions for separate projects, switch in
 
 ### Tools
 
-Captain Claw ships with 31 built-in tools. The agent picks the right tool for each task automatically.
+Captain Claw ships with 33 built-in tools. The agent picks the right tool for each task automatically.
 
 | Tool | What it does |
 |---|---|
@@ -382,7 +383,7 @@ Each of these is documented in detail in [USAGE.md](USAGE.md).
 
 - **[Computer](USAGE.md#computer)** — A retro-themed research workspace at `/computer`. Three-panel layout with input area, activity log, and tabbed output (Answer, Blueprint, Files, Visual, Map). Features themed HTML visual generation via LLM, interactive exploration trees for multi-turn research, model selector modal, persona selector, token tier control, folder browser (local filesystem + Google Drive), file attachments (images, PDF, DOCX, XLSX, PPTX, MD, TXT, CSV), PDF export via WeasyPrint (preserves full CSS styling), suggested next-step buttons after each response, and 14 built-in themes (Amiga Workbench, Atari ST, C64, Classic Mac, Windows 3.1, Hacker Terminal, and more) plus a custom theme engine. Each theme includes unique boot sequences and CSS variable styling. Supports **public mode** (`web.public_run: "computer"`) with per-session isolation, access codes, route lockdown, and **BYOK (Bring Your Own Key)** — public users can provide their own LLM API credentials (OpenAI, Anthropic, Gemini, xAI, OpenRouter) stored only in the browser.
 
-- **[Orchestrator / DAG mode](USAGE.md#orchestrator--dag-mode)** — `/orchestrate` decomposes a complex request into a task DAG and runs tasks in parallel across separate sessions with real-time progress monitoring. Also available headless via `captain-claw-orchestrate`.
+- **[Orchestrator / DAG mode](USAGE.md#orchestrator--dag-mode)** — `/orchestrate` decomposes a complex request into a task DAG and runs tasks in parallel across separate sessions. Features shared workspace (namespaced KV store for structured data flow between tasks), structured output validation (JSON Schema enforcement with auto-retry), explicit `run_tasks()` API for user-defined pipelines (bypass LLM decomposition), real-time trace timeline in the chat panel (Gantt-style span visualization with token accounting), file registry, timeout management, and headless CLI via `captain-claw-orchestrate`.
 
 - **[Skills system](USAGE.md#skills-system)** — OpenClaw-compatible `SKILL.md` files. Auto-discovered from workspace, managed, and plugin directories. Install from GitHub with `/skill install <url>`.
 

@@ -517,7 +517,7 @@ The agent can also manage APIs via the `apis` tool during conversation. APIs are
 |---|---|
 | `/orchestrate <request>` | Decompose a complex task into a DAG and run in parallel sessions |
 
-The orchestrator decomposes the request into tasks, builds a dependency graph, assigns sessions, and executes tasks in parallel. See [Orchestrator / DAG Mode](#orchestrator--dag-mode) for details.
+The orchestrator decomposes the request into tasks, builds a dependency graph, assigns sessions, and executes tasks in parallel. Tasks share structured data through a shared workspace, can enforce JSON Schema output validation, and emit trace spans visible in the Flight Deck chat panel. See [Orchestrator / DAG Mode](#orchestrator--dag-mode) for details.
 
 ### Admin Commands
 
@@ -2885,7 +2885,7 @@ execution_queue:
 
 ## Orchestrator / DAG Mode
 
-The orchestrator decomposes complex requests into a task DAG and executes tasks in parallel across separate sessions.
+The orchestrator decomposes complex requests into a task DAG and executes tasks in parallel across separate sessions. Tasks share data through a structured workspace, can enforce JSON Schema output validation, and emit real-time trace spans for observability.
 
 ### Flow
 
@@ -2921,6 +2921,69 @@ The orchestrator decomposes complex requests into a task DAG and executes tasks 
 4. If not postponed, the task restarts (up to `worker_max_retries`)
 5. After all retries exhausted, task fails
 
+### Shared Workspace
+
+Tasks within an orchestration run share a namespaced key-value store for passing structured data between tasks without relying on intermediate files.
+
+- **Automatic**: Every task's text output and validated structured output are written to the workspace automatically
+- **Manual**: Workers can use the `workspace_read` and `workspace_write` tools for fine-grained data sharing
+- **Namespaced**: Keys are prefixed by task ID (`task_id:key`) to prevent collisions
+- **Injected**: Upstream task data is injected into downstream worker prompts automatically
+- **Real-time**: Workspace changes are broadcast to the Flight Deck UI via WebSocket
+
+Each task can declare `workspace_inputs` (keys to read from upstream tasks) and `workspace_outputs` (keys it will produce) for explicit data flow documentation.
+
+### Structured Output Validation
+
+Tasks can declare a JSON Schema via `output_schema` to enforce structured output:
+
+1. After the worker agent completes, the output is parsed and validated against the schema
+2. If validation fails, the agent gets **one automatic retry** with the error and schema fed back
+3. On success, the validated data is stored in `task.validated_output` and written to the shared workspace as JSON
+4. On final failure, the task is marked as failed with the validation error
+
+This enables reliable structured data pipelines — e.g., "extract a list of products as `{name, price, url}`" with guaranteed schema conformance.
+
+### Explicit Task Pipelines (run_tasks API)
+
+The `run_tasks()` and `prepare_tasks()` APIs let you define a task DAG explicitly without LLM decomposition:
+
+```python
+# REST API (proxied through Flight Deck)
+POST /api/orchestrator/run-tasks
+{
+  "tasks": [
+    {"id": "t1", "title": "Fetch data", "description": "...", "depends_on": []},
+    {"id": "t2", "title": "Analyze", "description": "...", "depends_on": ["t1"],
+     "output_schema": {"type": "object", "properties": {"score": {"type": "number"}}}}
+  ],
+  "synthesis_instruction": "Summarize the analysis"
+}
+```
+
+Each task supports: `id`, `title`, `description`, `depends_on`, `model_id`, `session_name`, `session_id`, `output_schema`, `output_schema_name`, `workspace_outputs`, `workspace_inputs`.
+
+This powers Flight Deck's Swarm Workflows and enables programmatic pipeline construction.
+
+### Trace Timeline (Observability)
+
+Every orchestration run emits structured trace spans for real-time observability:
+
+| Span Type | What It Tracks |
+|---|---|
+| `decompose` | LLM decomposition of the request into tasks |
+| `execution` | Overall DAG execution phase with completed/failed counts |
+| `task` | Individual worker task with token usage and error details |
+| `synthesize` | Final synthesis step |
+
+Spans are broadcast to Flight Deck's chat panel in real-time, where they appear as a **Gantt-style trace timeline** (click the Activity icon in the chat tab bar). The timeline shows:
+- Color-coded horizontal bars per span type
+- Running/completed/failed status with live animation
+- Duration and token usage per span
+- Summary header with total span count, completion stats, and token accounting
+
+Trace data is also available via `GET /api/orchestrator/traces` (spans + summary).
+
 ### Dashboard (Web UI)
 
 The orchestrator dashboard at `/orchestrator` shows:
@@ -2928,6 +2991,8 @@ The orchestrator dashboard at `/orchestrator` shows:
 - Summary bar with task counts and token usage
 - Detail panel for each task (edit, restart, pause, resume, postpone)
 - Chronological event log
+- Workspace input/output indicators on task nodes
+- Schema validation badges on tasks with output schemas
 
 ### File Registry
 
@@ -3655,6 +3720,7 @@ Flight Deck serves both the React frontend and the FastAPI backend from a single
 | Fleet-level instructions | Per-agent instructions injected into system prompts, editable from agent config editor |
 | Datastore browser | View agent datastore tables and rows directly from agent cards |
 | Agent groups & tags | Organize agents into teams and roles with color-coded group badges |
+| Trace timeline | Real-time orchestrator observability — Gantt-style span visualization in the chat panel with duration, token usage, phase breakdown (decompose/execute/task/synthesize), and status tracking |
 
 ### Agent Forge
 
