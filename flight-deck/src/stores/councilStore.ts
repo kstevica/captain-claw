@@ -3,6 +3,7 @@ import { AgentChatWS } from '../services/agentChat'
 import { useAuthStore } from './authStore'
 import { useContainerStore } from './containerStore'
 import { useProcessStore } from './processStore'
+import { uploadFileToAgent } from '../services/fileTransfer'
 
 // Instruction templates (raw text imports)
 import btwTemplate from '../instructions/council/btw_context.md?raw'
@@ -106,16 +107,26 @@ export interface CouncilSession {
   sessionType: SessionType
   verbosity: Verbosity
   maxRounds: number
+  originalMaxRounds: number   // the initial cap set at creation
+  extensions: number[]        // e.g. [5, 10] = two extensions added
   currentRound: number
   status: CouncilStatus
   moderatorMode: ModeratorMode
   moderatorAgentId: string
+  autoAdvance: boolean        // auto-proceed to next round after 5s countdown
   agents: CouncilAgent[]
   messages: CouncilMessage[]
   votes: CouncilVote[]
   artifacts: CouncilArtifact[]
+  fileRefs: CouncilFileRef[]
   memoryRounds: MemoryRounds
   config: { firstSpeaker: string }
+}
+
+export interface CouncilFileRef {
+  name: string
+  path: string  // absolute path on agent filesystem
+  size: number
 }
 
 export interface CreateSessionConfig {
@@ -128,6 +139,7 @@ export interface CreateSessionConfig {
   moderatorAgentId: string
   agents: CouncilAgentDef[]
   firstSpeaker: string
+  files: File[]
 }
 
 // ── Constants ───────────────────────────────────────────────────
@@ -146,7 +158,7 @@ const SESSION_TYPE_DESC: Record<SessionType, string> = {
   planning: 'This is a planning session. Break down tasks, assign responsibilities, identify risks, and create actionable steps.',
 }
 
-const AGENT_TIMEOUT_MS = 120_000
+const AGENT_TIMEOUT_MS = 300_000
 
 /** Simple {placeholder} template renderer. */
 function renderTemplate(template: string, vars: Record<string, string | number>): string {
@@ -337,6 +349,19 @@ function buildBtwPrompt(session: CouncilSession): string {
     ? `Moderation: Moderated by ${session.agents.find(a => a.id === session.moderatorAgentId)?.name || 'a moderator'} who selects speakers based on suitability scores.`
     : `Moderation: Round-robin — all participants speak each round, ordered by suitability score. The user approves each new round.`
 
+  // Build file reference section
+  let fileInfo = ''
+  if (session.fileRefs.length > 0) {
+    const refs = session.fileRefs.map(f => `[Attached file: ${f.name} → ${f.path}]`).join('\n')
+    fileInfo = `\n\nThe following files have been provided for this council session. Read and reference them as needed:\n${refs}`
+  }
+
+  let extensionNote = ''
+  if (session.extensions.length > 0) {
+    const extList = session.extensions.map(e => `+${e}`).join(', ')
+    extensionNote = ` Originally ${session.originalMaxRounds} rounds, extended: ${extList}.`
+  }
+
   return renderTemplate(btwTemplate, {
     sessionType: session.sessionType.toUpperCase(),
     sessionTypeDesc: SESSION_TYPE_DESC[session.sessionType],
@@ -346,7 +371,8 @@ function buildBtwPrompt(session: CouncilSession): string {
     currentRound: session.currentRound || 1,
     moderatorInfo,
     verbosityRule: VERBOSITY_RULES[session.verbosity],
-  })
+    extensionNote,
+  }) + fileInfo
 }
 
 function buildTurnPrompt(
@@ -378,11 +404,19 @@ function buildTurnPrompt(
 
   const directiveText = directive ? `\nDirective from the user: ${directive}` : ''
 
+  // Build extension note for agents
+  let extensionNote = ''
+  if (session.extensions.length > 0) {
+    const extList = session.extensions.map(e => `+${e}`).join(', ')
+    extensionNote = ` (originally ${session.originalMaxRounds} rounds, extended: ${extList})`
+  }
+
   return renderTemplate(turnTemplate, {
     round,
     maxRounds: session.maxRounds,
     recentContributions,
     directive: directiveText,
+    extensionNote,
   })
 }
 
@@ -441,7 +475,7 @@ function generateMinutesMd(session: CouncilSession, tldrs: CouncilArtifact[]): s
   lines.push(`**Type:** ${session.sessionType}`)
   lines.push(`**Mode:** ${session.moderatorMode}`)
   lines.push(`**Participants:** ${session.agents.map(a => a.name).join(', ')}`)
-  lines.push(`**Rounds:** ${session.currentRound} / ${session.maxRounds}`)
+  lines.push(`**Rounds:** ${session.currentRound} / ${session.maxRounds}${session.extensions.length > 0 ? ` (originally ${session.originalMaxRounds}, extended: ${session.extensions.map(e => `+${e}`).join(', ')})` : ''}`)
   lines.push(`**Date:** ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`)
   lines.push('')
   lines.push('---')
@@ -577,13 +611,35 @@ function collectContextMessages(
 
 // ── Store ───────────────────────────────────────────────────────
 
+// Auto-advance timer stored outside Zustand (not serialisable)
+let _autoAdvanceTimerId: ReturnType<typeof setInterval> | null = null
+
+/** Merge partial config into the persisted session config JSON */
+function _persistConfig(sessionId: string, patch: Record<string, unknown>) {
+  // Read current active session to get full config
+  const s = useCouncilStore.getState().activeSession
+  if (!s) return
+  const fullConfig = {
+    ...s.config,
+    memoryRounds: s.memoryRounds,
+    originalMaxRounds: s.originalMaxRounds,
+    extensions: s.extensions,
+    autoAdvance: s.autoAdvance,
+    fileRefs: s.fileRefs,
+    ...patch,
+  }
+  apiUpdateSession(sessionId, { config: JSON.stringify(fullConfig) })
+}
+
 interface CouncilStore {
   sessions: CouncilSessionSummary[]
   activeSession: CouncilSession | null
   loading: boolean
   speaking: string   // agentId currently speaking, '' if idle
+  pendingFiles: File[]  // files to upload to agents on council start
   generatingArtifact: '' | 'tldr' | 'minutes_md' | 'minutes_html'
   activityLog: ActivityLogEntry[]
+  autoAdvanceCountdown: number  // seconds remaining, 0 = not counting
 
   // Activity log
   _log: (agentId: string, agentName: string, type: ActivityLogEntry['type'], detail: string) => void
@@ -611,6 +667,9 @@ interface CouncilStore {
   muteAgent: (agentId: string, muted: boolean) => void
   pinMessage: (messageId: number) => void
   setMemoryRounds: (value: MemoryRounds) => void
+  setAutoAdvance: (value: boolean) => void
+  extendRounds: (amount: number) => Promise<void>
+  cancelAutoAdvance: () => void
 
   // Minutes & TL;DR
   generateTldrs: () => Promise<void>
@@ -622,6 +681,8 @@ interface CouncilStore {
   _addMessage: (msg: Omit<CouncilMessage, 'id' | 'localId' | 'createdAt'>) => Promise<void>
   _addSystemMessage: (round: number, content: string) => Promise<void>
   _persistSession: () => Promise<void>
+  _startAutoAdvanceTimer: () => void
+  _cancelAutoAdvanceTimer: () => void
   _runSpeakerTurn: (agentId: string, round: number, recentMsgs: CouncilMessage[], directive?: string) => Promise<CouncilMessage | null>
   _runRoundRobin: (round: number) => Promise<void>
   _runModeratorRound: (round: number) => Promise<void>
@@ -633,8 +694,10 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
   activeSession: null,
   loading: false,
   speaking: '',
+  pendingFiles: [],
   generatingArtifact: '',
   activityLog: [],
+  autoAdvanceCountdown: 0,
 
   _log: (agentId, agentName, type, detail) => {
     const entry: ActivityLogEntry = {
@@ -671,9 +734,11 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       moderator_mode: cfg.moderatorMode,
       moderator_agent: cfg.moderatorAgentId,
       agents: JSON.stringify(agentDefs),
-      config: JSON.stringify({ firstSpeaker: cfg.firstSpeaker, memoryRounds: 10 }),
+      config: JSON.stringify({ firstSpeaker: cfg.firstSpeaker, memoryRounds: 10, originalMaxRounds: cfg.maxRounds, extensions: [] }),
     })
     const id = data.id as string
+    // Stash files for upload during startCouncil
+    if (cfg.files?.length) set({ pendingFiles: cfg.files })
     await get().loadSessionList()
     return id
   },
@@ -706,14 +771,18 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
         sessionType: raw.session_type as SessionType,
         verbosity: raw.verbosity as Verbosity,
         maxRounds: raw.max_rounds as number,
+        originalMaxRounds: (config.originalMaxRounds as number) || (raw.max_rounds as number),
+        extensions: (config.extensions as number[]) || [],
         currentRound: raw.current_round as number,
         status: raw.status as CouncilStatus,
         moderatorMode: raw.moderator_mode as ModeratorMode,
         moderatorAgentId: raw.moderator_agent as string,
+        autoAdvance: (config.autoAdvance as boolean) ?? false,
         agents,
         messages,
         votes,
         artifacts,
+        fileRefs: (config.fileRefs as CouncilFileRef[]) || [],
         memoryRounds: (config.memoryRounds as MemoryRounds) || 10,
         config: { firstSpeaker: config.firstSpeaker || '' },
       }
@@ -893,7 +962,13 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     if (!s || s.status !== 'setup') return
 
     // Update status
-    const updated: CouncilSession = { ...s, status: 'active', currentRound: 1 }
+    const updated: CouncilSession = {
+      ...s,
+      status: 'active',
+      currentRound: 1,
+      originalMaxRounds: s.originalMaxRounds || s.maxRounds,
+      extensions: s.extensions || [],
+    }
     set({ activeSession: updated })
     await apiUpdateSession(s.id, { status: 'active', current_round: 1 })
 
@@ -904,7 +979,52 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     get()._log('', 'System', 'system', 'Connecting to agents...')
     await new Promise(r => setTimeout(r, 1000))
 
-    // Send BTW context to all agents
+    // Upload pending files to all agents in parallel
+    const pendingFiles = get().pendingFiles
+    const fileRefs: CouncilFileRef[] = []
+    if (pendingFiles.length > 0) {
+      get()._log('', 'System', 'system', `Uploading ${pendingFiles.length} file(s) to ${updated.agents.length} agents...`)
+      const connectedAgents = get().activeSession?.agents.filter(a => a.ws?.connected) || []
+
+      for (const file of pendingFiles) {
+        // Upload to all agents in parallel
+        const uploads = connectedAgents.map(async (agent) => {
+          try {
+            const result = await uploadFileToAgent(agent.host, agent.port, agent.auth, file)
+            return { agentId: agent.id, path: result.path, ok: true }
+          } catch (err) {
+            get()._log(agent.id, agent.name, 'error', `Failed to upload ${file.name}: ${err}`)
+            return { agentId: agent.id, path: '', ok: false }
+          }
+        })
+        const results = await Promise.all(uploads)
+        const successCount = results.filter(r => r.ok).length
+        // Use the path from the first successful upload (all agents get the same relative path)
+        const firstOk = results.find(r => r.ok)
+        if (firstOk) {
+          fileRefs.push({ name: file.name, path: firstOk.path, size: file.size })
+        }
+        get()._log('', 'System', 'system', `Uploaded ${file.name} to ${successCount}/${connectedAgents.length} agents`)
+      }
+
+      // Persist file refs in session config and update local state
+      const currentSession = get().activeSession
+      if (currentSession) {
+        set({ activeSession: { ...currentSession, fileRefs }, pendingFiles: [] })
+        await apiUpdateSession(currentSession.id, {
+          config: JSON.stringify({
+            ...currentSession.config,
+            memoryRounds: currentSession.memoryRounds,
+            originalMaxRounds: currentSession.originalMaxRounds,
+            extensions: currentSession.extensions,
+            autoAdvance: currentSession.autoAdvance,
+            fileRefs,
+          }),
+        })
+      }
+    }
+
+    // Send BTW context to all agents (includes file references)
     const session = get().activeSession!
     const btwPrompt = buildBtwPrompt(session)
     for (const agent of session.agents) {
@@ -936,6 +1056,7 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
   },
 
   advanceRound: async () => {
+    get()._cancelAutoAdvanceTimer()
     const s = get().activeSession
     if (!s || s.status !== 'active') return
 
@@ -958,6 +1079,7 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
   },
 
   requestSynthesis: async () => {
+    get()._cancelAutoAdvanceTimer()
     const s = get().activeSession
     if (!s) return
 
@@ -1034,6 +1156,7 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
   },
 
   concludeSession: async () => {
+    get()._cancelAutoAdvanceTimer()
     const s = get().activeSession
     if (!s) return
     set({ activeSession: { ...s, status: 'concluded' } })
@@ -1097,11 +1220,46 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     const s = get().activeSession
     if (!s) return
     set({ activeSession: { ...s, memoryRounds: value } })
-    // Persist to server config
-    apiUpdateSession(s.id, {
-      config: JSON.stringify({ ...s.config, memoryRounds: value }),
-    })
+    _persistConfig(s.id, { memoryRounds: value })
     get()._log('', 'System', 'system', `Council memory set to ${value === 0 ? 'indefinite' : `${value} rounds`}`)
+  },
+
+  setAutoAdvance: (value) => {
+    const s = get().activeSession
+    if (!s) return
+    set({ activeSession: { ...s, autoAdvance: value } })
+    _persistConfig(s.id, { autoAdvance: value })
+    get()._log('', 'System', 'system', `Auto-advance ${value ? 'enabled' : 'disabled'}`)
+    // If disabling and timer is running, cancel it
+    if (!value) get()._cancelAutoAdvanceTimer()
+  },
+
+  extendRounds: async (amount) => {
+    const s = get().activeSession
+    if (!s) return
+    const newMax = s.maxRounds + amount
+    const newExtensions = [...s.extensions, amount]
+    set({ activeSession: { ...s, maxRounds: newMax, extensions: newExtensions } })
+    await apiUpdateSession(s.id, { max_rounds: newMax })
+    _persistConfig(s.id, { extensions: newExtensions })
+    get()._log('', 'System', 'system', `Council extended by ${amount} rounds (now ${newMax} total)`)
+    // Inform agents about the extension
+    await get()._addSystemMessage(
+      s.currentRound,
+      `Council extended by +${amount} rounds. New limit: ${newMax} rounds (originally ${s.originalMaxRounds}).`,
+    )
+    // If council was concluded, reactivate it
+    if (s.status === 'concluded') {
+      const current = get().activeSession!
+      set({ activeSession: { ...current, status: 'active' } })
+      await apiUpdateSession(current.id, { status: 'active' })
+      get().connectAllAgents()
+      get()._log('', 'System', 'system', 'Council reactivated after extension')
+    }
+  },
+
+  cancelAutoAdvance: () => {
+    get()._cancelAutoAdvanceTimer()
   },
 
   // ── Minutes & TL;DR ──
@@ -1287,6 +1445,39 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     })
   },
 
+  _startAutoAdvanceTimer: () => {
+    // Cancel any existing timer first
+    get()._cancelAutoAdvanceTimer()
+    const s = get().activeSession
+    if (!s || !s.autoAdvance || s.status !== 'active') return
+    // Don't start if we've reached max rounds
+    if (s.currentRound >= s.maxRounds) return
+
+    set({ autoAdvanceCountdown: 5 })
+    get()._log('', 'System', 'system', 'Auto-advance: next round in 5 seconds...')
+
+    _autoAdvanceTimerId = setInterval(() => {
+      const countdown = get().autoAdvanceCountdown
+      if (countdown <= 1) {
+        get()._cancelAutoAdvanceTimer()
+        // Trigger advance
+        get().advanceRound()
+      } else {
+        set({ autoAdvanceCountdown: countdown - 1 })
+      }
+    }, 1000)
+  },
+
+  _cancelAutoAdvanceTimer: () => {
+    if (_autoAdvanceTimerId !== null) {
+      clearInterval(_autoAdvanceTimerId)
+      _autoAdvanceTimerId = null
+    }
+    if (get().autoAdvanceCountdown > 0) {
+      set({ autoAdvanceCountdown: 0 })
+    }
+  },
+
   _runSpeakerTurn: async (agentId, round, recentMsgs, directive?) => {
     const s = get().activeSession
     if (!s) return null
@@ -1382,6 +1573,8 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     }
 
     await get()._addSystemMessage(round, `Round ${round} complete. Approve next round or request synthesis.`)
+    // Start auto-advance countdown if enabled
+    get()._startAutoAdvanceTimer()
   },
 
   _runModeratorRound: async (round) => {
@@ -1458,6 +1651,8 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     }
 
     await get()._addSystemMessage(round, `Round ${round} complete. Approve next round or request synthesis.`)
+    // Start auto-advance countdown if enabled
+    get()._startAutoAdvanceTimer()
   },
 
   _getSuitabilityScores: async () => {

@@ -1,6 +1,7 @@
-import { useState } from 'react'
-import { Swords, Lightbulb, ClipboardCheck, Map, Play } from 'lucide-react'
+import { useState, useRef } from 'react'
+import { Swords, Lightbulb, ClipboardCheck, Map, Play, Paperclip, X } from 'lucide-react'
 import { AgentPicker, isOldManName } from './AgentPicker'
+import { formatSize } from '../../services/fileTransfer'
 import type {
   CouncilAgentDef, CreateSessionConfig, SessionType, Verbosity,
 } from '../../stores/councilStore'
@@ -32,10 +33,29 @@ export function CouncilSetup({ onStart, onCancel }: CouncilSetupProps) {
   const [maxRounds, setMaxRounds] = useState(5)
   const [agents, setAgents] = useState<CouncilAgentDef[]>([])
   const [firstSpeaker, setFirstSpeaker] = useState('random')
+  const [files, setFiles] = useState<File[]>([])
+  const [dragOver, setDragOver] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const oldMan = agents.find(a => isOldManName(a.name))
   const moderatorMode = oldMan ? 'moderator' : 'round-robin'
   const canStart = topic.trim() && agents.length >= 2
+
+  const addFiles = (newFiles: FileList | File[]) => {
+    const arr = Array.from(newFiles)
+    setFiles(prev => {
+      const names = new Set(prev.map(f => f.name))
+      return [...prev, ...arr.filter(f => !names.has(f.name))]
+    })
+  }
+
+  const removeFile = (name: string) => setFiles(prev => prev.filter(f => f.name !== name))
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    setDragOver(false)
+    if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files)
+  }
 
   const handleStart = () => {
     if (!canStart) return
@@ -49,6 +69,7 @@ export function CouncilSetup({ onStart, onCancel }: CouncilSetupProps) {
       moderatorAgentId: oldMan?.id || '',
       agents,
       firstSpeaker,
+      files,
     })
   }
 
@@ -146,6 +167,52 @@ export function CouncilSetup({ onStart, onCancel }: CouncilSetupProps) {
           {!oldMan && agents.length >= 2 && <span className="ml-2 text-zinc-500">Round-robin mode</span>}
         </label>
         <AgentPicker selected={agents} onChange={setAgents} />
+      </div>
+
+      {/* File Attachments */}
+      <div>
+        <label className="mb-2 block text-xs font-medium text-zinc-400">
+          Attachments {files.length > 0 && <span className="text-zinc-500">({files.length} file{files.length !== 1 ? 's' : ''})</span>}
+        </label>
+        <div
+          onDragOver={e => { e.preventDefault(); setDragOver(true) }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={handleDrop}
+          onClick={() => fileInputRef.current?.click()}
+          className={`flex cursor-pointer flex-col items-center gap-1 rounded-lg border border-dashed p-4 text-center transition-colors ${
+            dragOver
+              ? 'border-violet-500 bg-violet-500/10'
+              : 'border-zinc-700/50 bg-zinc-800/30 hover:border-zinc-600 hover:bg-zinc-700/20'
+          }`}
+        >
+          <Paperclip className="h-5 w-5 text-zinc-500" />
+          <span className="text-xs text-zinc-400">Drop files here or click to browse</span>
+          <span className="text-[10px] text-zinc-500">Files will be uploaded to all agents at council start</span>
+        </div>
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={e => { if (e.target.files?.length) { addFiles(e.target.files); e.target.value = '' } }}
+        />
+        {files.length > 0 && (
+          <div className="mt-2 space-y-1">
+            {files.map(f => (
+              <div key={f.name} className="flex items-center gap-2 rounded-md bg-zinc-800/50 px-2 py-1.5 text-xs">
+                <Paperclip className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" />
+                <span className="min-w-0 flex-1 truncate text-zinc-300">{f.name}</span>
+                <span className="flex-shrink-0 text-zinc-500">{formatSize(f.size)}</span>
+                <button
+                  onClick={e => { e.stopPropagation(); removeFile(f.name) }}
+                  className="flex-shrink-0 rounded p-0.5 text-zinc-500 hover:bg-zinc-700 hover:text-zinc-300"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* First Speaker */}

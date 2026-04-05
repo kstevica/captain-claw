@@ -1,23 +1,26 @@
 import { useState } from 'react'
-import { Send, SkipForward, FileText, CheckCircle, ChevronDown, Download, MessageSquareQuote } from 'lucide-react'
+import { Send, SkipForward, FileText, CheckCircle, ChevronDown, Download, MessageSquareQuote, Pause } from 'lucide-react'
 import type { CouncilSession } from '../../stores/councilStore'
 
 interface CouncilControlsProps {
   session: CouncilSession
   speaking: string
   generatingArtifact: string
+  autoAdvanceCountdown: number
   onInject: (content: string) => void
   onDirectAddress: (agentId: string, content: string) => void
   onAdvanceRound: () => void
   onRequestSynthesis: () => void
   onConclude: () => void
+  onCancelAutoAdvance: () => void
   onGenerateTldrs: () => void
   onExportMd: () => void
 }
 
 export function CouncilControls({
-  session, speaking, generatingArtifact, onInject, onDirectAddress,
-  onAdvanceRound, onRequestSynthesis, onConclude,
+  session, speaking, generatingArtifact, autoAdvanceCountdown,
+  onInject, onDirectAddress,
+  onAdvanceRound, onRequestSynthesis, onConclude, onCancelAutoAdvance,
   onGenerateTldrs, onExportMd,
 }: CouncilControlsProps) {
   const [input, setInput] = useState('')
@@ -27,9 +30,19 @@ export function CouncilControls({
   const isActive = session.status === 'active'
   const isBusy = !!speaking
 
-  // Check if the last system message indicates round completion
-  const lastSysMsg = [...session.messages].reverse().find(m => m.role === 'system')
-  const isRoundComplete = lastSysMsg?.content.includes('Round') && lastSysMsg?.content.includes('complete')
+  // Check if any recent system message indicates round completion.
+  // We scan the last few system messages because an extension message
+  // ("Council extended by +N rounds...") may have been appended after
+  // the "Round X complete" message.
+  const recentSysMsgs = [...session.messages]
+    .reverse()
+    .filter(m => m.role === 'system')
+    .slice(0, 5)
+  const isRoundComplete = recentSysMsgs.some(m =>
+    m.content.includes('complete') && m.content.includes('Round'),
+  )
+  // Council was extended after the round ended — user needs a Continue button
+  const canContinue = isActive && !isBusy && isRoundComplete && session.currentRound < session.maxRounds
 
   const handleSend = () => {
     const msg = input.trim()
@@ -57,6 +70,7 @@ export function CouncilControls({
       <div className="border-t border-zinc-700/50 bg-zinc-900/50 px-4 py-3">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs text-zinc-500 mr-auto">Session concluded.</span>
+          <span className="text-[10px] text-zinc-600">Use sidebar to extend rounds.</span>
           <button
             onClick={onGenerateTldrs}
             disabled={!!generatingArtifact}
@@ -87,41 +101,71 @@ export function CouncilControls({
     <div className="border-t border-zinc-700/50 bg-zinc-900/50 px-4 py-3 space-y-2">
       {/* Round control bar */}
       {isRoundComplete && (
-        <div className="flex items-center gap-2 rounded-lg bg-zinc-800/50 px-3 py-2">
-          <span className="flex-1 text-xs text-zinc-400">
-            Round {session.currentRound} complete.
-            {session.currentRound >= session.maxRounds && ' Max rounds reached.'}
-          </span>
-          {session.currentRound < session.maxRounds && (
-            <button
-              onClick={onAdvanceRound}
-              disabled={isBusy}
-              className="flex items-center gap-1 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
-            >
-              <SkipForward className="h-3.5 w-3.5" /> Next Round
-            </button>
+        <div className="space-y-2">
+          {/* Auto-advance countdown bar */}
+          {autoAdvanceCountdown > 0 && (
+            <div className="flex items-center gap-2 rounded-lg bg-violet-500/10 border border-violet-500/20 px-3 py-2">
+              <div className="h-2 w-2 rounded-full bg-violet-400 animate-pulse" />
+              <span className="flex-1 text-xs font-medium text-violet-300">
+                Auto-advancing in {autoAdvanceCountdown}s...
+              </span>
+              <button
+                onClick={onCancelAutoAdvance}
+                className="flex items-center gap-1 rounded-lg border border-violet-500/30 px-2.5 py-1 text-xs text-violet-400 hover:bg-violet-500/20"
+              >
+                <Pause className="h-3 w-3" /> Pause
+              </button>
+            </div>
           )}
-          <button
-            onClick={onRequestSynthesis}
-            disabled={isBusy}
-            className="flex items-center gap-1 rounded-lg border border-cyan-500/40 px-3 py-1.5 text-xs font-medium text-cyan-400 hover:bg-cyan-500/10 disabled:opacity-40"
-          >
-            <FileText className="h-3.5 w-3.5" /> Synthesize
-          </button>
-          <button
-            onClick={onGenerateTldrs}
-            disabled={isBusy || !!generatingArtifact}
-            className="flex items-center gap-1 rounded-lg border border-violet-500/30 px-3 py-1.5 text-xs text-violet-400 hover:bg-violet-500/10 disabled:opacity-40"
-          >
-            <MessageSquareQuote className="h-3.5 w-3.5" /> TL;DR
-          </button>
-          <button
-            onClick={onConclude}
-            disabled={isBusy}
-            className="flex items-center gap-1 rounded-lg border border-zinc-600 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-700/30 disabled:opacity-40"
-          >
-            <CheckCircle className="h-3.5 w-3.5" /> Conclude
-          </button>
+          <div className="flex items-center gap-2 rounded-lg bg-zinc-800/50 px-3 py-2 flex-wrap">
+            <span className="text-xs text-zinc-400">
+              Round {session.currentRound}{session.currentRound >= session.maxRounds ? ` / ${session.maxRounds}` : ''} complete.
+              {session.currentRound >= session.maxRounds && (
+                <span className="text-amber-400/80"> Max rounds reached — extend from sidebar or conclude.</span>
+              )}
+            </span>
+            <div className="flex items-center gap-2 ml-auto">
+              {canContinue && (
+                <button
+                  onClick={onAdvanceRound}
+                  disabled={isBusy}
+                  className="flex items-center gap-1 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+                >
+                  <SkipForward className="h-3.5 w-3.5" /> Continue (Round {session.currentRound + 1})
+                </button>
+              )}
+              {!canContinue && session.currentRound < session.maxRounds && (
+                <button
+                  onClick={onAdvanceRound}
+                  disabled={isBusy}
+                  className="flex items-center gap-1 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+                >
+                  <SkipForward className="h-3.5 w-3.5" /> Next Round
+                </button>
+              )}
+              <button
+                onClick={onRequestSynthesis}
+                disabled={isBusy}
+                className="flex items-center gap-1 rounded-lg border border-cyan-500/40 px-3 py-1.5 text-xs font-medium text-cyan-400 hover:bg-cyan-500/10 disabled:opacity-40"
+              >
+                <FileText className="h-3.5 w-3.5" /> Synthesize
+              </button>
+              <button
+                onClick={onGenerateTldrs}
+                disabled={isBusy || !!generatingArtifact}
+                className="flex items-center gap-1 rounded-lg border border-violet-500/30 px-3 py-1.5 text-xs text-violet-400 hover:bg-violet-500/10 disabled:opacity-40"
+              >
+                <MessageSquareQuote className="h-3.5 w-3.5" /> TL;DR
+              </button>
+              <button
+                onClick={onConclude}
+                disabled={isBusy}
+                className="flex items-center gap-1 rounded-lg border border-zinc-600 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-700/30 disabled:opacity-40"
+              >
+                <CheckCircle className="h-3.5 w-3.5" /> Conclude
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

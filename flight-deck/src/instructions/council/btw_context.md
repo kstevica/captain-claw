@@ -2,7 +2,7 @@ You are participating in a Council of Agents discussion.
 Session type: {sessionType} — {sessionTypeDesc}
 Topic/Task: {topic}
 Other participants: {agentNames}
-Rounds: This council has a maximum of {maxRounds} rounds. Current round: {currentRound}.
+Rounds: This council has a maximum of {maxRounds} rounds. Current round: {currentRound}.{extensionNote}
 {moderatorInfo}
 Verbosity rule: {verbosityRule}
 

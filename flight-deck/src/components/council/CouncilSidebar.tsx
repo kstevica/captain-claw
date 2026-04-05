@@ -1,8 +1,12 @@
-import { useRef, useEffect } from 'react'
-import { Wifi, WifiOff, VolumeX, Volume2, Pin, Crown, Loader2, Wrench, Activity, Leaf } from 'lucide-react'
+import { useRef, useEffect, useState } from 'react'
+import {
+  Wifi, WifiOff, VolumeX, Volume2, Pin, Crown, Loader2, Wrench,
+  Activity, Leaf, Paperclip, Play, Plus, ChevronDown, ChevronRight,
+} from 'lucide-react'
 import { VotingPanel } from './VotingPanel'
 import { useContainerStore } from '../../stores/containerStore'
 import { useProcessStore } from '../../stores/processStore'
+import { formatSize } from '../../services/fileTransfer'
 import type { CouncilSession, ActivityLogEntry, MemoryRounds } from '../../stores/councilStore'
 import { useCouncilStore } from '../../stores/councilStore'
 
@@ -25,10 +29,10 @@ const TYPE_LABELS: Record<string, string> = {
 }
 
 const VERBOSITY_LABELS: Record<string, string> = {
-  message: 'Message (5 sentences)',
-  short: 'Short (3 paragraphs)',
-  medium: 'Medium (5 paragraphs)',
-  long: 'Long (10 paragraphs)',
+  message: 'Message',
+  short: 'Short',
+  medium: 'Medium',
+  long: 'Long',
 }
 
 const LOG_TYPE_COLORS: Record<string, string> = {
@@ -43,17 +47,25 @@ const LOG_TYPE_COLORS: Record<string, string> = {
   disconnect: 'text-red-400',
 }
 
+const EXTEND_OPTIONS = [3, 5, 10, 20]
+
 interface CouncilSidebarProps {
   session: CouncilSession
   speaking: string
   activityLog: ActivityLogEntry[]
+  autoAdvanceCountdown: number
   onMute: (agentId: string, muted: boolean) => void
   onPinClick: (messageId: number) => void
 }
 
-export function CouncilSidebar({ session, speaking, activityLog, onMute, onPinClick }: CouncilSidebarProps) {
+export function CouncilSidebar({
+  session, speaking, activityLog, autoAdvanceCountdown,
+  onMute, onPinClick,
+}: CouncilSidebarProps) {
   const pinnedMessages = session.messages.filter(m => m.pinned)
   const logContainerRef = useRef<HTMLDivElement>(null)
+  const [showExtend, setShowExtend] = useState(false)
+  const [infoCollapsed, setInfoCollapsed] = useState(false)
 
   // Look up cognitive mode & eco mode per agent from desktop stores
   const containerCogModes = useContainerStore(s => s.cognitiveModeOverrides)
@@ -67,63 +79,175 @@ export function CouncilSidebar({ session, speaking, activityLog, onMute, onPinCl
     return { cogMode, ecoMode }
   }
 
+  const store = useCouncilStore
+
   // Auto-scroll activity log when anything is active or new entries arrive
   useEffect(() => {
     const el = logContainerRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [activityLog.length, speaking])
 
+  const isActive = session.status === 'active'
+  const isConcluded = session.status === 'concluded'
+
   return (
     <div className="flex h-full flex-col border-l border-zinc-700/50 bg-zinc-900/30">
-      {/* Session info — compact, always visible */}
-      <div className="shrink-0 border-b border-zinc-700/50 p-3 space-y-2">
-        <h3 className="text-xs font-medium text-zinc-400 uppercase tracking-wider">Session Info</h3>
-        <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs">
-          <div className="flex justify-between">
-            <span className="text-zinc-500">Type</span>
-            <span className="text-zinc-300">{TYPE_LABELS[session.sessionType]}</span>
+      {/* ─── Session Info ─── */}
+      <div className="shrink-0 border-b border-zinc-700/50">
+        <button
+          onClick={() => setInfoCollapsed(!infoCollapsed)}
+          className="flex w-full items-center gap-1.5 px-3 py-2 text-xs font-medium uppercase tracking-wider text-zinc-400 hover:bg-zinc-800/30"
+        >
+          {infoCollapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+          Session Info
+          <span className="ml-auto text-[10px] font-normal normal-case text-zinc-600">
+            {TYPE_LABELS[session.sessionType]} · {VERBOSITY_LABELS[session.verbosity]}
+          </span>
+        </button>
+
+        {!infoCollapsed && (
+          <div className="space-y-3 px-3 pb-3">
+            {/* Compact info grid */}
+            <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs">
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Round</span>
+                <span className="text-zinc-300">
+                  {session.currentRound} / {session.maxRounds}
+                  {session.extensions.length > 0 && (
+                    <span className="ml-1 text-[10px] text-amber-400/70">
+                      (was {session.originalMaxRounds})
+                    </span>
+                  )}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Mode</span>
+                <span className="text-zinc-300">
+                  {session.moderatorMode === 'moderator' ? 'Moderator' : 'Round-Robin'}
+                </span>
+              </div>
+              <div className="flex justify-between col-span-2">
+                <span className="text-zinc-500">Status</span>
+                <span className={`font-medium ${
+                  session.status === 'active' ? 'text-emerald-400' :
+                  session.status === 'synthesizing' ? 'text-violet-400' :
+                  session.status === 'concluded' ? 'text-zinc-400' :
+                  'text-zinc-500'
+                }`}>{session.status}</span>
+              </div>
+            </div>
+
+            {/* ─── Controls row ─── */}
+            <div className="space-y-2">
+              {/* Memory selector */}
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-zinc-500">Memory</span>
+                <select
+                  value={session.memoryRounds}
+                  onChange={e => store.getState().setMemoryRounds(Number(e.target.value) as MemoryRounds)}
+                  className="rounded border border-zinc-700/50 bg-zinc-800/50 px-1.5 py-0.5 text-[11px] text-zinc-300 focus:outline-none focus:border-violet-500/50"
+                >
+                  <option value={5}>5 rounds</option>
+                  <option value={10}>10 rounds</option>
+                  <option value={20}>20 rounds</option>
+                  <option value={30}>30 rounds</option>
+                  <option value={0}>Indefinite</option>
+                </select>
+              </div>
+
+              {/* Auto-advance toggle */}
+              {(isActive || isConcluded) && (
+                <div className="flex items-center justify-between text-xs">
+                  <span className="flex items-center gap-1.5 text-zinc-500">
+                    <Play className="h-3 w-3" /> Auto-advance
+                  </span>
+                  <button
+                    onClick={() => store.getState().setAutoAdvance(!session.autoAdvance)}
+                    className={`relative h-5 w-9 rounded-full transition-colors ${
+                      session.autoAdvance ? 'bg-violet-600' : 'bg-zinc-700'
+                    }`}
+                  >
+                    <div className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
+                      session.autoAdvance ? 'translate-x-4' : 'translate-x-0.5'
+                    }`} />
+                  </button>
+                </div>
+              )}
+
+              {/* Auto-advance countdown indicator */}
+              {autoAdvanceCountdown > 0 && (
+                <div className="flex items-center gap-2 rounded-md bg-violet-500/10 border border-violet-500/20 px-2 py-1.5">
+                  <div className="flex items-center gap-1">
+                    <div className="h-2 w-2 rounded-full bg-violet-400 animate-pulse" />
+                    <span className="text-[11px] font-medium text-violet-300">
+                      Next round in {autoAdvanceCountdown}s
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => store.getState().cancelAutoAdvance()}
+                    className="ml-auto rounded px-1.5 py-0.5 text-[10px] text-violet-400 hover:bg-violet-500/20 border border-violet-500/30"
+                  >
+                    Stop
+                  </button>
+                </div>
+              )}
+
+              {/* Extend rounds */}
+              {(isActive || isConcluded) && (
+                <div className="relative">
+                  <button
+                    onClick={() => setShowExtend(!showExtend)}
+                    className="flex w-full items-center justify-between rounded-md border border-zinc-700/50 bg-zinc-800/30 px-2 py-1.5 text-xs text-zinc-400 hover:bg-zinc-700/30 hover:text-zinc-300 transition-colors"
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <Plus className="h-3 w-3" /> Extend Rounds
+                    </span>
+                    <ChevronDown className={`h-3 w-3 transition-transform ${showExtend ? 'rotate-180' : ''}`} />
+                  </button>
+                  {showExtend && (
+                    <div className="mt-1 flex gap-1">
+                      {EXTEND_OPTIONS.map(n => (
+                        <button
+                          key={n}
+                          onClick={() => { store.getState().extendRounds(n); setShowExtend(false) }}
+                          className="flex-1 rounded-md border border-zinc-700/50 bg-zinc-800/50 py-1 text-[11px] font-medium text-zinc-300 hover:bg-violet-500/10 hover:border-violet-500/30 hover:text-violet-300 transition-colors"
+                        >
+                          +{n}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {session.extensions.length > 0 && (
+                    <div className="mt-1 text-[10px] text-zinc-500">
+                      Extended: {session.extensions.map(e => `+${e}`).join(', ')} from original {session.originalMaxRounds}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Attached files */}
+            {session.fileRefs && session.fileRefs.length > 0 && (
+              <div className="space-y-1">
+                <h4 className="flex items-center gap-1 text-[10px] font-medium text-zinc-500 uppercase tracking-wider">
+                  <Paperclip className="h-2.5 w-2.5" /> Files ({session.fileRefs.length})
+                </h4>
+                <div className="space-y-0.5">
+                  {session.fileRefs.map((f, i) => (
+                    <div key={i} className="flex items-center gap-1.5 text-[10px] text-zinc-400 truncate">
+                      <Paperclip className="h-2.5 w-2.5 shrink-0 text-zinc-500" />
+                      <span className="truncate">{f.name}</span>
+                      <span className="shrink-0 text-zinc-600">{formatSize(f.size)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
-          <div className="flex justify-between">
-            <span className="text-zinc-500">Verbosity</span>
-            <span className="text-zinc-300">{VERBOSITY_LABELS[session.verbosity]}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-zinc-500">Round</span>
-            <span className="text-zinc-300">{session.currentRound} / {session.maxRounds}</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-zinc-500">Mode</span>
-            <span className="text-zinc-300">
-              {session.moderatorMode === 'moderator' ? 'Moderator' : 'Round-Robin'}
-            </span>
-          </div>
-          <div className="flex justify-between col-span-2">
-            <span className="text-zinc-500">Status</span>
-            <span className={`font-medium ${
-              session.status === 'active' ? 'text-emerald-400' :
-              session.status === 'synthesizing' ? 'text-violet-400' :
-              session.status === 'concluded' ? 'text-zinc-400' :
-              'text-zinc-500'
-            }`}>{session.status}</span>
-          </div>
-          <div className="flex justify-between items-center col-span-2">
-            <span className="text-zinc-500">Memory</span>
-            <select
-              value={session.memoryRounds}
-              onChange={e => useCouncilStore.getState().setMemoryRounds(Number(e.target.value) as MemoryRounds)}
-              className="rounded border border-zinc-700/50 bg-zinc-800/50 px-1.5 py-0.5 text-[11px] text-zinc-300 focus:outline-none focus:border-violet-500/50"
-            >
-              <option value={5}>5 rounds</option>
-              <option value={10}>10 rounds</option>
-              <option value={20}>20 rounds</option>
-              <option value={30}>30 rounds</option>
-              <option value={0}>Indefinite</option>
-            </select>
-          </div>
-        </div>
+        )}
       </div>
 
-      {/* Agents + tool activity */}
+      {/* ─── Agents ─── */}
       <div className="shrink-0 border-b border-zinc-700/50 p-3 space-y-2 max-h-[40%] overflow-auto">
         <h3 className="text-xs font-medium text-zinc-400 uppercase tracking-wider">
           Agents ({session.agents.length})
@@ -249,7 +373,7 @@ export function CouncilSidebar({ session, speaking, activityLog, onMute, onPinCl
         )}
       </div>
 
-      {/* Activity Log — takes remaining space */}
+      {/* ─── Activity Log ─── */}
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
         <div className="shrink-0 flex items-center gap-1 px-3 py-2 border-b border-zinc-700/30">
           <Activity className="h-3 w-3 text-zinc-500" />

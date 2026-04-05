@@ -18,8 +18,10 @@ const SIDEBAR_DEFAULT_RATIO = 0.5
 export function CouncilPage() {
   const {
     sessions, activeSession, loading, speaking, generatingArtifact, activityLog,
+    autoAdvanceCountdown,
     loadSessionList, createSession, loadSession, deleteSession, clearActive,
     startCouncil, advanceRound, requestSynthesis, concludeSession,
+    cancelAutoAdvance,
     injectMessage, directAddress, muteAgent, pinMessage,
     connectAllAgents,
     generateTldrs, exportMinutesMd,
@@ -216,11 +218,13 @@ export function CouncilPage() {
                 session={activeSession}
                 speaking={speaking}
                 generatingArtifact={generatingArtifact}
+                autoAdvanceCountdown={autoAdvanceCountdown}
                 onInject={injectMessage}
                 onDirectAddress={directAddress}
                 onAdvanceRound={advanceRound}
                 onRequestSynthesis={requestSynthesis}
                 onConclude={concludeSession}
+                onCancelAutoAdvance={cancelAutoAdvance}
                 onGenerateTldrs={generateTldrs}
                 onExportMd={exportMinutesMd}
               />
@@ -243,6 +247,7 @@ export function CouncilPage() {
                 session={activeSession}
                 speaking={speaking}
                 activityLog={activityLog}
+                autoAdvanceCountdown={autoAdvanceCountdown}
                 onMute={muteAgent}
                 onPinClick={pinMessage}
               />
