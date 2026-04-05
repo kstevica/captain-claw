@@ -6,6 +6,10 @@ const TYPE_COLORS: Record<string, string> = {
   brainstorm: 'bg-green-500/20 text-green-400',
   review: 'bg-blue-500/20 text-blue-400',
   planning: 'bg-yellow-500/20 text-yellow-400',
+  interview: 'bg-cyan-500/20 text-cyan-400',
+  troubleshoot: 'bg-orange-500/20 text-orange-400',
+  critique: 'bg-rose-500/20 text-rose-400',
+  freeform: 'bg-purple-500/20 text-purple-400',
 }
 
 const STATUS_COLORS: Record<string, string> = {

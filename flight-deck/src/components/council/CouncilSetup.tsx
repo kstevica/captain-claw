@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react'
-import { Swords, Lightbulb, ClipboardCheck, Map, Play, Paperclip, X } from 'lucide-react'
+import { Swords, Lightbulb, ClipboardCheck, Map, Play, Paperclip, X, MessageCircleQuestion, Bug, ShieldAlert, MessagesSquare } from 'lucide-react'
 import { AgentPicker, isOldManName } from './AgentPicker'
 import { formatSize } from '../../services/fileTransfer'
 import type {
@@ -11,9 +11,14 @@ const SESSION_TYPES: { id: SessionType; label: string; icon: typeof Swords; desc
   { id: 'brainstorm', label: 'Brainstorm', icon: Lightbulb, desc: 'Creative ideation' },
   { id: 'review', label: 'Review', icon: ClipboardCheck, desc: 'Critical analysis' },
   { id: 'planning', label: 'Planning', icon: Map, desc: 'Task decomposition' },
+  { id: 'interview', label: 'Interview', icon: MessageCircleQuestion, desc: 'Knowledge extraction' },
+  { id: 'troubleshoot', label: 'Troubleshoot', icon: Bug, desc: 'Problem diagnosis' },
+  { id: 'critique', label: 'Critique', icon: ShieldAlert, desc: 'Adversarial stress-test' },
+  { id: 'freeform', label: 'Freeform', icon: MessagesSquare, desc: 'Open conversation' },
 ]
 
 const VERBOSITY_OPTIONS: { id: Verbosity; label: string; desc: string }[] = [
+  { id: 'thought', label: 'Thought', desc: '1-2 sentences' },
   { id: 'message', label: 'Message', desc: 'Up to 5 sentences' },
   { id: 'short', label: 'Short', desc: 'Up to 3 paragraphs' },
   { id: 'medium', label: 'Medium', desc: 'Up to 5 paragraphs' },

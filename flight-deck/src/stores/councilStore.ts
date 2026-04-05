@@ -16,8 +16,8 @@ import tldrTemplate from '../instructions/council/tldr.md?raw'
 
 // ── Types ───────────────────────────────────────────────────────
 
-export type SessionType = 'debate' | 'brainstorm' | 'review' | 'planning'
-export type Verbosity = 'message' | 'short' | 'medium' | 'long'
+export type SessionType = 'debate' | 'brainstorm' | 'review' | 'planning' | 'interview' | 'troubleshoot' | 'critique' | 'freeform'
+export type Verbosity = 'thought' | 'message' | 'short' | 'medium' | 'long'
 export type CouncilStatus = 'setup' | 'active' | 'synthesizing' | 'concluded'
 export type ModeratorMode = 'moderator' | 'round-robin'
 export type AgentAction = 'answer' | 'respond' | 'challenge' | 'refine' | 'broaden' | 'pass'
@@ -120,6 +120,8 @@ export interface CouncilSession {
   artifacts: CouncilArtifact[]
   fileRefs: CouncilFileRef[]
   memoryRounds: MemoryRounds
+  createdAt: string           // ISO timestamp of session creation
+  concludedAt: string         // ISO timestamp when session concluded (empty if still active)
   config: { firstSpeaker: string }
 }
 
@@ -145,6 +147,7 @@ export interface CreateSessionConfig {
 // ── Constants ───────────────────────────────────────────────────
 
 const VERBOSITY_RULES: Record<Verbosity, string> = {
+  thought: 'Limit your response to 1-2 sentences. Be extremely concise — just the core thought.',
   message: 'Limit your response to at most 5 sentences (one short paragraph).',
   short: 'Limit your response to at most 3 short paragraphs.',
   medium: 'Limit your response to at most 5 paragraphs.',
@@ -156,6 +159,10 @@ const SESSION_TYPE_DESC: Record<SessionType, string> = {
   brainstorm: 'This is a brainstorming session. Build on ideas, suggest new angles, and avoid criticism in early rounds. Be creative.',
   review: 'This is a review session. One agent presents work, others provide constructive critique. Be specific about what works and what does not.',
   planning: 'This is a planning session. Break down tasks, assign responsibilities, identify risks, and create actionable steps.',
+  interview: 'This is an interview session. One agent asks focused questions, others provide detailed answers. Extract knowledge, clarify assumptions, and explore topics in depth.',
+  troubleshoot: 'This is a troubleshooting session. Collaboratively diagnose the problem, propose hypotheses, narrow down root causes, and suggest fixes. Be methodical and evidence-driven.',
+  critique: 'This is a critique session. Actively look for flaws, weaknesses, and gaps. Be adversarial but constructive — the goal is to stress-test ideas and strengthen them.',
+  freeform: 'This is a freeform discussion. There are no structural constraints — speak naturally, follow tangents, and let the conversation evolve organically.',
 }
 
 const AGENT_TIMEOUT_MS = 300_000
@@ -332,11 +339,14 @@ function parseAgentResponse(raw: string): ParsedResponse {
   const targetMatch = raw.match(/^TARGET:\s*(.+)/mi)
   if (targetMatch) targetAgent = targetMatch[1].trim()
 
-  // Strip the structured lines from content
+  // Strip the structured lines and session memory retrieval noise from content
   const content = raw
     .replace(/^SUITABILITY:\s*[\d.]+\s*$/gmi, '')
     .replace(/^ACTION:\s*\S+\s*$/gmi, '')
     .replace(/^TARGET:\s*.+\s*$/gmi, '')
+    // Strip agent session/memory retrieval lines that weak models echo back
+    .replace(/^\[session\]\s*.+$/gmi, '')
+    .replace(/^\[user\]\s*COUNCIL ROUND\b.+$/gmi, '')
     .trim()
 
   return { suitability, action, targetAgent, content }
@@ -784,6 +794,8 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
         artifacts,
         fileRefs: (config.fileRefs as CouncilFileRef[]) || [],
         memoryRounds: (config.memoryRounds as MemoryRounds) || 10,
+        createdAt: raw.created_at as string || '',
+        concludedAt: (config.concludedAt as string) || '',
         config: { firstSpeaker: config.firstSpeaker || '' },
       }
 
@@ -1157,8 +1169,10 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     // Move to concluded state and disconnect agents
     const final = get().activeSession
     if (final) {
-      set({ activeSession: { ...final, status: 'concluded' } })
+      const concludedAt = new Date().toISOString()
+      set({ activeSession: { ...final, status: 'concluded', concludedAt } })
       await apiUpdateSession(final.id, { status: 'concluded' })
+      _persistConfig(final.id, { concludedAt })
       get().disconnectAllAgents()
       await get().loadSessionList()
     }
@@ -1168,8 +1182,10 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     get()._cancelAutoAdvanceTimer()
     const s = get().activeSession
     if (!s) return
-    set({ activeSession: { ...s, status: 'concluded' } })
+    const concludedAt = new Date().toISOString()
+    set({ activeSession: { ...s, status: 'concluded', concludedAt } })
     await apiUpdateSession(s.id, { status: 'concluded' })
+    _persistConfig(s.id, { concludedAt })
     get().disconnectAllAgents()
     await get()._addSystemMessage(s.currentRound, 'Council session concluded.')
     await get().loadSessionList()

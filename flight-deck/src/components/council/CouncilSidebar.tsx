@@ -1,9 +1,10 @@
 import { useRef, useEffect, useState } from 'react'
 import {
   Wifi, WifiOff, VolumeX, Volume2, Pin, Crown, Loader2, Wrench,
-  Activity, Leaf, Paperclip, Play, Plus, ChevronDown, ChevronRight,
+  Activity, Leaf, Paperclip, Play, Plus, ChevronDown, ChevronRight, FolderOpen,
 } from 'lucide-react'
 import { VotingPanel } from './VotingPanel'
+import { CouncilFileBrowser } from './CouncilFileBrowser'
 import { useContainerStore } from '../../stores/containerStore'
 import { useProcessStore } from '../../stores/processStore'
 import { formatSize } from '../../services/fileTransfer'
@@ -26,9 +27,14 @@ const TYPE_LABELS: Record<string, string> = {
   brainstorm: 'Brainstorm',
   review: 'Review',
   planning: 'Planning',
+  interview: 'Interview',
+  troubleshoot: 'Troubleshoot',
+  critique: 'Critique',
+  freeform: 'Freeform',
 }
 
 const VERBOSITY_LABELS: Record<string, string> = {
+  thought: 'Thought',
   message: 'Message',
   short: 'Short',
   medium: 'Medium',
@@ -66,6 +72,7 @@ export function CouncilSidebar({
   const logContainerRef = useRef<HTMLDivElement>(null)
   const [showExtend, setShowExtend] = useState(false)
   const [infoCollapsed, setInfoCollapsed] = useState(false)
+  const [showFileBrowser, setShowFileBrowser] = useState(false)
 
   // Look up cognitive mode & eco mode per agent from desktop stores
   const containerCogModes = useContainerStore(s => s.cognitiveModeOverrides)
@@ -243,6 +250,14 @@ export function CouncilSidebar({
                 </div>
               </div>
             )}
+
+            {/* Browse agent files */}
+            <button
+              onClick={() => setShowFileBrowser(true)}
+              className="flex w-full items-center justify-center gap-1.5 rounded-md border border-zinc-700/50 bg-zinc-800/30 px-2 py-1.5 text-xs text-zinc-400 hover:bg-zinc-700/30 hover:text-zinc-300 transition-colors"
+            >
+              <FolderOpen className="h-3 w-3" /> Browse Agent Files
+            </button>
           </div>
         )}
       </div>
@@ -402,6 +417,16 @@ export function CouncilSidebar({
           })}
         </div>
       </div>
+
+      {/* Council File Browser modal */}
+      {showFileBrowser && (
+        <CouncilFileBrowser
+          agents={session.agents}
+          sessionCreatedAt={session.createdAt}
+          sessionConcludedAt={session.concludedAt}
+          onClose={() => setShowFileBrowser(false)}
+        />
+      )}
     </div>
   )
 }
