@@ -11,6 +11,7 @@ const APPROVAL_KEY = 'fd:process-consult-approval'
 const FLEET_INSTRUCTIONS_KEY = 'fd:process-fleet-instructions'
 const COGNITIVE_MODE_KEY = 'fd:process-cognitive-modes'
 const ECO_MODE_KEY = 'fd:process-eco-modes'
+const MODEL_OVERRIDE_KEY = 'fd:process-model-overrides'
 
 function loadMap(key: string): Record<string, string> {
   try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} }
@@ -34,6 +35,7 @@ interface ProcessStore {
   fleetInstructionsOverrides: Record<string, string>
   cognitiveModeOverrides: Record<string, string>
   ecoModeOverrides: Record<string, boolean>
+  modelOverrides: Record<string, { provider: string; model: string }>
 
   fetchProcesses: () => Promise<void>
   stopProcess: (slug: string) => Promise<void>
@@ -53,6 +55,8 @@ interface ProcessStore {
   getCognitiveMode: (slug: string) => string
   setEcoMode: (slug: string, enabled: boolean) => void
   getEcoMode: (slug: string) => boolean
+  setModelOverride: (slug: string, provider: string, model: string) => void
+  getModelOverride: (slug: string) => { provider: string; model: string } | null
 }
 
 export const useProcessStore = create<ProcessStore>((set, get) => ({
@@ -65,16 +69,19 @@ export const useProcessStore = create<ProcessStore>((set, get) => ({
   fleetInstructionsOverrides: loadMap(FLEET_INSTRUCTIONS_KEY),
   cognitiveModeOverrides: loadMap(COGNITIVE_MODE_KEY),
   ecoModeOverrides: loadBoolMap(ECO_MODE_KEY),
+  modelOverrides: (() => { try { return JSON.parse(localStorage.getItem(MODEL_OVERRIDE_KEY) || '{}') } catch { return {} } })(),
 
   fetchProcesses: async () => {
     try {
       const processes = await dockerApi.listProcesses()
       const descOverrides = get().descriptionOverrides
       const nameOverrides = get().nameOverrides
+      const modelOverrides = get().modelOverrides
       const merged = processes.map((p) => ({
         ...p,
         ...(descOverrides[p.slug] != null ? { description: descOverrides[p.slug] } : {}),
         ...(nameOverrides[p.slug] != null ? { name: nameOverrides[p.slug] } : {}),
+        ...(modelOverrides[p.slug] != null ? { provider: modelOverrides[p.slug].provider, model: modelOverrides[p.slug].model } : {}),
       }))
       set({ processes: merged })
     } catch {
@@ -160,6 +167,17 @@ export const useProcessStore = create<ProcessStore>((set, get) => ({
   },
 
   getEcoMode: (slug) => get().ecoModeOverrides[slug] || false,
+
+  setModelOverride: (slug, provider, model) => {
+    const overrides = { ...get().modelOverrides, [slug]: { provider, model } }
+    const val = JSON.stringify(overrides)
+    if (useAuthStore.getState().authEnabled) queueSave(MODEL_OVERRIDE_KEY, val)
+    else localStorage.setItem(MODEL_OVERRIDE_KEY, val)
+    const processes = get().processes.map((p) => p.slug === slug ? { ...p, provider, model } : p)
+    set({ modelOverrides: overrides, processes })
+  },
+
+  getModelOverride: (slug) => get().modelOverrides[slug] || null,
 }))
 
 registerHydrator((settings) => {
@@ -172,6 +190,7 @@ registerHydrator((settings) => {
     [FLEET_INSTRUCTIONS_KEY, 'fleetInstructionsOverrides'],
     [COGNITIVE_MODE_KEY, 'cognitiveModeOverrides'],
     [ECO_MODE_KEY, 'ecoModeOverrides'],
+    [MODEL_OVERRIDE_KEY, 'modelOverrides'],
   ] as const) {
     const raw = settings[key]
     if (raw) {

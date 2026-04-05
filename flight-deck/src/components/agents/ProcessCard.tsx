@@ -11,6 +11,7 @@ import { AgentConfigEditor } from './AgentConfigEditor'
 import { DatastoreBrowser } from './DatastoreBrowser'
 import { OpenDropdown } from '../common/OpenDropdown'
 import { CognitiveModeSelector } from '../common/CognitiveModeSelector'
+import { ModelSelector } from '../common/ModelSelector'
 import { useAuthStore } from '../../stores/authStore'
 import { queueSave, registerHydrator } from '../../services/settingsSync'
 
@@ -99,6 +100,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   const [modeSaved, setModeSaved] = useState(false)
   const ecoMode = getEcoMode(proc.slug)
   const [ecoSaved, setEcoSaved] = useState(false)
+  const { setModelOverride } = useProcessStore()
 
   const isRunning = proc.status === 'running'
   const agentName = proc.name || proc.slug
@@ -414,6 +416,9 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
             </div>
           )}
         </div>
+
+        {/* Model / Provider selector */}
+        <ModelSelector kind="process" identifier={proc.slug} onModelChange={(p, m) => setModelOverride(proc.slug, p, m)} />
 
         {/* Cognitive Mode (runtime switch) */}
         <CognitiveModeSelector

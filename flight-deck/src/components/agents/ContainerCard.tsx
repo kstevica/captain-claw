@@ -11,6 +11,7 @@ import { AgentConfigEditor } from './AgentConfigEditor'
 import { DatastoreBrowser } from './DatastoreBrowser'
 import { OpenDropdown } from '../common/OpenDropdown'
 import { CognitiveModeSelector } from '../common/CognitiveModeSelector'
+import { ModelSelector } from '../common/ModelSelector'
 import { useAuthStore } from '../../stores/authStore'
 import { queueSave, registerHydrator } from '../../services/settingsSync'
 
@@ -531,6 +532,9 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
             </div>
           )}
         </div>
+
+        {/* Model / Provider selector */}
+        <ModelSelector kind="docker" identifier={container.id} />
 
         {/* Cognitive Mode (runtime switch) */}
         <CognitiveModeSelector

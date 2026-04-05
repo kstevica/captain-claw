@@ -325,29 +325,118 @@ interface ParsedResponse {
   content: string
 }
 
+/**
+ * Strip all thinking / reasoning XML blocks that reasoning models emit.
+ * Handles <think>, <thinking>, <reasoning>, <reflection>, <inner_monologue>,
+ * and similar tags — both self-closing and block forms.
+ */
+function stripThinkingBlocks(text: string): string {
+  // Remove block tags: <think>...</think>, <thinking>...</thinking>, etc.
+  // Use [\s\S] for cross-line matching
+  let result = text
+  const thinkTags = ['think', 'thinking', 'reasoning', 'reflection', 'inner_monologue', 'scratchpad']
+  for (const tag of thinkTags) {
+    // Block form: <tag>...</tag> (greedy-safe via lazy match)
+    const blockRe = new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, 'gi')
+    result = result.replace(blockRe, '')
+    // Unclosed tag (model started thinking but never closed): strip from <tag> to end
+    const unclosedRe = new RegExp(`<${tag}>(?:(?!</${tag}>)[\\s\\S])*$`, 'gi')
+    result = result.replace(unclosedRe, '')
+  }
+  return result
+}
+
+/**
+ * Extract only the actual contribution from an agent response.
+ *
+ * Strategy: instead of trying to strip noise line-by-line (which is fragile),
+ * we look for the SUITABILITY/ACTION/TARGET header block and take everything
+ * AFTER the last header line. This isolates the actual answer from all the
+ * instruction echoes, memory retrieval, and meta-commentary that precede it.
+ *
+ * If no headers are found, we fall back to aggressive line-by-line cleaning.
+ */
+function extractContent(raw: string): string {
+  // First, strip all thinking/reasoning blocks
+  let text = stripThinkingBlocks(raw)
+
+  // Strip [session] and [tool] memory retrieval blocks (multi-line)
+  text = text.replace(/^\[session\]\s.*(?:\n(?:\s.*|\(score=.*|sessions\/.*|\n))*$/gm, '')
+  text = text.replace(/^\[tool\]\s.*(?:\n(?:\s.*|\(score=.*|\n))*$/gm, '')
+  text = text.replace(/^\[user\]\s*(?:COUNCIL ROUND|SUITABILITY).*$/gm, '')
+
+  // Find the last header line (TARGET is always last in the SUITABILITY/ACTION/TARGET block)
+  const lines = text.split('\n')
+  let lastHeaderIdx = -1
+
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim()
+    if (/^SUITABILITY:\s*[\d.]/i.test(trimmed)) lastHeaderIdx = i
+    if (/^ACTION:\s*(answer|respond|challenge|refine|broaden|pass)/i.test(trimmed)) lastHeaderIdx = i
+    if (/^TARGET:\s*.+/i.test(trimmed)) lastHeaderIdx = i
+  }
+
+  let content: string
+  if (lastHeaderIdx >= 0) {
+    // Take everything after the last header line — this is the actual contribution
+    content = lines.slice(lastHeaderIdx + 1).join('\n')
+  } else {
+    // No headers found — use full text but strip noise lines
+    content = text
+  }
+
+  // Final cleanup: strip any remaining noise lines that leaked through
+  const cleaned = content.split('\n').filter(line => {
+    const t = line.trim()
+    if (!t) return true  // preserve blank lines for formatting
+    // Residual header lines
+    if (/^SUITABILITY:\s*[\d.]/i.test(t)) return false
+    if (/^ACTION:\s*(answer|respond|challenge|refine|broaden|pass)\s*$/i.test(t)) return false
+    if (/^TARGET:\s*.+$/i.test(t)) return false
+    // Memory retrieval
+    if (/^\[session\]\s/i.test(t) || /^\[tool\]\s/i.test(t)) return false
+    if (/^\(score=[\d.]+\)/.test(t)) return false
+    if (/^sessions\/\w+\.txt:\d+/.test(t)) return false
+    // Instruction echoes
+    if (/^#{1,3}\s*(Task|Instructions|Items to process|Context)\b/i.test(t)) return false
+    if (/^Provide your contribution now/i.test(t)) return false
+    if (/^Remember to start with SUITABILITY/i.test(t)) return false
+    if (/^Structure your response starting with/i.test(t)) return false
+    if (/^You are participating in a Council/i.test(t)) return false
+    if (/^Session type:/i.test(t)) return false
+    if (/^Verbosity rule:/i.test(t)) return false
+    if (/^Other participants:/i.test(t)) return false
+    if (/^COUNCIL ROUND \d/i.test(t)) return false
+    if (/^Discussion so far:/i.test(t)) return false
+    if (/^Follow the verbosity rule/i.test(t)) return false
+    if (/^Before each of your contributions/i.test(t)) return false
+    if (/^Formulate a (contribution|response) that/i.test(t)) return false
+    if (/^Analyze the (existing|ongoing) (arguments|debate|discussion)/i.test(t)) return false
+    if (/^\\n#{1,3}\s/.test(t)) return false
+    return true
+  })
+
+  return cleaned.join('\n').trim()
+}
+
 function parseAgentResponse(raw: string): ParsedResponse {
   let suitability = 0.5
   let action: AgentAction = 'answer'
   let targetAgent = ''
 
-  const suitMatch = raw.match(/^SUITABILITY:\s*([\d.]+)/mi)
+  // Strip thinking blocks first so headers inside them don't confuse parsing
+  const stripped = stripThinkingBlocks(raw)
+
+  const suitMatch = stripped.match(/^SUITABILITY:\s*([\d.]+)/mi)
   if (suitMatch) suitability = Math.max(0, Math.min(1, parseFloat(suitMatch[1]) || 0.5))
 
-  const actionMatch = raw.match(/^ACTION:\s*(answer|respond|challenge|refine|broaden|pass)/mi)
+  const actionMatch = stripped.match(/^ACTION:\s*(answer|respond|challenge|refine|broaden|pass)/mi)
   if (actionMatch) action = actionMatch[1] as AgentAction
 
-  const targetMatch = raw.match(/^TARGET:\s*(.+)/mi)
+  const targetMatch = stripped.match(/^TARGET:\s*(.+)/mi)
   if (targetMatch) targetAgent = targetMatch[1].trim()
 
-  // Strip the structured lines and session memory retrieval noise from content
-  const content = raw
-    .replace(/^SUITABILITY:\s*[\d.]+\s*$/gmi, '')
-    .replace(/^ACTION:\s*\S+\s*$/gmi, '')
-    .replace(/^TARGET:\s*.+\s*$/gmi, '')
-    // Strip agent session/memory retrieval lines that weak models echo back
-    .replace(/^\[session\]\s*.+$/gmi, '')
-    .replace(/^\[user\]\s*COUNCIL ROUND\b.+$/gmi, '')
-    .trim()
+  const content = extractContent(raw)
 
   return { suitability, action, targetAgent, content }
 }
@@ -390,6 +479,7 @@ function buildTurnPrompt(
   round: number,
   contextMessages: CouncilMessage[],
   directive?: string,
+  speakerName?: string,
 ): string {
   let recentContributions = ''
   if (contextMessages.length > 0) {
@@ -421,11 +511,16 @@ function buildTurnPrompt(
     extensionNote = ` (originally ${session.originalMaxRounds} rounds, extended: ${extList})`
   }
 
+  // Remind the agent who it is and not to echo instructions or address itself
+  const identityNote = speakerName
+    ? `\nYou are ${speakerName}. Do NOT repeat these instructions, do NOT echo memory retrieval results, and do NOT address or refer to yourself in the third person. Respond directly in character.`
+    : ''
+
   return renderTemplate(turnTemplate, {
     round,
     maxRounds: session.maxRounds,
     recentContributions,
-    directive: directiveText,
+    directive: directiveText + identityNote,
     extensionNote,
   })
 }
@@ -1115,8 +1210,11 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     get()._sendToAgent(synthId, prompt)
     set({ speaking: synthId })
 
-    const response = await get()._collectResponse(synthId)
+    const rawSynthesis = await get()._collectResponse(synthId)
     set({ speaking: '' })
+
+    // Clean thinking blocks from synthesis too
+    const response = stripThinkingBlocks(rawSynthesis).trim()
 
     await get()._addMessage({
       round: session.currentRound,
@@ -1139,9 +1237,10 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       const votePrompt = buildVotePrompt(response)
       get()._sendToAgent(agent.id, votePrompt)
       set({ speaking: agent.id })
-      const voteRaw = await get()._collectResponse(agent.id)
+      const voteRawFull = await get()._collectResponse(agent.id)
       set({ speaking: '' })
 
+      const voteRaw = stripThinkingBlocks(voteRawFull)
       const voteMatch = voteRaw.match(/^VOTE:\s*(AGREE|DISAGREE|ABSTAIN)/mi)
       const reasonMatch = voteRaw.match(/^REASON:\s*(.+)/mi)
       const v: CouncilVote = {
@@ -1314,7 +1413,8 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       get()._log(agent.id, agent.name, 'speaking', 'Generating TL;DR...')
       set({ speaking: agent.id })
       get()._sendToAgent(agent.id, prompt)
-      const response = await get()._collectResponse(agent.id)
+      const responseRaw = await get()._collectResponse(agent.id)
+      const response = stripThinkingBlocks(responseRaw)
       set({ speaking: '' })
       get()._log(agent.id, agent.name, 'done', 'TL;DR complete')
 
@@ -1513,7 +1613,7 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       return null
     }
 
-    const prompt = buildTurnPrompt(s, round, recentMsgs, directive)
+    const prompt = buildTurnPrompt(s, round, recentMsgs, directive, agent.name)
     get()._sendToAgent(agentId, prompt)
     set({ speaking: agentId })
     get()._log(agentId, agent.name, 'speaking', `Speaking (round ${round})`)
@@ -1639,10 +1739,11 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       const modPrompt = buildModeratorSelectPrompt(scoreSummary, contextMsgs)
       get()._sendToAgent(s.moderatorAgentId, modPrompt)
       set({ speaking: s.moderatorAgentId })
-      const modResponse = await get()._collectResponse(s.moderatorAgentId)
+      const modResponseRaw = await get()._collectResponse(s.moderatorAgentId)
       set({ speaking: '' })
 
-      // Parse moderator's selection
+      // Parse moderator's selection (strip thinking blocks first)
+      const modResponse = stripThinkingBlocks(modResponseRaw)
       const selectedName = modResponse.trim().split('\n')[0].trim()
       const selectedAgent = currentSession.agents.find(a =>
         a.name.toLowerCase() === selectedName.toLowerCase() &&
@@ -1695,7 +1796,7 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     // Collect all scores in parallel
     const results = await Promise.all(
       eligible.map(async (agent) => {
-        const raw = await get()._collectResponse(agent.id)
+        const raw = stripThinkingBlocks(await get()._collectResponse(agent.id))
         const num = parseFloat(raw.trim())
         return { id: agent.id, score: isNaN(num) ? 0.5 : Math.max(0, Math.min(1, num)) }
       }),

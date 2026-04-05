@@ -1336,6 +1336,10 @@ async def update_agent_config(
         home_config = agent_dir / "data" / "home-config" / "config.yaml"
         if home_config.parent.is_dir():
             home_config.write_text(body.config_yaml)
+        # Also update home-config-parent/.captain-claw copy
+        parent_config = agent_dir / "data" / "home-config-parent" / ".captain-claw" / "config.yaml"
+        if parent_config.parent.is_dir():
+            parent_config.write_text(body.config_yaml)
         updated.append("config.yaml")
     if body.env is not None:
         env_file = agent_dir / ".env"
@@ -1343,6 +1347,52 @@ async def update_agent_config(
         updated.append(".env")
 
     return {"ok": True, "updated": updated, "message": "Restart the agent for changes to take effect."}
+
+
+class AgentModelUpdate(BaseModel):
+    provider: str
+    model: str
+    api_key: str | None = None
+
+
+@app.put("/fd/agent-model/{kind}/{identifier}")
+async def update_agent_model(
+    kind: str, identifier: str, body: AgentModelUpdate, request: Request,
+    user: dict | None = _required_user_dep,
+):
+    """Quick-update an agent's provider, model, and optionally api_key in all config locations."""
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+
+    # Gather all config file paths that may exist
+    config_paths = [
+        agent_dir / "config.yaml",
+        agent_dir / "data" / "home-config" / "config.yaml",
+        agent_dir / "data" / "home-config-parent" / ".captain-claw" / "config.yaml",
+    ]
+
+    updated_count = 0
+    for cfg_path in config_paths:
+        if not cfg_path.is_file():
+            continue
+        try:
+            data = yaml.safe_load(cfg_path.read_text()) or {}
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        if "model" not in data or not isinstance(data.get("model"), dict):
+            data["model"] = {}
+        data["model"]["provider"] = body.provider
+        data["model"]["model"] = body.model
+        if body.api_key is not None:
+            data["model"]["api_key"] = body.api_key
+        cfg_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True))
+        updated_count += 1
+
+    return {"ok": True, "updated": updated_count, "message": "Restart the agent for changes to take effect."}
 
 
 class AgentModeUpdate(BaseModel):
