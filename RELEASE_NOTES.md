@@ -1,144 +1,117 @@
-# Captain Claw v0.4.9 Release Notes
+# Captain Claw v0.4.15 Release Notes
 
-**Release title:** Multi-User Flight Deck, Agent Delegation & Docker Deployment
+**Release title:** Agent Council — Multi-Agent Deliberation
 
-**Release date:** 2026-04-02
+**Release date:** 2026-04-05
 
 ## Highlights
 
-Flight Deck gains **multi-user authentication** with JWT, an **admin dashboard** for managing users and plan tiers, and **server-side chat persistence**. Agents can now **delegate tasks** to each other with fire-and-forget semantics — the calling agent sends work and moves on, while the peer delivers results back automatically. Flight Deck also gets its own **Dockerfile and Docker Compose** for standalone deployment, plus an **agent config editor** for modifying agent settings in-flight.
+Flight Deck gains **Agent Council**, a new page for structured multi-agent deliberation. Assemble a panel of agents to debate, brainstorm, review, or plan together in turn-based rounds. Agents self-assess their suitability, choose actions (answer, challenge, refine, broaden), and build on each other's contributions across rounds. Sessions include synthesis with voting, per-agent TL;DR summaries, and Markdown minutes export — all re-generable even after conclusion.
 
 ## New Features
 
-### Multi-User Authentication
+### Agent Council
 
-Flight Deck now supports multi-user deployment with JWT-based authentication:
+A full multi-agent discussion system accessible from the Flight Deck sidebar:
 
-- **Registration & login** — first user becomes admin, subsequent users get the `user` role
-- **JWT tokens** — 15-minute access tokens with 7-day refresh token rotation via HttpOnly cookies
-- **WebSocket auth** — agent connections authenticated via token query parameter
-- **Login page** — sign in / register UI with error handling
-- **Profile management** — update display name and password via `/fd/auth/me`
-- Enable with `FD_AUTH_ENABLED=true` environment variable
+**Session setup:**
+- Four session types: Debate, Brainstorm, Review, Planning — each with tailored instructions
+- Four verbosity levels: Message (5 sentences), Short (3 paragraphs), Medium (5 paragraphs), Long (10 paragraphs)
+- Configurable max rounds (1–20), first speaker selection (or random)
+- Multi-agent picker with automatic moderator detection (Old Man)
 
-### Admin Dashboard
+**Turn-based discussion:**
+- Each agent receives full prior discussion context and responds with a suitability score (0–1) and an action: answer, respond, challenge, refine, broaden, or pass
+- Action badges and suitability bars displayed on every message
+- Full Markdown rendering with GFM support (tables, code blocks, lists)
+- Auto-scroll follows new messages when the user is at the bottom
 
-Full admin panel for managing the Flight Deck deployment:
+**Two moderation modes:**
+- **Round-Robin** — all agents speak each round, sorted by suitability score (highest first)
+- **Moderator** — Old Man selects speakers based on suitability scores and discussion flow
 
-- **User management** — list, search, edit roles (admin/user), delete users
-- **Plan tiers** — free/pro/enterprise with configurable limits per tier
-- **Per-user quotas** — override agent count, storage, rate limits for individual users
-- **Usage analytics** — event-based logging with type filtering and visualization
-- **System config** — enable/disable Docker spawning from the admin UI
+**Council memory:**
+- Agents receive context from all prior rounds, grouped by round number
+- Configurable memory window: 5, 10, 20, 30 rounds, or indefinite — adjustable mid-session
+- 30k token safety cap prevents context overflow regardless of setting
 
-### Rate Limiting & Quotas
+**Synthesis & voting:**
+- Request synthesis at any point — the moderator (or first agent) produces a summary
+- All other agents vote (agree / disagree / abstain) with reasoning
+- Results displayed as a proportional summary bar with individual vote cards
 
-Tiered plan system with per-user enforcement:
+**TL;DR panel:**
+- Each agent generates a 2-3 sentence personal takeaway from the discussion
+- Collapsible panel with regenerate button
+- Works during active sessions and after conclusion (agents are temporarily reconnected)
 
-- **Free tier** — 2 agents, 500MB storage, 60 requests/min, 5 spawns/hour
-- **Pro/Enterprise** — configurable higher limits
-- **Sliding-window** rate limiting for requests and spawn operations
-- **Agent count limits** with real-time quota tracking
-- Admin-configurable plan limits persisted to database
+**Minutes export:**
+- Export full session as Markdown (.md) with all rounds, action badges, suitability scores, synthesis, votes, and TL;DRs
+- Available during active sessions and after conclusion
 
-### Fire-and-Forget Task Delegation
+**Real-time activity log:**
+- Timestamped entries for tool usage, speaking status, connections, and system events
+- Color-coded by type (tool=amber, speaking=violet, done=emerald, system=cyan, error=red)
+- Auto-scrolls during active sessions
+- Shows last 3 tool names per agent while speaking
 
-Agents can now delegate tasks to peers without blocking:
+**Agent awareness:**
+- Agents know the council type, current round, max rounds, and moderation mode
+- Fleet instructions from Flight Deck are relayed to all council agents
+- Agents receive the peer list via `peer_agents` on connection
 
-- **`delegate` action** on the `flight_deck` tool — sends a task to a peer and returns immediately
-- **Background execution** — the peer agent works independently on the delegated task
-- **Automatic result delivery** — results are sent back to the source agent as a notification
-- **Busy-aware queuing** — if the source agent is busy, results are queued and processed when it becomes free
-- **`/fd/delegate-peer` endpoint** — two-phase background task: send to target, then deliver result to source
-- Strong task references prevent garbage collection of in-flight delegations
+**Cognitive mode & eco mode display:**
+- Sidebar shows each agent's current cognitive mode (colored dot) and eco mode (leaf icon)
+- Read-only in council — change settings from the Agent Desktop
 
-### Consultation Improvements
+**Resizable layout:**
+- 50/50 default split between discussion panel and sidebar
+- Drag handle to resize (min 280px sidebar, max 65% of width)
+- Session info, agent status, pinned messages, votes, and activity log in the sidebar
 
-- **Heartbeat streaming** — 15-second heartbeat events during peer consultation so the requesting agent knows work is happening (replaces the hard 30s timeout that caused premature failures)
-- **Deduplication** — prevents hammering a peer with duplicate consultation requests
-- **Notification message type** — fleet notifications no longer block the agent (previously set `_busy=True` and triggered full LLM responses)
+**Persistence:**
+- All sessions, messages, votes, and artifacts stored server-side in SQLite
+- Four new database tables: `council_sessions`, `council_messages`, `council_votes`, `council_artifacts`
+- Full REST API at `/fd/council/*` with auth
+- Sessions can be reopened and reviewed after conclusion
 
-### Chat Persistence
+**Architecture:**
+- Frontend-driven orchestration via Zustand store (matches chatStore pattern)
+- Separate WebSocket sessions per agent — messages go through the agent's normal LLM pipeline and persist in agent memory
+- Council messages are NOT visible in the FD chat panel (clean separation)
+- All instruction prompts externalized to `.md` template files in `instructions/council/`
 
-Server-side chat session and message storage:
+### Other Improvements
 
-- **Per-user isolation** — chat sessions and messages scoped by user ownership
-- **Session management** — create, list, load, and delete chat sessions
-- **Message history** — up to 500 messages per session with metadata (tool calls, model info, peer interactions)
-- **Debounced batching** — message persistence batched for performance
+- **Fixed agent response timing** — `_collectResponse` was reading `data.text` but agents send status in `data.status`, causing every speaker turn to wait the full 120-second timeout. Now reads both keys and detects empty status as idle. Agents respond in seconds instead of 2 minutes.
 
-### Settings Sync
+## Files Changed
 
-Per-user settings persisted server-side:
+**New files (21):**
+- `captain_claw/flight_deck/council_routes.py` — REST API router (10 endpoints)
+- `captain_claw/flight_deck/db.py` — 4 new tables, ~15 new DB methods
+- `flight-deck/src/stores/councilStore.ts` — Core orchestration store (~1400 lines)
+- `flight-deck/src/pages/CouncilPage.tsx` — Main page with resizable layout
+- `flight-deck/src/components/council/CouncilSetup.tsx` — Session creation form
+- `flight-deck/src/components/council/CouncilDiscussion.tsx` — Message thread with round headers
+- `flight-deck/src/components/council/CouncilMessage.tsx` — Message bubble with badges
+- `flight-deck/src/components/council/CouncilControls.tsx` — Input bar and round controls
+- `flight-deck/src/components/council/CouncilSidebar.tsx` — Session info, agents, activity log
+- `flight-deck/src/components/council/AgentPicker.tsx` — Multi-agent selector
+- `flight-deck/src/components/council/VotingPanel.tsx` — Vote summary and cards
+- `flight-deck/src/components/council/SynthesisView.tsx` — Synthesis document display
+- `flight-deck/src/components/council/TldrPanel.tsx` — Collapsible TL;DR panel
+- `flight-deck/src/components/council/SessionCard.tsx` — Session history card
+- `flight-deck/src/instructions/council/btw_context.md` — Initial agent context template
+- `flight-deck/src/instructions/council/turn_prompt.md` — Per-turn prompt template
+- `flight-deck/src/instructions/council/moderator_select.md` — Moderator speaker selection
+- `flight-deck/src/instructions/council/synthesis.md` — Synthesis generation template
+- `flight-deck/src/instructions/council/vote.md` — Voting prompt template
+- `flight-deck/src/instructions/council/suitability_check.md` — Suitability score check
+- `flight-deck/src/instructions/council/tldr.md` — TL;DR generation template
 
-- **Automatic migration** — localStorage settings migrated to server on login
-- **Hydration** — settings loaded from server on login
-- **24 synced keys** — theme, layout, panel sizes, view modes, and more
-- **Debounced persistence** — 300ms batching for settings updates
-
-### Agent Config Editor
-
-Edit agent configuration directly from the Flight Deck UI:
-
-- **config.yaml editing** — modify agent configuration in-flight
-- **.env editing** — update environment variables
-- **Restart warning** — indicates when agent restart is required for changes to take effect
-
-### Docker Deployment
-
-Flight Deck can now be deployed as a standalone Docker container:
-
-- **`Dockerfile.flight-deck`** — Python 3.11 slim base with FFmpeg, Git, and Playwright
-- **`docker-compose.flight-deck.yml`** — ready-to-run compose file with volume mounts and API key forwarding
-- **Non-root user** — runs as `claw` user for security
-- **Port range** — exposes 25080 (Flight Deck) + 24080–24099 (spawned agents)
-- **Persistent data** — `fd-data` volume for agent data, settings, and chat history
-
-## Backend Changes
-
-- **`POST /fd/delegate-peer`** — fire-and-forget task delegation with two-phase background execution
-- **`POST /fd/auth/register`** — user registration (first user becomes admin)
-- **`POST /fd/auth/login`** — login with JWT access + refresh token
-- **`POST /fd/auth/refresh`** — refresh access tokens with automatic rotation
-- **`POST /fd/auth/logout`** — clear refresh sessions
-- **`GET /fd/auth/me`**, **`PUT /fd/auth/me`** — user profile management
-- **`GET /fd/auth/status`** — public endpoint for checking auth status and Docker spawn availability
-- **`GET /fd/admin/users`**, **`PUT /fd/admin/users/{id}`**, **`DELETE /fd/admin/users/{id}`** — user management
-- **`GET /fd/admin/usage`** — usage analytics with event type filtering
-- **`GET/PUT /fd/admin/config`** — system configuration
-- **`GET/PUT/DELETE /fd/settings`** — per-user settings CRUD
-- **`GET/POST/DELETE /fd/chat/sessions`** — chat session management
-- **`GET/POST /fd/chat/sessions/{id}/messages`** — chat message persistence
-- **SQLite database** (`fd-data/flight_deck.db`) — users, sessions, settings, chat, usage logs with WAL mode
-- **Heartbeat streaming** on `/fd/consult-peer` — 15s interval heartbeat events
-- **Consultation deduplication** — `_active_consults` tracking prevents duplicate peer consultations
-- **`notification` WebSocket message type** — injects content into agent sessions without triggering _busy state
-- **`trigger_response` flag** — notifications can trigger agent LLM response, with queuing when agent is busy
-
-## New Files
-
-| File | Description |
-|---|---|
-| `captain_claw/flight_deck/auth.py` | JWT authentication with bcrypt password hashing and refresh token rotation |
-| `captain_claw/flight_deck/auth_routes.py` | Auth endpoints (register, login, refresh, logout, profile) |
-| `captain_claw/flight_deck/admin_routes.py` | Admin endpoints (user management, plans, quotas, usage, config) |
-| `captain_claw/flight_deck/db.py` | SQLite database with async support for users, sessions, settings, chat, usage |
-| `captain_claw/flight_deck/rate_limiter.py` | Tiered rate limiting and quota enforcement |
-| `captain_claw/flight_deck/settings_routes.py` | Per-user settings CRUD endpoints |
-| `captain_claw/flight_deck/chat_routes.py` | Chat session and message persistence endpoints |
-| `captain_claw/tools/consult_peer.py` | Peer consultation tool with approval gates and activity broadcasting |
-| `Dockerfile.flight-deck` | Docker image for standalone Flight Deck deployment |
-| `docker-compose.flight-deck.yml` | Docker Compose for Flight Deck with volume mounts |
-| `flight-deck/src/pages/AdminPage.tsx` | Admin dashboard UI (users, plans, usage, config) |
-| `flight-deck/src/pages/LoginPage.tsx` | Login/registration page |
-| `flight-deck/src/stores/authStore.ts` | Authentication state management |
-| `flight-deck/src/stores/chatStore.ts` | Chat persistence state management |
-| `flight-deck/src/services/settingsSync.ts` | Settings sync service with localStorage migration |
-| `flight-deck/src/components/agents/AgentConfigEditor.tsx` | In-flight agent config editor |
-
-## Stats
-
-- **~7,200 lines added** across 73 files
-- 16 new files, 10 new backend endpoints
-- 1 new tool action (`delegate`), 1 new tool (`consult_peer`)
-- 1 new Dockerfile, 1 new Docker Compose file
+**Modified files:**
+- `captain_claw/flight_deck/server.py` — Added council router
+- `flight-deck/src/App.tsx` — Added CouncilPage render
+- `flight-deck/src/types/index.ts` — Added 'council' to ViewMode
+- `flight-deck/src/components/layout/Sidebar.tsx` — Added Council nav item

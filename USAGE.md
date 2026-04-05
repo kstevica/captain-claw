@@ -3716,6 +3716,7 @@ Flight Deck serves both the React frontend and the FastAPI backend from a single
 | Free-form layout | Drag agent cards freely on the desktop, positions persisted to localStorage |
 | Embedded chat | Collapsible chat panel directly on agent cards |
 | Resizable panels | Director (220–500px), chat (320–900px), and tool panels (280–500px) are all resizable with drag handles |
+| Agent Council | Multi-agent deliberation — structured turn-based discussions (debate, brainstorm, review, planning) with synthesis, voting, TL;DR, and minutes export |
 | Agent Forge | AI-powered team decomposition — describe a goal, get a team of agents with roles, instructions, and tools |
 | Fleet-level instructions | Per-agent instructions injected into system prompts, editable from agent config editor |
 | Datastore browser | View agent datastore tables and rows directly from agent cards |
@@ -3764,6 +3765,76 @@ Agent Forge is a dedicated Flight Deck page that uses an LLM to decompose a busi
 - The lead agent's name includes `[Lead]` suffix
 
 The forge system prompt includes the full Captain Claw tool reference (44 tools with descriptions) and guidelines for tool selection per role type (research, content, data, coordination, communication, automation).
+
+### Agent Council (NEW in 0.4.15)
+
+Agent Council is a multi-agent deliberation system where connected agents discuss topics in structured turn-based rounds. It enables debates, brainstorming, code reviews, and planning sessions with full persistence and export.
+
+**Session types:**
+
+| Type | Purpose |
+|---|---|
+| Debate | Structured argumentation — agents take positions, challenge, and defend |
+| Brainstorm | Creative ideation — agents build on ideas, suggest new angles |
+| Review | Critical analysis — agents examine work and provide constructive critique |
+| Planning | Task decomposition — agents break down tasks, identify risks, create steps |
+
+**How it works:**
+
+1. Navigate to **Council** in the sidebar
+2. Set a topic, select session type, verbosity level, and max rounds
+3. Pick agents — if Old Man is included, moderator mode activates automatically
+4. Choose the first speaker (or random)
+5. Click **Start Council**
+
+**Turn flow:**
+
+Each agent receives the full discussion context (grouped by round) and responds with:
+- **SUITABILITY** (0–1) — self-assessed relevance score
+- **ACTION** — answer, respond, challenge, refine, broaden, or pass
+- **TARGET** — optionally direct the response at a specific agent
+
+These are displayed as color-coded badges on each message.
+
+**Moderation modes:**
+
+- **Round-Robin** — all agents speak each round, sorted by suitability score (highest first)
+- **Moderator** — Old Man selects speakers based on suitability scores and discussion flow
+
+**Council memory:**
+
+Agents receive context from prior rounds when speaking. A configurable memory setting (5, 10, 20, 30 rounds, or indefinite) controls how many rounds of history are included, with a 30k token safety cap. The memory setting is adjustable during the session from the sidebar.
+
+**Features:**
+
+| Feature | Description |
+|---|---|
+| Verbosity control | Message (5 sentences), Short (3 paragraphs), Medium (5 paragraphs), Long (10 paragraphs) |
+| Real-time activity log | Timestamped log showing tool usage, speaking status, connections, and system events |
+| Tool activity | Shows last 3 tools used by each agent while speaking |
+| Resizable layout | 50/50 split between discussion and sidebar, drag to resize |
+| Pin messages | Pin important messages for quick reference in the sidebar |
+| User injection | Send messages into the discussion or direct-address specific agents |
+| Mute agents | Temporarily mute agents from participating |
+| Synthesis | Request a synthesis document — moderator (or first agent) summarizes the discussion |
+| Voting | After synthesis, all agents vote (agree/disagree/abstain) with reasoning |
+| TL;DR | Each agent provides a 2-3 sentence personal summary — collapsible panel, re-generable |
+| Minutes export | Export full session as Markdown (.md) with all rounds, synthesis, votes, and TL;DRs |
+| Cognitive mode display | Shows each agent's current cognitive mode and eco mode status in the sidebar |
+| Fleet instructions | Fleet instructions from Flight Deck are relayed to agents in the council |
+
+**Session persistence:**
+
+All council sessions, messages, votes, and artifacts are persisted server-side in SQLite. Sessions can be reopened and reviewed after conclusion. TL;DRs and exports can be regenerated at any time.
+
+**Agent awareness:**
+
+Agents in a council receive context about:
+- The council type (debate, brainstorm, review, planning)
+- Current round and max rounds
+- Moderation mode and moderator identity
+- All participating agents
+- Fleet-level instructions from Flight Deck
 
 ### Fleet-Level Instructions
 

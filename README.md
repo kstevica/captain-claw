@@ -41,6 +41,7 @@ Each forged agent receives:
 
 | Feature | Description |
 |---|---|
+| Agent Council | Multi-agent deliberation — structured turn-based discussions with debates, brainstorms, reviews, and planning sessions |
 | Agent Forge | AI-powered team decomposition — describe a goal, get a team of agents |
 | Multi-agent spawn | Docker containers or pip processes, no Docker required for processes |
 | Fleet discovery | Agents discover peers and communicate via consult (sync) and delegate (async) |
