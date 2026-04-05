@@ -1153,6 +1153,15 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     }
 
     await get()._addSystemMessage(session.currentRound, 'Synthesis and voting complete.')
+
+    // Move to concluded state and disconnect agents
+    const final = get().activeSession
+    if (final) {
+      set({ activeSession: { ...final, status: 'concluded' } })
+      await apiUpdateSession(final.id, { status: 'concluded' })
+      get().disconnectAllAgents()
+      await get().loadSessionList()
+    }
   },
 
   concludeSession: async () => {
