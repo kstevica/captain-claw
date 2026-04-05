@@ -11,6 +11,7 @@ import {
   BarChart3,
   Shield,
   Wand2,
+  Users,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { APP_VERSION, BUILD_DATE } from '../../version'
@@ -24,6 +25,7 @@ import type { ViewMode } from '../../types'
 
 const navItems: { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?: boolean }[] = [
   { id: 'desktop', icon: Monitor, label: 'Agent Desktop' },
+  { id: 'council', icon: Users, label: 'Council' },
   { id: 'operations', icon: BarChart3, label: 'Operations' },
   { id: 'workflow', icon: GitBranch, label: 'Workflows' },
   { id: 'spawner', icon: Plus, label: 'Spawn Agent' },

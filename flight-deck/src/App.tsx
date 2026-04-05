@@ -15,6 +15,7 @@ import { SpawnerPage } from './pages/SpawnerPage'
 import { ForgePage } from './pages/ForgePage'
 import { LoginPage } from './pages/LoginPage'
 import { AdminPage } from './pages/AdminPage'
+import { CouncilPage } from './pages/CouncilPage'
 import { useUIStore } from './stores/uiStore'
 import { useAgentStore } from './stores/agentStore'
 import { useAuthStore, checkAuthStatus, refreshAccessToken } from './stores/authStore'
@@ -284,6 +285,7 @@ function AppContent() {
       {view === 'spawner' && <SpawnerPage />}
       {view === 'forge' && <ForgePage />}
       {view === 'admin' && <AdminPage />}
+      {view === 'council' && <CouncilPage />}
     </>
   )
 

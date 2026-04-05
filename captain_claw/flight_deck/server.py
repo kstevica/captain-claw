@@ -313,11 +313,13 @@ from captain_claw.flight_deck.auth_routes import router as auth_router
 from captain_claw.flight_deck.settings_routes import router as settings_router
 from captain_claw.flight_deck.chat_routes import router as chat_router
 from captain_claw.flight_deck.admin_routes import router as admin_router
+from captain_claw.flight_deck.council_routes import router as council_router
 
 app.include_router(auth_router)
 app.include_router(settings_router)
 app.include_router(chat_router)
 app.include_router(admin_router)
+app.include_router(council_router)
 
 
 # ── Auth dependency helper ──
