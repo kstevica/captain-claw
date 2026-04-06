@@ -54,6 +54,7 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [deep_memory](#deep_memory)
   - [insights](#insights-1)
   - [nervous_system](#nervous_system)
+  - [mcp_serve](#mcp_serve)
 - [Guard System](#guard-system)
 - [Skills System](#skills-system)
 - [Datastore](#datastore)
@@ -94,6 +95,7 @@ For a quick overview and installation guide, see [README.md](README.md).
 - [Remote Integrations](#remote-integrations)
   - [Telegram: Per-User Sessions](#telegram-per-user-sessions)
 - [OpenAI-Compatible API Proxy](#openai-compatible-api-proxy)
+- [MCP Server](#mcp-server)
 - [Google OAuth, Drive, Calendar, and Gmail](#google-oauth-drive-calendar-and-gmail)
 - [Send Mail](#send-mail)
 - [Termux](#termux)
@@ -1719,6 +1721,16 @@ cognitive_metrics:
   db_path: "~/.captain-claw/cognitive_metrics.db"  # SQLite database path
   auto_snapshot_interval_hours: 24          # hours between automatic snapshots
   max_events: 10000                         # max events before pruning
+```
+
+### mcp_serve
+
+Settings for Captain Claw's MCP server mode (`captain-claw-mcp`). See [MCP Server](#mcp-server) for full usage details.
+
+```yaml
+mcp_serve:
+  enabled: true                               # enable MCP server
+  log_path: "~/.captain-claw/mcp_server.log"  # server log file path
 ```
 
 ---
@@ -4175,6 +4187,85 @@ web:
 ```
 
 Requests are proxied through the Captain Claw agent pool. Each API request gets its own agent context with full tool access.
+
+---
+
+## MCP Server
+
+Captain Claw can run as a Model Context Protocol (MCP) server over stdio, allowing external MCP clients — such as Claude Desktop — to interact with the agent. Clients can browse sessions, read conversation history, send messages to the agent, and check agent status.
+
+### Launch
+
+```bash
+captain-claw-mcp          # stdio mode (for MCP client config)
+```
+
+Or run directly with Python:
+
+```bash
+python -m captain_claw.mcp_serve
+```
+
+### Claude Desktop Integration
+
+Add to your `claude_desktop_config.json` (typically at `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+
+```json
+{
+  "mcpServers": {
+    "captain-claw": {
+      "command": "captain-claw-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+If `captain-claw-mcp` is not on your PATH (e.g. installed in a virtualenv), use the full path:
+
+```json
+{
+  "mcpServers": {
+    "captain-claw": {
+      "command": "/path/to/venv/bin/python",
+      "args": ["-m", "captain_claw.mcp_serve"]
+    }
+  }
+}
+```
+
+### Available Tools
+
+The MCP server exposes the following tools to clients:
+
+| Tool | Description |
+|---|---|
+| `sessions_list` | List recent sessions with IDs, names, timestamps, and message counts |
+| `session_get` | Get session details by ID or name (message count, role breakdown, metadata) |
+| `messages_read` | Read conversation messages with pagination (limit/offset) |
+| `message_send` | Send a message to the agent and get a response — the agent uses its full tool suite |
+| `session_create` | Create a new named session |
+| `agent_status` | Get model, provider, token usage, active session, and enabled tools |
+
+### How It Works
+
+- The server uses **stdio transport** with newline-delimited JSON-RPC 2.0, following the MCP specification.
+- The agent is **lazily initialized** on first `message_send` call, keeping the handshake fast.
+- All stderr output is redirected to a log file so it doesn't corrupt the JSON-RPC stream.
+- `message_send` runs the full Captain Claw agent loop — the agent can use all its tools (shell, web search, file ops, browser, etc.) to answer.
+- You can target a specific session with `message_send` to continue an existing conversation.
+
+### Configuration
+
+```yaml
+mcp_serve:
+  enabled: true
+  log_path: ~/.captain-claw/mcp_server.log
+```
+
+### Log File
+
+Server logs are written to `~/.captain-claw/mcp_server.log` (configurable via `mcp_serve.log_path`). Check this file for debugging connection issues.
 
 ---
 

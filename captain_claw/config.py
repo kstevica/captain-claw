@@ -916,6 +916,13 @@ class WebConfig(BaseModel):
     public_run: str = ""
 
 
+class MCPServeConfig(BaseModel):
+    """Configuration for Captain Claw's MCP server mode."""
+
+    enabled: bool = True
+    log_path: str = "~/.captain-claw/mcp_server.log"
+
+
 class ProviderKeysConfig(BaseModel):
     """Per-provider API keys managed from the settings UI."""
 
@@ -984,6 +991,7 @@ class Config(BaseSettings):
     cognitive_metrics: CognitiveMetricsConfig = Field(default_factory=CognitiveMetricsConfig)
     cognitive_tempo: CognitiveTempoConfig = Field(default_factory=CognitiveTempoConfig)
     cognitive_mode: CognitiveModeConfig = Field(default_factory=CognitiveModeConfig)
+    mcp_serve: MCPServeConfig = Field(default_factory=MCPServeConfig)
 
     model_config = SettingsConfigDict(
         env_prefix="CLAW_",

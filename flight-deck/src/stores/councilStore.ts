@@ -365,12 +365,20 @@ function extractContent(raw: string): string {
   text = text.replace(/^\[tool\]\s.*(?:\n(?:\s.*|\(score=.*|\n))*$/gm, '')
   text = text.replace(/^\[user\]\s*(?:COUNCIL ROUND|SUITABILITY).*$/gm, '')
 
+  // Strip lines where all three headers are on one line (with optional markdown bold)
+  text = text.replace(/^\**SUITABILITY:\**\s*[\d.]+\s+\**ACTION:\**\s*\w+\s+\**TARGET:\**\s*.+$/gmi, '')
+  // Also handle two-header combos on one line
+  text = text.replace(/^\**SUITABILITY:\**\s*[\d.]+\s+\**ACTION:\**\s*\w+\s*$/gmi, '')
+
   // Find the last header line (TARGET is always last in the SUITABILITY/ACTION/TARGET block)
   const lines = text.split('\n')
   let lastHeaderIdx = -1
 
+  // Strip markdown bold/italic markers for header detection
+  const stripMd = (s: string) => s.replace(/\*{1,2}|_{1,2}/g, '')
+
   for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim()
+    const trimmed = stripMd(lines[i].trim())
     if (/^SUITABILITY:\s*[\d.]/i.test(trimmed)) lastHeaderIdx = i
     if (/^ACTION:\s*(answer|respond|challenge|refine|broaden|pass)/i.test(trimmed)) lastHeaderIdx = i
     if (/^TARGET:\s*.+/i.test(trimmed)) lastHeaderIdx = i
@@ -389,10 +397,12 @@ function extractContent(raw: string): string {
   const cleaned = content.split('\n').filter(line => {
     const t = line.trim()
     if (!t) return true  // preserve blank lines for formatting
-    // Residual header lines
-    if (/^SUITABILITY:\s*[\d.]/i.test(t)) return false
-    if (/^ACTION:\s*(answer|respond|challenge|refine|broaden|pass)\s*$/i.test(t)) return false
-    if (/^TARGET:\s*.+$/i.test(t)) return false
+    // Strip markdown bold/italic for matching
+    const tb = t.replace(/\*{1,2}|_{1,2}/g, '')
+    // Residual header lines (single or combined on one line)
+    if (/^SUITABILITY:\s*[\d.]/i.test(tb)) return false
+    if (/^ACTION:\s*(answer|respond|challenge|refine|broaden|pass)/i.test(tb)) return false
+    if (/^TARGET:\s*.+$/i.test(tb)) return false
     // Memory retrieval
     if (/^\[session\]\s/i.test(t) || /^\[tool\]\s/i.test(t)) return false
     if (/^\(score=[\d.]+\)/.test(t)) return false
@@ -426,14 +436,16 @@ function parseAgentResponse(raw: string): ParsedResponse {
 
   // Strip thinking blocks first so headers inside them don't confuse parsing
   const stripped = stripThinkingBlocks(raw)
+  // Also strip markdown bold/italic so **SUITABILITY:** etc. are matched
+  const plain = stripped.replace(/\*{1,2}|_{1,2}/g, '')
 
-  const suitMatch = stripped.match(/^SUITABILITY:\s*([\d.]+)/mi)
+  const suitMatch = plain.match(/^SUITABILITY:\s*([\d.]+)/mi)
   if (suitMatch) suitability = Math.max(0, Math.min(1, parseFloat(suitMatch[1]) || 0.5))
 
-  const actionMatch = stripped.match(/^ACTION:\s*(answer|respond|challenge|refine|broaden|pass)/mi)
+  const actionMatch = plain.match(/^ACTION:\s*(answer|respond|challenge|refine|broaden|pass)/mi)
   if (actionMatch) action = actionMatch[1] as AgentAction
 
-  const targetMatch = stripped.match(/^TARGET:\s*(.+)/mi)
+  const targetMatch = plain.match(/^TARGET:\s*(.+)/mi)
   if (targetMatch) targetAgent = targetMatch[1].trim()
 
   const content = extractContent(raw)
@@ -526,11 +538,15 @@ function buildTurnPrompt(
 }
 
 function buildModeratorSelectPrompt(
-  scores: { name: string; score: number; spoken: boolean }[],
+  scores: { name: string; score: number; spoken: boolean; spokeLastPrevRound?: boolean }[],
   recentMessages: CouncilMessage[],
 ): string {
   const agentScores = scores
-    .map(s => `- ${s.name}: suitability=${s.score.toFixed(2)}, spoken=${s.spoken ? 'yes' : 'no'}`)
+    .map(s => {
+      let line = `- ${s.name}: suitability=${s.score.toFixed(2)}, spoken=${s.spoken ? 'yes' : 'no'}`
+      if (s.spokeLastPrevRound) line += ' (spoke last in previous round — do NOT pick first)'
+      return line
+    })
     .join('\n')
   const recentDiscussion = recentMessages
     .slice(-3)
@@ -1686,6 +1702,18 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       (scores.get(b.id) || 0.5) - (scores.get(a.id) || 0.5),
     )
 
+    // Ensure the last speaker from the previous round doesn't go first
+    if (round > 1 && sorted.length > 1) {
+      const prevRoundMsgs = s.messages.filter(m => m.round === round - 1 && m.role === 'agent')
+      const lastSpeakerId = prevRoundMsgs.length > 0
+        ? prevRoundMsgs[prevRoundMsgs.length - 1].agentId
+        : null
+      if (lastSpeakerId && sorted[0]?.id === lastSpeakerId) {
+        const [first, ...rest] = sorted
+        sorted.splice(0, sorted.length, ...rest, first)
+      }
+    }
+
     for (const agent of sorted) {
       const currentSession = get().activeSession
       if (!currentSession || currentSession.status !== 'active') break
@@ -1716,6 +1744,15 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     const totalNonMod = s.agents.filter(a => a.id !== s.moderatorAgentId && !a.muted).length
     const spokenThisRound = new Set<string>()
 
+    // Find last speaker from previous round to avoid picking them first
+    let lastSpeakerPrevRound: string | null = null
+    if (round > 1) {
+      const prevRoundMsgs = s.messages.filter(m => m.round === round - 1 && m.role === 'agent')
+      if (prevRoundMsgs.length > 0) {
+        lastSpeakerPrevRound = prevRoundMsgs[prevRoundMsgs.length - 1].agentId
+      }
+    }
+
     // Let moderator manage turns until all agents have spoken
     for (let turn = 0; turn < totalNonMod; turn++) {
       const currentSession = get().activeSession
@@ -1731,6 +1768,7 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
           name: a.name,
           score: scores.get(a.id) || 0.5,
           spoken: spokenThisRound.has(a.id),
+          spokeLastPrevRound: turn === 0 && a.id === lastSpeakerPrevRound,
         }))
 
       const contextMsgs = collectContextMessages(

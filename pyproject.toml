@@ -91,6 +91,7 @@ captain-claw = "captain_claw.main:main"
 captain-claw-web = "captain_claw.web_server:main"
 captain-claw-orchestrate = "captain_claw.orchestrator_cli:cli_orchestrate"
 captain-claw-fd = "captain_claw.flight_deck.server:main"
+captain-claw-mcp = "captain_claw.mcp_serve:main"
 botport = "botport.server:main"
 
 [build-system]
