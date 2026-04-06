@@ -94,6 +94,11 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   const [editingFwdTask, setEditingFwdTask] = useState(false)
   const [fwdTaskDraft, setFwdTaskDraft] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>(() => loadViewModes()[proc.slug] || 'expanded')
+  useEffect(() => {
+    const handler = () => setViewMode(loadViewModes()[proc.slug] || 'expanded')
+    window.addEventListener('fd:bulk-view-change', handler)
+    return () => window.removeEventListener('fd:bulk-view-change', handler)
+  }, [proc.slug])
   const [showConfig, setShowConfig] = useState(false)
   const [showDatastore, setShowDatastore] = useState(false)
   const cognitiveMode = getCognitiveMode(proc.slug)

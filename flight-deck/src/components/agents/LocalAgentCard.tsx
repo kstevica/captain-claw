@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { MessageSquare, Trash2, RefreshCw, Cpu, Loader2, FolderOpen, Pencil, Check, X, Minimize2, Maximize2 } from 'lucide-react'
 import type { LocalAgent } from '../../stores/localAgentStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
@@ -48,6 +48,11 @@ export function LocalAgentCard({ agent, onBrowseFiles, onDragStart, isDragging }
   const [editingFwdTask, setEditingFwdTask] = useState(false)
   const [fwdTaskDraft, setFwdTaskDraft] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>(() => loadViewModes()[agent.id] || 'expanded')
+  useEffect(() => {
+    const handler = () => setViewMode(loadViewModes()[agent.id] || 'expanded')
+    window.addEventListener('fd:bulk-view-change', handler)
+    return () => window.removeEventListener('fd:bulk-view-change', handler)
+  }, [agent.id])
 
   const toggleViewMode = () => {
     const next = cycleMode(viewMode)

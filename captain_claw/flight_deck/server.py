@@ -886,20 +886,22 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
 
 @app.post("/fd/containers/{container_id}/stop", response_model=ContainerActionResult)
 async def stop_container(container_id: str, request: Request, user: dict | None = _required_user_dep):
+    import asyncio
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
     if c.status != "running":
         return ContainerActionResult(ok=True, container_id=c.short_id, message="Already stopped")
-    c.stop(timeout=5)
+    await asyncio.get_event_loop().run_in_executor(None, lambda: c.stop(timeout=5))
     return ContainerActionResult(ok=True, container_id=c.short_id, message="Stopped")
 
 
 @app.post("/fd/containers/{container_id}/start", response_model=ContainerActionResult)
 async def start_container(container_id: str, request: Request, user: dict | None = _required_user_dep):
+    import asyncio
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
     if c.status == "running":
         return ContainerActionResult(ok=True, container_id=c.short_id, message="Already running")
     try:
-        c.start()
+        await asyncio.get_event_loop().run_in_executor(None, c.start)
     except docker.errors.APIError as exc:
         explanation = exc.explanation or str(exc)
         raise HTTPException(500, f"Docker start failed: {explanation}")
@@ -908,16 +910,18 @@ async def start_container(container_id: str, request: Request, user: dict | None
 
 @app.post("/fd/containers/{container_id}/restart", response_model=ContainerActionResult)
 async def restart_container(container_id: str, request: Request, user: dict | None = _required_user_dep):
+    import asyncio
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
-    c.restart(timeout=5)
+    await asyncio.get_event_loop().run_in_executor(None, lambda: c.restart(timeout=5))
     return ContainerActionResult(ok=True, container_id=c.short_id, message="Restarted")
 
 
 @app.delete("/fd/containers/{container_id}", response_model=ContainerActionResult)
 async def remove_container(container_id: str, force: bool = False, request: Request = None, user: dict | None = _required_user_dep):
+    import asyncio
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
     name = c.name
-    c.remove(force=force)
+    await asyncio.get_event_loop().run_in_executor(None, lambda: c.remove(force=force))
     return ContainerActionResult(ok=True, container_id=container_id, message=f"Removed '{name}'")
 
 
@@ -2626,14 +2630,16 @@ def _do_start_process(slug: str) -> ProcessActionResult:
 async def stop_process(slug: str, request: Request, user: dict | None = _required_user_dep):
     """Stop a running process agent."""
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
-    return _do_stop_process(slug)
+    import asyncio
+    return await asyncio.get_event_loop().run_in_executor(None, _do_stop_process, slug)
 
 
 @app.post("/fd/processes/{slug}/start", response_model=ProcessActionResult)
 async def start_process(slug: str, request: Request, user: dict | None = _required_user_dep):
     """Start a stopped process agent."""
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
-    return _do_start_process(slug)
+    import asyncio
+    return await asyncio.get_event_loop().run_in_executor(None, _do_start_process, slug)
 
 
 @app.post("/fd/processes/{slug}/restart", response_model=ProcessActionResult)

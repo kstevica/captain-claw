@@ -105,6 +105,11 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   const [editingFwdTask, setEditingFwdTask] = useState(false)
   const [fwdTaskDraft, setFwdTaskDraft] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>(() => loadViewModes()[container.id] || 'expanded')
+  useEffect(() => {
+    const handler = () => setViewMode(loadViewModes()[container.id] || 'expanded')
+    window.addEventListener('fd:bulk-view-change', handler)
+    return () => window.removeEventListener('fd:bulk-view-change', handler)
+  }, [container.id])
   const [showConfig, setShowConfig] = useState(false)
   const [showDatastore, setShowDatastore] = useState(false)
   const cognitiveMode = getCognitiveMode(container.id)

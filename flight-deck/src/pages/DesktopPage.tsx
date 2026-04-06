@@ -9,8 +9,8 @@ import { ContainerCard } from '../components/agents/ContainerCard'
 import { LocalAgentCard } from '../components/agents/LocalAgentCard'
 import { ProcessCard } from '../components/agents/ProcessCard'
 import { FileBrowser } from '../components/agents/FileBrowser'
-import { Radio, Plus, Server, LayoutGrid, Move, Zap, X } from 'lucide-react'
-import { spawnOldMan } from '../services/docker'
+import { Radio, Plus, Server, LayoutGrid, Move, Zap, X, ChevronDown, Minimize2, Square, Play, Shuffle, Trash2 } from 'lucide-react'
+import { spawnOldMan, stopContainer as apiStopContainer, startContainer as apiStartContainer, stopProcess as apiStopProcess, startProcess as apiStartProcess, removeContainer as apiRemoveContainer, removeProcess as apiRemoveProcess } from '../services/docker'
 import type { AgentEndpoint } from '../services/fileTransfer'
 import { useGroupStore } from '../stores/groupStore'
 import { useAuthStore } from '../stores/authStore'
@@ -78,10 +78,12 @@ function autoPosition(index: number, containerWidth: number): Position {
 export function DesktopPage() {
   const { instances, concerns, selectedInstanceId, selectInstance } = useAgentStore()
   const { containers, fetchContainers, dockerAvailable, checkHealth } = useContainerStore()
-  const { agents: localAgents, addAgent, probeAll } = useLocalAgentStore()
+  const { agents: localAgents, addAgent, removeAgent, probeAll } = useLocalAgentStore()
   const { processes, fetchProcesses } = useProcessStore()
   const selectedInstance = instances.find((i) => i.id === selectedInstanceId)
   const [showAddAgent, setShowAddAgent] = useState(false)
+  const [showBulkMenu, setShowBulkMenu] = useState(false)
+  const bulkMenuRef = useRef<HTMLDivElement>(null)
   const [showOldManWizard, setShowOldManWizard] = useState(false)
   const [browsingAgent, setBrowsingAgent] = useState<AgentEndpoint | null>(null)
   const [positions, setPositions] = useState<Record<string, Position>>(loadPositions)
@@ -130,6 +132,18 @@ export function DesktopPage() {
     return () => clearInterval(interval)
   }, [checkHealth, fetchContainers, fetchProcesses, probeAll])
 
+  // Close bulk menu on outside click
+  useEffect(() => {
+    if (!showBulkMenu) return
+    const handler = (e: MouseEvent) => {
+      if (bulkMenuRef.current && !bulkMenuRef.current.contains(e.target as Node)) setShowBulkMenu(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showBulkMenu])
+
+  // ── Bulk actions ──
+
   // Build unified agent list (with optional group filter)
   const unifiedAgents: UnifiedAgent[] = useMemo(() => {
     const all: UnifiedAgent[] = [
@@ -142,6 +156,98 @@ export function DesktopPage() {
     if (!group) return all
     return all.filter((a) => group.agentIds.includes(a.id))
   }, [containers, processes, localAgents, groupFilter, groups])
+
+  // ── Bulk actions (scoped to currently filtered agents) ──
+
+  const _refresh = useCallback(() => { fetchContainers(); fetchProcesses() }, [fetchContainers, fetchProcesses])
+
+  // Get filtered agents by kind from unifiedAgents
+  const _scoped = useCallback(() => {
+    const ids = new Set(unifiedAgents.map(a => a.id))
+    const curContainers = useContainerStore.getState().containers.filter(c => ids.has(c.id))
+    const curProcesses = useProcessStore.getState().processes.filter(p => ids.has(`proc-${p.slug}`))
+    const curLocal = useLocalAgentStore.getState().agents.filter(a => ids.has(a.id))
+    return { curContainers, curProcesses, curLocal }
+  }, [unifiedAgents])
+
+  const _label = groupFilter ? ' filtered' : ''
+
+  const bulkMinimizeAll = useCallback(() => {
+    setShowBulkMenu(false)
+    const { curContainers, curProcesses, curLocal } = _scoped()
+
+    // Merge with existing view modes (don't overwrite unfiltered agents)
+    for (const [key, ids] of [
+      ['fd:container-view', curContainers.map(c => c.id)],
+      ['fd:process-view', curProcesses.map(p => p.slug)],
+      ['fd:local-agent-view', curLocal.map(a => a.id)],
+    ] as const) {
+      const existing: Record<string, string> = (() => { try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} } })()
+      for (const id of ids) existing[id] = 'icon'
+      const val = JSON.stringify(existing)
+      localStorage.setItem(key, val)
+      if (useAuthStore.getState().authEnabled) queueSave(key, val)
+    }
+    window.dispatchEvent(new CustomEvent('fd:bulk-view-change'))
+  }, [_scoped])
+
+  const bulkStopAll = useCallback(() => {
+    setShowBulkMenu(false)
+    const { curContainers, curProcesses } = _scoped()
+    const running = curContainers.filter(c => c.status === 'running')
+    const runningProcs = curProcesses.filter(p => p.status === 'running')
+    const total = running.length + runningProcs.length
+    if (total === 0) return
+    if (!confirm(`Stop ${total}${_label} running agent${total !== 1 ? 's' : ''}?`)) return
+    running.forEach(c => apiStopContainer(c.id).then(_refresh, _refresh))
+    runningProcs.forEach(p => apiStopProcess(p.slug).then(_refresh, _refresh))
+  }, [_scoped, _refresh, _label])
+
+  const bulkStartAll = useCallback(() => {
+    setShowBulkMenu(false)
+    const { curContainers, curProcesses } = _scoped()
+    const stopped = curContainers.filter(c => c.status !== 'running')
+    const stoppedProcs = curProcesses.filter(p => p.status !== 'running')
+    const total = stopped.length + stoppedProcs.length
+    if (total === 0) return
+    if (!confirm(`Start ${total}${_label} stopped agent${total !== 1 ? 's' : ''}?`)) return
+    stopped.forEach(c => apiStartContainer(c.id).then(_refresh, _refresh))
+    stoppedProcs.forEach(p => apiStartProcess(p.slug).then(_refresh, _refresh))
+  }, [_scoped, _refresh, _label])
+
+  const bulkInverseAll = useCallback(() => {
+    setShowBulkMenu(false)
+    const { curContainers, curProcesses } = _scoped()
+    const toStop = curContainers.filter(c => c.status === 'running')
+    const toStopProcs = curProcesses.filter(p => p.status === 'running')
+    const toStart = curContainers.filter(c => c.status !== 'running')
+    const toStartProcs = curProcesses.filter(p => p.status !== 'running')
+    const total = toStop.length + toStopProcs.length + toStart.length + toStartProcs.length
+    if (total === 0) return
+    if (!confirm(`Inverse${_label} agents? Will stop ${toStop.length + toStopProcs.length} and start ${toStart.length + toStartProcs.length}.`)) return
+    toStop.forEach(c => apiStopContainer(c.id).then(_refresh, _refresh))
+    toStopProcs.forEach(p => apiStopProcess(p.slug).then(_refresh, _refresh))
+    toStart.forEach(c => apiStartContainer(c.id).then(_refresh, _refresh))
+    toStartProcs.forEach(p => apiStartProcess(p.slug).then(_refresh, _refresh))
+  }, [_scoped, _refresh, _label])
+
+  const bulkRemoveAll = useCallback(() => {
+    setShowBulkMenu(false)
+    const { curContainers, curProcesses, curLocal } = _scoped()
+    const total = curContainers.length + curProcesses.length + curLocal.length
+    if (total === 0) return
+    if (!confirm(`Remove ${total}${_label} agent${total !== 1 ? 's' : ''}? This cannot be undone.`)) return
+    if (!confirm(`Are you sure? This will permanently remove ${total} agents.`)) return
+    curContainers.forEach(c => {
+      const p = c.status === 'running' ? apiStopContainer(c.id) : Promise.resolve()
+      p.then(() => apiRemoveContainer(c.id)).then(_refresh, _refresh)
+    })
+    curProcesses.forEach(p => {
+      const q = p.status === 'running' ? apiStopProcess(p.slug) : Promise.resolve()
+      q.then(() => apiRemoveProcess(p.slug)).then(_refresh, _refresh)
+    })
+    for (const a of curLocal) removeAgent(a.id)
+  }, [_scoped, _refresh, _label, removeAgent])
 
   // Assign initial positions for new agents
   useEffect(() => {
@@ -342,13 +448,46 @@ export function DesktopPage() {
               <Server className="h-3.5 w-3.5" />
               Agents ({agentCount})
             </div>
-            <button
-              onClick={() => setShowAddAgent(!showAddAgent)}
-              className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              Add Local Agent
-            </button>
+            <div className="relative" ref={bulkMenuRef}>
+              <button
+                onClick={() => setShowBulkMenu(!showBulkMenu)}
+                className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+              >
+                Actions
+                <ChevronDown className="h-3 w-3" />
+              </button>
+              {showBulkMenu && (
+                <div className="absolute right-0 z-50 mt-1 w-52 rounded-md border border-zinc-700 bg-zinc-900 py-1 shadow-lg"
+                >
+                  <button onClick={bulkMinimizeAll}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-700/50">
+                    <Minimize2 className="h-3.5 w-3.5" /> Minimize all agents
+                  </button>
+                  <button onClick={bulkStopAll}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-700/50">
+                    <Square className="h-3.5 w-3.5" /> Stop all agents
+                  </button>
+                  <button onClick={bulkStartAll}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-700/50">
+                    <Play className="h-3.5 w-3.5" /> Start all agents
+                  </button>
+                  <button onClick={bulkInverseAll}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-700/50">
+                    <Shuffle className="h-3.5 w-3.5" /> Inverse started agents
+                  </button>
+                  <div className="my-1 border-t border-zinc-700/50" />
+                  <button onClick={() => { setShowBulkMenu(false); setShowAddAgent(!showAddAgent) }}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-700/50">
+                    <Plus className="h-3.5 w-3.5" /> Add Local Agent
+                  </button>
+                  <div className="my-1 border-t border-zinc-700/50" />
+                  <button onClick={bulkRemoveAll}
+                    className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-red-400 hover:bg-zinc-700/50">
+                    <Trash2 className="h-3.5 w-3.5" /> Remove all agents
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
           {showAddAgent && (

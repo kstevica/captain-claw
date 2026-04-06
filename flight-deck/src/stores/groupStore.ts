@@ -2,10 +2,13 @@ import { create } from 'zustand'
 import { queueSave, registerHydrator } from '../services/settingsSync'
 import { useAuthStore } from './authStore'
 
+export type GroupType = 'group' | 'role'
+
 export interface AgentGroup {
   id: string
   name: string
   color: string
+  type: GroupType
   agentIds: string[]
 }
 
@@ -13,7 +16,11 @@ const STORAGE_KEY = 'fd:agent-groups'
 const COLORS = ['violet', 'blue', 'emerald', 'amber', 'pink', 'cyan', 'red', 'indigo']
 
 function load(): AgentGroup[] {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]') } catch { return [] }
+  try {
+    const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]') as AgentGroup[]
+    // Migrate: default type to 'group' for existing entries
+    return raw.map(g => ({ ...g, type: g.type || 'group' }))
+  } catch { return [] }
 }
 function save(groups: AgentGroup[]) {
   const val = JSON.stringify(groups)
@@ -26,7 +33,7 @@ function save(groups: AgentGroup[]) {
 
 interface GroupStore {
   groups: AgentGroup[]
-  createGroup: (name: string) => string
+  createGroup: (name: string, type?: GroupType) => string
   deleteGroup: (id: string) => void
   renameGroup: (id: string, name: string) => void
   addToGroup: (groupId: string, agentId: string) => void
@@ -37,10 +44,10 @@ interface GroupStore {
 export const useGroupStore = create<GroupStore>((set, get) => ({
   groups: load(),
 
-  createGroup: (name) => {
+  createGroup: (name, type = 'group') => {
     const id = `grp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     const color = COLORS[get().groups.length % COLORS.length]
-    const group: AgentGroup = { id, name, color, agentIds: [] }
+    const group: AgentGroup = { id, name, color, type, agentIds: [] }
     const groups = [...get().groups, group]
     save(groups)
     set({ groups })
