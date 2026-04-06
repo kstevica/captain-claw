@@ -25,6 +25,7 @@ import {
   ArrowDown,
   Edit3,
   Box,
+  Cpu,
   Settings2 as Cog,
   X,
   ChevronDown,
@@ -34,6 +35,7 @@ import {
 import { useWorkflowStore } from '../stores/workflowStore'
 import { usePipelineStore, type Pipeline, type PipelineStep } from '../stores/pipelineStore'
 import { useContainerStore } from '../stores/containerStore'
+import { useProcessStore } from '../stores/processStore'
 import { useLocalAgentStore } from '../stores/localAgentStore'
 import { TaskNode } from '../components/workflow/TaskNode'
 import { StatusBadge } from '../components/common/StatusBadge'
@@ -79,6 +81,7 @@ function TabButton({ active, onClick, icon: Icon, label }: { active: boolean; on
 function PipelinesTab() {
   const { pipelines, createPipeline, deletePipeline, updatePipeline, addStep, removeStep, updateStep } = usePipelineStore()
   const containers = useContainerStore((s) => s.containers)
+  const processes = useProcessStore((s) => s.processes)
   const localAgents = useLocalAgentStore((s) => s.agents)
 
   const [newName, setNewName] = useState('')
@@ -87,6 +90,9 @@ function PipelinesTab() {
   const allAgents = [
     ...containers.filter((c) => c.web_port).map((c) => ({
       id: c.id, name: c.agent_name || c.name, kind: 'docker' as const,
+    })),
+    ...processes.filter((p) => p.web_port).map((p) => ({
+      id: p.slug, name: p.name, kind: 'process' as const,
     })),
     ...localAgents.map((a) => ({ id: a.id, name: a.name, kind: 'local' as const })),
   ]
@@ -188,7 +194,7 @@ function PipelineCard({
   onAddStep: (step: PipelineStep) => void
   onRemoveStep: (idx: number) => void
   onUpdateStep: (idx: number, patch: Partial<PipelineStep>) => void
-  allAgents: { id: string; name: string; kind: 'docker' | 'local' }[]
+  allAgents: { id: string; name: string; kind: 'docker' | 'process' | 'local' }[]
   agentName: (id: string) => string
   agentKind: (id: string) => string
 }) {
@@ -243,7 +249,9 @@ function PipelineCard({
                   <span className={`rounded px-1.5 py-0.5 ${
                     agentKind(s.agentId) === 'docker'
                       ? 'bg-blue-500/10 text-blue-400'
-                      : 'bg-amber-500/10 text-amber-400'
+                      : agentKind(s.agentId) === 'process'
+                        ? 'bg-emerald-500/10 text-emerald-400'
+                        : 'bg-amber-500/10 text-amber-400'
                   }`}>
                     {agentName(s.agentId)}
                   </span>
@@ -301,7 +309,9 @@ function PipelineCard({
                     <div className={`flex h-7 w-7 items-center justify-center rounded-full text-[11px] font-bold ${
                       agentKind(step.agentId) === 'docker'
                         ? 'bg-blue-500/15 text-blue-400 ring-1 ring-blue-500/20'
-                        : 'bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/20'
+                        : agentKind(step.agentId) === 'process'
+                          ? 'bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/20'
+                          : 'bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/20'
                     }`}>
                       {i + 1}
                     </div>
@@ -311,12 +321,16 @@ function PipelineCard({
                       <div className="flex items-center gap-1.5">
                         {agentKind(step.agentId) === 'docker'
                           ? <Box className="h-3.5 w-3.5 text-blue-400/70" />
-                          : <Cog className="h-3.5 w-3.5 text-amber-400/70" />}
+                          : agentKind(step.agentId) === 'process'
+                            ? <Cpu className="h-3.5 w-3.5 text-emerald-400/70" />
+                            : <Cog className="h-3.5 w-3.5 text-amber-400/70" />}
                         <span className="text-sm font-medium text-zinc-200">{agentName(step.agentId)}</span>
                         <span className={`text-[10px] rounded px-1 py-0.5 ${
                           agentKind(step.agentId) === 'docker'
                             ? 'bg-blue-500/10 text-blue-400/70'
-                            : 'bg-amber-500/10 text-amber-400/70'
+                            : agentKind(step.agentId) === 'process'
+                              ? 'bg-emerald-500/10 text-emerald-400/70'
+                              : 'bg-amber-500/10 text-amber-400/70'
                         }`}>
                           {agentKind(step.agentId)}
                         </span>
@@ -406,7 +420,9 @@ function PipelineCard({
                     >
                       {a.kind === 'docker'
                         ? <Box className="h-3 w-3 text-blue-400/70" />
-                        : <Cog className="h-3 w-3 text-amber-400/70" />}
+                        : a.kind === 'process'
+                          ? <Cpu className="h-3 w-3 text-emerald-400/70" />
+                          : <Cog className="h-3 w-3 text-amber-400/70" />}
                       {a.name}
                     </button>
                   ))}

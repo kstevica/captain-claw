@@ -9,10 +9,12 @@ import { ContainerCard } from '../components/agents/ContainerCard'
 import { LocalAgentCard } from '../components/agents/LocalAgentCard'
 import { ProcessCard } from '../components/agents/ProcessCard'
 import { FileBrowser } from '../components/agents/FileBrowser'
-import { Radio, Plus, Server, LayoutGrid, Move, Zap, X, ChevronDown, Minimize2, Square, Play, Shuffle, Trash2 } from 'lucide-react'
+import { Radio, Plus, Server, LayoutGrid, Move, Zap, X, ChevronDown, Minimize2, Square, Play, Shuffle, Trash2, Wand2, Users, CheckCircle2 } from 'lucide-react'
 import { spawnOldMan, stopContainer as apiStopContainer, startContainer as apiStartContainer, stopProcess as apiStopProcess, startProcess as apiStartProcess, removeContainer as apiRemoveContainer, removeProcess as apiRemoveProcess } from '../services/docker'
 import type { AgentEndpoint } from '../services/fileTransfer'
 import { useGroupStore } from '../stores/groupStore'
+import { useOnboardingStore } from '../stores/onboardingStore'
+import { useUIStore } from '../stores/uiStore'
 import { useAuthStore } from '../stores/authStore'
 import { GroupFilter } from '../components/common/AgentGroups'
 import { queueSave, registerHydrator } from '../services/settingsSync'
@@ -80,7 +82,9 @@ export function DesktopPage() {
   const { containers, fetchContainers, dockerAvailable, checkHealth } = useContainerStore()
   const { agents: localAgents, addAgent, removeAgent, probeAll } = useLocalAgentStore()
   const { processes, fetchProcesses } = useProcessStore()
+  const setView = useUIStore((s) => s.setView)
   const selectedInstance = instances.find((i) => i.id === selectedInstanceId)
+  const onboarding = useOnboardingStore()
   const [showAddAgent, setShowAddAgent] = useState(false)
   const [showBulkMenu, setShowBulkMenu] = useState(false)
   const bulkMenuRef = useRef<HTMLDivElement>(null)
@@ -327,6 +331,11 @@ export function DesktopPage() {
   const hasContent = instances.length > 0 || containers.length > 0 || processes.length > 0 || localAgents.length > 0
   const agentCount = containers.length + processes.length + localAgents.length
 
+  // Auto-complete desktop onboarding when agents exist
+  useEffect(() => {
+    if (hasContent && !onboarding.completed.desktop) onboarding.completeStep('desktop')
+  }, [hasContent]) // eslint-disable-line react-hooks/exhaustive-deps
+
   // Check if Old Man is already in the fleet
   const hasOldMan = containers.some((c) => (c.agent_name || c.name || '').toLowerCase().includes('old-man') || (c.agent_name || c.name || '').toLowerCase().includes('old man'))
     || processes.some((p) => (p.name || p.slug || '').toLowerCase().includes('old-man') || (p.name || p.slug || '').toLowerCase().includes('old man'))
@@ -545,7 +554,60 @@ export function DesktopPage() {
           )}
         </div>
 
-        {!hasContent && <OldManOnboarding onSpawned={() => { fetchContainers(); fetchProcesses() }} />}
+        {!hasContent && (
+          <>
+            {/* Welcome guide for new users */}
+            {!onboarding.completed.desktop && (
+              <div className="mb-6 rounded-xl border border-zinc-800 bg-zinc-900/50 p-6">
+                <h2 className="mb-1 text-lg font-semibold text-zinc-200">Welcome to Flight Deck</h2>
+                <p className="mb-5 text-sm text-zinc-500">Get started in three steps to unlock the full power of your AI agent fleet.</p>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                  {[
+                    { step: 'desktop' as const, icon: Zap, label: '1. Launch your first agent', desc: 'Spawn an AI agent with a single click. It will be ready to chat, execute tasks, and collaborate with other agents.', action: undefined },
+                    { step: 'forge' as const, icon: Wand2, label: '2. Build a team with Forge', desc: 'Describe a business objective and let AI design a specialized team of agents with roles, tools, and instructions.', action: () => setView('forge') },
+                    { step: 'council' as const, icon: Users, label: '3. Run a Council session', desc: 'Have your agents discuss topics, debate ideas, or review work together in moderated multi-round sessions.', action: () => setView('council') },
+                  ].map(({ step, icon: StepIcon, label, desc, action }) => (
+                    <button
+                      key={step}
+                      onClick={action}
+                      disabled={!action}
+                      className={`rounded-lg border p-4 text-left transition-colors ${
+                        onboarding.completed[step]
+                          ? 'border-emerald-500/20 bg-emerald-500/5'
+                          : step === 'desktop'
+                            ? 'border-violet-500/30 bg-violet-500/10'
+                            : 'border-zinc-800 hover:border-zinc-700 hover:bg-zinc-800/50'
+                      } ${!action ? 'cursor-default' : ''}`}
+                    >
+                      <div className="mb-2 flex items-center gap-2">
+                        {onboarding.completed[step]
+                          ? <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                          : <StepIcon className={`h-4 w-4 ${step === 'desktop' ? 'text-violet-400' : 'text-zinc-500'}`} />
+                        }
+                        <span className={`text-sm font-medium ${onboarding.completed[step] ? 'text-emerald-300' : 'text-zinc-200'}`}>{label}</span>
+                      </div>
+                      <p className="text-xs leading-relaxed text-zinc-500">{desc}</p>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            <OldManOnboarding onSpawned={() => { fetchContainers(); fetchProcesses() }} />
+          </>
+        )}
+
+        {/* Next steps banner for users who just spawned their first agent */}
+        {hasContent && !onboarding.completed.forge && !onboarding.isHintDismissed('desktop-next') && (
+          <div className="mb-4 flex items-center gap-3 rounded-lg border border-violet-500/20 bg-violet-500/5 px-4 py-3">
+            <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+            <span className="flex-1 text-xs text-zinc-300">
+              Agent running! Next: <button onClick={() => setView('forge')} className="font-medium text-violet-400 hover:underline">build a team with Agent Forge</button> or <button onClick={() => setView('council')} className="font-medium text-violet-400 hover:underline">run a Council session</button>.
+            </span>
+            <button onClick={() => onboarding.dismissHint('desktop-next')} className="rounded p-0.5 text-zinc-500 hover:text-zinc-300">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Detail panel */}

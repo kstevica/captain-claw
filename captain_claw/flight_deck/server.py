@@ -233,7 +233,12 @@ def _reattach_processes():
     """On startup, check registered processes and restart any that were running."""
     registry = _load_process_registry()
     restarted = []
+    skipped = []
     for slug, entry in registry.items():
+        # Skip agents that were intentionally stopped by the user
+        if entry.get("stopped"):
+            skipped.append(slug)
+            continue
         pid = entry.get("pid")
         if pid:
             try:
@@ -250,6 +255,8 @@ def _reattach_processes():
     _save_process_registry(registry)
     if restarted:
         print(f"Flight Deck: restarted {len(restarted)} process agent(s): {', '.join(restarted)}")
+    if skipped:
+        print(f"Flight Deck: skipped {len(skipped)} stopped process agent(s): {', '.join(skipped)}")
 
 
 # ── App ──
@@ -2596,9 +2603,10 @@ def _do_stop_process(slug: str) -> ProcessActionResult:
     if pid:
         _kill_pid(pid)
 
-    # Update registry
+    # Update registry — mark as intentionally stopped
     if slug in registry:
         registry[slug]["pid"] = None
+        registry[slug]["stopped"] = True
         _save_process_registry(registry)
 
     _processes.pop(slug, None)
@@ -2617,6 +2625,9 @@ def _do_start_process(slug: str) -> ProcessActionResult:
 
     if not (DATA_DIR / slug).is_dir():
         raise HTTPException(404, f"Agent directory not found: {DATA_DIR / slug}")
+
+    # Clear stopped flag — user is intentionally starting this agent
+    entry.pop("stopped", None)
 
     if not _start_registered_process(slug, entry):
         raise HTTPException(500, "Failed to start process (captain-claw-web not found?)")

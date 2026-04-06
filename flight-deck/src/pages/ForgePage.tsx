@@ -5,6 +5,8 @@ import { useContainerStore } from '../stores/containerStore'
 import { useProcessStore } from '../stores/processStore'
 import { useGroupStore } from '../stores/groupStore'
 import { useUIStore } from '../stores/uiStore'
+import { useOnboardingStore } from '../stores/onboardingStore'
+import { HelpHint } from '../components/common/HelpHint'
 import { spawnAgent, spawnProcess, type SpawnConfig } from '../services/docker'
 import { queueSave, registerHydrator } from '../services/settingsSync'
 import { refreshAccessToken } from '../stores/authStore'
@@ -142,6 +144,7 @@ export function ForgePage() {
   const { setDescription: setProcessDesc, setNameOverride: setProcessName } = useProcessStore()
   const { createGroup, addToGroup, groups } = useGroupStore()
   const { setView } = useUIStore()
+  const onboarding = useOnboardingStore()
 
   useEffect(() => {
     saveForgeConfig(llmConfig)
@@ -414,6 +417,28 @@ export function ForgePage() {
             )}
           </div>
 
+          {/* Forge intro for new users */}
+          <HelpHint id="forge-intro" banner>
+            <p className="mb-2 font-medium text-zinc-200">How Agent Forge works</p>
+            <p className="mb-2">Describe a business objective in plain English. The AI will design specialized agents with roles, tools, and instructions tailored to your goal. You can review and customize each agent before spawning the team.</p>
+            <p>Try one of these examples:</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {[
+                'Research competitors in the SaaS market and create a comparison report',
+                'Monitor social media mentions and draft weekly summary reports',
+                'Review a codebase, identify issues, and create documentation',
+              ].map((ex) => (
+                <button
+                  key={ex}
+                  onClick={() => setPrompt(ex)}
+                  className="fd-help-chip rounded-full border border-violet-500/30 bg-violet-500/10 px-3 py-1 text-[11px] text-violet-300 hover:bg-violet-500/20 transition-colors"
+                >
+                  {ex}
+                </button>
+              ))}
+            </div>
+          </HelpHint>
+
           {/* Prompt Input */}
           <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 space-y-3">
             <label className="block text-sm font-medium text-zinc-300">Describe your objective</label>
@@ -661,13 +686,21 @@ export function ForgePage() {
           {phase === 'done' && (
             <div className="flex items-center gap-3">
               <button
-                onClick={() => setView('desktop')}
+                onClick={() => { onboarding.completeStep('forge'); setView('desktop') }}
                 className="flex items-center gap-2 rounded-xl bg-violet-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-violet-500 transition-colors"
               >
                 Go to Agent Desktop
               </button>
+              {!onboarding.completed.council && (
+                <button
+                  onClick={() => { onboarding.completeStep('forge'); setView('council') }}
+                  className="flex items-center gap-2 rounded-xl border border-violet-500/30 bg-violet-500/10 px-4 py-2.5 text-sm font-medium text-violet-300 hover:bg-violet-500/20 transition-colors"
+                >
+                  Next: Run a Council Session
+                </button>
+              )}
               <button
-                onClick={() => { setPhase('input'); setAgents([]); setPrompt(''); setError('') }}
+                onClick={() => { onboarding.completeStep('forge'); setPhase('input'); setAgents([]); setPrompt(''); setError('') }}
                 className="flex items-center gap-2 rounded-xl border border-zinc-700 px-4 py-2.5 text-sm font-medium text-zinc-400 hover:bg-zinc-800 transition-colors"
               >
                 Forge Another Team

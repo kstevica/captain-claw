@@ -56,6 +56,7 @@ export function ChatPanel() {
     useChatStore()
   const localAgents = useLocalAgentStore((s) => s.agents)
   const containers = useContainerStore((s) => s.containers)
+  const processes = useProcessStore((s) => s.processes)
   const [showSendContext, setShowSendContext] = useState(false)
   const [showTracePanel, setShowTracePanel] = useState(false)
   const activeId = activeChatId || ''
@@ -72,6 +73,9 @@ export function ChatPanel() {
     ...containers
       .filter((c) => c.status === 'running' && c.web_port && c.id !== activeChatId)
       .map((c) => ({ id: c.id, name: c.agent_name || c.name, host: 'localhost', port: c.web_port!, auth: c.web_auth })),
+    ...processes
+      .filter((p) => p.status === 'running' && p.web_port && `proc-${p.slug}` !== activeChatId)
+      .map((p) => ({ id: `proc-${p.slug}`, name: p.name, host: 'localhost', port: p.web_port, auth: p.web_auth })),
     ...localAgents
       .filter((a) => a.status === 'online' && a.id !== activeChatId)
       .map((a) => ({ id: a.id, name: a.name, host: a.host, port: a.port, auth: a.authToken })),
@@ -617,31 +621,42 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
   const forwardTargets = useMemo(() => {
     const targets: { id: string; name: string; host: string; port: number; auth: string }[] = []
     for (const c of containers) {
-      if (c.status === 'running' && c.web_port) {
+      if (c.status === 'running' && c.web_port && c.id !== agentId) {
         targets.push({ id: c.id, name: c.agent_name || c.name, host: 'localhost', port: c.web_port, auth: c.web_auth || '' })
       }
     }
+    for (const p of processes) {
+      if (p.status === 'running' && p.web_port && `proc-${p.slug}` !== agentId) {
+        targets.push({ id: `proc-${p.slug}`, name: p.name, host: 'localhost', port: p.web_port, auth: p.web_auth || '' })
+      }
+    }
     for (const a of localAgents) {
-      if (a.status === 'online') {
+      if (a.status === 'online' && a.id !== agentId) {
         targets.push({ id: a.id, name: a.name, host: a.host, port: a.port, auth: a.authToken || '' })
       }
     }
     return targets
-  }, [containers, localAgents])
+  }, [containers, processes, localAgents, agentId])
 
   const handleForward = useCallback(async (target: typeof forwardTargets[0]) => {
     const src = sourceName || 'another agent'
     const role = message.role === 'user' ? 'User' : 'Assistant'
     // Look up forwarding task from target agent's card config
     const container = containers.find((c) => c.id === target.id)
+    const process = target.id.startsWith('proc-') ? processes.find((p) => `proc-${p.slug}` === target.id) : undefined
     const localAgent = localAgents.find((a) => a.id === target.id)
-    const fwdTask = (container ? useContainerStore.getState().getForwardingTask(target.id) : localAgent?.forwardingTask) || 'Review the context above and provide your analysis.'
+    const fwdTask = (container
+      ? useContainerStore.getState().getForwardingTask(target.id)
+      : process
+        ? useProcessStore.getState().getForwardingTask(target.id)
+        : localAgent?.forwardingTask
+    ) || 'Review the context above and provide your analysis.'
     const composed = `--- Context from "${src}" ---\n\n**${role}:**\n${message.content}\n\n--- End of context ---\n\n${fwdTask}`
     openChat(target.id, target.name, target.host, target.port, target.auth)
     await new Promise((r) => setTimeout(r, 1000))
     sendMessageToAgent(target.id, composed)
     setShowForward(false)
-  }, [message, sourceName, containers, localAgents, openChat, sendMessageToAgent])
+  }, [message, sourceName, containers, processes, localAgents, openChat, sendMessageToAgent])
 
   const handlePin = useCallback(() => {
     if (!agentId || pinned) return

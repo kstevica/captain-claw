@@ -7,6 +7,7 @@ import { useContainerStore } from '../stores/containerStore'
 import { useProcessStore } from '../stores/processStore'
 import { spawnAgent, spawnProcess, type SpawnConfig } from '../services/docker'
 import { fetchSettings, queueSave } from '../services/settingsSync'
+import { HelpHint } from '../components/common/HelpHint'
 
 // ── Agent config model ──
 
@@ -578,6 +579,10 @@ export function SpawnerPage() {
               <Cpu className="h-3.5 w-3.5 inline mr-1.5" />Local Process (pip) — Docker spawning is disabled by admin
             </div>
           )}
+
+          <HelpHint id="spawner-mode" banner>
+            <strong className="text-zinc-200">Process vs Docker agents</strong> — Local Process agents run directly on your machine via pip — great for development and debugging. Docker agents run in isolated containers with their own environment — better for production and when you need reproducible setups. Both connect to BotPort the same way.
+          </HelpHint>
 
           {/* Save dialog */}
           {showSaveDialog && (

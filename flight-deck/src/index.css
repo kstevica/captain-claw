@@ -158,3 +158,18 @@ html.light .divide-zinc-800 > * + * { border-color: #d4d4d8 !important; }
 /* Active button backgrounds */
 html.light .bg-zinc-700 { background-color: #d4d4d8 !important; }
 html.light .bg-zinc-700\/30 { background-color: rgba(212,212,216,0.4) !important; }
+/* Help hint banners & chips */
+html.light .fd-help-banner { border-color: rgba(139,92,246,0.35) !important; background: rgba(139,92,246,0.08) !important; }
+html.light .fd-help-banner .text-zinc-300 { color: #3f3f46 !important; }
+html.light .fd-help-banner .text-zinc-200 { color: #18181b !important; }
+html.light .fd-help-banner .text-violet-400 { color: #7c3aed !important; }
+html.light .fd-help-chip { border-color: rgba(139,92,246,0.4) !important; background: rgba(139,92,246,0.12) !important; color: #6d28d9 !important; }
+html.light .fd-help-chip:hover { background: rgba(139,92,246,0.2) !important; }
+/* Violet accent text in light mode */
+html.light .text-violet-300 { color: #6d28d9 !important; }
+html.light .text-violet-400 { color: #7c3aed !important; }
+html.light .text-amber-400 { color: #d97706 !important; }
+/* Violet selected cards/buttons */
+html.light .border-violet-500\/50 { border-color: rgba(139,92,246,0.45) !important; }
+html.light .bg-violet-500\/10 { background-color: rgba(139,92,246,0.1) !important; }
+html.light .bg-violet-500\/5 { background-color: rgba(139,92,246,0.06) !important; }

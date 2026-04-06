@@ -19,6 +19,7 @@ import { useAgentStore } from '../../stores/agentStore'
 import { useAuthStore } from '../../stores/authStore'
 import { useConnectionStore } from '../../stores/connectionStore'
 import { useChatStore } from '../../stores/chatStore'
+import { useOnboardingStore } from '../../stores/onboardingStore'
 import { botportWS } from '../../services/ws'
 import { StatusBadge } from '../common/StatusBadge'
 import type { ViewMode } from '../../types'
@@ -39,6 +40,7 @@ export function Sidebar() {
   const { authEnabled, user: authUser } = useAuthStore()
   const { botportUrl, setBotportUrl } = useConnectionStore()
   const { sessions, chatOpen, switchChat } = useChatStore()
+  const onboardingCompleted = useOnboardingStore((s) => s.completed)
   const [showSettings, setShowSettings] = useState(false)
   const [urlDraft, setUrlDraft] = useState(botportUrl)
   const chatSessions = Array.from(sessions.values())
@@ -140,7 +142,12 @@ export function Sidebar() {
                 : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'
             }`}
           >
-            <Icon className="h-4 w-4 shrink-0" />
+            <span className="relative shrink-0">
+              <Icon className="h-4 w-4" />
+              {((id === 'forge' && !onboardingCompleted.forge) || (id === 'council' && !onboardingCompleted.council)) && (
+                <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-violet-500 animate-pulse" />
+              )}
+            </span>
             {sidebarOpen && label}
           </button>
         ))}
