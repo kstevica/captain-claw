@@ -3,7 +3,6 @@ import {
   Wifi, WifiOff, VolumeX, Volume2, Pin, Crown, Loader2, Wrench,
   Activity, Leaf, Paperclip, Play, Plus, ChevronDown, ChevronRight, FolderOpen,
 } from 'lucide-react'
-import { VotingPanel } from './VotingPanel'
 import { CouncilFileBrowser } from './CouncilFileBrowser'
 import { useContainerStore } from '../../stores/containerStore'
 import { useProcessStore } from '../../stores/processStore'
@@ -391,12 +390,6 @@ export function CouncilSidebar({
           </div>
         )}
 
-        {/* Votes */}
-        {session.votes.length > 0 && (
-          <div className="pt-2">
-            <VotingPanel votes={session.votes} />
-          </div>
-        )}
       </div>
 
       {/* ─── Activity Log ─── */}

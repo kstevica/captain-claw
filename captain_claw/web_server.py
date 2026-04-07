@@ -28,6 +28,7 @@ from captain_claw.config import Config, get_config, set_config
 from captain_claw.google_oauth_manager import GoogleOAuthManager
 from captain_claw.instructions import InstructionLoader
 from captain_claw.logging import configure_logging, get_logger
+from captain_claw.ws_utils import fire_and_forget_send
 from captain_claw.session_orchestrator import SessionOrchestrator
 from captain_claw.telegram_bridge import TelegramBridge, TelegramMessage
 
@@ -335,8 +336,8 @@ class WebServer:
                 """Create a sender closure bound to a session id."""
                 def _send_msg(msg: dict) -> None:
                     ws = self._public_active_ws.get(sid)
-                    if ws and not ws.closed:
-                        asyncio.ensure_future(ws.send_str(json.dumps(msg, default=str)))
+                    if ws is not None:
+                        fire_and_forget_send(ws, json.dumps(msg, default=str))
                 return _send_msg
 
             send = _make_send(session_id)
@@ -636,7 +637,7 @@ class WebServer:
             if public_mode and not getattr(ws, "_is_admin", False):
                 continue
             try:
-                asyncio.ensure_future(ws.send_str(data))
+                fire_and_forget_send(ws, data)
             except Exception:
                 stale.append(ws)
         for ws in stale:

@@ -4,13 +4,15 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
-import type { CouncilMessage } from '../../stores/councilStore'
+import type { CouncilMessage, CouncilVote } from '../../stores/councilStore'
+import { VotingPanel } from './VotingPanel'
 
 interface SynthesisViewProps {
   message: CouncilMessage
+  votes?: CouncilVote[]
 }
 
-export function SynthesisView({ message }: SynthesisViewProps) {
+export function SynthesisView({ message, votes }: SynthesisViewProps) {
   const [collapsed, setCollapsed] = useState(false)
 
   return (
@@ -32,6 +34,11 @@ export function SynthesisView({ message }: SynthesisViewProps) {
           <div className="fd-markdown prose prose-sm prose-invert max-w-none text-zinc-300 leading-relaxed">
             <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{message.content}</Markdown>
           </div>
+          {votes && votes.length > 0 && (
+            <div className="mt-4 border-t border-cyan-500/20 pt-3">
+              <VotingPanel votes={votes} />
+            </div>
+          )}
         </div>
       )}
     </div>

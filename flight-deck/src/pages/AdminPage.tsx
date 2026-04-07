@@ -145,6 +145,7 @@ const LLM_PROVIDERS = [
   { value: 'gemini', label: 'Gemini' },
   { value: 'openrouter', label: 'OpenRouter' },
   { value: 'xai', label: 'xAI' },
+  { value: 'litert', label: 'LiteRT (local Gemma)' },
 ] as const
 
 async function fetchPlans(): Promise<Record<string, PlanLimits>> {

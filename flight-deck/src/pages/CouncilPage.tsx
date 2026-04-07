@@ -212,7 +212,7 @@ export function CouncilPage() {
               {/* Synthesis view if present */}
               {synthesisMsg && (
                 <div className="shrink-0 px-4 pt-3">
-                  <SynthesisView message={synthesisMsg} />
+                  <SynthesisView message={synthesisMsg} votes={activeSession.votes} />
                 </div>
               )}
 

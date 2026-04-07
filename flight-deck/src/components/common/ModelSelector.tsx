@@ -17,6 +17,7 @@ interface ModelInfo {
 const KNOWN_PROVIDERS = [
   'ollama', 'anthropic', 'openai', 'gemini', 'groq', 'mistral',
   'deepseek', 'openrouter', 'xai', 'together', 'cerebras', 'sambanova', 'fireworks',
+  'litert',
 ]
 
 function parseModelFromYaml(yaml: string): ModelInfo {

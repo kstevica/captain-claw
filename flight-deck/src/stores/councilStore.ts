@@ -1143,7 +1143,12 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
 
     // Send task to first speaker
     await get()._addSystemMessage(1, `Council started. First speaker: ${session.agents.find(a => a.id === firstSpeakerId)?.name || 'Unknown'}`)
-    const firstMsg = await get()._runSpeakerTurn(firstSpeakerId, 1, [], 'You are the first speaker. Present your take on the topic.')
+    const firstMsg = await get()._runSpeakerTurn(
+      firstSpeakerId,
+      1,
+      [],
+      'You are the first speaker — you set the factual baseline for the whole discussion. If your take depends on dates, current events, version numbers, prices, statistics, recent news, named people/projects, or anything you are not 100% confident about, use your tools (especially `web_search` and `web_fetch`) BEFORE answering. Do not speculate when a lookup is cheap. Cite the source domain or title for anything you fetched.',
+    )
     if (!firstMsg) return
 
     // Now run the rest of round 1

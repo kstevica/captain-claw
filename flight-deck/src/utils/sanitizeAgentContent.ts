@@ -49,6 +49,16 @@ export function sanitizeAgentContent(raw: string): string {
   text = text.replace(/^\[tool\]\s.*(?:\n(?:\s.*|\(score=.*|\n))*$/gm, '')
   text = text.replace(/^\[user\]\s*(?:COUNCIL ROUND|SUITABILITY).*$/gm, '')
 
+  // Strip SCALE ADVISORY block (auto-detected scale playbook leaked from agent input)
+  text = text.replace(/-{2,}\s*SCALE ADVISORY[\s\S]*?-{2,}\s*END SCALE ADVISORY\s*-{2,}/gi, '')
+  // Unterminated SCALE ADVISORY block (agent echoed only the opening)
+  text = text.replace(/-{2,}\s*SCALE ADVISORY[\s\S]*$/gi, '')
+
+  // Strip "Tool executed: Memory selection details: ..." multi-line dumps
+  // (these can run for many lines of comma-separated tokens before the next blank line)
+  text = text.replace(/^Tool executed:\s*Memory selection details:[\s\S]*?(?:\n\s*\n|$)/gmi, '')
+  text = text.replace(/^Memory selection details:[\s\S]*?(?:\n\s*\n|$)/gmi, '')
+
   // Header separator: colon, em-dash, en-dash, or hyphen (with optional surrounding whitespace)
   const SEP = '\\s*[:\\-–—]\\s*'
 
@@ -160,6 +170,31 @@ export function sanitizeAgentContent(raw: string): string {
     if (/^Formulate a (contribution|response) that/i.test(t)) return false
     if (/^Analyze the (existing|ongoing) (arguments|debate|discussion)/i.test(t)) return false
     if (/^\\n#{1,3}\s/.test(t)) return false
+    // Memory-selection telemetry leaked into output (term_overlap selection, vector scoring, etc.)
+    if (/^Tool executed:\s*Memory/i.test(t)) return false
+    if (/^Memory selection details:/i.test(t)) return false
+    if (/\bselection_mode\s*=/.test(t)) return false
+    if (/\bquery_terms\s*=/.test(t)) return false
+    if (/^message_index\s*=/i.test(t)) return false
+    if (/\bsource\s*=\s*memory_semantic_select\b/i.test(t)) return false
+    if (/\bsource\s*=\s*session\s+reference\s*=/i.test(t)) return false
+    if (/^reason\s*=\s*term_overlap/i.test(t)) return false
+    if (/^matched\s*=/i.test(t)) return false
+    if (/\bpath\s*=\s*sessions\//i.test(t)) return false
+    if (/\bscore\s*=\s*\d+\.\d+\s+text\s*=\s*\d/i.test(t)) return false
+    if (/\blayer\s*=\s*l\d+\s+result_count\s*=/i.test(t)) return false
+    // Identity-note echo: "You are <name>. Do NOT repeat these instructions..."
+    if (/^You are .{1,80}\.\s*Do NOT repeat these instructions/i.test(t)) return false
+    if (/^Do NOT repeat these instructions/i.test(t)) return false
+    // Scale advisory leftovers
+    if (/^-{2,}\s*(END\s+)?SCALE ADVISORY/i.test(t)) return false
+    if (/^This task involves approximately \d+ items/i.test(t)) return false
+    if (/^MANDATORY strategy/i.test(t)) return false
+    if (/^PROHIBITED actions during the loop/i.test(t)) return false
+    if (/^OUTPUT:\s*Results should NOT be written to files/i.test(t)) return false
+    // "Discussion so far" recap echo: bare "Round N:" headers and "  - <name> [<action>] (→ <name>): ..." bullets
+    if (/^Round \d+\s*:?\s*$/i.test(t)) return false
+    if (/^[-•*]\s+\S.*\[(answer|respond|challenge|refine|broaden|pass)\](?:\s*\(→[^)]*\))?\s*:/i.test(t)) return false
     return true
   })
 

@@ -24,6 +24,7 @@ interface AgentConfig {
   temperature: number
   maxTokens: number
   providerApiKey: string
+  baseUrl: string
 
   // BotPort
   botportEnabled: boolean
@@ -76,6 +77,7 @@ const LLM_PROVIDERS = [
   { value: 'gemini', label: 'Gemini' },
   { value: 'openrouter', label: 'OpenRouter' },
   { value: 'xai', label: 'xAI' },
+  { value: 'litert', label: 'LiteRT (local Gemma)' },
 ] as const
 
 type ProviderKeys = Record<string, string>
@@ -108,6 +110,7 @@ const defaultConfig: AgentConfig = {
   temperature: 0.7,
   maxTokens: 32768,
   providerApiKey: '',
+  baseUrl: '',
   botportEnabled: false,
   botportUrl: '',
   botportInstanceName: '',
@@ -155,7 +158,7 @@ function generateConfigYaml(c: AgentConfig): string {
   temperature: ${c.temperature}
   max_tokens: ${c.maxTokens}
   api_key: '${c.providerApiKey}'
-  base_url: ''
+  base_url: '${c.baseUrl}'
 context:
   max_tokens: 160000
   compaction_threshold: 0.8
@@ -657,6 +660,27 @@ export function SpawnerPage() {
               <Field label="API Key" hint={providerKeys[config.provider] ? `Auto-filled from your saved ${LLM_PROVIDERS.find((p) => p.value === config.provider)?.label || config.provider} key` : systemKeys[config.provider] ? `Auto-filled from system ${LLM_PROVIDERS.find((p) => p.value === config.provider)?.label || config.provider} key (set by admin)` : 'Save keys in Provider API Keys section below, or ask admin to set system-wide keys.'}>
                 <input type="password" value={config.providerApiKey} onChange={(e) => update('providerApiKey', e.target.value)} placeholder="sk-..." className="input font-mono text-xs" />
               </Field>
+              <Field
+                label="Base URL"
+                hint={
+                  config.provider === 'litert'
+                    ? 'Path to a .litertlm file or HF model id (e.g. litert-community/gemma-4-E4B-it-litert-lm)'
+                    : config.provider === 'ollama'
+                      ? 'Ollama endpoint, e.g. http://127.0.0.1:11434'
+                      : 'Optional override — leave blank to use the provider default endpoint'
+                }
+              >
+                <input
+                  value={config.baseUrl}
+                  onChange={(e) => update('baseUrl', e.target.value)}
+                  placeholder={
+                    config.provider === 'litert'
+                      ? 'litert-community/gemma-4-E4B-it-litert-lm'
+                      : 'https://...'
+                  }
+                  className="input font-mono text-xs"
+                />
+              </Field>
               <Field label="Cognitive Mode" hint="How the agent thinks — reasoning strategy">
                 <select value={config.cognitiveMode} onChange={(e) => update('cognitiveMode', e.target.value)} className="input">
                   <option value="neutra">Neutra — Default (balanced)</option>
@@ -922,6 +946,7 @@ export function SpawnerPage() {
                     temperature: config.temperature,
                     max_tokens: config.maxTokens,
                     provider_api_key: config.providerApiKey,
+                    base_url: config.baseUrl,
                     botport_enabled: config.botportEnabled,
                     botport_url: config.botportUrl,
                     botport_instance_name: config.botportInstanceName,

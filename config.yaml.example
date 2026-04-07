@@ -19,6 +19,23 @@ model:
     reasoning_level: ''
     description: ''
     model_type: llm
+  - id: gemma-4-e4b-local
+    provider: litert
+    # `model` is a display label; the actual file is resolved from `base_url`.
+    model: gemma-4-e4b
+    # Either an absolute path to a .litertlm file, OR a litert-lm model id
+    # like "litert-community/gemma-4-E4B-it-litert-lm" (must already be
+    # imported via `litert-lm import <id>` so the file lives at
+    # ~/.litert-lm/models/<repo>--<name>/model.litertlm).
+    base_url: litert-community/gemma-4-E4B-it-litert-lm
+    temperature: null
+    max_tokens: 4096
+    tokens_per_minute: 0
+    max_context: 4096
+    max_output_tokens: 4096
+    reasoning_level: ''
+    description: 'Local Gemma 4 E4B via litert-lm. Good for council members and offline chat. No tool calling.'
+    model_type: llm
   - id: gpt-5-mini
     provider: openai
     model: gpt-5-mini

@@ -739,6 +739,7 @@ const PROVIDERS = [
   { id: 'ollama', label: 'Ollama (local)', defaultModel: 'minimax-m2.7:cloud' },
   { id: 'openrouter', label: 'OpenRouter', defaultModel: 'google/gemini-3-flash' },
   { id: 'xai', label: 'xAI', defaultModel: 'grok-3-mini' },
+  { id: 'litert', label: 'LiteRT (local Gemma)', defaultModel: 'litert-community/gemma-4-E4B-it-litert-lm' },
 ]
 
 function OldManOnboarding({ onSpawned }: { onSpawned: () => void }) {

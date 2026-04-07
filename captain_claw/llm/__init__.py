@@ -265,6 +265,10 @@ def _normalize_provider_name(provider: str) -> str:
         "xai": "xai",
         "ollama": "ollama",
         "openrouter": "openrouter",
+        "litert": "litert",
+        "litert-lm": "litert",
+        "litertlm": "litert",
+        "gemma-local": "litert",
     }
     return aliases.get(key, key)
 
@@ -1738,6 +1742,1028 @@ class LiteLLMProvider(LLMProvider):
             return len(text) // 4
 
 
+def _litert_tool_fields(tool: Any) -> tuple[str, str, dict[str, Any]]:
+    """Extract ``(name, description, parameters)`` from a tool of any shape.
+
+    Captain Claw passes tools to providers in several shapes depending on
+    the call site:
+      - ``ToolDefinition`` dataclass instances
+      - OpenAI-style dicts: ``{"type": "function", "function": {...}}``
+      - Flat dicts: ``{"name": ..., "description": ..., "parameters": ...}``
+    """
+    if isinstance(tool, ToolDefinition):
+        return tool.name, tool.description or "", tool.parameters or {}
+    if isinstance(tool, dict):
+        if isinstance(tool.get("function"), dict):
+            fn = tool["function"]
+            return (
+                str(fn.get("name") or ""),
+                str(fn.get("description") or ""),
+                fn.get("parameters") or {},
+            )
+        return (
+            str(tool.get("name") or ""),
+            str(tool.get("description") or ""),
+            tool.get("parameters") or {},
+        )
+    # Last-resort attribute lookup.
+    return (
+        str(getattr(tool, "name", "") or ""),
+        str(getattr(tool, "description", "") or ""),
+        getattr(tool, "parameters", {}) or {},
+    )
+
+
+def _litert_build_tool_manifest(tools: list[Any]) -> str:
+    """Render a compact text manifest of tools for the system prompt.
+
+    Local Gemma via litert-lm has no structured function-calling bridge,
+    so we teach the model to emit calls as inline text using a fixed
+    fence that we can parse out of the reply afterwards.
+    """
+    lines: list[str] = [
+        "You can call tools. To call a tool, write EXACTLY this on its own line:",
+        "<tool_call>{\"name\": \"tool_name\", \"arguments\": {\"arg\": \"value\"}}</tool_call>",
+        "Use ONE call per turn. After the tool result is returned to you,",
+        "continue the conversation. Do not invent tools — only use the ones listed.",
+        "",
+        "Available tools:",
+    ]
+    for t in tools:
+        name, description, params = _litert_tool_fields(t)
+        if not name:
+            continue
+        props = params.get("properties") if isinstance(params, dict) else None
+        required = params.get("required") if isinstance(params, dict) else None
+        arg_summary = ""
+        if isinstance(props, dict) and props:
+            arg_bits = []
+            for arg_name, arg_schema in props.items():
+                ty = ""
+                if isinstance(arg_schema, dict):
+                    ty = str(arg_schema.get("type") or "")
+                req = (
+                    isinstance(required, list) and arg_name in required
+                )
+                arg_bits.append(
+                    f"{arg_name}{':' + ty if ty else ''}{'' if req else '?'}"
+                )
+            arg_summary = "(" + ", ".join(arg_bits) + ")"
+        desc = description.strip().replace("\n", " ")
+        if len(desc) > 200:
+            desc = desc[:197] + "..."
+        lines.append(f"- {name}{arg_summary} — {desc}")
+    return "\n".join(lines)
+
+
+# Patterns we accept for inline tool calls coming back from local Gemma:
+#   1. Our preferred fence:  <tool_call>{...json...}</tool_call>
+#   2. The model's habit:    <execute_tool_call> name(arg='value') </execute_tool_call>
+#                            <execute_tool_call> web_tool_call: name(arg='value') </execute_tool_call>
+#   3. Bare JSON-in-fence:   ```tool_call\n{...}\n```
+#   4. Gemma-4 native template:
+#         <|tool_call>call:name{key:<|"|>value<|"|>,n:42}<tool_call|>
+#      where strings are wrapped in the literal delimiter ``<|"|>``.
+_LITERT_TOOL_CALL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (
+        re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL | re.IGNORECASE),
+        "json",
+    ),
+    (
+        re.compile(r"```tool_call\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE),
+        "json",
+    ),
+    (
+        re.compile(
+            r"<execute_tool_call>\s*(?:web_tool_call:\s*)?([a-zA-Z_][\w\.]*)\s*\((.*?)\)\s*</execute_tool_call>",
+            re.DOTALL | re.IGNORECASE,
+        ),
+        "pyish",
+    ),
+    (
+        re.compile(
+            r"<\|tool_call>\s*call:\s*([a-zA-Z_][\w\.]*)\s*\{(.*?)\}\s*<tool_call\|>",
+            re.DOTALL,
+        ),
+        "gemma",
+    ),
+]
+
+
+def _litert_parse_gemma_args(arg_str: str) -> dict[str, Any]:
+    """Parse Gemma-4 native ``key:<|"|>value<|"|>,n:42`` argument strings.
+
+    Strings are wrapped in the literal three-char delimiter ``<|"|>`` on
+    both sides. Other scalars (ints, floats, bools, null) are bare.
+    Nested objects/arrays use ``{}`` / ``[]`` and are kept as raw strings
+    if encountered (best-effort).
+    """
+    out: dict[str, Any] = {}
+    if not arg_str.strip():
+        return out
+
+    QUOTE = "<|\"|>"
+
+    # Tokenise on top-level commas, respecting nested {}/[] and <|"|>...<|"|>.
+    parts: list[str] = []
+    depth = 0
+    in_str = False
+    i = 0
+    buf: list[str] = []
+    n = len(arg_str)
+    while i < n:
+        # Detect the literal quote delimiter <|"|>
+        if arg_str.startswith(QUOTE, i):
+            in_str = not in_str
+            buf.append(QUOTE)
+            i += len(QUOTE)
+            continue
+        ch = arg_str[i]
+        if in_str:
+            buf.append(ch)
+            i += 1
+            continue
+        if ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    if buf:
+        parts.append("".join(buf))
+
+    for part in parts:
+        if ":" not in part:
+            continue
+        key, _, raw = part.partition(":")
+        key = key.strip()
+        raw = raw.strip()
+        if not key:
+            continue
+        # String form: <|"|>...<|"|>
+        if raw.startswith(QUOTE) and raw.endswith(QUOTE) and len(raw) >= 2 * len(QUOTE):
+            out[key] = raw[len(QUOTE) : -len(QUOTE)]
+            continue
+        low = raw.lower()
+        if low == "true":
+            out[key] = True
+            continue
+        if low == "false":
+            out[key] = False
+            continue
+        if low in ("null", "none"):
+            out[key] = None
+            continue
+        try:
+            out[key] = int(raw)
+            continue
+        except ValueError:
+            pass
+        try:
+            out[key] = float(raw)
+            continue
+        except ValueError:
+            pass
+        # Strip any leftover Gemma quote markers we might have missed.
+        out[key] = raw.replace(QUOTE, "")
+    return out
+
+
+def _litert_parse_pyish_args(arg_str: str) -> dict[str, Any]:
+    """Parse ``key='value', key2=123`` style argument lists into a dict.
+
+    Best-effort — we accept single or double quoted strings, bare ints
+    and floats, and ``true``/``false``/``null``. Unparseable values fall
+    back to the raw string.
+    """
+    out: dict[str, Any] = {}
+    if not arg_str.strip():
+        return out
+    # Tokenise on top-level commas (don't split inside quotes/brackets).
+    parts: list[str] = []
+    depth = 0
+    quote: str | None = None
+    buf: list[str] = []
+    for ch in arg_str:
+        if quote:
+            buf.append(ch)
+            if ch == quote and (len(buf) < 2 or buf[-2] != "\\"):
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(buf))
+            buf = []
+            continue
+        buf.append(ch)
+    if buf:
+        parts.append("".join(buf))
+
+    for part in parts:
+        if "=" not in part:
+            continue
+        key, _, raw = part.partition("=")
+        key = key.strip()
+        raw = raw.strip()
+        if not key:
+            continue
+        # Strip matching quotes.
+        if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ("'", '"'):
+            out[key] = raw[1:-1]
+            continue
+        low = raw.lower()
+        if low == "true":
+            out[key] = True
+            continue
+        if low == "false":
+            out[key] = False
+            continue
+        if low in ("null", "none"):
+            out[key] = None
+            continue
+        try:
+            out[key] = int(raw)
+            continue
+        except ValueError:
+            pass
+        try:
+            out[key] = float(raw)
+            continue
+        except ValueError:
+            pass
+        out[key] = raw
+    return out
+
+
+def _litert_extract_tool_calls(text: str) -> tuple[str, list[ToolCall]]:
+    """Scan ``text`` for inline tool-call fences and return ``(stripped_text, calls)``.
+
+    The returned text has all matched fences removed so the user only
+    sees the natural-language portion of the model's reply.
+    """
+    if not text:
+        return text, []
+    calls: list[ToolCall] = []
+    cleaned = text
+    counter = 0
+
+    for pattern, kind in _LITERT_TOOL_CALL_PATTERNS:
+        while True:
+            m = pattern.search(cleaned)
+            if not m:
+                break
+            try:
+                if kind == "json":
+                    payload = json.loads(m.group(1))
+                    if isinstance(payload, dict):
+                        name = str(payload.get("name") or payload.get("tool") or "").strip()
+                        args = payload.get("arguments") or payload.get("args") or {}
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args)
+                            except Exception:  # pylint: disable=broad-exception-caught
+                                args = {"_raw": args}
+                        if name:
+                            counter += 1
+                            calls.append(
+                                ToolCall(
+                                    id=f"litert_{counter}",
+                                    name=name,
+                                    arguments=args if isinstance(args, dict) else {},
+                                )
+                            )
+                elif kind == "pyish":
+                    name = m.group(1).strip()
+                    args = _litert_parse_pyish_args(m.group(2) or "")
+                    if name:
+                        counter += 1
+                        calls.append(
+                            ToolCall(
+                                id=f"litert_{counter}",
+                                name=name,
+                                arguments=args,
+                            )
+                        )
+                elif kind == "gemma":
+                    name = m.group(1).strip()
+                    args = _litert_parse_gemma_args(m.group(2) or "")
+                    if name:
+                        counter += 1
+                        calls.append(
+                            ToolCall(
+                                id=f"litert_{counter}",
+                                name=name,
+                                arguments=args,
+                            )
+                        )
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                log.warning("litert tool-call parse failed: %s", exc)
+            # Drop this fence from the visible text either way.
+            cleaned = cleaned[: m.start()] + cleaned[m.end():]
+
+    return cleaned.strip(), calls
+
+
+class LiteRTProvider(LLMProvider):
+    """Local provider backed by Google's litert-lm runtime.
+
+    Loads a ``.litertlm`` model file once at construction and serves chat
+    requests in-process. Each request creates a fresh ``Conversation`` with
+    the prior history as preface and sends only the latest user message —
+    Captain Claw is stateless from the model's perspective (it always
+    passes the full message list), and litert-lm's ``send_message`` API
+    expects exactly one message at a time.
+
+    **Tool calling is not exposed.** litert-lm's ``Conversation`` API does
+    accept Python tool functions, but Captain Claw passes JSON-Schema
+    ``ToolDefinition`` objects which would need an inverse bridge. For
+    now any ``tools=`` argument is logged and ignored. Local Gemma models
+    are best used as council members or chat companions where tools
+    aren't needed.
+
+    **Concurrency.** The underlying engine is single-threaded, so an
+    ``asyncio.Lock`` serializes ``complete()`` and ``complete_streaming()``
+    across the process. Streaming runs the sync iterator in a worker
+    thread and pipes chunks back through an ``asyncio.Queue``.
+
+    **Model resolution.** ``model_path`` may be either an absolute path to
+    a ``.litertlm`` file or a model id like
+    ``litert-community/gemma-4-E4B-it-litert-lm`` — in the latter case the
+    model must already be present at
+    ``~/.litert-lm/models/<repo>--<name>/model.litertlm`` (run
+    ``litert-lm import <id>`` once first, or run the upstream
+    ``litert-lm run --from-huggingface-repo=<id>`` once to download).
+    """
+
+    def __init__(
+        self,
+        model: str,
+        model_path: str | None = None,
+        backend: str = "gpu",
+        temperature: float = 0.7,  # noqa: ARG002 — kept for API parity
+        max_tokens: int = 4096,
+        max_num_tokens: int = 16384,
+        tokens_per_minute: int = 0,
+    ):
+        # The provider only validates the model path here. The actual
+        # ``litert_lm.Engine`` is owned by a dedicated subprocess that
+        # is spawned lazily on the first ``complete()`` call by the
+        # shared worker client. Running the engine out-of-process
+        # isolates two C++-side failure modes that previously took the
+        # whole agent down: KV-cache overflow on long conversations
+        # and Metal/GPU context exhaustion. See
+        # ``captain_claw/llm/litert_worker.py``.
+
+        self.provider = "litert"
+        self.model = model
+        # Expose the original reference (HF id or absolute path) as
+        # ``base_url`` so the agent's "is current provider already this
+        # one?" comparison can short-circuit and skip rebuilding the
+        # engine on session-load.
+        self.base_url = (model_path or "").strip()
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+
+        # Resolve the model file. Order of precedence:
+        #   1. If `ref` is an existing file path, use it directly.
+        #   2. Try the litert-lm CLI layout (~/.litert-lm/models/<id>/model.litertlm).
+        #   3. Try the Hugging Face hub cache populated by
+        #      `litert-lm run --from-huggingface-repo=<id>` — that path is
+        #      ~/.cache/huggingface/hub/models--<owner>--<repo>/snapshots/<rev>/<file>.litertlm.
+        ref = model_path or model
+        resolved_path = self._resolve_model_file(ref)
+        if not resolved_path:
+            raise LLMError(
+                f"litert model file not found for reference '{ref}'. "
+                "Pass an absolute path to a .litertlm file in `base_url`, or run "
+                f"`litert-lm run --from-huggingface-repo={ref} <file>.litertlm` "
+                "once to download it first."
+            )
+        self.model_path = resolved_path
+
+        self._backend = (backend or "gpu").strip().lower()
+        # Honour the caller's chosen window verbatim. ``create_provider``
+        # is responsible for capping this at the .litertlm file's real
+        # KV limit (see ``LITERT_MAX_NUM_TOKENS``); the previous
+        # ``max(max_num_tokens, max_tokens, 4096)`` floor was leaking
+        # the global 160k context budget into the engine and either
+        # getting silently clamped or hanging on VRAM pressure.
+        self._max_num_tokens = max(int(max_num_tokens or 0), 1024)
+
+        # Acquire (or build) the shared worker client for this
+        # (path, backend, max_num_tokens) triple. This does NOT spawn
+        # the child yet — that happens on the first send_message call,
+        # so importing this provider is cheap and side-effect free.
+        from captain_claw.llm.litert_worker import get_or_create_litert_worker
+
+        self._client = get_or_create_litert_worker(
+            model_path=self.model_path,
+            backend=self._backend,
+            max_num_tokens=self._max_num_tokens,
+            recycle_after_each=True,
+        )
+
+        log.info(
+            "LiteRTProvider bound to worker client",
+            model=self.model,
+            path=self.model_path,
+            backend=self._backend,
+            max_num_tokens=self._max_num_tokens,
+        )
+
+        self.rate_limiter = (
+            TokenRateLimiter(tokens_per_minute) if tokens_per_minute > 0 else None
+        )
+
+    @staticmethod
+    def _resolve_model_file(ref: str) -> str | None:
+        """Resolve a model reference to an absolute .litertlm file path."""
+        if not ref:
+            return None
+
+        # 1. Direct file path.
+        if os.path.isfile(ref):
+            return os.path.abspath(ref)
+
+        # 2. litert-lm CLI imported-models layout.
+        try:
+            from litert_lm_cli.model import Model as _CliModel  # type: ignore[import-not-found]
+
+            cli_model = _CliModel.from_model_reference(ref)
+            if os.path.isfile(cli_model.model_path):
+                return cli_model.model_path
+        except ImportError:
+            pass
+
+        # 3. Hugging Face hub cache. The reference is expected to look
+        # like "owner/repo" (with optional ":filename" suffix). The cache
+        # directory follows the form
+        # ~/.cache/huggingface/hub/models--<owner>--<repo>/snapshots/<rev>/.
+        # IMPORTANT: we return the SYMLINK path inside snapshots/, not
+        # the resolved blob — litert-lm relies on the .litertlm suffix
+        # for format detection, and the blob filename is a bare sha256
+        # without an extension.
+        if "/" in ref:
+            spec, _, hint_filename = ref.partition(":")
+            owner_repo = spec.replace("/", "--")
+            try:
+                hf_home = os.environ.get("HF_HOME") or os.path.join(
+                    os.path.expanduser("~"), ".cache", "huggingface"
+                )
+                hub_dir = os.path.join(hf_home, "hub", f"models--{owner_repo}", "snapshots")
+                if os.path.isdir(hub_dir):
+                    candidates: list[str] = []
+                    for snap in sorted(os.listdir(hub_dir)):
+                        snap_dir = os.path.join(hub_dir, snap)
+                        if not os.path.isdir(snap_dir):
+                            continue
+                        for fname in sorted(os.listdir(snap_dir)):
+                            if not fname.endswith(".litertlm"):
+                                continue
+                            if hint_filename and fname != hint_filename:
+                                continue
+                            full = os.path.join(snap_dir, fname)
+                            # `os.path.isfile` follows the symlink for us;
+                            # we keep the symlink path so the .litertlm
+                            # suffix is preserved when litert-lm opens it.
+                            if os.path.isfile(full):
+                                candidates.append(full)
+                    if candidates:
+                        # Prefer the lexicographically last (newest snapshot
+                        # rev sorted, last file alphabetically).
+                        return candidates[-1]
+            except OSError:
+                pass
+
+        return None
+
+    @staticmethod
+    def _to_litert_msg(msg: Message) -> dict[str, Any]:
+        """Convert a Captain Claw Message to litert-lm's expected dict shape."""
+        role = msg.role or "user"
+        # litert-lm's chat template expects content as a list of typed parts.
+        return {
+            "role": role,
+            "content": [{"type": "text", "text": msg.content or ""}],
+        }
+
+    def _split_history(self, messages: list[Message]) -> tuple[list[dict[str, Any]], str]:
+        """Return ``(preface, last_user_text)`` for the conversation.
+
+        The preface is everything up to (but not including) the trailing
+        user turn; the trailing user turn's text becomes the
+        ``send_message`` argument. Anything after the last user turn (e.g.
+        a stale assistant draft) is dropped — the new response replaces it.
+        """
+        if not messages:
+            return [], ""
+        last_user_idx = -1
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].role == "user":
+                last_user_idx = i
+                break
+        if last_user_idx < 0:
+            # No user turn at all — feed everything as preface and send
+            # an empty prompt. Unusual, but the model will produce
+            # something deterministic.
+            return [self._to_litert_msg(m) for m in messages], ""
+        preface = [self._to_litert_msg(m) for m in messages[:last_user_idx]]
+        last_text = messages[last_user_idx].content or ""
+        return preface, last_text
+
+    def _build_preface(
+        self,
+        messages: list[Message],
+        tool_manifest: str = "",
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Split history into (preface, last_user) and inject the manifest.
+
+        The actual ``send_message`` call is performed by the worker
+        subprocess via ``self._client.send_message(...)``.
+        """
+        preface, last_user = self._split_history(messages)
+        if tool_manifest:
+            # Inject the manifest as a synthetic system turn at the very
+            # top of the preface so it's always in scope.
+            preface = [
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": tool_manifest}],
+                }
+            ] + preface
+        return preface, last_user
+
+    # ------------------------------------------------------------------
+    # CLI fallback (current default)
+    # ------------------------------------------------------------------
+    #
+    # The Python ``litert_lm.Engine`` path still exists above as the
+    # subprocess worker client, but right now we deliberately bypass it
+    # and shell out to the upstream ``litert-lm run`` CLI for every
+    # call. Each invocation pays the full model load cost (~5–15s on
+    # warm OS page cache) but starts from a completely fresh process,
+    # which sidesteps every state-leak / GPU-context / KV-cache issue
+    # we've been chasing. The trade-off is latency, not correctness.
+    #
+    # The CLI command we run mirrors what the user verified manually:
+    #
+    #     litert-lm run \
+    #         --from-huggingface-repo=<repo> <file> \
+    #         --backend=gpu --prompt="<text>"
+    #
+    # ``LITERT_HF_REPO`` / ``LITERT_HF_FILE`` / ``LITERT_CLI_BIN`` /
+    # ``LITERT_CLI_TIMEOUT_SECONDS`` override the defaults.
+
+    def _build_cli_prompt(
+        self,
+        messages: list[Message],
+        manifest: str = "",
+    ) -> str:
+        """Flatten the conversation into a single string for ``--prompt``.
+
+        Format is intentionally minimal — role label + content per turn,
+        blank line between turns. The CLI applies its own chat template
+        on top of this so we don't need Gemma-specific markers.
+        """
+        parts: list[str] = []
+        if manifest:
+            parts.append(f"System:\n{manifest}")
+        for msg in messages:
+            role = (msg.role or "user").strip().lower()
+            text = (msg.content or "").strip()
+            if not text:
+                continue
+            label = {
+                "system": "System",
+                "user": "User",
+                "assistant": "Assistant",
+                "tool": "Tool",
+            }.get(role, role.capitalize())
+            parts.append(f"{label}:\n{text}")
+        return "\n\n".join(parts)
+
+    async def _complete_via_cli(
+        self,
+        messages: list[Message],
+        manifest: str = "",
+    ) -> str:
+        """Run ``litert-lm run`` as a one-shot subprocess and return stdout.
+
+        Returns the raw stdout text. Caller is responsible for
+        post-processing (reasoning-artifact stripping, tool-call
+        extraction, etc.). Raises :class:`LLMError` on non-zero exit
+        or timeout.
+        """
+        prompt = self._build_cli_prompt(messages, manifest)
+
+        # ── Pre-flight prune ───────────────────────────────────────
+        # The .litertlm file we ship has an 8k KV cache, and the CLI
+        # segfaults (SIGSEGV, not a clean error) on prompts much over
+        # ~25 KB. Enforce a hard character budget here by dropping
+        # middle conversation turns (oldest first, keeping the system
+        # preamble + the most recent turns) until we fit. This is a
+        # last-line safety net; ideally the agent's context manager
+        # wouldn't send us 50 KB in the first place.
+        try:
+            budget_chars = int(
+                os.getenv("LITERT_PROMPT_BUDGET_CHARS", "24000") or 24000
+            )
+        except ValueError:
+            budget_chars = 24000
+
+        if budget_chars > 0 and len(prompt) > budget_chars:
+            # Split messages into system (kept) vs. conversation (prunable).
+            keep_system: list[Message] = []
+            convo: list[Message] = []
+            for m in messages:
+                if (m.role or "").strip().lower() == "system" and not convo:
+                    keep_system.append(m)
+                else:
+                    convo.append(m)
+
+            before_len = len(prompt)
+            before_msgs = len(messages)
+            dropped = 0
+            # Drop oldest conversation turns one at a time, always
+            # preserving the most recent user/assistant turn so the
+            # model still has something to respond to.
+            while convo and len(prompt) > budget_chars and len(convo) > 1:
+                convo.pop(0)
+                dropped += 1
+                prompt = self._build_cli_prompt(
+                    keep_system + convo, manifest
+                )
+
+            log.warning(
+                "litert prompt pruned",
+                before_len=before_len,
+                after_len=len(prompt),
+                before_msgs=before_msgs,
+                after_msgs=len(keep_system) + len(convo),
+                dropped=dropped,
+                budget_chars=budget_chars,
+            )
+
+            # If we're *still* over budget after dropping everything
+            # prunable, the system preamble alone is too big. Log
+            # loudly and let the CLI try — it may segfault, but at
+            # least we'll see it in the logs.
+            if len(prompt) > budget_chars:
+                log.error(
+                    "litert prompt still over budget after pruning",
+                    final_len=len(prompt),
+                    budget_chars=budget_chars,
+                    hint=(
+                        "System preamble + manifest exceed the budget. "
+                        "Reduce tool manifest or system prompt."
+                    ),
+                )
+
+        # Dump the exact prompt to disk so we can re-run the failing
+        # call manually with ``litert-lm run … --prompt="$(cat …)"``
+        # without having to reconstruct it. Overwritten on every call;
+        # the most recent prompt always wins.
+        try:
+            with open("/tmp/big_prompt.txt", "w", encoding="utf-8") as _f:
+                _f.write(prompt)
+        except Exception as _dump_err:  # pylint: disable=broad-exception-caught
+            log.warning(
+                "Failed to dump litert prompt to /tmp/big_prompt.txt",
+                error=str(_dump_err),
+            )
+
+        # Default to the ``litert-lm`` script next to the running
+        # Python interpreter. When Captain Claw runs from a venv,
+        # ``sys.executable`` is ``<venv>/bin/python`` and the CLI is
+        # ``<venv>/bin/litert-lm`` — looking it up via PATH would miss
+        # it because nothing puts the venv bin on PATH globally.
+        import sys as _sys
+
+        default_cli = os.path.join(
+            os.path.dirname(_sys.executable), "litert-lm"
+        )
+        if not os.path.isfile(default_cli):
+            default_cli = "litert-lm"
+        cli_bin = os.getenv("LITERT_CLI_BIN", default_cli)
+        hf_repo = os.getenv(
+            "LITERT_HF_REPO",
+            "litert-community/gemma-4-E4B-it-litert-lm",
+        )
+        hf_file = os.getenv(
+            "LITERT_HF_FILE",
+            os.path.basename(self.model_path) or "gemma-4-E4B-it.litertlm",
+        )
+        timeout_s = float(
+            os.getenv("LITERT_CLI_TIMEOUT_SECONDS", "300") or 300
+        )
+
+        cmd = [
+            cli_bin,
+            "run",
+            f"--from-huggingface-repo={hf_repo}",
+            hf_file,
+            f"--backend={self._backend}",
+            f"--prompt={prompt}",
+        ]
+
+        log.info(
+            "Running litert-lm CLI",
+            bin=cli_bin,
+            backend=self._backend,
+            hf_repo=hf_repo,
+            hf_file=hf_file,
+            prompt_len=len(prompt),
+            timeout_s=timeout_s,
+        )
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as e:
+            raise LLMError(
+                f"litert-lm CLI not found at '{cli_bin}'. Set LITERT_CLI_BIN "
+                f"or install litert-lm. ({e})"
+            ) from e
+
+        # Stream stdout/stderr line-by-line so the parent's log shows
+        # progress in real time instead of waiting for the subprocess
+        # to exit. This is the only way to know the CLI is alive when
+        # generation is taking 30+ seconds.
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+
+        async def _drain(
+            stream: asyncio.StreamReader | None,
+            sink: list[str],
+            label: str,
+        ) -> None:
+            if stream is None:
+                return
+            while True:
+                try:
+                    line = await stream.readline()
+                except Exception as e:  # pylint: disable=broad-exception-caught
+                    log.warning(
+                        "litert-lm CLI stream read failed",
+                        stream=label,
+                        error=str(e),
+                    )
+                    break
+                if not line:
+                    break
+                text = line.decode(errors="replace")
+                sink.append(text)
+                stripped = text.rstrip("\n")
+                if stripped:
+                    log.info(
+                        "litert-lm CLI",
+                        stream=label,
+                        line=stripped,
+                    )
+
+        drain_out = asyncio.create_task(_drain(proc.stdout, stdout_chunks, "stdout"))
+        drain_err = asyncio.create_task(_drain(proc.stderr, stderr_chunks, "stderr"))
+
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+        except asyncio.TimeoutError as e:
+            log.error(
+                "litert-lm CLI timed out — killing subprocess",
+                timeout_s=timeout_s,
+                stdout_so_far=len("".join(stdout_chunks)),
+                stderr_so_far=len("".join(stderr_chunks)),
+            )
+            try:
+                proc.kill()
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+            # Cancel the drain tasks so they don't leak.
+            for t in (drain_out, drain_err):
+                if not t.done():
+                    t.cancel()
+            raise LLMError(
+                f"litert-lm CLI timed out after {timeout_s}s"
+            ) from e
+
+        # Make sure the drain tasks finish reading whatever is left in
+        # the pipes before we return.
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(drain_out, drain_err, return_exceptions=True),
+                timeout=5,
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            for t in (drain_out, drain_err):
+                if not t.done():
+                    t.cancel()
+
+        stdout_text = "".join(stdout_chunks)
+        stderr_text = "".join(stderr_chunks)
+
+        log.info(
+            "litert-lm CLI finished",
+            returncode=proc.returncode,
+            stdout_len=len(stdout_text),
+            stderr_len=len(stderr_text),
+        )
+
+        if proc.returncode != 0:
+            tail = stderr_text[-800:] if stderr_text else "(no stderr)"
+            raise LLMError(
+                f"litert-lm CLI exited with code {proc.returncode}: {tail}"
+            )
+
+        return stdout_text
+
+    async def complete(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,  # noqa: ARG002
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        manifest = _litert_build_tool_manifest(list(tools)) if tools else ""
+        if self.rate_limiter:
+            estimated = self._estimate_request_tokens(
+                messages, max_tokens or self.max_tokens
+            )
+            await self.rate_limiter.acquire(estimated)
+
+        preface, last_user = self._build_preface(messages, manifest)
+        try:
+            content = await self._client.send_message(preface, last_user)
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            err_text = str(e)
+            err_type = type(e).__name__
+            log.error(
+                "litert-lm complete() failed; returning graceful response",
+                error=err_text,
+                error_type=err_type,
+            )
+            friendly = self._friendly_litert_error(err_text, err_type)
+            return LLMResponse(
+                content=friendly,
+                tool_calls=[],
+                model=self.model,
+                usage={
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+                finish_reason="length",
+            )
+
+        content = _strip_reasoning_artifacts(content)
+        tool_calls: list[ToolCall] = []
+        if tools:
+            content, tool_calls = _litert_extract_tool_calls(content)
+        completion_tokens = self.count_tokens(content)
+        return LLMResponse(
+            content=content,
+            tool_calls=tool_calls,
+            model=self.model,
+            usage={
+                "prompt_tokens": 0,
+                "completion_tokens": completion_tokens,
+                "total_tokens": completion_tokens,
+            },
+            finish_reason="tool_calls" if tool_calls else "stop",
+        )
+
+    async def complete_streaming(
+        self,
+        messages: list[Message],
+        tools: list[ToolDefinition] | None = None,
+        temperature: float | None = None,  # noqa: ARG002
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[str]:
+        manifest = _litert_build_tool_manifest(list(tools)) if tools else ""
+        if self.rate_limiter:
+            estimated = self._estimate_request_tokens(
+                messages, max_tokens or self.max_tokens
+            )
+            await self.rate_limiter.acquire(estimated)
+
+        # The worker client doesn't expose true token streaming yet, so
+        # we just run one blocking ``send_message`` and yield the full
+        # answer as a single chunk. ``_complete_via_cli`` is still below
+        # as an emergency fallback but is no longer used.
+        preface, last_user = self._build_preface(messages, manifest)
+        try:
+            content = await self._client.send_message(preface, last_user)
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            err_text = str(e)
+            err_type = type(e).__name__
+            log.error(
+                "litert-lm complete_streaming() failed; yielding graceful response",
+                error=err_text,
+                error_type=err_type,
+            )
+            yield self._friendly_litert_error(err_text, err_type)
+            return
+
+        content = _strip_reasoning_artifacts(content)
+        if tools:
+            # Strip the inline tool-call fences before streaming the
+            # remainder to the user — the agent loop will run the actual
+            # call via complete() on its own (it always re-issues with
+            # tools when finish_reason == "tool_calls").
+            content, _ = _litert_extract_tool_calls(content)
+        if content:
+            yield content
+
+    def count_tokens(self, text: str) -> int:
+        return len(text) // 4
+
+    @staticmethod
+    def _friendly_litert_error(err_text: str, err_type: str) -> str:
+        """Turn a worker-client error into a user-visible message.
+
+        Recognises three buckets:
+          1. **Timeout / crash** — the worker hung or died (most common
+             cause: KV-cache overflow that aborts the C++ side). The
+             worker has already been killed; the next call will respawn
+             a fresh child.
+          2. **Overflow signalled cleanly** — the worker raised a
+             readable error mentioning ``cache``/``length``/etc.
+          3. **Anything else** — surfaced verbatim.
+        """
+        lower = (err_text or "").lower()
+
+        # Bucket 1: timeout / crash from the worker client.
+        if (
+            "did not respond" in lower
+            or "did not boot" in lower
+            or "worker boot failed" in lower
+            or "unexpected response from worker" in lower
+            or "failed to spawn worker" in lower
+            or "failed to enqueue request" in lower
+        ):
+            return (
+                "[litert] Local model worker crashed or hung "
+                "(usually KV-cache overflow on long conversations — "
+                "Gemma-3n previews are capped at ~8192 tokens by the "
+                ".litertlm file). A fresh worker will be spawned on "
+                "the next message; use /clear or trim the conversation "
+                "to stay under the limit."
+            )
+
+        # Bucket 2: overflow surfaced cleanly by the worker.
+        looks_like_overflow = any(
+            tok in lower
+            for tok in (
+                "kv",
+                "cache",
+                "max_num_tokens",
+                "max_seq",
+                "out of range",
+                "exceed",
+                "too long",
+                "length",
+                "capacity",
+            )
+        )
+        if looks_like_overflow:
+            return (
+                "[litert] Local model ran out of context window "
+                "(KV cache exhausted — Gemma-3n previews are capped at "
+                "~8192 tokens by the .litertlm file). Use /clear or trim "
+                "the conversation and try again."
+            )
+
+        return (
+            f"[litert] Local model call failed ({err_type}): {err_text}. "
+            "The conversation was preserved — try again, or /clear if it "
+            "keeps failing."
+        )
+
+    async def close(self) -> None:
+        # The worker client is shared across providers via the registry
+        # and the child is daemonized, so it will die with the parent.
+        # We deliberately do NOT call ``self._client.shutdown()`` here:
+        # another provider in the same process may still be using it.
+        return
+
+
 def create_provider(
     provider: str = "ollama",
     model: str = "llama3.2",
@@ -1758,6 +2784,12 @@ def create_provider(
     - `gemini` / `google`
     - `grok` / `xai`
     - `openrouter`
+    - `litert` / `litert-lm` — local Gemma via Google's litert-lm runtime.
+      Pass the model id (e.g. ``litert-community/gemma-4-E4B-it-litert-lm``)
+      or an absolute path to a ``.litertlm`` file in ``base_url``. The
+      model must already be present at
+      ``~/.litert-lm/models/<repo>--<name>/model.litertlm``. Set
+      ``LITERT_BACKEND=cpu`` env var to force CPU; defaults to GPU.
     """
     normalized = _normalize_provider_name(provider)
 
@@ -1795,9 +2827,47 @@ def create_provider(
             extra_headers=extra_headers,
         )
 
+    if normalized == "litert":
+        # `base_url` doubles as the model file path / model id resolver
+        # for the local litert-lm runtime, since this provider has no
+        # network endpoint. Falls back to `model` if base_url is empty.
+        #
+        # IMPORTANT: ``max_num_tokens`` is NOT the same thing as
+        # Captain Claw's global ``num_ctx``. It's the *combined*
+        # prompt+output KV-cache working window allocated at engine
+        # construction time. The upstream Gemma-4 E4B .litertlm file
+        # supports up to 32k tokens (per the HF model card:
+        # "The model can support up to 32k context length."), but the
+        # ``Engine(max_num_tokens=...)`` default is only 4096 — if we
+        # don't override it, the engine silently clamps at 4k and then
+        # segfaults the moment we feed it a larger prompt.
+        #
+        # We previously capped this at 8192 while chasing a different
+        # bug where Captain Claw's 160k global context budget was
+        # leaking into the engine. That cap was the wrong fix: 8k is
+        # too small for real multi-round council sessions, and when a
+        # ~12k prompt hit the engine with only 8k allocated it blew
+        # past the buffer → SIGSEGV. Use the full 32k the model
+        # supports and let the agent's own context manager handle
+        # higher-level pruning. Override via ``LITERT_MAX_NUM_TOKENS``
+        # if you're running a differently-built file.
+        litert_max_num_tokens = int(
+            os.getenv("LITERT_MAX_NUM_TOKENS", "32768") or 32768
+        )
+        return LiteRTProvider(
+            model=model,
+            model_path=(base_url or None),
+            backend=os.getenv("LITERT_BACKEND", "gpu"),
+            temperature=temperature,
+            max_tokens=max_tokens,
+            max_num_tokens=litert_max_num_tokens,
+            tokens_per_minute=tokens_per_minute,
+        )
+
     raise ValueError(
         f"Provider '{provider}' not supported. "
-        "Use one of: ollama, openai/chatgpt, anthropic/claude, gemini/google, grok/xai, openrouter."
+        "Use one of: ollama, openai/chatgpt, anthropic/claude, gemini/google, "
+        "grok/xai, openrouter, litert."
     )
 
 

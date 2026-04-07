@@ -566,6 +566,7 @@ class AgentConfig(BaseModel):
     temperature: float = 0.7
     max_tokens: int = 32768
     provider_api_key: str = ""
+    base_url: str = ""
 
     # BotPort
     botport_enabled: bool = True
@@ -655,7 +656,11 @@ def _build_config_yaml(c: AgentConfig) -> str:
             "temperature": c.temperature,
             "max_tokens": c.max_tokens,
             "api_key": "",  # Key goes in .env
-            "base_url": f"http://{dhost}:11434" if c.provider == "ollama" else "",
+            "base_url": (
+                c.base_url
+                if c.base_url
+                else (f"http://{dhost}:11434" if c.provider == "ollama" else "")
+            ),
         },
         "context": {
             "max_tokens": 160000,
@@ -755,7 +760,11 @@ def _build_process_config_yaml(c: AgentConfig, agent_dir: Path) -> str:
             "temperature": c.temperature,
             "max_tokens": c.max_tokens,
             "api_key": "",  # Key goes in .env
-            "base_url": "http://127.0.0.1:11434" if c.provider == "ollama" else "",
+            "base_url": (
+                c.base_url
+                if c.base_url
+                else ("http://127.0.0.1:11434" if c.provider == "ollama" else "")
+            ),
         },
         "context": {
             "max_tokens": 160000,

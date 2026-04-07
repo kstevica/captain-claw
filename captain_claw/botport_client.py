@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import aiohttp
 
+from captain_claw.ws_utils import fire_and_forget_send
+
 from captain_claw.config import BotPortClientConfig, get_config
 from captain_claw.instructions import InstructionLoader
 from captain_claw.logging import get_logger
@@ -849,7 +851,7 @@ class BotPortClient:
             "data": data,
         })
         # Fire-and-forget: schedule the send without blocking the agent loop.
-        asyncio.ensure_future(self._ws.send_str(msg))
+        fire_and_forget_send(self._ws, msg)
 
     def _make_activity_status_callback(
         self, original: Callable[[str], None] | None,

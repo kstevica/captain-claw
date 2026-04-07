@@ -11,6 +11,7 @@ from aiohttp import web
 
 from captain_claw.config import get_config
 from captain_claw.logging import get_logger
+from captain_claw.ws_utils import fire_and_forget_send
 from captain_claw.next_steps import extract_next_steps, next_steps_to_dicts
 
 if TYPE_CHECKING:
@@ -56,6 +57,14 @@ async def _generate_task_name(
     Uses the cheapest/fastest model available via litellm.
     """
     try:
+        # litellm has no provider mapping for ``litert/...`` model
+        # strings, so calling acompletion with one raises BadRequestError
+        # every single turn and spams the log. Skip task naming entirely
+        # for litert — it's a cosmetic feature and not worth the noise.
+        if (model or "").strip().lower().startswith("litert/"):
+            log.info("Task naming: skipped (litert provider)", model=model)
+            return ""
+
         from litellm import acompletion
 
         # Build the naming prompt.
@@ -226,10 +235,7 @@ async def handle_chat(
     if is_public:
         import json as _json_mod
         def _send_msg(msg: dict) -> None:
-            if not ws.closed:
-                asyncio.ensure_future(ws.send_str(
-                    _json_mod.dumps(msg, default=str)
-                ))
+            fire_and_forget_send(ws, _json_mod.dumps(msg, default=str))
         _send_msg({"type": "status", "status": "thinking"})
         _send_msg({
             "type": "chat_message", "role": "user",
@@ -308,8 +314,7 @@ async def _run_agent(
 
     def _send_to_ws(msg: dict) -> None:
         """Send directly to this user's WebSocket."""
-        if not ws.closed:
-            asyncio.ensure_future(ws.send_str(_json.dumps(msg, default=str)))
+        fire_and_forget_send(ws, _json.dumps(msg, default=str))
 
     # Choose the right send function.
     send = _send_to_ws if is_public else (lambda msg: server._broadcast(msg))

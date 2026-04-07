@@ -95,6 +95,7 @@ export interface SpawnConfig {
   temperature: number
   max_tokens: number
   provider_api_key: string
+  base_url: string
   botport_enabled: boolean
   botport_url: string
   botport_instance_name: string

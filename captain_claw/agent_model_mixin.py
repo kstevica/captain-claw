@@ -175,6 +175,28 @@ class AgentModelMixin:
         normalized_cfg_provider = self._normalize_provider_key(str(cfg.model.provider))
         cfg_base_url = str(cfg.model.base_url or "").strip()
 
+        # Short-circuit: if the currently-active provider already matches the
+        # requested (provider, model, base_url) triple, don't rebuild it. This
+        # is important for providers like ``litert`` whose ``__init__`` mmaps
+        # a multi-GB model file and seizes the GPU — re-instantiating during
+        # session-load can crash the process. We still refresh runtime metadata
+        # so display strings reflect the new ``source``/``model_id``.
+        existing = getattr(self, "provider", None)
+        if existing is not None:
+            existing_provider = self._normalize_provider_key(
+                str(getattr(existing, "provider", "") or "")
+            )
+            existing_model = str(getattr(existing, "model", "") or "").strip()
+            existing_base = str(getattr(existing, "base_url", "") or "").strip()
+            requested_base = (base_url or "").strip()
+            if (
+                existing_provider == normalized_provider
+                and existing_model == model
+                and existing_base == requested_base
+            ):
+                self._refresh_runtime_model_details(source=source, model_id=model_id)
+                return
+
         # Prevent default-provider base_url (e.g. Ollama localhost) from leaking
         # into a different selected provider via persisted session metadata.
         if base_url and normalized_provider != normalized_cfg_provider and cfg_base_url and base_url == cfg_base_url:
@@ -192,7 +214,7 @@ class AgentModelMixin:
         # model key (which may belong to a different provider).
         # When extra_headers carry auth, skip the api_key entirely.
         # Providers like ollama don't use API keys — never leak a foreign key.
-        _NO_KEY_PROVIDERS = {"ollama"}
+        _NO_KEY_PROVIDERS = {"ollama", "litert"}
         if extra_headers:
             resolved_api_key = None
         elif normalized_provider in _NO_KEY_PROVIDERS:

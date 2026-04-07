@@ -64,7 +64,7 @@ interface AgentProposal {
 
 type Phase = 'input' | 'review' | 'spawning' | 'done'
 
-const PROVIDERS = ['anthropic', 'openai', 'ollama', 'gemini', 'xai', 'openrouter']
+const PROVIDERS = ['anthropic', 'openai', 'ollama', 'gemini', 'xai', 'openrouter', 'litert']
 
 const DEFAULT_TOOLS = [
   'shell', 'read', 'write', 'glob', 'edit', 'web_fetch', 'web_search',
@@ -253,6 +253,7 @@ export function ForgePage() {
         temperature: 0.7,
         max_tokens: 32768,
         provider_api_key: agent.providerApiKey,
+        base_url: '',
         botport_enabled: false,
         botport_url: '',
         botport_instance_name: '',
