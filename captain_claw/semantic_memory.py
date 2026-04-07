@@ -596,8 +596,9 @@ class SemanticMemoryIndex:
             if len(snippet) > max_snippet_chars:
                 snippet = snippet[:max_snippet_chars].rstrip() + "... [truncated]"
             citation = f"{item.path}:{item.start_line}"
+            created = (item.updated_at or "").strip() or "unknown"
             lines.append(
-                f"- [{item.source}] {citation} (score={item.score:.3f}) {snippet}"
+                f"- [{item.source}] {citation} (score={item.score:.3f}, created={created}) {snippet}"
             )
             debug.append(
                 f"- source={item.source} reference={item.reference} path={item.path} "

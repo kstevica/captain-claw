@@ -21,6 +21,7 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -568,8 +569,15 @@ class DeepMemoryIndex:
             if r.start_line:
                 loc += f":{r.start_line}"
             source_tag = f"[{r.source}]" if r.source else ""
+            if r.updated_at:
+                try:
+                    created = datetime.fromtimestamp(int(r.updated_at), tz=UTC).isoformat()
+                except (ValueError, OSError, OverflowError):
+                    created = "unknown"
+            else:
+                created = "unknown"
             lines.append(
-                f"- {source_tag} {loc} (score={r.score:.2f}) {snippet}"
+                f"- {source_tag} {loc} (score={r.score:.2f}, created={created}) {snippet}"
             )
             debug_lines.append(
                 f"  doc_id={r.doc_id} source={r.source} ref={r.reference} "
