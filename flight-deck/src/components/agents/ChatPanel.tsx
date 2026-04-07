@@ -24,6 +24,8 @@ import {
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
 import { useChatStore } from '../../stores/chatStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useContainerStore } from '../../stores/containerStore'
@@ -734,7 +736,7 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
       <div className="group mb-3 flex flex-col items-end gap-0.5">
         <div className="max-w-[85%] rounded-xl rounded-br-sm bg-violet-600/20 px-3.5 py-2.5">
           <div className="fd-markdown text-sm text-zinc-200">
-            <Markdown remarkPlugins={[remarkGfm]}>{processImagePaths(message.content, agentConn?.host, agentConn?.port, agentConn?.auth)}</Markdown>
+            <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{processImagePaths(message.content, agentConn?.host, agentConn?.port, agentConn?.auth)}</Markdown>
           </div>
           <span className="mt-1 block text-right text-[10px] text-zinc-500">
             {formatTime(message.timestamp)}
@@ -822,7 +824,7 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
     <div className="group mb-3 flex flex-col items-start gap-0.5">
       <div className={`max-w-[85%] rounded-xl rounded-bl-sm bg-zinc-800/60 px-3.5 py-2.5 ${message.replay ? 'opacity-60' : ''}`}>
         <div className="fd-markdown text-sm text-zinc-300">
-          <Markdown remarkPlugins={[remarkGfm]}>{processImagePaths(cleanContent, agentConn?.host, agentConn?.port, agentConn?.auth)}</Markdown>
+          <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{processImagePaths(cleanContent, agentConn?.host, agentConn?.port, agentConn?.auth)}</Markdown>
         </div>
         <div className="mt-1 flex items-center gap-2 text-[10px] text-zinc-600">
           <span>{formatTime(message.timestamp)}</span>

@@ -286,7 +286,7 @@ export function OperationsPage() {
           <div>
             <h1 className="text-lg font-semibold flex items-center gap-2">
               <BarChart3 className="h-5 w-5 text-violet-400" />
-              Operations
+              Stats
             </h1>
             <p className="text-sm text-zinc-500">Token usage, costs, and performance across all agents</p>
           </div>

@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { RefreshCw, Loader2, MessageSquareQuote, ChevronDown } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
 import type { CouncilArtifact } from '../../stores/councilStore'
 
 interface TldrPanelProps {
@@ -59,7 +61,7 @@ export function TldrPanel({ tldrs, generating, onGenerate }: TldrPanelProps) {
               >
                 <span className="text-xs font-medium text-zinc-300">{t.agentName}</span>
                 <div className="fd-markdown mt-1 text-xs text-zinc-400 leading-relaxed">
-                  <Markdown remarkPlugins={[remarkGfm]}>{t.content}</Markdown>
+                  <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{t.content}</Markdown>
                 </div>
               </div>
             ))}

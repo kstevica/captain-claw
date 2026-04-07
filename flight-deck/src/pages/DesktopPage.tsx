@@ -127,14 +127,24 @@ export function DesktopPage() {
       .map((a) => ({ id: a.id, name: a.name, host: a.host, port: a.port, auth: a.authToken })),
   ]
 
+  // Reactively read auth state so the polling effect re-runs when the user
+  // logs in / out (otherwise we'd be stuck with the initial value).
+  const authEnabled = useAuthStore((s) => s.authEnabled)
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
+
   useEffect(() => {
+    // When auth is enabled but the user isn't logged in (e.g. on first
+    // mount before login, or after a session expiry), skip polling — every
+    // request would otherwise hit /fd/containers and /fd/processes with no
+    // Authorization header and spam the server log with 401s.
+    if (authEnabled === true && !isAuthenticated) return
     checkHealth()
     fetchContainers()
     fetchProcesses()
     probeAll()
     const interval = setInterval(() => { fetchContainers(); fetchProcesses() }, 10000)
     return () => clearInterval(interval)
-  }, [checkHealth, fetchContainers, fetchProcesses, probeAll])
+  }, [checkHealth, fetchContainers, fetchProcesses, probeAll, authEnabled, isAuthenticated])
 
   // Close bulk menu on outside click
   useEffect(() => {

@@ -2364,11 +2364,27 @@ class AgentContextMixin:
                 if _lines:
                     peer_agents_block = (
                         "\n\n## Other Available Agents\n"
-                        "The following peer agents are available. If a user's request "
-                        "would be better handled by one of them, suggest that the user "
-                        "forwards the task or context to the appropriate agent.\n"
+                        "The following peer agents are available **right now in this session**. "
+                        "This list is authoritative — it overrides any peer/fleet/roster information "
+                        "you may recall from memory, insights, or prior conversations. Do NOT mention, "
+                        "name, or attempt to consult any agent that is not in this list, even if you "
+                        "remember them from a previous session. If a user's request would be better "
+                        "handled by one of the agents below, suggest that the user forwards the task "
+                        "or context to the appropriate agent.\n"
                         + "\n".join(_lines)
                     )
+                else:
+                    peer_agents_block = (
+                        "\n\n## Other Available Agents\n"
+                        "No peer agents are available in this session. Do NOT reference or attempt "
+                        "to consult any peer/fleet agent from memory — none are reachable right now."
+                    )
+        else:
+            peer_agents_block = (
+                "\n\n## Other Available Agents\n"
+                "No peer agents are available in this session. Do NOT reference or attempt "
+                "to consult any peer/fleet agent from memory — none are reachable right now."
+            )
 
         # Visualization style: brand-aware chart/dashboard generation.
         visualization_style_block = ""

@@ -11,6 +11,8 @@ import { formatSize } from '../../services/fileTransfer'
 import type { CouncilSession, ActivityLogEntry, MemoryRounds } from '../../stores/councilStore'
 import { useCouncilStore } from '../../stores/councilStore'
 
+import { suitabilityLabel } from '../../utils/suitability'
+
 const COGNITIVE_MODE_COLORS: Record<string, { dot: string; label: string }> = {
   neutra:     { dot: 'bg-zinc-500',    label: 'Neutra' },
   ionian:     { dot: 'bg-amber-400',   label: 'Ionian' },
@@ -269,9 +271,13 @@ export function CouncilSidebar({
         </h3>
         <div className="space-y-1">
           {session.agents.map(agent => {
-            const lastMsg = [...session.messages]
-              .reverse()
-              .find(m => m.agentId === agent.id && m.role === 'agent')
+            const agentMsgs = session.messages.filter(
+              m => m.agentId === agent.id && m.role === 'agent',
+            )
+            const avgSuitability = agentMsgs.length > 0
+              ? agentMsgs.reduce((sum, m) => sum + m.suitability, 0) / agentMsgs.length
+              : 0
+            const hasMsgs = agentMsgs.length > 0
             const isSpeaking = speaking === agent.id
             const isMod = agent.id === session.moderatorAgentId
 
@@ -311,15 +317,20 @@ export function CouncilSidebar({
                         </span>
                       )}
                     </div>
-                    {lastMsg && (
-                      <div className="flex items-center gap-1 mt-0.5">
+                    {hasMsgs && (
+                      <div
+                        className="flex items-center gap-1 mt-0.5"
+                        title={`Average self-rated suitability for the topic across ${agent.name}'s ${agentMsgs.length} contribution${agentMsgs.length === 1 ? '' : 's'}. Each agent reports a SUITABILITY score at the top of every turn; the moderator uses it to pick who speaks next.`}
+                      >
                         <div className="h-1 w-8 rounded-full bg-zinc-700 overflow-hidden">
                           <div
                             className="h-full rounded-full bg-violet-500"
-                            style={{ width: `${lastMsg.suitability * 100}%` }}
+                            style={{ width: `${avgSuitability * 100}%` }}
                           />
                         </div>
-                        <span className="text-[10px] text-zinc-500">{lastMsg.suitability.toFixed(2)}</span>
+                        <span className="text-[10px] text-zinc-500">
+                          {suitabilityLabel(avgSuitability)} ({Math.round(avgSuitability * 100)}%)
+                        </span>
                       </div>
                     )}
                   </div>

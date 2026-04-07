@@ -6,6 +6,7 @@ import { useLocalAgentStore } from './localAgentStore'
 import { useProcessStore } from './processStore'
 import { useTraceStore } from './traceStore'
 import type { TraceSpan } from '../types'
+import { sanitizeAgentContent } from '../utils/sanitizeAgentContent'
 
 // ── Chat persistence helpers ──
 
@@ -38,10 +39,11 @@ async function serverLoadMessages(sessionId: string): Promise<ChatMessage[]> {
     return rows.map((r, i) => {
       let meta: Record<string, unknown> = {}
       try { meta = JSON.parse(r.metadata || '{}') } catch { /* ignore */ }
+      const role = r.role as ChatMessage['role']
       return {
         id: `hist-${i}-${Date.now()}`,
-        role: r.role as ChatMessage['role'],
-        content: r.content,
+        role,
+        content: role === 'assistant' ? sanitizeAgentContent(r.content) : r.content,
         timestamp: r.created_at,
         replay: true,
         tool_name: meta.tool_name as string | undefined,
@@ -310,10 +312,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     ws.on('chat_message', (data) => {
       // Skip echoed user messages — we already add them locally in sendMessage
       if (data.role === 'user' && !data.replay) return
+      const rawContent = (data.content as string) || ''
+      // Sanitize assistant content: strip thinking blocks, council protocol
+      // headers (SUITABILITY/ACTION/TARGET), insight echoes, and other
+      // instruction/memory leaks. User content is left as-is.
+      const cleanContent = data.role === 'assistant' ? sanitizeAgentContent(rawContent) : rawContent
       const msg: ChatMessage = {
         id: nextId(),
         role: data.role as 'user' | 'assistant',
-        content: data.content as string || '',
+        content: cleanContent,
         timestamp: data.timestamp as string || new Date().toISOString(),
         replay: data.replay as boolean || false,
         model: data.model as string || '',

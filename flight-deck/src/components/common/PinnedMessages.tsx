@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { Pin, X, Tag, MessageSquare, Copy, Check, ChevronDown, ChevronRight, Trash2 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
 import { usePinnedStore, type PinnedMessage } from '../../stores/pinnedStore'
 
 export function PinnedMessages({ onClose }: { onClose: () => void }) {
@@ -144,7 +146,7 @@ function PinnedCard({
       <div className="mt-1">
         {expanded ? (
           <div className="fd-markdown prose-xs text-xs text-zinc-300">
-            <Markdown remarkPlugins={[remarkGfm]}>{pin.content}</Markdown>
+            <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{pin.content}</Markdown>
           </div>
         ) : (
           <p className="text-xs text-zinc-400 cursor-pointer" onClick={() => setExpanded(true)}>

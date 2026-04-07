@@ -15,6 +15,8 @@ import {
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
 import { useChatStore } from '../../stores/chatStore'
 import { uploadFileToAgent } from '../../services/fileTransfer'
 import type { ChatMessage } from '../../services/agentChat'
@@ -360,7 +362,7 @@ function EmbeddedMessage({ message, agentHost, agentPort, agentAuth }: { message
       <div className="mb-2 flex justify-end">
         <div className="max-w-[90%] rounded-lg rounded-br-sm bg-violet-600/20 px-2.5 py-1.5">
           <div className="fd-markdown text-xs text-zinc-200">
-            <Markdown remarkPlugins={[remarkGfm]}>{processImagePaths(message.content, agentHost, agentPort, agentAuth)}</Markdown>
+            <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{processImagePaths(message.content, agentHost, agentPort, agentAuth)}</Markdown>
           </div>
           <span className="mt-0.5 block text-right text-[9px] text-zinc-600">{formatTime(message.timestamp)}</span>
         </div>
@@ -405,7 +407,7 @@ function EmbeddedMessage({ message, agentHost, agentPort, agentAuth }: { message
     <div className="mb-2">
       <div className={`max-w-[90%] rounded-lg rounded-bl-sm bg-zinc-800/60 px-2.5 py-1.5 ${message.replay ? 'opacity-60' : ''}`}>
         <div className="fd-markdown text-xs text-zinc-300">
-          <Markdown remarkPlugins={[remarkGfm]}>{processImagePaths(cleanContent, agentHost, agentPort, agentAuth)}</Markdown>
+          <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{processImagePaths(cleanContent, agentHost, agentPort, agentAuth)}</Markdown>
         </div>
         <div className="mt-0.5 flex items-center gap-1.5 text-[9px] text-zinc-600">
           <span>{formatTime(message.timestamp)}</span>

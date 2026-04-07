@@ -30,17 +30,18 @@ export function CouncilControls({
   const isActive = session.status === 'active'
   const isBusy = !!speaking
 
-  // Check if any recent system message indicates round completion.
+  // Check if any recent system message indicates the *current* round is complete.
   // We scan the last few system messages because an extension message
   // ("Council extended by +N rounds...") may have been appended after
-  // the "Round X complete" message.
+  // the "Round X complete" message. We pin to currentRound so a stale
+  // "Round 1 complete" doesn't bleed into Round 2 while agents are still speaking.
   const recentSysMsgs = [...session.messages]
     .reverse()
     .filter(m => m.role === 'system')
     .slice(0, 5)
-  const isRoundComplete = recentSysMsgs.some(m =>
-    m.content.includes('complete') && m.content.includes('Round'),
-  )
+  const completeMarker = `Round ${session.currentRound} complete`
+  const isRoundComplete = !isBusy && recentSysMsgs.some(m => m.content.includes(completeMarker))
+  const isRoundInSession = isActive && !isRoundComplete
   // Council was extended after the round ended — user needs a Continue button
   const canContinue = isActive && !isBusy && isRoundComplete && session.currentRound < session.maxRounds
 
@@ -99,6 +100,15 @@ export function CouncilControls({
 
   return (
     <div className="border-t border-zinc-700/50 bg-zinc-900/50 px-4 py-3 space-y-2">
+      {/* In-session status (round still running) */}
+      {isRoundInSession && (
+        <div className="flex items-center gap-2 rounded-lg bg-zinc-800/50 px-3 py-2">
+          <div className="h-2 w-2 rounded-full bg-violet-400 animate-pulse" />
+          <span className="text-xs text-zinc-400">
+            Round {session.currentRound} in session{session.currentRound >= session.maxRounds ? ` / ${session.maxRounds}` : ''}...
+          </span>
+        </div>
+      )}
       {/* Round control bar */}
       {isRoundComplete && (
         <div className="space-y-2">

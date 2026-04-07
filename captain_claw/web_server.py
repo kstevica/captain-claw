@@ -2364,20 +2364,133 @@ async def _run_server(config: Config) -> None:
     runner = web.AppRunner(app)
     await runner.setup()
 
+    import socket as _socket
+
+    def _probe_port_free(_host: str, _port: int) -> bool:
+        """Return True if (host, port) accepts a fresh bind right now."""
+        try:
+            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as _s:
+                # No SO_REUSEADDR — we want a strict "is this free" answer.
+                _s.bind((_host, _port))
+        except OSError:
+            return False
+        return True
+
     host = config.web.host
-    port = config.web.port
-    max_retries = 10
-    for attempt in range(max_retries):
+    requested_port = config.web.port
+    port = requested_port
+    max_search = 200
+    bound = False
+    scanned: list[int] = []
+    for _ in range(max_search):
+        # Probe first so we skip ports that are clearly in use (another agent
+        # listening, a stale docker binding, etc.) instead of feeding them to
+        # aiohttp and parsing the OSError after the fact.
+        if not _probe_port_free(host, port):
+            scanned.append(port)
+            port += 1
+            continue
         try:
             site = web.TCPSite(runner, host, port)
             await site.start()
+            bound = True
             break
         except OSError as exc:
-            if attempt < max_retries - 1:
-                log.warning("Port unavailable, trying next", port=port, next_port=port + 1, error=str(exc))
-                port += 1
-            else:
-                raise
+            # TOCTOU: something grabbed the port between our probe and the
+            # aiohttp bind. Move on to the next candidate.
+            log.warning(
+                "Port grabbed between probe and bind, trying next",
+                port=port,
+                error=str(exc),
+            )
+            scanned.append(port)
+            port += 1
+
+    if not bound:
+        raise RuntimeError(
+            f"No free TCP port found in range {requested_port}..{requested_port + max_search - 1} "
+            f"(scanned {len(scanned)} ports)"
+        )
+
+    if port != requested_port:
+        log.warning(
+            "Port drifted from requested value",
+            requested=requested_port,
+            actual=port,
+            skipped=scanned[:10],
+        )
+
+    # Reflect the actual bound port everywhere downstream code reads it.
+    config.web.port = port
+
+    # If we fell through to a different port, tell Flight Deck so it can update
+    # its registry and re-broadcast the fleet membership to peer agents.
+    if port != requested_port:
+        _slug = os.environ.get("FD_AGENT_SLUG", "").strip()
+        _fd_url = (os.environ.get("FD_URL", "") or os.environ.get("FD_INTERNAL_URL", "")).strip().rstrip("/")
+        if _slug and _fd_url:
+            async def _announce_port_with_retry():
+                # Flight Deck may not be listening yet — it kicks off child
+                # agents during its own startup lifespan, before uvicorn has
+                # bound the socket. Retry with backoff so the registry still
+                # converges to the correct port once FD is up.
+                import httpx as _httpx
+                _auth_token = config.web.auth_token or ""
+                _delays = [0.2, 0.5, 1.0, 2.0, 3.0, 5.0, 5.0, 5.0, 10.0, 10.0]
+                for _attempt, _delay in enumerate(_delays, start=1):
+                    try:
+                        async with _httpx.AsyncClient(timeout=5.0) as _client:
+                            _resp = await _client.post(
+                                f"{_fd_url}/fd/processes/{_slug}/announce-port",
+                                json={"port": port, "auth": _auth_token},
+                            )
+                        if _resp.status_code == 200:
+                            log.info(
+                                "Announced port to Flight Deck",
+                                slug=_slug,
+                                port=port,
+                                requested=requested_port,
+                                attempts=_attempt,
+                            )
+                            return
+                        # 4xx/5xx that is NOT a connection error — log and
+                        # keep retrying a few times in case FD is still
+                        # warming up its routes.
+                        log.warning(
+                            "Flight Deck port announce rejected, will retry",
+                            slug=_slug,
+                            port=port,
+                            status=_resp.status_code,
+                            body=_resp.text[:200],
+                            attempt=_attempt,
+                        )
+                    except Exception as _exc:
+                        log.info(
+                            "Flight Deck not reachable yet, retrying port announce",
+                            slug=_slug,
+                            error=str(_exc),
+                            attempt=_attempt,
+                        )
+                    await asyncio.sleep(_delay)
+                log.error(
+                    "Gave up announcing drifted port to Flight Deck — registry is stale",
+                    slug=_slug,
+                    requested=requested_port,
+                    actual=port,
+                )
+
+            # Fire-and-forget so startup isn't blocked by the retry loop.
+            asyncio.create_task(_announce_port_with_retry())
+        else:
+            # No FD to announce to (manual launch). Still shout about the
+            # drift so whoever started this agent notices their registry /
+            # config is now out of sync with the bound port.
+            log.warning(
+                "Port fallback occurred but FD_AGENT_SLUG / FD_URL not set — "
+                "any external registry pointing at this agent is now stale",
+                requested=requested_port,
+                actual=port,
+            )
 
     print(f"\n  Captain Claw Web UI running at http://{host}:{port}")
     if config.web.public_run:

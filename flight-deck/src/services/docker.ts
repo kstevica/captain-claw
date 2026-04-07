@@ -14,6 +14,16 @@ function _authHeaders(): Record<string, string> {
 }
 
 async function fdFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  // Auth guard: when auth is enabled but we don't have a token in memory
+  // (page reload before refresh, post-logout, etc.) try to refresh once
+  // before issuing the request. Skips the inevitable 401 round-trip and
+  // keeps the server log clean.
+  const _state = useAuthStore.getState()
+  if (_state.authEnabled === true && !_state.token) {
+    const refreshed = await refreshAccessToken()
+    if (!refreshed) throw new Error('Not authenticated')
+  }
+
   const res = await fetch(`${FD_BASE}${path}`, {
     headers: _authHeaders(),
     credentials: 'include',

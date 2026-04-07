@@ -3,7 +3,8 @@ import { AgentChatWS } from '../services/agentChat'
 import { useAuthStore } from './authStore'
 import { useContainerStore } from './containerStore'
 import { useProcessStore } from './processStore'
-import { uploadFileToAgent } from '../services/fileTransfer'
+import { uploadFileToAgent, transferFile } from '../services/fileTransfer'
+import { sanitizeAgentContent, stripThinkingBlocks as sharedStripThinkingBlocks } from '../utils/sanitizeAgentContent'
 
 // Instruction templates (raw text imports)
 import btwTemplate from '../instructions/council/btw_context.md?raw'
@@ -330,104 +331,10 @@ interface ParsedResponse {
  * Handles <think>, <thinking>, <reasoning>, <reflection>, <inner_monologue>,
  * and similar tags — both self-closing and block forms.
  */
-function stripThinkingBlocks(text: string): string {
-  // Remove block tags: <think>...</think>, <thinking>...</thinking>, etc.
-  // Use [\s\S] for cross-line matching
-  let result = text
-  const thinkTags = ['think', 'thinking', 'reasoning', 'reflection', 'inner_monologue', 'scratchpad']
-  for (const tag of thinkTags) {
-    // Block form: <tag>...</tag> (greedy-safe via lazy match)
-    const blockRe = new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, 'gi')
-    result = result.replace(blockRe, '')
-    // Unclosed tag (model started thinking but never closed): strip from <tag> to end
-    const unclosedRe = new RegExp(`<${tag}>(?:(?!</${tag}>)[\\s\\S])*$`, 'gi')
-    result = result.replace(unclosedRe, '')
-  }
-  return result
-}
+const stripThinkingBlocks = sharedStripThinkingBlocks
 
-/**
- * Extract only the actual contribution from an agent response.
- *
- * Strategy: instead of trying to strip noise line-by-line (which is fragile),
- * we look for the SUITABILITY/ACTION/TARGET header block and take everything
- * AFTER the last header line. This isolates the actual answer from all the
- * instruction echoes, memory retrieval, and meta-commentary that precede it.
- *
- * If no headers are found, we fall back to aggressive line-by-line cleaning.
- */
-function extractContent(raw: string): string {
-  // First, strip all thinking/reasoning blocks
-  let text = stripThinkingBlocks(raw)
-
-  // Strip [session] and [tool] memory retrieval blocks (multi-line)
-  text = text.replace(/^\[session\]\s.*(?:\n(?:\s.*|\(score=.*|sessions\/.*|\n))*$/gm, '')
-  text = text.replace(/^\[tool\]\s.*(?:\n(?:\s.*|\(score=.*|\n))*$/gm, '')
-  text = text.replace(/^\[user\]\s*(?:COUNCIL ROUND|SUITABILITY).*$/gm, '')
-
-  // Strip lines where all three headers are on one line (with optional markdown bold)
-  text = text.replace(/^\**SUITABILITY:\**\s*[\d.]+\s+\**ACTION:\**\s*\w+\s+\**TARGET:\**\s*.+$/gmi, '')
-  // Also handle two-header combos on one line
-  text = text.replace(/^\**SUITABILITY:\**\s*[\d.]+\s+\**ACTION:\**\s*\w+\s*$/gmi, '')
-
-  // Find the last header line (TARGET is always last in the SUITABILITY/ACTION/TARGET block)
-  const lines = text.split('\n')
-  let lastHeaderIdx = -1
-
-  // Strip markdown bold/italic markers for header detection
-  const stripMd = (s: string) => s.replace(/\*{1,2}|_{1,2}/g, '')
-
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = stripMd(lines[i].trim())
-    if (/^SUITABILITY:\s*[\d.]/i.test(trimmed)) lastHeaderIdx = i
-    if (/^ACTION:\s*(answer|respond|challenge|refine|broaden|pass)/i.test(trimmed)) lastHeaderIdx = i
-    if (/^TARGET:\s*.+/i.test(trimmed)) lastHeaderIdx = i
-  }
-
-  let content: string
-  if (lastHeaderIdx >= 0) {
-    // Take everything after the last header line — this is the actual contribution
-    content = lines.slice(lastHeaderIdx + 1).join('\n')
-  } else {
-    // No headers found — use full text but strip noise lines
-    content = text
-  }
-
-  // Final cleanup: strip any remaining noise lines that leaked through
-  const cleaned = content.split('\n').filter(line => {
-    const t = line.trim()
-    if (!t) return true  // preserve blank lines for formatting
-    // Strip markdown bold/italic for matching
-    const tb = t.replace(/\*{1,2}|_{1,2}/g, '')
-    // Residual header lines (single or combined on one line)
-    if (/^SUITABILITY:\s*[\d.]/i.test(tb)) return false
-    if (/^ACTION:\s*(answer|respond|challenge|refine|broaden|pass)/i.test(tb)) return false
-    if (/^TARGET:\s*.+$/i.test(tb)) return false
-    // Memory retrieval
-    if (/^\[session\]\s/i.test(t) || /^\[tool\]\s/i.test(t)) return false
-    if (/^\(score=[\d.]+\)/.test(t)) return false
-    if (/^sessions\/\w+\.txt:\d+/.test(t)) return false
-    // Instruction echoes
-    if (/^#{1,3}\s*(Task|Instructions|Items to process|Context)\b/i.test(t)) return false
-    if (/^Provide your contribution now/i.test(t)) return false
-    if (/^Remember to start with SUITABILITY/i.test(t)) return false
-    if (/^Structure your response starting with/i.test(t)) return false
-    if (/^You are participating in a Council/i.test(t)) return false
-    if (/^Session type:/i.test(t)) return false
-    if (/^Verbosity rule:/i.test(t)) return false
-    if (/^Other participants:/i.test(t)) return false
-    if (/^COUNCIL ROUND \d/i.test(t)) return false
-    if (/^Discussion so far:/i.test(t)) return false
-    if (/^Follow the verbosity rule/i.test(t)) return false
-    if (/^Before each of your contributions/i.test(t)) return false
-    if (/^Formulate a (contribution|response) that/i.test(t)) return false
-    if (/^Analyze the (existing|ongoing) (arguments|debate|discussion)/i.test(t)) return false
-    if (/^\\n#{1,3}\s/.test(t)) return false
-    return true
-  })
-
-  return cleaned.join('\n').trim()
-}
+// Re-exported from shared util so council and chat use the same sanitizer.
+const extractContent = sanitizeAgentContent
 
 function parseAgentResponse(raw: string): ParsedResponse {
   let suitability = 0.5
@@ -439,13 +346,16 @@ function parseAgentResponse(raw: string): ParsedResponse {
   // Also strip markdown bold/italic so **SUITABILITY:** etc. are matched
   const plain = stripped.replace(/\*{1,2}|_{1,2}/g, '')
 
-  const suitMatch = plain.match(/^SUITABILITY:\s*([\d.]+)/mi)
+  // Header separator: colon, em-dash, en-dash, or hyphen.
+  const SEP = '\\s*[:\\-–—]\\s*'
+
+  const suitMatch = plain.match(new RegExp(`^SUITABILITY${SEP}([\\d.]+)`, 'mi'))
   if (suitMatch) suitability = Math.max(0, Math.min(1, parseFloat(suitMatch[1]) || 0.5))
 
-  const actionMatch = plain.match(/^ACTION:\s*(answer|respond|challenge|refine|broaden|pass)/mi)
+  const actionMatch = plain.match(new RegExp(`^ACTION${SEP}(answer|respond|challenge|refine|broaden|pass)`, 'mi'))
   if (actionMatch) action = actionMatch[1] as AgentAction
 
-  const targetMatch = plain.match(/^TARGET:\s*(.+)/mi)
+  const targetMatch = plain.match(new RegExp(`^TARGET${SEP}(.+)`, 'mi'))
   if (targetMatch) targetAgent = targetMatch[1].trim()
 
   const content = extractContent(raw)
@@ -492,6 +402,7 @@ function buildTurnPrompt(
   contextMessages: CouncilMessage[],
   directive?: string,
   speakerName?: string,
+  speakerAgentId?: string,
 ): string {
   let recentContributions = ''
   if (contextMessages.length > 0) {
@@ -514,6 +425,32 @@ function buildTurnPrompt(
     recentContributions = '\nDiscussion so far:\n' + sections.join('\n\n')
   }
 
+  // Collect files that other agents wrote earlier in this session and that
+  // Flight Deck has copied into the upcoming speaker's own filesystem. Each
+  // agent works in an isolated sandbox, so we surface only the destination
+  // path that exists on this speaker's side (not the author's source path).
+  let filesNudge = ''
+  if (speakerAgentId) {
+    const entries = _sessionSharedFiles.get(session.id) || []
+    const lines: string[] = []
+    for (const entry of entries) {
+      if (entry.srcAgentId === speakerAgentId) continue
+      const localPath = entry.destPaths[speakerAgentId]
+      if (!localPath) continue
+      lines.push(
+        `  - ${localPath} (written by ${entry.srcAgentName} in round ${entry.round}` +
+          (localPath === entry.srcPath ? '' : `, originally ${entry.srcPath}`) +
+          `)`,
+      )
+    }
+    if (lines.length > 0) {
+      filesNudge =
+        '\n\nFiles shared in this discussion (already copied into your sandbox by Flight Deck):\n' +
+        lines.join('\n') +
+        '\nIf any of these are relevant to your angle, use your `read` tool on the path above to read what was actually written before contributing — build on it or push back against it instead of guessing from the summaries.'
+    }
+  }
+
   const directiveText = directive ? `\nDirective from the user: ${directive}` : ''
 
   // Build extension note for agents
@@ -531,7 +468,7 @@ function buildTurnPrompt(
   return renderTemplate(turnTemplate, {
     round,
     maxRounds: session.maxRounds,
-    recentContributions,
+    recentContributions: recentContributions + filesNudge,
     directive: directiveText + identityNote,
     extensionNote,
   })
@@ -735,6 +672,32 @@ function collectContextMessages(
 // Auto-advance timer stored outside Zustand (not serialisable)
 let _autoAdvanceTimerId: ReturnType<typeof setInterval> | null = null
 
+// Pending file-write captures per agent, populated by the WS `monitor` handler
+// when an agent calls the `write` tool. Drained at the end of each speaker turn,
+// transferred to other council agents via Flight Deck's file-transfer endpoint,
+// and surfaced to subsequent speakers via buildTurnPrompt.
+const _pendingWrittenFiles = new Map<string, string[]>()
+
+// Files written during the current session, keyed by sessionId. Each entry
+// records the source path on the author's filesystem plus the post-transfer
+// destination path on each peer agent (so we can tell each speaker exactly
+// where the file lives in their own sandbox).
+interface SharedFileEntry {
+  srcPath: string
+  srcAgentId: string
+  srcAgentName: string
+  round: number
+  destPaths: Record<string, string>  // peerAgentId -> path on peer's filesystem
+}
+const _sessionSharedFiles = new Map<string, SharedFileEntry[]>()
+
+/** Extract the destination path from a `write` tool output line. */
+function _extractWrittenPath(output: string): string | null {
+  if (!output) return null
+  const m = /Written\s+\d+\s+chars?\s*\(\d+\s+lines?\)\s+to\s+(\S+)/i.exec(output)
+  return m ? m[1] : null
+}
+
 /** Merge partial config into the persisted session config JSON */
 function _persistConfig(sessionId: string, patch: Record<string, unknown>) {
   // Read current active session to get full config
@@ -805,6 +768,7 @@ interface CouncilStore {
   _startAutoAdvanceTimer: () => void
   _cancelAutoAdvanceTimer: () => void
   _runSpeakerTurn: (agentId: string, round: number, recentMsgs: CouncilMessage[], directive?: string) => Promise<CouncilMessage | null>
+  _shareWrittenFiles: (srcAgentId: string, srcAgentName: string, round: number, paths: string[]) => Promise<void>
   _runRoundRobin: (round: number) => Promise<void>
   _runModeratorRound: (round: number) => Promise<void>
   _getSuitabilityScores: () => Promise<Map<string, number>>
@@ -1028,6 +992,18 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
         const toolName = data.tool_name as string || ''
         if (!toolName) return
         get()._log(a.id, a.name, 'tool', toolName)
+        // Capture file writes so we can nudge the next speaker to read them
+        if (toolName.toLowerCase() === 'write') {
+          const output = (data.output as string) || ''
+          const path = _extractWrittenPath(output)
+          if (path) {
+            const existing = _pendingWrittenFiles.get(a.id) || []
+            if (!existing.includes(path)) {
+              existing.push(path)
+              _pendingWrittenFiles.set(a.id, existing)
+            }
+          }
+        }
         set(state => {
           if (!state.activeSession) return state
           return {
@@ -1629,7 +1605,7 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       return null
     }
 
-    const prompt = buildTurnPrompt(s, round, recentMsgs, directive, agent.name)
+    const prompt = buildTurnPrompt(s, round, recentMsgs, directive, agent.name, agentId)
     get()._sendToAgent(agentId, prompt)
     set({ speaking: agentId })
     get()._log(agentId, agent.name, 'speaking', `Speaking (round ${round})`)
@@ -1661,6 +1637,18 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       targetAgentId = target?.id || ''
     }
 
+    // Drain any file writes that this agent performed during the turn and
+    // transfer them to every other council agent via Flight Deck so peers can
+    // actually read them in the next round.
+    const writtenFiles = _pendingWrittenFiles.get(agentId) || []
+    _pendingWrittenFiles.delete(agentId)
+    if (writtenFiles.length > 0) {
+      await get()._shareWrittenFiles(agentId, agent.name, round, writtenFiles)
+    }
+
+    const metadata: Record<string, unknown> = {}
+    if (writtenFiles.length > 0) metadata.writtenFiles = writtenFiles
+
     const msg: Omit<CouncilMessage, 'id' | 'localId' | 'createdAt'> = {
       round,
       agentId,
@@ -1671,12 +1659,84 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       targetAgentId,
       content: parsed.content,
       pinned: false,
-      metadata: {},
+      metadata,
     }
 
     await get()._addMessage(msg)
     const current = get().activeSession
     return current?.messages[current.messages.length - 1] || null
+  },
+
+  _shareWrittenFiles: async (srcAgentId, srcAgentName, round, paths) => {
+    const s = get().activeSession
+    if (!s) return
+    const srcAgent = s.agents.find(a => a.id === srcAgentId)
+    if (!srcAgent) return
+    const peers = s.agents.filter(
+      a => a.id !== srcAgentId && a.connected && !a.muted,
+    )
+    if (peers.length === 0) return
+
+    const existing = _sessionSharedFiles.get(s.id) || []
+    for (const srcPath of paths) {
+      const entry: SharedFileEntry = {
+        srcPath,
+        srcAgentId,
+        srcAgentName,
+        round,
+        destPaths: {},
+      }
+      // Transfer to each peer in parallel; the dest path comes back from the
+      // server (it may differ from srcPath if the peer's sandbox renames it).
+      const transfers = peers.map(async (peer) => {
+        try {
+          const result = await transferFile(
+            { id: srcAgent.id, name: srcAgent.name, host: srcAgent.host, port: srcAgent.port, auth: srcAgent.auth },
+            { id: peer.id, name: peer.name, host: peer.host, port: peer.port, auth: peer.auth },
+            srcPath,
+          )
+          if (result?.dest_path) {
+            entry.destPaths[peer.id] = result.dest_path
+          }
+        } catch (err) {
+          get()._log(
+            srcAgentId,
+            srcAgentName,
+            'error',
+            `Failed to share ${srcPath} with ${peer.name}: ${(err as Error).message}`,
+          )
+        }
+      })
+      await Promise.all(transfers)
+      if (Object.keys(entry.destPaths).length > 0) {
+        existing.push(entry)
+        const recipients = Object.entries(entry.destPaths).map(([pid, path]) => {
+          const peer = s.agents.find(a => a.id === pid)
+          return { agentId: pid, agentName: peer?.name || pid, path }
+        })
+        const fileName = srcPath.split('/').pop() || srcPath
+        await get()._addMessage({
+          round,
+          agentId: '',
+          agentName: 'Flight Deck',
+          role: 'system',
+          action: '',
+          suitability: 0,
+          targetAgentId: '',
+          content: `Shared ${fileName} from ${srcAgentName} to ${recipients.length} agent${recipients.length === 1 ? '' : 's'}.`,
+          pinned: false,
+          metadata: {
+            kind: 'file_share',
+            fileName,
+            srcPath,
+            srcAgentId,
+            srcAgentName,
+            recipients,
+          },
+        })
+      }
+    }
+    _sessionSharedFiles.set(s.id, existing)
   },
 
   _runRoundRobin: async (round) => {

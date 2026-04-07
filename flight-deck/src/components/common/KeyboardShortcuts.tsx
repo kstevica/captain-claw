@@ -5,9 +5,10 @@ import { useChatStore } from '../../stores/chatStore'
 
 const shortcuts = [
   { keys: ['Cmd/Ctrl', '1'], action: 'Agent Desktop' },
-  { keys: ['Cmd/Ctrl', '2'], action: 'Operations' },
-  { keys: ['Cmd/Ctrl', '3'], action: 'Workflows' },
-  { keys: ['Cmd/Ctrl', '4'], action: 'Spawn Agent' },
+  { keys: ['Cmd/Ctrl', '2'], action: 'Council' },
+  { keys: ['Cmd/Ctrl', '3'], action: 'Spawn Agent' },
+  { keys: ['Cmd/Ctrl', '4'], action: 'Agent Forge' },
+  { keys: ['Cmd/Ctrl', '5'], action: 'Workflows' },
   { keys: ['Cmd/Ctrl', 'D'], action: 'Toggle Director' },
   { keys: ['Cmd/Ctrl', 'J'], action: 'Toggle Chat Panel' },
   { keys: ['Cmd/Ctrl', 'K'], action: 'Toggle Shortcuts Help' },
@@ -44,13 +45,16 @@ export function useKeyboardShortcuts(
         if (mod) { e.preventDefault(); setView('desktop') }
         break
       case '2':
-        if (mod) { e.preventDefault(); setView('operations') }
+        if (mod) { e.preventDefault(); setView('council') }
         break
       case '3':
-        if (mod) { e.preventDefault(); setView('workflow') }
+        if (mod) { e.preventDefault(); setView('spawner') }
         break
       case '4':
-        if (mod) { e.preventDefault(); setView('spawner') }
+        if (mod) { e.preventDefault(); setView('forge') }
+        break
+      case '5':
+        if (mod) { e.preventDefault(); setView('workflow') }
         break
       case 'd':
         if (mod) { e.preventDefault(); onToggleDirector() }

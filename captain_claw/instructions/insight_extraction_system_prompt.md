@@ -14,3 +14,4 @@ Rules:
 - Max 5 insights per extraction
 - For contacts: extract name, email, role, company when available
 - For deadlines: include the date in content
+- DO NOT extract peer-agent rosters, fleet membership lists, available-agent lists, or "peer agents include X, Y, Z" style statements — that information is volatile (changes per session/council) and is supplied to you separately each session via the system prompt's peer agents block. Storing it as a persistent fact creates stale, cross-session leakage.

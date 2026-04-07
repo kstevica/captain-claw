@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from abc import ABC, abstractmethod
 from collections import deque
@@ -213,6 +214,40 @@ def _safe_json_loads(raw: str) -> dict[str, Any]:
         return {"value": value}
     except Exception:
         return {"raw": raw}
+
+
+# Matches <think>...</think> blocks (and common variants like <thinking>,
+# <reasoning>) emitted by some models as raw text in the content field
+# instead of in a separate reasoning_content field. We strip these so the
+# user-visible chat content never contains the model's private chain of
+# thought.
+_THINK_BLOCK_RE = re.compile(
+    r"<\s*(think|thinking|reasoning|reflection)\s*>.*?<\s*/\s*\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+# Matches an unterminated leading think/reasoning block (model started a
+# <think> tag but never closed it before the answer began).
+_THINK_OPEN_RE = re.compile(
+    r"^\s*<\s*(think|thinking|reasoning|reflection)\s*>.*?(?=<\s*/\s*\1\s*>|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_reasoning_artifacts(text: str) -> str:
+    """Remove <think>...</think> style reasoning blocks from model output.
+
+    Some providers (notably xAI Grok and certain DeepSeek/Qwen variants)
+    leak their internal reasoning into the ``content`` field rather than
+    keeping it in a separate ``reasoning_content`` field. This helper
+    strips those blocks so they don't end up in the chat UI.
+    """
+    if not text:
+        return text
+    # Drop fully closed <think>...</think> blocks anywhere in the text.
+    cleaned = _THINK_BLOCK_RE.sub("", text)
+    # Drop a leading unterminated <think> block (if any).
+    cleaned = _THINK_OPEN_RE.sub("", cleaned)
+    return cleaned.lstrip()
 
 
 def _normalize_provider_name(provider: str) -> str:
@@ -1026,10 +1061,20 @@ class OllamaProvider(LLMProvider):
                         status_code=response.status_code,
                     )
                 data = response.json()
-                content = _obj_get(_obj_get(data, "message", {}), "content", "") or ""
+                msg_obj = _obj_get(data, "message", {})
+                content = _obj_get(msg_obj, "content", "") or ""
+                # Some Ollama models (deepseek-r1, qwq, etc.) emit
+                # <think>...</think> reasoning blocks. Strip them.
+                _rc = _obj_get(msg_obj, "reasoning_content", None) or _obj_get(msg_obj, "thinking", None)
+                if _rc:
+                    log.debug(
+                        "Discarding Ollama reasoning_content",
+                        model=self.model, reasoning_chars=len(str(_rc)),
+                    )
+                content = _strip_reasoning_artifacts(str(content))
 
                 tool_calls: list[ToolCall] = []
-                raw_calls = _obj_get(_obj_get(data, "message", {}), "tool_calls", []) or []
+                raw_calls = _obj_get(msg_obj, "tool_calls", []) or []
                 for idx, raw_call in enumerate(raw_calls, start=1):
                     function = _obj_get(raw_call, "function", {}) or {}
                     call_name = str(_obj_get(function, "name", "") or "")
@@ -1288,6 +1333,12 @@ class LiteLLMProvider(LLMProvider):
                 first = choices[0]
                 delta = _obj_get(first, "delta", {})
 
+                # Skip reasoning_content deltas (Grok, DeepSeek, etc.) —
+                # we never want internal chain-of-thought in chat output.
+                _rc = _obj_get(delta, "reasoning_content", None)
+                if _rc:
+                    continue
+
                 # Content text — may be a string or a list of parts
                 # (Gemini sometimes returns list of content parts).
                 c = _obj_get(delta, "content", "")
@@ -1372,10 +1423,11 @@ class LiteLLMProvider(LLMProvider):
             if collected_tool_calls
             else None
         )
+        final_content = _strip_reasoning_artifacts("".join(content_parts))
         return {
             "choices": [{
                 "message": {
-                    "content": "".join(content_parts),
+                    "content": final_content,
                     "tool_calls": tc_out,
                 },
                 "finish_reason": finish_reason,
@@ -1464,6 +1516,19 @@ class LiteLLMProvider(LLMProvider):
                 content = "".join(text_parts)
             else:
                 content = str(raw_content) if raw_content else ""
+            # Discard provider reasoning_content (xAI Grok, DeepSeek, etc.)
+            # — never include the model's internal chain-of-thought in the
+            # user-visible response. We log its presence for debugging.
+            reasoning_content = _obj_get(choice, "reasoning_content", None)
+            if reasoning_content:
+                log.debug(
+                    "Discarding reasoning_content from LLM response",
+                    provider=self.provider,
+                    model=self.model,
+                    reasoning_chars=len(str(reasoning_content)),
+                )
+            # Strip any <think>...</think> blocks that leaked into content.
+            content = _strip_reasoning_artifacts(content)
             finish_reason = str(_obj_get(first_choice, "finish_reason", "") or "")
 
             tool_calls: list[ToolCall] = []
@@ -1541,7 +1606,11 @@ class LiteLLMProvider(LLMProvider):
                 )
             )
             async for chunk in stream:
-                delta = _obj_get(_obj_get(_obj_get(chunk, "choices", [{}])[0], "delta", {}), "content", "")
+                delta_obj = _obj_get(_obj_get(chunk, "choices", [{}])[0], "delta", {})
+                # Skip reasoning_content deltas (Grok, DeepSeek, etc.).
+                if _obj_get(delta_obj, "reasoning_content", None):
+                    continue
+                delta = _obj_get(delta_obj, "content", "")
                 if not delta:
                     continue
                 if isinstance(delta, str):

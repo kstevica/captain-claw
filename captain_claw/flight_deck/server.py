@@ -27,7 +27,132 @@ import logging
 from captain_claw.flight_deck.auth import get_current_user, get_optional_user, get_ws_user, set_auth_db
 from captain_claw.flight_deck.db import FlightDeckDB
 
-log = logging.getLogger("flight_deck")
+
+# ── Console logging: timestamps + ANSI colors ──────────────────────────
+_ANSI = {
+    "reset":   "\033[0m",
+    "dim":     "\033[2m",
+    "bold":    "\033[1m",
+    "grey":    "\033[90m",
+    "red":     "\033[31m",
+    "green":   "\033[32m",
+    "yellow":  "\033[33m",
+    "blue":    "\033[34m",
+    "magenta": "\033[35m",
+    "cyan":    "\033[36m",
+    "white":   "\033[37m",
+    "br_red":  "\033[91m",
+    "br_green":"\033[92m",
+    "br_yellow":"\033[93m",
+    "br_blue": "\033[94m",
+    "br_cyan": "\033[96m",
+}
+
+_LEVEL_COLORS = {
+    "DEBUG":    _ANSI["grey"],
+    "INFO":     _ANSI["br_green"],
+    "WARNING":  _ANSI["br_yellow"],
+    "ERROR":    _ANSI["br_red"],
+    "CRITICAL": _ANSI["bold"] + _ANSI["br_red"],
+}
+
+
+class _FDColorFormatter(logging.Formatter):
+    """Date/time + colored level + dim logger name + message."""
+
+    def __init__(self, use_color: bool):
+        super().__init__()
+        self.use_color = use_color
+
+    def format(self, record: logging.LogRecord) -> str:
+        ts = self.formatTime(record, "%Y-%m-%d %H:%M:%S")
+        level = record.levelname
+        name = record.name
+        msg = record.getMessage()
+        if record.exc_info:
+            msg = msg + "\n" + self.formatException(record.exc_info)
+        if self.use_color:
+            lvl_col = _LEVEL_COLORS.get(level, "")
+            R = _ANSI["reset"]
+            return (
+                f"{_ANSI['grey']}[{ts}]{R} "
+                f"{lvl_col}{level:<8}{R} "
+                f"{_ANSI['cyan']}{name}{R}  "
+                f"{msg}"
+            )
+        return f"[{ts}] {level:<8} {name}  {msg}"
+
+
+def _configure_fd_logging() -> None:
+    """Install our colored handler on the root logger and silence dupes."""
+    use_color = sys.stderr.isatty() and os.environ.get("NO_COLOR", "") == ""
+    handler = logging.StreamHandler(stream=sys.stderr)
+    handler.setFormatter(_FDColorFormatter(use_color=use_color))
+    root = logging.getLogger()
+    # Replace any pre-existing handlers so we don't double-print.
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    # Make sure these loggers don't add their own handlers on top of ours.
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "fastapi", "flight_deck"):
+        lg = logging.getLogger(name)
+        lg.handlers.clear()
+        lg.propagate = True
+    # Quiet down access log a touch — INFO level keeps it visible.
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+
+
+_configure_fd_logging()
+
+class _KwargLoggerAdapter:
+    """Thin wrapper around stdlib Logger that accepts structured kwargs.
+
+    Multiple call sites in this file use a structlog-like API
+    (`log.info("event", key=val, ...)`). The stdlib logger raises
+    ``TypeError: Logger._log() got an unexpected keyword argument ...`` for
+    those, which historically masked bugs (e.g. /announce-port returning 500
+    on every call, leaving the registry stale). This adapter converts the
+    kwargs into ``key=value key2=value2`` and appends them to the message
+    so the existing call sites Just Work without churn.
+
+    Reserved kwargs that the stdlib logger understands (``exc_info``,
+    ``stack_info``, ``stacklevel``, ``extra``) are passed through unchanged.
+    """
+
+    _RESERVED = {"exc_info", "stack_info", "stacklevel", "extra"}
+
+    def __init__(self, logger: logging.Logger):
+        self._logger = logger
+
+    def _emit(self, level: int, msg, args, kwargs):
+        passthrough = {k: kwargs.pop(k) for k in list(kwargs) if k in self._RESERVED}
+        if kwargs:
+            extras = " ".join(f"{k}={v}" for k, v in kwargs.items())
+            if isinstance(msg, str) and args:
+                # Preserve old %-style formatting if used
+                try:
+                    msg = msg % args
+                    args = ()
+                except Exception:
+                    pass
+            msg = f"{msg}  {extras}" if msg else extras
+        self._logger.log(level, msg, *args, **passthrough)
+
+    def debug(self, msg=None, *args, **kwargs): self._emit(logging.DEBUG, msg, args, kwargs)
+    def info(self, msg=None, *args, **kwargs): self._emit(logging.INFO, msg, args, kwargs)
+    def warning(self, msg=None, *args, **kwargs): self._emit(logging.WARNING, msg, args, kwargs)
+    def error(self, msg=None, *args, **kwargs): self._emit(logging.ERROR, msg, args, kwargs)
+    def critical(self, msg=None, *args, **kwargs): self._emit(logging.CRITICAL, msg, args, kwargs)
+    # Alias used by some libs
+    warn = warning
+
+    def __getattr__(self, name):
+        # Fall through to the underlying logger for anything we don't override
+        return getattr(self._logger, name)
+
+
+log = _KwargLoggerAdapter(logging.getLogger("flight_deck"))
 from captain_claw.flight_deck.rate_limiter import (
     check_api_rate_limit, check_spawn_rate_limit, check_agent_count_limit,
     load_plan_limits_from_db_sync,
@@ -79,6 +204,18 @@ def get_docker() -> docker.DockerClient:
 PROCESS_REGISTRY_FILE = DATA_DIR / ".processes.json"
 _processes: dict[str, subprocess.Popen] = {}  # slug -> Popen
 
+# Serialise process spawns so concurrent requests can't both pick the same
+# port between the availability check and Popen. Lazily constructed in the
+# running event loop (asyncio.Lock() at import time would bind to whichever
+# loop happens to exist then).
+_spawn_lock: asyncio.Lock | None = None
+
+def _get_spawn_lock() -> asyncio.Lock:
+    global _spawn_lock
+    if _spawn_lock is None:
+        _spawn_lock = asyncio.Lock()
+    return _spawn_lock
+
 
 class ProcessEntry(BaseModel):
     """Persisted metadata for a managed process agent."""
@@ -93,19 +230,57 @@ class ProcessEntry(BaseModel):
 
 
 def _load_process_registry() -> dict[str, dict]:
-    """Load process registry from disk."""
-    if PROCESS_REGISTRY_FILE.is_file():
-        try:
-            return json.loads(PROCESS_REGISTRY_FILE.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {}
+    """Load process registry from disk.
+
+    Uses an advisory shared flock so we don't observe a partially-written file
+    while another coroutine / process is in the middle of `_save_process_registry`.
+    Falls back to {} only if the file is genuinely missing or unparseable —
+    NEVER on transient lock contention.
+    """
+    if not PROCESS_REGISTRY_FILE.is_file():
+        return {}
+    try:
+        import fcntl as _fcntl
+        with PROCESS_REGISTRY_FILE.open("r") as _f:
+            try:
+                _fcntl.flock(_f.fileno(), _fcntl.LOCK_SH)
+            except OSError:
+                pass  # flock unsupported on some FSes (NFS, etc.) — best effort
+            data = _f.read()
+        return json.loads(data) if data else {}
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("process registry read failed", error=str(exc))
+        return {}
 
 
 def _save_process_registry(registry: dict[str, dict]):
-    """Persist process registry to disk."""
+    """Persist process registry to disk atomically.
+
+    Writes to a sibling .tmp file then os.replace()s — a partial write can
+    never leave the canonical file in a half-written state, and concurrent
+    readers will always see either the previous or the new full snapshot.
+    Also takes an exclusive flock around the rename for cross-process safety.
+    """
     PROCESS_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
-    PROCESS_REGISTRY_FILE.write_text(json.dumps(registry, indent=2))
+    payload = json.dumps(registry, indent=2)
+    tmp_path = PROCESS_REGISTRY_FILE.with_suffix(PROCESS_REGISTRY_FILE.suffix + ".tmp")
+    try:
+        import fcntl as _fcntl
+        with tmp_path.open("w") as _f:
+            try:
+                _fcntl.flock(_f.fileno(), _fcntl.LOCK_EX)
+            except OSError:
+                pass
+            _f.write(payload)
+            _f.flush()
+            try:
+                os.fsync(_f.fileno())
+            except OSError:
+                pass
+        os.replace(str(tmp_path), str(PROCESS_REGISTRY_FILE))
+    except OSError as exc:
+        log.error("process registry write failed", error=str(exc))
+        raise
 
 
 def _process_is_alive(slug: str) -> bool:
@@ -210,6 +385,13 @@ def _start_registered_process(slug: str, entry: dict) -> bool:
                     environment[k] = v
 
     environment["HOME"] = str(agent_dir / "data" / "home-config-parent")
+    # Slug + URL for port-fallback callbacks. Without FD_URL the agent can't
+    # announce a drifted port back to Flight Deck and the registry goes stale
+    # (chat panel then 401s because FD proxies to the old port).
+    environment["FD_AGENT_SLUG"] = slug
+    if "FD_URL" not in environment:
+        fd_port = os.environ.get("FD_PORT", "25080")
+        environment["FD_URL"] = f"http://localhost:{fd_port}"
 
     log_file = agent_dir / "process.log"
     try:
@@ -231,9 +413,13 @@ def _start_registered_process(slug: str, entry: dict) -> bool:
 
 def _reattach_processes():
     """On startup, check registered processes and restart any that were running."""
+    import time as _time
+
     registry = _load_process_registry()
     restarted = []
     skipped = []
+    stagger_s = float(os.environ.get("FD_REATTACH_STAGGER_S", "0.3"))
+    first_launch = True
     for slug, entry in registry.items():
         # Skip agents that were intentionally stopped by the user
         if entry.get("stopped"):
@@ -246,8 +432,13 @@ def _reattach_processes():
                 continue
             except (OSError, ProcessLookupError):
                 pass
-        # Process was registered but is dead — restart it
+        # Process was registered but is dead — restart it. Stagger the
+        # launches so concurrent port probes don't race and pick the same
+        # fallback port.
         if entry.get("web_port"):
+            if not first_launch and stagger_s > 0:
+                _time.sleep(stagger_s)
+            first_launch = False
             if _start_registered_process(slug, entry):
                 restarted.append(slug)
             else:
@@ -264,7 +455,14 @@ def _reattach_processes():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _reattach_processes()
+    # Defer reattach so uvicorn has time to actually bind its listening
+    # socket. Otherwise the children we launch here race to call
+    # /fd/processes/{slug}/announce-port before FD is accepting connections,
+    # and their drift announcements get "connection refused".
+    async def _deferred_reattach():
+        await asyncio.sleep(1.0)
+        await asyncio.to_thread(_reattach_processes)
+    asyncio.create_task(_deferred_reattach())
     # Initialize database for auth & settings
     if AUTH_ENABLED:
         _fd_db = FlightDeckDB(DATA_DIR / "flight-deck.db")
@@ -820,6 +1018,9 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
     # Pass owner ID so child agents can propagate ownership when spawning
     if owner_id:
         environment["FD_OWNER_ID"] = owner_id
+
+    # Slug for port-fallback callbacks (Docker path)
+    environment["FD_AGENT_SLUG"] = slug
 
     # Labels for tracking
     labels = {
@@ -2153,15 +2354,26 @@ async def transfer_file(req: TransferRequest, request: Request, user: dict | Non
     """Download a file from one agent and upload it to another."""
     import httpx
 
-    src_params = f"?token={req.src_auth}" if req.src_auth else ""
-    dst_params = f"?token={req.dst_auth}" if req.dst_auth else ""
+    # Build query params properly: a path with `?` collisions plus an
+    # unencoded source path used to silently corrupt both URLs and the source
+    # agent ended up parsing `path=/foo/bar?token=xyz` as a single value.
+    src_params: dict[str, str] = {"path": req.src_path}
+    if req.src_auth:
+        src_params["token"] = req.src_auth
+    dst_params: dict[str, str] = {}
+    if req.dst_auth:
+        dst_params["token"] = req.dst_auth
 
     async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
         # Download from source
-        dl_url = f"http://{req.src_host}:{req.src_port}/api/files/download?path={req.src_path}{src_params}"
-        dl_resp = await client.get(dl_url)
+        dl_url = f"http://{req.src_host}:{req.src_port}/api/files/download"
+        dl_resp = await client.get(dl_url, params=src_params)
         if dl_resp.status_code != 200:
-            raise HTTPException(502, f"Source agent download failed: {dl_resp.status_code}")
+            raise HTTPException(
+                502,
+                f"Source agent download failed: {dl_resp.status_code} "
+                f"({dl_resp.text[:200]})",
+            )
 
         # Get filename from content-disposition or path
         cd = dl_resp.headers.get("content-disposition", "")
@@ -2171,11 +2383,15 @@ async def transfer_file(req: TransferRequest, request: Request, user: dict | Non
             filename = req.src_path.rsplit("/", 1)[-1]
 
         # Upload to destination
-        up_url = f"http://{req.dst_host}:{req.dst_port}/api/file/upload{dst_params}"
+        up_url = f"http://{req.dst_host}:{req.dst_port}/api/file/upload"
         files = {"file": (filename, dl_resp.content, dl_resp.headers.get("content-type", "application/octet-stream"))}
-        up_resp = await client.post(up_url, files=files)
+        up_resp = await client.post(up_url, params=dst_params, files=files)
         if up_resp.status_code != 200:
-            raise HTTPException(502, f"Destination agent upload failed: {up_resp.status_code}")
+            raise HTTPException(
+                502,
+                f"Destination agent upload failed: {up_resp.status_code} "
+                f"({up_resp.text[:200]})",
+            )
 
         result = up_resp.json()
         return {"ok": True, "filename": filename, "dest_path": result.get("path", ""), "size": result.get("size", 0)}
@@ -2433,6 +2649,15 @@ async def list_processes(request: Request, user: dict | None = _required_user_de
 @app.post("/fd/spawn-process", response_model=ProcessActionResult)
 async def spawn_process(config: AgentConfig, request: Request, user: dict | None = _optional_user_dep):
     """Spawn a new Captain Claw process agent (pip-installed, no Docker)."""
+    # Serialise spawns so two concurrent requests can't both land on the same
+    # port between the port-pick and the Popen. The lock also covers a small
+    # settle delay after launch to let the child's TCPSite.bind succeed (or
+    # drift + announce) before the next spawn's port probe runs.
+    async with _get_spawn_lock():
+        return await _spawn_process_locked(config, request, user)
+
+
+async def _spawn_process_locked(config: AgentConfig, request: Request, user: dict | None):
     # Rate limiting & agent count check
     if AUTH_ENABLED and user:
         check_api_rate_limit(user)
@@ -2506,6 +2731,10 @@ async def spawn_process(config: AgentConfig, request: Request, user: dict | None
     if owner_id:
         environment["FD_OWNER_ID"] = owner_id
 
+    # Slug for port-fallback callbacks: lets the agent tell FD which actual
+    # port it bound to if the requested one was already in use.
+    environment["FD_AGENT_SLUG"] = slug
+
     # Set HOME to the agent's home-config directory so captain-claw
     # picks up ~/.captain-claw/config.yaml from there
     environment["HOME"] = str(agent_dir / "data" / "home-config-parent")
@@ -2535,6 +2764,27 @@ async def spawn_process(config: AgentConfig, request: Request, user: dict | None
         if bundled.exists():
             cc_web_bin = str(bundled)
 
+    # IMPORTANT: write the registry entry BEFORE we Popen the child. The
+    # child can bind, drift to a fallback port, and POST to /announce-port
+    # in the milliseconds between Popen and the post-Popen registry write —
+    # if we wrote the registry after Popen we'd race the announce and
+    # silently overwrite the drifted port back to the original (stale)
+    # value. Pre-writing the entry also guarantees the announce-port
+    # endpoint can find the slug.
+    registry = _load_process_registry()
+    registry[slug] = {
+        "slug": slug,
+        "name": config.name or slug,
+        "description": config.description,
+        "web_port": config.web_port,
+        "web_auth": config.web_auth_token,
+        "pid": None,  # filled in below once Popen returns
+        "provider": config.provider,
+        "model": config.model,
+        "owner": owner_id,
+    }
+    _save_process_registry(registry)
+
     try:
         proc = subprocess.Popen(
             [cc_web_bin, "--port", str(config.web_port)],
@@ -2553,27 +2803,70 @@ async def spawn_process(config: AgentConfig, request: Request, user: dict | None
 
     _processes[slug] = proc
 
-    # Save to registry
+    # Stamp the live PID. Read-modify-write so we don't clobber a port the
+    # child may have already announced between Popen and now.
     registry = _load_process_registry()
-    registry[slug] = {
-        "slug": slug,
-        "name": config.name or slug,
-        "description": config.description,
-        "web_port": config.web_port,
-        "web_auth": config.web_auth_token,
-        "pid": proc.pid,
-        "provider": config.provider,
-        "model": config.model,
-        "owner": owner_id,
-    }
-    _save_process_registry(registry)
+    if slug in registry:
+        registry[slug]["pid"] = proc.pid
+        _save_process_registry(registry)
 
     # Log usage
     if AUTH_ENABLED and user:
         db = app.state.fd_db
         await db.log_usage(user["id"], "agent_spawn", json.dumps({"agent": slug, "type": "process", "provider": config.provider, "model": config.model}))
 
-    # Notify other agents about the new peer (scoped to same owner)
+    # Let the child actually bind its TCP port (and potentially announce a
+    # drift back to us) before the spawn lock is released and the next queued
+    # spawn runs its port probe. Without this window two back-to-back spawns
+    # can both see the same port as "free".
+    settle_s = float(os.environ.get("FD_SPAWN_SETTLE_S", "0.3"))
+    if settle_s > 0:
+        await asyncio.sleep(settle_s)
+
+    # After settle, re-read the registry: if the child drifted and announced
+    # a new port, we want to surface the actual bound port in our response
+    # (and to peers we notify) instead of the originally requested one.
+    final_registry = _load_process_registry()
+    actual_port = final_registry.get(slug, {}).get("web_port", config.web_port)
+    log.info(
+        "spawn-process: post-settle registry read",
+        slug=slug,
+        requested=config.web_port,
+        actual=actual_port,
+        drifted=actual_port != config.web_port,
+    )
+    if actual_port != config.web_port:
+        log.info(
+            "spawn-process: child drifted to a fallback port",
+            slug=slug,
+            requested=config.web_port,
+            actual=actual_port,
+        )
+        config.web_port = actual_port
+    else:
+        # No drift detected yet — but the child's announce might still be in
+        # flight (network/scheduler latency, slow startup). Schedule a deferred
+        # re-check that won't block the spawn response but will still surface
+        # the corrected port to the FD UI on its next poll.
+        async def _late_drift_check():
+            for _ in range(10):  # up to ~5 s
+                await asyncio.sleep(0.5)
+                _later = _load_process_registry().get(slug, {}).get("web_port", 0)
+                if _later and _later != config.web_port:
+                    log.info(
+                        "spawn-process: late drift detected after spawn returned",
+                        slug=slug,
+                        was=config.web_port,
+                        now=_later,
+                    )
+                    return
+        try:
+            asyncio.get_event_loop().create_task(_late_drift_check())
+        except RuntimeError:
+            pass
+
+    # Notify other agents about the new peer (scoped to same owner). Done
+    # AFTER the settle so the announced port is used, not the stale one.
     if config.web_enabled:
         _schedule_fleet_notify(config.name or slug, config.web_port, owner_id=owner_id)
 
@@ -2635,6 +2928,71 @@ def _do_start_process(slug: str) -> ProcessActionResult:
     _save_process_registry(registry)
 
     return ProcessActionResult(ok=True, slug=slug, message=f"Started (PID {entry.get('pid', '?')})")
+
+
+class AnnouncePortRequest(BaseModel):
+    """Agent → FD callback: actual port the agent successfully bound to."""
+    port: int
+    auth: str = ""  # web_auth_token used as a shared secret to authenticate the callback
+
+
+@app.post("/fd/processes/{slug}/announce-port", response_model=ProcessActionResult)
+async def announce_process_port(slug: str, body: AnnouncePortRequest):
+    """Update a process's actual web port after the agent fell back to a free
+    port (because the requested one was already in use). Authenticated via the
+    process's existing web_auth token, so no user session is required.
+
+    Side-effects: persists the new port in the registry and re-broadcasts the
+    fleet membership so peer agents and Flight Deck UI clients learn the new
+    address.
+    """
+    log.info("announce-port: received", slug=slug, new_port=body.port)
+    registry = _load_process_registry()
+    entry = registry.get(slug)
+    if not entry:
+        log.warning("announce-port: slug not in registry", slug=slug, registry_slugs=list(registry.keys()))
+        raise HTTPException(404, f"Process '{slug}' not found")
+
+    expected_auth = entry.get("web_auth", "")
+    # Compare with constant-time helper to avoid trivial timing leaks.
+    import hmac
+    if expected_auth and not hmac.compare_digest(expected_auth, body.auth or ""):
+        log.warning("announce-port: auth mismatch", slug=slug)
+        raise HTTPException(401, "Invalid auth token for port announce")
+
+    if body.port <= 0 or body.port > 65535:
+        raise HTTPException(400, f"Invalid port: {body.port}")
+
+    old_port = entry.get("web_port", 0)
+    if old_port == body.port:
+        log.info("announce-port: unchanged", slug=slug, port=body.port)
+        return ProcessActionResult(ok=True, slug=slug, message=f"Port unchanged ({body.port})")
+
+    entry["web_port"] = body.port
+    _save_process_registry(registry)
+    log.info("announce-port: registry updated", slug=slug, old_port=old_port, new_port=body.port)
+
+    # Verify the write actually landed by re-reading. Catches the (theoretical)
+    # case where another writer raced us between save and return.
+    _verify = _load_process_registry().get(slug, {}).get("web_port", 0)
+    if _verify != body.port:
+        log.error(
+            "announce-port: registry write was clobbered immediately after save!",
+            slug=slug,
+            wrote=body.port,
+            now_reads=_verify,
+        )
+
+    # Re-notify the fleet so peers update their connection details.
+    owner_id = entry.get("owner", "")
+    name = entry.get("name", slug)
+    _schedule_fleet_notify(name, body.port, event="rebound", owner_id=owner_id)
+
+    return ProcessActionResult(
+        ok=True,
+        slug=slug,
+        message=f"Updated port: {old_port} → {body.port}",
+    )
 
 
 @app.post("/fd/processes/{slug}/stop", response_model=ProcessActionResult)
@@ -2982,8 +3340,10 @@ def main():
         print("Run 'cd flight-deck && npm run build' to build the frontend first.")
         print("Starting API-only mode (use --dev with Vite dev server).\n")
 
-    print(f"Flight Deck starting on http://{args.host}:{args.port}")
-    uvicorn.run(app, host=args.host, port=args.port)
+    log.info("Flight Deck starting on http://%s:%s", args.host, args.port)
+    # log_config=None: keep our colored formatter from _configure_fd_logging()
+    # instead of letting uvicorn slap its default handlers back on.
+    uvicorn.run(app, host=args.host, port=args.port, log_config=None)
 
 
 if __name__ == "__main__":

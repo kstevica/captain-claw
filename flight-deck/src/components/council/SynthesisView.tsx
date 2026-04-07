@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { FileText, ChevronDown, ChevronRight } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
 import type { CouncilMessage } from '../../stores/councilStore'
 
 interface SynthesisViewProps {
@@ -28,7 +30,7 @@ export function SynthesisView({ message }: SynthesisViewProps) {
       {!collapsed && (
         <div className="px-4 pb-4">
           <div className="fd-markdown prose prose-sm prose-invert max-w-none text-zinc-300 leading-relaxed">
-            <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown>
+            <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{message.content}</Markdown>
           </div>
         </div>
       )}

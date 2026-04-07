@@ -27,10 +27,10 @@ import type { ViewMode } from '../../types'
 const navItems: { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?: boolean }[] = [
   { id: 'desktop', icon: Monitor, label: 'Agent Desktop' },
   { id: 'council', icon: Users, label: 'Council' },
-  { id: 'operations', icon: BarChart3, label: 'Operations' },
-  { id: 'workflow', icon: GitBranch, label: 'Workflows' },
   { id: 'spawner', icon: Plus, label: 'Spawn Agent' },
   { id: 'forge', icon: Wand2, label: 'Agent Forge' },
+  { id: 'workflow', icon: GitBranch, label: 'Workflows' },
+  { id: 'operations', icon: BarChart3, label: 'Stats' },
   { id: 'admin', icon: Shield, label: 'Admin', adminOnly: true },
 ]
 
