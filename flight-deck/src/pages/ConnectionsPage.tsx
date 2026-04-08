@@ -4,8 +4,8 @@ import CodexConnection from '../components/connections/CodexConnection'
 
 export default function ConnectionsPage() {
   return (
-    <div className="min-h-full bg-zinc-950 text-zinc-200">
-      <div className="max-w-3xl mx-auto px-6 py-8">
+    <div className="h-full overflow-y-auto bg-zinc-950 text-zinc-200">
+      <div className="max-w-3xl mx-auto px-6 py-8 pb-16">
         <div className="flex items-center gap-3 mb-6">
           <div className="h-10 w-10 rounded-md bg-zinc-900 border border-zinc-800 flex items-center justify-center">
             <Plug className="h-5 w-5 text-violet-500" />

@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Sparkles,
   Loader2,
@@ -6,6 +6,7 @@ import {
   AlertCircle,
   RefreshCw,
   KeyRound,
+  ChevronDown,
 } from 'lucide-react'
 import { useCodexAuthStore } from '../../stores/codexAuthStore'
 
@@ -19,6 +20,7 @@ function formatExpiry(seconds?: number): string {
 
 export default function CodexConnection() {
   const { status, loading, error, lastMessage, refresh, reimport } = useCodexAuthStore()
+  const [collapsed, setCollapsed] = useState(false)
 
   useEffect(() => {
     refresh()
@@ -34,7 +36,15 @@ export default function CodexConnection() {
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-3 px-5 py-4 border-b border-zinc-800">
+      <button
+        type="button"
+        onClick={() => setCollapsed((v) => !v)}
+        className={
+          'w-full flex items-center gap-3 px-5 py-4 text-left hover:bg-zinc-900/80 transition-colors ' +
+          (collapsed ? '' : 'border-b border-zinc-800')
+        }
+        aria-expanded={!collapsed}
+      >
         <div className="h-10 w-10 rounded-md bg-gradient-to-br from-emerald-500/20 to-teal-500/20 border border-zinc-800 flex items-center justify-center">
           <Sparkles className="h-5 w-5 text-zinc-200" />
         </div>
@@ -71,9 +81,16 @@ export default function CodexConnection() {
           </div>
         </div>
         {loading && <Loader2 className="h-4 w-4 animate-spin text-zinc-500" />}
-      </div>
+        <ChevronDown
+          className={
+            'h-4 w-4 text-zinc-500 transition-transform ' +
+            (collapsed ? '-rotate-90' : '')
+          }
+        />
+      </button>
 
       {/* Body */}
+      {!collapsed && (
       <div className="px-5 py-4 space-y-4">
         {error && (
           <div className="flex items-start gap-2 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-500">
@@ -163,6 +180,7 @@ export default function CodexConnection() {
           </span>
         </div>
       </div>
+      )}
     </div>
   )
 }

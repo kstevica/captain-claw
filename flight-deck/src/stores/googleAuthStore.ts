@@ -25,6 +25,14 @@ export interface GoogleAuthStatus {
   redirect_uri: string
 }
 
+export interface ScopeCatalogEntry {
+  scope: string
+  label: string
+  description: string
+  sensitivity: 'none' | 'sensitive' | 'restricted'
+  group: string
+}
+
 export interface GoogleAuthConfig {
   mode: GoogleAuthMode
   client_id: string
@@ -32,6 +40,9 @@ export interface GoogleAuthConfig {
   client_secret_set: boolean
   project_id: string
   location: string
+  scopes: string[]
+  default_scopes: string[]
+  scope_catalog: ScopeCatalogEntry[]
   redirect_uri: string
 }
 
@@ -48,6 +59,7 @@ interface GoogleAuthStore {
     client_secret: string
     project_id: string
     location: string
+    scopes: string[]
   }>) => Promise<boolean>
   clearCredentials: () => Promise<boolean>
   connect: () => void

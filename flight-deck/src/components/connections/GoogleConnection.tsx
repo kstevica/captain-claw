@@ -11,6 +11,7 @@ import {
   AlertCircle,
   KeyRound,
   Trash2,
+  ChevronDown,
 } from 'lucide-react'
 import { useGoogleAuthStore } from '../../stores/googleAuthStore'
 
@@ -33,8 +34,10 @@ export default function GoogleConnection() {
   const [clientSecret, setClientSecret] = useState('')
   const [projectId, setProjectId] = useState('')
   const [location, setLocation] = useState('')
+  const [scopes, setScopes] = useState<string[]>([])
   const [saving, setSaving] = useState(false)
   const [revealSecret, setRevealSecret] = useState(false)
+  const [collapsed, setCollapsed] = useState(false)
 
   useEffect(() => {
     refresh()
@@ -47,6 +50,7 @@ export default function GoogleConnection() {
       setClientId(config.client_id || '')
       setProjectId(config.project_id || '')
       setLocation(config.location || 'us-central1')
+      setScopes(config.scopes || config.default_scopes || [])
     }
   }, [config])
 
@@ -57,16 +61,28 @@ export default function GoogleConnection() {
 
   const handleSave = async () => {
     setSaving(true)
-    const patch: Record<string, string> = {}
+    const patch: Record<string, string | string[]> = {}
     if (clientId !== (config?.client_id || '')) patch.client_id = clientId
     if (clientSecret) patch.client_secret = clientSecret
     if (projectId !== (config?.project_id || '')) patch.project_id = projectId
     if (location !== (config?.location || '')) patch.location = location
+    const prevScopes = new Set(config?.scopes || [])
+    const nextScopes = new Set(scopes)
+    const scopesChanged =
+      prevScopes.size !== nextScopes.size ||
+      [...nextScopes].some((s) => !prevScopes.has(s))
+    if (scopesChanged) patch.scopes = scopes
     if (Object.keys(patch).length > 0) {
       await saveConfig(patch)
       setClientSecret('')
     }
     setSaving(false)
+  }
+
+  const toggleScope = (scope: string) => {
+    setScopes((prev) =>
+      prev.includes(scope) ? prev.filter((s) => s !== scope) : [...prev, scope],
+    )
   }
 
   const handleClear = async () => {
@@ -91,16 +107,30 @@ export default function GoogleConnection() {
   const pill = "inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border"
   const pillTiny = "inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border"
 
+  const prevScopeSet = new Set(config?.scopes || [])
+  const scopesDirty =
+    prevScopeSet.size !== scopes.length ||
+    scopes.some((s) => !prevScopeSet.has(s))
+
   const canSave =
     (clientId.trim() !== (config?.client_id || '').trim()) ||
     clientSecret.trim() !== '' ||
     (projectId.trim() !== (config?.project_id || '').trim()) ||
-    (location.trim() !== (config?.location || '').trim())
+    (location.trim() !== (config?.location || '').trim()) ||
+    scopesDirty
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-3 px-5 py-4 border-b border-zinc-800">
+      <button
+        type="button"
+        onClick={() => setCollapsed((v) => !v)}
+        className={
+          'w-full flex items-center gap-3 px-5 py-4 text-left hover:bg-zinc-900/80 transition-colors ' +
+          (collapsed ? '' : 'border-b border-zinc-800')
+        }
+        aria-expanded={!collapsed}
+      >
         <div className="h-10 w-10 rounded-md bg-gradient-to-br from-blue-500/20 to-red-500/20 border border-zinc-800 flex items-center justify-center">
           <Mail className="h-5 w-5 text-zinc-200" />
         </div>
@@ -133,9 +163,16 @@ export default function GoogleConnection() {
           </div>
         </div>
         {loading && <Loader2 className="h-4 w-4 animate-spin text-zinc-500" />}
-      </div>
+        <ChevronDown
+          className={
+            'h-4 w-4 text-zinc-500 transition-transform ' +
+            (collapsed ? '-rotate-90' : '')
+          }
+        />
+      </button>
 
       {/* Body */}
+      {!collapsed && (
       <div className="px-5 py-4 space-y-4">
         {error && (
           <div className="flex items-start gap-2 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-500">
@@ -305,6 +342,74 @@ export default function GoogleConnection() {
             </div>
           </div>
 
+          {/* Scope picker */}
+          {config?.scope_catalog && config.scope_catalog.length > 0 && (
+            <div>
+              <div className="text-xs font-medium text-zinc-400 mb-1.5">
+                Requested scopes
+              </div>
+              <div className="rounded-md border border-zinc-800 bg-zinc-950/60 divide-y divide-zinc-800">
+                {config.scope_catalog.map((entry) => {
+                  const checked = scopes.includes(entry.scope)
+                  const sensitivity = entry.sensitivity
+                  const isIdentity = entry.group === 'identity'
+                  const disabled =
+                    entry.scope === 'openid' || entry.scope === 'email'
+                  return (
+                    <label
+                      key={entry.scope}
+                      className={
+                        'flex items-start gap-2 px-3 py-2 cursor-pointer hover:bg-zinc-900/50 ' +
+                        (disabled ? 'opacity-70 cursor-not-allowed' : '')
+                      }
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={disabled}
+                        onChange={() => !disabled && toggleScope(entry.scope)}
+                        className="mt-0.5 accent-violet-600"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-sm text-zinc-200">{entry.label}</span>
+                          {sensitivity === 'none' && !isIdentity && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-500 border border-emerald-500/30">
+                              non-sensitive
+                            </span>
+                          )}
+                          {sensitivity === 'sensitive' && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-600 border border-amber-500/30">
+                              sensitive
+                            </span>
+                          )}
+                          {sensitivity === 'restricted' && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-red-500/15 text-red-500 border border-red-500/30">
+                              restricted
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-zinc-500 mt-0.5">
+                          {entry.description}
+                        </div>
+                      </div>
+                    </label>
+                  )
+                })}
+              </div>
+              <div className="mt-1.5 text-[11px] text-zinc-500 leading-snug">
+                Google blocks unverified apps from requesting{' '}
+                <span className="text-amber-600">sensitive</span> or{' '}
+                <span className="text-red-500">restricted</span> scopes unless
+                you add your Google account as a{' '}
+                <span className="text-zinc-300">Test user</span> on your OAuth
+                consent screen (Google Cloud Console → OAuth consent screen →
+                Test users). Changing scopes will disconnect and require you
+                to re-consent.
+              </div>
+            </div>
+          )}
+
           <div className="flex items-center gap-2 pt-1 flex-wrap">
             <button
               onClick={handleSave}
@@ -332,6 +437,7 @@ export default function GoogleConnection() {
           </div>
         </div>
       </div>
+      )}
     </div>
   )
 }

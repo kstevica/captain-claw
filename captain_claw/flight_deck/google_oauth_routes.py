@@ -27,6 +27,7 @@ from captain_claw.flight_deck.auth import get_current_user, get_db
 from captain_claw.flight_deck.db import FlightDeckDB
 from captain_claw.google_oauth import (
     DEFAULT_SCOPES,
+    SCOPE_CATALOG,
     GoogleOAuthTokens,
     build_authorization_url,
     exchange_code_for_tokens,
@@ -34,6 +35,7 @@ from captain_claw.google_oauth import (
     generate_pkce_pair,
     refresh_access_token,
     revoke_token,
+    sanitize_scopes,
 )
 from captain_claw.logging import get_logger
 
@@ -63,6 +65,7 @@ _K_CLIENT_ID = "google_oauth:client_id"
 _K_CLIENT_SECRET = "google_oauth:client_secret"
 _K_PROJECT_ID = "google_oauth:project_id"
 _K_LOCATION = "google_oauth:location"
+_K_SCOPES = "google_oauth:scopes"
 _K_TOKENS = "google_oauth:tokens"
 _K_USER = "google_oauth:user"
 # Legacy / reserved — kept for backwards compatibility when reading
@@ -70,17 +73,7 @@ _K_USER = "google_oauth:user"
 _K_TOKEN_MODE = "google_oauth:token_mode"
 
 
-_GMAIL_SCOPE_LABELS = {
-    "https://www.googleapis.com/auth/drive": "Drive",
-    "https://www.googleapis.com/auth/calendar": "Calendar",
-    "https://www.googleapis.com/auth/gmail.readonly": "Gmail (read)",
-    "https://www.googleapis.com/auth/gmail.compose": "Gmail (drafts)",
-    "https://www.googleapis.com/auth/gmail.modify": "Gmail (read + modify)",
-    "https://www.googleapis.com/auth/gmail.send": "Gmail (send)",
-    "https://www.googleapis.com/auth/cloud-platform": "Vertex AI / Gemini",
-    "openid": "OpenID",
-    "email": "Email address",
-}
+_GMAIL_SCOPE_LABELS = {s["scope"]: s["label"] for s in SCOPE_CATALOG}
 
 
 def _label_scopes(granted: list[str]) -> list[dict[str, str]]:
@@ -106,13 +99,27 @@ def _purge_stale_pending() -> None:
 # ── storage helpers ─────────────────────────────────────────────────
 
 
-async def _load_user_config(db: FlightDeckDB) -> dict[str, str]:
+async def _load_user_config(db: FlightDeckDB) -> dict[str, Any]:
     """Return the user-supplied (custom) OAuth config from system_settings."""
+    raw_scopes = (await db.get_system_setting(_K_SCOPES)) or ""
+    scopes: list[str]
+    if raw_scopes:
+        try:
+            loaded = json.loads(raw_scopes)
+            if isinstance(loaded, list):
+                scopes = sanitize_scopes([str(s) for s in loaded])
+            else:
+                scopes = list(DEFAULT_SCOPES)
+        except Exception:
+            scopes = list(DEFAULT_SCOPES)
+    else:
+        scopes = list(DEFAULT_SCOPES)
     return {
         "client_id": (await db.get_system_setting(_K_CLIENT_ID)) or "",
         "client_secret": (await db.get_system_setting(_K_CLIENT_SECRET)) or "",
         "project_id": (await db.get_system_setting(_K_PROJECT_ID)) or "",
         "location": (await db.get_system_setting(_K_LOCATION)) or "us-central1",
+        "scopes": scopes,
     }
 
 
@@ -127,14 +134,16 @@ async def _effective_oauth(db: FlightDeckDB) -> dict[str, Any] | None:
     user = await _load_user_config(db)
     if not (user["client_id"] and user["client_secret"]):
         return None
+    scopes = sanitize_scopes(user.get("scopes"))
+    has_cloud = "https://www.googleapis.com/auth/cloud-platform" in scopes
     return {
         "mode": "custom",
         "client_id": user["client_id"],
         "client_secret": user["client_secret"],
         "project_id": user["project_id"],
         "location": user["location"],
-        "scopes": list(DEFAULT_SCOPES),
-        "supports_vertex": bool(user["project_id"]),
+        "scopes": scopes,
+        "supports_vertex": bool(user["project_id"]) and has_cloud,
     }
 
 
@@ -180,13 +189,16 @@ async def _token_client(db: FlightDeckDB) -> dict[str, Any] | None:
     user_cfg = await _load_user_config(db)
     if not user_cfg["client_id"] or not user_cfg["client_secret"]:
         return None
+    scopes = sanitize_scopes(user_cfg.get("scopes"))
+    has_cloud = "https://www.googleapis.com/auth/cloud-platform" in scopes
     return {
         "mode": "custom",
         "client_id": user_cfg["client_id"],
         "client_secret": user_cfg["client_secret"],
         "project_id": user_cfg["project_id"],
         "location": user_cfg["location"] or "us-central1",
-        "supports_vertex": bool(user_cfg["project_id"]),
+        "scopes": scopes,
+        "supports_vertex": bool(user_cfg["project_id"]) and has_cloud,
     }
 
 
@@ -230,6 +242,10 @@ class GoogleConfigUpdate(BaseModel):
     client_secret: str | None = None
     project_id: str | None = None
     location: str | None = None
+    # ``scopes`` is the *full* desired list — pass the current list with
+    # items added/removed. Unknown or duplicate entries are silently
+    # dropped server-side. ``None`` leaves the stored list unchanged.
+    scopes: list[str] | None = None
 
 
 # ── status / config endpoints ───────────────────────────────────────
@@ -275,8 +291,19 @@ async def google_config_get(
         "client_secret_set": bool(user["client_secret"]),
         "project_id": user["project_id"],
         "location": user["location"] or "us-central1",
+        "scopes": user["scopes"],
+        "default_scopes": list(DEFAULT_SCOPES),
+        "scope_catalog": SCOPE_CATALOG,
         "redirect_uri": _redirect_uri(request),
     }
+
+
+@router.get("/scope_catalog")
+async def google_scope_catalog(
+    _user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Return the catalogue of selectable OAuth scopes for the UI."""
+    return {"scope_catalog": SCOPE_CATALOG, "default_scopes": list(DEFAULT_SCOPES)}
 
 
 @router.post("/config")
@@ -300,6 +327,7 @@ async def google_config_post(
         await db.set_system_setting(_K_CLIENT_ID, "")
         await db.set_system_setting(_K_CLIENT_SECRET, "")
         await db.set_system_setting(_K_PROJECT_ID, "")
+        await db.set_system_setting(_K_SCOPES, "")
         await _clear_oauth_state(db)
         return {"ok": True, "cleared": True}
 
@@ -329,10 +357,21 @@ async def google_config_post(
     if location is not None:
         await db.set_system_setting(_K_LOCATION, location)
 
-    if will_change_client:
+    scopes_changed = False
+    if body.scopes is not None:
+        new_scopes = sanitize_scopes(body.scopes)
+        prev_scopes = eff_before["scopes"] if eff_before else list(DEFAULT_SCOPES)
+        if set(new_scopes) != set(prev_scopes):
+            scopes_changed = True
+        await db.set_system_setting(_K_SCOPES, json.dumps(new_scopes))
+
+    # Both rotating the client and changing the scope set invalidate
+    # the stored tokens — the refresh token is bound to the client that
+    # minted it, and scope changes require a fresh consent.
+    if will_change_client or scopes_changed:
         await _clear_oauth_state(db)
 
-    return {"ok": True, "mode": "custom"}
+    return {"ok": True, "mode": "custom", "scopes_changed": scopes_changed}
 
 
 # ── login / callback / logout ───────────────────────────────────────

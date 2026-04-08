@@ -29,17 +29,170 @@ GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 
+# Non-sensitive scopes that Google lets *any* OAuth client request,
+# even when the app is unverified and still in Testing mode. We use
+# this as the default scope list so a fresh install of captain-claw
+# can connect a Google account without hitting the "sensitive scopes
+# without verification" block.
+#
+# Everything beyond this set (Gmail, Drive full access, Calendar,
+# Vertex AI / cloud-platform) is either "sensitive" or "restricted"
+# per Google's policy and requires either:
+#   * Adding the user as an explicit *Test user* on the consent screen
+#     while the app is in Testing mode, OR
+#   * Going through Google's OAuth verification process.
+#
+# Users opt into those by ticking them in the Connections page UI,
+# which persists the chosen list in ``system_settings`` and feeds it
+# back through :func:`build_authorization_url`.
 DEFAULT_SCOPES = [
-    "https://www.googleapis.com/auth/cloud-platform",
-    "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/calendar",
-    # Gmail read (list / search / read_message / get_thread).
-    "https://www.googleapis.com/auth/gmail.readonly",
-    # Gmail compose (create_draft only — the tool never sends).
-    "https://www.googleapis.com/auth/gmail.compose",
     "openid",
     "email",
+    "profile",
+    # Per-file Drive access — non-sensitive, unlike the full-drive scope.
+    "https://www.googleapis.com/auth/drive.file",
 ]
+
+
+# Catalogue of scopes the Connections UI knows how to request.
+# ``sensitivity`` is one of:
+#   * ``none``       — freely usable by unverified apps
+#   * ``sensitive``  — Google flags these; unverified apps need test users
+#   * ``restricted`` — requires security review + verification in prod
+#
+# The UI shows a badge for each tier so users understand what they're
+# signing up for before ticking a box.
+SCOPE_CATALOG: list[dict[str, str]] = [
+    {
+        "scope": "openid",
+        "label": "OpenID",
+        "description": "Sign in with Google (required).",
+        "sensitivity": "none",
+        "group": "identity",
+    },
+    {
+        "scope": "email",
+        "label": "Email address",
+        "description": "Your Google account email.",
+        "sensitivity": "none",
+        "group": "identity",
+    },
+    {
+        "scope": "profile",
+        "label": "Basic profile",
+        "description": "Your name and profile picture.",
+        "sensitivity": "none",
+        "group": "identity",
+    },
+    {
+        "scope": "https://www.googleapis.com/auth/drive.file",
+        "label": "Drive (per-file)",
+        "description": (
+            "Read/write Drive files the app created or the user explicitly "
+            "picks — no access to anything else in Drive."
+        ),
+        "sensitivity": "none",
+        "group": "drive",
+    },
+    {
+        "scope": "https://www.googleapis.com/auth/drive.readonly",
+        "label": "Drive (read all)",
+        "description": "Read all files in Drive. Restricted scope.",
+        "sensitivity": "restricted",
+        "group": "drive",
+    },
+    {
+        "scope": "https://www.googleapis.com/auth/drive",
+        "label": "Drive (full access)",
+        "description": "Full read/write access to all of Drive. Restricted scope.",
+        "sensitivity": "restricted",
+        "group": "drive",
+    },
+    {
+        "scope": "https://www.googleapis.com/auth/gmail.readonly",
+        "label": "Gmail (read)",
+        "description": "List, search, and read messages. Restricted scope.",
+        "sensitivity": "restricted",
+        "group": "gmail",
+    },
+    {
+        "scope": "https://www.googleapis.com/auth/gmail.compose",
+        "label": "Gmail (drafts)",
+        "description": "Create draft replies. Sensitive scope.",
+        "sensitivity": "sensitive",
+        "group": "gmail",
+    },
+    {
+        "scope": "https://www.googleapis.com/auth/gmail.modify",
+        "label": "Gmail (read + modify)",
+        "description": "Read + label / archive / trash. Restricted scope.",
+        "sensitivity": "restricted",
+        "group": "gmail",
+    },
+    {
+        "scope": "https://www.googleapis.com/auth/gmail.send",
+        "label": "Gmail (send)",
+        "description": "Send mail on your behalf. Sensitive scope.",
+        "sensitivity": "sensitive",
+        "group": "gmail",
+    },
+    {
+        "scope": "https://www.googleapis.com/auth/calendar.readonly",
+        "label": "Calendar (read)",
+        "description": "Read calendars and events. Sensitive scope.",
+        "sensitivity": "sensitive",
+        "group": "calendar",
+    },
+    {
+        "scope": "https://www.googleapis.com/auth/calendar",
+        "label": "Calendar (read + write)",
+        "description": "Read and manage events. Sensitive scope.",
+        "sensitivity": "sensitive",
+        "group": "calendar",
+    },
+    {
+        "scope": "https://www.googleapis.com/auth/cloud-platform",
+        "label": "Vertex AI / Gemini",
+        "description": (
+            "Access Google Cloud APIs (Vertex AI / Gemini). Sensitive, "
+            "and only useful when you also configure a project_id."
+        ),
+        "sensitivity": "sensitive",
+        "group": "cloud",
+    },
+]
+
+
+_SCOPE_SET: frozenset[str] = frozenset(s["scope"] for s in SCOPE_CATALOG)
+
+
+def sanitize_scopes(scopes: list[str] | None) -> list[str]:
+    """Return *scopes* filtered to known entries, always including the
+    identity triplet (openid/email/profile) so Google can identify the
+    account. Falls back to :data:`DEFAULT_SCOPES` when *scopes* is
+    empty or ``None``."""
+    if not scopes:
+        return list(DEFAULT_SCOPES)
+    seen: set[str] = set()
+    out: list[str] = []
+    for s in scopes:
+        if not isinstance(s, str):
+            continue
+        s = s.strip()
+        if not s or s in seen:
+            continue
+        if s not in _SCOPE_SET:
+            # Unknown scopes are dropped rather than passed through —
+            # prevents typos / stale values from breaking the OAuth URL.
+            continue
+        seen.add(s)
+        out.append(s)
+    # Always include openid so the ``/userinfo`` endpoint works.
+    for required in ("openid", "email"):
+        if required not in seen:
+            out.insert(0, required)
+            seen.add(required)
+    return out
 
 # App-state keys used by GoogleOAuthManager for persistent storage.
 STATE_KEY_TOKENS = "google_oauth_tokens"

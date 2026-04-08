@@ -1097,25 +1097,96 @@ class ChatGPTResponsesProvider(LLMProvider):
             else:
                 result = self._parse_response_output(completed)
 
-            # If parsing the completed event produced no content but we
-            # *do* have output_text deltas in the stream, reconstruct
-            # the message text from those — they are the canonical
-            # streaming text channel for the Responses API and are
-            # always present when the model emits any tokens.
+            # If parsing the completed event produced no content/tools,
+            # reconstruct directly from the streamed events. The Codex
+            # backend reliably emits text via ``response.output_text.delta``
+            # and tool calls via ``response.output_item.done`` (with the
+            # function_call item) plus per-arg ``response.function_call_arguments.delta``
+            # chunks. Either source is enough to recover a valid turn.
             if not result.content and not result.tool_calls:
                 delta_parts: list[str] = []
+                # call_id → {"id", "name", "arguments_str"}
+                fc_by_id: dict[str, dict[str, Any]] = {}
+                fc_order: list[str] = []
+
+                def _ingest_fc_item(item: dict[str, Any]) -> None:
+                    if not isinstance(item, dict):
+                        return
+                    if item.get("type") != "function_call":
+                        return
+                    cid = str(item.get("call_id", "") or item.get("id", ""))
+                    if not cid:
+                        return
+                    slot = fc_by_id.setdefault(
+                        cid, {"id": cid, "name": "", "arguments_str": ""}
+                    )
+                    if cid not in fc_order:
+                        fc_order.append(cid)
+                    nm = item.get("name")
+                    if isinstance(nm, str) and nm:
+                        slot["name"] = nm
+                    args = item.get("arguments")
+                    if isinstance(args, str) and args:
+                        slot["arguments_str"] = args
+                    elif isinstance(args, dict):
+                        slot["arguments_str"] = json.dumps(args)
+
                 for evt in events:
-                    if evt.get("type") == "response.output_text.delta":
+                    et = evt.get("type", "")
+                    if et == "response.output_text.delta":
                         d = evt.get("delta", "")
                         if isinstance(d, str) and d:
                             delta_parts.append(d)
-                if delta_parts:
+                    elif et == "response.output_item.added":
+                        _ingest_fc_item(evt.get("item", {}) or {})
+                    elif et == "response.output_item.done":
+                        _ingest_fc_item(evt.get("item", {}) or {})
+                    elif et == "response.function_call_arguments.delta":
+                        cid = str(evt.get("call_id", "") or evt.get("item_id", ""))
+                        if cid:
+                            slot = fc_by_id.setdefault(
+                                cid, {"id": cid, "name": "", "arguments_str": ""}
+                            )
+                            if cid not in fc_order:
+                                fc_order.append(cid)
+                            d = evt.get("delta", "")
+                            if isinstance(d, str):
+                                # Only append deltas if we don't already have
+                                # the full arguments string from output_item.done
+                                # (which would otherwise duplicate).
+                                if not slot["arguments_str"]:
+                                    slot["arguments_str"] += d
+                    elif et == "response.function_call_arguments.done":
+                        cid = str(evt.get("call_id", "") or evt.get("item_id", ""))
+                        full = evt.get("arguments", "")
+                        if cid and isinstance(full, str) and full:
+                            slot = fc_by_id.setdefault(
+                                cid, {"id": cid, "name": "", "arguments_str": ""}
+                            )
+                            if cid not in fc_order:
+                                fc_order.append(cid)
+                            slot["arguments_str"] = full
+
+                recovered_tool_calls: list[ToolCall] = []
+                for cid in fc_order:
+                    slot = fc_by_id[cid]
+                    if not slot.get("name"):
+                        continue
+                    raw_args = slot.get("arguments_str") or "{}"
+                    args = _safe_json_loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+                    recovered_tool_calls.append(
+                        ToolCall(id=slot["id"], name=slot["name"], arguments=args)
+                    )
+
+                if delta_parts or recovered_tool_calls:
                     result = LLMResponse(
                         content="".join(delta_parts),
-                        tool_calls=result.tool_calls,
+                        tool_calls=recovered_tool_calls or result.tool_calls,
                         model=result.model,
                         usage=result.usage,
-                        finish_reason=result.finish_reason,
+                        finish_reason=(
+                            "tool_calls" if recovered_tool_calls else result.finish_reason
+                        ),
                     )
 
             if not result.content and not result.tool_calls:
