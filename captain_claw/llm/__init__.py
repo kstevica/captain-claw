@@ -586,6 +586,25 @@ def _extract_usage(usage_obj: Any) -> dict[str, int]:
 # ── ChatGPT Responses API helpers ─────────────────────────────────────────
 
 
+# Models the ChatGPT "Sign in with ChatGPT" / Codex backend actually
+# accepts. The endpoint at chatgpt.com/backend-api/codex/responses is
+# *not* the same as api.openai.com/v1 — it only serves Codex-family
+# models tied to a ChatGPT plan. Anything else either 400s or, worse,
+# returns an empty body that looks like a successful but blank response.
+_CODEX_BACKEND_SUPPORTED_MODELS: frozenset[str] = frozenset({
+    "gpt-5",
+    "gpt-5-codex",
+    "gpt-5.1",
+    "gpt-5.1-codex",
+    "gpt-5.1-codex-mini",
+    "gpt-5.1-codex-max",
+    "gpt-5.2",
+    "gpt-5.2-codex",
+    "gpt-5.3-codex",
+    "codex-mini-latest",
+})
+
+
 def _normalize_chatgpt_model(name: str) -> str:
     """Normalize ChatGPT / Codex model name aliases."""
     base = (name or "").strip()
@@ -622,8 +641,31 @@ def _normalize_chatgpt_model(name: str) -> str:
         "codex-mini": "codex-mini-latest",
         "codex-mini-latest": "codex-mini-latest",
         "gpt-5.1-codex-mini": "gpt-5.1-codex-mini",
+        # Common non-codex aliases users pick from generic OpenAI model
+        # lists. The Codex backend doesn't serve these, so remap them to
+        # the closest Codex-family equivalent rather than 400ing.
+        "gpt-5-mini": "gpt-5.1-codex-mini",
+        "gpt-5.1-mini": "gpt-5.1-codex-mini",
+        "gpt-5.2-mini": "gpt-5.1-codex-mini",
+        "gpt-5.3-mini": "gpt-5.1-codex-mini",
+        "gpt-5.4-mini": "gpt-5.1-codex-mini",
     }
-    return mapping.get(base, base)
+    return mapping.get(base.lower(), base)
+
+
+def _is_codex_family_model(name: str) -> bool:
+    """Return True if *name* is a GPT-5 / Codex family model that can
+    only be served by the ChatGPT Responses endpoint (never by the
+    regular ``api.openai.com/v1`` chat completions API)."""
+    normalized = _normalize_chatgpt_model(name)
+    if not normalized:
+        return False
+    lowered = normalized.lower()
+    if "codex" in lowered:
+        return True
+    if lowered.startswith("gpt-5"):
+        return True
+    return False
 
 
 def _convert_messages_for_responses_api(
@@ -733,6 +775,15 @@ def _convert_tools_for_responses_api(
     return result
 
 
+class _CodexAuthExpired(Exception):
+    """Internal sentinel — raised when the Responses API returns 401.
+
+    Caught inside :class:`ChatGPTResponsesProvider` to trigger a
+    one-shot forced refresh from the Codex auth manager. Never
+    surfaces to callers.
+    """
+
+
 class ChatGPTResponsesProvider(LLMProvider):
     """Direct connection to the ChatGPT Responses API.
 
@@ -750,13 +801,28 @@ class ChatGPTResponsesProvider(LLMProvider):
         temperature: float = 0.7,
         max_tokens: int = 32000,
         tokens_per_minute: int = 0,
+        use_codex_auth_manager: bool = True,
     ):
         import uuid
 
         self.provider = "openai"
         self.model = _normalize_chatgpt_model(model)
+        if self.model != (model or "").strip():
+            log.info(
+                "ChatGPT Codex: remapped model alias",
+                requested=model,
+                using=self.model,
+            )
+        if self.model not in _CODEX_BACKEND_SUPPORTED_MODELS:
+            log.warning(
+                "ChatGPT Codex: model not in known-supported set — "
+                "the chatgpt.com Codex backend will likely reject it. "
+                "Pick one of: %s",
+                ", ".join(sorted(_CODEX_BACKEND_SUPPORTED_MODELS)),
+                extra={"requested_model": model, "normalized": self.model},
+            )
         self.base_url = base_url.rstrip("/")
-        self.extra_headers = extra_headers or {}
+        self.extra_headers = dict(extra_headers or {})
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.session_id = uuid.uuid4().hex
@@ -764,6 +830,22 @@ class ChatGPTResponsesProvider(LLMProvider):
         self.rate_limiter = (
             TokenRateLimiter(tokens_per_minute) if tokens_per_minute > 0 else None
         )
+
+        # Codex tokens (Authorization + chatgpt-account-id) expire roughly
+        # every 24 hours and are refreshed in the background by the Codex
+        # CLI (or, when running under Flight Deck, by FD re-reading
+        # ``~/.codex/auth.json`` on demand). When enabled, we hand the
+        # auth problem off to :class:`CodexAuthManager`, which sources
+        # tokens from Flight Deck (preferred) or the local auth.json,
+        # and refreshes them pre-request when stale or on any 401.
+        self._codex_auth: "CodexAuthManager | None" = None
+        if use_codex_auth_manager:
+            try:
+                from captain_claw.codex_auth_manager import CodexAuthManager
+                self._codex_auth = CodexAuthManager()
+            except Exception as exc:  # pragma: no cover — import safety net
+                log.debug("CodexAuthManager unavailable: %s", exc)
+                self._codex_auth = None
 
     # ── helpers ────────────────────────────────────────────────────────
 
@@ -776,6 +858,28 @@ class ChatGPTResponsesProvider(LLMProvider):
         }
         headers.update(self.extra_headers)
         return headers
+
+    async def _ensure_fresh_auth(self, *, force: bool = False) -> None:
+        """Refresh ``self.extra_headers`` from the Codex auth manager.
+
+        Called before each request (fast path: returns immediately when
+        the cached token isn't stale) and again after any 401 response
+        with ``force=True``.
+        """
+        if self._codex_auth is None:
+            return
+        try:
+            fresh = await self._codex_auth.get_headers(force_refresh=force)
+        except Exception as exc:
+            log.debug("Codex auth refresh failed: %s", exc)
+            return
+        if not fresh:
+            return
+        # Replace just the auth-related headers so any caller-supplied
+        # extras (e.g. OpenAI-Beta) are preserved.
+        for key in ("Authorization", "chatgpt-account-id"):
+            if key in fresh:
+                self.extra_headers[key] = fresh[key]
 
     def _build_payload(
         self,
@@ -830,14 +934,40 @@ class ChatGPTResponsesProvider(LLMProvider):
         content_parts: list[str] = []
         tool_calls: list[ToolCall] = []
 
+        def _harvest_text(node: Any) -> None:
+            """Recursively pull any ``text`` strings out of a Responses API
+            output node. The Codex backend's shape varies between
+            ``message`` items with ``content[].text``, ``output_text``
+            items with a top-level ``text``, and (for reasoning models)
+            nested ``content`` arrays — so we just walk everything."""
+            if isinstance(node, dict):
+                t = node.get("type", "")
+                if isinstance(t, str) and ("output_text" in t or t == "text"):
+                    text = node.get("text")
+                    if isinstance(text, str) and text:
+                        content_parts.append(text)
+                # Some shapes nest text in {"text": {"value": "..."}}
+                txt_field = node.get("text")
+                if isinstance(txt_field, dict):
+                    val = txt_field.get("value")
+                    if isinstance(val, str) and val:
+                        content_parts.append(val)
+                for key in ("content", "parts", "items"):
+                    child = node.get(key)
+                    if child is not None:
+                        _harvest_text(child)
+            elif isinstance(node, list):
+                for child in node:
+                    _harvest_text(child)
+
         for item in output_items:
             item_type = item.get("type", "")
 
             if item_type == "message":
-                for part in item.get("content", []) or []:
-                    text = part.get("text", "")
-                    if text:
-                        content_parts.append(str(text))
+                _harvest_text(item.get("content", []) or [])
+
+            elif item_type in ("output_text", "text"):
+                _harvest_text(item)
 
             elif item_type == "function_call":
                 call_id = str(item.get("call_id", "") or item.get("id", ""))
@@ -845,6 +975,11 @@ class ChatGPTResponsesProvider(LLMProvider):
                 raw_args = item.get("arguments", "{}")
                 args = _safe_json_loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
                 tool_calls.append(ToolCall(id=call_id, name=name, arguments=args))
+
+            else:
+                # Unknown item shape — try to harvest any text fields
+                # rather than silently dropping the turn.
+                _harvest_text(item)
 
         usage_raw = response_data.get("usage", {}) or {}
         usage = {
@@ -878,21 +1013,53 @@ class ChatGPTResponsesProvider(LLMProvider):
             await self.rate_limiter.acquire(estimated)
 
         payload = self._build_payload(messages, tools, temperature, max_tokens)
-        headers = self._build_headers()
 
-        try:
-            collected_lines: list[str] = []
-            async with self.client.stream("POST", self.base_url, json=payload, headers=headers) as response:
+        # Refresh from Codex auth manager pre-request (cheap no-op when
+        # cached token isn't stale). On 401 we'll retry once with a
+        # forced refresh.
+        await self._ensure_fresh_auth()
+
+        async def _do_request() -> list[str]:
+            collected: list[str] = []
+            headers = self._build_headers()
+            async with self.client.stream(
+                "POST", self.base_url, json=payload, headers=headers,
+            ) as response:
+                if response.status_code == 401:
+                    await response.aread()
+                    raise _CodexAuthExpired()
                 if not response.is_success:
                     error_text = await response.aread()
                     raise LLMAPIError(
                         f"ChatGPT Responses API error {response.status_code}: {error_text.decode(errors='replace')}",
                         status_code=response.status_code,
                     )
+                log.debug(
+                    "ChatGPT Responses API stream opened",
+                    status=response.status_code,
+                    content_type=response.headers.get("content-type", ""),
+                )
                 async for line in response.aiter_lines():
-                    collected_lines.append(line)
+                    collected.append(line)
+            return collected
+
+        try:
+            try:
+                collected_lines = await _do_request()
+            except _CodexAuthExpired:
+                log.info("ChatGPT Responses API 401 — force-refreshing Codex auth and retrying once.")
+                await self._ensure_fresh_auth(force=True)
+                collected_lines = await _do_request()
 
             events = self._parse_sse_events(collected_lines)
+
+            log.info(
+                "ChatGPT Responses API stream parsed",
+                model=self.model,
+                raw_lines=len(collected_lines),
+                events=len(events),
+                event_types=sorted({str(e.get("type", "")) for e in events})[:20],
+            )
 
             # Find the completed event.
             completed: dict[str, Any] | None = None
@@ -930,6 +1097,56 @@ class ChatGPTResponsesProvider(LLMProvider):
             else:
                 result = self._parse_response_output(completed)
 
+            # If parsing the completed event produced no content but we
+            # *do* have output_text deltas in the stream, reconstruct
+            # the message text from those — they are the canonical
+            # streaming text channel for the Responses API and are
+            # always present when the model emits any tokens.
+            if not result.content and not result.tool_calls:
+                delta_parts: list[str] = []
+                for evt in events:
+                    if evt.get("type") == "response.output_text.delta":
+                        d = evt.get("delta", "")
+                        if isinstance(d, str) and d:
+                            delta_parts.append(d)
+                if delta_parts:
+                    result = LLMResponse(
+                        content="".join(delta_parts),
+                        tool_calls=result.tool_calls,
+                        model=result.model,
+                        usage=result.usage,
+                        finish_reason=result.finish_reason,
+                    )
+
+            if not result.content and not result.tool_calls:
+                # The Codex backend sometimes returns 200 with a body
+                # that has no message / no tool_calls — usually because
+                # the model isn't actually served on this account, or
+                # because the request was rejected mid-stream with an
+                # error event we didn't recognise. Surface a useful
+                # diagnostic instead of letting the orchestrator finish
+                # silently with an empty turn.
+                preview_lines = [ln for ln in collected_lines if ln.strip()][:20]
+                log.warning(
+                    "ChatGPT Responses API returned an empty turn",
+                    model=self.model,
+                    raw_lines=len(collected_lines),
+                    events=len(events),
+                    completed_seen=completed is not None,
+                    preview="\n".join(preview_lines)[:2000],
+                )
+                # Look for a Codex error event the parser may have missed.
+                err_detail = ""
+                for evt in events:
+                    et = str(evt.get("type", ""))
+                    if "error" in et.lower():
+                        err_detail = json.dumps(evt)[:500]
+                        break
+                if err_detail:
+                    raise LLMAPIError(
+                        f"ChatGPT Responses API returned an error event: {err_detail}"
+                    )
+
             if self.rate_limiter:
                 self.rate_limiter.record_actual(result.usage.get("total_tokens", 0), estimated)
             return result
@@ -953,46 +1170,63 @@ class ChatGPTResponsesProvider(LLMProvider):
             await self.rate_limiter.acquire(estimated)
 
         payload = self._build_payload(messages, tools, temperature, max_tokens)
-        headers = self._build_headers()
 
-        try:
-            async with self.client.stream("POST", self.base_url, json=payload, headers=headers) as response:
-                if not response.is_success:
-                    error_text = await response.aread()
-                    raise LLMAPIError(
-                        f"ChatGPT Responses API error {response.status_code}: {error_text.decode(errors='replace')}",
-                        status_code=response.status_code,
-                    )
-                async for line in response.aiter_lines():
-                    stripped = line.strip()
-                    if not stripped or stripped.startswith("event:"):
+        await self._ensure_fresh_auth()
+
+        # For streaming we retry on 401 by re-entering the stream once.
+        # The retry is only safe before we've yielded any delta to the
+        # caller; we check the response status code first and bail out
+        # of the pre-stream block via ``continue`` when we see a 401.
+        for _attempt in (1, 2):
+            headers = self._build_headers()
+            try:
+                async with self.client.stream(
+                    "POST", self.base_url, json=payload, headers=headers,
+                ) as response:
+                    if response.status_code == 401 and _attempt == 1:
+                        await response.aread()
+                        log.info("ChatGPT Responses API 401 (streaming) — force-refreshing Codex auth and retrying once.")
+                        await self._ensure_fresh_auth(force=True)
                         continue
-                    if stripped.startswith("data: "):
-                        data_str = stripped[6:]
-                    elif stripped.startswith("data:"):
-                        data_str = stripped[5:]
-                    else:
-                        continue
-                    try:
-                        evt = json.loads(data_str)
-                    except json.JSONDecodeError:
-                        continue
-                    if evt.get("type") == "response.output_text.delta":
-                        delta = evt.get("delta", "")
-                        if delta:
-                            yield str(delta)
-        except LLMAPIError:
-            raise
-        except httpx.HTTPError as exc:
-            raise LLMAPIError(f"ChatGPT Responses API streaming error: {exc}")
-        except Exception as exc:
-            raise LLMError(f"ChatGPT Responses API streaming failed: {exc}")
+                    if not response.is_success:
+                        error_text = await response.aread()
+                        raise LLMAPIError(
+                            f"ChatGPT Responses API error {response.status_code}: {error_text.decode(errors='replace')}",
+                            status_code=response.status_code,
+                        )
+                    async for line in response.aiter_lines():
+                        stripped = line.strip()
+                        if not stripped or stripped.startswith("event:"):
+                            continue
+                        if stripped.startswith("data: "):
+                            data_str = stripped[6:]
+                        elif stripped.startswith("data:"):
+                            data_str = stripped[5:]
+                        else:
+                            continue
+                        try:
+                            evt = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+                        if evt.get("type") == "response.output_text.delta":
+                            delta = evt.get("delta", "")
+                            if delta:
+                                yield str(delta)
+                    return  # successful stream completed
+            except LLMAPIError:
+                raise
+            except httpx.HTTPError as exc:
+                raise LLMAPIError(f"ChatGPT Responses API streaming error: {exc}")
+            except Exception as exc:
+                raise LLMError(f"ChatGPT Responses API streaming failed: {exc}")
 
     def count_tokens(self, text: str) -> int:
         return len(text) // 4
 
     async def close(self) -> None:
         await self.client.aclose()
+        if self._codex_auth is not None:
+            await self._codex_auth.close()
 
 
 class OllamaProvider(LLMProvider):
@@ -2804,8 +3038,14 @@ def create_provider(
             tokens_per_minute=tokens_per_minute,
         )
 
-    # ChatGPT Responses API path — activated when openai + extra_headers.
-    if normalized == "openai" and extra_headers:
+    # ChatGPT Responses API path — activated when the OpenAI provider
+    # has explicit ``extra_headers`` configured OR the selected model
+    # is a Codex-family model (which can only be served by the ChatGPT
+    # Responses endpoint, never by the regular api.openai.com/v1).
+    # In the second case the ``CodexAuthManager`` will resolve the
+    # Authorization + chatgpt-account-id headers at call time from
+    # Flight Deck (``/fd/codex/access_token``) or ``~/.codex/auth.json``.
+    if normalized == "openai" and (bool(extra_headers) or _is_codex_family_model(model)):
         return ChatGPTResponsesProvider(
             model=model,
             base_url=base_url or "https://chatgpt.com/backend-api/codex/responses",

@@ -65,6 +65,19 @@ async def _generate_task_name(
             log.info("Task naming: skipped (litert provider)", model=model)
             return ""
 
+        # ChatGPTResponsesProvider authenticates via OAuth headers from
+        # ~/.codex/auth.json (no api_key) and talks to chatgpt.com's
+        # Responses endpoint, which litellm doesn't know about. Skip
+        # task naming in that case rather than spamming auth errors.
+        _has_oauth_header = bool(
+            extra_headers and any(
+                str(k).lower() == "authorization" for k in extra_headers.keys()
+            )
+        )
+        if not api_key and (_has_oauth_header or "chatgpt.com" in (base_url or "")):
+            log.info("Task naming: skipped (chatgpt oauth provider)", model=model)
+            return ""
+
         from litellm import acompletion
 
         # Build the naming prompt.
@@ -263,6 +276,10 @@ async def handle_chat(
     _naming_api_key = getattr(agent.provider, "api_key", None)
     _naming_base_url = getattr(agent.provider, "base_url", None)
     _naming_extra_headers = getattr(agent.provider, "extra_headers", None)
+    # Mark provider class so the namer can skip litellm entirely for
+    # the ChatGPT/Codex OAuth path (no api_key, OAuth headers attached
+    # only just-in-time inside complete()).
+    _naming_provider_class = type(agent.provider).__name__
 
     log.info(
         "Task naming: setup",
@@ -272,6 +289,13 @@ async def handle_chat(
     )
 
     async def _name_and_store() -> None:
+        if _naming_provider_class == "ChatGPTResponsesProvider":
+            log.info(
+                "Task naming: skipped (chatgpt oauth provider)",
+                model=_naming_model,
+            )
+            agent._current_task_name = ""
+            return
         name = await _generate_task_name(
             content, server._recent_prompts, _naming_model, _naming_api_key,
             _naming_base_url, _naming_extra_headers,

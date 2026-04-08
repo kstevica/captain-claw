@@ -1,5 +1,6 @@
 import { Plug } from 'lucide-react'
 import GoogleConnection from '../components/connections/GoogleConnection'
+import CodexConnection from '../components/connections/CodexConnection'
 
 export default function ConnectionsPage() {
   return (
@@ -19,6 +20,7 @@ export default function ConnectionsPage() {
 
         <div className="space-y-4">
           <GoogleConnection />
+          <CodexConnection />
         </div>
       </div>
     </div>
