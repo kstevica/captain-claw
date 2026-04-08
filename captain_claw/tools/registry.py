@@ -410,7 +410,31 @@ class ToolRegistry:
             session_policy=session_policy,
             task_policy=task_policy,
         )
-        return chain.resolve(list(self._tools.values()))
+        tools = chain.resolve(list(self._tools.values()))
+
+        # Auto-hide Google tools when Google OAuth isn't connected. Tools
+        # are registered eagerly (so they can reappear mid-session the
+        # moment the user connects in Flight Deck) but we don't want the
+        # LLM to see them in its tool list if calls would immediately
+        # fail. The connection flag is refreshed once per agent turn via
+        # ``GoogleOAuthManager.is_connected()`` — see
+        # ``agent_orchestration_mixin`` for the refresh hook.
+        try:
+            from captain_claw.google_oauth_manager import is_google_connected_cached
+
+            if not is_google_connected_cached():
+                filtered: list[Tool] = []
+                for tool in tools:
+                    meta = self._tool_metadata.get(tool.name, {})
+                    if meta.get("requires_google"):
+                        continue
+                    filtered.append(tool)
+                tools = filtered
+        except Exception:
+            # Never let the gating check break tool listing.
+            pass
+
+        return tools
 
     def get(self, name: str) -> Tool:
         """Get a tool by name.

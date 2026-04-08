@@ -1824,6 +1824,16 @@ class AgentContextMixin:
         await self._refresh_nervous_system_cache()
         await self._refresh_briefing_context_cache()
 
+        # Prime Google OAuth connection flag so the first turn's tool
+        # list immediately reflects whether Google is connected. Google
+        # tools are registered unconditionally and filtered by the tool
+        # registry based on this cached flag.
+        try:
+            from captain_claw.google_oauth_manager import GoogleOAuthManager
+            await GoogleOAuthManager(self.session_manager).is_connected()
+        except Exception as _exc:
+            log.debug("Google connection priming failed: %s", _exc)
+
         self._initialized = True
         log.info("Agent initialized", session_id=self.session.id)
 
@@ -1945,11 +1955,11 @@ class AgentContextMixin:
             elif tool_name == "send_mail":
                 self.tools.register(SendMailTool())
             elif tool_name == "google_drive":
-                self.tools.register(GoogleDriveTool())
+                self.tools.register(GoogleDriveTool(), metadata={"requires_google": True})
             elif tool_name == "google_calendar":
-                self.tools.register(GoogleCalendarTool())
+                self.tools.register(GoogleCalendarTool(), metadata={"requires_google": True})
             elif tool_name == "google_mail":
-                self.tools.register(GoogleMailTool())
+                self.tools.register(GoogleMailTool(), metadata={"requires_google": True})
             elif tool_name == "gws":
                 self.tools.register(GwsTool())
             elif tool_name == "todo":

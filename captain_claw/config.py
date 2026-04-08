@@ -464,7 +464,14 @@ class ToolsConfig(BaseModel):
     plugin_dirs: list[str] = ["skills/tools"]
 
     # These tools are always available — re-inject if removed by user.
-    _ALWAYS_ENABLED: frozenset[str] = frozenset({"read", "write", "edit", "personality", "botport", "playbooks", "browser", "datastore", "direct_api", "cron"})
+    # Google tools are always registered but the tool registry hides
+    # them from agents until Google OAuth is actually connected, so
+    # there's no harm in having them permanently enabled.
+    _ALWAYS_ENABLED: frozenset[str] = frozenset({
+        "read", "write", "edit", "personality", "botport", "playbooks",
+        "browser", "datastore", "direct_api", "cron",
+        "google_drive", "google_calendar", "google_mail",
+    })
 
     @model_validator(mode="after")
     def _ensure_always_enabled(self) -> "ToolsConfig":
@@ -887,11 +894,24 @@ class GoogleOAuthConfig(BaseModel):
     client_secret: str = ""
     project_id: str = ""  # GCP project ID (required for Vertex AI)
     location: str = "us-central1"  # Vertex AI region
+    # When set, this captain-claw instance is a *client* of a Flight Deck
+    # backend that owns the real OAuth tokens. The manager will fetch
+    # fresh access tokens from `{flight_deck_url}/fd/google/access_token`
+    # instead of running its own authorization flow. Typical value:
+    # "http://localhost:25080".
+    flight_deck_url: str = ""
+    # Optional shared secret sent as ``X-Agent-Secret`` when talking to
+    # Flight Deck's agent-facing endpoints. Leave empty for same-host
+    # deployments — Flight Deck allows loopback callers unconditionally.
+    flight_deck_secret: str = ""
     scopes: list[str] = Field(default_factory=lambda: [
         "https://www.googleapis.com/auth/cloud-platform",
         "https://www.googleapis.com/auth/drive",
         "https://www.googleapis.com/auth/calendar",
+        # Gmail read (list / search / read_message / get_thread).
         "https://www.googleapis.com/auth/gmail.readonly",
+        # Gmail compose (create_draft only — the tool never sends).
+        "https://www.googleapis.com/auth/gmail.compose",
         "openid",
         "email",
     ])

@@ -1,16 +1,28 @@
-"""Google Mail (Gmail) tool for reading emails (read-only).
+"""Google Mail (Gmail) tool — read and draft.
 
-Uses the Gmail REST API v1 via httpx with OAuth2 Bearer tokens
-managed by :class:`~captain_claw.google_oauth_manager.GoogleOAuthManager`.
-Only ``gmail.readonly`` scope is required — no send/modify/delete operations.
+Uses the Gmail REST API v1 via httpx with OAuth2 Bearer tokens managed
+by :class:`~captain_claw.google_oauth_manager.GoogleOAuthManager`. This
+is the canonical Gmail integration for captain-claw — the gws CLI tool
+no longer handles Gmail.
+
+Required OAuth scopes:
+
+* ``gmail.readonly`` — list, search, read messages and threads.
+* ``gmail.compose``  — create drafts.
+
+Both are requested as part of the standard Google OAuth login flow.
+This tool intentionally does NOT expose send / reply / label / trash
+actions — users review drafts in Gmail and send them manually.
 """
 
 from __future__ import annotations
 
 import base64
+import email.policy
 import email.utils
 import html as html_module
 import re
+from email.message import EmailMessage
 from typing import Any
 
 import httpx
@@ -26,24 +38,81 @@ log = get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 _GMAIL_API = "https://gmail.googleapis.com/gmail/v1"
-_GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+
+# Read operations accept gmail.readonly or the broader gmail.modify
+# (in case a legacy connection still has it). Draft creation requires
+# gmail.compose (gmail.modify also suffices).
+_GMAIL_READ_SCOPES = (
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.modify",
+)
+_GMAIL_COMPOSE_SCOPES = (
+    "https://www.googleapis.com/auth/gmail.compose",
+    "https://www.googleapis.com/auth/gmail.modify",
+)
 
 # Max body length returned to the agent.
 _MAX_BODY_CHARS = 30_000
 
+# Appended to list / search output so the LLM always sees the routing
+# reminder next to the IDs it should pass back in. Helps prevent the
+# model from reaching for filesystem read/glob when the user asks to
+# "read" or "open" one of the listed emails.
+_FOLLOWUP_HINT = (
+    "\nNext steps — use google_mail actions only (never filesystem tools):\n"
+    "  • Read full email body: google_mail action=read_message "
+    "message_id=<Newest msg ID above>\n"
+    "  • Read whole conversation: google_mail action=get_thread "
+    "thread_id=<Thread ID above>\n"
+    "  • Reply to one: google_mail action=create_draft "
+    "reply_to_message_id=<Newest msg ID above> body=...\n"
+    "  • Narrow the list: google_mail action=search query='from:... is:unread'"
+)
+
 
 class GoogleMailTool(Tool):
-    """Read emails from Gmail (read-only). Actions: list_messages, search,
-    read_message, list_labels, get_thread."""
+    """Read Gmail and create drafts. Actions: list_messages, search,
+    read_message, get_thread, list_labels, create_draft."""
 
     name = "google_mail"
     description = (
-        "Read emails from Gmail (read-only). Actions: "
-        "list_messages (list recent emails from inbox or a label), "
-        "search (find emails by Gmail search query like 'from:alice subject:report'), "
+        "Gmail — read AND create drafts (no sending; the user reviews and sends drafts in Gmail). "
+        "ROUTING: any user request that refers to an email, message, inbox, thread, "
+        "conversation, sender, subject line, or Gmail — including phrases like "
+        "'read the one from X', 'open that email', 'show me the Fil Rouge email', "
+        "'what does Alice's message say', 'reply to this' — MUST be handled with "
+        "google_mail actions (read_message / get_thread / search / create_draft). "
+        "NEVER use filesystem tools (read, glob, grep) to try to fulfill email "
+        "requests — emails do not live on disk. If you just ran list_messages or "
+        "search and the user refers to one of the items by sender/subject, call "
+        "read_message with the `Newest msg:` ID (or get_thread with the `Thread:` ID) "
+        "printed next to that item. "
+        "DEFAULT SCOPE: unless the user explicitly asks for another folder / category / "
+        "archived mail / spam / trash / all-mail, reads and searches are restricted to "
+        "the INBOX **Primary** tab (i.e. `in:inbox category:primary`) so Promotions, "
+        "Social, Updates, and Forums clutter are excluded. "
+        "THREAD-CENTRIC: list_messages and search are grouped by conversation by "
+        "default — one item per thread, showing the newest activity, unread count, "
+        "and participants. When the user asks 'how many new emails' or 'what's new', "
+        "count threads, not raw messages (a 4-reply unread conversation is ONE new "
+        "item, not four). If the user explicitly wants every individual message, pass "
+        "`group_by_thread=false`. "
+        "For list_messages, leave `label` unset (defaults to INBOX Primary). Only set it "
+        "when the user names a specific folder like SENT/DRAFT/STARRED. "
+        "For search, if the query does not already contain `in:`, `label:`, or `category:`, "
+        "`in:inbox category:primary` is auto-prepended. Pass an explicit operator "
+        "(e.g. `category:promotions`, `in:anywhere`, `label:work`) to broaden. "
+        "Actions: "
+        "list_messages (list recent Primary-tab threads, newest first), "
+        "search (Gmail search query — e.g. 'from:alice subject:report'; Primary-scoped, thread-grouped), "
         "read_message (get full email content by message ID), "
         "get_thread (get all messages in a thread), "
-        "list_labels (list available Gmail labels/folders)."
+        "list_labels (list available Gmail labels/folders), "
+        "create_draft (save a draft — never sends; user reviews in Gmail and sends manually). "
+        "When drafting a REPLY to an existing email, always pass `reply_to_message_id` "
+        "(the original message's ID) so the draft is threaded under the original "
+        "conversation in Gmail, with proper In-Reply-To/References headers and a "
+        "`Re:` subject."
     )
     timeout_seconds = 120.0
     parameters = {
@@ -57,20 +126,65 @@ class GoogleMailTool(Tool):
                     "read_message",
                     "get_thread",
                     "list_labels",
+                    "create_draft",
                 ],
                 "description": "The action to perform.",
+            },
+            "to": {
+                "type": "string",
+                "description": (
+                    "Recipient address(es) for create_draft. "
+                    "Comma-separated for multiple recipients."
+                ),
+            },
+            "cc": {
+                "type": "string",
+                "description": "CC recipients (comma-separated). Optional.",
+            },
+            "bcc": {
+                "type": "string",
+                "description": "BCC recipients (comma-separated). Optional.",
+            },
+            "subject": {
+                "type": "string",
+                "description": "Subject line for create_draft.",
+            },
+            "body": {
+                "type": "string",
+                "description": "Message body (plain text) for create_draft.",
+            },
+            "html_body": {
+                "type": "string",
+                "description": "Optional HTML body. When set, saved as an HTML alternative.",
             },
             "query": {
                 "type": "string",
                 "description": (
                     "Gmail search query (for search action). Supports all Gmail "
                     "search operators: from:, to:, subject:, has:attachment, "
-                    "after:2026/01/01, before:, is:unread, label:, etc."
+                    "after:2026/01/01, before:, is:unread, label:, etc. "
+                    "IMPORTANT: searches are auto-scoped to the INBOX Primary tab "
+                    "(`in:inbox category:primary` is prepended) unless the query "
+                    "already contains an `in:`, `label:`, or `category:` operator, "
+                    "or the user explicitly asks you to search all mail / archive / "
+                    "spam / trash / another category."
                 ),
             },
             "message_id": {
                 "type": "string",
                 "description": "Message ID (for read_message action).",
+            },
+            "reply_to_message_id": {
+                "type": "string",
+                "description": (
+                    "For create_draft: the Gmail message ID you are replying to. "
+                    "When set, the draft is created inside the same thread and "
+                    "appears nested under the original email in Gmail. The tool "
+                    "automatically pulls the original sender, subject (with a "
+                    "`Re:` prefix), Message-ID, and References headers — you do "
+                    "NOT need to set `to` or `subject` yourself unless you want "
+                    "to override them."
+                ),
             },
             "thread_id": {
                 "type": "string",
@@ -81,7 +195,8 @@ class GoogleMailTool(Tool):
                 "description": (
                     "Label/folder to list from (for list_messages). "
                     "Common values: INBOX, SENT, DRAFT, STARRED, UNREAD, SPAM, TRASH. "
-                    "Defaults to INBOX."
+                    "Defaults to INBOX (auto-narrowed to the Primary category). "
+                    "Only override when the user explicitly asks for a different folder."
                 ),
             },
             "max_results": {
@@ -93,6 +208,17 @@ class GoogleMailTool(Tool):
                 "description": (
                     "Whether to include message body in list/search results. "
                     "Default false for list/search (headers only), always true for read_message."
+                ),
+            },
+            "group_by_thread": {
+                "type": "boolean",
+                "description": (
+                    "For list_messages and search: when true (DEFAULT), results "
+                    "are grouped by conversation — one entry per thread showing "
+                    "the newest activity, unread count, and participants. Set to "
+                    "false only if the user explicitly asks for every individual "
+                    "message. This is how 'how many new emails do I have' should "
+                    "be answered: count threads, not raw messages."
                 ),
             },
         },
@@ -115,8 +241,11 @@ class GoogleMailTool(Tool):
         kwargs.pop("_file_registry", None)
         kwargs.pop("_task_id", None)
 
+        compose_actions = {"create_draft"}
+        need_compose = action in compose_actions
+
         try:
-            token = await self._get_access_token()
+            token = await self._get_access_token(need_compose=need_compose)
         except RuntimeError as e:
             return ToolResult(success=False, error=str(e))
 
@@ -126,6 +255,7 @@ class GoogleMailTool(Tool):
             "read_message": self._action_read_message,
             "get_thread": self._action_get_thread,
             "list_labels": self._action_list_labels,
+            "create_draft": self._action_create_draft,
         }
         handler = handlers.get(action)
         if handler is None:
@@ -149,8 +279,13 @@ class GoogleMailTool(Tool):
     # Token access
     # ------------------------------------------------------------------
 
-    async def _get_access_token(self) -> str:
-        """Retrieve a valid Google OAuth access token."""
+    async def _get_access_token(self, need_compose: bool = False) -> str:
+        """Retrieve a valid Google OAuth access token.
+
+        When *need_compose* is True, verifies that a draft-capable scope
+        (``gmail.compose`` or ``gmail.modify``) was granted. Otherwise a
+        read scope (``gmail.readonly`` or ``gmail.modify``) is required.
+        """
         from captain_claw.google_oauth_manager import GoogleOAuthManager
         from captain_claw.session import get_session_manager
 
@@ -159,17 +294,25 @@ class GoogleMailTool(Tool):
         if not tokens:
             raise RuntimeError(
                 "Google account is not connected. "
-                "Please connect via the web UI (Settings > Google OAuth) or "
-                "navigate to /auth/google/login in your browser."
+                "Please connect via the Flight Deck Connections page."
             )
 
         granted = set(tokens.scope.split()) if tokens.scope else set()
-        if _GMAIL_SCOPE not in granted:
-            raise RuntimeError(
-                "Gmail readonly scope not granted. Your current OAuth connection "
-                "does not include Gmail access. Please disconnect and reconnect "
-                "your Google account to grant Gmail permissions."
-            )
+
+        if need_compose:
+            if not any(s in granted for s in _GMAIL_COMPOSE_SCOPES):
+                raise RuntimeError(
+                    "Gmail compose scope not granted. Your current OAuth "
+                    "connection doesn't allow draft creation. Please "
+                    "disconnect and reconnect your Google account."
+                )
+        else:
+            if not any(s in granted for s in _GMAIL_READ_SCOPES):
+                raise RuntimeError(
+                    "Gmail read scope not granted. Your current OAuth connection "
+                    "does not include Gmail access. Please disconnect and reconnect "
+                    "your Google account to grant Gmail permissions."
+                )
 
         return tokens.access_token
 
@@ -260,16 +403,66 @@ class GoogleMailTool(Tool):
         label: str = "INBOX",
         max_results: int | float | None = None,
         include_body: bool = False,
+        group_by_thread: bool = True,
         **kwargs: Any,
     ) -> ToolResult:
-        """List recent messages from a label."""
+        """List recent conversations (threads) from a label.
+
+        By default this action is **thread-centric**: it returns one
+        entry per conversation (newest activity first) so a thread with
+        four unread replies counts as a single item, not four. Set
+        ``group_by_thread=False`` to get individual messages instead.
+
+        When *label* is left at its default (``INBOX``) the listing is
+        further narrowed to the Primary category so Promotions / Social /
+        Updates / Forums clutter is excluded.
+        """
         limit = min(int(max_results or 10), 50)
 
-        params: dict[str, Any] = {
-            "maxResults": limit,
-            "labelIds": label.upper(),
-        }
+        label_norm = (label or "INBOX").strip().upper() or "INBOX"
+        default_primary = label_norm == "INBOX"
 
+        params: dict[str, Any] = {"maxResults": limit}
+        if default_primary:
+            params["q"] = self._DEFAULT_SCOPE  # in:inbox category:primary
+        else:
+            params["labelIds"] = label_norm
+
+        where_label = "INBOX (Primary)" if default_primary else label_norm
+
+        if group_by_thread:
+            # Use the threads endpoint so one conversation == one item,
+            # regardless of how many replies are unread.
+            resp = await self._client.get(
+                f"{_GMAIL_API}/users/me/threads",
+                params=params,
+                headers=self._auth_headers(token),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            thread_stubs = data.get("threads", [])
+            if not thread_stubs:
+                return ToolResult(
+                    success=True,
+                    content=f"No threads found in {where_label}.",
+                )
+
+            thread_summaries = await self._fetch_thread_summaries(
+                token,
+                [t["id"] for t in thread_stubs],
+                include_body=include_body,
+            )
+
+            lines = [
+                f"Threads in {where_label} ({len(thread_summaries)} shown, "
+                f"grouped by conversation):\n"
+            ]
+            for ts in thread_summaries:
+                lines.append(self._format_thread_summary(ts, include_body=include_body))
+            lines.append(_FOLLOWUP_HINT)
+            return ToolResult(success=True, content="\n".join(lines))
+
+        # Flat message listing (group_by_thread=False)
         resp = await self._client.get(
             f"{_GMAIL_API}/users/me/messages",
             params=params,
@@ -280,13 +473,13 @@ class GoogleMailTool(Tool):
 
         message_stubs = data.get("messages", [])
         if not message_stubs:
-            return ToolResult(success=True, content=f"No messages found in {label}.")
+            return ToolResult(success=True, content=f"No messages found in {where_label}.")
 
         messages = await self._fetch_message_batch(
             token, [m["id"] for m in message_stubs], include_body=include_body,
         )
 
-        lines = [f"Messages in {label} ({len(messages)} shown):\n"]
+        lines = [f"Messages in {where_label} ({len(messages)} shown, flat):\n"]
         for msg in messages:
             lines.append(self._format_message_summary(msg, include_body=include_body))
 
@@ -296,23 +489,84 @@ class GoogleMailTool(Tool):
     # Action: search
     # ------------------------------------------------------------------
 
+    # Operators that already express a folder/container scope. If any of
+    # these are present in the query, we leave it alone — otherwise we
+    # auto-prepend ``in:inbox`` so searches don't silently pull archived
+    # / spam / trashed mail the user never asked for.
+    _SCOPE_OPERATORS = ("in:", "label:", "category:")
+
+    _DEFAULT_SCOPE = "in:inbox category:primary"
+
+    @classmethod
+    def _scope_query_to_inbox(cls, query: str) -> str:
+        """Prepend the default inbox/primary scope unless *query* already
+        contains an explicit scope operator (``in:``, ``label:``, or
+        ``category:``)."""
+        q = query.strip()
+        if not q:
+            return cls._DEFAULT_SCOPE
+        q_lower = q.lower()
+        for op in cls._SCOPE_OPERATORS:
+            if op in q_lower:
+                return q
+        return f"{cls._DEFAULT_SCOPE} {q}"
+
     async def _action_search(
         self,
         token: str,
         query: str = "",
         max_results: int | float | None = None,
         include_body: bool = False,
+        group_by_thread: bool = True,
         **kwargs: Any,
     ) -> ToolResult:
-        """Search messages using Gmail search syntax."""
+        """Search conversations (or messages) using Gmail search syntax."""
         if not query:
             return ToolResult(success=False, error="Search query is required.")
 
+        effective_query = self._scope_query_to_inbox(query)
         limit = min(int(max_results or 10), 50)
 
+        scope_note = ""
+        if effective_query != query:
+            scope_note = (
+                " (auto-scoped to INBOX Primary; pass an explicit in:/label:/"
+                "category: operator to broaden)"
+            )
+
+        if group_by_thread:
+            resp = await self._client.get(
+                f"{_GMAIL_API}/users/me/threads",
+                params={"q": effective_query, "maxResults": limit},
+                headers=self._auth_headers(token),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            thread_stubs = data.get("threads", [])
+            if not thread_stubs:
+                return ToolResult(
+                    success=True,
+                    content=f"No threads found for: {effective_query}{scope_note}",
+                )
+
+            thread_summaries = await self._fetch_thread_summaries(
+                token,
+                [t["id"] for t in thread_stubs],
+                include_body=include_body,
+            )
+            lines = [
+                f"Search results for '{effective_query}'{scope_note} "
+                f"({len(thread_summaries)} threads):\n"
+            ]
+            for ts in thread_summaries:
+                lines.append(self._format_thread_summary(ts, include_body=include_body))
+            lines.append(_FOLLOWUP_HINT)
+            return ToolResult(success=True, content="\n".join(lines))
+
+        # Flat message search
         resp = await self._client.get(
             f"{_GMAIL_API}/users/me/messages",
-            params={"q": query, "maxResults": limit},
+            params={"q": effective_query, "maxResults": limit},
             headers=self._auth_headers(token),
         )
         resp.raise_for_status()
@@ -320,13 +574,19 @@ class GoogleMailTool(Tool):
 
         message_stubs = data.get("messages", [])
         if not message_stubs:
-            return ToolResult(success=True, content=f"No messages found for: {query}")
+            return ToolResult(
+                success=True,
+                content=f"No messages found for: {effective_query}{scope_note}",
+            )
 
         messages = await self._fetch_message_batch(
             token, [m["id"] for m in message_stubs], include_body=include_body,
         )
 
-        lines = [f"Search results for '{query}' ({len(messages)} found):\n"]
+        lines = [
+            f"Search results for '{effective_query}'{scope_note} "
+            f"({len(messages)} messages, flat):\n"
+        ]
         for msg in messages:
             lines.append(self._format_message_summary(msg, include_body=include_body))
 
@@ -385,20 +645,266 @@ class GoogleMailTool(Tool):
         return ToolResult(success=True, content="\n".join(lines))
 
     # ------------------------------------------------------------------
+    # Action: create_draft
+    # ------------------------------------------------------------------
+
+    async def _action_create_draft(
+        self,
+        token: str,
+        to: str = "",
+        cc: str = "",
+        bcc: str = "",
+        subject: str = "",
+        body: str = "",
+        html_body: str = "",
+        reply_to_message_id: str = "",
+        **kwargs: Any,
+    ) -> ToolResult:
+        """Save a draft message.
+
+        When ``reply_to_message_id`` is provided, the draft is created
+        inside the original message's thread with In-Reply-To /
+        References headers set, so Gmail nests it under the conversation.
+        """
+        thread_id: str = ""
+        in_reply_to: str = ""
+        references: str = ""
+
+        if reply_to_message_id:
+            # Pull the headers we need to thread the reply correctly.
+            try:
+                meta_resp = await self._client.get(
+                    f"{_GMAIL_API}/users/me/messages/{reply_to_message_id}",
+                    params={
+                        "format": "metadata",
+                        "metadataHeaders": [
+                            "From", "To", "Cc", "Subject",
+                            "Message-ID", "References", "Reply-To",
+                        ],
+                    },
+                    headers=self._auth_headers(token),
+                )
+                meta_resp.raise_for_status()
+                orig = meta_resp.json()
+            except httpx.HTTPStatusError as exc:
+                return self._handle_http_error(exc)
+            except Exception as exc:
+                return ToolResult(
+                    success=False,
+                    error=f"Failed to load reply_to_message_id={reply_to_message_id}: {exc}",
+                )
+
+            thread_id = orig.get("threadId", "") or ""
+            orig_headers: dict[str, str] = {}
+            for h in orig.get("payload", {}).get("headers", []):
+                name = (h.get("name") or "").lower()
+                orig_headers[name] = h.get("value", "") or ""
+
+            orig_msg_id = orig_headers.get("message-id", "")
+            orig_refs = orig_headers.get("references", "")
+            orig_subject = orig_headers.get("subject", "")
+            orig_from = orig_headers.get("reply-to") or orig_headers.get("from", "")
+
+            if orig_msg_id:
+                in_reply_to = orig_msg_id
+                references = (orig_refs + " " + orig_msg_id).strip() if orig_refs else orig_msg_id
+
+            # Default the recipient to the original sender when caller
+            # didn't override it.
+            if not to and orig_from:
+                to = orig_from
+
+            # Default subject to `Re: <original>` unless caller set one.
+            if not subject and orig_subject:
+                if orig_subject.lower().startswith("re:"):
+                    subject = orig_subject
+                else:
+                    subject = f"Re: {orig_subject}"
+
+        if not reply_to_message_id and not to and not subject and not body:
+            return ToolResult(
+                success=False,
+                error="create_draft requires at least one of: to, subject, body (or reply_to_message_id).",
+            )
+
+        raw = self._build_raw_message(
+            to=to, cc=cc, bcc=bcc, subject=subject,
+            body=body, html_body=html_body,
+            in_reply_to=in_reply_to, references=references,
+        )
+        draft_message: dict[str, Any] = {"raw": raw}
+        if thread_id:
+            draft_message["threadId"] = thread_id
+
+        resp = await self._client.post(
+            f"{_GMAIL_API}/users/me/drafts",
+            headers={**self._auth_headers(token), "Content-Type": "application/json"},
+            json={"message": draft_message},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        threaded_note = ""
+        if thread_id:
+            threaded_note = f"\n  Threaded under: {thread_id} (reply to {reply_to_message_id})"
+        return ToolResult(
+            success=True,
+            content=(
+                f"Draft created.{threaded_note}\n"
+                f"  Draft ID: {data.get('id', '?')}\n"
+                f"  Message ID: {data.get('message', {}).get('id', '?')}"
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Raw RFC-822 message builder
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_raw_message(
+        to: str = "",
+        cc: str = "",
+        bcc: str = "",
+        subject: str = "",
+        body: str = "",
+        html_body: str = "",
+        in_reply_to: str = "",
+        references: str = "",
+    ) -> str:
+        """Build a base64url-encoded RFC-822 message for the Gmail API.
+
+        Construct with the SMTP policy from the start so every header
+        fold and every line ending is RFC 5322-compliant CRLF. Building
+        with the default compat32 policy and only applying SMTP at
+        serialization time has been observed to produce drafts whose
+        body Gmail's web UI fails to render in threaded reply drafts.
+        """
+        msg = EmailMessage(policy=email.policy.SMTP)
+        if to:
+            msg["To"] = to
+        if cc:
+            msg["Cc"] = cc
+        if bcc:
+            msg["Bcc"] = bcc
+        if subject:
+            msg["Subject"] = subject
+        if in_reply_to:
+            msg["In-Reply-To"] = in_reply_to
+        if references:
+            msg["References"] = references
+
+        plain = body or ""
+
+        # Always attach an HTML alternative. Gmail's web compose UI is
+        # HTML-first — for threaded reply drafts specifically, it only
+        # reliably renders the ``text/html`` part; drafts with just a
+        # ``text/plain`` part have been observed to show an empty body
+        # in the Gmail UI even though the raw message has the text.
+        effective_html = html_body
+        if not effective_html:
+            effective_html = GoogleMailTool._text_to_html(plain)
+        if not plain and html_body:
+            plain = GoogleMailTool._html_to_text(html_body)
+
+        msg.set_content(plain or " ")
+        msg.add_alternative(effective_html, subtype="html")
+
+        raw_bytes = msg.as_bytes()
+        return base64.urlsafe_b64encode(raw_bytes).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _text_to_html(text: str) -> str:
+        """Convert a plain text body to a simple HTML equivalent.
+
+        Newlines become ``<br>`` and characters are HTML-escaped. This
+        is intentionally minimal — Gmail will reformat it when the user
+        opens the draft anyway, we just need a non-empty HTML part so
+        the compose UI renders the body correctly.
+        """
+        if not text:
+            return "<div></div>"
+        escaped = html_module.escape(text)
+        return "<div>" + escaped.replace("\n", "<br>") + "</div>"
+
+    # ------------------------------------------------------------------
     # Message fetching helpers
     # ------------------------------------------------------------------
+
+    async def _fetch_thread_summaries(
+        self, token: str, thread_ids: list[str], include_body: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Fetch one summary dict per thread.
+
+        Each summary includes the thread id, total message count, unread
+        count, the newest message (headers + snippet/body), and the list
+        of unique participants seen across the thread.
+        """
+        summaries: list[dict[str, Any]] = []
+        for thread_id in thread_ids:
+            try:
+                # Thread endpoint doesn't accept metadataHeaders, so use
+                # 'metadata' for list views (snippets + headers) or
+                # 'full' when include_body=True.
+                fmt = "full" if include_body else "metadata"
+                resp = await self._client.get(
+                    f"{_GMAIL_API}/users/me/threads/{thread_id}",
+                    params={"format": fmt},
+                    headers=self._auth_headers(token),
+                )
+                resp.raise_for_status()
+                raw = resp.json()
+                msgs = raw.get("messages", [])
+                if not msgs:
+                    summaries.append({"thread_id": thread_id, "error": "empty thread"})
+                    continue
+
+                parsed_msgs = [self._parse_message(m) for m in msgs]
+                # Sort by internalDate if available, newest first.
+                def _sort_key(m: dict[str, Any]) -> int:
+                    try:
+                        return int(m.get("_internal_date") or 0)
+                    except Exception:
+                        return 0
+                parsed_msgs.sort(key=_sort_key, reverse=True)
+
+                newest = parsed_msgs[0]
+                unread_count = sum(1 for m in parsed_msgs if m.get("is_unread"))
+                participants: list[str] = []
+                seen: set[str] = set()
+                for m in parsed_msgs:
+                    addr = m.get("from", "")
+                    if addr and addr not in seen:
+                        seen.add(addr)
+                        participants.append(addr)
+
+                summaries.append({
+                    "thread_id": thread_id,
+                    "message_count": len(parsed_msgs),
+                    "unread_count": unread_count,
+                    "participants": participants,
+                    "newest": newest,
+                    "is_unread": unread_count > 0,
+                })
+            except Exception as exc:
+                log.debug("Failed to fetch thread %s: %s", thread_id, exc)
+                summaries.append({"thread_id": thread_id, "error": str(exc)})
+
+        return summaries
 
     async def _fetch_message_batch(
         self, token: str, message_ids: list[str], include_body: bool = False,
     ) -> list[dict[str, Any]]:
         """Fetch metadata (or full) for a batch of messages."""
         fmt = "full" if include_body else "metadata"
-        meta_headers = "From,To,Subject,Date"
+        # Gmail's ``metadataHeaders`` is a *repeated* query parameter —
+        # it must be sent as multiple ``metadataHeaders=From&
+        # metadataHeaders=To&...`` pairs, NOT a single comma-separated
+        # value. httpx handles this automatically when we pass a list.
+        meta_headers = ["From", "To", "Cc", "Subject", "Date", "Reply-To"]
 
         messages: list[dict[str, Any]] = []
         for msg_id in message_ids:
             try:
-                params: dict[str, str] = {"format": fmt}
+                params: dict[str, Any] = {"format": fmt}
                 if fmt == "metadata":
                     params["metadataHeaders"] = meta_headers
                 resp = await self._client.get(
@@ -476,6 +982,7 @@ class GoogleMailTool(Tool):
             "attachments": att_list,
             "is_unread": is_unread,
             "is_starred": is_starred,
+            "_internal_date": internal_date,
         }
 
     @staticmethod
@@ -544,6 +1051,64 @@ class GoogleMailTool(Tool):
     # ------------------------------------------------------------------
     # Formatting
     # ------------------------------------------------------------------
+
+    @classmethod
+    def _format_thread_summary(
+        cls, ts: dict[str, Any], include_body: bool = False,
+    ) -> str:
+        """Format a thread summary entry for list output."""
+        if "error" in ts:
+            return f"  [error] thread {ts.get('thread_id', '?')}: {ts['error']}"
+
+        newest = ts.get("newest", {})
+        msg_count = ts.get("message_count", 1)
+        unread_count = ts.get("unread_count", 0)
+        participants = ts.get("participants", [])
+
+        # Thread badges
+        unread_badge = f" [NEW ×{unread_count}]" if unread_count else ""
+        if unread_count and msg_count > 1:
+            unread_badge = f" [{unread_count} NEW / {msg_count} msgs]"
+        elif msg_count > 1:
+            unread_badge += f" [{msg_count} msgs]"
+        starred = " ★" if newest.get("is_starred") else ""
+
+        att_count = len(newest.get("attachments", []))
+        att_str = f"  📎{att_count}" if att_count else ""
+
+        # Participants (first 3 unique senders, shortened)
+        parts_short: list[str] = []
+        for addr in participants[:3]:
+            p = email.utils.parseaddr(addr)
+            parts_short.append(p[0] or p[1] or addr)
+        if len(participants) > 3:
+            parts_short.append(f"+{len(participants) - 3}")
+        parts_str = ", ".join(parts_short) if parts_short else "?"
+
+        # Newest date
+        date_str = newest.get("date", "")
+        try:
+            parsed_date = email.utils.parsedate_to_datetime(date_str)
+            date_short = parsed_date.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            date_short = date_str[:20] if date_str else ""
+
+        icon = "📩" if unread_count else "📧"
+        lines = [
+            f"  {icon} {newest.get('subject', '(no subject)')}{unread_badge}{starred}{att_str}",
+            f"    Participants: {parts_str}  |  Latest: {date_short}",
+            f"    Thread: {ts.get('thread_id', '')}  |  Newest msg: {newest.get('id', '')}",
+        ]
+
+        if include_body and newest.get("body"):
+            preview = newest["body"][:300]
+            if len(newest["body"]) > 300:
+                preview += "…"
+            lines.append(f"    Preview: {preview}")
+        elif newest.get("snippet"):
+            lines.append(f"    Preview: {newest['snippet']}")
+
+        return "\n".join(lines)
 
     @staticmethod
     def _format_message_summary(msg: dict[str, Any], include_body: bool = False) -> str:

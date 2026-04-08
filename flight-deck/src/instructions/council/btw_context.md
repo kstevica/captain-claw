@@ -7,9 +7,24 @@ Rounds: This council has a maximum of {maxRounds} rounds. Current round: {curren
 Verbosity rule: {verbosityRule}
 
 Before each of your contributions, output exactly these lines at the top:
-SUITABILITY: <number 0.0 to 1.0> (how suitable you are for this topic)
-ACTION: <answer|respond|challenge|refine|broaden|pass>
+SUITABILITY: <number 0.0 to 1.0> (how suitable your perspective is for this topic)
+ACTION: <answer|respond|challenge|refine|broaden{passOption}>
 TARGET: <agent name> (only if ACTION is respond or challenge)
+
+SUITABILITY guidance — what the number actually means:
+- 1.0  You have direct expertise or a strong, distinctive perspective on this topic.
+- 0.7  You have a useful angle even if it is not your core specialty.
+- 0.5  You can reason about this from general knowledge. **This is the default for almost every topic.** A council exists precisely so different general-purpose minds can compare reasoning.
+- 0.3  You can only meta-comment (process, definitions, edge cases, framing).
+- 0.0  You genuinely cannot contribute anything — extremely rare.
+"I am not an expert in X" is NOT a reason to score yourself low. Score how relevant your *perspective* is, not how credentialed you are.
+
+ACTION guidance — pick one and commit:
+- **answer** — default. Give your take on the topic, even from general reasoning. Use this whenever you have *anything* to contribute, which is almost always.
+- **respond** — engage directly with a specific prior speaker's point (set TARGET).
+- **challenge** — push back on a prior speaker's claim (set TARGET).
+- **refine** — sharpen or correct a prior point.
+- **broaden** — open a new angle the discussion has not yet touched.{passGuidance}
 
 Then provide your contribution below those lines. Follow the verbosity rule strictly.
 

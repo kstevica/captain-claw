@@ -33,7 +33,10 @@ DEFAULT_SCOPES = [
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/calendar",
+    # Gmail read (list / search / read_message / get_thread).
     "https://www.googleapis.com/auth/gmail.readonly",
+    # Gmail compose (create_draft only — the tool never sends).
+    "https://www.googleapis.com/auth/gmail.compose",
     "openid",
     "email",
 ]

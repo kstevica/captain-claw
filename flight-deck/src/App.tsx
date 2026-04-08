@@ -16,6 +16,7 @@ import { ForgePage } from './pages/ForgePage'
 import { LoginPage } from './pages/LoginPage'
 import { AdminPage } from './pages/AdminPage'
 import { CouncilPage } from './pages/CouncilPage'
+import ConnectionsPage from './pages/ConnectionsPage'
 import { useUIStore } from './stores/uiStore'
 import { useAgentStore } from './stores/agentStore'
 import { useAuthStore, checkAuthStatus, refreshAccessToken } from './stores/authStore'
@@ -286,6 +287,7 @@ function AppContent() {
       {view === 'forge' && <ForgePage />}
       {view === 'admin' && <AdminPage />}
       {view === 'council' && <CouncilPage />}
+      {view === 'connections' && <ConnectionsPage />}
     </>
   )
 

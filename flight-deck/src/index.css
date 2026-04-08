@@ -1,6 +1,10 @@
 @import "tailwindcss";
 @import "@xyflow/react/dist/style.css";
 
+/* Use class-based dark mode so `dark:` variants work with our
+   manual html.light / html.dark switching (see themeStore.ts). */
+@custom-variant dark (&:where(html.dark, html.dark *));
+
 :root {
   --fd-sidebar: 260px;
   --fd-panel: 380px;

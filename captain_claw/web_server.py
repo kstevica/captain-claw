@@ -1175,6 +1175,18 @@ class WebServer:
         from captain_claw.web.google_oauth import auth_google_logout
         return await auth_google_logout(self, request)
 
+    async def _auth_google_config_get(self, request: web.Request) -> web.Response:
+        from captain_claw.web.google_oauth import auth_google_config_get
+        return await auth_google_config_get(self, request)
+
+    async def _auth_google_config_post(self, request: web.Request) -> web.Response:
+        from captain_claw.web.google_oauth import auth_google_config_post
+        return await auth_google_config_post(self, request)
+
+    async def _auth_google_cors_preflight(self, request: web.Request) -> web.Response:
+        from captain_claw.web.google_oauth import auth_google_cors_preflight
+        return await auth_google_cors_preflight(self, request)
+
     # Static pages
     async def _serve_home(self, request: web.Request) -> web.Response:
         if self.config.web.public_run:
@@ -2226,6 +2238,9 @@ class WebServer:
         app.router.add_get("/auth/google/callback", self._auth_google_callback)
         app.router.add_get("/auth/google/status", self._auth_google_status)
         app.router.add_post("/auth/google/logout", self._auth_google_logout)
+        app.router.add_get("/auth/google/config", self._auth_google_config_get)
+        app.router.add_post("/auth/google/config", self._auth_google_config_post)
+        app.router.add_route("OPTIONS", "/auth/google/{tail:.*}", self._auth_google_cors_preflight)
         if STATIC_DIR.is_dir():
             app.router.add_static("/static/", STATIC_DIR, show_index=False)
             app.router.add_get("/", self._serve_home)

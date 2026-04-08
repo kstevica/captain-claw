@@ -977,6 +977,17 @@ class AgentOrchestrationMixin:
                     )
                 )
 
+            # Refresh Google OAuth connection flag so Google-dependent
+            # tools appear/disappear in the agent's tool list the moment
+            # the user connects or disconnects via Flight Deck. Cheap:
+            # flight-deck client mode re-uses the in-process access-token
+            # cache; local mode hits SQLite app_state.
+            try:
+                from captain_claw.google_oauth_manager import GoogleOAuthManager
+                await GoogleOAuthManager(self.session_manager).is_connected()
+            except Exception:
+                pass
+
             active_task_tool_policy = self._active_task_tool_policy_payload(planning_pipeline)
             tool_defs = self.tools.get_definitions(
                 session_id=session_id,

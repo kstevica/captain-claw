@@ -121,6 +121,16 @@ export interface CouncilSession {
   artifacts: CouncilArtifact[]
   fileRefs: CouncilFileRef[]
   memoryRounds: MemoryRounds
+  /**
+   * If false, participants are forbidden from using ACTION: pass.
+   * The btw_context.md template omits "pass" from the action list,
+   * adds explicit "do not pass" guidance, and the speaker turn loop
+   * retries once with a hard directive if the model passes anyway.
+   * Default: false (passing disabled — every participant must
+   * contribute every round). Flip on via the sidebar toggle if you
+   * want to allow passing for a specific session.
+   */
+  allowPass: boolean
   createdAt: string           // ISO timestamp of session creation
   concludedAt: string         // ISO timestamp when session concluded (empty if still active)
   config: { firstSpeaker: string }
@@ -383,6 +393,19 @@ function buildBtwPrompt(session: CouncilSession): string {
     extensionNote = ` Originally ${session.originalMaxRounds} rounds, extended: ${extList}.`
   }
 
+  // Pass-action wiring. The btw template carries two placeholders:
+  //   {passOption}    — appended into the ACTION list line
+  //   {passGuidance}  — appended at the end of the ACTION guidance block
+  // When allowPass is true we keep the historical behaviour (pass is
+  // listed and softly discouraged). When allowPass is false we strip
+  // pass from the list entirely and add a hard "you must contribute"
+  // line so the model has no easy out.
+  const allowPass = session.allowPass !== false
+  const passOption = allowPass ? '|pass' : ''
+  const passGuidance = allowPass
+    ? '\n- **pass** — last resort. Use ONLY if every angle you would raise has already been said by a previous speaker in this round. "I am not an expert" is NOT a valid reason to pass. The whole point of a multi-agent council is that every participant brings their reasoning, even on topics outside their wheelhouse.'
+    : '\n\nPassing is DISABLED for this council session. You must contribute every round. If you feel out of your depth, share your reasoning anyway — even a "here is how I would think about this if I had to decide" framing is more valuable than silence.'
+
   return renderTemplate(btwTemplate, {
     sessionType: session.sessionType.toUpperCase(),
     sessionTypeDesc: SESSION_TYPE_DESC[session.sessionType],
@@ -393,6 +416,8 @@ function buildBtwPrompt(session: CouncilSession): string {
     moderatorInfo,
     verbosityRule: VERBOSITY_RULES[session.verbosity],
     extensionNote,
+    passOption,
+    passGuidance,
   }) + fileInfo
 }
 
@@ -710,6 +735,7 @@ function _persistConfig(sessionId: string, patch: Record<string, unknown>) {
     extensions: s.extensions,
     autoAdvance: s.autoAdvance,
     fileRefs: s.fileRefs,
+    allowPass: s.allowPass,
     ...patch,
   }
   apiUpdateSession(sessionId, { config: JSON.stringify(fullConfig) })
@@ -751,6 +777,7 @@ interface CouncilStore {
   muteAgent: (agentId: string, muted: boolean) => void
   pinMessage: (messageId: number) => void
   setMemoryRounds: (value: MemoryRounds) => void
+  setAllowPass: (value: boolean) => void
   setAutoAdvance: (value: boolean) => void
   extendRounds: (amount: number) => Promise<void>
   cancelAutoAdvance: () => void
@@ -819,7 +846,7 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       moderator_mode: cfg.moderatorMode,
       moderator_agent: cfg.moderatorAgentId,
       agents: JSON.stringify(agentDefs),
-      config: JSON.stringify({ firstSpeaker: cfg.firstSpeaker, memoryRounds: 10, originalMaxRounds: cfg.maxRounds, extensions: [] }),
+      config: JSON.stringify({ firstSpeaker: cfg.firstSpeaker, memoryRounds: 10, originalMaxRounds: cfg.maxRounds, extensions: [], allowPass: false }),
     })
     const id = data.id as string
     // Stash files for upload during startCouncil
@@ -869,6 +896,12 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
         artifacts,
         fileRefs: (config.fileRefs as CouncilFileRef[]) || [],
         memoryRounds: (config.memoryRounds as MemoryRounds) || 10,
+        // Hydrate the pass toggle. Default false: passing is
+        // disabled unless the user explicitly opts in via the
+        // sidebar toggle. Old sessions saved before this field
+        // existed will also default to false on reload — flip the
+        // sidebar switch back on if you want the old behaviour.
+        allowPass: (config.allowPass as boolean | undefined) ?? false,
         createdAt: raw.created_at as string || '',
         concludedAt: (config.concludedAt as string) || '',
         config: { firstSpeaker: config.firstSpeaker || '' },
@@ -1118,6 +1151,7 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
             extensions: currentSession.extensions,
             autoAdvance: currentSession.autoAdvance,
             fileRefs,
+            allowPass: currentSession.allowPass,
           }),
         })
       }
@@ -1343,6 +1377,19 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     set({ activeSession: { ...s, memoryRounds: value } })
     _persistConfig(s.id, { memoryRounds: value })
     get()._log('', 'System', 'system', `Council memory set to ${value === 0 ? 'indefinite' : `${value} rounds`}`)
+  },
+
+  setAllowPass: (value) => {
+    const s = get().activeSession
+    if (!s) return
+    set({ activeSession: { ...s, allowPass: value } })
+    _persistConfig(s.id, { allowPass: value })
+    get()._log(
+      '',
+      'System',
+      'system',
+      `Council passing ${value ? 'enabled' : 'disabled — participants must contribute every round'}`,
+    )
   },
 
   setAutoAdvance: (value) => {
@@ -1631,7 +1678,52 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       }
     })
 
-    const parsed = parseAgentResponse(raw)
+    let parsed = parseAgentResponse(raw)
+
+    // Pass enforcement. If the session disallows passing and the
+    // model passed anyway, re-issue the turn ONCE with a hard
+    // directive demanding a real contribution. We only retry once —
+    // if the model passes a second time, we accept it rather than
+    // looping forever, but we tag the message so it's visible in the
+    // log that this happened.
+    if (parsed.action === 'pass' && s.allowPass === false) {
+      get()._log(
+        agentId,
+        agent.name,
+        'system',
+        'Passed but session has passing disabled — retrying with hard directive',
+      )
+      const retryDirective =
+        'Your previous response used ACTION: pass, but passing is DISABLED for this council session. ' +
+        'You must contribute. Pick one of: answer | respond | challenge | refine | broaden — and share your reasoning, ' +
+        'even if the topic is outside your specialty. A "here is how I would think about this if I had to decide" framing ' +
+        'is more valuable than silence. Do not pass again.'
+      const retryPrompt = buildTurnPrompt(
+        s,
+        round,
+        recentMsgs,
+        directive ? `${directive}\n\n${retryDirective}` : retryDirective,
+        agent.name,
+        agentId,
+      )
+      get()._sendToAgent(agentId, retryPrompt)
+      set({ speaking: agentId })
+      const retryRaw = await get()._collectResponse(agentId)
+      set({ speaking: '' })
+      const retryParsed = parseAgentResponse(retryRaw)
+      if (retryParsed.action !== 'pass') {
+        // Retry succeeded — use it.
+        parsed = retryParsed
+      } else {
+        // Retry also passed; keep the original but log it.
+        get()._log(
+          agentId,
+          agent.name,
+          'system',
+          'Retry also passed — accepting pass to avoid infinite loop',
+        )
+      }
+    }
 
     // Resolve target agent ID from name
     let targetAgentId = ''

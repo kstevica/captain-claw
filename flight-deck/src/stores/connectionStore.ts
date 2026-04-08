@@ -6,18 +6,23 @@ const STORAGE_KEY = 'fd:botport-connection'
 
 interface ConnectionConfig {
   botportUrl: string  // e.g. "http://localhost:23180" or "https://botport.example.com"
+  captainClawUrl: string  // e.g. "http://localhost:23080" (captain-claw aiohttp server)
 }
 
 interface ConnectionStore extends ConnectionConfig {
   setBotportUrl: (url: string) => void
+  setCaptainClawUrl: (url: string) => void
 }
 
 function loadConfig(): ConnectionConfig {
   try {
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}')
-    return { botportUrl: stored.botportUrl || '' }
+    return {
+      botportUrl: stored.botportUrl || '',
+      captainClawUrl: stored.captainClawUrl || '',
+    }
   } catch {
-    return { botportUrl: '' }
+    return { botportUrl: '', captainClawUrl: '' }
   }
 }
 
@@ -35,8 +40,15 @@ export const useConnectionStore = create<ConnectionStore>((set) => ({
   ...initial,
 
   setBotportUrl: (botportUrl) => {
-    persist({ botportUrl })
+    const next = { ...useConnectionStore.getState(), botportUrl }
+    persist({ botportUrl: next.botportUrl, captainClawUrl: next.captainClawUrl })
     set({ botportUrl })
+  },
+
+  setCaptainClawUrl: (captainClawUrl) => {
+    const next = { ...useConnectionStore.getState(), captainClawUrl }
+    persist({ botportUrl: next.botportUrl, captainClawUrl: next.captainClawUrl })
+    set({ captainClawUrl })
   },
 }))
 
@@ -47,6 +59,9 @@ registerHydrator((settings) => {
       const config = JSON.parse(raw)
       if (config.botportUrl !== undefined) {
         useConnectionStore.setState({ botportUrl: config.botportUrl })
+      }
+      if (config.captainClawUrl !== undefined) {
+        useConnectionStore.setState({ captainClawUrl: config.captainClawUrl })
       }
     } catch { /* ignore */ }
   }
@@ -82,4 +97,15 @@ export function getWsUrl(): string {
     .replace(/^https:/, 'wss:')
     .replace(/\/+$/, '')
   return `${wsBase}/ws/dashboard`
+}
+
+/**
+ * Get the base URL for direct calls to the captain-claw aiohttp server
+ * (hosts /auth/google/* and other captain-claw REST endpoints).
+ * Falls back to "http://localhost:23080" if not configured.
+ */
+export function getCaptainClawBase(): string {
+  const { captainClawUrl } = useConnectionStore.getState()
+  const url = (captainClawUrl || 'http://localhost:23080').replace(/\/+$/, '')
+  return url
 }

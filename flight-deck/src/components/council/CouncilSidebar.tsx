@@ -182,6 +182,34 @@ export function CouncilSidebar({
                 </div>
               )}
 
+              {/* Allow passing toggle. When OFF, participants are
+                  forbidden from using ACTION: pass — the btw template
+                  drops the option entirely and the speaker turn loop
+                  retries once with a hard directive if the model
+                  passes anyway. */}
+              <div
+                className="flex items-center justify-between text-xs"
+                title={
+                  session.allowPass
+                    ? 'Participants may use ACTION: pass when they have nothing to add'
+                    : 'Participants must contribute every round; pass action is disabled'
+                }
+              >
+                <span className="text-zinc-500">Allow passing</span>
+                <button
+                  onClick={() => store.getState().setAllowPass(!session.allowPass)}
+                  className={`relative h-5 w-9 rounded-full transition-colors ${
+                    session.allowPass ? 'bg-violet-600' : 'bg-zinc-700'
+                  }`}
+                >
+                  <div
+                    className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
+                      session.allowPass ? 'translate-x-4' : 'translate-x-0.5'
+                    }`}
+                  />
+                </button>
+              </div>
+
               {/* Auto-advance countdown indicator */}
               {autoAdvanceCountdown > 0 && (
                 <div className="flex items-center gap-2 rounded-md bg-violet-500/10 border border-violet-500/20 px-2 py-1.5">
