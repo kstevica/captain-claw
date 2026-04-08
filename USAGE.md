@@ -3734,6 +3734,110 @@ Flight Deck serves both the React frontend and the FastAPI backend from a single
 | Datastore browser | View agent datastore tables and rows directly from agent cards |
 | Agent groups & tags | Organize agents into teams and roles with color-coded group badges |
 | Trace timeline | Real-time orchestrator observability — Gantt-style span visualization in the chat panel with duration, token usage, phase breakdown (decompose/execute/task/synthesize), and status tracking |
+| Connections page | Unified external-service authentication: Google OAuth (with per-scope picker and sensitivity tiers) and ChatGPT (Codex OAuth) in a single scrollable, collapsible UI |
+
+### Connections
+
+The Connections page lives in the Flight Deck sidebar and manages external-service authentication for the entire fleet. A single Flight Deck instance can serve OAuth tokens to every captain-claw sub-agent it spawns (on the same host or a remote one) via a shared-secret or loopback trust boundary — no need to re-authenticate per agent.
+
+Both connection cards are **collapsible** (click the header to toggle) and the whole page scrolls independently so the scope picker can expand without breaking the layout.
+
+#### Google
+
+Captain Claw does not ship with bundled Google OAuth credentials. Every deployment must create its own OAuth 2.0 Client ID in [Google Cloud Console](https://console.cloud.google.com/apis/credentials) (type: **Web application**), add the redirect URI shown in the Connections page (e.g. `http://localhost:25080/fd/google/callback`) to the Authorized redirect URIs list, and paste the Client ID + Client Secret into the form.
+
+**Scope picker**
+
+Rather than requesting a fixed list of scopes at connection time, Captain Claw lets you tick individual scopes from a catalog of 13. Each scope is tagged with a sensitivity tier that controls how Google treats your app:
+
+| Tier | Badge | Meaning |
+|---|---|---|
+| `none` | green | Freely usable by unverified apps. No consent-screen restrictions. |
+| `sensitive` | amber | Google flags these. Unverified apps require you to add yourself as a Test user. |
+| `restricted` | red | Requires security review + verification for production use. |
+
+**Default scope set (all non-sensitive):**
+
+- `openid` — Sign in with Google *(required)*
+- `email` — Your Google account email *(required)*
+- `profile` — Your name and profile picture
+- `drive.file` — Per-file Drive access for files the app creates or the user picks
+
+**Opt-in scopes:**
+
+- Drive: `drive.readonly` (restricted), `drive` (restricted)
+- Gmail: `gmail.readonly` (restricted), `gmail.compose` (sensitive), `gmail.modify` (restricted), `gmail.send` (sensitive)
+- Calendar: `calendar.readonly` (sensitive), `calendar` (sensitive)
+- Cloud: `cloud-platform` (sensitive) — required for Vertex AI / Gemini access alongside a Google Cloud `project_id`
+
+**Important: unverified apps and test users.** Google blocks unverified apps from requesting sensitive or restricted scopes at runtime. If you tick any of those scopes, you must either:
+
+1. **Go to Google Cloud Console → APIs & Services → OAuth consent screen → Test users** and add your Google account there while the app is in Testing mode, or
+2. **Submit your app for verification** (required for production use).
+
+The Connections page shows a reminder banner about this directly under the scope picker.
+
+**Scope changes invalidate tokens.** Changing the scope set (same as rotating the client_id) clears stored tokens and forces fresh consent, because OAuth refresh tokens are bound to their original scope grant. Captain Claw handles this automatically on save.
+
+**Vertex AI / Gemini.** Set a `project_id` in the form **and** tick the `cloud-platform` scope to enable Vertex AI. The UI's `supports_vertex` status only reports `true` when both are in place, so the Gemini provider won't be promised to you on a connection that can't deliver it.
+
+**Endpoints:**
+
+- `GET /fd/google/status` — connection state (configured / connected / granted_scopes / supports_vertex).
+- `GET /fd/google/config` — full config including `scopes`, `default_scopes`, and `scope_catalog`.
+- `GET /fd/google/scope_catalog` — just the scope catalog.
+- `POST /fd/google/config` — save any subset of `client_id`, `client_secret`, `project_id`, `location`, `scopes`. Pass `{"clear": true}` to wipe saved credentials, tokens, and scopes in one shot.
+- `GET /fd/google/login` — starts the OAuth flow (returns HTTP 400 HTML when not configured).
+- `GET /fd/google/callback` — OAuth callback.
+- `POST /fd/google/logout` — revoke and clear.
+- `GET /fd/google/access_token` — agent-facing; returns a currently-valid access token. Gated by loopback or `X-Agent-Secret` header.
+- `GET /fd/google/credentials` — agent-facing; returns full `authorized_user` credentials for LiteLLM / Vertex paths.
+
+#### ChatGPT (Codex OAuth) — Sign in with ChatGPT
+
+A new connection card uses the same "Sign in with ChatGPT" flow the Codex CLI uses. Captain Claw reads the tokens the Codex CLI caches in `~/.codex/auth.json` and talks directly to the ChatGPT Responses API at `https://chatgpt.com/backend-api/codex/responses` — **no `OPENAI_API_KEY` required**, billing goes through your ChatGPT Plus/Pro/Team plan.
+
+**Setup:**
+
+1. Install the [Codex CLI](https://github.com/openai/codex) on the host running Flight Deck.
+2. Run `codex login` — the CLI handles the OAuth flow and stores tokens in `~/.codex/auth.json`.
+3. Open **Flight Deck → Connections → ChatGPT (Codex)** and click **Reimport from Codex CLI**.
+4. Configure an agent with `provider: openai` and a Codex-family model (see below).
+
+**Status display:**
+
+- Email and ChatGPT plan (from the decoded JWT claims).
+- Token expiry countdown (`5h 32m`, or `Token stale` when inside the 60-second safety margin).
+- Access-token preview (first 12 + last 6 chars) for sanity-checking you're reading the file you expect.
+- Auth file path on disk.
+
+**Supported models:**
+
+The ChatGPT/Codex backend serves a specific set of Codex-family models, not the full OpenAI API catalog:
+
+- `gpt-5`
+- `gpt-5-codex`
+- `gpt-5.1`, `gpt-5.1-codex`, `gpt-5.1-codex-mini`, `gpt-5.1-codex-max`
+- `gpt-5.2`, `gpt-5.2-codex`
+- `gpt-5.3-codex`
+- `codex-mini-latest`
+
+Common non-Codex aliases — `gpt-5-mini`, `gpt-5.1-mini`, `gpt-5.2-mini`, `gpt-5.3-mini`, `gpt-5.4-mini` — are automatically remapped to `gpt-5.1-codex-mini`. The agent logs `ChatGPT Codex: remapped model alias` at construction time so you can see what the remap resolved to. Requesting a model that isn't in the known-supported set fires a warning with the full supported list.
+
+**How tokens stay fresh:**
+
+The `CodexAuthManager` decodes the JWT `exp` claim with a 60-second safety margin. Before every request, `_ensure_fresh_auth()` is a cheap cache hit when the token is still valid. On a 401 response, the provider forces a refresh and retries the request exactly once (in both `complete()` and `complete_streaming()`). Under Flight Deck, the token source is `GET /fd/codex/access_token` — so every sub-agent Flight Deck spawns shares one centrally-managed connection, even across hosts. Without Flight Deck, the manager reads `~/.codex/auth.json` directly for standalone installs.
+
+**Endpoints:**
+
+- `GET /fd/codex/status` — `configured`, `connected`, `email`, `plan`, `account_id`, `expires_at`, `seconds_until_expiry`, `stale`, `access_token_preview`, `auth_path`.
+- `POST /fd/codex/reimport` — force a re-read of `~/.codex/auth.json`. No persistent state to update — every status call already re-reads on demand — but this gives the UI a clear affordance to press after running `codex login` again.
+- `GET /fd/codex/access_token` — agent-facing; returns `{access_token, account_id, expires_at, email, plan}`. Gated by loopback or `X-Agent-Secret` header, same as the Google equivalent.
+
+**Environment variables:**
+
+- `FD_URL` — when set on a spawned captain-claw agent, the Codex auth manager pulls tokens from Flight Deck instead of reading `~/.codex/auth.json` locally.
+- `FD_AGENT_SHARED_SECRET` — optional shared secret used in both directions (FD validates incoming agent calls; agents attach it as `X-Agent-Secret` when calling FD).
 
 ### Agent Forge
 

@@ -37,7 +37,7 @@ def _utcnow_iso() -> str:
 
 PROTOCOL_VERSION = "2025-03-26"
 SERVER_NAME = "captain-claw"
-SERVER_VERSION = "0.4.19"
+SERVER_VERSION = "0.4.20"
 
 # ---------------------------------------------------------------------------
 # Tool definitions (MCP format)

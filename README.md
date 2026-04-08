@@ -13,6 +13,14 @@
 
 An open-source AI agent with multi-agent orchestration, autonomous cognitive systems, and a full management dashboard. Runs locally, supports every major LLM provider, and ships with 44 built-in tools.
 
+## What's New in 0.4.20
+
+- **Sign in with ChatGPT** — Use OpenAI through your ChatGPT Plus/Pro/Team plan, no API key required. Captain Claw reuses the Codex CLI's OAuth tokens from `~/.codex/auth.json`, auto-refreshes them, and ships a new Flight Deck Connections card with a one-click reimport button. Direct connection to the ChatGPT Responses API for Codex-family models (`gpt-5-codex`, `gpt-5.1-codex-mini`, etc.).
+- **Scoped Google OAuth** — Bundled OAuth client removed (security hardening); bring your own Google Cloud OAuth client. New scope picker in the Connections page with sensitivity badges (`non-sensitive` / `sensitive` / `restricted`). Defaults to non-sensitive scopes only (`openid`, `email`, `profile`, `drive.file`) so fresh installs can connect without hitting Google's "App is blocked" screen. Opt into Gmail / Drive / Calendar / Vertex individually.
+- **On-Device Gemma (LiteRT)** — Production-grade subprocess worker for `litert-lm` models. Runs `.litertlm` files in an isolated child process that can crash and respawn without losing your session, with a text-based tool protocol so Gemma local models support the full captain-claw tool registry.
+
+See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the full changelog.
+
 ## What Makes Captain Claw Different
 
 ### Flight Deck — Multi-Agent Command Center
@@ -103,10 +111,12 @@ Mix providers freely — each session independently selects its model.
 
 | Provider | Models |
 |---|---|
-| OpenAI | GPT-5.4, GPT-5.4-mini, GPT-5.4-nano, o3, o4-mini, gpt-image-1.5 |
+| OpenAI (API key) | GPT-5.4, GPT-5.4-mini, GPT-5.4-nano, o3, o4-mini, gpt-image-1.5 |
+| OpenAI (Sign in with ChatGPT) | `gpt-5`, `gpt-5-codex`, `gpt-5.1-codex`, `gpt-5.1-codex-mini`, `gpt-5.1-codex-max`, `gpt-5.2-codex`, `gpt-5.3-codex` — billed against your ChatGPT plan, no API key |
 | Anthropic | Claude Opus 4.6, Sonnet 4.6, Haiku 4.5 (with prompt caching) |
-| Google | Gemini 3.1 Pro/Flash, Gemini 2.5 Pro/Flash |
+| Google | Gemini 3.1 Pro/Flash, Gemini 2.5 Pro/Flash (API key or OAuth/Vertex) |
 | Ollama | Any local model |
+| LiteRT (on-device) | `.litertlm` Gemma models running locally via an isolated subprocess worker |
 | OpenRouter | 200+ models via meta-router |
 
 ## Quick Start
