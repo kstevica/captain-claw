@@ -1136,11 +1136,15 @@ async def _handle_reflection_command(server: WebServer, args: str) -> str:
     """Handle /reflection command variants."""
     from captain_claw.reflections import (
         generate_reflection,
+        list_imported_reflections,
         list_reflections,
         load_latest_reflection,
+        merge_reflection_with_import,
     )
 
-    subcmd = args.lower()
+    parts = args.split(None, 1)
+    subcmd = parts[0].lower() if parts else ""
+    subargs = parts[1].strip() if len(parts) > 1 else ""
 
     if subcmd in ("generate", "start", "new"):
         if not server.agent:
@@ -1162,6 +1166,55 @@ async def _handle_reflection_command(server: WebServer, args: str) -> str:
                 preview += "..."
             lines.append(f"- **{r.timestamp}**: {preview}")
         return "**Recent reflections:**\n" + "\n".join(lines)
+
+    elif subcmd == "imported":
+        sources = list_imported_reflections()
+        if not sources:
+            return (
+                "No imported reflections staged. Import a memory bundle "
+                "(via Flight Deck or `/api/memory/import`) to stage some."
+            )
+        lines: list[str] = []
+        for s in sources:
+            lines.append(f"- **{s['label']}** ({s['count']} file(s)):")
+            for entry in s["reflections"][:3]:
+                preview = entry["summary"][:70].replace("\n", " ")
+                if len(entry["summary"]) > 70:
+                    preview += "..."
+                lines.append(f"  - `{entry['filename']}` — {entry['timestamp']}: {preview}")
+            if s["count"] > 3:
+                lines.append(f"  - ...and {s['count'] - 3} more")
+        lines.append("\nUse `/reflection merge <label>` to promote a staged personality.")
+        return "**Imported reflections:**\n" + "\n".join(lines)
+
+    elif subcmd == "merge":
+        if not server.agent:
+            return "Agent not available."
+        if not subargs:
+            return (
+                "Usage: `/reflection merge <label> [filename]`\n\n"
+                "Run `/reflection imported` to see available labels. The merge "
+                "preserves the current personality while absorbing knowledge "
+                "and directives from the imported reflection."
+            )
+        merge_parts = subargs.split(None, 1)
+        label = merge_parts[0]
+        filename = merge_parts[1].strip() if len(merge_parts) > 1 else None
+        try:
+            merged = await merge_reflection_with_import(
+                server.agent, label=label, filename=filename,
+            )
+        except FileNotFoundError as exc:
+            return f"**Merge failed:** {exc}"
+        except ValueError as exc:
+            return f"**Merge failed:** {exc}"
+        except Exception as exc:
+            return f"**Merge failed:** {exc}"
+        return (
+            f"**Reflection merged from `{label}`** ({merged.timestamp}):\n\n"
+            f"{merged.summary}\n\n"
+            f"_This is now the active personality. The imported file was left in place._"
+        )
 
     else:
         # Show latest

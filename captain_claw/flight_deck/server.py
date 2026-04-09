@@ -2614,6 +2614,337 @@ async def proxy_traces(
         raise HTTPException(502, "Cannot connect to agent")
 
 
+# ── Memory transfer (curated insights + reflections) ──
+
+
+@app.get("/fd/agent-memory/{host}/{port}/export")
+async def proxy_memory_export(
+    host: str, port: int,
+    token: str = "",
+    min_importance: int = 0,
+    include_expired: bool = False,
+    reflection_limit: int = 50,
+    include_semantic: bool = False,
+    semantic_limit: int = 1000,
+    semantic_min_chars: int = 100,
+    semantic_sources: str = "",
+    semantic_include_imported: bool = False,
+    user: dict | None = _required_user_dep,
+):
+    """Proxy a curated-memory bundle download from a CC agent.
+
+    Streams the agent's ``/api/memory/export`` response back to the
+    Flight Deck client, preserving the file download headers so the
+    browser saves it as a JSON file.
+
+    When ``include_semantic`` is true, the bundle additionally contains
+    a text-only dump of the agent's semantic memory chunks (no vectors;
+    the importing agent re-embeds with its own provider).
+    """
+    import httpx
+    from fastapi.responses import Response
+
+    auth = token or _resolve_agent_auth(port)
+    qs_parts = []
+    if auth:
+        qs_parts.append(f"token={auth}")
+    qs_parts.append(f"min_importance={int(min_importance)}")
+    if include_expired:
+        qs_parts.append("include_expired=1")
+    qs_parts.append(f"reflection_limit={int(reflection_limit)}")
+    if include_semantic:
+        qs_parts.append("include_semantic=1")
+        qs_parts.append(f"semantic_limit={int(semantic_limit)}")
+        qs_parts.append(f"semantic_min_chars={int(semantic_min_chars)}")
+        if semantic_sources:
+            qs_parts.append(f"semantic_sources={semantic_sources}")
+        if semantic_include_imported:
+            qs_parts.append("semantic_include_imported=1")
+    url = f"http://{host}:{port}/api/memory/export?{'&'.join(qs_parts)}"
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                raise HTTPException(resp.status_code, resp.text)
+            disposition = resp.headers.get(
+                "content-disposition",
+                f'attachment; filename="captain-claw-memory-{host}-{port}.json"',
+            )
+            return Response(
+                content=resp.content,
+                media_type="application/json",
+                headers={"Content-Disposition": disposition},
+            )
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.post("/fd/agent-memory/{host}/{port}/import")
+async def proxy_memory_import(
+    host: str, port: int,
+    request: Request,
+    token: str = "",
+    min_importance: int = 0,
+    source_label: str = "",
+    stage_conflicts: bool = False,
+    skip_semantic: bool = False,
+    user: dict | None = _required_user_dep,
+):
+    """Proxy a curated-memory bundle into a CC agent.
+
+    Body: the JSON bundle previously downloaded via ``proxy_memory_export``
+    (or any compatible bundle from another agent). When ``stage_conflicts``
+    is true, conflicting decision/preference/workflow insights are routed
+    to the agent's pending-review queue instead of being silently deduped.
+    When ``skip_semantic`` is true, any ``semantic_chunks`` present in the
+    bundle are dropped on the server side (curated-only import).
+    """
+    import httpx
+
+    auth = token or _resolve_agent_auth(port)
+    qs_parts = []
+    if auth:
+        qs_parts.append(f"token={auth}")
+    qs_parts.append(f"min_importance={int(min_importance)}")
+    if source_label:
+        qs_parts.append(f"source_label={source_label}")
+    if stage_conflicts:
+        qs_parts.append("stage_conflicts=1")
+    if skip_semantic:
+        qs_parts.append("skip_semantic=1")
+    url = f"http://{host}:{port}/api/memory/import?{'&'.join(qs_parts)}"
+    body = await request.body()
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                url,
+                content=body,
+                headers={"Content-Type": "application/json"},
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.get("/fd/agent-memory/{host}/{port}/reflections/imported")
+async def proxy_list_imported_reflections(
+    host: str, port: int,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """List imported (staged) reflections on a CC agent for the merge picker."""
+    import httpx
+
+    auth = token or _resolve_agent_auth(port)
+    qs = f"?token={auth}" if auth else ""
+    url = f"http://{host}:{port}/api/memory/reflections/imported{qs}"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.post("/fd/agent-memory/{host}/{port}/reflections/merge")
+async def proxy_merge_reflection(
+    host: str, port: int,
+    request: Request,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Trigger a personality-preserving reflection merge on a CC agent.
+
+    Body: ``{"label": "<imported-subdir>", "filename": "<optional>"}``.
+    The agent runs its reflection-merge LLM flow and writes the result as
+    the new active reflection.
+    """
+    import httpx
+
+    auth = token or _resolve_agent_auth(port)
+    qs = f"?token={auth}" if auth else ""
+    url = f"http://{host}:{port}/api/memory/reflections/merge{qs}"
+    body = await request.body()
+
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            resp = await client.post(
+                url,
+                content=body,
+                headers={"Content-Type": "application/json"},
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+# ── Semantic memory import management ──
+
+
+@app.get("/fd/agent-memory/{host}/{port}/semantic/labels")
+async def proxy_list_semantic_imports(
+    host: str, port: int,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """List imported semantic sources on a CC agent."""
+    import httpx
+
+    auth = token or _resolve_agent_auth(port)
+    qs = f"?token={auth}" if auth else ""
+    url = f"http://{host}:{port}/api/memory/semantic/labels{qs}"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.delete("/fd/agent-memory/{host}/{port}/semantic/labels/{label}")
+async def proxy_delete_semantic_import(
+    host: str, port: int, label: str,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Purge one imported semantic source on a CC agent."""
+    import httpx
+
+    auth = token or _resolve_agent_auth(port)
+    qs = f"?token={auth}" if auth else ""
+    url = f"http://{host}:{port}/api/memory/semantic/labels/{label}{qs}"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.delete(url)
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+# ── Pending-review insights (stage_conflicts queue) ──
+
+
+@app.get("/fd/agent-insights/{host}/{port}/pending")
+async def proxy_list_pending_insights(
+    host: str, port: int,
+    token: str = "",
+    category: str = "",
+    limit: int = 100,
+    user: dict | None = _required_user_dep,
+):
+    """List the agent's staged insight conflicts awaiting review."""
+    import httpx
+
+    auth = token or _resolve_agent_auth(port)
+    qs_parts = []
+    if auth:
+        qs_parts.append(f"token={auth}")
+    if category:
+        qs_parts.append(f"category={category}")
+    qs_parts.append(f"limit={int(limit)}")
+    url = f"http://{host}:{port}/api/insights/pending?{'&'.join(qs_parts)}"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.get("/fd/agent-insights/{host}/{port}/pending/count")
+async def proxy_count_pending_insights(
+    host: str, port: int,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Cheap poll for the UI badge."""
+    import httpx
+
+    auth = token or _resolve_agent_auth(port)
+    qs = f"?token={auth}" if auth else ""
+    url = f"http://{host}:{port}/api/insights/pending/count{qs}"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.post("/fd/agent-insights/{host}/{port}/pending/{pending_id}/approve")
+async def proxy_approve_pending_insight(
+    host: str, port: int, pending_id: str,
+    token: str = "",
+    supersede: bool = True,
+    user: dict | None = _required_user_dep,
+):
+    """Promote a staged insight into the live table."""
+    import httpx
+
+    auth = token or _resolve_agent_auth(port)
+    qs_parts = []
+    if auth:
+        qs_parts.append(f"token={auth}")
+    qs_parts.append(f"supersede={'1' if supersede else '0'}")
+    url = (
+        f"http://{host}:{port}/api/insights/pending/{pending_id}/approve"
+        f"?{'&'.join(qs_parts)}"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(url)
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.post("/fd/agent-insights/{host}/{port}/pending/{pending_id}/reject")
+async def proxy_reject_pending_insight(
+    host: str, port: int, pending_id: str,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Drop a staged insight without promoting it."""
+    import httpx
+
+    auth = token or _resolve_agent_auth(port)
+    qs = f"?token={auth}" if auth else ""
+    url = f"http://{host}:{port}/api/insights/pending/{pending_id}/reject{qs}"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(url)
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
 # ── Process agent endpoints ──
 
 

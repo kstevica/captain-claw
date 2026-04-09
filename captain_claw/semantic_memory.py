@@ -556,6 +556,358 @@ class SemanticMemoryIndex:
             )
         return results
 
+    # ── Cross-machine transfer (text-only, no embeddings) ────────────────
+    #
+    # Unlike the curated memory bundle (insights + reflections), the
+    # semantic store is deliberately machine-local. These two methods let
+    # you ship raw chunks between agents WITHOUT moving the vectors
+    # themselves — avoiding the embedding-model-lock-in problem entirely.
+    # The target re-embeds on import using whatever provider it has
+    # configured, so two agents running different models can still share
+    # knowledge.
+    #
+    # Imported chunks are tagged with a ``source_label`` so they can be
+    # listed, re-imported idempotently, or purged as a set later.
+
+    def export_chunks(
+        self,
+        *,
+        min_chars: int = 100,
+        limit: int = 1000,
+        include_sources: list[str] | None = None,
+        exclude_sources: list[str] | None = None,
+        since: str | None = None,
+        include_imported: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Dump chunks as plain dicts (no embeddings).
+
+        Default filters skip tiny chunks, cap at 1000 rows, and exclude
+        already-imported rows (``source_label IS NULL``) so you only
+        ship your own memories — chains like A→B→C stay one-hop.
+        """
+        if self._closed:
+            return []
+        conn = self._conn_or_raise()
+        where: list[str] = ["LENGTH(c.text) >= ?"]
+        params: list[Any] = [max(0, int(min_chars))]
+        if include_sources:
+            placeholders = ",".join("?" for _ in include_sources)
+            where.append(f"c.source IN ({placeholders})")
+            params.extend(include_sources)
+        if exclude_sources:
+            placeholders = ",".join("?" for _ in exclude_sources)
+            where.append(f"c.source NOT IN ({placeholders})")
+            params.extend(exclude_sources)
+        if since:
+            where.append("c.updated_at >= ?")
+            params.append(str(since))
+        if not include_imported:
+            where.append("(c.source_label IS NULL OR c.source_label = '')")
+        sql = (
+            "SELECT c.chunk_id, c.doc_id, c.source, c.reference, c.path, "
+            "c.chunk_index, c.start_line, c.end_line, c.text, c.text_l1, "
+            "c.text_l2, c.updated_at, c.source_label, d.signature "
+            "FROM memory_chunks c "
+            "LEFT JOIN memory_documents d ON d.doc_id = c.doc_id "
+            f"WHERE {' AND '.join(where)} "
+            "ORDER BY c.updated_at DESC, c.doc_id, c.chunk_index "
+            "LIMIT ?"
+        )
+        params.append(max(1, int(limit)))
+        rows = conn.execute(sql, params).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            out.append(
+                {
+                    "chunk_id": str(r[0]),
+                    "doc_id": str(r[1]),
+                    "source": str(r[2]),
+                    "reference": str(r[3]),
+                    "path": str(r[4]),
+                    "chunk_index": int(r[5]),
+                    "start_line": int(r[6]),
+                    "end_line": int(r[7]),
+                    "text": str(r[8]),
+                    "text_l1": str(r[9] or ""),
+                    "text_l2": str(r[10] or ""),
+                    "updated_at": str(r[11]),
+                    "source_label": (str(r[12]) if r[12] else None),
+                    "doc_signature": (str(r[13]) if r[13] else ""),
+                }
+            )
+        return out
+
+    def import_chunks(
+        self,
+        chunks: list[dict[str, Any]],
+        *,
+        source_label: str,
+        re_embed: bool = True,
+    ) -> dict[str, Any]:
+        """Import chunks dumped by ``export_chunks`` on another agent.
+
+        Chunks are grouped by their original ``(source, reference)``
+        pair and re-materialised under a deterministic target doc_id
+        (``imported:<label>:<source>:<reference>``) so re-imports are
+        idempotent and can be purged as a set via ``source_label``.
+        The target re-embeds with its own provider — the source's
+        embedding model is irrelevant.
+        """
+        label = str(source_label or "").strip() or "unknown"
+        stats = {
+            "docs_upserted": 0,
+            "chunks_inserted": 0,
+            "chunks_skipped": 0,
+            "embedded": 0,
+            "embedding_skipped": False,
+            "source_label": label,
+        }
+        if self._closed or not isinstance(chunks, list):
+            return stats
+
+        # Group by original doc identity so re-imports collapse to the
+        # same target doc_id (and re-inserting nukes prior chunks).
+        groups: dict[tuple[str, str], dict[str, Any]] = {}
+        for c in chunks:
+            if not isinstance(c, dict):
+                stats["chunks_skipped"] += 1
+                continue
+            text = str(c.get("text") or "").strip()
+            if not text:
+                stats["chunks_skipped"] += 1
+                continue
+            src = str(c.get("source") or "imported").strip() or "imported"
+            ref = str(c.get("reference") or "").strip()
+            if not ref:
+                ref = f"unref:{_hash_text(text)[:16]}"
+            key = (src, ref)
+            g = groups.setdefault(
+                key,
+                {
+                    "source": src,
+                    "reference": ref,
+                    "path": str(c.get("path") or src).strip() or src,
+                    "signature": str(c.get("doc_signature") or "") or _hash_text(ref),
+                    "updated_at": str(c.get("updated_at") or _utcnow_iso()),
+                    "chunks": [],
+                },
+            )
+            g["chunks"].append(c)
+            ts = str(c.get("updated_at") or "")
+            if ts and ts > g["updated_at"]:
+                g["updated_at"] = ts
+
+        if not groups:
+            return stats
+
+        conn = self._conn_or_raise()
+        now_iso = _utcnow_iso()
+        # We only re-embed if the target has at least one provider.
+        can_embed = bool(re_embed and self.embedding_chain.enabled)
+        stats["embedding_skipped"] = not can_embed
+        to_embed: list[_Chunk] = []
+
+        with self._db_lock:
+            for (src, ref), g in groups.items():
+                target_doc_id = _hash_text(
+                    f"imported:{label}:{src}:{ref}"
+                )
+                # Upsert the doc row, then replace any existing chunks.
+                conn.execute(
+                    """
+                    INSERT INTO memory_documents
+                        (doc_id, source, reference, path, signature, updated_at, source_label)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(doc_id) DO UPDATE SET
+                        path=excluded.path,
+                        signature=excluded.signature,
+                        updated_at=excluded.updated_at,
+                        source_label=excluded.source_label
+                    """,
+                    (
+                        target_doc_id,
+                        src,
+                        ref,
+                        g["path"],
+                        g["signature"],
+                        g["updated_at"],
+                        label,
+                    ),
+                )
+                self._delete_chunks_for_doc(target_doc_id)
+                stats["docs_upserted"] += 1
+
+                # Stable sort: chunk_index, falling back to text hash.
+                g["chunks"].sort(key=lambda c: (int(c.get("chunk_index") or 0), str(c.get("text") or "")[:16]))
+                rows_chunks: list[tuple[Any, ...]] = []
+                rows_fts: list[tuple[Any, ...]] = []
+                for idx, c in enumerate(g["chunks"]):
+                    text = str(c.get("text") or "")
+                    text_l1 = str(c.get("text_l1") or "")
+                    text_l2 = str(c.get("text_l2") or "")
+                    chunk_index = int(c.get("chunk_index") or idx)
+                    start_line = int(c.get("start_line") or 1)
+                    end_line = int(c.get("end_line") or start_line)
+                    chunk_updated = str(c.get("updated_at") or now_iso)
+                    chunk_id = _hash_text(
+                        f"{target_doc_id}:{chunk_index}:{text[:64]}"
+                    )
+                    rows_chunks.append(
+                        (
+                            chunk_id,
+                            target_doc_id,
+                            src,
+                            ref,
+                            g["path"],
+                            chunk_index,
+                            start_line,
+                            end_line,
+                            text,
+                            text_l1,
+                            text_l2,
+                            chunk_updated,
+                            label,
+                        )
+                    )
+                    rows_fts.append(
+                        (chunk_id, text, text_l1, text_l2, g["path"], src, ref)
+                    )
+                    if can_embed:
+                        to_embed.append(
+                            _Chunk(
+                                chunk_id=chunk_id,
+                                chunk_index=chunk_index,
+                                start_line=start_line,
+                                end_line=end_line,
+                                text=text,
+                                updated_at=chunk_updated,
+                                text_l1=text_l1,
+                                text_l2=text_l2,
+                            )
+                        )
+                if rows_chunks:
+                    conn.executemany(
+                        """
+                        INSERT INTO memory_chunks (
+                            chunk_id, doc_id, source, reference, path,
+                            chunk_index, start_line, end_line, text,
+                            text_l1, text_l2, updated_at, source_label
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        rows_chunks,
+                    )
+                    conn.executemany(
+                        """
+                        INSERT INTO memory_chunks_fts
+                            (chunk_id, text, text_l1, text_l2, path, source, reference)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        rows_fts,
+                    )
+                    stats["chunks_inserted"] += len(rows_chunks)
+            conn.commit()
+
+        # Re-embed outside the write lock section would be nice, but
+        # _upsert_embeddings_for_chunks takes the conn directly — it's
+        # still fine inside the same thread. Any embedding failure is
+        # logged and falls back to keyword-only retrieval for those rows.
+        if can_embed and to_embed:
+            before = len(to_embed)
+            try:
+                self._upsert_embeddings_for_chunks(to_embed)
+                with self._db_lock:
+                    conn.commit()
+                stats["embedded"] = before
+            except Exception as exc:
+                log.warning(
+                    "Semantic import: embedding pass failed",
+                    error=str(exc),
+                    label=label,
+                )
+                stats["embedded"] = 0
+                stats["embedding_skipped"] = True
+
+        self._clear_cache()
+        self._dirty = True
+        return stats
+
+    def list_import_labels(self) -> list[dict[str, Any]]:
+        """Return one row per distinct ``source_label`` in the store."""
+        if self._closed:
+            return []
+        conn = self._conn_or_raise()
+        rows = conn.execute(
+            """
+            SELECT source_label,
+                   COUNT(*) AS chunks,
+                   COUNT(DISTINCT doc_id) AS docs,
+                   MAX(updated_at) AS latest
+            FROM memory_chunks
+            WHERE source_label IS NOT NULL AND source_label <> ''
+            GROUP BY source_label
+            ORDER BY latest DESC
+            """
+        ).fetchall()
+        return [
+            {
+                "source_label": str(r[0]),
+                "chunks": int(r[1] or 0),
+                "docs": int(r[2] or 0),
+                "latest": str(r[3] or ""),
+            }
+            for r in rows
+        ]
+
+    def delete_imported(self, source_label: str) -> dict[str, int]:
+        """Remove all chunks + docs + embeddings tagged with ``source_label``."""
+        label = str(source_label or "").strip()
+        result = {"chunks": 0, "docs": 0}
+        if not label or self._closed:
+            return result
+        conn = self._conn_or_raise()
+        with self._db_lock:
+            # Count chunks up-front so the return value reflects what
+            # was actually wiped (the delete cascade below runs through
+            # _delete_document which clears chunks+fts+embeddings).
+            chunk_count_row = conn.execute(
+                "SELECT COUNT(*) FROM memory_chunks WHERE source_label = ?",
+                (label,),
+            ).fetchone()
+            result["chunks"] = int(chunk_count_row[0] or 0) if chunk_count_row else 0
+
+            doc_rows = conn.execute(
+                "SELECT doc_id FROM memory_documents WHERE source_label = ?",
+                (label,),
+            ).fetchall()
+            doc_ids = [str(r[0]) for r in doc_rows]
+            for doc_id in doc_ids:
+                self._delete_document(doc_id)
+                result["docs"] += 1
+
+            # Catch any stray chunks tagged without a matching doc row
+            # (shouldn't happen, but clean them up defensively).
+            stray = conn.execute(
+                "SELECT chunk_id FROM memory_chunks WHERE source_label = ?",
+                (label,),
+            ).fetchall()
+            stray_ids = [str(r[0]) for r in stray]
+            if stray_ids:
+                conn.executemany(
+                    "DELETE FROM memory_chunks_fts WHERE chunk_id = ?",
+                    [(cid,) for cid in stray_ids],
+                )
+                conn.executemany(
+                    "DELETE FROM memory_embeddings WHERE chunk_id = ?",
+                    [(cid,) for cid in stray_ids],
+                )
+                conn.execute(
+                    "DELETE FROM memory_chunks WHERE source_label = ?",
+                    (label,),
+                )
+            conn.commit()
+        self._clear_cache()
+        return result
+
     @staticmethod
     def _pick_layer_text(
         layer: str, *, text: str, text_l1: str, text_l2: str,
@@ -723,8 +1075,39 @@ class SemanticMemoryIndex:
                     conn.execute("ALTER TABLE memory_chunks ADD COLUMN text_l1 TEXT NOT NULL DEFAULT ''")
                 if "text_l2" not in cols:
                     conn.execute("ALTER TABLE memory_chunks ADD COLUMN text_l2 TEXT NOT NULL DEFAULT ''")
+                # source_label: identifies the origin agent for imported chunks.
+                # NULL for locally-produced content; set by import_chunks().
+                if "source_label" not in cols:
+                    conn.execute(
+                        "ALTER TABLE memory_chunks ADD COLUMN source_label TEXT"
+                    )
             except Exception:
                 pass  # table may not exist yet on first run
+
+            # Migrate memory_documents: add source_label column.
+            try:
+                doc_cols = {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(memory_documents)").fetchall()
+                }
+                if "source_label" not in doc_cols:
+                    conn.execute(
+                        "ALTER TABLE memory_documents ADD COLUMN source_label TEXT"
+                    )
+            except Exception:
+                pass
+
+            try:
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_memory_chunks_source_label "
+                    "ON memory_chunks(source_label)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_memory_documents_source_label "
+                    "ON memory_documents(source_label)"
+                )
+            except Exception:
+                pass
 
             # Migrate FTS: recreate if it lacks the new columns.
             try:

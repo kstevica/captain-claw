@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import { MessageSquare, Trash2, RefreshCw, Cpu, Loader2, FolderOpen, Pencil, Check, X, Minimize2, Maximize2 } from 'lucide-react'
+import { MessageSquare, Trash2, RefreshCw, Cpu, Loader2, FolderOpen, Pencil, Check, X, Minimize2, Maximize2, Download, Upload } from 'lucide-react'
+import { useAgentMemoryTransfer } from '../../hooks/useAgentMemoryTransfer'
 import type { LocalAgent } from '../../stores/localAgentStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useChatStore } from '../../stores/chatStore'
@@ -48,6 +49,13 @@ export function LocalAgentCard({ agent, onBrowseFiles, onDragStart, isDragging }
   const [editingFwdTask, setEditingFwdTask] = useState(false)
   const [fwdTaskDraft, setFwdTaskDraft] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>(() => loadViewModes()[agent.id] || 'expanded')
+  const memory = useAgentMemoryTransfer({
+    host: agent.host,
+    port: agent.port,
+    authToken: agent.authToken,
+    label: agent.name,
+  })
+
   useEffect(() => {
     const handler = () => setViewMode(loadViewModes()[agent.id] || 'expanded')
     window.addEventListener('fd:bulk-view-change', handler)
@@ -181,7 +189,7 @@ export function LocalAgentCard({ agent, onBrowseFiles, onDragStart, isDragging }
             ) : null}
           </div>
 
-          {/* Line 3: files, probe, remove */}
+          {/* Line 3: files, probe, memory, remove */}
           <div className="flex items-center gap-1 -mx-1">
             {onBrowseFiles && (
               <button onClick={onBrowseFiles} className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
@@ -191,6 +199,28 @@ export function LocalAgentCard({ agent, onBrowseFiles, onDragStart, isDragging }
             <button onClick={() => probeAgent(agent.id)} className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
               <RefreshCw className="h-3 w-3" /> Probe
             </button>
+            {isOnline && (
+              <>
+                <button
+                  onClick={() => memory.exportMemory()}
+                  disabled={memory.busy}
+                  title="Download curated memory (insights + reflections) as JSON"
+                  className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
+                >
+                  {memory.state === 'exporting' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+                  Export
+                </button>
+                <button
+                  onClick={() => memory.promptImport()}
+                  disabled={memory.busy}
+                  title="Merge a memory bundle from another agent"
+                  className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
+                >
+                  {memory.state === 'importing' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Upload className="h-3 w-3" />}
+                  Import
+                </button>
+              </>
+            )}
             <div className="flex-1" />
             <button
               onClick={() => { if (confirm(`Remove '${agent.name}'?`)) removeAgent(agent.id) }}
@@ -205,6 +235,13 @@ export function LocalAgentCard({ agent, onBrowseFiles, onDragStart, isDragging }
         {agent.status === 'online' && (
           <EmbeddedChat containerId={agent.id} containerName={agent.name} host={agent.host} port={agent.port} auth={agent.authToken} />
         )}
+        <input
+          ref={memory.fileInputRef}
+          type="file"
+          accept="application/json,.json"
+          className="hidden"
+          onChange={memory.handleFileSelected}
+        />
       </div>
     )
   }
@@ -432,7 +469,7 @@ export function LocalAgentCard({ agent, onBrowseFiles, onDragStart, isDragging }
       )}
 
       {/* Actions */}
-      <div className="mt-4 flex items-center gap-1">
+      <div className="mt-4 flex items-center gap-1 flex-wrap">
         {onBrowseFiles && (
           <button
             onClick={onBrowseFiles}
@@ -449,6 +486,28 @@ export function LocalAgentCard({ agent, onBrowseFiles, onDragStart, isDragging }
           <RefreshCw className="h-3.5 w-3.5" />
           Probe
         </button>
+        {agent.status === 'online' && (
+          <>
+            <button
+              onClick={() => memory.exportMemory()}
+              disabled={memory.busy}
+              title="Download curated memory (insights + reflections) as JSON"
+              className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
+            >
+              {memory.state === 'exporting' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+              Export Memory
+            </button>
+            <button
+              onClick={() => memory.promptImport()}
+              disabled={memory.busy}
+              title="Merge a memory bundle from another agent"
+              className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
+            >
+              {memory.state === 'importing' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+              Import Memory
+            </button>
+          </>
+        )}
         <div className="flex-1" />
         <button
           onClick={() => { if (confirm(`Remove '${agent.name}'?`)) removeAgent(agent.id) }}
@@ -458,6 +517,13 @@ export function LocalAgentCard({ agent, onBrowseFiles, onDragStart, isDragging }
           Remove
         </button>
       </div>
+      <input
+        ref={memory.fileInputRef}
+        type="file"
+        accept="application/json,.json"
+        className="hidden"
+        onChange={memory.handleFileSelected}
+      />
       </div>
 
       {/* Embedded Chat */}

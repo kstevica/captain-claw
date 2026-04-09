@@ -31,6 +31,11 @@ VALID_CATEGORIES = frozenset({
     "deadline", "project", "workflow",
 })
 
+# Categories where a silent dedup on import would destroy important
+# personality/decision information. When ``stage_conflicts=True`` these
+# are routed through the pending-review queue instead.
+CONFLICT_STAGED_CATEGORIES = frozenset({"decision", "preference", "workflow"})
+
 # BM25 rank threshold for dedup (FTS5 returns negative ranks; closer to 0 = better).
 _DEDUP_RANK_THRESHOLD = -8.0
 
@@ -118,6 +123,35 @@ class InsightsManager:
                 await self._db.execute(f"ALTER TABLE insights ADD COLUMN {col} TEXT DEFAULT NULL")
             except Exception:
                 pass  # column already exists
+
+        # Pending-review queue for staged imports (see CONFLICT_STAGED_CATEGORIES).
+        # Populated only by ``import_items(stage_conflicts=True)`` when an incoming
+        # decision/preference/workflow insight would otherwise be silently deduped.
+        # Rows wait here until a human calls approve_pending()/reject_pending().
+        await self._db.execute("""
+            CREATE TABLE IF NOT EXISTS insights_pending (
+                id              TEXT PRIMARY KEY,
+                content         TEXT NOT NULL,
+                category        TEXT NOT NULL,
+                entity_key      TEXT,
+                importance      INTEGER NOT NULL DEFAULT 5,
+                source_tool     TEXT,
+                source_session  TEXT,
+                created_at      TEXT NOT NULL,
+                expires_at      TEXT,
+                tags            TEXT,
+                source_label    TEXT,
+                conflict_reason TEXT,
+                conflicts_with  TEXT,
+                conflict_snapshot TEXT
+            )
+        """)
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_insights_pending_created ON insights_pending(created_at DESC)"
+        )
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_insights_pending_category ON insights_pending(category)"
+        )
 
         await self._db.commit()
 
@@ -393,6 +427,346 @@ class InsightsManager:
         if deleted:
             log.info("Pruned expired insights", count=deleted)
         return deleted
+
+    # ── export / import ──────────────────────────────────────────────
+
+    async def export_all(
+        self,
+        *,
+        min_importance: int = 0,
+        include_expired: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Dump all insights as plain dicts for cross-machine transfer.
+
+        ``min_importance`` filters out low-value rows (use 7+ for dev→prod).
+        ``include_expired`` keeps rows whose ``expires_at`` is in the past.
+        """
+        await self._ensure_db()
+        assert self._db is not None
+
+        rows = await self._db.execute_fetchall(
+            "SELECT * FROM insights WHERE importance >= ? ORDER BY importance DESC, created_at DESC",
+            (int(min_importance),),
+        )
+        items = [self._row_to_dict(r) for r in rows]
+        if include_expired:
+            return items
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        return [i for i in items if not i.get("expires_at") or i["expires_at"] > now]
+
+    async def import_items(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        min_importance: int = 0,
+        source_label: str = "imported",
+        stage_conflicts: bool = False,
+    ) -> dict[str, int]:
+        """Merge externally-supplied insights into this database.
+
+        By default reuses ``add()`` so the entity_key + FTS dedup logic silently
+        drops near-duplicates. When ``stage_conflicts=True``, incoming items in
+        ``CONFLICT_STAGED_CATEGORIES`` (decision/preference/workflow) that would
+        hit a dedup conflict are routed to the ``insights_pending`` queue
+        instead of being dropped, so a human can review and approve/reject each.
+
+        Adds an ``imported-from:<source_label>`` tag for traceability and rewrites
+        ``source_session`` so origin can be queried later.
+
+        Returns counters: stored, deduped, staged, skipped_low_importance,
+        skipped_expired, skipped_invalid.
+        """
+        await self._ensure_db()
+        assert self._db is not None
+
+        stats = {
+            "stored": 0,
+            "deduped": 0,
+            "staged": 0,
+            "skipped_low_importance": 0,
+            "skipped_expired": 0,
+            "skipped_invalid": 0,
+        }
+        now_iso = datetime.now(UTC).isoformat(timespec="seconds")
+
+        for item in items:
+            if not isinstance(item, dict) or not item.get("content"):
+                stats["skipped_invalid"] += 1
+                continue
+            importance = int(item.get("importance", 5))
+            if importance < min_importance:
+                stats["skipped_low_importance"] += 1
+                continue
+            expires_at = item.get("expires_at") or None
+            if expires_at and expires_at <= now_iso:
+                stats["skipped_expired"] += 1
+                continue
+
+            existing_tags = (item.get("tags") or "").strip()
+            import_tag = f"imported-from:{source_label}"
+            tags = f"{existing_tags},{import_tag}" if existing_tags else import_tag
+
+            original_session = item.get("source_session") or ""
+            new_session = (
+                f"imported:{source_label}:{original_session}"
+                if original_session
+                else f"imported:{source_label}"
+            )
+
+            content = str(item["content"]).strip()
+            category = str(item.get("category", "fact")).strip().lower()
+            if category not in VALID_CATEGORIES:
+                category = "fact"
+            entity_key = item.get("entity_key") or None
+
+            # Stage-conflicts path: for sensitive categories, detect a
+            # conflict BEFORE calling add(), and route to the pending queue.
+            if stage_conflicts and category in CONFLICT_STAGED_CATEGORIES:
+                conflict: dict[str, Any] | None = None
+                reason: str | None = None
+                if entity_key:
+                    existing = await self.find_by_entity_key(entity_key)
+                    if existing and existing.get("content", "").strip() != content:
+                        conflict = existing
+                        reason = "entity_key collision"
+                if conflict is None:
+                    similar = await self.find_similar(content, limit=1)
+                    if similar and similar[0].get("content", "").strip() != content:
+                        conflict = similar[0]
+                        reason = "fts similarity"
+
+                if conflict is not None:
+                    pending_id = await self._stage_pending(
+                        content=content,
+                        category=category,
+                        entity_key=entity_key,
+                        importance=importance,
+                        source_tool=item.get("source_tool") or "memory_import",
+                        source_session=new_session,
+                        tags=tags,
+                        expires_at=expires_at,
+                        source_label=source_label,
+                        conflict_reason=reason or "conflict",
+                        conflicts_with=conflict.get("id"),
+                        conflict_snapshot=conflict,
+                    )
+                    if pending_id:
+                        stats["staged"] += 1
+                        continue
+
+            insight_id = await self.add(
+                content=content,
+                category=category,
+                entity_key=entity_key,
+                importance=importance,
+                source_tool=item.get("source_tool") or "memory_import",
+                source_session=new_session,
+                tags=tags,
+                expires_at=expires_at,
+            )
+            if insight_id:
+                stats["stored"] += 1
+            else:
+                stats["deduped"] += 1
+
+        return stats
+
+    # ── pending-review queue (staged conflicts) ──────────────────────
+
+    async def _stage_pending(
+        self,
+        *,
+        content: str,
+        category: str,
+        entity_key: str | None,
+        importance: int,
+        source_tool: str | None,
+        source_session: str | None,
+        tags: str | None,
+        expires_at: str | None,
+        source_label: str,
+        conflict_reason: str,
+        conflicts_with: str | None,
+        conflict_snapshot: dict[str, Any] | None,
+    ) -> str:
+        """Insert a row into ``insights_pending``. Internal — called by ``import_items``."""
+        assert self._db is not None
+
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        pending_id = "pend_" + uuid.uuid4().hex[:10]
+        snapshot_json = json.dumps(conflict_snapshot, default=str) if conflict_snapshot else None
+
+        await self._db.execute(
+            """INSERT INTO insights_pending
+               (id, content, category, entity_key, importance, source_tool,
+                source_session, created_at, expires_at, tags, source_label,
+                conflict_reason, conflicts_with, conflict_snapshot)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                pending_id, content, category, entity_key, importance,
+                source_tool, source_session, now, expires_at, tags,
+                source_label, conflict_reason, conflicts_with, snapshot_json,
+            ),
+        )
+        await self._db.commit()
+        log.info(
+            "Insight staged for review",
+            id=pending_id,
+            category=category,
+            source=source_label,
+            reason=conflict_reason,
+            conflicts_with=conflicts_with,
+        )
+        return pending_id
+
+    async def list_pending(
+        self,
+        *,
+        category: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List staged conflicts waiting for human review, newest-first."""
+        await self._ensure_db()
+        assert self._db is not None
+
+        if category:
+            rows = await self._db.execute_fetchall(
+                "SELECT * FROM insights_pending WHERE category = ? ORDER BY created_at DESC LIMIT ?",
+                (category.lower().strip(), limit),
+            )
+        else:
+            rows = await self._db.execute_fetchall(
+                "SELECT * FROM insights_pending ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            )
+        return [self._pending_row_to_dict(r) for r in rows]
+
+    async def count_pending(self) -> int:
+        """Total pending-review count."""
+        await self._ensure_db()
+        assert self._db is not None
+
+        rows = await self._db.execute_fetchall("SELECT COUNT(*) FROM insights_pending")
+        return rows[0][0] if rows else 0
+
+    async def get_pending(self, pending_id: str) -> dict[str, Any] | None:
+        """Fetch a single pending insight by id."""
+        await self._ensure_db()
+        assert self._db is not None
+
+        rows = await self._db.execute_fetchall(
+            "SELECT * FROM insights_pending WHERE id = ?", (pending_id,),
+        )
+        return self._pending_row_to_dict(rows[0]) if rows else None
+
+    async def approve_pending(
+        self,
+        pending_id: str,
+        *,
+        supersede: bool = True,
+    ) -> dict[str, Any] | None:
+        """Promote a pending insight into the live ``insights`` table.
+
+        If ``supersede`` is True and the pending row was staged because of an
+        entity_key or FTS conflict, the existing conflicting insight is deleted
+        first so the approved value replaces it. Returns the new live insight
+        dict, or None if the pending id wasn't found.
+        """
+        await self._ensure_db()
+        assert self._db is not None
+
+        pending = await self.get_pending(pending_id)
+        if not pending:
+            return None
+
+        # Delete the conflict victim if asked.
+        if supersede and pending.get("conflicts_with"):
+            try:
+                await self.delete(pending["conflicts_with"])
+            except Exception as exc:
+                log.warning("Failed to delete superseded insight", error=str(exc))
+
+        # Insert into the live table — bypass add() dedup because we've
+        # already made the human-reviewed decision.
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        insight_id = uuid.uuid4().hex[:12]
+        await self._db.execute(
+            """INSERT INTO insights
+               (id, content, category, entity_key, importance, source_tool,
+                source_session, created_at, updated_at, expires_at, tags,
+                source_message_id, supersedes_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                insight_id,
+                pending["content"],
+                pending["category"],
+                pending.get("entity_key"),
+                int(pending.get("importance", 5)),
+                pending.get("source_tool"),
+                pending.get("source_session"),
+                now, now,
+                pending.get("expires_at"),
+                pending.get("tags"),
+                None,
+                pending.get("conflicts_with") if supersede else None,
+            ),
+        )
+        await self._db.execute(
+            "DELETE FROM insights_pending WHERE id = ?", (pending_id,),
+        )
+        await self._db.commit()
+        log.info(
+            "Pending insight approved",
+            pending_id=pending_id,
+            new_id=insight_id,
+            superseded=pending.get("conflicts_with") if supersede else None,
+        )
+        return await self.get(insight_id)
+
+    async def reject_pending(self, pending_id: str) -> bool:
+        """Drop a staged conflict without promoting it. Returns True if found."""
+        await self._ensure_db()
+        assert self._db is not None
+
+        cursor = await self._db.execute(
+            "DELETE FROM insights_pending WHERE id = ?", (pending_id,),
+        )
+        await self._db.commit()
+        found = (cursor.rowcount or 0) > 0
+        if found:
+            log.info("Pending insight rejected", pending_id=pending_id)
+        return found
+
+    async def clear_pending(self) -> int:
+        """Delete every staged conflict. Returns number deleted."""
+        await self._ensure_db()
+        assert self._db is not None
+
+        cursor = await self._db.execute("DELETE FROM insights_pending")
+        await self._db.commit()
+        return cursor.rowcount or 0
+
+    @staticmethod
+    def _pending_row_to_dict(row: Any) -> dict[str, Any]:
+        """Convert an insights_pending row to a plain dict."""
+        cols = [
+            "id", "content", "category", "entity_key", "importance",
+            "source_tool", "source_session", "created_at", "expires_at",
+            "tags", "source_label", "conflict_reason", "conflicts_with",
+            "conflict_snapshot",
+        ]
+        d: dict[str, Any] = {}
+        for i, col in enumerate(cols):
+            if i < len(row):
+                d[col] = row[i]
+        # Parse the snapshot JSON back to a dict for convenient UI rendering.
+        snap = d.get("conflict_snapshot")
+        if isinstance(snap, str) and snap:
+            try:
+                d["conflict_snapshot"] = json.loads(snap)
+            except Exception:
+                d["conflict_snapshot"] = None
+        return d
 
     async def count(self) -> int:
         """Total insight count."""

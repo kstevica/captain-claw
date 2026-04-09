@@ -1548,6 +1548,50 @@ class WebServer:
         from captain_claw.web.rest_reflections import delete_reflection_api
         return await delete_reflection_api(self, request)
 
+    async def _export_memory(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_memory_transfer import export_memory
+        return await export_memory(self, request)
+
+    async def _import_memory(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_memory_transfer import import_memory
+        return await import_memory(self, request)
+
+    async def _list_imported_reflections(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_memory_transfer import list_imported
+        return await list_imported(self, request)
+
+    async def _merge_reflection(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_memory_transfer import merge_reflection
+        return await merge_reflection(self, request)
+
+    async def _list_semantic_imports(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_memory_transfer import list_semantic_imports
+        return await list_semantic_imports(self, request)
+
+    async def _delete_semantic_import(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_memory_transfer import delete_semantic_import
+        return await delete_semantic_import(self, request)
+
+    async def _list_pending_insights(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_insights_pending import list_pending
+        return await list_pending(self, request)
+
+    async def _count_pending_insights(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_insights_pending import count_pending
+        return await count_pending(self, request)
+
+    async def _approve_pending_insight(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_insights_pending import approve_pending
+        return await approve_pending(self, request)
+
+    async def _reject_pending_insight(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_insights_pending import reject_pending
+        return await reject_pending(self, request)
+
+    async def _clear_pending_insights(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_insights_pending import clear_pending
+        return await clear_pending(self, request)
+
     async def _get_usage(self, request: web.Request) -> web.Response:
         """GET /api/usage — query LLM usage records with date filtering."""
         import json as _json
@@ -2128,6 +2172,20 @@ class WebServer:
         app.router.add_post("/api/reflections/generate", self._generate_reflection)
         app.router.add_put("/api/reflections/{timestamp}", self._update_reflection)
         app.router.add_delete("/api/reflections/{timestamp}", self._delete_reflection)
+        # Cross-machine memory transfer (curated layers + optional
+        # text-only semantic chunks; the target re-embeds on import so
+        # different embedding models across agents still work).
+        app.router.add_get("/api/memory/export", self._export_memory)
+        app.router.add_post("/api/memory/import", self._import_memory)
+        app.router.add_get("/api/memory/reflections/imported", self._list_imported_reflections)
+        app.router.add_post("/api/memory/reflections/merge", self._merge_reflection)
+        app.router.add_get("/api/memory/semantic/labels", self._list_semantic_imports)
+        app.router.add_delete("/api/memory/semantic/labels/{label}", self._delete_semantic_import)
+        app.router.add_get("/api/insights/pending", self._list_pending_insights)
+        app.router.add_get("/api/insights/pending/count", self._count_pending_insights)
+        app.router.add_post("/api/insights/pending/{pending_id}/approve", self._approve_pending_insight)
+        app.router.add_post("/api/insights/pending/{pending_id}/reject", self._reject_pending_insight)
+        app.router.add_delete("/api/insights/pending", self._clear_pending_insights)
         app.router.add_get("/api/workflow-browser", self._list_workflow_outputs)
         app.router.add_get("/api/workflow-browser/output/{filename}", self._get_workflow_output)
         app.router.add_get("/api/files", self._list_files)

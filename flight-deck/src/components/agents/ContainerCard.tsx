@@ -1,6 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf } from 'lucide-react'
+import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Download, Upload, Brain, Inbox, ShieldAlert } from 'lucide-react'
+import { useAgentMemoryTransfer } from '../../hooks/useAgentMemoryTransfer'
+import { ReflectionMergeModal } from './ReflectionMergeModal'
+import { PendingInsightsModal } from './PendingInsightsModal'
 import type { ContainerInfo } from '../../services/docker'
 import { getContainerLogs } from '../../services/docker'
 import { useContainerStore } from '../../stores/containerStore'
@@ -112,6 +115,8 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   }, [container.id])
   const [showConfig, setShowConfig] = useState(false)
   const [showDatastore, setShowDatastore] = useState(false)
+  const [showMergeReflection, setShowMergeReflection] = useState(false)
+  const [showPendingInsights, setShowPendingInsights] = useState(false)
   const cognitiveMode = getCognitiveMode(container.id)
   const [modeSaved, setModeSaved] = useState(false)
   const ecoMode = getEcoMode(container.id)
@@ -119,6 +124,13 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
 
   const isRunning = container.status === 'running'
   const agentName = container.agent_name || container.name
+
+  const memory = useAgentMemoryTransfer({
+    host: 'localhost',
+    port: container.web_port ?? 0,
+    authToken: container.web_auth || '',
+    label: agentName,
+  })
 
   const toggleViewMode = () => {
     const next = cycleMode(viewMode)
@@ -188,6 +200,15 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
         doAction('remove', () => removeContainer(container.id))
     },
     onConfig: () => setShowConfig(true),
+    onExportMemory: () => memory.exportMemory(),
+    onExportFullMemory: () => memory.exportMemory({ includeSemantic: true }),
+    onImportMemory: () => memory.promptImport(false),
+    onImportStageMemory: () => memory.promptImport(true),
+    onMergeReflection: () => setShowMergeReflection(true),
+    onReviewPending: () => setShowPendingInsights(true),
+    memoryState: memory.state,
+    memoryBusy: memory.busy,
+    canMemory: Boolean(container.web_port),
   }
 
   // ── Config modal (rendered in all view modes via portal) ──
@@ -198,6 +219,32 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
 
   const datastoreModal = showDatastore && isRunning && container.web_port && createPortal(
     <DatastoreBrowser host="localhost" port={container.web_port} auth={container.web_auth} agentName={agentName} onClose={() => setShowDatastore(false)} />,
+    document.body
+  )
+
+  const mergeReflectionModal = showMergeReflection && isRunning && container.web_port && createPortal(
+    <ReflectionMergeModal
+      target={{
+        host: 'localhost',
+        port: container.web_port,
+        authToken: container.web_auth || '',
+        label: agentName,
+      }}
+      onClose={() => setShowMergeReflection(false)}
+    />,
+    document.body
+  )
+
+  const pendingInsightsModal = showPendingInsights && isRunning && container.web_port && createPortal(
+    <PendingInsightsModal
+      target={{
+        host: 'localhost',
+        port: container.web_port,
+        authToken: container.web_auth || '',
+        label: agentName,
+      }}
+      onClose={() => setShowPendingInsights(false)}
+    />,
     document.body
   )
 
@@ -230,7 +277,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
         <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleViewMode} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Expand card">
           <Maximize2 className="h-3 w-3" />
         </button>
-      </div>{configModal}{datastoreModal}</>
+      </div>{configModal}{datastoreModal}{mergeReflectionModal}{pendingInsightsModal}</>
     )
   }
 
@@ -398,7 +445,14 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
         {isRunning && container.web_port && (
           <EmbeddedChat containerId={container.id} containerName={agentName} host="localhost" port={container.web_port} auth={container.web_auth} />
         )}
-      </div>{configModal}{datastoreModal}</>
+        <input
+          ref={memory.fileInputRef}
+          type="file"
+          accept="application/json,.json"
+          className="hidden"
+          onChange={memory.handleFileSelected}
+        />
+      </div>{configModal}{datastoreModal}{mergeReflectionModal}{pendingInsightsModal}</>
     )
   }
 
@@ -697,7 +751,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
         )}
 
         {/* Actions */}
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 flex-wrap">
           {onBrowseFiles && (
             <button onClick={onBrowseFiles} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
               <FolderOpen className="h-3.5 w-3.5" /> Files
@@ -780,13 +834,23 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
         <EmbeddedChat containerId={container.id} containerName={agentName} host="localhost" port={container.web_port} auth={container.web_auth} />
       )}
 
+      <input
+        ref={memory.fileInputRef}
+        type="file"
+        accept="application/json,.json"
+        className="hidden"
+        onChange={memory.handleFileSelected}
+      />
+
       {configModal}
       {datastoreModal}
+      {mergeReflectionModal}
+      {pendingInsightsModal}
     </div>
   )
 }
 
-function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart, onRebuild, onClone, onRemove, onConfig }: {
+function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart, onRebuild, onClone, onRemove, onConfig, onExportMemory, onExportFullMemory, onImportMemory, onImportStageMemory, onMergeReflection, onReviewPending, memoryState, memoryBusy, canMemory }: {
   isRunning: boolean
   actionLoading: string | null
   onStart: () => void
@@ -796,6 +860,15 @@ function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart,
   onClone: () => void
   onRemove: () => void
   onConfig: () => void
+  onExportMemory: () => void
+  onExportFullMemory: () => void
+  onImportMemory: () => void
+  onImportStageMemory: () => void
+  onMergeReflection: () => void
+  onReviewPending: () => void
+  memoryState: 'idle' | 'exporting' | 'importing'
+  memoryBusy: boolean
+  canMemory: boolean
 }) {
   const [open, setOpen] = useState(false)
   const btnRef = useRef<HTMLButtonElement>(null)
@@ -824,11 +897,17 @@ function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart,
     }
   }, [open, updatePos])
 
-  const items: { icon: typeof Play; label: string; onClick: () => void; loading?: boolean; danger?: boolean; accent?: boolean; show?: boolean }[] = [
+  const items: { icon: typeof Play; label: string; onClick: () => void; loading?: boolean; danger?: boolean; accent?: boolean; show?: boolean; disabled?: boolean }[] = [
     { icon: Play,      label: 'Start',   onClick: onStart,   loading: actionLoading === 'start',   accent: true, show: !isRunning },
     { icon: Square,    label: 'Stop',    onClick: onStop,    loading: actionLoading === 'stop',    show: isRunning },
     { icon: RotateCcw, label: 'Restart', onClick: onRestart, loading: actionLoading === 'restart', show: isRunning },
     { icon: Settings,  label: 'Config',  onClick: onConfig },
+    { icon: Download,  label: memoryState === 'exporting' ? 'Exporting…' : 'Export Memory', onClick: onExportMemory, loading: memoryState === 'exporting', show: isRunning && canMemory, disabled: memoryBusy },
+    { icon: Download,  label: 'Export Memory + Semantic', onClick: onExportFullMemory, show: isRunning && canMemory, disabled: memoryBusy },
+    { icon: Upload,    label: memoryState === 'importing' ? 'Importing…' : 'Import Memory', onClick: onImportMemory, loading: memoryState === 'importing', show: isRunning && canMemory, disabled: memoryBusy },
+    { icon: ShieldAlert, label: 'Import (stage conflicts)', onClick: onImportStageMemory, show: isRunning && canMemory, disabled: memoryBusy },
+    { icon: Brain,     label: 'Merge Reflection…', onClick: onMergeReflection, show: isRunning && canMemory },
+    { icon: Inbox,     label: 'Pending Insights…', onClick: onReviewPending, show: isRunning && canMemory },
     { icon: RefreshCw, label: 'Rebuild', onClick: onRebuild, loading: actionLoading === 'rebuild' },
     { icon: Copy,      label: 'Clone',   onClick: onClone,   loading: actionLoading === 'clone' },
     { icon: Trash2,    label: 'Remove',  onClick: onRemove,  loading: actionLoading === 'remove',  danger: true },
@@ -863,7 +942,7 @@ function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart,
                 {isDivider && <div className="my-1 border-t border-zinc-800" />}
                 <button
                   onClick={() => { setOpen(false); item.onClick() }}
-                  disabled={item.loading}
+                  disabled={item.loading || item.disabled}
                   className={`flex w-full items-center gap-2.5 px-3 py-2 text-[13px] transition-colors disabled:opacity-40 ${
                     item.danger
                       ? 'text-red-400 hover:bg-red-500/10'
