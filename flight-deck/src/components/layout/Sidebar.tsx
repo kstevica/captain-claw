@@ -13,6 +13,8 @@ import {
   Wand2,
   Users,
   Plug,
+  CalendarDays,
+  Sparkles,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { APP_VERSION, BUILD_DATE } from '../../version'
@@ -27,10 +29,12 @@ import type { ViewMode } from '../../types'
 
 const navItems: { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?: boolean }[] = [
   { id: 'desktop', icon: Monitor, label: 'Agent Desktop' },
+  { id: 'today', icon: CalendarDays, label: 'Today' },
   { id: 'council', icon: Users, label: 'Council' },
   { id: 'spawner', icon: Plus, label: 'Spawn Agent' },
   { id: 'forge', icon: Wand2, label: 'Agent Forge' },
   { id: 'workflow', icon: GitBranch, label: 'Workflows' },
+  { id: 'skills', icon: Sparkles, label: 'Skills' },
   { id: 'operations', icon: BarChart3, label: 'Stats' },
   { id: 'connections', icon: Plug, label: 'Connections' },
   { id: 'admin', icon: Shield, label: 'Admin', adminOnly: true },

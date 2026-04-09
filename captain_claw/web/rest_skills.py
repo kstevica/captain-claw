@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import platform
+import posixpath
+import shutil
+import tempfile
+import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -161,6 +165,186 @@ async def install_skill(server: WebServer, request: web.Request) -> web.Response
         "skill_name": result.skill_name,
         "destination": result.destination,
         "repo": result.repo,
+    })
+
+
+# ── Upload-based skill install ────────────────────────────────
+
+_UPLOAD_ALLOWED_EXTS = {".md", ".zip"}
+_UPLOAD_MAX_BYTES = 20 * 1024 * 1024  # 20 MB hard cap for skill uploads
+
+
+def _normalize_zip_member(raw: str) -> str | None:
+    cleaned = str(raw or "").replace("\\", "/")
+    if not cleaned:
+        return None
+    parts = [p for p in cleaned.split("/") if p and p != "."]
+    if not parts:
+        return None
+    normalized = posixpath.normpath("/".join(parts))
+    if not normalized or normalized in {".", ".."}:
+        return None
+    if normalized.startswith("../") or normalized.startswith("/"):
+        raise ValueError(f"Archive member escapes target directory: {raw}")
+    if any(part in {"..", ""} for part in normalized.split("/")):
+        raise ValueError(f"Archive member escapes target directory: {raw}")
+    return normalized
+
+
+def _extract_zip(archive_path: Path, target_dir: Path) -> None:
+    resolved = target_dir.resolve()
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        for member in archive.infolist():
+            rel = _normalize_zip_member(member.filename)
+            if not rel:
+                continue
+            dest = (resolved / rel).resolve()
+            dest.relative_to(resolved)
+            if member.is_dir():
+                dest.mkdir(parents=True, exist_ok=True)
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(member, "r") as src, dest.open("wb") as out:
+                shutil.copyfileobj(src, out)
+
+
+def _find_skill_root_in(extract_dir: Path) -> Path | None:
+    """Locate the directory containing SKILL.md in an extracted archive."""
+    direct = extract_dir / "SKILL.md"
+    if direct.is_file():
+        return extract_dir
+    # Walk shallowly: prefer the shortest path containing SKILL.md.
+    candidates: list[Path] = []
+    for path in extract_dir.rglob("SKILL.md"):
+        if path.is_file():
+            candidates.append(path.parent)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: len(p.parts))
+    return candidates[0]
+
+
+async def install_skill_upload(server: WebServer, request: web.Request) -> web.Response:
+    """POST /api/skills/install-upload — install a skill from an uploaded .md or .zip."""
+    from captain_claw.config import get_config
+    from captain_claw.skills import (
+        SOURCE_MANAGED,
+        _load_skill_entry,
+        _sanitize_skill_install_dir_name,
+    )
+
+    try:
+        reader = await request.multipart()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Multipart body required"}, status=400)
+    if reader is None:
+        return web.json_response({"ok": False, "error": "Multipart body required"}, status=400)
+
+    file_field = None
+    while True:
+        field = await reader.next()
+        if field is None:
+            break
+        if field.name == "file":
+            file_field = field
+            break
+
+    if file_field is None:
+        return web.json_response({"ok": False, "error": "No file field in upload"}, status=400)
+
+    original_name = file_field.filename or "skill"
+    ext = Path(original_name).suffix.lower()
+    if ext not in _UPLOAD_ALLOWED_EXTS:
+        return web.json_response(
+            {"ok": False, "error": f"Unsupported file type '{ext}'. Allowed: .md, .zip"},
+            status=400,
+        )
+
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file_field.read_chunk(8192)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > _UPLOAD_MAX_BYTES:
+            return web.json_response({"ok": False, "error": "File too large (max 20 MB)"}, status=413)
+        chunks.append(chunk)
+    file_bytes = b"".join(chunks)
+    if not file_bytes:
+        return web.json_response({"ok": False, "error": "Empty file"}, status=400)
+
+    cfg = get_config()
+    managed_dir = Path(cfg.skills.managed_dir).expanduser().resolve()
+    managed_dir.mkdir(parents=True, exist_ok=True)
+
+    base_name = Path(original_name).stem
+    install_name = _sanitize_skill_install_dir_name(base_name)
+    if not install_name:
+        return web.json_response({"ok": False, "error": "Invalid skill name"}, status=400)
+
+    destination = (managed_dir / install_name).resolve()
+    try:
+        destination.relative_to(managed_dir)
+    except Exception:
+        return web.json_response({"ok": False, "error": "Resolved destination is outside managed dir"}, status=400)
+    if destination.exists():
+        return web.json_response(
+            {"ok": False, "error": f"Skill folder already exists: {destination.name}"},
+            status=409,
+        )
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="captain-claw-skill-upload-") as temp_dir:
+            staging = Path(temp_dir).resolve()
+            if ext == ".md":
+                # Single file: write as SKILL.md inside a synthetic folder.
+                skill_root = staging / install_name
+                skill_root.mkdir(parents=True, exist_ok=True)
+                (skill_root / "SKILL.md").write_bytes(file_bytes)
+            else:
+                # Zip file: write to disk, extract, then locate SKILL.md.
+                archive_path = staging / "upload.zip"
+                archive_path.write_bytes(file_bytes)
+                extract_dir = staging / "extracted"
+                extract_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    _extract_zip(archive_path, extract_dir)
+                except zipfile.BadZipFile:
+                    return web.json_response({"ok": False, "error": "Invalid zip file"}, status=400)
+                except ValueError as exc:
+                    return web.json_response({"ok": False, "error": str(exc)}, status=400)
+                skill_root = _find_skill_root_in(extract_dir)
+                if skill_root is None:
+                    return web.json_response(
+                        {"ok": False, "error": "Archive does not contain SKILL.md"},
+                        status=400,
+                    )
+
+            # Copy to managed dir.
+            shutil.copytree(skill_root, destination)
+            try:
+                entry = _load_skill_entry(destination / "SKILL.md", SOURCE_MANAGED, cfg)
+            except Exception:
+                entry = None
+            if entry is None:
+                shutil.rmtree(destination, ignore_errors=True)
+                return web.json_response(
+                    {"ok": False, "error": "Installed SKILL.md could not be parsed"},
+                    status=422,
+                )
+    except Exception as exc:
+        log.error("Skill upload install failed", filename=original_name, error=str(exc))
+        shutil.rmtree(destination, ignore_errors=True)
+        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    log.info("Skill installed from upload", filename=original_name, destination=str(destination))
+    return web.json_response({
+        "ok": True,
+        "skill_name": entry.name,
+        "destination": str(destination),
+        "source": "upload",
+        "kind": ext.lstrip("."),
     })
 
 

@@ -2006,6 +2006,10 @@ class WebServer:
         from captain_claw.web.rest_skills import install_skill
         return await install_skill(self, request)
 
+    async def _install_skill_upload(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_skills import install_skill_upload
+        return await install_skill_upload(self, request)
+
     async def _toggle_skill(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_skills import toggle_skill
         return await toggle_skill(self, request)
@@ -2078,6 +2082,7 @@ class WebServer:
         app.router.add_put("/api/settings", self._put_settings)
         app.router.add_get("/api/skills", self._list_skills)
         app.router.add_post("/api/skills/install", self._install_skill)
+        app.router.add_post("/api/skills/install-upload", self._install_skill_upload)
         app.router.add_post("/api/skills/toggle", self._toggle_skill)
         app.router.add_get("/api/read-folders", self._list_read_folders)
         app.router.add_post("/api/read-folders", self._add_read_folder)

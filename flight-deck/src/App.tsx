@@ -16,6 +16,8 @@ import { ForgePage } from './pages/ForgePage'
 import { LoginPage } from './pages/LoginPage'
 import { AdminPage } from './pages/AdminPage'
 import { CouncilPage } from './pages/CouncilPage'
+import { TodayPage } from './pages/TodayPage'
+import { SkillsPage } from './pages/SkillsPage'
 import ConnectionsPage from './pages/ConnectionsPage'
 import { useUIStore } from './stores/uiStore'
 import { useAgentStore } from './stores/agentStore'
@@ -281,8 +283,10 @@ function AppContent() {
   const mainContent = (
     <>
       {view === 'desktop' && <DesktopPage />}
+      {view === 'today' && <TodayPage />}
       {view === 'operations' && <OperationsPage />}
       {view === 'workflow' && <WorkflowPage />}
+      {view === 'skills' && <SkillsPage />}
       {view === 'spawner' && <SpawnerPage />}
       {view === 'forge' && <ForgePage />}
       {view === 'admin' && <AdminPage />}

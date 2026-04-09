@@ -2945,6 +2945,163 @@ async def proxy_reject_pending_insight(
         raise HTTPException(502, "Cannot connect to agent")
 
 
+# ── Today aggregator proxy endpoints (reflections / cron / intuitions / skills) ──
+
+
+async def _proxy_get_json(host: str, port: int, path: str, token: str = "", timeout: float = 15.0):
+    """Helper: GET an agent endpoint and return parsed JSON or raise HTTPException."""
+    import httpx
+    auth = token or _resolve_agent_auth(port)
+    sep = "&" if "?" in path else "?"
+    url = f"http://{host}:{port}{path}"
+    if auth:
+        url = f"{url}{sep}token={auth}"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.get("/fd/agent-reflections/{host}/{port}")
+async def proxy_list_reflections(
+    host: str, port: int,
+    token: str = "",
+    limit: int = 20,
+    user: dict | None = _required_user_dep,
+):
+    """List recent reflections on a CC agent."""
+    return await _proxy_get_json(host, port, f"/api/reflections?limit={int(limit)}", token=token)
+
+
+@app.get("/fd/agent-reflections/{host}/{port}/latest")
+async def proxy_latest_reflection(
+    host: str, port: int,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Get the latest active reflection from a CC agent."""
+    return await _proxy_get_json(host, port, "/api/reflections/latest", token=token)
+
+
+@app.get("/fd/agent-cron/{host}/{port}")
+async def proxy_list_cron(
+    host: str, port: int,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """List cron jobs on a CC agent."""
+    return await _proxy_get_json(host, port, "/api/cron/jobs", token=token)
+
+
+@app.get("/fd/agent-intuitions/{host}/{port}")
+async def proxy_list_intuitions(
+    host: str, port: int,
+    token: str = "",
+    limit: int = 20,
+    user: dict | None = _required_user_dep,
+):
+    """List recent intuitions (nervous system) on a CC agent."""
+    return await _proxy_get_json(
+        host, port, f"/api/nervous-system?limit={int(limit)}", token=token
+    )
+
+
+# ── Skills proxy endpoints ──
+
+
+@app.get("/fd/agent-skills/{host}/{port}")
+async def proxy_list_skills(
+    host: str, port: int,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """List installed skills on a CC agent."""
+    return await _proxy_get_json(host, port, "/api/skills", token=token, timeout=30.0)
+
+
+@app.post("/fd/agent-skills/{host}/{port}/install")
+async def proxy_install_skill(
+    host: str, port: int,
+    request: Request,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Install a skill on a CC agent from a GitHub URL."""
+    import httpx
+
+    auth = token or _resolve_agent_auth(port)
+    qs = f"?token={auth}" if auth else ""
+    url = f"http://{host}:{port}/api/skills/install{qs}"
+    body = await request.body()
+    try:
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            resp = await client.post(
+                url, content=body, headers={"Content-Type": "application/json"}
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.post("/fd/agent-skills/{host}/{port}/install-upload")
+async def proxy_install_skill_upload(
+    host: str, port: int,
+    request: Request,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Install a skill on a CC agent from an uploaded .md or .zip file."""
+    import httpx
+
+    auth = token or _resolve_agent_auth(port)
+    qs = f"?token={auth}" if auth else ""
+    url = f"http://{host}:{port}/api/skills/install-upload{qs}"
+    body = await request.body()
+    content_type = request.headers.get("content-type", "application/octet-stream")
+    try:
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            resp = await client.post(
+                url, content=body, headers={"Content-Type": content_type}
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.post("/fd/agent-skills/{host}/{port}/toggle")
+async def proxy_toggle_skill(
+    host: str, port: int,
+    request: Request,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Enable or disable a skill on a CC agent."""
+    import httpx
+
+    auth = token or _resolve_agent_auth(port)
+    qs = f"?token={auth}" if auth else ""
+    url = f"http://{host}:{port}/api/skills/toggle{qs}"
+    body = await request.body()
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                url, content=body, headers={"Content-Type": "application/json"}
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
 # ── Process agent endpoints ──
 
 
