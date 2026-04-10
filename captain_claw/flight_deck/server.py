@@ -3102,6 +3102,195 @@ async def proxy_toggle_skill(
         raise HTTPException(502, "Cannot connect to agent")
 
 
+# ── Captain Claw Game proxy endpoints ──
+
+
+async def _proxy_post_json(
+    host: str, port: int, path: str, token: str, body: bytes, timeout: float = 30.0,
+):
+    """Helper: POST a JSON body to an agent endpoint and return parsed JSON."""
+    import httpx
+    auth = token or _resolve_agent_auth(port)
+    sep = "&" if "?" in path else "?"
+    url = f"http://{host}:{port}{path}"
+    if auth:
+        url = f"{url}{sep}token={auth}"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(
+                url, content=body or b"{}",
+                headers={"Content-Type": "application/json"},
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+async def _proxy_delete_json(
+    host: str, port: int, path: str, token: str, timeout: float = 15.0,
+):
+    """Helper: DELETE an agent endpoint and return parsed JSON."""
+    import httpx
+    auth = token or _resolve_agent_auth(port)
+    sep = "&" if "?" in path else "?"
+    url = f"http://{host}:{port}{path}"
+    if auth:
+        url = f"{url}{sep}token={auth}"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.delete(url)
+            if resp.status_code == 200:
+                return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.get("/fd/agent-games/{host}/{port}/worlds")
+async def proxy_games_worlds(
+    host: str, port: int,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """List available demo worlds on a CC agent."""
+    return await _proxy_get_json(host, port, "/api/games/worlds", token=token)
+
+
+@app.get("/fd/agent-games/{host}/{port}")
+async def proxy_games_list(
+    host: str, port: int,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """List active games on a CC agent."""
+    return await _proxy_get_json(host, port, "/api/games", token=token)
+
+
+@app.post("/fd/agent-games/{host}/{port}")
+async def proxy_games_create(
+    host: str, port: int,
+    request: Request,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Create a new game on a CC agent."""
+    return await _proxy_post_json(host, port, "/api/games", token, await request.body())
+
+
+@app.post("/fd/agent-games/{host}/{port}/generate")
+async def proxy_games_generate(
+    host: str, port: int,
+    request: Request,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Generate a new game from a WorldSpec."""
+    return await _proxy_post_json(
+        host, port, "/api/games/generate", token, await request.body(),
+        timeout=180.0,  # pipeline mode makes multiple LLM calls
+    )
+
+
+@app.get("/fd/agent-games/{host}/{port}/{game_id}")
+async def proxy_games_get(
+    host: str, port: int, game_id: str,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Get full state of a game."""
+    return await _proxy_get_json(host, port, f"/api/games/{game_id}", token=token)
+
+
+@app.post("/fd/agent-games/{host}/{port}/{game_id}/restart")
+async def proxy_games_restart(
+    host: str, port: int, game_id: str,
+    request: Request,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Reset a game back to tick 0."""
+    return await _proxy_post_json(
+        host, port, f"/api/games/{game_id}/restart", token, await request.body(),
+    )
+
+
+@app.post("/fd/agent-games/{host}/{port}/{game_id}/seats")
+async def proxy_games_reassign_seats(
+    host: str, port: int, game_id: str,
+    request: Request,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Reassign seat types for a game (only at tick 0)."""
+    return await _proxy_post_json(
+        host, port, f"/api/games/{game_id}/seats", token, await request.body(),
+    )
+
+
+@app.post("/fd/agent-games/{host}/{port}/{game_id}/tick")
+async def proxy_games_tick(
+    host: str, port: int, game_id: str,
+    request: Request,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Advance one tick."""
+    return await _proxy_post_json(
+        host, port, f"/api/games/{game_id}/tick", token, await request.body(),
+    )
+
+
+@app.post("/fd/agent-games/{host}/{port}/{game_id}/intent")
+async def proxy_games_intent(
+    host: str, port: int, game_id: str,
+    request: Request,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Queue a human intent for the next tick."""
+    return await _proxy_post_json(
+        host, port, f"/api/games/{game_id}/intent", token, await request.body(),
+    )
+
+
+@app.post("/fd/agent-games/{host}/{port}/{game_id}/natural")
+async def proxy_games_natural(
+    host: str, port: int, game_id: str,
+    request: Request,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Parse natural language input and queue as intent."""
+    return await _proxy_post_json(
+        host, port, f"/api/games/{game_id}/natural", token, await request.body(),
+    )
+
+
+@app.post("/fd/agent-games/{host}/{port}/{game_id}/replay")
+async def proxy_games_replay(
+    host: str, port: int, game_id: str,
+    request: Request,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Replay a game from its intent log."""
+    return await _proxy_post_json(
+        host, port, f"/api/games/{game_id}/replay", token, await request.body(),
+    )
+
+
+@app.delete("/fd/agent-games/{host}/{port}/{game_id}")
+async def proxy_games_delete(
+    host: str, port: int, game_id: str,
+    token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Drop a game session from the agent."""
+    return await _proxy_delete_json(host, port, f"/api/games/{game_id}", token=token)
+
+
 # ── Process agent endpoints ──
 
 

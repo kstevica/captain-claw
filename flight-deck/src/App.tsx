@@ -18,6 +18,7 @@ import { AdminPage } from './pages/AdminPage'
 import { CouncilPage } from './pages/CouncilPage'
 import { TodayPage } from './pages/TodayPage'
 import { SkillsPage } from './pages/SkillsPage'
+import { GamesPage } from './pages/GamesPage'
 import ConnectionsPage from './pages/ConnectionsPage'
 import { useUIStore } from './stores/uiStore'
 import { useAgentStore } from './stores/agentStore'
@@ -287,6 +288,7 @@ function AppContent() {
       {view === 'operations' && <OperationsPage />}
       {view === 'workflow' && <WorkflowPage />}
       {view === 'skills' && <SkillsPage />}
+      {view === 'games' && <GamesPage />}
       {view === 'spawner' && <SpawnerPage />}
       {view === 'forge' && <ForgePage />}
       {view === 'admin' && <AdminPage />}

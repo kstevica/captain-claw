@@ -262,6 +262,10 @@ class WebServer:
         self.agent.ws_broadcast = self._broadcast
         await self.agent.initialize()
 
+        # Give the game registry access to the LLM provider for AgentSeat.
+        from captain_claw.games.registry import get_registry
+        get_registry().set_provider(self.agent.provider)
+
         # Initialize orchestrator (shares provider and callbacks with main agent).
         cfg = get_config()
         self._orchestrator = SessionOrchestrator(
@@ -2058,6 +2062,60 @@ class WebServer:
         from captain_claw.web.rest_skills import get_folder_trees
         return await get_folder_trees(self, request)
 
+    # ── Captain Claw Game REST ─────────────────────────────────────
+
+    async def _games_list_worlds(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_games import list_worlds
+        return await list_worlds(self, request)
+
+    async def _games_list(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_games import list_games
+        return await list_games(self, request)
+
+    async def _games_create(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_games import create_game
+        return await create_game(self, request)
+
+    async def _games_get(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_games import get_game
+        return await get_game(self, request)
+
+    async def _games_tick(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_games import tick_game
+        return await tick_game(self, request)
+
+    async def _games_intent(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_games import submit_intent
+        return await submit_intent(self, request)
+
+    async def _games_natural(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_games import submit_natural
+        return await submit_natural(self, request)
+
+    async def _games_replay(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_games import replay_game
+        return await replay_game(self, request)
+
+    async def _games_restart(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_games import restart_game
+        return await restart_game(self, request)
+
+    async def _games_delete(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_games import delete_game
+        return await delete_game(self, request)
+
+    async def _games_generate(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_games import generate_game
+        return await generate_game(self, request)
+
+    async def _games_reassign_seats(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_games import reassign_seats
+        return await reassign_seats(self, request)
+
+    async def _games_cognitive_modes(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_games import list_cognitive_modes
+        return await list_cognitive_modes(self, request)
+
     # ── App setup ────────────────────────────────────────────────────
 
     def create_app(self) -> web.Application:
@@ -2095,6 +2153,20 @@ class WebServer:
         app.router.add_delete("/api/read-folders/gdrive", self._remove_gdrive_folder)
         app.router.add_get("/api/read-folders/gdrive/browse", self._browse_gdrive)
         app.router.add_get("/api/folder-trees", self._get_folder_trees)
+        # ── Captain Claw Game ──
+        app.router.add_get("/api/games/worlds", self._games_list_worlds)
+        app.router.add_get("/api/games/cognitive-modes", self._games_cognitive_modes)
+        app.router.add_post("/api/games/generate", self._games_generate)
+        app.router.add_get("/api/games", self._games_list)
+        app.router.add_post("/api/games", self._games_create)
+        app.router.add_get("/api/games/{game_id}", self._games_get)
+        app.router.add_post("/api/games/{game_id}/seats", self._games_reassign_seats)
+        app.router.add_post("/api/games/{game_id}/tick", self._games_tick)
+        app.router.add_post("/api/games/{game_id}/natural", self._games_natural)
+        app.router.add_post("/api/games/{game_id}/intent", self._games_intent)
+        app.router.add_post("/api/games/{game_id}/restart", self._games_restart)
+        app.router.add_post("/api/games/{game_id}/replay", self._games_replay)
+        app.router.add_delete("/api/games/{game_id}", self._games_delete)
         app.router.add_get("/api/sessions", self.list_sessions_api)
         app.router.add_post("/api/sessions/bulk-delete", self._bulk_delete_sessions)
         app.router.add_get("/api/sessions/{id}", self._get_session_detail)
