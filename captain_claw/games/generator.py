@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from captain_claw.games.solvability import SolvabilityReport, check_solvable
-from captain_claw.games.spec import SIZE_HINTS, WorldSpec
+from captain_claw.games.spec import BATCH_ENTITIES, BATCH_ROOMS, SIZE_HINTS, WorldSpec
 from captain_claw.games.world import Character, Entity, Interaction, Room, World
 from captain_claw.games.world_io import save_world
 from captain_claw.llm import LLMProvider, Message
@@ -323,13 +323,22 @@ Return JSON: {{
 """
 
 
-def _stage_rooms(spec: WorldSpec, premise: dict[str, Any]) -> str:
+def _stage_rooms(spec: WorldSpec, premise: dict[str, Any], *, count: int | None = None, existing_rooms: list[dict[str, Any]] | None = None, batch_label: str = "") -> str:
     hints = SIZE_HINTS[spec.size]
-    return f"""\
-STAGE 2 — ROOMS.
-Premise: {json.dumps(premise)}
-Build a connected room graph with about {hints['rooms']} rooms. Every room reachable from every other room.
+    target = count or hints['rooms']
+    context = ""
+    if existing_rooms:
+        context = f"""
+You already generated these rooms (connect new rooms to them via exits):
+{json.dumps([{{'id': r['id'], 'name': r['name'], 'exits': r.get('exits', {{}})}} for r in existing_rooms])}
 
+DO NOT re-generate these rooms. Only generate NEW rooms that connect to them.
+"""
+    return f"""\
+STAGE 2 — ROOMS{batch_label}.
+Premise: {json.dumps(premise)}
+Generate exactly {target} NEW rooms for this world. Every room reachable from every other room.
+{context}
 Return JSON: {{
   "rooms": [
     {{
@@ -372,13 +381,23 @@ Return JSON: {{
 """
 
 
-def _stage_inventory(spec: WorldSpec, rooms: dict[str, Any]) -> str:
+def _stage_inventory(spec: WorldSpec, rooms: dict[str, Any], *, count: int | None = None, existing_entities: list[dict[str, Any]] | None = None, batch_label: str = "") -> str:
     hints = SIZE_HINTS[spec.size]
-    return f"""\
-STAGE 4 — INVENTORY.
-Rooms: {[r['id'] for r in rooms['rooms']]}
-Distribute about {hints['entities']} items across the rooms. Items can be evidence, tools, decoration, or props.
+    target = count or hints['entities']
+    room_ids = [r['id'] for r in rooms['rooms']]
+    context = ""
+    if existing_entities:
+        context = f"""
+You already generated these items (DO NOT re-generate them):
+{json.dumps([{{'id': e['id'], 'name': e['name'], 'room': e.get('room', '')}} for e in existing_entities])}
 
+Generate only NEW items with unique ids.
+"""
+    return f"""\
+STAGE 4 — INVENTORY{batch_label}.
+Rooms: {room_ids}
+Generate exactly {target} NEW items distributed across the rooms. Items can be evidence, tools, decoration, or props.
+{context}
 Return JSON: {{
   "entities": [
     {{
@@ -491,13 +510,113 @@ async def _stage_call(
     transcript: GenerationTranscript,
     stage: str,
     user: str,
+    *,
+    max_retries: int = 1,
+    max_tokens: int = 4096,
 ) -> dict[str, Any]:
-    raw = await _call(provider, load_game_instruction("generator_pipeline_system.md"), user, temperature=0.7, max_tokens=4096)
+    system = load_game_instruction("generator_pipeline_system.md")
+    raw = await _call(provider, system, user, temperature=0.7, max_tokens=max_tokens)
     blob = _extract_json(raw)
     transcript.record(stage, user, raw, blob, blob is not None)
-    if blob is None:
-        raise ValueError(f"pipeline stage '{stage}' returned no parseable JSON")
-    return blob
+    if blob is not None:
+        return blob
+
+    # Retry: feed the broken response back with a repair prompt
+    for attempt in range(max_retries):
+        log.warning(
+            "Pipeline stage returned unparseable JSON, retrying",
+            stage=stage, attempt=attempt + 1,
+            raw_preview=raw[:300] if raw else "(empty)",
+        )
+        repair_user = (
+            f"{user}\n\n"
+            f"YOUR PREVIOUS RESPONSE WAS NOT VALID JSON. Here is what you returned:\n"
+            f"---\n{raw[:1000]}\n---\n\n"
+            f"Please return ONLY a valid JSON object. No prose, no markdown fences, no commentary."
+        )
+        raw = await _call(provider, system, repair_user, temperature=0.3, max_tokens=max_tokens)
+        blob = _extract_json(raw)
+        transcript.record(f"{stage}_repair_{attempt + 1}", repair_user, raw, blob, blob is not None)
+        if blob is not None:
+            return blob
+
+    raise ValueError(f"pipeline stage '{stage}' returned no parseable JSON after {max_retries + 1} attempts")
+
+
+async def _batched_rooms(
+    provider: LLMProvider,
+    transcript: GenerationTranscript,
+    spec: WorldSpec,
+    premise: dict[str, Any],
+) -> dict[str, Any]:
+    """Generate rooms, batching into multiple calls if the target exceeds BATCH_ROOMS."""
+    hints = SIZE_HINTS[spec.size]
+    total = hints["rooms"]
+    if total <= BATCH_ROOMS:
+        return await _stage_call(provider, transcript, "rooms", _stage_rooms(spec, premise), max_tokens=8192)
+
+    all_rooms: list[dict[str, Any]] = []
+    remaining = total
+    batch_num = 0
+    while remaining > 0:
+        batch_num += 1
+        count = min(remaining, BATCH_ROOMS)
+        label = f" (batch {batch_num}, {count} rooms)"
+        prompt = _stage_rooms(
+            spec, premise,
+            count=count,
+            existing_rooms=all_rooms if all_rooms else None,
+            batch_label=label,
+        )
+        result = await _stage_call(
+            provider, transcript, f"rooms_batch_{batch_num}", prompt, max_tokens=8192,
+        )
+        new_rooms = result.get("rooms", [])
+        all_rooms.extend(new_rooms)
+        remaining -= len(new_rooms)
+        log.info("Room batch complete", batch=batch_num, generated=len(new_rooms), total=len(all_rooms), target=total)
+        if len(new_rooms) == 0:
+            log.warning("Room batch returned 0 rooms, stopping", batch=batch_num)
+            break
+    return {"rooms": all_rooms}
+
+
+async def _batched_inventory(
+    provider: LLMProvider,
+    transcript: GenerationTranscript,
+    spec: WorldSpec,
+    rooms: dict[str, Any],
+) -> dict[str, Any]:
+    """Generate entities, batching into multiple calls if the target exceeds BATCH_ENTITIES."""
+    hints = SIZE_HINTS[spec.size]
+    total = hints["entities"]
+    if total <= BATCH_ENTITIES:
+        return await _stage_call(provider, transcript, "inventory", _stage_inventory(spec, rooms), max_tokens=8192)
+
+    all_entities: list[dict[str, Any]] = []
+    remaining = total
+    batch_num = 0
+    while remaining > 0:
+        batch_num += 1
+        count = min(remaining, BATCH_ENTITIES)
+        label = f" (batch {batch_num}, {count} items)"
+        prompt = _stage_inventory(
+            spec, rooms,
+            count=count,
+            existing_entities=all_entities if all_entities else None,
+            batch_label=label,
+        )
+        result = await _stage_call(
+            provider, transcript, f"inventory_batch_{batch_num}", prompt, max_tokens=8192,
+        )
+        new_entities = result.get("entities", [])
+        all_entities.extend(new_entities)
+        remaining -= len(new_entities)
+        log.info("Entity batch complete", batch=batch_num, generated=len(new_entities), total=len(all_entities), target=total)
+        if len(new_entities) == 0:
+            log.warning("Entity batch returned 0 entities, stopping", batch=batch_num)
+            break
+    return {"entities": all_entities}
 
 
 async def generate_pipeline(
@@ -509,13 +628,11 @@ async def generate_pipeline(
     transcript = GenerationTranscript()
 
     premise = await _stage_call(provider, transcript, "premise", _stage_premise(spec))
-    rooms = await _stage_call(provider, transcript, "rooms", _stage_rooms(spec, premise))
+    rooms = await _batched_rooms(provider, transcript, spec, premise)
     characters = await _stage_call(
         provider, transcript, "cast", _stage_cast(spec, premise, rooms)
     )
-    inventory = await _stage_call(
-        provider, transcript, "inventory", _stage_inventory(spec, rooms)
-    )
+    inventory = await _batched_inventory(provider, transcript, spec, rooms)
     # Clue web is recorded in the transcript but not consumed by the engine yet (M2 territory)
     try:
         await _stage_call(provider, transcript, "clues", _stage_clues(premise, inventory))
@@ -525,16 +642,18 @@ async def generate_pipeline(
         await _stage_call(provider, transcript, "sheets", _stage_sheets(spec, characters, premise))
     except Exception as exc:  # noqa: BLE001
         log.warning("Sheets stage failed (non-fatal)", error=str(exc))
-    # ASCII refinement is also non-fatal
-    try:
-        ascii_refined = await _stage_call(provider, transcript, "ascii", _stage_ascii(rooms))
-        # Patch tiles back into rooms
-        refined_by_id = {r["id"]: r.get("ascii_tile") for r in ascii_refined.get("rooms", [])}
-        for r in rooms["rooms"]:
-            if r["id"] in refined_by_id and refined_by_id[r["id"]]:
-                r["ascii_tile"] = refined_by_id[r["id"]]
-    except Exception as exc:  # noqa: BLE001
-        log.warning("ASCII stage failed (non-fatal)", error=str(exc))
+    # ASCII refinement — skip for very large worlds (too many rooms)
+    if SIZE_HINTS[spec.size]["rooms"] <= BATCH_ROOMS:
+        try:
+            ascii_refined = await _stage_call(provider, transcript, "ascii", _stage_ascii(rooms))
+            refined_by_id = {r["id"]: r.get("ascii_tile") for r in ascii_refined.get("rooms", [])}
+            for r in rooms["rooms"]:
+                if r["id"] in refined_by_id and refined_by_id[r["id"]]:
+                    r["ascii_tile"] = refined_by_id[r["id"]]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ASCII stage failed (non-fatal)", error=str(exc))
+    else:
+        log.info("Skipping ASCII refinement for large world", rooms=len(rooms.get("rooms", [])))
 
     win = await _stage_call(provider, transcript, "win", _stage_winconditon(spec, rooms))
     blob = _assemble_pipeline(spec, premise, rooms, characters, inventory, win)
@@ -591,6 +710,10 @@ async def generate_world(
     err = spec.validate()
     if err:
         raise ValueError(err)
+    # Force pipeline mode for large worlds — fast mode can't fit them in one call
+    if spec.size in ("xl", "huge", "epic") and mode == "fast":
+        log.info("Forcing pipeline mode for large world", size=spec.size)
+        mode = "pipeline"
     if mode == "fast":
         world, transcript = await generate_fast(provider, spec)
     elif mode == "pipeline":

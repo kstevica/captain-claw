@@ -150,6 +150,18 @@ model:
     reasoning_level: ''
     temperature: 0
     base_url: ''
+  - id: vllm-nemotron
+    provider: openai
+    model: mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit
+    base_url: http://localhost:8000/v1
+    temperature: 0.7
+    max_tokens: 4096
+    tokens_per_minute: 0
+    max_context: 0
+    max_output_tokens: 0
+    reasoning_level: ''
+    description: local vLLM Nemotron 30B model
+    model_type: llm
 context:
   max_tokens: 160000
   compaction_threshold: 0.8

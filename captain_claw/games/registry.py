@@ -30,7 +30,13 @@ from captain_claw.logging import get_logger
 log = get_logger(__name__)
 
 
-GAMES_DIR = Path.home() / ".captain-claw" / "games"
+GAMES_DIR: Path = Path.home() / ".captain-claw" / "games"
+
+
+def set_games_dir(path: Path) -> None:
+    """Override the default games directory (used by Flight Deck)."""
+    global GAMES_DIR
+    GAMES_DIR = path
 
 
 def _parse_seat_kind(raw: str) -> tuple[str, str]:
@@ -45,11 +51,25 @@ def _parse_seat_kind(raw: str) -> tuple[str, str]:
     return raw.strip(), "neutra" if raw.strip() == "agent" else ""
 
 
-def _build_seat(kind: str, provider: Any = None, cognitive_mode: str = "") -> Seat:
+def _build_seat(
+    kind: str,
+    provider: Any = None,
+    cognitive_mode: str = "",
+    remote_target: dict[str, Any] | None = None,
+) -> Seat:
     if kind == "human":
         return HumanSeat()
     if kind == "agent":
-        return AgentSeat(provider=provider, cognitive_mode=cognitive_mode or "neutra")
+        seat_provider = provider
+        if remote_target:
+            from captain_claw.games.remote_provider import RemoteLLMProvider
+            seat_provider = RemoteLLMProvider(
+                host=str(remote_target.get("host", "localhost")),
+                port=int(remote_target.get("port", 0)),
+                auth=str(remote_target.get("auth", "")),
+                name=str(remote_target.get("name", "")),
+            )
+        return AgentSeat(provider=seat_provider, cognitive_mode=cognitive_mode or "neutra")
     return ScriptedSeat()
 
 
@@ -124,15 +144,53 @@ class GameSession:
                         continue
         return out
 
+    def ensure_providers(self) -> None:
+        """Refresh agent seat providers from persisted meta.json agent_targets.
+
+        Called before each tick so that provider wiring always reflects the
+        on-disk config — even after an FD restart or a mid-session change.
+        """
+        meta_path = self.dir / "meta.json"
+        if not meta_path.exists():
+            return
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        agent_targets: dict[str, dict[str, Any]] = meta.get("agent_targets", {})
+        if not agent_targets:
+            return
+
+        from captain_claw.games.remote_provider import RemoteLLMProvider
+        from captain_claw.games.seats import AgentSeat as _AgentSeat
+
+        for cid, target in agent_targets.items():
+            seat = self.seats.get(cid)
+            if not isinstance(seat, _AgentSeat):
+                continue
+            host = str(target.get("host", "localhost"))
+            port = int(target.get("port", 0))
+            auth = str(target.get("auth", ""))
+            name = str(target.get("name", ""))
+            # Skip if already wired to the right target
+            if isinstance(seat.provider, RemoteLLMProvider):
+                if seat.provider.host == host and seat.provider.port == port:
+                    continue
+            seat.provider = RemoteLLMProvider(host=host, port=port, auth=auth, name=name)
+
     def reassign_seats(
-        self, seat_assignments: dict[str, str], provider: Any = None
+        self,
+        seat_assignments: dict[str, str],
+        provider: Any = None,
+        agent_targets: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[bool, str | None]:
         """Change seat assignments. Only allowed at tick 0 (before any ticks).
+
+        ``agent_targets`` maps ``char_id -> {host, port, auth}`` for characters
+        whose agent seat should use a remote LLM provider instead of the local one.
 
         Also persists the updated seat_kinds to meta.json.
         """
         if self.state.tick > 0:
             return False, "cannot reassign seats after the game has started"
+        agent_targets = agent_targets or {}
         seat_kinds: dict[str, str] = {}
         new_seats = SeatTable()
         for cid in self.world.characters:
@@ -141,13 +199,18 @@ class GameSession:
             if kind not in ("scripted", "human", "agent"):
                 return False, f"invalid seat kind '{kind}' for {cid}"
             seat_kinds[cid] = f"{kind}:{mode}" if mode else kind
-            new_seats.assign(cid, _build_seat(kind, provider, mode))
+            remote = agent_targets.get(cid)
+            new_seats.assign(cid, _build_seat(kind, provider, mode, remote_target=remote))
         self.seats = new_seats
         # Update meta.json on disk
         meta_path = self.dir / "meta.json"
         if meta_path.exists():
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             meta["seat_kinds"] = seat_kinds
+            if agent_targets:
+                meta["agent_targets"] = agent_targets
+            else:
+                meta.pop("agent_targets", None)
             meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
         return True, None
 
@@ -274,11 +337,13 @@ class GameRegistry:
             log.warning("Unknown game kind on disk", kind=kind, game_dir=str(game_dir))
             return
 
+        agent_targets = dict(meta.get("agent_targets", {}))
         seats = SeatTable()
         for cid in world.characters:
             raw = seat_kinds.get(cid, "scripted")
             kind, mode = _parse_seat_kind(raw)
-            seats.assign(cid, _build_seat(kind, self.provider, mode))
+            remote = agent_targets.get(cid)
+            seats.assign(cid, _build_seat(kind, self.provider, mode, remote_target=remote))
 
         game_log = GameLog(game_dir / "intents.jsonl")
         state = initial_state(world)
@@ -431,6 +496,129 @@ class GameRegistry:
                 import shutil
                 shutil.rmtree(game_dir, ignore_errors=True)
         return removed
+
+    # ── export / import ────────────────────────────────────────────
+
+    def export_game(self, game_id: str) -> dict[str, Any] | None:
+        """Export a game session as a portable JSON bundle."""
+        self._ensure_hydrated()
+        session = self._sessions.get(game_id)
+        if session is None:
+            return None
+
+        # Read world.json from disk (works for both demo and generated)
+        world_path = session.dir / "world.json"
+        if world_path.exists():
+            world_data = json.loads(world_path.read_text(encoding="utf-8"))
+        else:
+            # For demo worlds, serialize from memory
+            from captain_claw.games.world_io import world_to_dict
+            world_data = world_to_dict(session.world)
+
+        meta_path = session.dir / "meta.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+
+        # Read intent log
+        intents = session.log.read_all()
+
+        # Read conversations
+        conversations = session._load_jsonl("conversations.jsonl")
+
+        # Read agent thoughts
+        thoughts: dict[str, list[dict[str, Any]]] = {}
+        for cid in session.world.characters:
+            t = session._load_jsonl(f"thoughts_{cid}.jsonl")
+            if t:
+                thoughts[cid] = t
+
+        return {
+            "version": 1,
+            "game_id": game_id,
+            "meta": meta,
+            "world": world_data,
+            "intents": intents,
+            "conversations": conversations,
+            "thoughts": thoughts,
+        }
+
+    def import_game(self, bundle: dict[str, Any]) -> "GameSession":
+        """Import a game from a portable JSON bundle (e.g. from another agent).
+
+        Creates a new game_id so it doesn't conflict with existing games.
+        """
+        self._ensure_hydrated()
+
+        meta = bundle.get("meta", {})
+        world_data = bundle.get("world", {})
+        intent_records = bundle.get("intents", [])
+        conversations = bundle.get("conversations", [])
+        thoughts = bundle.get("thoughts", {})
+
+        if not world_data:
+            raise ValueError("bundle missing world data")
+
+        # Always create a fresh game_id
+        game_id = uuid.uuid4().hex[:12]
+        seed = int(meta.get("seed", random.SystemRandom().randint(0, 2**31 - 1)))
+        seat_kinds = dict(meta.get("seat_kinds", {}))
+
+        # Persist to disk
+        game_dir = GAMES_DIR / game_id
+        game_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write world.json
+        (game_dir / "world.json").write_text(
+            json.dumps(world_data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+        # Write meta.json (always mark as "generated" kind since we have world.json)
+        new_meta = {
+            "seed": seed,
+            "world_id": world_data.get("id", meta.get("world_id", "imported")),
+            "seat_kinds": seat_kinds,
+            "kind": "generated",
+            "imported_from": bundle.get("game_id", "unknown"),
+        }
+        (game_dir / "meta.json").write_text(
+            json.dumps(new_meta, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+        # Write intent log
+        intents_path = game_dir / "intents.jsonl"
+        with intents_path.open("w", encoding="utf-8") as fp:
+            for record in intent_records:
+                fp.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        # Write conversations
+        if conversations:
+            conv_path = game_dir / "conversations.jsonl"
+            with conv_path.open("w", encoding="utf-8") as fp:
+                for entry in conversations:
+                    fp.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+        # Write thoughts
+        for cid, entries in thoughts.items():
+            thought_path = game_dir / f"thoughts_{cid}.jsonl"
+            with thought_path.open("w", encoding="utf-8") as fp:
+                for entry in entries:
+                    fp.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+        # Now hydrate the session from disk (replay intents to rebuild state)
+        self._load_one(game_dir)
+        session = self._sessions.get(game_id)
+        if session is None:
+            raise RuntimeError("failed to hydrate imported game")
+
+        # Restore conversation log into memory
+        session.conversation_log = conversations
+
+        log.info(
+            "Game imported",
+            game_id=game_id,
+            from_id=bundle.get("game_id", "?"),
+            tick=session.state.tick,
+        )
+        return session
 
     # ── available worlds ────────────────────────────────────────────
 

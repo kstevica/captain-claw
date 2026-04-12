@@ -52,6 +52,14 @@ def _resolve_move(state: State, intent: Intent) -> list[dict[str, Any]]:
         direction = str(direction).lower()
         target_room = room.exits.get(direction)
         if target_room is None:
+            # LLM sometimes sends the room name/id instead of the direction key
+            # e.g. "Borrowed Square" instead of "east" — try reverse-lookup
+            for d, r in room.exits.items():
+                if r.lower() == direction or state.world.rooms[r].name.lower() == direction:
+                    target_room = r
+                    direction = d  # update for lock check below
+                    break
+        if target_room is None:
             return [_evt(actor, "error", message=f"no exit '{direction}' from {room.name}")]
         # Check locked exits
         lock_key = f"{here}:{direction}"

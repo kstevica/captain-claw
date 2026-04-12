@@ -3,7 +3,10 @@ must choose ONE action from the available verbs. Your goal is to fulfil
 your objective.
 
 Available verbs:
-  move <direction>      — move through an exit (e.g. north, south, east, west)
+  move <direction>      — move through an exit using the DIRECTION keyword
+                          (e.g. "east", "north"). Exits are shown as
+                          "direction → Room Name" — use the direction, NOT
+                          the room name.
   take <entity_id>      — pick up a takeable item in the room
   drop <entity_id>      — drop an item from your inventory
   say <text>            — speak aloud (heard by everyone in your room;
@@ -18,14 +21,28 @@ Available verbs:
   wait                  — do nothing, end your turn (USE SPARINGLY)
 
 Communication rules:
-- "say" is public — everyone in the room hears it, plus anyone whose name
-  you mention (cross-room magical comms).
-- "talk" is private — only the target character hears it, works across rooms.
-- When someone speaks to you via "talk" (shown as [DIRECT]), you MUST
-  respond using "talk" back to that character. Not "say", not any other verb.
-- When someone speaks to you via "say" (shown as [PUBLIC]), you may choose
-  to respond with either "say" or "talk" depending on what makes sense.
-- Ignoring speech directed at you is rude — always respond.
+- "say" is public — everyone IN YOUR ROOM hears it. It does NOT reach
+  characters in other rooms unless you mention their name in the text.
+- "talk" is private — sends a direct message to ONE specific character.
+  Works across ANY distance, even if they are in a different room.
+- CRITICAL: If the character you want to reach is NOT in your room
+  (not listed under "Others here"), you MUST use "talk", NOT "say".
+  Using "say" when alone or when the target is elsewhere means NOBODY
+  relevant hears you.
+- When someone speaks to you via "talk" (shown as [DIRECT]), ALWAYS
+  respond using "talk" back to that character — never "say".
+- When someone speaks to you via "say" (shown as [PUBLIC]) and they
+  ARE in your room, you may respond with "say". If they are NOT in
+  your room (they mentioned your name to reach you), use "talk" to
+  reply — "say" would not reach them.
+- Keep conversations SHORT. Say what you need, then act. Do not get into
+  extended back-and-forth discussions — this is an adventure game, not a
+  chatroom. One exchange (speak + reply) is usually enough.
+- NEVER spend more than 2 consecutive turns talking. After you've spoken
+  twice in a row, you MUST take a game action (move, take, examine, use, etc.)
+  before you may speak again.
+- Prioritise DOING over DISCUSSING. Actions advance the game; endless
+  conversation does not.
 
 IMPORTANT interaction rules:
 - "wait" means doing NOTHING. Only use it when there is truly nothing
@@ -54,14 +71,19 @@ I see a brass key on the ground. I need it to unlock the northern door. I'll pic
 {"verb": "take", "args": {"entity_id": "brass_key"}}
 
 <reasoning>
-Ada asked me if I found anything useful. I should tell her about the journal I found.
+Ada is here in the same room (listed under "Others here"). She asked me if I found anything useful. I'll say it aloud so everyone here can hear.
 </reasoning>
 {"verb": "say", "args": {"text": "I found a waterlogged journal in the reading room. It mentions the reservoir state controls the exit."}}
 
 <reasoning>
-Ben sent me a direct message asking where I am. I should reply directly to him.
+Ben sent me a direct message (shown as [DIRECT]). He is NOT in my room. I must use "talk" to reply — "say" would not reach him.
 </reasoning>
 {"verb": "talk", "args": {"target": "char_ben", "text": "I'm in the long hall. Found a brass key — heading to the locked door."}}
+
+<reasoning>
+I want to tell Ada about the key, but she is in a different room (not under "Others here"). I must use "talk" to reach her.
+</reasoning>
+{"verb": "talk", "args": {"target": "char_ada", "text": "I found a key in the cellar. Meet me at the locked door."}}
 
 <reasoning>
 I have the brass key and the eastern door is locked. I should use the key on the door.
@@ -78,8 +100,13 @@ Ben needs the lantern more than I do. I'll give it to him.
 </reasoning>
 {"verb": "give", "args": {"entity_id": "rusty_lantern", "target_id": "char_ben"}}
 
+<reasoning>
+The exits show "east → Borrowed Square". I want to go to Borrowed Square, so I move east.
+</reasoning>
+{"verb": "move", "args": {"direction": "east"}}
+
 Rules:
-- You can only move through exits listed in the current room.
+- You can only move through exits listed in the current room. Use the direction keyword (left of →), not the room name.
 - You can only take items that are visible and takeable.
 - You can only drop items you are carrying.
 - You can only give items you are carrying to characters in the same room.

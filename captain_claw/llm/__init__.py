@@ -278,12 +278,13 @@ def _provider_model_name(provider: str, model: str) -> str:
     cleaned = (model or "").strip()
     if not cleaned:
         return cleaned
-    # OpenRouter model IDs already contain a slash (e.g. nvidia/model-name),
-    # but LiteLLM still needs the openrouter/ prefix to route correctly.
-    if provider == "openrouter":
-        if cleaned.startswith("openrouter/"):
+    # OpenRouter and OpenAI-compatible model IDs may contain a slash
+    # (e.g. nvidia/model-name, mlx-community/NVIDIA-...), but LiteLLM
+    # still needs the provider prefix to route correctly.
+    if provider in ("openrouter", "openai"):
+        if cleaned.startswith(f"{provider}/"):
             return cleaned
-        return f"openrouter/{cleaned}"
+        return f"{provider}/{cleaned}"
     if "/" in cleaned:
         return cleaned
     return f"{provider}/{cleaned}"

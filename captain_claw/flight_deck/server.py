@@ -455,6 +455,23 @@ def _reattach_processes():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # Initialize game registry with FD data dir
+    from captain_claw.games.registry import set_games_dir
+    games_dir = DATA_DIR / "games"
+    games_dir.mkdir(parents=True, exist_ok=True)
+    set_games_dir(games_dir)
+    # Set up image generation provider (default from IMAGE_PROVIDERS order)
+    from captain_claw.games.image_service import switch_provider, list_providers, get_provider_id
+    providers = list_providers()
+    default_id = get_provider_id()
+    default_prov = next((p for p in providers if p["id"] == default_id and p["available"]), None)
+    if not default_prov:
+        default_prov = next((p for p in providers if p["available"]), None)
+    if default_prov:
+        switch_provider(default_prov["id"])
+        print(f"Flight Deck: image provider '{default_prov['id']}' enabled")
+    else:
+        print("Flight Deck: no image provider available")
     # Defer reattach so uvicorn has time to actually bind its listening
     # socket. Otherwise the children we launch here race to call
     # /fd/processes/{slug}/announce-port before FD is accepting connections,
@@ -521,6 +538,7 @@ from captain_claw.flight_deck.admin_routes import router as admin_router
 from captain_claw.flight_deck.council_routes import router as council_router
 from captain_claw.flight_deck.google_oauth_routes import router as google_oauth_router
 from captain_claw.flight_deck.codex_oauth_routes import router as codex_oauth_router
+from captain_claw.flight_deck.games_routes import router as games_router
 
 app.include_router(auth_router)
 app.include_router(settings_router)
@@ -529,6 +547,7 @@ app.include_router(admin_router)
 app.include_router(council_router)
 app.include_router(google_oauth_router)
 app.include_router(codex_oauth_router)
+app.include_router(games_router)
 
 
 # ── Auth dependency helper ──
@@ -3148,147 +3167,8 @@ async def _proxy_delete_json(
         raise HTTPException(502, "Cannot connect to agent")
 
 
-@app.get("/fd/agent-games/{host}/{port}/worlds")
-async def proxy_games_worlds(
-    host: str, port: int,
-    token: str = "",
-    user: dict | None = _required_user_dep,
-):
-    """List available demo worlds on a CC agent."""
-    return await _proxy_get_json(host, port, "/api/games/worlds", token=token)
 
-
-@app.get("/fd/agent-games/{host}/{port}")
-async def proxy_games_list(
-    host: str, port: int,
-    token: str = "",
-    user: dict | None = _required_user_dep,
-):
-    """List active games on a CC agent."""
-    return await _proxy_get_json(host, port, "/api/games", token=token)
-
-
-@app.post("/fd/agent-games/{host}/{port}")
-async def proxy_games_create(
-    host: str, port: int,
-    request: Request,
-    token: str = "",
-    user: dict | None = _required_user_dep,
-):
-    """Create a new game on a CC agent."""
-    return await _proxy_post_json(host, port, "/api/games", token, await request.body())
-
-
-@app.post("/fd/agent-games/{host}/{port}/generate")
-async def proxy_games_generate(
-    host: str, port: int,
-    request: Request,
-    token: str = "",
-    user: dict | None = _required_user_dep,
-):
-    """Generate a new game from a WorldSpec."""
-    return await _proxy_post_json(
-        host, port, "/api/games/generate", token, await request.body(),
-        timeout=180.0,  # pipeline mode makes multiple LLM calls
-    )
-
-
-@app.get("/fd/agent-games/{host}/{port}/{game_id}")
-async def proxy_games_get(
-    host: str, port: int, game_id: str,
-    token: str = "",
-    user: dict | None = _required_user_dep,
-):
-    """Get full state of a game."""
-    return await _proxy_get_json(host, port, f"/api/games/{game_id}", token=token)
-
-
-@app.post("/fd/agent-games/{host}/{port}/{game_id}/restart")
-async def proxy_games_restart(
-    host: str, port: int, game_id: str,
-    request: Request,
-    token: str = "",
-    user: dict | None = _required_user_dep,
-):
-    """Reset a game back to tick 0."""
-    return await _proxy_post_json(
-        host, port, f"/api/games/{game_id}/restart", token, await request.body(),
-    )
-
-
-@app.post("/fd/agent-games/{host}/{port}/{game_id}/seats")
-async def proxy_games_reassign_seats(
-    host: str, port: int, game_id: str,
-    request: Request,
-    token: str = "",
-    user: dict | None = _required_user_dep,
-):
-    """Reassign seat types for a game (only at tick 0)."""
-    return await _proxy_post_json(
-        host, port, f"/api/games/{game_id}/seats", token, await request.body(),
-    )
-
-
-@app.post("/fd/agent-games/{host}/{port}/{game_id}/tick")
-async def proxy_games_tick(
-    host: str, port: int, game_id: str,
-    request: Request,
-    token: str = "",
-    user: dict | None = _required_user_dep,
-):
-    """Advance one tick."""
-    return await _proxy_post_json(
-        host, port, f"/api/games/{game_id}/tick", token, await request.body(),
-    )
-
-
-@app.post("/fd/agent-games/{host}/{port}/{game_id}/intent")
-async def proxy_games_intent(
-    host: str, port: int, game_id: str,
-    request: Request,
-    token: str = "",
-    user: dict | None = _required_user_dep,
-):
-    """Queue a human intent for the next tick."""
-    return await _proxy_post_json(
-        host, port, f"/api/games/{game_id}/intent", token, await request.body(),
-    )
-
-
-@app.post("/fd/agent-games/{host}/{port}/{game_id}/natural")
-async def proxy_games_natural(
-    host: str, port: int, game_id: str,
-    request: Request,
-    token: str = "",
-    user: dict | None = _required_user_dep,
-):
-    """Parse natural language input and queue as intent."""
-    return await _proxy_post_json(
-        host, port, f"/api/games/{game_id}/natural", token, await request.body(),
-    )
-
-
-@app.post("/fd/agent-games/{host}/{port}/{game_id}/replay")
-async def proxy_games_replay(
-    host: str, port: int, game_id: str,
-    request: Request,
-    token: str = "",
-    user: dict | None = _required_user_dep,
-):
-    """Replay a game from its intent log."""
-    return await _proxy_post_json(
-        host, port, f"/api/games/{game_id}/replay", token, await request.body(),
-    )
-
-
-@app.delete("/fd/agent-games/{host}/{port}/{game_id}")
-async def proxy_games_delete(
-    host: str, port: int, game_id: str,
-    token: str = "",
-    user: dict | None = _required_user_dep,
-):
-    """Drop a game session from the agent."""
-    return await _proxy_delete_json(host, port, f"/api/games/{game_id}", token=token)
+# (Game proxy routes removed — games hosted directly by FD via games_routes.py)
 
 
 # ── Process agent endpoints ──

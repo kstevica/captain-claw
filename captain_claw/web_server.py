@@ -2062,59 +2062,37 @@ class WebServer:
         from captain_claw.web.rest_skills import get_folder_trees
         return await get_folder_trees(self, request)
 
-    # ── Captain Claw Game REST ─────────────────────────────────────
+    async def _llm_complete(self, request: web.Request) -> web.Response:
+        """Expose the local LLM provider for remote agent seats."""
+        provider = getattr(getattr(self, "agent", None), "provider", None)
+        if provider is None:
+            return web.json_response({"ok": False, "error": "no LLM provider"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
 
-    async def _games_list_worlds(self, request: web.Request) -> web.Response:
-        from captain_claw.web.rest_games import list_worlds
-        return await list_worlds(self, request)
+        from captain_claw.llm import Message, LLMResponse
+        raw_messages = body.get("messages", [])
+        messages = [Message(role=m["role"], content=m["content"]) for m in raw_messages]
+        temperature = body.get("temperature")
+        max_tokens = body.get("max_tokens")
 
-    async def _games_list(self, request: web.Request) -> web.Response:
-        from captain_claw.web.rest_games import list_games
-        return await list_games(self, request)
-
-    async def _games_create(self, request: web.Request) -> web.Response:
-        from captain_claw.web.rest_games import create_game
-        return await create_game(self, request)
-
-    async def _games_get(self, request: web.Request) -> web.Response:
-        from captain_claw.web.rest_games import get_game
-        return await get_game(self, request)
-
-    async def _games_tick(self, request: web.Request) -> web.Response:
-        from captain_claw.web.rest_games import tick_game
-        return await tick_game(self, request)
-
-    async def _games_intent(self, request: web.Request) -> web.Response:
-        from captain_claw.web.rest_games import submit_intent
-        return await submit_intent(self, request)
-
-    async def _games_natural(self, request: web.Request) -> web.Response:
-        from captain_claw.web.rest_games import submit_natural
-        return await submit_natural(self, request)
-
-    async def _games_replay(self, request: web.Request) -> web.Response:
-        from captain_claw.web.rest_games import replay_game
-        return await replay_game(self, request)
-
-    async def _games_restart(self, request: web.Request) -> web.Response:
-        from captain_claw.web.rest_games import restart_game
-        return await restart_game(self, request)
-
-    async def _games_delete(self, request: web.Request) -> web.Response:
-        from captain_claw.web.rest_games import delete_game
-        return await delete_game(self, request)
-
-    async def _games_generate(self, request: web.Request) -> web.Response:
-        from captain_claw.web.rest_games import generate_game
-        return await generate_game(self, request)
-
-    async def _games_reassign_seats(self, request: web.Request) -> web.Response:
-        from captain_claw.web.rest_games import reassign_seats
-        return await reassign_seats(self, request)
-
-    async def _games_cognitive_modes(self, request: web.Request) -> web.Response:
-        from captain_claw.web.rest_games import list_cognitive_modes
-        return await list_cognitive_modes(self, request)
+        try:
+            resp: LLMResponse = await provider.complete(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return web.json_response({
+                "ok": True,
+                "content": resp.content,
+                "model": resp.model,
+                "usage": resp.usage,
+                "finish_reason": resp.finish_reason,
+            })
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
     # ── App setup ────────────────────────────────────────────────────
 
@@ -2153,20 +2131,8 @@ class WebServer:
         app.router.add_delete("/api/read-folders/gdrive", self._remove_gdrive_folder)
         app.router.add_get("/api/read-folders/gdrive/browse", self._browse_gdrive)
         app.router.add_get("/api/folder-trees", self._get_folder_trees)
-        # ── Captain Claw Game ──
-        app.router.add_get("/api/games/worlds", self._games_list_worlds)
-        app.router.add_get("/api/games/cognitive-modes", self._games_cognitive_modes)
-        app.router.add_post("/api/games/generate", self._games_generate)
-        app.router.add_get("/api/games", self._games_list)
-        app.router.add_post("/api/games", self._games_create)
-        app.router.add_get("/api/games/{game_id}", self._games_get)
-        app.router.add_post("/api/games/{game_id}/seats", self._games_reassign_seats)
-        app.router.add_post("/api/games/{game_id}/tick", self._games_tick)
-        app.router.add_post("/api/games/{game_id}/natural", self._games_natural)
-        app.router.add_post("/api/games/{game_id}/intent", self._games_intent)
-        app.router.add_post("/api/games/{game_id}/restart", self._games_restart)
-        app.router.add_post("/api/games/{game_id}/replay", self._games_replay)
-        app.router.add_delete("/api/games/{game_id}", self._games_delete)
+        # ── LLM proxy (for remote agent seats) ──
+        app.router.add_post("/api/llm/complete", self._llm_complete)
         app.router.add_get("/api/sessions", self.list_sessions_api)
         app.router.add_post("/api/sessions/bulk-delete", self._bulk_delete_sessions)
         app.router.add_get("/api/sessions/{id}", self._get_session_detail)

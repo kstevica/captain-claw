@@ -18,7 +18,7 @@ class WorldSpec:
     seats: int = 2                           # number of player characters
     genre: str = "exploration"               # cozy-mystery | exploration | escape | ...
     tone: str = "neutral"                    # short adjective list — drives narration
-    size: str = "small"                      # small | medium | large
+    size: str = "small"                      # small | medium | large | xl | huge | epic
     constraints: list[str] = field(default_factory=list)
     seat_mode: str = "party"                 # party | solo | mixed
     summary: str = ""                        # optional longer paragraph
@@ -58,8 +58,8 @@ class WorldSpec:
             return "spec.goal is required"
         if self.seats < 1 or self.seats > 6:
             return "spec.seats must be 1..6"
-        if self.size not in {"small", "medium", "large"}:
-            return "spec.size must be small | medium | large"
+        if self.size not in {"small", "medium", "large", "xl", "huge", "epic"}:
+            return "spec.size must be small | medium | large | xl | huge | epic"
         if self.seat_mode not in {"party", "solo", "mixed"}:
             return "spec.seat_mode must be party | solo | mixed"
         return None
@@ -67,7 +67,14 @@ class WorldSpec:
 
 # Size hints used by the generator to bound the world's complexity.
 SIZE_HINTS: dict[str, dict[str, int]] = {
-    "small":  {"rooms": 4,  "entities": 4,  "talkable_npcs": 0},
-    "medium": {"rooms": 7,  "entities": 8,  "talkable_npcs": 2},
-    "large":  {"rooms": 12, "entities": 14, "talkable_npcs": 4},
+    "small":  {"rooms": 4,   "entities": 4,   "talkable_npcs": 0},
+    "medium": {"rooms": 7,   "entities": 8,   "talkable_npcs": 2},
+    "large":  {"rooms": 12,  "entities": 14,  "talkable_npcs": 4},
+    "xl":     {"rooms": 37,  "entities": 27,  "talkable_npcs": 4},
+    "huge":   {"rooms": 75,  "entities": 55,  "talkable_npcs": 4},
+    "epic":   {"rooms": 135, "entities": 90,  "talkable_npcs": 4},
 }
+
+# Batch size limits for multi-pass generation (rooms/entities per LLM call)
+BATCH_ROOMS = 20
+BATCH_ENTITIES = 25

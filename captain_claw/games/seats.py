@@ -191,7 +191,20 @@ def _parse_agent_response(raw: str) -> dict[str, Any] | None:
     return None
 
 
-def _build_agent_prompt(view: dict[str, Any]) -> str:
+def _consecutive_speech(thought_log: list[dict[str, Any]]) -> int:
+    """Count how many consecutive say/talk actions end the thought log."""
+    count = 0
+    for entry in reversed(thought_log):
+        action = entry.get("action", "")
+        verb = action.split()[0] if action else ""
+        if verb in ("say", "talk"):
+            count += 1
+        else:
+            break
+    return count
+
+
+def _build_agent_prompt(view: dict[str, Any], consecutive_speech: int = 0) -> str:
     """Build a user prompt from the structured view dict."""
     char = view.get("character", {})
     cr = view.get("current_room")
@@ -265,26 +278,42 @@ def _build_agent_prompt(view: dict[str, Any]) -> str:
             lines.append(f'  {tag} {h["actor_name"]}: "{h["text"]}"')
             if kind == "talk":
                 has_direct = True
-        lines.append("")
-        lines.append("*** CONVERSATION RULE: Someone just spoke to you! ***")
-        lines.append("Your action this tick MUST be a response to what was said.")
-        if has_direct:
-            lines.append("You received a [DIRECT] message — you MUST reply with 'talk' to that character.")
+
+        # Sliding conversation rule — prevents infinite chat loops
+        if consecutive_speech >= 2:
+            # Agent has been talking for 2+ ticks in a row — break the loop
+            lines.append("")
+            lines.append("*** You have been talking for several turns in a row. ***")
+            lines.append("You MUST take a GAME ACTION now (move, take, examine, use, give, look).")
+            lines.append("Do NOT say or talk this tick. Advance your objective instead.")
+            lines.append("You can always continue the conversation later after you've made progress.")
+        elif consecutive_speech == 1:
+            # Already responded once — nudge toward action
+            lines.append("")
+            lines.append("You already responded to conversation last tick.")
+            lines.append("You SHOULD take a game action now (move, take, examine, use) to make progress on your objective.")
+            lines.append("Only respond with say/talk if something truly new or urgent was said.")
         else:
-            lines.append("You may respond with 'say' (public) or 'talk' (private).")
-        lines.append("You cannot move, take, use, examine, or do anything else this tick.")
-        lines.append("Social obligation overrides all other plans. Respond first, act next tick.")
+            # First time hearing speech — respond naturally
+            lines.append("")
+            if has_direct:
+                lines.append("You received a [DIRECT] message — reply with 'talk' to that character.")
+            else:
+                lines.append("Someone spoke to you. You may respond with 'say' or 'talk', or take a game action if you prefer.")
+            lines.append("Keep responses brief and then plan your next game action.")
 
     lines.append("")
-    if heard:
+    if heard and consecutive_speech >= 2:
+        lines.append("What GAME ACTION do you take? (move, take, examine, use, give, look — NOT say/talk)")
+    elif heard:
         has_direct = any(h.get("kind") == "talk" for h in heard)
-        if has_direct:
-            lines.append("What do you say back? You MUST use 'talk' to reply to the direct message.")
+        if has_direct and consecutive_speech == 0:
+            lines.append("What do you say back? Use 'talk' to reply to the direct message.")
         else:
-            lines.append("What do you say in response? Use 'say' or 'talk'.")
+            lines.append("What do you do? You may respond briefly or take a game action.")
     else:
         lines.append("What do you do? First write your <reasoning>, then the JSON action.")
-    lines.append("Remember: your action MUST match your reasoning. If you plan to speak, use 'say' or 'talk'.")
+    lines.append("Remember: your action MUST match your reasoning.")
     return "\n".join(lines)
 
 
@@ -441,7 +470,8 @@ class AgentSeat:
         from captain_claw.llm import Message
 
         view = project_view(state, char_id)
-        user_prompt = _build_agent_prompt(view)
+        consec = _consecutive_speech(self.thought_log)
+        user_prompt = _build_agent_prompt(view, consecutive_speech=consec)
 
         temperature = self._get_temperature()
 
@@ -554,10 +584,17 @@ class SeatTable:
         return [(c, s) for c, s in self._by_char.items() if isinstance(s, HumanSeat)]
 
     def to_summary(self) -> list[dict[str, Any]]:
+        from captain_claw.games.remote_provider import RemoteLLMProvider
         out = []
         for c, s in self._by_char.items():
             entry: dict[str, Any] = {"character": c, "kind": s.kind}
             if isinstance(s, AgentSeat):
                 entry["cognitive_mode"] = s.cognitive_mode
+                if isinstance(s.provider, RemoteLLMProvider):
+                    entry["remote_agent"] = {
+                        "host": s.provider.host,
+                        "port": s.provider.port,
+                        "name": s.provider.name,
+                    }
             out.append(entry)
         return out

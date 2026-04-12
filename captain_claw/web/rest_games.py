@@ -83,6 +83,70 @@ async def list_cognitive_modes(server: "WebServer", request: web.Request) -> web
     return web.json_response({"modes": modes})
 
 
+_RANDOM_IDEA_PROMPT = """\
+Generate a creative, original text-adventure game idea. Be imaginative and varied — \
+avoid generic fantasy quests. Draw from sci-fi, horror, mystery, historical, surreal, \
+comedic, noir, post-apocalyptic, underwater, space, micro-scale, time-travel, or any \
+other unexpected genre. Surprise me.
+
+Return ONLY a JSON object with these fields:
+- "title": a short evocative title (3-6 words)
+- "goal": a one-sentence objective for the players (what they must accomplish)
+- "description": a 2-3 sentence description of the world, its atmosphere, and backstory
+
+Be specific and vivid. Not "explore a dungeon" but "navigate the ventilation shafts \
+of a derelict space station before the reactor melts down". Not "find the treasure" \
+but "recover the stolen painting from a 1920s speakeasy before the cops raid at midnight".
+
+JSON only, no markdown fences:"""
+
+
+async def random_world_idea(server: "WebServer", request: web.Request) -> web.Response:
+    """Use the agent's LLM to generate a random world idea."""
+    provider = getattr(getattr(server, "agent", None), "provider", None)
+    if provider is None:
+        return web.json_response({"ok": False, "error": "no LLM provider"}, status=503)
+
+    import json as _json
+    from captain_claw.llm import Message
+
+    try:
+        # Add a random seed word to push the LLM away from repetitive ideas
+        seed_words = [
+            "clockwork", "underwater", "miniature", "fungal", "orbital", "frozen",
+            "volcanic", "dream", "microscopic", "desert", "arctic", "jungle",
+            "subterranean", "floating", "mirror", "ancient", "neon", "abandoned",
+            "haunted", "coral", "crystalline", "mechanical", "overgrown", "buried",
+            "inverted", "temporal", "acoustic", "magnetic", "bioluminescent", "nomadic",
+            "petrified", "hollow", "woven", "fermented", "tidal", "spectral",
+        ]
+        seed = random.choice(seed_words)
+        prompt = f"{_RANDOM_IDEA_PROMPT}\n\nInspiration seed (use loosely, don't force it): {seed}"
+
+        resp = await provider.complete(
+            [Message(role="user", content=prompt)],
+            temperature=1.0,
+            max_tokens=300,
+        )
+        raw = (resp.content or "").strip()
+        # Strip markdown fences if present
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+        if raw.endswith("```"):
+            raw = raw[:-3].strip()
+
+        idea = _json.loads(raw)
+        return web.json_response({
+            "ok": True,
+            "title": str(idea.get("title", "")),
+            "goal": str(idea.get("goal", "")),
+            "description": str(idea.get("description", "")),
+        })
+    except Exception as exc:
+        log.warning("Random idea generation failed", error=str(exc))
+        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+
 async def list_games(server: "WebServer", request: web.Request) -> web.Response:
     return web.json_response({"games": get_registry().list()})
 
@@ -113,6 +177,13 @@ async def create_game(server: "WebServer", request: web.Request) -> web.Response
         session = get_registry().create_from_demo(world_id, seat_assignments, seed)
     except ValueError as exc:
         return web.json_response({"ok": False, "error": str(exc)}, status=404)
+
+    # If agent_targets are provided, reassign seats to wire up remote providers
+    raw_targets = body.get("agent_targets") or {}
+    if raw_targets:
+        agent_targets = {str(k): dict(v) for k, v in raw_targets.items()}
+        provider = getattr(getattr(server, "agent", None), "provider", None)
+        session.reassign_seats(seat_assignments, provider=provider, agent_targets=agent_targets)
 
     log.info("Game created", game_id=session.game_id, world_id=world_id, seed=session.seed)
     return web.json_response({"ok": True, "game": _session_payload(session)})
@@ -351,8 +422,12 @@ async def reassign_seats(server: "WebServer", request: web.Request) -> web.Respo
         return web.json_response({"ok": False, "error": "seats must be an object"}, status=400)
     seat_assignments = {str(k): str(v) for k, v in raw_seats.items()}
 
+    # Optional per-character agent targets: {char_id: {host, port, auth}}
+    raw_targets = body.get("agent_targets") or {}
+    agent_targets = {str(k): dict(v) for k, v in raw_targets.items()} if raw_targets else None
+
     provider = getattr(getattr(server, "agent", None), "provider", None)
-    ok, err = session.reassign_seats(seat_assignments, provider=provider)
+    ok, err = session.reassign_seats(seat_assignments, provider=provider, agent_targets=agent_targets)
     if not ok:
         return web.json_response({"ok": False, "error": err}, status=400)
 
@@ -410,6 +485,37 @@ async def generate_game(server: "WebServer", request: web.Request) -> web.Respon
         return web.json_response({"ok": False, "error": f"generation failed: {exc}"}, status=500)
 
     log.info("Game generated", game_id=session.game_id, mode=mode, seed=session.seed)
+    return web.json_response({"ok": True, "game": _session_payload(session)})
+
+
+async def export_game(server: "WebServer", request: web.Request) -> web.Response:
+    """Export a game as a portable JSON bundle for transfer to another agent."""
+    game_id = request.match_info["game_id"]
+    bundle = get_registry().export_game(game_id)
+    if bundle is None:
+        return web.json_response({"ok": False, "error": "game not found"}, status=404)
+    return web.json_response({"ok": True, "bundle": bundle})
+
+
+async def import_game(server: "WebServer", request: web.Request) -> web.Response:
+    """Import a game from a portable JSON bundle (transferred from another agent)."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+
+    bundle = body.get("bundle")
+    if not bundle or not isinstance(bundle, dict):
+        return web.json_response({"ok": False, "error": "missing bundle object"}, status=400)
+
+    try:
+        session = get_registry().import_game(bundle)
+    except ValueError as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=400)
+    except Exception as exc:
+        log.exception("Import failed")
+        return web.json_response({"ok": False, "error": f"import failed: {exc}"}, status=500)
+
     return web.json_response({"ok": True, "game": _session_payload(session)})
 
 
