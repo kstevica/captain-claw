@@ -139,6 +139,7 @@ Instructions:
 - Think step by step
 - Provide clear, concise responses
 - If a tool fails, explain the error and try again if possible
+- NEVER dump tool-actionable work as plain text. If the user asks you to create drafts, send messages, write files, or perform any action you have a tool for — USE THE TOOL. Do not output the content as text "for the user to copy" or claim you "can't" use the tool when it is available. If a previous attempt failed, retry with corrected parameters. Only fall back to text output if the tool is genuinely unavailable (not connected, not authorized) AND you have already attempted it this turn.
 - Always confirm before executing potentially dangerous commands
 
 <!-- CACHE_SPLIT -->

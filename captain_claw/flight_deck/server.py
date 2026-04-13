@@ -1506,16 +1506,28 @@ async def clone_container(container_id: str, req: CloneRequest, request: Request
 
 
 @app.get("/fd/containers/{container_id}/logs")
-async def container_logs(container_id: str, tail: int = 200, follow: bool = False, request: Request = None, user: dict | None = _required_user_dep):
+async def container_logs(container_id: str, tail: int = 200, since_ts: float = 0, follow: bool = False, request: Request = None, user: dict | None = _required_user_dep):
+    """Fetch container logs.
+
+    When *since_ts* > 0 the Docker ``since`` parameter is used so only
+    new log lines written after that Unix timestamp are returned
+    (incremental fetch).  The response includes ``timestamp`` – the
+    current time – for the frontend to pass back on the next poll.
+    """
+    import time
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
+    now = time.time()
     if follow:
         def stream():
             for chunk in c.logs(stream=True, follow=True, tail=tail):
                 yield chunk
         return StreamingResponse(stream(), media_type="text/plain")
+    elif since_ts > 0:
+        logs = c.logs(tail=0, since=since_ts, timestamps=False).decode("utf-8", errors="replace")
+        return {"logs": logs, "timestamp": now}
     else:
         logs = c.logs(tail=tail).decode("utf-8", errors="replace")
-        return {"logs": logs}
+        return {"logs": logs, "timestamp": now}
 
 
 # ── Agent config editing ──
@@ -3607,18 +3619,49 @@ async def remove_process(slug: str, force: bool = False, request: Request = None
 
 
 @app.get("/fd/processes/{slug}/logs")
-async def process_logs(slug: str, tail: int = 200, request: Request = None, user: dict | None = _required_user_dep):
+async def process_logs(slug: str, tail: int = 200, since_byte: int = 0, request: Request = None, user: dict | None = _required_user_dep):
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
-    """Read logs from a process agent's log file."""
+    """Read logs from a process agent's log file.
+
+    When *since_byte* > 0 the response only contains bytes written after
+    that offset (incremental fetch).  The response always includes
+    ``byte_offset`` – the file size at the time of reading – so the
+    frontend can pass it back on the next poll.
+    """
     log_file = DATA_DIR / slug / "process.log"
     if not log_file.is_file():
-        return {"logs": "(no logs yet)"}
+        return {"logs": "(no logs yet)", "byte_offset": 0}
     try:
-        lines = log_file.read_text().splitlines()
+        file_size = log_file.stat().st_size
+        if since_byte > 0 and since_byte <= file_size:
+            # Incremental: read only new bytes since last poll
+            with open(log_file, "rb") as f:
+                f.seek(since_byte)
+                new_bytes = f.read()
+            text = new_bytes.decode("utf-8", errors="replace")
+            # Strip leading partial line if we didn't land on a boundary
+            if since_byte > 0 and text and text[0] != "\n" and since_byte < file_size:
+                nl = text.find("\n")
+                if nl >= 0:
+                    text = text[nl + 1:]
+            return {"logs": text, "byte_offset": file_size}
+        # Initial fetch: efficiently read last N lines from end of file
+        chunk_size = max(4096, tail * 200)  # reasonable estimate
+        with open(log_file, "rb") as f:
+            f.seek(0, 2)  # seek to end
+            end_pos = f.tell()
+            start = max(0, end_pos - chunk_size)
+            f.seek(start)
+            data = f.read()
+        text = data.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        # If we didn't read from start, first line may be partial – drop it
+        if start > 0 and len(lines) > tail:
+            lines = lines[1:]
         tail_lines = lines[-tail:] if len(lines) > tail else lines
-        return {"logs": "\n".join(tail_lines)}
+        return {"logs": "\n".join(tail_lines), "byte_offset": end_pos}
     except Exception as exc:
-        return {"logs": f"(error reading logs: {exc})"}
+        return {"logs": f"(error reading logs: {exc})", "byte_offset": 0}
 
 
 @app.post("/fd/processes/{slug}/clone", response_model=ProcessActionResult)

@@ -157,9 +157,19 @@ export const cloneContainer = (id: string, newName: string) =>
 export const removeContainer = (id: string, force = false) =>
   fdFetch<ContainerActionResult>(`/containers/${id}?force=${force}`, { method: 'DELETE' })
 
-export const getContainerLogs = async (id: string, tail = 200): Promise<string> => {
-  const data = await fdFetch<{ logs: string }>(`/containers/${id}/logs?tail=${tail}`)
-  return data.logs
+export interface LogResult {
+  logs: string
+  /** Unix timestamp cursor for container logs (pass back as since_ts) */
+  timestamp?: number
+  /** Byte offset cursor for process logs (pass back as since_byte) */
+  byte_offset?: number
+}
+
+export const getContainerLogs = async (id: string, tail = 200, sinceTs = 0): Promise<LogResult> => {
+  const qs = sinceTs > 0
+    ? `/containers/${id}/logs?tail=${tail}&since_ts=${sinceTs}`
+    : `/containers/${id}/logs?tail=${tail}`
+  return fdFetch<LogResult>(qs)
 }
 
 export const healthCheck = () =>
@@ -225,9 +235,11 @@ export const restartProcess = (slug: string) =>
 export const removeProcess = (slug: string) =>
   fdFetch<ProcessActionResult>(`/processes/${slug}`, { method: 'DELETE' })
 
-export const getProcessLogs = async (slug: string, tail = 200): Promise<string> => {
-  const data = await fdFetch<{ logs: string }>(`/processes/${slug}/logs?tail=${tail}`)
-  return data.logs
+export const getProcessLogs = async (slug: string, tail = 200, sinceByte = 0): Promise<LogResult> => {
+  const qs = sinceByte > 0
+    ? `/processes/${slug}/logs?tail=${tail}&since_byte=${sinceByte}`
+    : `/processes/${slug}/logs?tail=${tail}`
+  return fdFetch<LogResult>(qs)
 }
 
 export const cloneProcess = (slug: string, newName: string) =>

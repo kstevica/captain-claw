@@ -98,6 +98,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   const [logs, setLogs] = useState('')
   const [logsLoading, setLogsLoading] = useState(false)
   const logsRef = useRef<HTMLPreElement>(null)
+  const logCursorRef = useRef<number>(0) // timestamp cursor for incremental fetching
   const [actionLoading, setActionLoading] = useState<string | null>(null)
   const [showConnect, setShowConnect] = useState(false)
   const [connectPort, setConnectPort] = useState('24080')
@@ -150,8 +151,9 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
     if (showLogs) { setShowLogs(false); return }
     setLogsLoading(true)
     try {
-      const text = await getContainerLogs(container.id, 250)
-      setLogs(text)
+      const result = await getContainerLogs(container.id, 250)
+      setLogs(result.logs)
+      logCursorRef.current = result.timestamp || 0
       setShowLogs(true)
     } catch (e) {
       setLogs(`Failed to fetch logs: ${e}`)
@@ -159,13 +161,17 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
     } finally { setLogsLoading(false) }
   }
 
-  // Live log polling while logs are visible
+  // Live log polling while logs are visible — incremental
   useEffect(() => {
     if (!showLogs || !isRunning) return
     const interval = setInterval(async () => {
       try {
-        const text = await getContainerLogs(container.id, 250)
-        setLogs(text)
+        const cursor = logCursorRef.current
+        const result = await getContainerLogs(container.id, 250, cursor)
+        logCursorRef.current = result.timestamp || 0
+        if (result.logs) {
+          setLogs((prev) => prev ? prev + '\n' + result.logs : result.logs)
+        }
       } catch { /* ignore polling errors */ }
     }, 3000)
     return () => clearInterval(interval)

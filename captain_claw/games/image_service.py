@@ -20,6 +20,7 @@ _log = get_logger(__name__)
 # ── Available image provider presets ──────────────────────────────
 
 IMAGE_PROVIDERS: list[dict[str, str]] = [
+    {"id": "none",           "label": "None (no image generation)",       "kind": "none"},
     {"id": "gemini-imagen",  "label": "Gemini Imagen 4 Fast (API)",       "kind": "llm"},
     {"id": "fibo-lite",      "label": "Fibo-lite (local, ~5 GB)",        "kind": "mflux"},
     {"id": "schnell",        "label": "FLUX.1-schnell (local, ~12 GB)",  "kind": "mflux"},
@@ -29,7 +30,7 @@ IMAGE_PROVIDERS: list[dict[str, str]] = [
 # ── Active provider state ─────────────────────────────────────────
 
 _provider: ImageProvider | None = None
-_provider_id: str = "gemini-imagen"
+_provider_id: str = "none"
 _mflux_available: bool = False
 
 
@@ -75,6 +76,10 @@ def get_provider_id() -> str:
 
 
 def switch_provider(provider_id: str) -> ImageProvider | None:
+    if provider_id == "none":
+        set_image_provider(None, "none")
+        _log.info("Image provider switched", provider_id="none", label="None")
+        return None
     provider = create_provider(provider_id)
     if provider is not None:
         set_image_provider(provider, provider_id)

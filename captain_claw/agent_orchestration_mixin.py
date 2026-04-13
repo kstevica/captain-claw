@@ -63,7 +63,7 @@ _ECO_INTENT_PATTERNS: list[tuple[_re.Pattern[str], frozenset[str]]] = [
     (_re.compile(r"\bimage\b|\bphoto\b|\bpicture\b|\bscreenshot\b|\bdraw\b|\bgenerate\s+(?:an?\s+)?image", _re.I),
      frozenset({"image_gen", "image_ocr", "image_vision", "screen_capture"})),
     # Email
-    (_re.compile(r"\bemail\b|\bmail\b|\bgmail\b|\bsend\s+(?:a\s+)?message\b", _re.I),
+    (_re.compile(r"\bemail\b|\bmail\b|\bgmail\b|\bdraft\b|\bsend\s+(?:a\s+)?message\b", _re.I),
      frozenset({"send_mail", "google_mail", "gws"})),
     # Calendar
     (_re.compile(r"\bcalendar\b|\bschedule\b|\bmeeting\b|\bagenda\b|\bevent\b", _re.I),
@@ -144,6 +144,8 @@ class AgentOrchestrationMixin:
         self._turn_tool_call_counts: dict[str, int] = {}
         # Reset per-turn all-blocked streak counter.
         self._all_blocked_streak: int = 0
+        # Reset tool-avoidance nudge flag (one nudge per turn max).
+        self._tool_avoidance_nudged: bool = False
         # Reset per-turn coverage gate streak.
         self._coverage_gate_streak: int = 0
         self._coverage_gate_prev_missing: int = -1
@@ -1019,12 +1021,22 @@ class AgentOrchestrationMixin:
             _eco_active = getattr(self, "instructions", None) and self.instructions.use_micro
             if _eco_active and tool_defs and not _force_script:
                 _intent_tools = _eco_select_tools_by_intent(effective_user_input or "")
-                # Also include tools already used in this turn (the LLM may
-                # want to call them again with different args).
+                # Also include tools already used in this turn or recent
+                # session history (the LLM may want to call them again).
                 _turn_used: set[str] = set()
                 if hasattr(self, "_turn_tool_call_counts"):
                     _turn_used = set(self._turn_tool_call_counts.keys())
-                _keep = _ECO_CORE_TOOLS | _intent_tools | _turn_used
+                # Include tools used in recent session messages so the LLM
+                # retains access to tools it used in prior turns (e.g.
+                # google_mail for drafting after datastore lookup).
+                _session_used: set[str] = set()
+                if self.session and self.session.messages:
+                    for _msg in self.session.messages[-40:]:
+                        for _tc in (_msg.get("tool_calls") or []):
+                            _tn = _tc.get("name") or _tc.get("function", {}).get("name", "")
+                            if _tn:
+                                _session_used.add(_tn)
+                _keep = _ECO_CORE_TOOLS | _intent_tools | _turn_used | _session_used
                 _full_count = len(tool_defs)
                 _deferred = [td["name"] for td in tool_defs if td.get("name") not in _keep]
                 tool_defs = [td for td in tool_defs if td.get("name") in _keep]
@@ -1824,6 +1836,31 @@ class AgentOrchestrationMixin:
                     )
                     if finalized:
                         return finish(final_text, success=finish_success)
+                    continue
+
+            # ── Tool-avoidance nudge ──────────────────────────────
+            # Detect when the LLM dumps actionable content as text
+            # instead of using an available tool (e.g. writing out
+            # email drafts instead of calling create_draft).  Inject a
+            # corrective nudge and re-enter the loop.
+            if not getattr(self, "_tool_avoidance_nudged", False):
+                _resp_text = str(response.content or "")
+                _avail_tool_names = {td.get("name", "") for td in (tool_defs or [])}
+                _nudge_msg = None
+                if "google_mail" in _avail_tool_names and _re.search(
+                    r"(?:\*\*(?:To|Subject):\*\*|\bSubject:\s).+\n.*(?:\*\*(?:To|Subject):\*\*|\bSubject:\s)",
+                    _resp_text,
+                ):
+                    _nudge_msg = (
+                        "STOP. You have the google_mail tool available with create_draft action. "
+                        "Do NOT output email drafts as text. Call google_mail with action=create_draft "
+                        "for EACH recipient right now. Use the to, subject, and body parameters."
+                    )
+                if _nudge_msg:
+                    log.warning("Tool-avoidance detected, nudging LLM", tool="google_mail")
+                    self._tool_avoidance_nudged = True
+                    self._add_session_message(role="assistant", content=_resp_text)
+                    self._add_session_message(role="user", content=_nudge_msg)
                     continue
 
             # ── No tool calls — final response ────────────────────

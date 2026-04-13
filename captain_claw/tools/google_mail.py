@@ -77,6 +77,11 @@ class GoogleMailTool(Tool):
     name = "google_mail"
     description = (
         "Gmail — read AND create drafts (no sending; the user reviews and sends drafts in Gmail). "
+        "MANDATORY: when the user asks you to draft/write/prepare emails, you MUST call "
+        "create_draft for EACH recipient — do NOT output email text for the user to copy. "
+        "If you need to create 11 drafts, call create_draft 11 times. If a previous attempt "
+        "in this conversation failed, retry now — do not reference past failures as a reason "
+        "to skip the tool call. "
         "ROUTING: any user request that refers to an email, message, inbox, thread, "
         "conversation, sender, subject line, or Gmail — including phrases like "
         "'read the one from X', 'open that email', 'show me the Fil Rouge email', "

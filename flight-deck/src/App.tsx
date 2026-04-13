@@ -416,7 +416,7 @@ function AppContent() {
             )}
 
             {/* Main content */}
-            <div className="flex-1 overflow-hidden">
+            <div className="flex-1 overflow-hidden" style={{ minWidth: 360 }}>
               {mainContent}
             </div>
 

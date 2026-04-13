@@ -109,6 +109,7 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
         replay_session = server.agent.session
 
     if replay_session:
+        batch: list[dict] = []
         for msg in replay_session.messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
@@ -126,22 +127,24 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
                 }
                 if msg.get("feedback"):
                     payload["feedback"] = msg["feedback"]
-                await server._send(ws, payload)
+                batch.append(payload)
             elif role == "tool" and tool_name == "task_rephrase":
-                await server._send(ws, {
+                batch.append({
                     "type": "chat_message",
                     "role": "rephrase",
                     "content": content,
                     "replay": True,
                 })
             elif role == "tool" and tool_name and not Agent._is_monitor_only_tool_name(tool_name):
-                await server._send(ws, {
+                batch.append({
                     "type": "monitor",
                     "tool_name": tool_name,
                     "arguments": msg.get("tool_arguments", {}),
                     "output": content,
                     "replay": True,
                 })
+        if batch:
+            await server._send(ws, {"type": "replay_batch", "messages": batch})
         await server._send(ws, {"type": "replay_done"})
 
     try:

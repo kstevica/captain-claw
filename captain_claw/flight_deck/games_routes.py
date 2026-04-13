@@ -182,6 +182,9 @@ async def get_image_providers():
 async def set_image_provider_route(provider_id: str):
     """Switch the active image generation provider."""
     from captain_claw.games.image_service import switch_provider, get_provider_id
+    if provider_id == "none":
+        switch_provider("none")
+        return {"ok": True, "active": "none", "label": "None"}
     provider = switch_provider(provider_id)
     if provider is None:
         raise HTTPException(400, f"Provider '{provider_id}' not available")

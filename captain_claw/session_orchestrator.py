@@ -51,7 +51,9 @@ _POLL_INTERVAL_SECONDS = 1.0
 
 # Default and ceiling for the worker iteration budget estimator.
 _WORKER_DEFAULT_ITERATIONS = 5
-_WORKER_MAX_ITERATIONS = 20
+_WORKER_MAX_ITERATIONS = 25
+# Absolute ceiling for per-item tasks (drafts, emails, fetches per row).
+_WORKER_PER_ITEM_CEILING = 120
 
 # Tasks whose primary purpose is NOT list-processing should skip the
 # deferred scale init entirely.  We set a flag on the worker agent so
@@ -90,6 +92,7 @@ _COMPLEXITY_SIGNALS: list[tuple[re.Pattern[str], int]] = [
     # (tool call + process result).
     (re.compile(r"\beach\b.*\b(?:article|page|url|item|link|entry|result)", re.I), 8),
     (re.compile(r"\b(?:web_fetch|fetch|scrape)\b", re.I), 4),
+    (re.compile(r"\bcreate\b.*\bdraft", re.I), 3),
 ]
 
 # ── Binary file output detection ──
@@ -202,17 +205,43 @@ def _scan_workspace_tree(workspace_path: Path, max_depth: int = 3, max_entries: 
     return "Workspace contents (pre-existing user files — search these with default glob):\n" + "\n".join(lines)
 
 
+_PER_ITEM_TASK_RE = re.compile(
+    r"\b(?:draft|email|mail|message|fetch|process|create)\b"
+    r".*\b(?:for\s+(?:all|each|every)|(?:all|each|every)\s+\d*\s*(?:team|recipient|member|user|item|entry|row|record|accepted))",
+    re.IGNORECASE,
+)
+_ITEM_COUNT_RE = re.compile(
+    r"\b(\d+)\s*(?:team|recipient|member|user|item|entry|row|record|email|draft|message|accepted)",
+    re.IGNORECASE,
+)
+
+
 def _estimate_task_iterations(description: str) -> int:
     """Estimate how many iterations a worker task will need.
 
     Scans the task description for complexity signals and returns an
     iteration budget that is at least ``_WORKER_DEFAULT_ITERATIONS``
     and at most ``_WORKER_MAX_ITERATIONS``.
+
+    For per-item tasks (e.g. "create drafts for all 11 teams"), the
+    budget scales with the item count: ``count * 2 + 5`` (each item
+    needs a tool call + LLM turn, plus overhead), capped at
+    ``_WORKER_PER_ITEM_CEILING``.
     """
     budget = _WORKER_DEFAULT_ITERATIONS
     for pattern, weight in _COMPLEXITY_SIGNALS:
         if pattern.search(description):
             budget += weight
+
+    # Per-item scaling: if the task looks like bulk per-item work and
+    # mentions a count, scale the budget to fit all items.
+    if _PER_ITEM_TASK_RE.search(description):
+        count_match = _ITEM_COUNT_RE.search(description)
+        item_count = int(count_match.group(1)) if count_match else 15  # conservative default
+        per_item_budget = item_count * 2 + 5  # 2 iterations per item + overhead
+        budget = max(budget, per_item_budget)
+        return min(budget, _WORKER_PER_ITEM_CEILING)
+
     return min(budget, _WORKER_MAX_ITERATIONS)
 
 

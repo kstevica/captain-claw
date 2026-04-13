@@ -156,6 +156,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (existing) {
       // Already have a session, just activate it
       if (!existing.connected) {
+        // Clear old replay messages — agent will resend them on reconnect
+        const kept = existing.messages.filter((m) => !m.replay)
+        if (kept.length !== existing.messages.length) {
+          updateSession(containerId, { messages: kept })
+        }
         existing.ws.connect()
       }
       set({ activeChatId: containerId, chatOpen: true })
@@ -329,6 +334,46 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (data.role === 'assistant' && !data.replay) {
         updateSession(containerId, { busy: false, statusText: '' })
       }
+    })
+
+    ws.on('replay_batch', (data) => {
+      const messages = (data.messages as Array<Record<string, unknown>>) || []
+      if (messages.length === 0) return
+      // Clear old replay messages before adding new batch (prevents piling on reconnect)
+      useChatStore.setState((state) => {
+        const s = state.sessions.get(containerId)
+        if (!s) return state
+        const kept = s.messages.filter((m) => !m.replay)
+        const replayed: ChatMessage[] = messages.map((d) => {
+          const type = d.type as string
+          const role = d.role as string || ''
+          const rawContent = (d.content as string) || ''
+          if (type === 'monitor') {
+            return {
+              id: nextId(),
+              role: 'tool' as const,
+              content: (d.output as string) || '',
+              timestamp: new Date().toISOString(),
+              replay: true,
+              tool_name: d.tool_name as string,
+              tool_arguments: d.arguments as Record<string, unknown>,
+              tool_output: (d.output as string) || '',
+            }
+          }
+          return {
+            id: nextId(),
+            role: role as ChatMessage['role'],
+            content: role === 'assistant' ? sanitizeAgentContent(rawContent) : rawContent,
+            timestamp: (d.timestamp as string) || new Date().toISOString(),
+            replay: true,
+            model: (d.model as string) || '',
+          }
+        })
+        const updated = { ...s, messages: [...replayed, ...kept] }
+        const newSessions = new Map(state.sessions)
+        newSessions.set(containerId, updated)
+        return { sessions: newSessions }
+      })
     })
 
     ws.on('replay_done', () => {

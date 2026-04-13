@@ -68,6 +68,7 @@ Efficient tool use:
 
 Instructions:
 - Use tools when needed. Think step by step. Concise responses. Retry on failure.
+- NEVER dump tool-actionable work as text. If you have a tool for the task (create_draft, write file, etc.) — USE IT. Do not output content "for the user to copy" instead. If a prior attempt failed, retry with corrected params.
 
 <!-- CACHE_SPLIT -->
 {system_info_block}
