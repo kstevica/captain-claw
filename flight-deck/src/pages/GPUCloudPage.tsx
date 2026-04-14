@@ -20,6 +20,8 @@ import {
   CircleDot,
   Server,
   Timer,
+  Shield,
+  ShieldOff,
 } from 'lucide-react'
 import { useVastAIStore, type VastInstance, type VastOffer, type VastOfferFilter } from '../stores/vastaiStore'
 
@@ -192,6 +194,15 @@ function InstanceCard({ inst }: { inst: VastInstance }) {
               <DollarSign className="h-3 w-3" />
               {formatPrice(inst.dph_total)}
             </span>
+            {inst.secure_ollama ? (
+              <span className="flex items-center gap-0.5 text-emerald-500" title="Secured with nginx proxy + Bearer token auth">
+                <Shield className="h-3 w-3" />
+              </span>
+            ) : (
+              <span className="flex items-center gap-0.5 text-amber-500" title="Ollama exposed without auth">
+                <ShieldOff className="h-3 w-3" />
+              </span>
+            )}
             <span className="flex items-center gap-1">
               <HardDrive className="h-3 w-3" />
               {formatSize(inst.disk_gb)}
@@ -246,6 +257,9 @@ function InstanceCard({ inst }: { inst: VastInstance }) {
             {inst.ollama_ready ? (
               <span className="flex items-center gap-1 text-xs text-emerald-400">
                 <CircleDot className="h-3 w-3" /> Ollama ready
+                {inst.public_ip && inst.ollama_port > 0 && (
+                  <span className="ml-1 text-zinc-500 font-mono">http://{inst.public_ip}:{inst.ollama_port}</span>
+                )}
               </span>
             ) : (
               <span className="flex items-center gap-1 text-xs text-amber-400">
@@ -368,10 +382,11 @@ function CreateModal({ offer, onClose }: { offer: VastOffer; onClose: () => void
   const [label, setLabel] = useState(`${offer.gpu_name.toLowerCase()}-ollama`)
   const [diskGb, setDiskGb] = useState(64)
   const [prePullModel, setPrePullModel] = useState('')
+  const [secureOllama, setSecureOllama] = useState(true)
   const isCreating = actionLoading === 'create'
 
   const submit = async () => {
-    const inst = await createInstance(offer.id, label, diskGb, prePullModel)
+    const inst = await createInstance(offer.id, label, diskGb, prePullModel, secureOllama)
     if (inst) onClose()
   }
 
@@ -409,6 +424,27 @@ function CreateModal({ offer, onClose }: { offer: VastOffer; onClose: () => void
             <input value={prePullModel} onChange={(e) => setPrePullModel(e.target.value)}
               placeholder="e.g. llama3.2, qwen3:8b"
               className="w-full rounded border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500 focus:outline-none" />
+          </div>
+          <div className="flex items-center justify-between">
+            <div>
+              <label className="block text-xs text-zinc-300 font-medium">Secure Ollama</label>
+              <p className="text-xs text-zinc-500 mt-0.5">
+                {secureOllama
+                  ? 'nginx proxy validates Bearer token — only you can access'
+                  : 'Ollama exposed directly — anyone with the IP can use it'}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSecureOllama(!secureOllama)}
+              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ${
+                secureOllama ? 'bg-violet-600' : 'bg-zinc-700'
+              }`}
+            >
+              <span className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-200 ${
+                secureOllama ? 'translate-x-4' : 'translate-x-0'
+              }`} />
+            </button>
           </div>
         </div>
 

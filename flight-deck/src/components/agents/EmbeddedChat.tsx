@@ -12,6 +12,7 @@ import {
   FileIcon,
   ImageIcon,
   XCircle,
+  Zap,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -71,6 +72,8 @@ export function EmbeddedChat({ containerId, containerName, host, port, auth }: E
   }, [expanded, session, containerId, containerName, host, port, auth, openChat])
 
   const messageCount = session?.messages.filter((m) => m.role === 'user' || m.role === 'assistant').length ?? 0
+  const lastTokPerSec = session?.lastTokPerSec ?? 0
+  const avgTokPerSec = session?.avgTokPerSec ?? 0
 
   return (
     <div className="border-t border-zinc-800">
@@ -86,6 +89,13 @@ export function EmbeddedChat({ containerId, containerName, host, port, auth }: E
         )}
         {session?.busy && <Loader2 className="h-3 w-3 animate-spin text-violet-400" />}
         <div className="flex-1" />
+        {lastTokPerSec > 0 && (
+          <span className="flex items-center gap-1 text-xs text-zinc-500 font-mono" title={`avg: ${avgTokPerSec.toFixed(1)} tok/s`}>
+            <Zap className="h-3 w-3 text-amber-500/70" />
+            {lastTokPerSec.toFixed(1)} tok/s
+            {avgTokPerSec > 0 && <span className="text-zinc-600">/ {avgTokPerSec.toFixed(1)} avg</span>}
+          </span>
+        )}
         {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
       </button>
 

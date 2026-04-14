@@ -452,7 +452,7 @@ export function DesktopPage() {
               <Radio className="h-3.5 w-3.5" />
               BotPort Agents ({instances.length})
             </div>
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-5 xl:grid-cols-3">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-5">
               {instances.map((inst) => (
                 <AgentCard key={inst.id} instance={inst} />
               ))}
@@ -519,7 +519,7 @@ export function DesktopPage() {
           {agentCount > 0 ? (
             effectiveLayout === 'grid' ? (
               /* ── Grid layout ── */
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-5 xl:grid-cols-3">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 md:gap-5">
                 {unifiedAgents.map((agent) => (
                   <div key={agent.id}>{renderAgentCard(agent)}</div>
                 ))}

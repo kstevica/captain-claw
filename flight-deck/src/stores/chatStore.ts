@@ -124,6 +124,11 @@ interface ChatSession {
   personalities: AgentPersonalityInfo[]
   activeModel: string
   activePersonality: string
+  // Token generation speed tracking
+  _busyStartedAt: number // timestamp (ms) when agent became busy
+  lastTokPerSec: number  // last generation speed (tok/s)
+  avgTokPerSec: number   // running average tok/s
+  _tokSamples: number    // number of samples for avg calculation
 }
 
 interface ChatStore {
@@ -183,6 +188,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       personalities: [],
       activeModel: '',
       activePersonality: '',
+      _busyStartedAt: 0,
+      lastTokPerSec: 0,
+      avgTokPerSec: 0,
+      _tokSamples: 0,
     }
 
     const sessions = new Map(get().sessions)
@@ -384,7 +393,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const text = data.text as string || data.status as string || ''
       // "ready", "idle", or empty status means agent is done
       const idle = !text || /^(ready|idle|done|completed)$/i.test(text)
-      updateSession(containerId, { busy: !idle, statusText: idle ? '' : text })
+      const patch: Partial<ChatSession> = { busy: !idle, statusText: idle ? '' : text }
+      // Record when agent first becomes busy (for tok/s calculation)
+      if (!idle) {
+        const s = useChatStore.getState().sessions.get(containerId)
+        if (s && !s.busy) patch._busyStartedAt = Date.now()
+      }
+      updateSession(containerId, patch)
     })
 
     ws.on('monitor', (data) => {
@@ -478,6 +493,27 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
     })
 
+    // Token generation speed tracking from usage events
+    ws.on('usage', (data) => {
+      const last = data.last as Record<string, number> | undefined
+      if (!last) return
+      const completionTokens = last.completion_tokens || 0
+      if (completionTokens <= 0) return
+      const s = useChatStore.getState().sessions.get(containerId)
+      if (!s || !s._busyStartedAt) return
+      const elapsedSec = (Date.now() - s._busyStartedAt) / 1000
+      if (elapsedSec <= 0) return
+      const tokPerSec = completionTokens / elapsedSec
+      const samples = s._tokSamples + 1
+      const newAvg = (s.avgTokPerSec * s._tokSamples + tokPerSec) / samples
+      updateSession(containerId, {
+        lastTokPerSec: tokPerSec,
+        avgTokPerSec: newAvg,
+        _tokSamples: samples,
+        _busyStartedAt: 0,
+      })
+    })
+
     ws.connect()
   },
 
@@ -514,7 +550,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       timestamp: new Date().toISOString(),
     }
     addMessage(containerId, msg)
-    updateSession(containerId, { busy: true, statusText: 'Thinking...' })
+    updateSession(containerId, { busy: true, statusText: 'Thinking...', _busyStartedAt: Date.now() })
     session.ws.send(content)
   },
 

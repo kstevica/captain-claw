@@ -9,23 +9,29 @@ from __future__ import annotations
 
 def ollama_setup_script(
     pre_pull_model: str = "",
-    ollama_host: str = "0.0.0.0:11434",
+    secure: bool = True,
+    bearer_token: str = "",
 ) -> str:
     """Return a bash on-start script that installs and starts Ollama.
 
     The script:
     1. Installs Ollama via the official installer (skips if already present).
-    2. Starts ``ollama serve`` in the background bound to all interfaces.
+    2. Starts ``ollama serve`` in the background.
     3. Waits for the Ollama API to become healthy.
-    4. Optionally pulls a model if *pre_pull_model* is set.
+    4. Optionally installs an nginx reverse proxy with Bearer token auth.
+    5. Optionally pulls a model if *pre_pull_model* is set.
 
     Parameters
     ----------
     pre_pull_model:
         Model tag to automatically pull after Ollama starts
         (e.g. ``"llama3.2"``).  Empty string = skip.
-    ollama_host:
-        Bind address for ``ollama serve``.
+    secure:
+        When True, install nginx as a reverse proxy on port 11434 that
+        validates the Bearer token.  Ollama then only listens on
+        localhost:11435 (inaccessible from outside).
+    bearer_token:
+        Required when *secure* is True.  The expected Bearer token.
     """
     pull_block = ""
     if pre_pull_model:
@@ -39,12 +45,23 @@ ollama pull "{safe_model}" 2>&1 | tail -5
 echo "[captain-claw] Model pull complete: {safe_model}"
 """
 
+    if secure:
+        # Secure mode: Ollama on localhost:11435, nginx proxy on 0.0.0.0:11434
+        ollama_host = "127.0.0.1:11435"
+        ollama_health_url = "http://127.0.0.1:11435/api/version"
+        nginx_block = _nginx_proxy_block(bearer_token)
+    else:
+        # Open mode: Ollama directly on 0.0.0.0:11434
+        ollama_host = "0.0.0.0:11434"
+        ollama_health_url = "http://localhost:11434/api/version"
+        nginx_block = ""
+
     return f"""#!/bin/bash
 set -e
 
-echo "[captain-claw] Starting Ollama setup..."
+echo "[captain-claw] Starting Ollama setup (secure={'yes' if secure else 'no'})..."
 
-# Install Ollama if not already present (vastai/ollama image has it pre-installed).
+# Install Ollama if not already present (ollama/ollama image has it pre-installed).
 if ! command -v ollama &>/dev/null; then
     echo "[captain-claw] Installing Ollama..."
     curl -fsSL https://ollama.com/install.sh | sh
@@ -53,7 +70,7 @@ else
 fi
 
 # Start Ollama server in the background if not already running.
-if ! curl -sf http://localhost:11434/api/version > /dev/null 2>&1; then
+if ! curl -sf {ollama_health_url} > /dev/null 2>&1; then
     echo "[captain-claw] Starting Ollama server on {ollama_host}..."
     OLLAMA_HOST="{ollama_host}" nohup ollama serve > /var/log/ollama.log 2>&1 &
     echo "[captain-claw] Ollama PID: $!"
@@ -61,7 +78,7 @@ if ! curl -sf http://localhost:11434/api/version > /dev/null 2>&1; then
     # Wait for Ollama to become healthy (up to 120 seconds).
     echo "[captain-claw] Waiting for Ollama health check..."
     for i in $(seq 1 60); do
-        if curl -sf http://localhost:11434/api/version > /dev/null 2>&1; then
+        if curl -sf {ollama_health_url} > /dev/null 2>&1; then
             echo "[captain-claw] Ollama is healthy after $((i*2)) seconds."
             break
         fi
@@ -75,7 +92,7 @@ if ! curl -sf http://localhost:11434/api/version > /dev/null 2>&1; then
 else
     echo "[captain-claw] Ollama already running."
 fi
-
+{nginx_block}
 # Verify GPU is visible.
 echo "[captain-claw] GPU status:"
 nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader 2>/dev/null || echo "  (nvidia-smi not available)"
@@ -84,21 +101,66 @@ echo "[captain-claw] Setup complete."
 """
 
 
-def env_vars_for_instance(bearer_token: str) -> dict[str, str]:
-    """Return environment variables for a vast.ai instance.
+def _nginx_proxy_block(bearer_token: str) -> str:
+    """Return a bash snippet that installs and configures nginx as a
+    reverse proxy in front of Ollama with Bearer token authentication.
 
-    Configures the vast.ai base image's built-in auth and HTTPS.
+    nginx listens on ``0.0.0.0:11434`` (the externally-mapped port)
+    and proxies to Ollama on ``127.0.0.1:11435``.
+    """
+    # Escape any characters that might break the nginx config.
+    safe_token = bearer_token.replace("\\", "\\\\").replace('"', '\\"')
+
+    return f"""
+# ── Secure proxy: nginx with Bearer token auth ──
+echo "[captain-claw] Installing nginx for secure proxy..."
+apt-get update -qq && apt-get install -y -qq nginx > /dev/null 2>&1
+
+cat > /etc/nginx/sites-available/ollama-proxy <<'NGINX_EOF'
+server {{
+    listen 0.0.0.0:11434;
+
+    # Generous timeouts for large model pulls / long inference.
+    proxy_read_timeout 600s;
+    proxy_send_timeout 600s;
+    client_max_body_size 0;
+
+    location / {{
+        # Validate Bearer token.
+        set $expected "Bearer {safe_token}";
+        if ($http_authorization != $expected) {{
+            return 401 '{{"error": "unauthorized"}}';
+        }}
+
+        proxy_pass http://127.0.0.1:11435;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_buffering off;
+    }}
+}}
+NGINX_EOF
+
+# Disable default site, enable ours.
+rm -f /etc/nginx/sites-enabled/default
+ln -sf /etc/nginx/sites-available/ollama-proxy /etc/nginx/sites-enabled/
+nginx -t 2>&1 && nginx
+echo "[captain-claw] nginx proxy running on :11434 -> Ollama :11435 (auth required)"
+"""
+
+
+def env_vars_for_instance(bearer_token: str, *, secure: bool = True) -> dict[str, str]:
+    """Return environment variables for a vast.ai instance.
 
     Parameters
     ----------
     bearer_token:
         The token that clients will use as ``Authorization: Bearer <token>``
         to access services on this instance.
+    secure:
+        When True, Ollama binds to localhost only (nginx handles external
+        traffic).  When False, Ollama binds to all interfaces directly.
     """
     return {
-        "ENABLE_AUTH": "true",
-        "OPEN_BUTTON_TOKEN": bearer_token,
-        "ENABLE_HTTPS": "true",
-        # Ollama binds to all interfaces inside the container.
-        "OLLAMA_HOST": "0.0.0.0:11434",
+        # Ollama bind address depends on security mode.
+        "OLLAMA_HOST": "127.0.0.1:11435" if secure else "0.0.0.0:11434",
     }

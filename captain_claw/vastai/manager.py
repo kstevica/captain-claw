@@ -146,8 +146,12 @@ class VastAIManager:
         bearer_token = secrets.token_urlsafe(32)
 
         # Build env vars and onstart script.
-        env = env_vars_for_instance(bearer_token)
-        onstart = ollama_setup_script(pre_pull_model=req.pre_pull_model)
+        env = env_vars_for_instance(bearer_token, secure=req.secure_ollama)
+        onstart = ollama_setup_script(
+            pre_pull_model=req.pre_pull_model,
+            secure=req.secure_ollama,
+            bearer_token=bearer_token,
+        )
 
         # Create the instance via vast.ai API.
         instance_id, instance_api_key = await self._client.create_instance(
@@ -188,6 +192,7 @@ class VastAIManager:
             created_at=datetime.now(timezone.utc).isoformat(),
             label=req.label,
             auto_stop_minutes=5,
+            secure_ollama=req.secure_ollama,
         )
 
         self._instances[instance_id] = inst

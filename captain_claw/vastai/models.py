@@ -139,6 +139,12 @@ class VastInstance(BaseModel):
     last_activity_at: str = ""
     """ISO timestamp of last Ollama API activity on this instance."""
 
+    # Security
+    secure_ollama: bool = True
+    """When True, an nginx reverse proxy validates the Bearer token
+    before forwarding to Ollama.  When False, Ollama is directly
+    exposed (no auth enforcement)."""
+
     # Ollama status
     ollama_ready: bool = False
     """True once the Ollama health check passes."""
@@ -201,6 +207,10 @@ class CreateInstanceRequest(BaseModel):
     disk_gb: int = 64
     pre_pull_model: str = ""
     """If set, automatically pull this model after Ollama starts."""
+    secure_ollama: bool = True
+    """When True, install an nginx reverse proxy that validates the
+    Bearer token before forwarding requests to Ollama.  When False,
+    Ollama is directly exposed without auth enforcement."""
 
 
 class PullModelRequest(BaseModel):

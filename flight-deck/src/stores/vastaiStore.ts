@@ -33,6 +33,7 @@ export interface VastInstance {
   ollama_port: number
   ssh_port: number
   auth_token: string
+  secure_ollama: boolean
   dph_total: number
   disk_gb: number
   created_at: string
@@ -91,7 +92,7 @@ interface VastAIStore {
   searchOffers: (filters?: VastOfferFilter) => Promise<void>
   setApiKey: (key: string) => Promise<boolean>
   removeApiKey: () => Promise<boolean>
-  createInstance: (offerId: number, label?: string, diskGb?: number, prePullModel?: string) => Promise<VastInstance | null>
+  createInstance: (offerId: number, label?: string, diskGb?: number, prePullModel?: string, secureOllama?: boolean) => Promise<VastInstance | null>
   stopInstance: (id: number) => Promise<boolean>
   startInstance: (id: number) => Promise<boolean>
   destroyInstance: (id: number) => Promise<boolean>
@@ -210,7 +211,7 @@ export const useVastAIStore = create<VastAIStore>((set, get) => ({
     }
   },
 
-  createInstance: async (offerId, label, diskGb, prePullModel) => {
+  createInstance: async (offerId, label, diskGb, prePullModel, secureOllama) => {
     set({ actionLoading: 'create', error: null })
     try {
       const inst = await fetchJson('/fd/vastai/instances', {
@@ -220,6 +221,7 @@ export const useVastAIStore = create<VastAIStore>((set, get) => ({
           label: label ?? '',
           disk_gb: diskGb ?? 64,
           pre_pull_model: prePullModel ?? '',
+          secure_ollama: secureOllama ?? true,
         }),
       })
       set((s) => ({
