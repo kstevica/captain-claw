@@ -20,6 +20,7 @@ import { TodayPage } from './pages/TodayPage'
 import { SkillsPage } from './pages/SkillsPage'
 import { GamesPage } from './pages/GamesPage'
 import ConnectionsPage from './pages/ConnectionsPage'
+import { GPUCloudPage } from './pages/GPUCloudPage'
 import { useUIStore } from './stores/uiStore'
 import { useAgentStore } from './stores/agentStore'
 import { useAuthStore, checkAuthStatus, refreshAccessToken } from './stores/authStore'
@@ -294,6 +295,7 @@ function AppContent() {
       {view === 'admin' && <AdminPage />}
       {view === 'council' && <CouncilPage />}
       {view === 'connections' && <ConnectionsPage />}
+      {view === 'gpu-cloud' && <GPUCloudPage />}
     </>
   )
 

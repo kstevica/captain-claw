@@ -489,10 +489,21 @@ async def lifespan(app: FastAPI):
         # Load admin-configured plan limits from DB
         plan_limits_raw = await _fd_db.get_system_setting("fd:plan-limits")
         load_plan_limits_from_db_sync(plan_limits_raw)
+        # Initialize vast.ai GPU cloud integration.
+        from captain_claw.vastai.manager import VastAIManager
+        from captain_claw.flight_deck.vastai_routes import set_vastai_manager
+        from captain_claw.vastai.wake import register_manager as _register_vastai_wake
+        _vastai_mgr = VastAIManager(_fd_db)
+        await _vastai_mgr.initialize()
+        set_vastai_manager(_vastai_mgr)
+        _register_vastai_wake(_vastai_mgr)
+        app.state.vastai_manager = _vastai_mgr
     yield
     # Shutdown: stop all managed process agents
     print("Flight Deck: stopping managed process agents...")
     _stop_all_processes()
+    if hasattr(app.state, "vastai_manager"):
+        await app.state.vastai_manager.shutdown()
     if AUTH_ENABLED and hasattr(app.state, "fd_db"):
         await app.state.fd_db.close()
     if _client:
@@ -539,6 +550,7 @@ from captain_claw.flight_deck.council_routes import router as council_router
 from captain_claw.flight_deck.google_oauth_routes import router as google_oauth_router
 from captain_claw.flight_deck.codex_oauth_routes import router as codex_oauth_router
 from captain_claw.flight_deck.games_routes import router as games_router
+from captain_claw.flight_deck.vastai_routes import router as vastai_router
 
 app.include_router(auth_router)
 app.include_router(settings_router)
@@ -548,6 +560,7 @@ app.include_router(council_router)
 app.include_router(google_oauth_router)
 app.include_router(codex_oauth_router)
 app.include_router(games_router)
+app.include_router(vastai_router)
 
 
 # ── Auth dependency helper ──

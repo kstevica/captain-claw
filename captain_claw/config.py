@@ -957,6 +957,7 @@ class ProviderKeysConfig(BaseModel):
     openrouter: str = ""
     openrouter_headers: list[str] = Field(default_factory=list)
     brave: str = ""
+    vastai: str = ""
 
     def headers_for(self, provider: str) -> dict[str, str]:
         """Parse extra header tags for *provider* into a dict.

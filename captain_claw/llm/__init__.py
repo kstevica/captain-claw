@@ -1331,6 +1331,13 @@ class OllamaProvider(LLMProvider):
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> LLMResponse:
+        # Auto-wake vast.ai instance if needed.
+        try:
+            from captain_claw.vastai.wake import maybe_wake_instance
+            await maybe_wake_instance(self.base_url)
+        except Exception:
+            pass  # Non-critical; don't block if wake module is unavailable.
+
         url = f"{self.base_url}/api/chat"
         ollama_messages = _convert_messages_for_ollama(messages)
         ollama_tools = _convert_tools_for_openai_style(tools) if tools else None
@@ -1439,6 +1446,13 @@ class OllamaProvider(LLMProvider):
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> AsyncIterator[str]:
+        # Auto-wake vast.ai instance if needed.
+        try:
+            from captain_claw.vastai.wake import maybe_wake_instance
+            await maybe_wake_instance(self.base_url)
+        except Exception:
+            pass
+
         url = f"{self.base_url}/api/chat"
         ollama_messages = _convert_messages_for_ollama(messages)
         ollama_tools = _convert_tools_for_openai_style(tools) if tools else None
@@ -2524,12 +2538,31 @@ class LiteRTProvider(LLMProvider):
         if "/" in ref:
             spec, _, hint_filename = ref.partition(":")
             owner_repo = spec.replace("/", "--")
+            # Flight Deck overrides $HOME for process agents, so
+            # expanduser("~") may point to the agent sandbox rather
+            # than the real user home.  Check both the $HOME-derived
+            # path AND the real home (from /etc/passwd / pw_dir) so
+            # we find models downloaded by the user on the host.
+            _candidate_homes: list[str] = []
+            _env_hf = os.environ.get("HF_HOME")
+            if _env_hf:
+                _candidate_homes.append(_env_hf)
+            _candidate_homes.append(
+                os.path.join(os.path.expanduser("~"), ".cache", "huggingface")
+            )
             try:
-                hf_home = os.environ.get("HF_HOME") or os.path.join(
-                    os.path.expanduser("~"), ".cache", "huggingface"
-                )
-                hub_dir = os.path.join(hf_home, "hub", f"models--{owner_repo}", "snapshots")
-                if os.path.isdir(hub_dir):
+                import pwd
+                _real_home = pwd.getpwuid(os.getuid()).pw_dir
+                _real_hf = os.path.join(_real_home, ".cache", "huggingface")
+                if _real_hf not in _candidate_homes:
+                    _candidate_homes.append(_real_hf)
+            except Exception:
+                pass
+            try:
+                for hf_home in _candidate_homes:
+                    hub_dir = os.path.join(hf_home, "hub", f"models--{owner_repo}", "snapshots")
+                    if not os.path.isdir(hub_dir):
+                        continue
                     candidates: list[str] = []
                     for snap in sorted(os.listdir(hub_dir)):
                         snap_dir = os.path.join(hub_dir, snap)
