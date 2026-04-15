@@ -1,5 +1,6 @@
 """Web fetch tools for retrieving web page content."""
 
+import asyncio
 import re
 import shutil
 from typing import Any
@@ -13,6 +14,16 @@ from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 
 log = get_logger(__name__)
+
+# ── Optional Playwright dependency ───────────────────────────────────
+
+try:
+    from playwright.async_api import async_playwright
+
+    _HAS_PLAYWRIGHT = True
+except ImportError:  # pragma: no cover
+    _HAS_PLAYWRIGHT = False
+    async_playwright = None  # type: ignore[assignment,misc]
 
 # ── Google Drive URL blocking ─────────────────────────────────────────
 
@@ -88,13 +99,100 @@ def _extract_readable_text(html: str, base_url: str | None = None) -> str:
     return text
 
 
+_LOAD_MORE_PATTERNS = [
+    "load more", "show more", "view more", "see more",
+    "more results", "load all", "show all", "view all",
+]
+
+_LOAD_MORE_SELECTORS = [
+    # Common CSS selectors for "load more" buttons
+    "button",
+    "a.load-more", "a.show-more", "a.view-more",
+    "[class*='load-more']", "[class*='loadmore']",
+    "[class*='show-more']", "[class*='showmore']",
+    "[class*='view-more']", "[class*='viewmore']",
+    "[data-action='load-more']", "[data-action='loadmore']",
+]
+
+
+async def _deep_fetch(url: str, max_scrolls: int = 20, scroll_pause: float = 1.0) -> str:
+    """Use Playwright to fetch a page with full JS rendering, auto-scroll, and load-more clicking.
+
+    Returns the final page HTML after all content has been loaded.
+    """
+    if not _HAS_PLAYWRIGHT:
+        raise RuntimeError(
+            "deep_fetch requires Playwright. "
+            "Install with: pip install playwright && playwright install chromium"
+        )
+
+    pw = await async_playwright().start()
+    try:
+        browser = await pw.chromium.launch(headless=True)
+        page = await browser.new_page(
+            user_agent="Captain Claw/0.1.0 (Web Fetch Tool)",
+            viewport={"width": 1280, "height": 800},
+        )
+        await page.goto(url, wait_until="networkidle", timeout=30000)
+
+        prev_height = 0
+        stable_rounds = 0
+
+        for _ in range(max_scrolls):
+            # Try clicking a "load more" button first.
+            clicked = False
+            for selector in _LOAD_MORE_SELECTORS:
+                try:
+                    elements = await page.query_selector_all(selector)
+                    for el in elements:
+                        text = (await el.inner_text()).strip().lower()
+                        if any(pat in text for pat in _LOAD_MORE_PATTERNS):
+                            if await el.is_visible():
+                                await el.click()
+                                clicked = True
+                                await asyncio.sleep(scroll_pause)
+                                break
+                except Exception:
+                    continue
+                if clicked:
+                    break
+
+            # Scroll to bottom.
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(scroll_pause)
+
+            # Check if page height grew.
+            cur_height = await page.evaluate("document.body.scrollHeight")
+            if cur_height == prev_height and not clicked:
+                stable_rounds += 1
+                if stable_rounds >= 2:
+                    break  # No new content after 2 stable rounds.
+            else:
+                stable_rounds = 0
+            prev_height = cur_height
+
+        html = await page.content()
+    finally:
+        try:
+            await browser.close()
+        except Exception:
+            pass
+        try:
+            await pw.stop()
+        except Exception:
+            pass
+
+    return html
+
+
 class WebFetchTool(Tool):
     """Fetch web page content as clean readable text (ALWAYS text mode)."""
 
     name = "web_fetch"
     description = (
         "Fetch a URL and return clean readable text (no HTML). "
-        "This is the default tool for reading web pages. Always extracts text."
+        "This is the default tool for reading web pages. Always extracts text. "
+        "Use deep_fetch=true for JS-rendered pages or pages with 'load more' buttons."
     )
     parameters = {
         "type": "object",
@@ -107,6 +205,14 @@ class WebFetchTool(Tool):
                 "type": "number",
                 "description": "Maximum characters to return (default from config, typically 100000)",
             },
+            "deep_fetch": {
+                "type": "boolean",
+                "description": (
+                    "Use a headless browser (Playwright) to render JavaScript, "
+                    "auto-scroll, and click 'load more' buttons to capture all content. "
+                    "Slower but necessary for JS-rendered or lazy-loaded pages. Default: false."
+                ),
+            },
         },
         "required": ["url"],
     }
@@ -118,6 +224,7 @@ class WebFetchTool(Tool):
         self,
         url: str,
         max_chars: int | None = None,
+        deep_fetch: bool = False,
         **kwargs: Any,
     ) -> ToolResult:
         """Fetch a web page and extract readable text via BeautifulSoup.
@@ -129,6 +236,7 @@ class WebFetchTool(Tool):
         Args:
             url: URL to fetch
             max_chars: Max characters to return
+            deep_fetch: Use headless browser to render JS and auto-scroll
 
         Returns:
             ToolResult with extracted readable text
@@ -141,24 +249,33 @@ class WebFetchTool(Tool):
             return ToolResult(success=False, error=_GDRIVE_FETCH_BLOCK_MSG)
 
         try:
-            log.info("Fetching URL (text mode)", url=url)
             cfg = get_config()
             configured_max = int(getattr(cfg.tools.web_fetch, "max_chars", 100000))
             effective_max_chars = configured_max if max_chars is None else int(max_chars)
             effective_max_chars = max(1, effective_max_chars)
 
-            response = await self.client.get(url)
-            response.raise_for_status()
+            if deep_fetch:
+                log.info("Fetching URL (deep_fetch mode)", url=url)
+                raw_html = await _deep_fetch(url)
+                status_code = 200  # Playwright doesn't expose status easily
+                mode = "deep"
+            else:
+                log.info("Fetching URL (text mode)", url=url)
+                response = await self.client.get(url)
+                response.raise_for_status()
+                raw_html = response.text
+                status_code = response.status_code
+                mode = "text"
 
-            content = _extract_readable_text(response.text, base_url=url)
+            content = _extract_readable_text(raw_html, base_url=url)
 
             if len(content) > effective_max_chars:
                 content = content[:effective_max_chars] + "\n... [truncated]"
 
             output = f"[URL: {url}]\n"
-            output += f"[Status: {response.status_code}]\n"
-            output += f"[Mode: text]\n"
-            output += f"[Size: {len(response.text)} chars]\n\n"
+            output += f"[Status: {status_code}]\n"
+            output += f"[Mode: {mode}]\n"
+            output += f"[Size: {len(raw_html)} chars]\n\n"
             output += content
 
             return ToolResult(

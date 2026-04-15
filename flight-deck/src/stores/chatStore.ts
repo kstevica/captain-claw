@@ -126,9 +126,10 @@ interface ChatSession {
   activePersonality: string
   // Token generation speed tracking
   _busyStartedAt: number // timestamp (ms) when agent became busy
-  lastTokPerSec: number  // last generation speed (tok/s)
-  avgTokPerSec: number   // running average tok/s
+  lastTokPerSec: number  // last wall-clock generation speed (tok/s)
+  avgTokPerSec: number   // running average wall-clock tok/s
   _tokSamples: number    // number of samples for avg calculation
+  llmTokPerSec: number   // real LLM generation speed (completion_tokens / llm_latency)
 }
 
 interface ChatStore {
@@ -192,6 +193,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       lastTokPerSec: 0,
       avgTokPerSec: 0,
       _tokSamples: 0,
+      llmTokPerSec: 0,
     }
 
     const sessions = new Map(get().sessions)
@@ -506,11 +508,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const tokPerSec = completionTokens / elapsedSec
       const samples = s._tokSamples + 1
       const newAvg = (s.avgTokPerSec * s._tokSamples + tokPerSec) / samples
+      // Real LLM speed from backend latency_ms (pure API call time)
+      const latencyMs = last.latency_ms || 0
+      const llmTokPerSec = latencyMs > 0 ? (completionTokens / latencyMs) * 1000 : 0
       updateSession(containerId, {
         lastTokPerSec: tokPerSec,
         avgTokPerSec: newAvg,
         _tokSamples: samples,
         _busyStartedAt: 0,
+        llmTokPerSec,
       })
     })
 

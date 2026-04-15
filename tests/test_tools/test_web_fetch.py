@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from captain_claw.config import get_config, set_config
@@ -70,7 +72,8 @@ async def test_web_fetch_text_mode_preserves_links():
 
 
 @pytest.mark.asyncio
-async def test_web_fetch_html_mode_returns_raw_html():
+async def test_web_fetch_ignores_legacy_extract_mode():
+    """extract_mode is silently stripped — web_fetch always returns text."""
     html = "<html><body><h1>Hello</h1></body></html>"
     tool = WebFetchTool()
     tool.client = _FakeClient(_FakeResponse(html))
@@ -78,20 +81,10 @@ async def test_web_fetch_html_mode_returns_raw_html():
     result = await tool.execute(url="https://example.com", extract_mode="html")
 
     assert result.success is True
-    assert "[Mode: html]" in result.content
-    assert "<html><body><h1>Hello</h1></body></html>" in result.content
-
-
-@pytest.mark.asyncio
-async def test_web_fetch_rejects_unsupported_extract_mode():
-    html = "<html><body>hello</body></html>"
-    tool = WebFetchTool()
-    tool.client = _FakeClient(_FakeResponse(html))
-
-    result = await tool.execute(url="https://example.com", extract_mode="xml")
-
-    assert result.success is False
-    assert "Unsupported extract_mode" in (result.error or "")
+    assert "[Mode: text]" in result.content
+    assert "Hello" in result.content
+    # Should NOT contain raw HTML — extract_mode is ignored.
+    assert "<html>" not in result.content
 
 
 @pytest.mark.asyncio
@@ -112,3 +105,22 @@ async def test_web_fetch_uses_configurable_default_max_chars():
         assert "abcdefghijklmnopqrst" in result.content
     finally:
         set_config(old_cfg)
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_deep_fetch_calls_playwright():
+    """deep_fetch=True should delegate to _deep_fetch and return deep mode."""
+    final_html = "<html><body><h1>Full Content</h1><p>Loaded via JS.</p></body></html>"
+
+    with patch("captain_claw.tools.web_fetch._deep_fetch", new_callable=AsyncMock) as mock_df:
+        mock_df.return_value = final_html
+        tool = WebFetchTool()
+
+        result = await tool.execute(url="https://example.com/lazy", deep_fetch=True)
+
+    assert result.success is True
+    assert "[Mode: deep]" in result.content
+    assert "Full Content" in result.content
+    assert "Loaded via JS." in result.content
+    assert "<html>" not in result.content  # Still extracts text, not raw HTML.
+    mock_df.assert_awaited_once_with("https://example.com/lazy")

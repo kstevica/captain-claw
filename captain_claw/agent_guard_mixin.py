@@ -368,6 +368,8 @@ class AgentGuardMixin:
 
         if turn_usage is not None:
             self._accumulate_usage(turn_usage, response.usage or {})
+            turn_usage.setdefault("latency_ms", 0)
+            turn_usage["latency_ms"] += _latency_ms
 
         allowed_output, output_error = await self._enforce_guard(
             guard_type="output",
