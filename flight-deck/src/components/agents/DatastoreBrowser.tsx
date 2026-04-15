@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Database, Table2, ChevronRight, Loader2, AlertTriangle, RefreshCw, ChevronLeft, X } from 'lucide-react'
+import { Database, Table2, ChevronRight, Loader2, AlertTriangle, RefreshCw, ChevronLeft, X, Download } from 'lucide-react'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
 
 interface TableInfo {
@@ -101,6 +101,36 @@ export function DatastoreBrowser({ host, port, auth, agentName, onClose }: Datas
     fetchRows(selectedTable, newPage)
   }
 
+  const [exportOpen, setExportOpen] = useState(false)
+
+  const exportTable = (format: string) => {
+    if (!selectedTable) return
+    const { token: storeToken, authEnabled } = useAuthStore.getState()
+    const authQs = auth ? `&token=${encodeURIComponent(auth)}` : ''
+    const url = `/fd/agent-datastore/${host}/${port}/tables/${encodeURIComponent(selectedTable)}/export?format=${format}${authQs}`
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${selectedTable}.${format}`
+    // For authenticated requests we need to fetch as blob
+    if (authEnabled && storeToken) {
+      fetch(url, { headers: { Authorization: `Bearer ${storeToken}` }, credentials: 'include' })
+        .then(r => r.blob())
+        .then(blob => {
+          const blobUrl = URL.createObjectURL(blob)
+          a.href = blobUrl
+          document.body.appendChild(a)
+          a.click()
+          document.body.removeChild(a)
+          URL.revokeObjectURL(blobUrl)
+        })
+    } else {
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+    }
+    setExportOpen(false)
+  }
+
   const selectedTableInfo = tables.find((t) => t.name === selectedTable)
   const totalPages = rows ? Math.ceil(rows.total / pageSize) : 0
 
@@ -197,7 +227,37 @@ export function DatastoreBrowser({ host, port, auth, agentName, onClose }: Datas
                     {selectedTableInfo.row_count} rows · {selectedTableInfo.columns.length} columns
                   </span>
                 )}
-                {rowsLoading && <Loader2 className="h-3 w-3 animate-spin text-zinc-500 ml-auto" />}
+                <div className="ml-auto flex items-center gap-2">
+                  {rowsLoading && <Loader2 className="h-3 w-3 animate-spin text-zinc-500" />}
+                  <div className="relative">
+                    <button
+                      onClick={() => setExportOpen(!exportOpen)}
+                      className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-colors"
+                    >
+                      <Download className="h-3 w-3" /> Export
+                    </button>
+                    {exportOpen && (
+                      <>
+                        <div className="fixed inset-0 z-20" onClick={() => setExportOpen(false)} />
+                        <div className="absolute right-0 top-full mt-1 z-30 rounded-lg border border-zinc-700 bg-zinc-800 shadow-xl py-1 min-w-[120px]">
+                          {[
+                            { fmt: 'csv', label: 'CSV' },
+                            { fmt: 'json', label: 'JSON' },
+                            { fmt: 'xlsx', label: 'Excel (XLSX)' },
+                          ].map(({ fmt, label }) => (
+                            <button
+                              key={fmt}
+                              onClick={() => exportTable(fmt)}
+                              className="block w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700 hover:text-zinc-100 transition-colors"
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
               </div>
 
               {/* Data table */}

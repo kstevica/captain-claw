@@ -139,6 +139,20 @@ class DatastoreManager:
         return cleaned
 
     @staticmethod
+    def _dedup_headers(headers: list[str]) -> list[str]:
+        """Ensure all header names are unique by appending _2, _3, ... for dupes."""
+        seen: dict[str, int] = {}
+        result: list[str] = []
+        for h in headers:
+            if h not in seen:
+                seen[h] = 1
+                result.append(h)
+            else:
+                seen[h] += 1
+                result.append(f"{h}_{seen[h]}")
+        return result
+
+    @staticmethod
     def _internal_name(user_name: str) -> str:
         return TABLE_PREFIX + DatastoreManager._safe_name(user_name)
 
@@ -1228,7 +1242,7 @@ class DatastoreManager:
         if not reader.fieldnames:
             raise ValueError("CSV has no headers")
 
-        headers = [self._safe_name(h) for h in reader.fieldnames]
+        headers = self._dedup_headers([self._safe_name(h) for h in reader.fieldnames])
         all_rows = list(reader)
 
         if not table_name:
@@ -1249,12 +1263,14 @@ class DatastoreManager:
                     ) from e
                 raise
 
-        # Build row dicts with safe column names
+        # Build row dicts with safe (deduped) column names
+        # Map original fieldnames (in order) to deduped headers
+        orig_to_dedup = dict(zip(reader.fieldnames, headers))
         rows_to_insert = []
         for row in all_rows:
             cleaned = {}
             for orig_key, val in row.items():
-                safe_key = self._safe_name(orig_key)
+                safe_key = orig_to_dedup.get(orig_key, self._safe_name(orig_key))
                 cleaned[safe_key] = self._coerce_value(val)
             rows_to_insert.append(cleaned)
 
@@ -1272,7 +1288,7 @@ class DatastoreManager:
         if not headers:
             raise ValueError("XLSX sheet has no data")
 
-        safe_headers = [self._safe_name(h) for h in headers]
+        safe_headers = self._dedup_headers([self._safe_name(h) for h in headers])
         if not table_name:
             table_name = file_path.stem
         safe = self._safe_name(table_name)

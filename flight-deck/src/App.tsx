@@ -21,6 +21,7 @@ import { SkillsPage } from './pages/SkillsPage'
 import { GamesPage } from './pages/GamesPage'
 import ConnectionsPage from './pages/ConnectionsPage'
 import { GPUCloudPage } from './pages/GPUCloudPage'
+import { PromptBuilderPage } from './pages/PromptBuilderPage'
 import { useUIStore } from './stores/uiStore'
 import { useAgentStore } from './stores/agentStore'
 import { useAuthStore, checkAuthStatus, refreshAccessToken } from './stores/authStore'
@@ -285,6 +286,7 @@ function AppContent() {
   const mainContent = (
     <>
       {view === 'desktop' && <DesktopPage />}
+      {view === 'prompt-builder' && <PromptBuilderPage />}
       {view === 'today' && <TodayPage />}
       {view === 'operations' && <OperationsPage />}
       {view === 'workflow' && <WorkflowPage />}

@@ -551,6 +551,7 @@ from captain_claw.flight_deck.google_oauth_routes import router as google_oauth_
 from captain_claw.flight_deck.codex_oauth_routes import router as codex_oauth_router
 from captain_claw.flight_deck.games_routes import router as games_router
 from captain_claw.flight_deck.vastai_routes import router as vastai_router
+from captain_claw.flight_deck.prompt_routes import router as prompt_router
 
 app.include_router(auth_router)
 app.include_router(settings_router)
@@ -561,6 +562,7 @@ app.include_router(google_oauth_router)
 app.include_router(codex_oauth_router)
 app.include_router(games_router)
 app.include_router(vastai_router)
+app.include_router(prompt_router)
 
 
 # ── Auth dependency helper ──
@@ -2344,6 +2346,69 @@ async def agent_datastore_rows(
             resp = await client.get(url)
             if resp.status_code == 200:
                 return resp.json()
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.get("/fd/agent-datastore/{host}/{port}/tables/{table_name}/export")
+async def agent_datastore_export(
+    host: str, port: int, table_name: str,
+    format: str = "csv", token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    """Proxy datastore export (csv/json/xlsx) from a CC agent."""
+    import httpx
+    from fastapi.responses import Response as FastAPIResponse
+    if format not in ("csv", "json", "xlsx"):
+        raise HTTPException(400, f"Unsupported format: {format}")
+    auth = token or _resolve_agent_auth(port)
+    qs = f"token={auth}&" if auth else ""
+    qs += f"format={format}"
+    url = f"http://{host}:{port}/api/datastore/tables/{table_name}/export?{qs}"
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                return FastAPIResponse(
+                    content=resp.content,
+                    media_type=resp.headers.get("content-type", "application/octet-stream"),
+                    headers={"Content-Disposition": resp.headers.get("content-disposition", f'attachment; filename="{table_name}.{format}"')},
+                )
+            raise HTTPException(resp.status_code, resp.text)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.post("/fd/agent-rephrase/{host}/{port}")
+async def agent_rephrase(
+    host: str, port: int, request: Request,
+    user: dict | None = _required_user_dep,
+):
+    """Proxy a rephrase request to a CC agent's LLM."""
+    import httpx
+    auth = _resolve_agent_auth(port)
+    params = f"?token={auth}" if auth else ""
+    url = f"http://{host}:{port}/api/llm/complete{params}"
+    body = await request.json()
+    prompt_text = body.get("content", "")
+    payload = {
+        "messages": [
+            {"role": "system", "content": "You are a prompt engineer. Rephrase the following user prompt to be clearer, more specific, and more effective for an AI agent. Keep the same intent but improve clarity, structure, and specificity. Return only the improved prompt text, nothing else."},
+            {"role": "user", "content": prompt_text},
+        ],
+        "temperature": 0.7,
+        "max_tokens": 4096,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                url, json=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return {"content": data.get("content", prompt_text)}
             raise HTTPException(resp.status_code, resp.text)
     except httpx.ConnectError:
         raise HTTPException(502, "Cannot connect to agent")

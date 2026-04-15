@@ -176,6 +176,19 @@ class FlightDeckDB:
             );
             CREATE INDEX IF NOT EXISTS idx_council_artifacts_session
                 ON council_artifacts(session_id);
+
+            CREATE TABLE IF NOT EXISTS prompts (
+                id         TEXT PRIMARY KEY,
+                user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                title      TEXT NOT NULL DEFAULT '',
+                content    TEXT NOT NULL DEFAULT '',
+                files      TEXT NOT NULL DEFAULT '[]',
+                tags       TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_prompts_user
+                ON prompts(user_id);
         """)
         await self._db.commit()
 
@@ -728,3 +741,67 @@ class FlightDeckDB:
             )
         await self._db.commit()
         return True
+
+    # ── Prompts ─────────────────────────────────────────────────────
+
+    async def list_prompts(self, user_id: str) -> list[dict]:
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            "SELECT * FROM prompts WHERE user_id = ? ORDER BY updated_at DESC",
+            (user_id,),
+        )
+        return [dict(r) for r in rows]
+
+    async def get_prompt(self, prompt_id: str, user_id: str) -> dict | None:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM prompts WHERE id = ? AND user_id = ?",
+            (prompt_id, user_id),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def create_prompt(
+        self, user_id: str, title: str, content: str,
+        files: str = "[]", tags: str = "[]",
+    ) -> dict:
+        assert self._db is not None
+        now = _utcnow()
+        pid = _uuid()
+        await self._db.execute(
+            "INSERT INTO prompts (id, user_id, title, content, files, tags, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (pid, user_id, title, content, files, tags, now, now),
+        )
+        await self._db.commit()
+        return {"id": pid, "user_id": user_id, "title": title, "content": content,
+                "files": files, "tags": tags, "created_at": now, "updated_at": now}
+
+    async def update_prompt(
+        self, prompt_id: str, user_id: str, **fields: str,
+    ) -> dict | None:
+        assert self._db is not None
+        existing = await self.get_prompt(prompt_id, user_id)
+        if not existing:
+            return None
+        allowed = {"title", "content", "files", "tags"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return existing
+        updates["updated_at"] = _utcnow()
+        sets = ", ".join(f"{k} = ?" for k in updates)
+        vals = list(updates.values()) + [prompt_id, user_id]
+        await self._db.execute(
+            f"UPDATE prompts SET {sets} WHERE id = ? AND user_id = ?", vals,
+        )
+        await self._db.commit()
+        return await self.get_prompt(prompt_id, user_id)
+
+    async def delete_prompt(self, prompt_id: str, user_id: str) -> bool:
+        assert self._db is not None
+        async with self._db.execute(
+            "DELETE FROM prompts WHERE id = ? AND user_id = ?",
+            (prompt_id, user_id),
+        ) as cur:
+            await self._db.commit()
+            return (cur.rowcount or 0) > 0
