@@ -97,6 +97,35 @@ def _worker_log(msg: str, **fields: Any) -> None:
         pass
 
 
+def _redirect_child_fds_to_log() -> None:
+    """Redirect fds 1/2 so native library writes don't reach the TUI.
+
+    litert_lm's C++ engine writes initialization/progress messages
+    straight to the inherited stderr, and our own ``_worker_log`` helper
+    does the same. In the CLI those bytes land on top of the locked
+    status and prompt rows. Swapping the child's fds for a log file
+    stops the garbage at the source.
+    """
+    try:
+        log_dir = os.path.expanduser("~/.captain-claw/logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, f"litert-worker-{os.getpid()}.log")
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            sys.stdout.flush()
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        try:
+            sys.stderr.flush()
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        os.dup2(fd, 1)
+        os.dup2(fd, 2)
+        os.close(fd)
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
+
 def worker_main(
     req_q: "mp.Queue",
     resp_q: "mp.Queue",
@@ -110,6 +139,8 @@ def worker_main(
     ``send_message``). On failure ``ok=False`` and the dict carries
     ``error`` + ``error_type`` strings.
     """
+    _redirect_child_fds_to_log()
+
     try:
         import litert_lm  # type: ignore[import-not-found]
     except Exception as e:  # noqa: BLE001

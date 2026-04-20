@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+from datetime import datetime
 from typing import Any
 
 from captain_claw.config import get_config
@@ -1293,6 +1294,25 @@ class AgentScaleLoopMixin:
             return ""
         return f"{safe}.md"
 
+    @staticmethod
+    def _default_scale_output_filename(task_description: str) -> str:
+        """Last-resort scale_loop output name that won't collide across runs.
+
+        Includes a timestamp so repeated runs don't overwrite each other,
+        and prefixes a short slug from the task description when one can
+        be extracted. Falls back to ``scale_output-{timestamp}.md``.
+        """
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        slug = ""
+        if task_description:
+            head = task_description.strip().splitlines()[0] if task_description.strip() else ""
+            head = re.sub(r"^Task:\s*", "", head, flags=re.IGNORECASE)
+            head = re.sub(r"\s+", "-", head.strip())[:40]
+            head = re.sub(r"[^\w.\-]", "_", head)
+            slug = re.sub(r"[-_]{2,}", "-", head).strip("-_")
+        prefix = slug if slug else "scale_output"
+        return f"{prefix}-{ts}.md"
+
     def _resolve_scale_output_path(self, filename_or_path: str) -> str:
         """Normalise a scale output filename for the write tool.
 
@@ -2183,14 +2203,14 @@ class AgentScaleLoopMixin:
                         # 2. output_file from plan (LLM-derived for single_file)
                         # 3. Extract filename from task description regex
                         # 4. Derive from worker task title (unique per worker)
-                        # 5. Last resort: "scale_output.md"
+                        # 5. Last resort: timestamped name derived from the task
                         if not write_path_arg:
                             write_path_arg = (
                                 str(sp.get("_output_filename_template", "")).strip()
                                 or str(sp.get("_output_file_from_plan", "")).strip()
                                 or self._extract_output_filename(task_description)
                                 or self._derive_output_filename_from_context(task_description)
-                                or "scale_output.md"
+                                or self._default_scale_output_filename(task_description)
                             )
                         # Resolve to absolute path under <workspace>/output/<session>/
                         # only when we don't have a known absolute path.

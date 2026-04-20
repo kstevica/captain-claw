@@ -9,6 +9,7 @@ interface UIStore {
   panelOpen: boolean
   mobilePanel: MobilePanel
   sidebarDrawerOpen: boolean
+  forgeProjectId: string
   setView: (v: ViewMode) => void
   toggleSidebar: () => void
   togglePanel: () => void
@@ -16,6 +17,7 @@ interface UIStore {
   setMobilePanel: (panel: MobilePanel) => void
   toggleMobilePanel: (panel: MobilePanel) => void
   setSidebarDrawerOpen: (v: boolean) => void
+  setForgeProjectId: (id: string) => void
 }
 
 export const useUIStore = create<UIStore>((set) => ({
@@ -24,6 +26,7 @@ export const useUIStore = create<UIStore>((set) => ({
   panelOpen: false,
   mobilePanel: 'none',
   sidebarDrawerOpen: false,
+  forgeProjectId: '',
 
   setView: (view) => set({ view }),
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
@@ -32,4 +35,5 @@ export const useUIStore = create<UIStore>((set) => ({
   setMobilePanel: (mobilePanel) => set({ mobilePanel }),
   toggleMobilePanel: (panel) => set((s) => ({ mobilePanel: s.mobilePanel === panel ? 'none' : panel })),
   setSidebarDrawerOpen: (sidebarDrawerOpen) => set({ sidebarDrawerOpen }),
+  setForgeProjectId: (forgeProjectId) => set({ forgeProjectId }),
 }))

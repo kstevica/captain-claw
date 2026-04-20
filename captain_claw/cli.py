@@ -682,8 +682,37 @@ Commands:
             else:
                 line = left[:left_width].ljust(left_width)
             sys.stdout.write(f"\033[{row};1H\033[2K{line}")
+        self._paint_status_and_prompt(m)
         sys.stdout.write("\0338")
         sys.stdout.flush()
+
+    def _paint_status_and_prompt(self, m: dict[str, int]) -> None:
+        """Repaint the yellow status lines and clear the prompt row.
+
+        Defensive repaint so native-library stderr writes (LiteRT engine,
+        multiprocessing workers) can't leave permanent garbage on the
+        locked rows. Skips clearing the prompt row while the user is
+        actively editing input, so keystrokes aren't wiped.
+        """
+        if not self._sticky_footer:
+            return
+        width = m["width"]
+        if self._ansi_enabled:
+            sys.stdout.write(f"\033[{m['status_start']};1H\033[2K")
+            sys.stdout.write(
+                f"\033[30;42m{self._fit_line(self._status_line_1, width)}\033[0m"
+            )
+            sys.stdout.write(f"\033[{m['status_start'] + 1};1H\033[2K")
+            sys.stdout.write(
+                f"\033[30;42m{self._fit_line(self._status_line_2, width)}\033[0m"
+            )
+        else:
+            sys.stdout.write(f"\033[{m['status_start']};1H\033[2K")
+            sys.stdout.write(self._fit_line(self._status_line_1, width))
+            sys.stdout.write(f"\033[{m['status_start'] + 1};1H\033[2K")
+            sys.stdout.write(self._fit_line(self._status_line_2, width))
+        if self._runtime_status != "user input":
+            sys.stdout.write(f"\033[{m['prompt_row']};1H\033[2K")
 
     def set_monitor_mode(self, enabled: bool) -> None:
         """Enable or disable split monitor view."""
@@ -1362,6 +1391,12 @@ Commands:
     def begin_assistant_stream(self) -> None:
         """Start assistant streaming in the output area."""
         self._assistant_output_active = True
+        if self._sticky_footer:
+            m = self._layout_metrics()
+            sys.stdout.write("\0337")
+            sys.stdout.write(f"\033[{m['prompt_row']};1H\033[2K")
+            sys.stdout.write("\0338")
+            sys.stdout.flush()
         if self._monitor_mode and self._sticky_footer:
             self._append_chat_text(self._monitor_role_prefix("assistant"))
             self._render_monitor_view()

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Download, Upload, Brain, Inbox, ShieldAlert } from 'lucide-react'
+import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Download, Upload, Brain, Inbox, ShieldAlert, Eraser } from 'lucide-react'
 import { useAgentMemoryTransfer } from '../../hooks/useAgentMemoryTransfer'
 import { ReflectionMergeModal } from './ReflectionMergeModal'
 import { PendingInsightsModal } from './PendingInsightsModal'
@@ -17,6 +17,14 @@ import { CognitiveModeSelector } from '../common/CognitiveModeSelector'
 import { ModelSelector } from '../common/ModelSelector'
 import { useAuthStore } from '../../stores/authStore'
 import { queueSave, registerHydrator } from '../../services/settingsSync'
+
+// Cap log buffer to avoid unbounded browser memory growth during long polling sessions
+const LOG_TAIL_LINES = 100
+function tailLines(text: string, n: number): string {
+  if (!text) return text
+  const lines = text.split('\n')
+  return lines.length > n ? lines.slice(lines.length - n).join('\n') : text
+}
 
 // ── Card view mode persistence (expanded / compact / icon) ──
 type ViewMode = 'expanded' | 'compact' | 'icon'
@@ -151,8 +159,8 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
     if (showLogs) { setShowLogs(false); return }
     setLogsLoading(true)
     try {
-      const result = await getContainerLogs(container.id, 250)
-      setLogs(result.logs)
+      const result = await getContainerLogs(container.id, LOG_TAIL_LINES)
+      setLogs(tailLines(result.logs, LOG_TAIL_LINES))
       logCursorRef.current = result.timestamp || 0
       setShowLogs(true)
     } catch (e) {
@@ -161,19 +169,19 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
     } finally { setLogsLoading(false) }
   }
 
-  // Live log polling while logs are visible — incremental
+  // Live log polling while logs are visible — incremental, capped to last N lines
   useEffect(() => {
     if (!showLogs || !isRunning) return
     const interval = setInterval(async () => {
       try {
         const cursor = logCursorRef.current
-        const result = await getContainerLogs(container.id, 250, cursor)
+        const result = await getContainerLogs(container.id, LOG_TAIL_LINES, cursor)
         logCursorRef.current = result.timestamp || 0
         if (result.logs) {
-          setLogs((prev) => prev ? prev + '\n' + result.logs : result.logs)
+          setLogs((prev) => tailLines(prev ? prev + '\n' + result.logs : result.logs, LOG_TAIL_LINES))
         }
       } catch { /* ignore polling errors */ }
-    }, 3000)
+    }, 10000)
     return () => clearInterval(interval)
   }, [showLogs, isRunning, container.id])
 
@@ -434,8 +442,9 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
         {showLogs && (
           <div className="border-t border-zinc-800">
             <div className="flex items-center justify-between px-3 py-1 bg-zinc-950/50">
-              <span className="text-[11px] text-zinc-500">Logs (last 250 lines)</span>
+              <span className="text-[11px] text-zinc-500">Logs (last 100 lines)</span>
               <div className="flex items-center gap-1">
+                <button onClick={() => setLogs('')} className="text-zinc-500 hover:text-zinc-300" title="Clear log view"><Eraser className="h-3 w-3" /></button>
                 <button onClick={() => navigator.clipboard.writeText(logs)} className="text-zinc-500 hover:text-zinc-300" title="Copy logs"><Copy className="h-3 w-3" /></button>
                 <button onClick={() => toggleLogs()} className="text-zinc-500 hover:text-zinc-300"><ChevronUp className="h-3 w-3" /></button>
               </div>
@@ -820,8 +829,9 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
       {showLogs && (
         <div className="border-t border-zinc-800">
           <div className="flex items-center justify-between px-4 py-1.5 bg-zinc-950/50">
-            <span className="text-xs text-zinc-500">Logs (last 250 lines)</span>
+            <span className="text-xs text-zinc-500">Logs (last 100 lines)</span>
             <div className="flex items-center gap-1.5">
+              <button onClick={() => setLogs('')} className="text-xs text-zinc-500 hover:text-zinc-300" title="Clear log view"><Eraser className="h-3.5 w-3.5" /></button>
               <button onClick={() => navigator.clipboard.writeText(logs)} className="text-xs text-zinc-500 hover:text-zinc-300" title="Copy logs"><Copy className="h-3.5 w-3.5" /></button>
               <button onClick={() => toggleLogs()} className="text-xs text-zinc-500 hover:text-zinc-300">
                 {showLogs ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}

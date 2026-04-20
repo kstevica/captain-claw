@@ -93,6 +93,19 @@ class TokenRateLimiter:
         """Wait until the window has room for *estimated_tokens*."""
         if not self.enabled:
             return
+        # A single request larger than the full per-minute budget can
+        # never fit — waiting would loop forever. Record it and pass
+        # through; the provider will reject it if it's truly over.
+        if estimated_tokens > self.tpm:
+            async with self._lock:
+                self._log.append((time.monotonic(), estimated_tokens))
+            log.warning(
+                "rate-limiter: request %d tokens exceeds %d TPM budget; passing through",
+                estimated_tokens,
+                self.tpm,
+            )
+            return
+        last_log = 0.0
         while True:
             async with self._lock:
                 now = time.monotonic()
@@ -109,13 +122,15 @@ class TokenRateLimiter:
                     if freed >= deficit:
                         wait = (ts + 60.0) - now
                         break
-            wait = max(0.1, wait)
-            log.info(
-                "rate-limiter: waiting %.1fs (used %d/%d TPM)",
-                wait,
-                used,
-                self.tpm,
-            )
+            wait = max(0.5, wait)
+            if now - last_log >= 10.0:
+                log.info(
+                    "rate-limiter: waiting %.1fs (used %d/%d TPM)",
+                    wait,
+                    used,
+                    self.tpm,
+                )
+                last_log = now
             await asyncio.sleep(wait)
 
     def record_actual(self, actual_tokens: int, estimated_tokens: int) -> None:

@@ -192,7 +192,8 @@ class WebFetchTool(Tool):
     description = (
         "Fetch a URL and return clean readable text (no HTML). "
         "This is the default tool for reading web pages. Always extracts text. "
-        "Use deep_fetch=true for JS-rendered pages or pages with 'load more' buttons."
+        "Uses a headless browser by default (deep_fetch=true) for JS-rendered pages; "
+        "pass deep_fetch=false for a faster plain HTTP fetch on simple/static pages."
     )
     parameters = {
         "type": "object",
@@ -210,7 +211,8 @@ class WebFetchTool(Tool):
                 "description": (
                     "Use a headless browser (Playwright) to render JavaScript, "
                     "auto-scroll, and click 'load more' buttons to capture all content. "
-                    "Slower but necessary for JS-rendered or lazy-loaded pages. Default: false."
+                    "Slower but necessary for JS-rendered or lazy-loaded pages. Default: true. "
+                    "Set to false for a faster plain HTTP fetch on simple/static pages."
                 ),
             },
         },
@@ -224,7 +226,7 @@ class WebFetchTool(Tool):
         self,
         url: str,
         max_chars: int | None = None,
-        deep_fetch: bool = False,
+        deep_fetch: bool = True,
         **kwargs: Any,
     ) -> ToolResult:
         """Fetch a web page and extract readable text via BeautifulSoup.

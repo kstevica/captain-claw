@@ -333,6 +333,8 @@ class SemanticMemoryIndex:
         self.index_sessions = bool(index_sessions)
         self.cross_session_retrieval = bool(cross_session_retrieval)
         self._active_session_reference: str | None = None
+        self._active_project_id: str | None = None
+        self._project_session_ids: list[str] | None = None  # cached session IDs for active project
         self.max_workspace_files = max(1, int(max_workspace_files))
         self.max_file_bytes = max(1024, int(max_file_bytes))
         self.include_extensions = {
@@ -381,6 +383,65 @@ class SemanticMemoryIndex:
             return
         self._active_session_reference = normalized
         self._clear_cache()
+
+    def set_active_project(
+        self,
+        project_id: str | None,
+        project_session_ids: list[str] | None = None,
+    ) -> None:
+        """Set active project scope for retrieval.
+
+        When a project is active, session-memory searches include all sessions
+        belonging to the project (not just the active session).
+
+        *project_session_ids* is the list of session IDs linked to this project
+        (fetched from ``project_sessions`` table).  If provided, searches include
+        chunks whose ``reference`` matches any of these session IDs.
+        """
+        normalized = str(project_id or "").strip() or None
+        if normalized == self._active_project_id:
+            return
+        self._active_project_id = normalized
+        self._project_session_ids = list(project_session_ids or []) if normalized else None
+        self._clear_cache()
+
+    def search_in_project(
+        self,
+        query: str,
+        project_session_ids: list[str],
+        max_results: int | None = None,
+    ) -> list[SemanticMemoryResult]:
+        """Search across all sessions belonging to a project.
+
+        This allows an agent working *outside* a project to pull project memory
+        via the ``project_memory`` tool without changing its own active scope.
+        """
+        cleaned = str(query or "").strip()
+        if not cleaned or not project_session_ids or self._closed:
+            return []
+        effective_max = max(1, int(max_results or self.max_results))
+
+        if self.auto_sync_on_search:
+            now = time.time()
+            stale = (now - self._last_sync_completed) >= self.stale_after_seconds
+            if stale or self._dirty:
+                self.schedule_sync("project_search")
+
+        keyword_hits = self._keyword_search(
+            cleaned,
+            limit=self.candidate_limit,
+            active_session_reference=None,
+            include_all_sessions=False,
+            project_session_ids=project_session_ids,
+        )
+        vector_hits = self._vector_search(
+            cleaned,
+            limit=self.candidate_limit,
+            active_session_reference=None,
+            include_all_sessions=False,
+            project_session_ids=project_session_ids,
+        )
+        return list(self._merge_hybrid(keyword_hits, vector_hits, max_results=effective_max))
 
     def set_summarizer(self, fn: Any) -> None:
         """Set a callable ``fn(text: str) -> tuple[str, str]`` that returns (L1, L2) summaries."""
@@ -461,17 +522,22 @@ class SemanticMemoryIndex:
             if stale or self._dirty:
                 self.schedule_sync("search")
 
+        # When a project is active, include all project sessions in the search scope.
+        project_sids = self._project_session_ids if self._active_project_id else None
+
         keyword_hits = self._keyword_search(
             cleaned,
             limit=self.candidate_limit,
             active_session_reference=self._active_session_reference,
             include_all_sessions=self.cross_session_retrieval,
+            project_session_ids=project_sids,
         )
         vector_hits = self._vector_search(
             cleaned,
             limit=self.candidate_limit,
             active_session_reference=self._active_session_reference,
             include_all_sessions=self.cross_session_retrieval,
+            project_session_ids=project_sids,
         )
         merged = self._merge_hybrid(keyword_hits, vector_hits, max_results=effective_max)
         self._cache[key] = (time.time() + self.cache_ttl_seconds, merged)
@@ -1462,15 +1528,27 @@ class SemanticMemoryIndex:
         *,
         active_session_reference: str | None,
         include_all_sessions: bool,
+        project_session_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         conn = self._conn_or_raise()
         fts_query = _build_fts_query(query)
         if not fts_query:
             return []
         session_reference = str(active_session_reference or "").strip()
+
+        # Build the session-scoping WHERE clause.
         if include_all_sessions:
             where_clause = ""
             params: tuple[Any, ...] = (fts_query, limit)
+        elif project_session_ids:
+            # Project mode: include workspace + all project sessions.
+            placeholders = ",".join("?" for _ in project_session_ids)
+            if session_reference:
+                where_clause = f"AND (c.source != 'session' OR c.reference = ? OR c.reference IN ({placeholders}))"
+                params = (fts_query, session_reference, *project_session_ids, limit)
+            else:
+                where_clause = f"AND (c.source != 'session' OR c.reference IN ({placeholders}))"
+                params = (fts_query, *project_session_ids, limit)
         elif session_reference:
             where_clause = "AND (c.source != 'session' OR c.reference = ?)"
             params = (fts_query, session_reference, limit)
@@ -1507,6 +1585,14 @@ class SemanticMemoryIndex:
             if include_all_sessions:
                 like_where = ""
                 like_params: tuple[Any, ...] = (like, limit)
+            elif project_session_ids:
+                placeholders = ",".join("?" for _ in project_session_ids)
+                if session_reference:
+                    like_where = f"AND (source != 'session' OR reference = ? OR reference IN ({placeholders}))"
+                    like_params = (like, session_reference, *project_session_ids, limit)
+                else:
+                    like_where = f"AND (source != 'session' OR reference IN ({placeholders}))"
+                    like_params = (like, *project_session_ids, limit)
             elif session_reference:
                 like_where = "AND (source != 'session' OR reference = ?)"
                 like_params = (like, session_reference, limit)
@@ -1553,6 +1639,7 @@ class SemanticMemoryIndex:
         *,
         active_session_reference: str | None,
         include_all_sessions: bool,
+        project_session_ids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         if not self.embedding_chain.enabled:
             return []
@@ -1572,6 +1659,14 @@ class SemanticMemoryIndex:
         if include_all_sessions:
             extra_where = ""
             params: tuple[Any, ...] = (provider_key, dims)
+        elif project_session_ids:
+            placeholders = ",".join("?" for _ in project_session_ids)
+            if session_reference:
+                extra_where = f"AND (c.source != 'session' OR c.reference = ? OR c.reference IN ({placeholders}))"
+                params = (provider_key, dims, session_reference, *project_session_ids)
+            else:
+                extra_where = f"AND (c.source != 'session' OR c.reference IN ({placeholders}))"
+                params = (provider_key, dims, *project_session_ids)
         elif session_reference:
             extra_where = "AND (c.source != 'session' OR c.reference = ?)"
             params = (provider_key, dims, session_reference)

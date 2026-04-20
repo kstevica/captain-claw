@@ -126,6 +126,30 @@ class LayeredMemory:
         if self.semantic is not None:
             self.semantic.set_active_session(self.active_session_id)
 
+    def set_active_project(
+        self,
+        project_id: str | None,
+        project_session_ids: list[str] | None = None,
+    ) -> None:
+        """Set active project scope — searches include all project sessions."""
+        if self.semantic is not None:
+            self.semantic.set_active_project(project_id, project_session_ids)
+
+    def search_in_project(
+        self,
+        query: str,
+        project_session_ids: list[str],
+        max_results: int | None = None,
+    ):
+        """Explicit project-scoped search (for project_memory tool)."""
+        if self.semantic is None:
+            return []
+        return self.semantic.search_in_project(
+            query=query,
+            project_session_ids=project_session_ids,
+            max_results=max_results,
+        )
+
     def record_message(self, role: str, content: str) -> None:
         self.working.add_message(role, content)
         if self.semantic is not None and role in {"user", "assistant"}:

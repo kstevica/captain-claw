@@ -18,6 +18,7 @@ import {
   Gamepad2,
   Cloud,
   FileText,
+  FolderKanban,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { APP_VERSION, BUILD_DATE } from '../../version'
@@ -36,6 +37,7 @@ const navItems: { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?:
   { id: 'today', icon: CalendarDays, label: 'Today' },
   { id: 'council', icon: Users, label: 'Council' },
   { id: 'spawner', icon: Plus, label: 'Spawn Agent' },
+  { id: 'projects', icon: FolderKanban, label: 'Projects' },
   { id: 'forge', icon: Wand2, label: 'Agent Forge' },
   { id: 'workflow', icon: GitBranch, label: 'Workflows' },
   { id: 'skills', icon: Sparkles, label: 'Skills' },

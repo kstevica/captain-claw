@@ -166,6 +166,14 @@ class AgentOrchestrationMixin:
             except Exception:
                 self._playbook_context_cache = None
 
+        # Refresh project context cache each turn so newly-linked sessions
+        # pick up project context without requiring agent restart.
+        if hasattr(self, "_refresh_project_context_cache"):
+            try:
+                await self._refresh_project_context_cache()
+            except Exception:
+                pass
+
         effective_user_input = user_input
         effective_user_input, clarification_context_applied = self._resolve_effective_user_input(user_input)
 

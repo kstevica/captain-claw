@@ -552,6 +552,7 @@ from captain_claw.flight_deck.codex_oauth_routes import router as codex_oauth_ro
 from captain_claw.flight_deck.games_routes import router as games_router
 from captain_claw.flight_deck.vastai_routes import router as vastai_router
 from captain_claw.flight_deck.prompt_routes import router as prompt_router
+from captain_claw.flight_deck.project_routes import router as project_router
 
 app.include_router(auth_router)
 app.include_router(settings_router)
@@ -563,6 +564,7 @@ app.include_router(codex_oauth_router)
 app.include_router(games_router)
 app.include_router(vastai_router)
 app.include_router(prompt_router)
+app.include_router(project_router)
 
 
 # ── Auth dependency helper ──
@@ -3847,6 +3849,7 @@ class ForgeRequest(BaseModel):
     provider: str = "anthropic"
     model: str = "claude-sonnet-4-20250514"
     api_key: str = ""
+    project_id: str = ""  # optional: forge agents for an existing project
 
 
 @app.post("/fd/forge")
@@ -3865,6 +3868,54 @@ async def forge_decompose(
         raise HTTPException(500, "Forge system prompt not found")
     system_prompt = system_prompt_file.read_text()
 
+    # If forging for a project, augment the prompt with project context.
+    user_prompt = body.prompt.strip()
+    if body.project_id:
+        try:
+            from captain_claw.projects import get_project_manager
+            pm = get_project_manager()
+            if pm:
+                ctx = await pm.get_project_context(body.project_id)
+                if ctx:
+                    project = ctx["project"]
+                    project_context_parts = [
+                        "\n\n## Project Context",
+                        f"Project: {project['name']}",
+                        f"Status: {project['status']}",
+                        f"Description: {project['description']}",
+                    ]
+                    goals = project.get("goals", [])
+                    if goals:
+                        project_context_parts.append("\nGoals:")
+                        for g in goals:
+                            project_context_parts.append(f"- [{g.get('status', 'pending')}] {g['goal']}")
+                    members = ctx.get("members", [])
+                    if members:
+                        project_context_parts.append("\nExisting team members:")
+                        for m in members:
+                            tags = ", ".join(m.get("expertise_tags", []))
+                            project_context_parts.append(
+                                f"- {m.get('agent_name') or m['agent_id']} ({m['role']})"
+                                + (f" — {tags}" if tags else "")
+                            )
+                    decisions = ctx.get("decisions", [])
+                    if decisions:
+                        project_context_parts.append("\nPrior decisions:")
+                        for d in decisions[:8]:
+                            project_context_parts.append(f"- {d['title']}: {d.get('content', '')[:200]}")
+                    project_context_parts.append(
+                        "\nDesign the team considering existing members and prior decisions. "
+                        "Do not duplicate roles already filled."
+                    )
+                    user_prompt += "\n".join(project_context_parts)
+                    # Log activity.
+                    await pm.log_activity(
+                        body.project_id, "forge_run",
+                        detail={"prompt": body.prompt[:200]},
+                    )
+        except Exception as exc:
+            log.warning("Failed to load project context for forge", error=str(exc))
+
     # Create an LLM provider and make the decomposition call
     try:
         from captain_claw.llm import create_provider, Message
@@ -3878,7 +3929,7 @@ async def forge_decompose(
         response = await provider.complete(
             messages=[
                 Message(role="system", content=system_prompt),
-                Message(role="user", content=body.prompt.strip()),
+                Message(role="user", content=user_prompt),
             ],
             temperature=0.7,
             max_tokens=16384,
@@ -3898,6 +3949,10 @@ async def forge_decompose(
         result = json.loads(content)
     except json.JSONDecodeError:
         raise HTTPException(502, f"LLM returned invalid JSON: {content[:500]}")
+
+    # Tag result with project_id so spawned agents can be auto-joined.
+    if body.project_id:
+        result["project_id"] = body.project_id
 
     return result
 

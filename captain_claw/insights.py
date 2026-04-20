@@ -124,6 +124,17 @@ class InsightsManager:
             except Exception:
                 pass  # column already exists
 
+        # Migration: Projects — add project_id for project-scoped insights.
+        try:
+            await self._db.execute(
+                "ALTER TABLE insights ADD COLUMN project_id TEXT DEFAULT ''"
+            )
+        except Exception:
+            pass  # column already exists
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_insights_project ON insights(project_id)"
+        )
+
         # Pending-review queue for staged imports (see CONFLICT_STAGED_CATEGORIES).
         # Populated only by ``import_items(stage_conflicts=True)`` when an incoming
         # decision/preference/workflow insight would otherwise be silently deduped.
@@ -175,6 +186,7 @@ class InsightsManager:
         expires_at: str | None = None,
         source_message_id: str | None = None,
         supersedes_id: str | None = None,
+        project_id: str = "",
     ) -> str | None:
         """Insert a new insight.  Returns the insight ID, or None if deduped."""
         await self._ensure_db()
@@ -207,15 +219,15 @@ class InsightsManager:
             """INSERT INTO insights
                (id, content, category, entity_key, importance, source_tool,
                 source_session, created_at, updated_at, expires_at, tags,
-                source_message_id, supersedes_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                source_message_id, supersedes_id, project_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (insight_id, content, category, entity_key, importance,
              source_tool, source_session, now, now, expires_at, tags,
-             source_message_id, supersedes_id),
+             source_message_id, supersedes_id, project_id or ""),
         )
         await self._db.commit()
         log.debug("Insight stored", id=insight_id, category=category,
-                  supersedes=supersedes_id)
+                  supersedes=supersedes_id, project_id=project_id)
         return insight_id
 
     async def search(
@@ -394,22 +406,78 @@ class InsightsManager:
         query: str | None = None,
         *,
         limit: int = 8,
+        project_id: str = "",
     ) -> list[dict[str, Any]]:
         """Retrieve insights for context injection.
 
-        If *query* is given, does FTS search; otherwise returns top by
-        importance + recency.
+        If *project_id* is given, returns project-scoped insights merged with
+        global insights (project_id='').  If *query* is given, does FTS search;
+        otherwise returns top by importance + recency.
         """
         if query:
-            return await self.search(query, limit=limit)
+            results = await self.search(query, limit=limit)
+            if project_id:
+                # Filter to project + global insights.
+                return [r for r in results if r.get("project_id", "") in ("", project_id)]
+            return results
 
         await self._ensure_db()
         assert self._db is not None
 
-        rows = await self._db.execute_fetchall(
-            "SELECT * FROM insights ORDER BY importance DESC, created_at DESC LIMIT ?",
-            (limit,),
-        )
+        if project_id:
+            rows = await self._db.execute_fetchall(
+                """SELECT * FROM insights
+                   WHERE project_id IN ('', ?)
+                   ORDER BY importance DESC, created_at DESC LIMIT ?""",
+                (project_id, limit),
+            )
+        else:
+            rows = await self._db.execute_fetchall(
+                "SELECT * FROM insights ORDER BY importance DESC, created_at DESC LIMIT ?",
+                (limit,),
+            )
+        return [self._row_to_dict(r) for r in rows]
+
+    async def search_in_project(
+        self,
+        query: str,
+        project_id: str,
+        *,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Search insights scoped to a specific project + global."""
+        results = await self.search(query, limit=limit * 2)
+        filtered = [
+            r for r in results
+            if r.get("project_id", "") in ("", project_id)
+        ]
+        return filtered[:limit]
+
+    async def list_project_insights(
+        self,
+        project_id: str,
+        *,
+        limit: int = 20,
+        category: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List insights belonging to a specific project."""
+        await self._ensure_db()
+        assert self._db is not None
+
+        if category:
+            rows = await self._db.execute_fetchall(
+                """SELECT * FROM insights
+                   WHERE project_id = ? AND category = ?
+                   ORDER BY importance DESC, created_at DESC LIMIT ?""",
+                (project_id, category.lower().strip(), limit),
+            )
+        else:
+            rows = await self._db.execute_fetchall(
+                """SELECT * FROM insights
+                   WHERE project_id = ?
+                   ORDER BY importance DESC, created_at DESC LIMIT ?""",
+                (project_id, limit),
+            )
         return [self._row_to_dict(r) for r in rows]
 
     async def prune_expired(self) -> int:
@@ -785,6 +853,7 @@ class InsightsManager:
             "id", "content", "category", "entity_key", "importance",
             "source_tool", "source_session", "created_at", "updated_at",
             "expires_at", "tags", "source_message_id", "supersedes_id",
+            "project_id",
         ]
         d: dict[str, Any] = {}
         for i, col in enumerate(cols):

@@ -1070,6 +1070,61 @@ class AgentContextMixin:
             "stored knowledge."
         )
 
+    # ── Project context ─────────────────────────────────────────────
+
+    async def _initialize_project_manager(self) -> None:
+        """Initialize the global ProjectManager using the session DB connection."""
+        try:
+            sm = self.session_manager
+            db = getattr(sm, "_db", None)
+            if db is None:
+                # Ensure the DB is open by forcing a lightweight operation.
+                await sm._ensure_db()
+                db = getattr(sm, "_db", None)
+            if db is None:
+                return
+            from captain_claw.projects import ProjectManager, set_project_manager
+            pm = ProjectManager(db)
+            await pm.ensure_tables()
+            set_project_manager(pm)
+        except Exception as exc:
+            log.debug("Project manager init failed (non-fatal)", error=str(exc))
+
+    async def _refresh_project_context_cache(self) -> None:
+        """Pre-fetch active project context for system prompt injection."""
+        self._project_context_cache = None
+        self._project_membership_cache = None
+        try:
+            from captain_claw.projects import get_project_manager
+            pm = get_project_manager()
+            if pm is None:
+                return
+            # Check if the current session belongs to a project.
+            session_id = self.session.id if self.session else ""
+            if not session_id:
+                return
+            project = await pm.session_project(session_id)
+            if project is None:
+                return
+            project_id = project["id"]
+            # Load full project context.
+            ctx = await pm.get_project_context(project_id)
+            if ctx:
+                self._project_context_cache = ctx
+                # Try to find our membership.
+                # Agent identity: use session_id as a fallback agent_id.
+                agent_id = getattr(self, "_agent_id", "") or session_id
+                membership = await pm.get_membership(project_id, agent_id)
+                self._project_membership_cache = membership
+                # Set project scope on memory so searches include project sessions.
+                sessions = await pm.project_sessions(project_id)
+                project_session_ids = [s["session_id"] for s in sessions]
+                memory = getattr(self, "memory", None)
+                if memory is not None:
+                    memory.set_active_project(project_id, project_session_ids)
+        except Exception as exc:
+            log.debug("Project context refresh failed (non-fatal)", error=str(exc))
+
     # ── Cognitive tempo ─────────────────────────────────────────────
 
     async def _assess_cognitive_tempo(self) -> None:
@@ -1523,6 +1578,71 @@ class AgentContextMixin:
             "user run /briefing for details."
         )
 
+    def _build_project_block(self) -> str:
+        """Build the {project_block} for the system prompt.
+
+        Injects project goals, team, recent decisions, and blockers when the
+        agent is assigned to an active project.
+        """
+        project_ctx = getattr(self, "_project_context_cache", None)
+        if not project_ctx:
+            return ""
+        project = project_ctx.get("project")
+        if not project:
+            return ""
+
+        lines = [
+            f"## Active Project: {project['name']}",
+            f"Status: {project['status']}",
+        ]
+        if project.get("description"):
+            lines.append(f"Description: {project['description']}")
+
+        goals = project.get("goals", [])
+        if goals:
+            lines.append("")
+            lines.append("### Goals")
+            status_icons = {"done": "✓", "in_progress": "→", "blocked": "✗", "pending": " "}
+            for g in goals:
+                icon = status_icons.get(g.get("status", "pending"), " ")
+                lines.append(f"- [{icon}] {g['goal']}")
+
+        membership = getattr(self, "_project_membership_cache", None)
+        if membership:
+            lines.append("")
+            tags = ", ".join(membership.get("expertise_tags", []))
+            tag_str = f" — expertise: {tags}" if tags else ""
+            lines.append(f"### Your Role: {membership['role']}{tag_str}")
+
+        members = project_ctx.get("members", [])
+        if members:
+            lines.append("")
+            lines.append("### Team")
+            for m in members:
+                lines.append(f"- {m.get('agent_name') or m['agent_id']} ({m['role']})")
+
+        blockers = project_ctx.get("blockers", [])
+        if blockers:
+            lines.append("")
+            lines.append("### Blockers")
+            for b in blockers:
+                lines.append(f"- ✗ {b['title']}")
+
+        decisions = project_ctx.get("decisions", [])
+        if decisions:
+            lines.append("")
+            lines.append("### Recent Decisions")
+            for d in decisions[:5]:
+                preview = d['content'][:150].replace("\n", " ") if d.get("content") else ""
+                lines.append(f"- {d['title']}" + (f": {preview}" if preview else ""))
+
+        lines.append("")
+        lines.append(
+            "Use the `project_memory` tool to search project knowledge, "
+            "view artifacts, or contribute findings."
+        )
+        return "\n".join(lines)
+
     def _build_semantic_memory_note(
         self,
         query: str | None,
@@ -1782,6 +1902,9 @@ class AgentContextMixin:
         self._sync_runtime_flags_from_session()
         self._initialize_layered_memory()
 
+        # Initialize project manager (shares session DB connection).
+        await self._initialize_project_manager()
+
         # Register default tools
         self._register_default_tools()
 
@@ -1823,6 +1946,7 @@ class AgentContextMixin:
         await self._assess_cognitive_tempo()
         await self._refresh_nervous_system_cache()
         await self._refresh_briefing_context_cache()
+        await self._refresh_project_context_cache()
 
         # Prime Google OAuth connection flag so the first turn's tool
         # list immediately reflects whether Google is connected. Google
@@ -2026,6 +2150,10 @@ class AgentContextMixin:
         # clear error when no peers are available or Flight Deck URL is missing.
         from captain_claw.tools.consult_peer import ConsultPeerTool
         self.tools.register(ConsultPeerTool())
+        # Project memory — always registered; the tool returns a clear error
+        # when the project system is not initialized.
+        from captain_claw.tools.project_memory import ProjectMemoryTool
+        self.tools.register(ProjectMemoryTool())
         # Flight Deck fleet discovery — always registered; queries /fd/fleet
         # for live peer discovery instead of relying on static pushed peer list.
         from captain_claw.tools.flight_deck import FlightDeckTool
@@ -2547,6 +2675,7 @@ class AgentContextMixin:
         insights_block = self._build_insights_block()
         nervous_system_block = self._build_nervous_system_block()
         briefing_block = self._build_briefing_block()
+        project_block = self._build_project_block()
         cognitive_self_awareness_block = self._build_cognitive_self_awareness_block()
         cognitive_mode_block = self._build_cognitive_mode_block()
 
@@ -2580,6 +2709,7 @@ class AgentContextMixin:
             insights_block=insights_block,
             nervous_system_block=nervous_system_block,
             briefing_block=briefing_block,
+            project_block=project_block,
             agent_version=__version__,
             agent_build_date=__build_date__,
         )

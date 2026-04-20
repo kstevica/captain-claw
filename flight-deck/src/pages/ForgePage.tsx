@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Wand2, Loader2, Trash2, Plus, Rocket, ChevronDown, ChevronRight, Check, AlertTriangle, Cpu, Server, Crown } from 'lucide-react'
+import { Wand2, Loader2, Trash2, Plus, Rocket, ChevronDown, ChevronRight, Check, AlertTriangle, Cpu, Server, Crown, FolderKanban } from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
 import { useContainerStore } from '../stores/containerStore'
 import { useProcessStore } from '../stores/processStore'
@@ -73,16 +73,19 @@ const DEFAULT_TOOLS = [
 
 // ── API call ──
 
-async function callForge(prompt: string, provider: string, model: string, apiKey: string) {
+async function callForge(prompt: string, provider: string, model: string, apiKey: string, projectId?: string) {
   const { token, authEnabled } = useAuthStore.getState()
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (authEnabled && token) headers['Authorization'] = `Bearer ${token}`
+
+  const payload: Record<string, string> = { prompt, provider, model, api_key: apiKey }
+  if (projectId) payload.project_id = projectId
 
   let res = await fetch('/fd/forge', {
     method: 'POST',
     headers,
     credentials: 'include',
-    body: JSON.stringify({ prompt, provider, model, api_key: apiKey }),
+    body: JSON.stringify(payload),
   })
   if (res.status === 401 && authEnabled) {
     const ok = await refreshAccessToken()
@@ -94,7 +97,7 @@ async function callForge(prompt: string, provider: string, model: string, apiKey
         method: 'POST',
         headers: h2,
         credentials: 'include',
-        body: JSON.stringify({ prompt, provider, model, api_key: apiKey }),
+        body: JSON.stringify(payload),
       })
     }
   }
@@ -103,6 +106,12 @@ async function callForge(prompt: string, provider: string, model: string, apiKey
     throw new Error(body.detail || `${res.status}`)
   }
   return res.json()
+}
+
+interface SimpleProject {
+  id: string
+  name: string
+  status: string
 }
 
 // ── Component ──
@@ -132,6 +141,12 @@ export function ForgePage() {
   const [agents, setAgents] = useState<AgentProposal[]>([])
   const [expandedAgent, setExpandedAgent] = useState<string | null>(null)
 
+  // Project selector
+  const [projects, setProjects] = useState<SimpleProject[]>([])
+  const forgeProjectId = useUIStore((s) => s.forgeProjectId)
+  const setForgeProjectId = useUIStore((s) => s.setForgeProjectId)
+  const [selectedProjectId, setSelectedProjectId] = useState(forgeProjectId)
+
   // Spawning state
   const [spawnProgress, setSpawnProgress] = useState<Record<string, 'pending' | 'spawning' | 'done' | 'error'>>({})
   const [spawnErrors, setSpawnErrors] = useState<Record<string, string>>({})
@@ -151,6 +166,14 @@ export function ForgePage() {
   }, [llmConfig])
 
   useEffect(() => {
+    fetch('/fd/projects').then((r) => r.json()).then((list) => {
+      setProjects((list || []).filter((p: SimpleProject) => p.status === 'active'))
+    }).catch(() => {})
+    // Clear the forge-from-project trigger
+    if (forgeProjectId) setForgeProjectId('')
+  }, [])
+
+  useEffect(() => {
     const val = JSON.stringify(envVars)
     if (useAuthStore.getState().authEnabled) queueSave('fd:forge-env-vars', val)
     else localStorage.setItem('fd:forge-env-vars', val)
@@ -161,7 +184,7 @@ export function ForgePage() {
     setLoading(true)
     setError('')
     try {
-      const result = await callForge(prompt, llmConfig.provider, llmConfig.model, llmConfig.api_key)
+      const result = await callForge(prompt, llmConfig.provider, llmConfig.model, llmConfig.api_key, selectedProjectId || undefined)
       setTeamName(result.team_name || 'Agent Team')
       setSummary(result.summary || '')
       const proposals: AgentProposal[] = (result.agents || []).map((a: any, i: number) => ({
@@ -306,6 +329,22 @@ export function ForgePage() {
           addToGroup(groupMap[agent.role], agentStoreId)
         }
 
+        // Join project if selected
+        if (selectedProjectId) {
+          try {
+            await fetch(`/fd/projects/${selectedProjectId}/members`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                agent_id: agentStoreId,
+                agent_name: agent.name,
+                role: agent.role,
+                expertise_tags: agent.tools.slice(0, 5),
+              }),
+            })
+          } catch { /* best-effort */ }
+        }
+
         progress[agent.id] = 'done'
       } catch (e) {
         progress[agent.id] = 'error'
@@ -439,6 +478,24 @@ export function ForgePage() {
               ))}
             </div>
           </HelpHint>
+
+          {/* Project selector */}
+          {projects.length > 0 && (
+            <div className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3">
+              <FolderKanban className="h-4 w-4 text-zinc-500" />
+              <label className="text-sm text-zinc-400">Project:</label>
+              <select
+                value={selectedProjectId}
+                onChange={(e) => setSelectedProjectId(e.target.value)}
+                className="flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+              >
+                <option value="">None (standalone team)</option>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
 
           {/* Prompt Input */}
           <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 space-y-3">
