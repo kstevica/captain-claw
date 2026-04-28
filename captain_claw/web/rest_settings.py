@@ -270,6 +270,9 @@ def _build_schema() -> list[dict[str, Any]]:
                         _field("context.micro_instructions", "Micro instructions",
                                type="toggle",
                                hint="Use compact instruction prompts (~66 % fewer tokens). Faster and cheaper but less detailed guidance for the LLM. Takes effect on new sessions."),
+                        _field("context.nano_instructions", "Nano instructions",
+                               type="toggle",
+                               hint="Barebone prompts + tiny tool set (read/write/glob/shell/datastore/insights). Designed for small local models that solve tasks by writing and running scripts. Implies micro. Takes effect on new sessions."),
                     ],
                 },
                 {

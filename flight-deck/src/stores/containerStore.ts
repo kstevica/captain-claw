@@ -13,6 +13,7 @@ const CONSULT_APPROVAL_KEY = 'fd:container-consult-approval'
 const FLEET_INSTRUCTIONS_KEY = 'fd:container-fleet-instructions'
 const COGNITIVE_MODE_KEY = 'fd:container-cognitive-modes'
 const ECO_MODE_KEY = 'fd:container-eco-modes'
+const NANO_MODE_KEY = 'fd:container-nano-modes'
 
 function loadMap(key: string): Record<string, string> {
   try { return JSON.parse(localStorage.getItem(key) || '{}') } catch { return {} }
@@ -38,6 +39,7 @@ interface ContainerStore {
   fleetInstructionsOverrides: Record<string, string>
   cognitiveModeOverrides: Record<string, string>
   ecoModeOverrides: Record<string, boolean>
+  nanoModeOverrides: Record<string, boolean>
 
   fetchContainers: () => Promise<void>
   selectContainer: (id: string | null) => void
@@ -60,6 +62,8 @@ interface ContainerStore {
   getCognitiveMode: (id: string) => string
   setEcoMode: (id: string, enabled: boolean) => void
   getEcoMode: (id: string) => boolean
+  setNanoMode: (id: string, enabled: boolean) => void
+  getNanoMode: (id: string) => boolean
 }
 
 export const useContainerStore = create<ContainerStore>((set, get) => ({
@@ -74,6 +78,7 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
   fleetInstructionsOverrides: loadMap(FLEET_INSTRUCTIONS_KEY),
   cognitiveModeOverrides: loadMap(COGNITIVE_MODE_KEY),
   ecoModeOverrides: loadBoolMap(ECO_MODE_KEY),
+  nanoModeOverrides: loadBoolMap(NANO_MODE_KEY),
 
   fetchContainers: async () => {
     try {
@@ -275,6 +280,16 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
   getEcoMode: (id) => {
     return get().ecoModeOverrides[id] || false
   },
+
+  setNanoMode: (id, enabled) => {
+    const overrides = { ...get().nanoModeOverrides, [id]: enabled }
+    saveMap(NANO_MODE_KEY, overrides)
+    set({ nanoModeOverrides: overrides })
+  },
+
+  getNanoMode: (id) => {
+    return get().nanoModeOverrides[id] || false
+  },
 }))
 
 registerHydrator((settings) => {
@@ -287,6 +302,7 @@ registerHydrator((settings) => {
     [FLEET_INSTRUCTIONS_KEY, 'fleetInstructionsOverrides'],
     [COGNITIVE_MODE_KEY, 'cognitiveModeOverrides'],
     [ECO_MODE_KEY, 'ecoModeOverrides'],
+    [NANO_MODE_KEY, 'nanoModeOverrides'],
   ] as const) {
     const raw = settings[key]
     if (raw) {

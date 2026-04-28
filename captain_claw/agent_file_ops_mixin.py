@@ -949,6 +949,9 @@ class AgentFileOpsMixin:
         """Persist assistant response for the current turn."""
         if not self.session:
             return
+        if not str(content or "").strip():
+            log.warning("Skipping empty assistant response — not persisting to session")
+            return
         self._add_session_message("assistant", content)
         await self.session_manager.save_session(self.session)
         memory = getattr(self, "memory", None)

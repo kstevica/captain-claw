@@ -139,6 +139,9 @@ class Agent(
             "completion_gate",
             "pipeline_trace",
             "telegram",
+            "memory_select",
+            "memory_semantic_select",
+            "memory_deep_select",
         }
 
     @staticmethod

@@ -1760,6 +1760,59 @@ async def get_agent_eco_mode(
     return {"enabled": False}
 
 
+class AgentNanoModeUpdate(BaseModel):
+    enabled: bool = False
+
+
+@app.put("/fd/agent-nano-mode/{kind}/{identifier}")
+async def update_agent_nano_mode(
+    kind: str, identifier: str, body: AgentNanoModeUpdate, request: Request,
+    user: dict | None = _required_user_dep,
+):
+    """Toggle nano (barebone) mode at runtime.
+
+    Writes ``nano_mode.txt`` — the agent picks it up on the next system
+    prompt build.  Nano implies eco/micro: tool definitions are stripped
+    to a barebone allowlist and prompts use nano_<name> templates.
+    """
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+
+    for subdir in ("home-config", "home-config-parent"):
+        cc_dir = agent_dir / "data" / subdir / ".captain-claw"
+        if cc_dir.is_dir():
+            nano_file = cc_dir / "nano_mode.txt"
+            if body.enabled:
+                nano_file.write_text("on", encoding="utf-8")
+            else:
+                nano_file.unlink(missing_ok=True)
+
+    return {"ok": True, "enabled": body.enabled, "message": "Nano mode updated. Takes effect on the agent's next response."}
+
+
+@app.get("/fd/agent-nano-mode/{kind}/{identifier}")
+async def get_agent_nano_mode(
+    kind: str, identifier: str, request: Request,
+    user: dict | None = _required_user_dep,
+):
+    """Read current nano mode state for an agent."""
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+
+    for subdir in ("home-config", "home-config-parent"):
+        nano_file = agent_dir / "data" / subdir / ".captain-claw" / "nano_mode.txt"
+        if nano_file.is_file():
+            return {"enabled": True}
+
+    return {"enabled": False}
+
+
 @app.get("/fd/cognitive-modes")
 async def list_cognitive_modes():
     """Return all available cognitive modes for UI dropdowns."""

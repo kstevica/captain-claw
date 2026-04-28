@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Cpu, Play, Square, RotateCcw, Trash2, ScrollText, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Pencil, Check, X, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Download, Upload, Brain, Inbox, ShieldAlert, Eraser } from 'lucide-react'
+import { Cpu, Play, Square, RotateCcw, Trash2, ScrollText, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Pencil, Check, X, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser } from 'lucide-react'
 import { useAgentMemoryTransfer } from '../../hooks/useAgentMemoryTransfer'
 import { ReflectionMergeModal } from './ReflectionMergeModal'
 import { PendingInsightsModal } from './PendingInsightsModal'
@@ -88,7 +88,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   onDragStart?: (e: React.PointerEvent) => void
   isDragging?: boolean
 }) {
-  const { stopProcess, startProcess, restartProcess, removeProcess, cloneProcess, setDescription, setNameOverride, setForwardingTask, getForwardingTask, setConsultApproval, getConsultApproval, setCognitiveMode: storeCognitiveMode, getCognitiveMode, setEcoMode: storeEcoMode, getEcoMode } = useProcessStore()
+  const { stopProcess, startProcess, restartProcess, removeProcess, cloneProcess, setDescription, setNameOverride, setForwardingTask, getForwardingTask, setConsultApproval, getConsultApproval, setCognitiveMode: storeCognitiveMode, getCognitiveMode, setEcoMode: storeEcoMode, getEcoMode, setNanoMode: storeNanoMode, getNanoMode } = useProcessStore()
   const openChat = useChatStore((s) => s.openChat)
   const session = useChatStore((s) => s.sessions.get(`proc-${proc.slug}`))
   const busy = session?.busy ?? false
@@ -119,6 +119,8 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   const [modeSaved, setModeSaved] = useState(false)
   const ecoMode = getEcoMode(proc.slug)
   const [ecoSaved, setEcoSaved] = useState(false)
+  const nanoMode = getNanoMode(proc.slug)
+  const [nanoSaved, setNanoSaved] = useState(false)
   const { setModelOverride } = useProcessStore()
 
   const isRunning = proc.status === 'running'
@@ -540,6 +542,32 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
             <span>Eco Mode</span>
           </button>
           {ecoSaved && <span className="text-[10px] text-emerald-500">saved</span>}
+          <button
+            onClick={async () => {
+              const next = !nanoMode
+              storeNanoMode(proc.slug, next)
+              try {
+                const { token, authEnabled } = useAuthStore.getState()
+                const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+                if (authEnabled && token) headers['Authorization'] = `Bearer ${token}`
+                const res = await fetch(`/fd/agent-nano-mode/process/${proc.slug}`, {
+                  method: 'PUT', headers, credentials: 'include',
+                  body: JSON.stringify({ enabled: next }),
+                })
+                if (res.ok) { setNanoSaved(true); setTimeout(() => setNanoSaved(false), 2000) }
+              } catch (err) { console.error('Failed to update nano mode:', err) }
+            }}
+            className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+              nanoMode
+                ? 'border-amber-500/40 bg-amber-500/15 text-amber-400 hover:bg-amber-500/25'
+                : 'border-zinc-700 bg-zinc-800/50 text-zinc-500 hover:bg-zinc-700/50 hover:text-zinc-400'
+            }`}
+            title="Nano Mode — barebone prompts + tiny tool set (read/write/glob/shell/datastore). Designed for small local models that solve tasks by writing scripts."
+          >
+            <Feather className="h-3 w-3" />
+            <span>Nano Mode</span>
+          </button>
+          {nanoSaved && <span className="text-[10px] text-amber-500">saved</span>}
         </div>
 
         {/* Forwarding Task */}

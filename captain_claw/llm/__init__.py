@@ -255,14 +255,41 @@ def _strip_reasoning_artifacts(text: str) -> str:
     leak their internal reasoning into the ``content`` field rather than
     keeping it in a separate ``reasoning_content`` field. This helper
     strips those blocks so they don't end up in the chat UI.
+
+    Edge case: small thinking models sometimes emit ONLY a thinking block
+    with no answer afterwards. If stripping produces empty output but the
+    raw text had content, fall back to the last paragraph inside the
+    thinking block — that's usually where the model's conclusion lives.
     """
     if not text:
         return text
-    # Drop fully closed <think>...</think> blocks anywhere in the text.
     cleaned = _THINK_BLOCK_RE.sub("", text)
-    # Drop a leading unterminated <think> block (if any).
     cleaned = _THINK_OPEN_RE.sub("", cleaned)
-    return cleaned.lstrip()
+    cleaned = cleaned.lstrip()
+    if cleaned:
+        return cleaned
+    inner = _extract_thinking_inner(text)
+    if not inner:
+        return cleaned
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", inner) if p.strip()]
+    if paragraphs:
+        log.warning(
+            "LLM returned only reasoning — surfacing last paragraph",
+            raw_chars=len(text),
+            inner_chars=len(inner),
+        )
+        return paragraphs[-1]
+    return inner.strip()
+
+
+def _extract_thinking_inner(text: str) -> str:
+    """Extract the inner text of <think>/<thinking>/<reasoning> blocks."""
+    matches = re.findall(
+        r"<\s*(?:think|thinking|reasoning|reflection)\s*>(.*?)(?:<\s*/\s*(?:think|thinking|reasoning|reflection)\s*>|$)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return "\n\n".join(m.strip() for m in matches if m.strip())
 
 
 def _normalize_provider_name(provider: str) -> str:
@@ -1328,6 +1355,7 @@ class OllamaProvider(LLMProvider):
         num_ctx: int = 160000,
         api_key: str | None = None,
         tokens_per_minute: int = 0,
+        think: bool = False,
     ):
         self.provider = "ollama"
         self.model = model
@@ -1336,6 +1364,7 @@ class OllamaProvider(LLMProvider):
         self.max_tokens = max_tokens
         self.num_ctx = max(1, int(num_ctx))
         self.api_key = api_key
+        self.think = bool(think)
         self.client = httpx.AsyncClient(timeout=120.0, follow_redirects=True)
         self.rate_limiter = TokenRateLimiter(tokens_per_minute) if tokens_per_minute > 0 else None
 
@@ -1346,12 +1375,18 @@ class OllamaProvider(LLMProvider):
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> LLMResponse:
-        # Auto-wake vast.ai instance if needed.
+        log.info(
+            "OllamaProvider.complete entry",
+            model=self.model,
+            base_url=self.base_url,
+            message_count=len(messages),
+            has_tools=bool(tools),
+        )
         try:
             from captain_claw.vastai.wake import maybe_wake_instance
             await maybe_wake_instance(self.base_url)
         except Exception:
-            pass  # Non-critical; don't block if wake module is unavailable.
+            pass
 
         url = f"{self.base_url}/api/chat"
         ollama_messages = _convert_messages_for_ollama(messages)
@@ -1368,6 +1403,7 @@ class OllamaProvider(LLMProvider):
             "model": self.model,
             "messages": ollama_messages,
             "stream": False,
+            "think": self.think,
             "options": options,
         }
         if ollama_tools:
@@ -1394,16 +1430,42 @@ class OllamaProvider(LLMProvider):
                     )
                 data = response.json()
                 msg_obj = _obj_get(data, "message", {})
-                content = _obj_get(msg_obj, "content", "") or ""
-                # Some Ollama models (deepseek-r1, qwq, etc.) emit
-                # <think>...</think> reasoning blocks. Strip them.
-                _rc = _obj_get(msg_obj, "reasoning_content", None) or _obj_get(msg_obj, "thinking", None)
-                if _rc:
-                    log.debug(
-                        "Discarding Ollama reasoning_content",
-                        model=self.model, reasoning_chars=len(str(_rc)),
+                raw_content = _obj_get(msg_obj, "content", "") or ""
+                _rc = (
+                    _obj_get(msg_obj, "reasoning_content", None)
+                    or _obj_get(msg_obj, "thinking", None)
+                    or _obj_get(msg_obj, "reasoning", None)
+                )
+                try:
+                    if hasattr(msg_obj, "keys"):
+                        _msg_keys_str = ",".join(str(k) for k in list(msg_obj.keys())[:20])
+                    else:
+                        _msg_keys_str = f"<no-keys: {type(msg_obj).__name__}>"
+                except Exception as _ke:
+                    _msg_keys_str = f"<error: {_ke}>"
+                log.info(
+                    "Ollama msg fields",
+                    keys=_msg_keys_str,
+                    msg_type=type(msg_obj).__name__,
+                    raw_content_len=len(str(raw_content)),
+                    reasoning_len=len(str(_rc)) if _rc else 0,
+                )
+                content = _strip_reasoning_artifacts(str(raw_content))
+                if not content.strip() and _rc:
+                    rc_str = str(_rc)
+                    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", rc_str) if p.strip()]
+                    fallback = paragraphs[-1] if paragraphs else rc_str.strip()
+                    log.warning(
+                        "Ollama content empty - surfacing reasoning tail",
+                        reasoning_chars=len(rc_str),
+                        fallback_chars=len(fallback),
                     )
-                content = _strip_reasoning_artifacts(str(content))
+                    content = fallback
+                log.info(
+                    "Ollama final content",
+                    content_len=len(content),
+                    preview=content[:200].replace("\n", " "),
+                )
 
                 tool_calls: list[ToolCall] = []
                 raw_calls = _obj_get(msg_obj, "tool_calls", []) or []
@@ -1483,6 +1545,7 @@ class OllamaProvider(LLMProvider):
             "model": self.model,
             "messages": ollama_messages,
             "stream": True,
+            "think": self.think,
             "options": options,
         }
         if ollama_tools:
@@ -1659,6 +1722,7 @@ class LiteLLMProvider(LLMProvider):
         callback in real time (for UI streaming).
         """
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         collected_tool_calls: dict[int, dict[str, Any]] = {}
         usage_obj: Any = None
         finish_reason = ""
@@ -1672,14 +1736,14 @@ class LiteLLMProvider(LLMProvider):
                 first = choices[0]
                 delta = _obj_get(first, "delta", {})
 
-                # Skip reasoning_content deltas (Grok, DeepSeek, etc.) —
-                # we never want internal chain-of-thought in chat output.
-                _rc = _obj_get(delta, "reasoning_content", None)
+                _rc = (
+                    _obj_get(delta, "reasoning_content", None)
+                    or _obj_get(delta, "thinking", None)
+                    or _obj_get(delta, "reasoning", None)
+                )
                 if _rc:
-                    continue
+                    reasoning_parts.append(str(_rc))
 
-                # Content text — may be a string or a list of parts
-                # (Gemini sometimes returns list of content parts).
                 c = _obj_get(delta, "content", "")
                 if c:
                     if isinstance(c, str):
@@ -1762,7 +1826,31 @@ class LiteLLMProvider(LLMProvider):
             if collected_tool_calls
             else None
         )
-        final_content = _strip_reasoning_artifacts("".join(content_parts))
+        joined_content = "".join(content_parts)
+        final_content = _strip_reasoning_artifacts(joined_content)
+        joined_reasoning = "".join(reasoning_parts).strip()
+        if not final_content.strip() and joined_reasoning and not tc_out:
+            paragraphs = [p.strip() for p in re.split(r"\n\s*\n", joined_reasoning) if p.strip()]
+            fallback = paragraphs[-1] if paragraphs else joined_reasoning
+            log.warning(
+                "Streamed content empty — surfacing reasoning tail",
+                provider=self.provider,
+                model=self.model,
+                reasoning_chars=len(joined_reasoning),
+                fallback_chars=len(fallback),
+            )
+            final_content = fallback
+        log.info(
+            "Streamed LLM response",
+            provider=self.provider,
+            model=self.model,
+            content_len=len(final_content),
+            content_preview=final_content[:300],
+            raw_content_len=len(joined_content),
+            reasoning_len=len(joined_reasoning),
+            tool_calls=len(collected_tool_calls),
+            finish_reason=finish_reason,
+        )
         return {
             "choices": [{
                 "message": {
@@ -1844,8 +1932,23 @@ class LiteLLMProvider(LLMProvider):
                 )
             first_choice = choices[0]
             choice = _obj_get(first_choice, "message", {})
+            try:
+                _msg_dump = choice if isinstance(choice, dict) else getattr(choice, "model_dump", lambda: None)()
+                if _msg_dump is None and hasattr(choice, "__dict__"):
+                    _msg_dump = {k: v for k, v in vars(choice).items() if not k.startswith("_")}
+                _msg_keys = list(_msg_dump.keys()) if isinstance(_msg_dump, dict) else []
+            except Exception:
+                _msg_dump = None
+                _msg_keys = []
+            log.info(
+                "LLM raw message keys",
+                provider=self.provider,
+                model=self.model,
+                keys=_msg_keys[:30],
+                has_thinking=bool(_obj_get(choice, "thinking", None)),
+                has_reasoning=bool(_obj_get(choice, "reasoning_content", None) or _obj_get(choice, "reasoning", None)),
+            )
             raw_content = _obj_get(choice, "content", "") or ""
-            # Some providers return content as a list of parts.
             if isinstance(raw_content, list):
                 text_parts = []
                 for part in raw_content:
@@ -1855,19 +1958,40 @@ class LiteLLMProvider(LLMProvider):
                 content = "".join(text_parts)
             else:
                 content = str(raw_content) if raw_content else ""
-            # Discard provider reasoning_content (xAI Grok, DeepSeek, etc.)
-            # — never include the model's internal chain-of-thought in the
-            # user-visible response. We log its presence for debugging.
-            reasoning_content = _obj_get(choice, "reasoning_content", None)
-            if reasoning_content:
+            reasoning_content = (
+                _obj_get(choice, "reasoning_content", None)
+                or _obj_get(choice, "thinking", None)
+                or _obj_get(choice, "reasoning", None)
+            )
+            content = _strip_reasoning_artifacts(content)
+            if not content.strip() and reasoning_content:
+                rc_str = str(reasoning_content)
+                paragraphs = [p.strip() for p in re.split(r"\n\s*\n", rc_str) if p.strip()]
+                fallback = paragraphs[-1] if paragraphs else rc_str.strip()
+                log.warning(
+                    "LLM content empty — surfacing reasoning_content tail",
+                    provider=self.provider,
+                    model=self.model,
+                    reasoning_chars=len(rc_str),
+                    fallback_chars=len(fallback),
+                )
+                content = fallback
+            elif reasoning_content:
                 log.debug(
                     "Discarding reasoning_content from LLM response",
                     provider=self.provider,
                     model=self.model,
                     reasoning_chars=len(str(reasoning_content)),
                 )
-            # Strip any <think>...</think> blocks that leaked into content.
-            content = _strip_reasoning_artifacts(content)
+            log.info(
+                "LLM response content",
+                provider=self.provider,
+                model=self.model,
+                content_len=len(content or ""),
+                content_preview=str(content or "")[:300],
+                raw_content_len=len(str(raw_content) if raw_content else ""),
+                reasoning_len=len(str(reasoning_content)) if reasoning_content else 0,
+            )
             finish_reason = str(_obj_get(first_choice, "finish_reason", "") or "")
 
             tool_calls: list[ToolCall] = []

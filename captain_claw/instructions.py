@@ -11,6 +11,10 @@ defaults intact.
 When ``use_micro`` is enabled (via ``context.micro_instructions`` config),
 the loader transparently resolves ``micro_<name>`` first, falling back to
 the standard template when no micro variant exists.
+
+When ``use_nano`` is enabled (via ``context.nano_instructions`` config or
+the ``nano_mode.txt`` runtime override), the loader resolves
+``nano_<name>`` → ``micro_<name>`` → ``<name>``.  Nano implies micro.
 """
 
 from __future__ import annotations
@@ -36,13 +40,16 @@ class _SafeFormatDict(dict[str, str]):
 class InstructionLoader:
     """Read and render instruction templates with personal-override support.
 
-    Resolution order for every template (when ``use_micro=True``):
-      1. ``personal_dir / micro_<name>``
-      2. ``base_dir / micro_<name>``
-      3. ``personal_dir / <name>``  (fallback to standard)
-      4. ``base_dir / <name>``
+    Resolution order for every template (when ``use_nano=True``):
+      1. ``personal_dir / nano_<name>``
+      2. ``base_dir / nano_<name>``
+      3. ``personal_dir / micro_<name>``
+      4. ``base_dir / micro_<name>``
+      5. ``personal_dir / <name>``  (fallback to standard)
+      6. ``base_dir / <name>``
 
-    When ``use_micro=False`` the standard two-layer resolution applies.
+    When ``use_micro=True`` (without nano), tiers 1-2 are skipped.
+    When both are False, only tiers 5-6 apply.
     """
 
     def __init__(
@@ -51,6 +58,7 @@ class InstructionLoader:
         personal_dir: Path | str | None = None,
         *,
         use_micro: bool | None = None,
+        use_nano: bool | None = None,
     ):
         self.base_dir = self._resolve_base_dir(base_dir)
         self.personal_dir: Path = (
@@ -63,10 +71,13 @@ class InstructionLoader:
         # Cleared on each drain via ``drain_recent_files()``.
         self._recent_files: list[str] = []
 
-        # Auto-detect micro mode from config when not explicitly passed.
+        # Auto-detect micro/nano modes from config when not explicitly passed.
         if use_micro is None:
             use_micro = self._detect_micro_from_config()
+        if use_nano is None:
+            use_nano = self._detect_nano_from_config()
         self._use_micro_base: bool = use_micro
+        self._use_nano_base: bool = use_nano
 
         # Eco-mode file path (runtime override, checked dynamically).
         try:
@@ -76,13 +87,24 @@ class InstructionLoader:
         self._eco_mode_mtime: float = 0.0
         self._eco_mode_cached: bool | None = None
 
+        # Nano-mode file path (runtime override, checked dynamically).
+        try:
+            self._nano_mode_file: Path = Path("~/.captain-claw/nano_mode.txt").expanduser()
+        except RuntimeError:
+            self._nano_mode_file = Path("/tmp/.captain-claw/nano_mode.txt")
+        self._nano_mode_mtime: float = 0.0
+        self._nano_mode_cached: bool | None = None
+
     @property
     def use_micro(self) -> bool:
         """Return True when micro instructions should be used.
 
         Checks ``eco_mode.txt`` on disk (mtime-based cache) so Flight Deck
         can toggle eco mode at runtime without restarting the agent.
+        Nano mode implies micro mode.
         """
+        if self.use_nano:
+            return True
         if self._use_micro_base:
             # Config-level micro is ON — always micro, ignore eco file.
             return True
@@ -104,12 +126,47 @@ class InstructionLoader:
     def use_micro(self, value: bool) -> None:
         self._use_micro_base = value
 
+    @property
+    def use_nano(self) -> bool:
+        """Return True when nano (barebone) instructions should be used.
+
+        Checks ``nano_mode.txt`` on disk (mtime-based cache) so Flight Deck
+        can toggle nano mode at runtime without restarting the agent.
+        """
+        if self._use_nano_base:
+            return True
+        try:
+            st = self._nano_mode_file.stat()
+            if st.st_mtime != self._nano_mode_mtime:
+                self._nano_mode_mtime = st.st_mtime
+                text = self._nano_mode_file.read_text(encoding="utf-8").strip().lower()
+                self._nano_mode_cached = text in ("on", "true", "1", "yes")
+            return self._nano_mode_cached or False
+        except FileNotFoundError:
+            self._nano_mode_cached = False
+            return False
+        except Exception:
+            return self._nano_mode_cached or False
+
+    @use_nano.setter
+    def use_nano(self, value: bool) -> None:
+        self._use_nano_base = value
+
     @staticmethod
     def _detect_micro_from_config() -> bool:
         """Read ``context.micro_instructions`` from the global config."""
         try:
             from captain_claw.config import get_config  # noqa: lazy import
             return bool(get_config().context.micro_instructions)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _detect_nano_from_config() -> bool:
+        """Read ``context.nano_instructions`` from the global config."""
+        try:
+            from captain_claw.config import get_config  # noqa: lazy import
+            return bool(get_config().context.nano_instructions)
         except Exception:
             return False
 
@@ -125,9 +182,20 @@ class InstructionLoader:
     def _path(self, name: str) -> Path:
         """Return the effective file path.
 
-        When ``use_micro`` is active, tries ``micro_<name>`` first in both
-        personal and base directories before falling back to the standard name.
+        Resolution order: nano → micro → standard (each with personal override
+        before the base directory).  Missing variants fall through to the next
+        tier.
         """
+        if self.use_nano:
+            nano_name = f"nano_{name}"
+            personal_nano = self.personal_dir / nano_name
+            if personal_nano.is_file():
+                return personal_nano
+            base_nano = self.base_dir / nano_name
+            if base_nano.is_file():
+                return base_nano
+            # Fall through to micro variants.
+
         if self.use_micro:
             micro_name = f"micro_{name}"
             personal_micro = self.personal_dir / micro_name

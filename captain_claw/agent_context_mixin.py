@@ -51,6 +51,21 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "desktop_action": "Control the desktop: click/type/scroll at screen coordinates, press keys/hotkeys, drag, open apps/folders/URLs. Use with screen_capture to see the screen first, then act on it. The 'screenshot_click' action chains screenshot+vision+click in one call — describe the element and it finds and clicks it automatically.",
 }
 
+_TOOL_PROMPT_DESCRIPTIONS_NANO: dict[str, str] = {
+    "shell": "run shell",
+    "read": "read file",
+    "write": "write file",
+    "edit": "edit file",
+    "glob": "find files",
+    "web_fetch": "url→text",
+    "web_search": "web search",
+    "datastore": "tables",
+    "insights": "facts",
+    "personality": "profile",
+    "clipboard": "clipboard",
+}
+
+
 _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "shell": "terminal commands",
     "read": "read files",
@@ -2351,7 +2366,20 @@ class AgentContextMixin:
     def _build_tool_list(self) -> str:
         """Build the textual tool list from currently registered tools."""
         registered = self.tools.list_tools()
+        use_nano = self.instructions.use_nano
         use_micro = self.instructions.use_micro
+
+        if use_nano:
+            from captain_claw.agent_orchestration_mixin import _NANO_TOOLS
+            descs = _TOOL_PROMPT_DESCRIPTIONS_NANO
+            parts = []
+            for name in registered:
+                if name not in _NANO_TOOLS:
+                    continue
+                desc = descs.get(name, name)
+                parts.append(f"{name}={desc}")
+            return "Tools: " + ", ".join(parts) if parts else ""
+
         descs = _TOOL_PROMPT_DESCRIPTIONS_MICRO if use_micro else _TOOL_PROMPT_DESCRIPTIONS
 
         if use_micro:
@@ -2550,9 +2578,13 @@ class AgentContextMixin:
 
         from captain_claw.system_info import build_system_info_block
 
-        system_info_block = build_system_info_block(
-            detail_level="micro" if self.instructions.use_micro else "normal"
-        )
+        if self.instructions.use_nano:
+            _detail = "nano"
+        elif self.instructions.use_micro:
+            _detail = "micro"
+        else:
+            _detail = "normal"
+        system_info_block = build_system_info_block(detail_level=_detail)
 
         # Build extra read dirs block + file tree listings for system prompt.
         extra_read_dirs_block = ""
@@ -3050,6 +3082,16 @@ class AgentContextMixin:
                 if (
                     str(msg.get("role", "")).strip().lower() == "tool"
                     and self._is_monitor_only_tool_name(tool_name)
+                ):
+                    continue
+                # Skip empty assistant messages (no content, no tool_calls).
+                # These are leftover poison from prior failed turns where the
+                # local LLM returned nothing — sending them back as history
+                # teaches the model that empty IS the correct response.
+                if (
+                    str(msg.get("role", "")).strip().lower() == "assistant"
+                    and not str(msg.get("content", "") or "").strip()
+                    and not msg.get("tool_calls")
                 ):
                     continue
                 # Keep only current-turn tool role messages.

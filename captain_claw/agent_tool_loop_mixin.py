@@ -431,6 +431,20 @@ class AgentToolLoopMixin:
     ) -> str:
         """Ask model to rewrite raw tool output into a user-friendly answer."""
         raw = (tool_output or "").strip() or "[no output]"
+
+        # Nano mode short-circuit: small local models take 10-30s on this
+        # second LLM call for a rewrite that adds little value on top of
+        # script output.  Return the raw output verbatim (truncated).
+        if getattr(self, "instructions", None) and self.instructions.use_nano:
+            _LIMIT = 4000
+            if len(raw) > _LIMIT:
+                raw = raw[:_LIMIT] + "\n…(truncated)"
+            log.info(
+                "Nano mode: skipped friendly tool-output rewrite",
+                sent_chars=len(raw),
+            )
+            return raw
+
         max_tool_output_chars = 45000
         clipped, clipped_note = self._clip_tool_output_for_rewrite(
             raw,

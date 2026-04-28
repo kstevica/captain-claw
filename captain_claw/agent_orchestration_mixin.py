@@ -36,6 +36,17 @@ _ECO_CORE_TOOLS: frozenset[str] = frozenset({
     "web_fetch", "web_search",
 })
 
+# ── Nano-mode: barebone tool allowlist for tiny local models. ──
+# The agent should solve complex tasks by writing scripts and running
+# them via shell rather than driving an LLM-side reasoning chain over
+# many specialized tools.  Anything outside this set is hidden from
+# the LLM (definitions stripped) when nano mode is active.
+_NANO_TOOLS: frozenset[str] = frozenset({
+    "shell", "read", "write", "edit", "glob",
+    "web_fetch", "web_search",
+    "datastore", "insights", "personality", "clipboard",
+})
+
 # ── Eco-mode: intent-based keyword → tool mapping ──
 # When eco mode is active, only core tools get full definitions by default.
 # These patterns add extra tools based on keywords detected in the user message.
@@ -1004,6 +1015,24 @@ class AgentOrchestrationMixin:
                 session_policy=session_tool_policy,
                 task_policy=active_task_tool_policy,
             )
+            # ── Nano mode: hard-restrict to a barebone tool set ──
+            # Small local models can't reliably pick from a long tool list;
+            # cut to the script-writing essentials and let them shell out.
+            _nano_active = bool(
+                getattr(self, "instructions", None) and self.instructions.use_nano
+            )
+            if _nano_active and tool_defs:
+                _before = len(tool_defs)
+                tool_defs = [
+                    td for td in tool_defs
+                    if td.get("name", "").strip().lower() in _NANO_TOOLS
+                ]
+                log.info(
+                    "Nano mode: restricted tool set",
+                    kept=[td["name"] for td in tool_defs],
+                    removed=_before - len(tool_defs),
+                )
+
             # ── Force script mode: strip tools the LLM must NOT use ──
             # Instruction alone is insufficient (Haiku ignores it).
             # Keep only tools needed for writing & running a script.
@@ -1027,7 +1056,7 @@ class AgentOrchestrationMixin:
             # exist but we save ~1K tokens per call on schema overhead.
             # The tools remain executable — the registry still has them.
             _eco_active = getattr(self, "instructions", None) and self.instructions.use_micro
-            if _eco_active and tool_defs and not _force_script:
+            if _eco_active and tool_defs and not _force_script and not _nano_active:
                 _intent_tools = _eco_select_tools_by_intent(effective_user_input or "")
                 # Also include tools already used in this turn or recent
                 # session history (the LLM may want to call them again).

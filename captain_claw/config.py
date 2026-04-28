@@ -74,6 +74,7 @@ class ContextConfig(BaseModel):
     compaction_threshold: float = 0.8
     compaction_ratio: float = 0.4
     micro_instructions: bool = False
+    nano_instructions: bool = False
     chunked_processing: ChunkedProcessingConfig = Field(
         default_factory=ChunkedProcessingConfig,
     )

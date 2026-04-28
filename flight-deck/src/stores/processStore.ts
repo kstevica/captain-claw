@@ -11,6 +11,7 @@ const APPROVAL_KEY = 'fd:process-consult-approval'
 const FLEET_INSTRUCTIONS_KEY = 'fd:process-fleet-instructions'
 const COGNITIVE_MODE_KEY = 'fd:process-cognitive-modes'
 const ECO_MODE_KEY = 'fd:process-eco-modes'
+const NANO_MODE_KEY = 'fd:process-nano-modes'
 const MODEL_OVERRIDE_KEY = 'fd:process-model-overrides'
 
 function loadMap(key: string): Record<string, string> {
@@ -35,6 +36,7 @@ interface ProcessStore {
   fleetInstructionsOverrides: Record<string, string>
   cognitiveModeOverrides: Record<string, string>
   ecoModeOverrides: Record<string, boolean>
+  nanoModeOverrides: Record<string, boolean>
   modelOverrides: Record<string, { provider: string; model: string }>
 
   fetchProcesses: () => Promise<void>
@@ -55,6 +57,8 @@ interface ProcessStore {
   getCognitiveMode: (slug: string) => string
   setEcoMode: (slug: string, enabled: boolean) => void
   getEcoMode: (slug: string) => boolean
+  setNanoMode: (slug: string, enabled: boolean) => void
+  getNanoMode: (slug: string) => boolean
   setModelOverride: (slug: string, provider: string, model: string) => void
   getModelOverride: (slug: string) => { provider: string; model: string } | null
 }
@@ -69,6 +73,7 @@ export const useProcessStore = create<ProcessStore>((set, get) => ({
   fleetInstructionsOverrides: loadMap(FLEET_INSTRUCTIONS_KEY),
   cognitiveModeOverrides: loadMap(COGNITIVE_MODE_KEY),
   ecoModeOverrides: loadBoolMap(ECO_MODE_KEY),
+  nanoModeOverrides: loadBoolMap(NANO_MODE_KEY),
   modelOverrides: (() => { try { return JSON.parse(localStorage.getItem(MODEL_OVERRIDE_KEY) || '{}') } catch { return {} } })(),
 
   fetchProcesses: async () => {
@@ -168,6 +173,14 @@ export const useProcessStore = create<ProcessStore>((set, get) => ({
 
   getEcoMode: (slug) => get().ecoModeOverrides[slug] || false,
 
+  setNanoMode: (slug, enabled) => {
+    const overrides = { ...get().nanoModeOverrides, [slug]: enabled }
+    persistMap(NANO_MODE_KEY, overrides)
+    set({ nanoModeOverrides: overrides })
+  },
+
+  getNanoMode: (slug) => get().nanoModeOverrides[slug] || false,
+
   setModelOverride: (slug, provider, model) => {
     const overrides = { ...get().modelOverrides, [slug]: { provider, model } }
     const val = JSON.stringify(overrides)
@@ -190,6 +203,7 @@ registerHydrator((settings) => {
     [FLEET_INSTRUCTIONS_KEY, 'fleetInstructionsOverrides'],
     [COGNITIVE_MODE_KEY, 'cognitiveModeOverrides'],
     [ECO_MODE_KEY, 'ecoModeOverrides'],
+    [NANO_MODE_KEY, 'nanoModeOverrides'],
     [MODEL_OVERRIDE_KEY, 'modelOverrides'],
   ] as const) {
     const raw = settings[key]
