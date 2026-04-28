@@ -1,6 +1,6 @@
 [project]
 name = "botport"
-version = "0.4.21"
+version = "0.4.22"
 description = "Agent-to-agent task routing hub for Captain Claw instances"
 readme = "README.md"
 requires-python = ">=3.11"

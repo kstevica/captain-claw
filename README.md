@@ -13,11 +13,14 @@
 
 An open-source AI agent with multi-agent orchestration, autonomous cognitive systems, and a full management dashboard. Runs locally, supports every major LLM provider, and ships with 44 built-in tools.
 
-## What's New in 0.4.20
+## What's New in 0.4.22
 
-- **Sign in with ChatGPT** — Use OpenAI through your ChatGPT Plus/Pro/Team plan, no API key required. Captain Claw reuses the Codex CLI's OAuth tokens from `~/.codex/auth.json`, auto-refreshes them, and ships a new Flight Deck Connections card with a one-click reimport button. Direct connection to the ChatGPT Responses API for Codex-family models (`gpt-5-codex`, `gpt-5.1-codex-mini`, etc.).
-- **Scoped Google OAuth** — Bundled OAuth client removed (security hardening); bring your own Google Cloud OAuth client. New scope picker in the Connections page with sensitivity badges (`non-sensitive` / `sensitive` / `restricted`). Defaults to non-sensitive scopes only (`openid`, `email`, `profile`, `drive.file`) so fresh installs can connect without hitting Google's "App is blocked" screen. Opt into Gmail / Drive / Calendar / Vertex individually.
-- **On-Device Gemma (LiteRT)** — Production-grade subprocess worker for `litert-lm` models. Runs `.litertlm` files in an isolated child process that can crash and respawn without losing your session, with a text-based tool protocol so Gemma local models support the full captain-claw tool registry.
+- **Nano Mode** — A restricted-tool runtime tuned for tiny local models (Qwen3, Llama 3.2, Phi). Compressed system prompt, 7-tool surface (shell/write/read/edit/glob/datastore/insights), aggressive empty-message filtering, and memory-injection delimiters that stop small models from echoing context back as their reply. A 3B-parameter model on a laptop can now drive a useful loop.
+- **Remote GPU via vast.ai** — Drive an Ollama server hosted on vast.ai with auto-wake on first request and auto-sleep when idle. Rent an H100 by the hour for evening work without paying for a 24/7 cloud GPU. Per-agent override; existing local-Ollama setups untouched.
+- **Smart `web_fetch`** — Plain HTTP first, transparent fallback to a headless Playwright browser when the response looks like an unrendered SPA shell. SPAs return real article text; static sites stay fast.
+- **Prompt Builder** — Compose reusable multi-step prompt templates with `{{variable}}` slots. Built-in variables for session ID, workspace path, user email, and today's date.
+- **Live Token-Speed Telemetry** — Real-time tokens-per-second in the agent sidebar (`<output_tps> tok/s / <total_llm_tps> llm`). Compare a 30B model at 2 tok/s on a Mac vs 60 tok/s on vast.ai at a glance.
+- **Reliability fixes** — Empty-response feedback loop on local Qwen3/DeepSeek-R1 thinking models is fixed (`think: false` by default, empty assistant messages no longer persisted, history self-heals on next turn). Memory-injection echoes on small/cheap cloud models are gone (context notes now wrapped with explicit "do not repeat" delimiters).
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the full changelog.
 

@@ -579,6 +579,8 @@ Find files by pattern.
 
 Fetch a URL and return clean readable text. Always operates in text mode — raw HTML is never returned. For raw HTML, use `web_get` instead.
 
+Smart fallback: tries plain HTTP first, then transparently retries through a headless Playwright browser when the response looks like an unrendered SPA shell (small body or JS-bundle-only). Static pages stay fast (no Playwright cold-start tax); React/Vue/Angular SPAs return their actual rendered text. If Playwright isn't installed, returns the original HTTP body with a note suggesting `playwright install`.
+
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `url` | string | yes | URL to fetch |
@@ -1159,6 +1161,20 @@ model:
 **Provider aliases:** `chatgpt` = `openai`, `claude` = `anthropic`, `google` = `gemini`.
 
 **Model types:** `llm` (default), `image` (for `image_gen`), `vision` (for `image_vision` and `image_ocr`), `ocr` (for `image_ocr` only).
+
+**Modes:** an agent can run in `standard` (default), `eco`, or `nano` mode.
+
+- `eco` — biases the agent toward cheaper/faster cloud models (e.g. `gpt-5-mini`, `claude-haiku`, `gemini-flash`) and trims a few expensive-but-optional context blocks. Toggled per-agent in Flight Deck via the **Eco Mode** chip.
+- `nano` — restricted-tool runtime tuned for tiny local models (3B–8B params). Ships a compressed system prompt and exposes only `shell`, `write`, `read`, `edit`, `glob`, `datastore`, and `insights`. Recommended models: `qwen2.5:3b`, `llama3.2:3b`, `phi3:mini`, or larger Qwen3 quantized to fit on a laptop. Toggled per-agent in Flight Deck via the **Nano Mode** chip.
+
+**Remote GPU via vast.ai:** point an Ollama-typed model at a vast.ai instance URL (`base_url: "https://<instance>.vast.ai:11434"`) and Captain Claw will auto-wake the instance on first request and auto-sleep it after the configured idle period.
+
+```yaml
+model:
+  provider: "ollama"
+  model: "qwen3.6:35b"
+  base_url: "https://my-instance.vast.ai:11434"
+```
 
 ### context
 

@@ -3361,6 +3361,23 @@ class AgentContextMixin:
 
         selected_messages = list(reversed(selected_reversed))
         selected_messages = self._normalize_selected_messages_for_provider(selected_messages)
+        # Tool names whose content is internal context — wrap with a clear
+        # delimiter and instruction so smaller/cheaper models don't echo
+        # the raw memory/playbook/planning text back as their reply.
+        _CONTEXT_INJECTION_TOOL_NAMES = {
+            "memory_context",
+            "semantic_memory_context",
+            "deep_memory_context",
+            "cross_session_context",
+            "playbook_context",
+            "planning_context",
+            "list_task_memory",
+            "scale_progress",
+            "todo_context",
+            "contacts_context",
+            "scripts_context",
+            "workspace_manifest",
+        }
         for msg in selected_messages:
             # Append system_hint to content for the LLM (not stored in
             # the visible content field, so users don't see it in chat).
@@ -3368,6 +3385,13 @@ class AgentContextMixin:
             _hint = msg.get("system_hint")
             if _hint:
                 _content = f"{_content}\n{_hint}"
+            _tn = str(msg.get("tool_name", "") or "")
+            if _tn in _CONTEXT_INJECTION_TOOL_NAMES and _content:
+                _content = (
+                    "[INTERNAL CONTEXT — reference only, do not repeat or quote in your reply]\n"
+                    f"{_content}\n"
+                    "[END INTERNAL CONTEXT]"
+                )
             messages.append(
                 Message(
                     role=msg["role"],
