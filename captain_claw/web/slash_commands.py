@@ -95,6 +95,7 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
                 f"**Session:** {server.agent.session.name if server.agent.session else 'none'}\n"
                 f"**Pipeline:** {server.agent.pipeline_mode}\n"
                 f"**Planning:** {'on' if server.agent.planning_enabled else 'off'}\n"
+                f"**Plan-mode auto-route:** {'on' if getattr(server.agent, 'plan_mode_auto', False) else 'off'}\n"
             )
 
         elif cmd in ("/stop", "/cancel"):
@@ -187,16 +188,24 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
                 result = f"Pipeline mode: **{server.agent.pipeline_mode}**"
 
         elif cmd in ("/planning",):
-            if args.strip().lower() == "on":
-                server.agent.planning_enabled = True
-                server.agent.pipeline_mode = "contracts"
-                result = "Planning enabled (contracts mode)."
-            elif args.strip().lower() == "off":
-                server.agent.planning_enabled = False
-                server.agent.pipeline_mode = "loop"
-                result = "Planning disabled (loop mode)."
+            arg = args.strip().lower()
+            if arg == "on":
+                await server.agent.set_plan_mode_auto(True)
+                result = (
+                    "Plan-mode auto-routing **enabled**. "
+                    "Every chat message will be routed through `/plan` "
+                    "then `/plan-execute`. Use `/planning off` to disable."
+                )
+            elif arg == "off":
+                await server.agent.set_plan_mode_auto(False)
+                result = "Plan-mode auto-routing **disabled**."
             else:
-                result = f"Planning: **{'on' if server.agent.planning_enabled else 'off'}** (mode: {server.agent.pipeline_mode})"
+                state = "on" if getattr(server.agent, "plan_mode_auto", False) else "off"
+                result = (
+                    f"Plan-mode auto-routing: **{state}**. "
+                    "Use `/planning on` or `/planning off`. "
+                    "(Pipeline planner+critic mode is set via `/pipeline contracts`.)"
+                )
 
         elif cmd in ("/skills",):
             skills = server.agent.discover_available_skills()

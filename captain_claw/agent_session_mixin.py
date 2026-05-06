@@ -708,6 +708,7 @@ class AgentSessionMixin:
         """Load runtime feature flags from active session metadata."""
         cfg = get_config()
         pipeline_mode = "loop"
+        plan_mode_auto = False
         monitor_trace_llm = bool(getattr(cfg.ui, "monitor_trace_llm", False))
         monitor_trace_pipeline = bool(getattr(cfg.ui, "monitor_trace_pipeline", True))
         llm_session_logging = bool(getattr(cfg.logging, "llm_session_logging", False))
@@ -720,6 +721,7 @@ class AgentSessionMixin:
                 elif bool(planning_meta.get("enabled", False)):
                     # Backward compatibility with older session metadata.
                     pipeline_mode = "contracts"
+                plan_mode_auto = bool(planning_meta.get("plan_mode_auto", False))
             monitor_meta = self.session.metadata.get("monitor")
             if isinstance(monitor_meta, dict) and "trace_llm" in monitor_meta:
                 monitor_trace_llm = bool(monitor_meta.get("trace_llm", False))
@@ -729,6 +731,7 @@ class AgentSessionMixin:
                 llm_session_logging = bool(monitor_meta.get("llm_session_logging", False))
         self.pipeline_mode = pipeline_mode
         self.planning_enabled = self.pipeline_mode == "contracts"
+        self.plan_mode_auto = plan_mode_auto
         self.monitor_trace_llm = monitor_trace_llm
         self.monitor_trace_pipeline = monitor_trace_pipeline
         self.llm_session_logging = llm_session_logging
@@ -772,6 +775,17 @@ class AgentSessionMixin:
     async def set_planning_mode(self, enabled: bool, persist: bool = True) -> None:
         """Backward-compatible alias for setting pipeline mode."""
         await self.set_pipeline_mode("contracts" if bool(enabled) else "loop", persist=persist)
+
+    async def set_plan_mode_auto(self, enabled: bool, persist: bool = True) -> None:
+        """Toggle plan-mode auto-routing for the current session."""
+        self.plan_mode_auto = bool(enabled)
+        if not self.session:
+            return
+        planning_meta = self.session.metadata.setdefault("planning", {})
+        planning_meta["plan_mode_auto"] = self.plan_mode_auto
+        planning_meta["updated_at"] = datetime.now(UTC).isoformat()
+        if persist:
+            await self.session_manager.save_session(self.session)
 
     async def set_monitor_trace_llm(self, enabled: bool, persist: bool = True) -> None:
         """Enable or disable full intermediate LLM tracing in monitor history."""

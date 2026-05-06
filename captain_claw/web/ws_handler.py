@@ -244,6 +244,9 @@ async def handle_ws_message(
         if content.startswith("/"):
             from captain_claw.web.slash_commands import handle_command
             await handle_command(server, ws, content)
+        elif getattr(server.agent, "plan_mode_auto", False):
+            from captain_claw.web.plan_auto_route import handle_plan_auto_route
+            await handle_plan_auto_route(server, ws, content)
         else:
             from captain_claw.web.chat_handler import handle_chat
             await handle_chat(
