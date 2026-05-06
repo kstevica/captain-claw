@@ -394,7 +394,15 @@ class ClipboardToolConfig(BaseModel):
 
 
 class MCPServerConfig(BaseModel):
-    """Configuration for a single remote MCP server."""
+    """**Deprecated.** Per-agent MCP server configuration.
+
+    MCP servers are now managed centrally by Flight Deck — see
+    ``captain_claw.flight_deck.mcp_storage`` and the Connections
+    page in the Flight Deck UI. This model is kept only so existing
+    YAML configs continue to parse without error; entries here are
+    ignored at runtime (a one-time warning is logged via
+    :meth:`captain_claw.config.warn_if_legacy_mcp_servers`).
+    """
 
     name: str = ""
     url: str = ""
@@ -1418,11 +1426,47 @@ class Config(BaseSettings):
 _config: Config | None = None
 
 
+_legacy_mcp_warning_emitted = False
+
+
+def warn_if_legacy_mcp_servers(config: Config) -> None:
+    """One-shot log warning when ``config.tools.mcp_servers`` is non-empty.
+
+    Per-agent MCP server configuration was removed in 0.4.23 — MCP is
+    now centrally managed by Flight Deck. Old YAML configs may still
+    contain entries; we keep parsing them to avoid breaking startup,
+    but flag the deprecation loudly so users move them over.
+    """
+    global _legacy_mcp_warning_emitted
+    if _legacy_mcp_warning_emitted:
+        return
+    legacy = getattr(getattr(config, "tools", None), "mcp_servers", None) or []
+    if not legacy:
+        _legacy_mcp_warning_emitted = True
+        return
+    _legacy_mcp_warning_emitted = True
+    try:
+        # Lazy import to avoid a circular dependency at module load time.
+        from captain_claw.logging import get_logger as _get_logger
+
+        _logger = _get_logger(__name__)
+        _logger.warning(
+            "tools.mcp_servers in config.yaml is deprecated and ignored. "
+            "Open Flight Deck → Connections → MCP servers to add these "
+            "servers there instead. Legacy entries: %s",
+            [getattr(s, "name", "?") or "?" for s in legacy],
+        )
+    except Exception:
+        # Logging must never fail config load.
+        pass
+
+
 def get_config() -> Config:
     """Get the global configuration instance."""
     global _config
     if _config is None:
         _config = Config.load()
+        warn_if_legacy_mcp_servers(_config)
     return _config
 
 

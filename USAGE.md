@@ -3750,7 +3750,7 @@ Flight Deck serves both the React frontend and the FastAPI backend from a single
 | Datastore browser | View agent datastore tables and rows directly from agent cards |
 | Agent groups & tags | Organize agents into teams and roles with color-coded group badges |
 | Trace timeline | Real-time orchestrator observability — Gantt-style span visualization in the chat panel with duration, token usage, phase breakdown (decompose/execute/task/synthesize), and status tracking |
-| Connections page | Unified external-service authentication: Google OAuth (with per-scope picker and sensitivity tiers) and ChatGPT (Codex OAuth) in a single scrollable, collapsible UI |
+| Connections page | Unified external-service authentication: Google OAuth (with per-scope picker and sensitivity tiers), ChatGPT (Codex OAuth), and centrally-managed MCP servers (HTTP + stdio transport, per-agent allowlists, hot-reload over SSE) in a single scrollable, collapsible UI |
 
 ### Connections
 
@@ -3854,6 +3854,57 @@ The `CodexAuthManager` decodes the JWT `exp` claim with a 60-second safety margi
 
 - `FD_URL` — when set on a spawned captain-claw agent, the Codex auth manager pulls tokens from Flight Deck instead of reading `~/.codex/auth.json` locally.
 - `FD_AGENT_SHARED_SECRET` — optional shared secret used in both directions (FD validates incoming agent calls; agents attach it as `X-Agent-Secret` when calling FD).
+
+#### MCP servers (centrally managed)
+
+Captain Claw 0.4.23 moved Model Context Protocol (MCP) management out of every individual agent and into Flight Deck as a fleet-wide service; 0.4.24 (Phase 2) added stdio transport, per-agent allowlists, hot tool-list reload, and streaming tool calls.
+
+Add an MCP server once in **Connections → MCP servers** and every agent in the fleet that the server's allowlist permits picks up the tools — no per-agent `config.yaml` MCP block, no N×M connections to upstream servers, and a single chokepoint for tokens, sessions and observability.
+
+**Supported transports:**
+
+- **`http`** — Streamable HTTP binding. Required field: `url`. Optional OAuth2 `client_credentials` flow (`client_id`, `client_secret`, `token_endpoint`) and arbitrary extra `headers`. `Mcp-Session-Id` is captured and replayed transparently.
+- **`stdio`** — child process speaking JSON-RPC over stdin/stdout (NDJSON). Required field: `command`. Optional `args` (argv tail) and `env` (extra env vars merged on top of the FD process environment). The de-facto standard for local servers shipped via `npx` / `uvx` (filesystem, sqlite, github, postgres, etc.). The child is spawned lazily on the first request, auto-respawned if it dies, and terminated with SIGTERM (2 s grace) then SIGKILL on close.
+
+**Per-agent allowlists.** Each server carries an optional `allowed_agents: list[str]`. Empty list = every agent in the fleet (the default and the Phase 1 behaviour). Once any slug is listed, only those agents can see, list, or call the server. Restricted servers return HTTP 404 to disallowed agents — same shape as "doesn't exist," so a restricted server's existence is opaque.
+
+Agents identify themselves via the `X-Agent-Slug` header, which `fd_client.flight_deck_headers()` automatically populates from the `FD_AGENT_SLUG` env var (Flight Deck injects this when spawning sub-agents).
+
+**Hot reload.** Agents subscribe to `GET /fd/mcp/agent/events` (an SSE stream) on boot. Save / edit / delete a server in the admin UI and every entitled agent re-registers proxy tools without a restart. The watcher reconnects forever with exponential backoff capped at 30 s. 25-second `ping` frames keep the connection alive through idle-TCP-killing proxies.
+
+**Streaming tool calls.** `POST /fd/mcp/<name>/call_stream` runs the upstream call as a background task and emits an SSE stream of:
+
+- `{"type":"progress","params":{...}}` — one frame per upstream `notifications/progress`
+- `{"type":"result","server":"...","tool":"...","result":{...}}` — terminal frame
+- `{"type":"error","error":"..."}` — terminal frame on failure
+- `{"type":"ping"}` — every 25 s while idle
+
+Cancels the upstream call cleanly when the client disconnects mid-stream. The agent's tool execution loop still uses one-shot `/call`; the streaming endpoint is for UIs that want live progress indicators.
+
+**Storage.** A flat JSON file at `~/.captain-claw-fd/mcp_servers.json` (override with `CAPTAIN_CLAW_FD_MCP_PATH`). Writes are atomic (write-tmp + rename) so a crashed Flight Deck never leaves a half-written file. Secrets are masked (`••••••••`) in every UI response — re-submitting a form with a masked secret preserves the stored value.
+
+**Endpoints (admin — gated by Flight Deck user auth):**
+
+- `GET /fd/mcp/servers` — list configured servers with secrets masked + runtime status (initialised? tool count? last error?)
+- `POST /fd/mcp/servers` — insert or update a server by name. Accepts `transport`, `url`, `command`, `args`, `env`, `client_id`, `client_secret`, `token_endpoint`, `headers`, `enabled`, `allowed_agents`.
+- `DELETE /fd/mcp/servers/{name}` — remove a server, drop its cached state, terminate any running stdio child.
+- `POST /fd/mcp/servers/{name}/test` — end-to-end probe (re-init + tools/list).
+- `POST /fd/mcp/probe` — probe a transient (non-persisted) record; powers the "Test connection" button on the Add-server form. For stdio records the spawned child is closed before returning so probing never leaks processes.
+
+**Endpoints (agent-facing — gated by loopback or `X-Agent-Secret` header, filtered by allowlist):**
+
+- `GET /fd/mcp/agent/servers` — enabled server names visible to this agent.
+- `GET /fd/mcp/{name}/tools?refresh={bool}` — proxy `tools/list` (30-second TTL cache, `refresh=true` bypasses).
+- `POST /fd/mcp/{name}/call` — proxy `tools/call`.
+- `POST /fd/mcp/{name}/call_stream` — streaming variant; SSE response.
+- `GET /fd/mcp/agent/events` — SSE stream of `server_added` / `server_updated` / `server_removed` / `tools_changed` events for hot reload.
+
+**Environment variables:**
+
+- `FD_URL` — agents call FD's MCP proxy at this base when set. Unset = MCP is disabled in the agent (Phase 1+ design: MCP is exclusively a Flight Deck feature).
+- `FD_AGENT_SLUG` — the agent's own slug; Flight Deck injects this when spawning sub-agents. Used as the `X-Agent-Slug` header for allowlist filtering.
+- `FD_AGENT_SHARED_SECRET` — optional shared secret; same one used by Codex / Google.
+- `CAPTAIN_CLAW_FD_MCP_PATH` — override the storage file location (useful for tests).
 
 ### Agent Forge
 

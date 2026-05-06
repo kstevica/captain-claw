@@ -59,6 +59,10 @@ _TOOL_PROMPT_DESCRIPTIONS_NANO: dict[str, str] = {
     "glob": "find files",
     "web_fetch": "url→text",
     "web_search": "web search",
+    "pdf_extract": "pdf→md",
+    "docx_extract": "docx→md",
+    "xlsx_extract": "xlsx→md",
+    "pptx_extract": "pptx→md",
     "datastore": "tables",
     "insights": "facts",
     "personality": "profile",
@@ -2343,21 +2347,45 @@ class AgentContextMixin:
                 )
 
     async def _register_mcp_tools_async_init(self) -> None:
-        """Connect to configured MCP servers and register their tools."""
-        config = get_config()
-        servers = getattr(config.tools, "mcp_servers", None)
-        if not servers:
+        """Register MCP tools by querying Flight Deck for the fleet's
+        configured servers.
+
+        MCP servers are now administered exclusively from Flight Deck
+        (see ``captain_claw/flight_deck/mcp_routes.py``); the per-agent
+        ``config.tools.mcp_servers`` list is no longer consulted. When
+        the agent is not running under Flight Deck (``FD_URL`` unset)
+        this is a no-op.
+        """
+        import asyncio as _asyncio
+
+        from captain_claw.fd_client import is_under_flight_deck
+        from captain_claw.tools.mcp_connector import (
+            register_mcp_tools,
+            watch_mcp_events,
+        )
+
+        if not is_under_flight_deck():
             return
 
-        from captain_claw.tools.mcp_connector import register_mcp_tools
-
-        srv_configs = [s.model_dump() for s in servers]
         try:
-            registered = await register_mcp_tools(self.tools, srv_configs)
+            registered = await register_mcp_tools(self.tools)
             if registered:
-                log.info("MCP tools registered", tools=registered)
+                log.info("MCP tools registered via Flight Deck", tools=registered)
         except Exception as exc:
             log.error("Failed to register MCP tools", error=str(exc))
+
+        # Phase 2.3: keep the registered tool list in sync with FD
+        # without a restart. The watcher reconnects forever; we fire
+        # and forget here, retaining the task on ``self`` so a possible
+        # GC won't cancel it mid-flight.  (When the agent shuts down
+        # the event loop dies and the task is cleaned up by asyncio.)
+        try:
+            self._mcp_event_watcher_task = _asyncio.create_task(  # type: ignore[attr-defined]
+                watch_mcp_events(self.tools),
+                name="mcp-event-watcher",
+            )
+        except Exception as exc:
+            log.warning("Failed to start MCP event watcher", error=str(exc))
 
     # ------------------------------------------------------------------
     # Conditional system-prompt helpers
@@ -2382,6 +2410,21 @@ class AgentContextMixin:
 
         descs = _TOOL_PROMPT_DESCRIPTIONS_MICRO if use_micro else _TOOL_PROMPT_DESCRIPTIONS
 
+        # Are any Flight-Deck-proxied MCP tools registered?  When yes we
+        # append an explicit policy sentence — gpt-5.3-codex (and other
+        # OpenAI reasoning models) will otherwise hallucinate "MCP
+        # execution is blocked here" and refuse to invoke them, even
+        # though the schemas are right there in tool_choice=auto.
+        _has_mcp = any(name.startswith("mcp_") for name in registered)
+        _mcp_policy = (
+            "MCP tools (names starting with `mcp_`) are first-class, "
+            "always-available tools in this runtime — invoke them "
+            "directly via the function-calling API like any other "
+            "tool. Do NOT say \"blocked\", \"can't execute MCP\", "
+            "\"MCP execution is not available\", or ask the user to "
+            "run the call themselves; those statements are false."
+        )
+
         if use_micro:
             parts = []
             for name in registered:
@@ -2391,7 +2434,10 @@ class AgentContextMixin:
                     desc = getattr(tool, "description", name) if tool else None
                 if desc:
                     parts.append(f"{name} ({desc})")
-            return "Tools: " + ", ".join(parts) + "." if parts else ""
+            if not parts:
+                return ""
+            tail = (" " + _mcp_policy) if _has_mcp else ""
+            return "Tools: " + ", ".join(parts) + "." + tail
         else:
             lines = ["Available tools:"]
             for name in registered:
@@ -2401,6 +2447,9 @@ class AgentContextMixin:
                     desc = getattr(tool, "description", name) if tool else None
                 if desc:
                     lines.append(f"- {name}: {desc}")
+            if _has_mcp:
+                lines.append("")
+                lines.append(_mcp_policy)
             return "\n".join(lines)
 
     def _build_conditional_section(

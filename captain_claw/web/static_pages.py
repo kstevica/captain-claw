@@ -161,5 +161,17 @@ async def serve_brain_graph(server: WebServer, request: web.Request) -> web.Resp
     return _cache_bust(STATIC_DIR / "brain-graph.html")
 
 
-async def serve_mcp_connectors(server: WebServer, request: web.Request) -> web.FileResponse:
-    return web.FileResponse(STATIC_DIR / "mcp-connectors.html")
+async def serve_mcp_connectors(server: WebServer, request: web.Request) -> web.Response:
+    """The agent-side MCP page is gone; redirect users to Flight Deck.
+
+    Kept as a redirect so anyone with a bookmarked URL or stale link
+    still lands somewhere useful instead of 404.
+    """
+    return web.Response(
+        status=410,
+        text=(
+            "MCP servers are now managed by Flight Deck. "
+            "Open Flight Deck → Connections → MCP servers."
+        ),
+        content_type="text/plain",
+    )

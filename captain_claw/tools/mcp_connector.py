@@ -1,4 +1,27 @@
-"""MCP Connector — discover and proxy tools from remote MCP servers."""
+"""MCP tools for captain-claw agents.
+
+In Phase 1 of the MCP-via-Flight-Deck design, all upstream MCP I/O lives
+inside Flight Deck (see :mod:`captain_claw.flight_deck.mcp_manager`).
+Agents do **not** open their own connections to MCP servers — instead
+they enumerate FD's configured servers via ``/fd/mcp/agent/servers``,
+fetch each server's tool catalogue from ``/fd/mcp/<name>/tools`` and
+proxy each call through ``/fd/mcp/<name>/call``.
+
+This module exposes:
+
+* :class:`MCPProxyTool` — a captain-claw :class:`Tool` whose ``execute``
+  forwards arguments to FD.
+* :class:`MCPProxyConnector` — the per-server client wrapping the FD
+  proxy endpoints.
+* :func:`register_mcp_tools` — top-level helper that asks FD for its
+  enabled server list and registers proxy tools for every advertised
+  upstream tool.
+
+When ``FD_URL`` is unset, :func:`register_mcp_tools` is a no-op. With
+the new architecture, MCP servers are administered exclusively from
+Flight Deck — there is no per-agent ``config.yaml`` ``mcp_servers``
+list any more.
+"""
 
 from __future__ import annotations
 
@@ -7,16 +30,92 @@ import json
 from pathlib import Path
 from typing import Any
 
-import httpx
-
+from captain_claw.fd_client import FDClient, is_under_flight_deck
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 
 log = get_logger(__name__)
 
 
+# When the SSE event stream drops we reconnect with exponential
+# backoff capped at this value. FD restarts and brief network blips are
+# common in dev — keep the cap short so reconnects feel snappy.
+_SSE_RECONNECT_INITIAL_SECONDS = 1.0
+_SSE_RECONNECT_MAX_SECONDS = 30.0
+
+# Per-process tracking of which proxy-tool names we registered for each
+# upstream server, so we can ``unregister`` the right ones when an
+# event tells us the server changed or went away. Keyed by server name
+# → list of registered captain-claw tool names.
+_registered_by_server: dict[str, list[str]] = {}
+
+
+# ── proxy connector ─────────────────────────────────────────────────
+
+
+class MCPProxyConnector:
+    """Talks to a Flight-Deck-managed MCP server via FD's REST proxy.
+
+    One instance per upstream server name. The connector owns a tiny
+    :class:`FDClient` so multiple proxy tools on the same server share
+    a connection pool.
+    """
+
+    def __init__(self, server_name: str, fd_client: FDClient | None = None) -> None:
+        self.name = server_name
+        self._fd = fd_client or FDClient()
+
+    async def discover_tools(self) -> list[dict[str, Any]]:
+        resp = await self._fd.get(f"/fd/mcp/{self.name}/tools")
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"FD /fd/mcp/{self.name}/tools returned {resp.status_code}: "
+                f"{resp.text[:200]}"
+            )
+        body = resp.json()
+        tools = body.get("tools", []) if isinstance(body, dict) else []
+        return list(tools)
+
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
+        resp = await self._fd.post(
+            f"/fd/mcp/{self.name}/call",
+            json={"tool": tool_name, "arguments": arguments},
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"FD /fd/mcp/{self.name}/call returned {resp.status_code}: "
+                f"{resp.text[:200]}"
+            )
+        body = resp.json()
+        result = (body or {}).get("result") if isinstance(body, dict) else None
+        if not isinstance(result, dict):
+            return json.dumps(body)
+
+        content = result.get("content", [])
+        is_error = result.get("isError", False)
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                btype = block.get("type")
+                if btype == "text":
+                    parts.append(block.get("text", ""))
+                elif btype == "image":
+                    parts.append(f"[image: {block.get('mimeType', 'unknown')}]")
+                else:
+                    parts.append(json.dumps(block))
+            elif isinstance(block, str):
+                parts.append(block)
+        text = "\n".join(parts) if parts else json.dumps(result)
+        if is_error:
+            raise RuntimeError(f"MCP tool error: {text}")
+        return text
+
+
+# ── proxy tool ──────────────────────────────────────────────────────
+
+
 class MCPProxyTool(Tool):
-    """A Captain Claw tool that proxies execution to a remote MCP server tool."""
+    """A captain-claw :class:`Tool` proxying execution to an upstream MCP tool."""
 
     def __init__(
         self,
@@ -24,17 +123,21 @@ class MCPProxyTool(Tool):
         mcp_description: str,
         mcp_input_schema: dict[str, Any],
         server_name: str,
-        connector: "MCPConnector",
-    ):
-        # Sanitize: Anthropic requires tool names to match ^[a-zA-Z0-9_-]{1,128}$
+        connector: MCPProxyConnector,
+    ) -> None:
+        # Anthropic restricts tool names to ^[a-zA-Z0-9_-]{1,128}$ so we
+        # need to sanitise the upstream identifier.
         safe_name = mcp_tool_name.replace(".", "_").replace(" ", "_")
         safe_server = server_name.replace(".", "_").replace(" ", "_")
         self.name = f"mcp_{safe_server}_{safe_name}"
-        self.description = f"[MCP:{server_name}] {mcp_description or mcp_tool_name}"
-        self.parameters = mcp_input_schema or {
-            "type": "object",
-            "properties": {},
-        }
+        # Use the upstream description verbatim.  An earlier version
+        # prepended ``[MCP:<server>]`` for traceability, but the
+        # ``MCP`` token in tool descriptions appeared to bias
+        # gpt-5.3-codex into refusing to invoke them ("MCP execution is
+        # blocked here").  The server is already encoded in the tool
+        # name (``mcp_<server>_<tool>``), so the prefix added nothing.
+        self.description = mcp_description or mcp_tool_name
+        self.parameters = mcp_input_schema or {"type": "object", "properties": {}}
         self.timeout_seconds = 60.0
         self._mcp_tool_name = mcp_tool_name
         self._server_name = server_name
@@ -42,19 +145,33 @@ class MCPProxyTool(Tool):
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         try:
-            # Only pass arguments declared in the MCP tool schema;
-            # Captain Claw's registry injects internal kwargs (paths,
-            # events, callbacks) that must not be forwarded.
-            declared = set(self.parameters.get("properties", {}).keys())
-            clean_args = {
-                k: str(v) if isinstance(v, Path) else v
-                for k, v in kwargs.items()
-                if k in declared
-            }
-            result = await self._connector.call_tool(
-                self._mcp_tool_name, clean_args
-            )
-            return ToolResult(success=True, content=result)
+            declared = set((self.parameters.get("properties") or {}).keys())
+            required = set(self.parameters.get("required") or [])
+            clean_args: dict[str, Any] = {}
+            for key, value in kwargs.items():
+                if key not in declared:
+                    continue
+                if isinstance(value, Path):
+                    value = str(value)
+                # Drop "empty filler" values for *optional* fields.  Models
+                # like gpt-5.3-codex defensively fill every declared
+                # property — sending ``""`` or ``None`` for fields they
+                # don't actually want to filter on.  Many MCP servers
+                # validate optional strings with ``minLength: 1`` (so
+                # ``""`` raises) or treat the literal value as a filter
+                # (so ``"any"`` matches nothing).  Stripping these
+                # makes the call equivalent to "field absent", which is
+                # what the model actually meant.  Required fields are
+                # forwarded as-is so upstream validation errors still
+                # surface to the model.
+                if key not in required:
+                    if value is None:
+                        continue
+                    if isinstance(value, str) and value.strip() == "":
+                        continue
+                clean_args[key] = value
+            text = await self._connector.call_tool(self._mcp_tool_name, clean_args)
+            return ToolResult(success=True, content=text)
         except Exception as exc:
             log.error(
                 "MCP tool execution failed",
@@ -65,286 +182,227 @@ class MCPProxyTool(Tool):
             return ToolResult(success=False, error=str(exc))
 
 
-class MCPConnector:
-    """Connects to a remote MCP server via Streamable HTTP transport.
-
-    Handles OAuth2 client_credentials authentication and provides
-    methods to discover tools and call them.
-    """
-
-    def __init__(
-        self,
-        name: str,
-        server_url: str,
-        client_id: str = "",
-        client_secret: str = "",
-        token_endpoint: str = "",
-        headers: dict[str, str] | None = None,
-    ):
-        self.name = name
-        self.server_url = server_url.rstrip("/")
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self.headers = dict(headers or {})
-        self._access_token: str | None = None
-        self._session_url: str | None = None
-
-        # Resolve token endpoint (absolute or relative to server)
-        if token_endpoint:
-            if token_endpoint.startswith("http"):
-                self.token_endpoint = token_endpoint
-            else:
-                # Relative path — resolve against server base URL
-                from urllib.parse import urlparse
-
-                parsed = urlparse(self.server_url)
-                base = f"{parsed.scheme}://{parsed.netloc}"
-                self.token_endpoint = (
-                    base + "/" + token_endpoint.lstrip("/")
-                )
-        else:
-            self.token_endpoint = ""
-
-    async def _get_access_token(self) -> str:
-        """Obtain an OAuth2 access token via client_credentials grant."""
-        if self._access_token:
-            return self._access_token
-
-        if not self.token_endpoint or not self.client_id:
-            return ""
-
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                self.token_endpoint,
-                data={
-                    "grant_type": "client_credentials",
-                    "client_id": self.client_id,
-                    "client_secret": self.client_secret,
-                },
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            self._access_token = data["access_token"]
-            log.info(
-                "MCP OAuth token acquired",
-                server=self.name,
-                token_type=data.get("token_type", "unknown"),
-            )
-            return self._access_token
-
-    async def _build_headers(self) -> dict[str, str]:
-        """Build request headers with auth."""
-        hdrs = {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-        }
-        hdrs.update(self.headers)
-
-        token = await self._get_access_token()
-        if token:
-            hdrs["Authorization"] = f"Bearer {token}"
-        return hdrs
-
-    def _jsonrpc(self, method: str, params: dict | None = None, id: int = 1) -> dict:
-        """Build a JSON-RPC 2.0 request."""
-        msg: dict[str, Any] = {
-            "jsonrpc": "2.0",
-            "method": method,
-            "id": id,
-        }
-        if params is not None:
-            msg["params"] = params
-        return msg
-
-    async def _post_rpc(self, method: str, params: dict | None = None) -> dict:
-        """Send a JSON-RPC request to the MCP server and return the result."""
-        headers = await self._build_headers()
-        url = self._session_url or self.server_url
-        payload = self._jsonrpc(method, params)
-
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(url, json=payload, headers=headers)
-
-            # Capture session URL from Mcp-Session header if present
-            session_id = resp.headers.get("mcp-session-id")
-            if session_id and not self._session_url:
-                self._session_url = self.server_url
-
-            # Handle SSE response (text/event-stream)
-            content_type = resp.headers.get("content-type", "")
-            if "text/event-stream" in content_type:
-                return self._parse_sse_response(resp.text)
-
-            resp.raise_for_status()
-            body = resp.json()
-
-            if "error" in body:
-                err = body["error"]
-                raise RuntimeError(
-                    f"MCP RPC error {err.get('code', '?')}: {err.get('message', str(err))}"
-                )
-            return body.get("result", body)
-
-    def _parse_sse_response(self, text: str) -> dict:
-        """Parse SSE text to extract the JSON-RPC result."""
-        for line in text.splitlines():
-            if line.startswith("data:"):
-                data_str = line[len("data:"):].strip()
-                if not data_str:
-                    continue
-                try:
-                    msg = json.loads(data_str)
-                    if "result" in msg:
-                        return msg["result"]
-                    if "error" in msg:
-                        err = msg["error"]
-                        raise RuntimeError(
-                            f"MCP RPC error {err.get('code', '?')}: {err.get('message', str(err))}"
-                        )
-                except json.JSONDecodeError:
-                    continue
-        raise RuntimeError(f"No valid JSON-RPC result in SSE response")
-
-    async def initialize(self) -> dict:
-        """Send MCP initialize handshake."""
-        result = await self._post_rpc("initialize", {
-            "protocolVersion": "2025-03-26",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "captain-claw",
-                "version": "0.4.21",
-            },
-        })
-        log.info(
-            "MCP server initialized",
-            server=self.name,
-            server_info=result.get("serverInfo", {}),
-        )
-        # Send initialized notification (no id = notification)
-        try:
-            headers = await self._build_headers()
-            url = self._session_url or self.server_url
-            notification = {
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized",
-            }
-            async with httpx.AsyncClient(timeout=10) as client:
-                await client.post(url, json=notification, headers=headers)
-        except Exception:
-            pass  # Notifications are best-effort
-        return result
-
-    async def discover_tools(self) -> list[dict[str, Any]]:
-        """List all tools available on the MCP server."""
-        result = await self._post_rpc("tools/list")
-        tools = result.get("tools", [])
-        log.info(
-            "MCP tools discovered",
-            server=self.name,
-            count=len(tools),
-            tools=[t.get("name") for t in tools],
-        )
-        return tools
-
-    async def call_tool(self, tool_name: str, arguments: dict) -> str:
-        """Call a tool on the MCP server and return the text result."""
-        result = await self._post_rpc("tools/call", {
-            "name": tool_name,
-            "arguments": arguments,
-        })
-
-        # Extract text from MCP content blocks
-        content = result.get("content", [])
-        is_error = result.get("isError", False)
-
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict):
-                if block.get("type") == "text":
-                    parts.append(block.get("text", ""))
-                elif block.get("type") == "image":
-                    parts.append(f"[image: {block.get('mimeType', 'unknown')}]")
-                else:
-                    parts.append(json.dumps(block))
-            elif isinstance(block, str):
-                parts.append(block)
-
-        text = "\n".join(parts) if parts else json.dumps(result)
-        if is_error:
-            raise RuntimeError(f"MCP tool error: {text}")
-        return text
-
-    def invalidate_token(self) -> None:
-        """Force re-authentication on next request."""
-        self._access_token = None
-        self._session_url = None
+# ── registration entrypoint ─────────────────────────────────────────
 
 
-async def register_mcp_tools(
+async def _register_one_server(
     registry: Any,
-    servers: list[dict[str, Any]],
+    server_name: str,
+    fd: FDClient,
 ) -> list[str]:
-    """Connect to MCP servers and register their tools in the Captain Claw registry.
+    """Discover and register every tool advertised by one MCP server.
 
-    Args:
-        registry: ToolRegistry instance
-        servers: List of server configs, each with:
-            - name: server identifier
-            - url: MCP server URL
-            - client_id: OAuth client ID (optional)
-            - client_secret: OAuth client secret (optional)
-            - token_endpoint: OAuth token endpoint (optional)
-            - headers: extra HTTP headers (optional)
-
-    Returns:
-        List of registered tool names.
+    Returns the captain-claw tool names that were registered. Errors
+    are logged but never raised — a single broken upstream shouldn't
+    take the whole agent down.
     """
-    registered: list[str] = []
-
-    for srv_config in servers:
-        name = srv_config.get("name", "default")
-        url = srv_config.get("url", "")
-        if not url:
-            log.warning("MCP server config missing URL, skipping", name=name)
-            continue
-
-        connector = MCPConnector(
-            name=name,
-            server_url=url,
-            client_id=srv_config.get("client_id", ""),
-            client_secret=srv_config.get("client_secret", ""),
-            token_endpoint=srv_config.get("token_endpoint", ""),
-            headers=srv_config.get("headers"),
+    connector = MCPProxyConnector(server_name, fd_client=fd)
+    try:
+        mcp_tools = await connector.discover_tools()
+    except Exception as exc:
+        log.error(
+            "Failed to fetch MCP tools from FD", server=server_name, error=str(exc)
         )
+        return []
+    registered: list[str] = []
+    for tool_def in mcp_tools:
+        if not isinstance(tool_def, dict):
+            continue
+        tool_name = str(tool_def.get("name") or "").strip()
+        if not tool_name:
+            continue
+        proxy = MCPProxyTool(
+            mcp_tool_name=tool_name,
+            mcp_description=str(tool_def.get("description") or ""),
+            mcp_input_schema=tool_def.get("inputSchema") or {},
+            server_name=server_name,
+            connector=connector,
+        )
+        registry.register(proxy)
+        registered.append(proxy.name)
+        log.info(
+            "Registered MCP proxy tool",
+            tool=proxy.name,
+            mcp_tool=tool_name,
+            server=server_name,
+        )
+    return registered
 
+
+def _unregister_server(registry: Any, server_name: str) -> int:
+    """Remove every captain-claw tool we previously registered for ``server_name``.
+
+    Returns the number of tools dropped. Safe to call when no tools
+    were ever registered for the server (returns 0).
+    """
+    names = _registered_by_server.pop(server_name, [])
+    for tool_name in names:
         try:
-            await connector.initialize()
-            mcp_tools = await connector.discover_tools()
+            registry.unregister(tool_name)
+        except Exception:
+            log.debug(
+                "registry.unregister raised; ignoring",
+                tool=tool_name,
+                exc_info=True,
+            )
+    if names:
+        log.info(
+            "Unregistered MCP proxy tools",
+            server=server_name,
+            count=len(names),
+        )
+    return len(names)
 
-            for tool_def in mcp_tools:
-                proxy = MCPProxyTool(
-                    mcp_tool_name=tool_def["name"],
-                    mcp_description=tool_def.get("description", ""),
-                    mcp_input_schema=tool_def.get("inputSchema", {}),
-                    server_name=name,
-                    connector=connector,
-                )
-                registry.register(proxy)
-                registered.append(proxy.name)
-                log.info(
-                    "Registered MCP tool",
-                    tool=proxy.name,
-                    mcp_tool=tool_def["name"],
-                    server=name,
-                )
 
+async def _refresh_server(registry: Any, server_name: str, fd: FDClient) -> None:
+    """Drop and re-register every proxy tool for one server.
+
+    Called when a ``server_added``, ``server_updated`` or
+    ``tools_changed`` event arrives. Idempotent — safe to call when
+    the server has no tools yet (just unregisters and registers an
+    empty list).
+    """
+    _unregister_server(registry, server_name)
+    registered = await _register_one_server(registry, server_name, fd)
+    if registered:
+        _registered_by_server[server_name] = registered
+
+
+async def register_mcp_tools(registry: Any) -> list[str]:
+    """Discover FD-managed MCP servers and register a proxy tool per upstream tool.
+
+    Called once during agent boot. Returns the list of registered
+    tool names (the same ones now in ``registry``).
+
+    When the agent is not running under Flight Deck (``FD_URL`` unset),
+    this returns immediately — MCP is exclusively a Flight Deck feature
+    in the new architecture.
+    """
+    if not is_under_flight_deck():
+        return []
+
+    fd = FDClient()
+    all_registered: list[str] = []
+    try:
+        resp = await fd.get("/fd/mcp/agent/servers")
+        if resp.status_code != 200:
+            log.warning(
+                "FD /fd/mcp/agent/servers returned %s: %s",
+                resp.status_code,
+                resp.text[:200],
+            )
+            return []
+        body = resp.json() if resp.content else {}
+        servers = body.get("servers", []) if isinstance(body, dict) else []
+    except Exception as exc:
+        log.warning("Failed to enumerate MCP servers from FD: %s", exc)
+        return []
+
+    for srv in servers:
+        if not isinstance(srv, dict):
+            continue
+        name = str(srv.get("name") or "").strip()
+        if not name:
+            continue
+        registered = await _register_one_server(registry, name, fd)
+        if registered:
+            _registered_by_server[name] = registered
+            all_registered.extend(registered)
+
+    return all_registered
+
+
+# ── hot-reload event subscriber (Phase 2.3) ─────────────────────────
+
+
+async def _consume_event_stream(registry: Any, fd: FDClient) -> None:
+    """One SSE connection. Returns when the stream ends (clean EOF).
+    Raises on transport errors so the outer loop can reconnect.
+    """
+    async with fd.stream(
+        "GET",
+        "/fd/mcp/agent/events",
+        headers={"Accept": "text/event-stream"},
+        timeout=None,
+    ) as response:
+        if response.status_code != 200:
+            # Drain enough to get a useful error line, then bail.
+            preview = ""
+            try:
+                preview = (await response.aread()).decode(errors="replace")[:200]
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"FD /fd/mcp/agent/events returned {response.status_code}: {preview}"
+            )
+        async for raw_line in response.aiter_lines():
+            line = raw_line.strip()
+            if not line or not line.startswith("data:"):
+                continue
+            payload = line[len("data:") :].strip()
+            if not payload:
+                continue
+            try:
+                event = json.loads(payload)
+            except json.JSONDecodeError:
+                log.debug("MCP event stream: skipping non-JSON line", line=payload[:200])
+                continue
+            await _handle_event(registry, fd, event)
+
+
+async def _handle_event(registry: Any, fd: FDClient, event: dict[str, Any]) -> None:
+    etype = str(event.get("type") or "")
+    server = str(event.get("server") or "")
+    if etype in ("ping", "hello"):
+        return
+    if not server:
+        return
+    if etype == "server_removed":
+        _unregister_server(registry, server)
+        return
+    if etype in ("server_added", "server_updated", "tools_changed"):
+        try:
+            await _refresh_server(registry, server, fd)
         except Exception as exc:
-            log.error(
-                "Failed to connect to MCP server",
-                server=name,
-                url=url,
+            log.warning(
+                "MCP event refresh failed",
+                server=server,
+                event_type=etype,
                 error=str(exc),
             )
+        return
+    log.debug("MCP event stream: ignoring unknown event", event_type=etype)
 
-    return registered
+
+async def watch_mcp_events(registry: Any) -> None:
+    """Long-running task that keeps the agent's MCP tool list fresh.
+
+    Subscribes to FD's SSE event stream and reconnects forever (with
+    exponential backoff capped at 30s) so the agent picks up MCP
+    changes hot — no restart required.
+
+    No-op when the agent isn't running under Flight Deck.
+    """
+    if not is_under_flight_deck():
+        return
+    fd = FDClient()
+    backoff = _SSE_RECONNECT_INITIAL_SECONDS
+    while True:
+        try:
+            log.debug("MCP event stream connecting")
+            await _consume_event_stream(registry, fd)
+            # Clean EOF — server probably restarted.  Reset backoff so
+            # the reconnect feels snappy.
+            backoff = _SSE_RECONNECT_INITIAL_SECONDS
+            log.debug("MCP event stream ended cleanly; reconnecting")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning(
+                "MCP event stream error; will reconnect",
+                error=str(exc),
+                backoff_seconds=backoff,
+            )
+        # Sleep before reconnect.
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, _SSE_RECONNECT_MAX_SECONDS)

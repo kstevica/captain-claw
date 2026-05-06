@@ -523,22 +523,14 @@ def _build_schema() -> list[dict[str, Any]]:
                 {
                     "id": "tools_mcp_servers",
                     "title": "MCP Connectors",
-                    "description": "Connect to remote MCP (Model Context Protocol) servers. Tools exposed by each server become available to the agent.",
-                    "type": "array",
-                    "layout": "cards",
-                    "array_key": "tools.mcp_servers",
-                    "item_fields": [
-                        _field("name", "Name", type="text",
-                               hint="Short identifier for this server (e.g. fric, crm)"),
-                        _field("url", "Server URL", type="text",
-                               hint="MCP server endpoint (e.g. https://api.example.com/mcp)"),
-                        _field("client_id", "OAuth Client ID", type="text",
-                               hint="OAuth2 client_credentials client ID"),
-                        _field("client_secret", "OAuth Client Secret", type="secret",
-                               hint="OAuth2 client_credentials client secret"),
-                        _field("token_endpoint", "Token Endpoint", type="text",
-                               hint="OAuth token URL (absolute or relative to server, e.g. /api/mcp/oauth/token)"),
-                    ],
+                    "description": (
+                        "MCP servers are now managed centrally from Flight Deck. "
+                        "Open Flight Deck → Connections → MCP servers to add, "
+                        "remove and probe servers; their tools become available "
+                        "to every agent in the fleet automatically."
+                    ),
+                    "type": "info",
+                    "fields": [],
                 },
             ],
         },

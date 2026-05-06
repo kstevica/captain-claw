@@ -44,6 +44,7 @@ _ECO_CORE_TOOLS: frozenset[str] = frozenset({
 _NANO_TOOLS: frozenset[str] = frozenset({
     "shell", "read", "write", "edit", "glob",
     "web_fetch", "web_search",
+    "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract",
     "datastore", "insights", "personality", "clipboard",
 })
 
@@ -1074,6 +1075,19 @@ class AgentOrchestrationMixin:
                             if _tn:
                                 _session_used.add(_tn)
                 _keep = _ECO_CORE_TOOLS | _intent_tools | _turn_used | _session_used
+                # Always preserve MCP tools (registered by Flight Deck via the
+                # MCPProxyConnector — names are prefixed ``mcp_<server>_<tool>``).
+                # The user opted into them explicitly by configuring an MCP
+                # server in Flight Deck, and the eco intent patterns can't know
+                # about arbitrary upstream tool names.  Without this guard the
+                # LLM sees the names in the system prompt but has no schema to
+                # call them with, so it hallucinates "MCP execution is blocked"
+                # and refuses to invoke them.
+                _mcp_tools = {
+                    td["name"] for td in tool_defs
+                    if str(td.get("name", "")).startswith("mcp_")
+                }
+                _keep = _keep | _mcp_tools
                 _full_count = len(tool_defs)
                 _deferred = [td["name"] for td in tool_defs if td.get("name") not in _keep]
                 tool_defs = [td for td in tool_defs if td.get("name") in _keep]

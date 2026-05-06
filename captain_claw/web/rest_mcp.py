@@ -1,4 +1,16 @@
-"""REST handlers for MCP connector management."""
+"""REST handlers for MCP connector management — delegates to Flight Deck.
+
+In Phase 1 of the MCP-via-Flight-Deck design, MCP servers are
+administered exclusively from Flight Deck. This handler stays in
+place so the existing per-agent settings page can still offer a
+"Test connection" button — but it forwards the probe request to FD's
+``/fd/mcp/probe`` endpoint instead of running the MCP handshake from
+the agent process.
+
+When the agent is not running under Flight Deck (``FD_URL`` unset)
+the endpoint returns a clear error directing the user to manage MCP
+through Flight Deck.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
+from captain_claw.fd_client import FDClient, is_under_flight_deck
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -14,75 +27,42 @@ if TYPE_CHECKING:
     from captain_claw.web_server import WebServer
 
 
-async def test_connection(server: WebServer, request: web.Request) -> web.Response:
-    """Test connectivity to an MCP server: authenticate, initialize, and list tools."""
+async def test_connection(server: "WebServer", request: web.Request) -> web.Response:
+    """Forward a "Test connection" probe to Flight Deck."""
     try:
         body: dict[str, Any] = await request.json()
     except Exception:
         return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
 
-    url = (body.get("url") or "").strip()
-    if not url:
-        return web.json_response({"ok": False, "error": "Server URL is required"}, status=400)
-
-    from captain_claw.tools.mcp_connector import MCPConnector
-
-    # Don't send masked secrets to the connector — treat as empty.
-    SECRET_MASK = "\u2022" * 8
-    client_secret = body.get("client_secret", "")
-    if client_secret == SECRET_MASK:
-        # Try to pull the real secret from saved config
-        client_secret = _resolve_saved_secret(body.get("name", ""), url)
-
-    connector = MCPConnector(
-        name=body.get("name", "test"),
-        server_url=url,
-        client_id=body.get("client_id", ""),
-        client_secret=client_secret,
-        token_endpoint=body.get("token_endpoint", ""),
-        headers=body.get("headers") or {},
-    )
-
-    try:
-        init_result = await connector.initialize()
-        server_info = init_result.get("serverInfo", {})
-    except Exception as exc:
-        return web.json_response({
-            "ok": False,
-            "error": f"Failed to initialize: {exc}",
-        })
-
-    try:
-        tools = await connector.discover_tools()
-    except Exception as exc:
-        return web.json_response({
-            "ok": False,
-            "error": f"Connected but failed to list tools: {exc}",
-            "server_info": server_info,
-        })
-
-    return web.json_response({
-        "ok": True,
-        "server_info": server_info,
-        "instructions": init_result.get("instructions", ""),
-        "tools": [
+    if not is_under_flight_deck():
+        return web.json_response(
             {
-                "name": t.get("name", ""),
-                "description": t.get("description", ""),
-            }
-            for t in tools
-        ],
-    })
+                "ok": False,
+                "error": (
+                    "MCP servers are now managed by Flight Deck. Start "
+                    "Flight Deck and add the server via Connections → MCP."
+                ),
+            },
+            status=400,
+        )
 
-
-def _resolve_saved_secret(name: str, url: str) -> str:
-    """Look up the real client_secret from saved config for a matching server."""
+    fd = FDClient()
     try:
-        from captain_claw.config import get_config
-        cfg = get_config()
-        for srv in cfg.tools.mcp_servers:
-            if (srv.name == name or srv.url == url) and srv.client_secret:
-                return srv.client_secret
-    except Exception:
-        pass
-    return ""
+        resp = await fd.post("/fd/mcp/probe", json=body)
+    except Exception as exc:
+        log.error("Failed to forward MCP probe to FD", error=str(exc))
+        return web.json_response(
+            {"ok": False, "error": f"Could not reach Flight Deck: {exc}"},
+            status=502,
+        )
+    finally:
+        await fd.close()
+
+    if resp.status_code != 200:
+        try:
+            payload = resp.json()
+        except Exception:
+            payload = {"ok": False, "error": resp.text[:500]}
+        return web.json_response(payload, status=resp.status_code)
+
+    return web.json_response(resp.json())

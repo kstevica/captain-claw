@@ -553,6 +553,7 @@ from captain_claw.flight_deck.games_routes import router as games_router
 from captain_claw.flight_deck.vastai_routes import router as vastai_router
 from captain_claw.flight_deck.prompt_routes import router as prompt_router
 from captain_claw.flight_deck.project_routes import router as project_router
+from captain_claw.flight_deck.mcp_routes import router as mcp_router
 
 app.include_router(auth_router)
 app.include_router(settings_router)
@@ -565,6 +566,7 @@ app.include_router(games_router)
 app.include_router(vastai_router)
 app.include_router(prompt_router)
 app.include_router(project_router)
+app.include_router(mcp_router)
 
 
 # ── Auth dependency helper ──

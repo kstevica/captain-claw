@@ -648,19 +648,36 @@ _CODEX_BACKEND_SUPPORTED_MODELS: frozenset[str] = frozenset({
 })
 
 
+_REASONING_EFFORT_VALUES: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh")
+
+
+def _extract_reasoning_effort(name: str) -> tuple[str, str | None]:
+    """Split an effort suffix off a model name.
+
+    ``"gpt-5-high"`` → ``("gpt-5", "high")``;
+    ``"gpt-5"`` → ``("gpt-5", None)``.
+    """
+    base = (name or "").strip()
+    if not base:
+        return base, None
+    lowered = base.lower()
+    for sep in ("-", "_"):
+        for effort in _REASONING_EFFORT_VALUES:
+            suffix = f"{sep}{effort}"
+            if lowered.endswith(suffix):
+                return base[: -len(suffix)], effort
+    return base, None
+
+
 def _normalize_chatgpt_model(name: str) -> str:
     """Normalize ChatGPT / Codex model name aliases."""
     base = (name or "").strip()
     if not base:
         return "gpt-5"
     # Strip effort suffixes (e.g. gpt-5-high → gpt-5).
-    for sep in ("-", "_"):
-        lowered = base.lower()
-        for effort in ("minimal", "low", "medium", "high", "xhigh"):
-            suffix = f"{sep}{effort}"
-            if lowered.endswith(suffix):
-                base = base[: -len(suffix)]
-                break
+    base, _ = _extract_reasoning_effort(base)
+    if not base:
+        return "gpt-5"
     mapping: dict[str, str] = {
         "gpt5": "gpt-5",
         "gpt-5-latest": "gpt-5",
@@ -824,7 +841,17 @@ class _CodexAuthExpired(Exception):
     Caught inside :class:`ChatGPTResponsesProvider` to trigger a
     one-shot forced refresh from the Codex auth manager. Never
     surfaces to callers.
+
+    Carries the upstream response body so the *second* 401 (after the
+    forced refresh) can be re-raised as an :class:`LLMError` whose
+    message includes what chatgpt.com actually said — otherwise we'd
+    swallow the diagnostic and surface an empty "ChatGPT Responses
+    API call failed:" string.
     """
+
+    def __init__(self, body: str = "") -> None:
+        super().__init__(body or "401 Unauthorized")
+        self.body = body
 
 
 class ChatGPTResponsesProvider(LLMProvider):
@@ -849,12 +876,17 @@ class ChatGPTResponsesProvider(LLMProvider):
         import uuid
 
         self.provider = "openai"
+        # Pull off any reasoning-effort suffix (gpt-5-high → effort=high)
+        # before alias normalization, then remember it for the request.
+        _stripped, _effort = _extract_reasoning_effort(model)
+        self.reasoning_effort = _effort
         self.model = _normalize_chatgpt_model(model)
         if self.model != (model or "").strip():
             log.info(
                 "ChatGPT Codex: remapped model alias",
                 requested=model,
                 using=self.model,
+                reasoning_effort=self.reasoning_effort or "default",
             )
         if self.model not in _CODEX_BACKEND_SUPPORTED_MODELS:
             log.warning(
@@ -944,6 +976,8 @@ class ChatGPTResponsesProvider(LLMProvider):
             "prompt_cache_key": self.session_id,
         }
         payload["instructions"] = instructions or "Follow the user's instructions."
+        if self.reasoning_effort:
+            payload["reasoning"] = {"effort": self.reasoning_effort}
         return payload
 
     @staticmethod
@@ -1057,6 +1091,23 @@ class ChatGPTResponsesProvider(LLMProvider):
 
         payload = self._build_payload(messages, tools, temperature, max_tokens)
 
+        # Diagnostic: surface exactly which tools we're sending to the
+        # Codex Responses API.  Helps debug "model won't invoke tool X"
+        # — if X isn't in this list, the payload is stripping it; if it
+        # is, the model itself is refusing.
+        try:
+            _payload_tool_names = [t.get("name") for t in payload.get("tools") or []]
+            _mcp_in_payload = [n for n in _payload_tool_names if isinstance(n, str) and n.startswith("mcp_")]
+            log.info(
+                "ChatGPT Responses API payload: tools",
+                total=len(_payload_tool_names),
+                mcp=len(_mcp_in_payload),
+                tool_choice=payload.get("tool_choice"),
+                sample=_payload_tool_names[:25],
+            )
+        except Exception:
+            pass
+
         # Refresh from Codex auth manager pre-request (cheap no-op when
         # cached token isn't stale). On 401 we'll retry once with a
         # forced refresh.
@@ -1069,8 +1120,20 @@ class ChatGPTResponsesProvider(LLMProvider):
                 "POST", self.base_url, json=payload, headers=headers,
             ) as response:
                 if response.status_code == 401:
-                    await response.aread()
-                    raise _CodexAuthExpired()
+                    body_bytes = await response.aread()
+                    body_text = body_bytes.decode(errors="replace")[:500]
+                    log.warning(
+                        "ChatGPT Responses API 401 body",
+                        body=body_text,
+                        model=self.model,
+                        url=self.base_url,
+                        actual_url=str(response.request.url),
+                        host=response.request.url.host,
+                        port=response.request.url.port,
+                        auth_present=bool(headers.get("Authorization")),
+                        account_id_present=bool(headers.get("chatgpt-account-id")),
+                    )
+                    raise _CodexAuthExpired(body_text)
                 if not response.is_success:
                     error_text = await response.aread()
                     raise LLMAPIError(
@@ -1615,7 +1678,13 @@ class LiteLLMProvider(LLMProvider):
         extra_headers: dict[str, str] | None = None,
     ):
         self.provider = _normalize_provider_name(provider)
-        self.model = _provider_model_name(self.provider, model)
+        # Pull any reasoning-effort suffix off the model name (gpt-5-high
+        # → effort=high, model=gpt-5). Only meaningful for OpenAI's
+        # reasoning-capable models, but we parse it for any provider so
+        # the LiteLLM call doesn't see a fake suffix.
+        _stripped, _effort = _extract_reasoning_effort(model)
+        self.reasoning_effort = _effort if self.provider == "openai" else None
+        self.model = _provider_model_name(self.provider, _stripped or model)
         self.api_key = _resolve_api_key(self.provider, api_key)
         self.base_url = (base_url or "").strip() or None
         self.temperature = _normalize_temperature_for_model(
@@ -1704,6 +1773,12 @@ class LiteLLMProvider(LLMProvider):
             kwargs["api_base"] = self.base_url
         if self.extra_headers:
             kwargs["extra_headers"] = self.extra_headers
+
+        # Reasoning-effort suffix on OpenAI reasoning-capable models
+        # (gpt-5*, o-series). LiteLLM forwards ``reasoning_effort`` to the
+        # OpenAI API as the ``reasoning.effort`` field.
+        if self.reasoning_effort and self.provider == "openai":
+            kwargs["reasoning_effort"] = self.reasoning_effort
         return kwargs
 
     async def _collect_streaming_response(

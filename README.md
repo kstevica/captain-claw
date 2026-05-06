@@ -13,14 +13,17 @@
 
 An open-source AI agent with multi-agent orchestration, autonomous cognitive systems, and a full management dashboard. Runs locally, supports every major LLM provider, and ships with 44 built-in tools.
 
-## What's New in 0.4.22
+## What's New in 0.4.24
 
-- **Nano Mode** — A restricted-tool runtime tuned for tiny local models (Qwen3, Llama 3.2, Phi). Compressed system prompt, 7-tool surface (shell/write/read/edit/glob/datastore/insights), aggressive empty-message filtering, and memory-injection delimiters that stop small models from echoing context back as their reply. A 3B-parameter model on a laptop can now drive a useful loop.
-- **Remote GPU via vast.ai** — Drive an Ollama server hosted on vast.ai with auto-wake on first request and auto-sleep when idle. Rent an H100 by the hour for evening work without paying for a 24/7 cloud GPU. Per-agent override; existing local-Ollama setups untouched.
-- **Smart `web_fetch`** — Plain HTTP first, transparent fallback to a headless Playwright browser when the response looks like an unrendered SPA shell. SPAs return real article text; static sites stay fast.
-- **Prompt Builder** — Compose reusable multi-step prompt templates with `{{variable}}` slots. Built-in variables for session ID, workspace path, user email, and today's date.
-- **Live Token-Speed Telemetry** — Real-time tokens-per-second in the agent sidebar (`<output_tps> tok/s / <total_llm_tps> llm`). Compare a 30B model at 2 tok/s on a Mac vs 60 tok/s on vast.ai at a glance.
-- **Reliability fixes** — Empty-response feedback loop on local Qwen3/DeepSeek-R1 thinking models is fixed (`think: false` by default, empty assistant messages no longer persisted, history self-heals on next turn). Memory-injection echoes on small/cheap cloud models are gone (context notes now wrapped with explicit "do not repeat" delimiters).
+**Centralised MCP — Phase 2.** The four "known limitations" 0.4.23 flagged are now closed. Flight Deck's MCP control plane is feature-complete enough to drive the full ecosystem of MCP servers across a fleet without per-agent config.
+
+- **stdio transport** — Add MCP servers that ship as `npx` / `uvx` child processes (Anthropic's filesystem, sqlite, github, postgres, etc.) directly from the Flight Deck admin UI. New `command` / `args` / `env` fields on each server record. The child is spawned lazily, auto-respawned if it dies, and torn down with SIGTERM (2 s grace) then SIGKILL on close. Concurrent JSON-RPC requests on the same subprocess are correlated by id over a single background reader task.
+- **Per-agent allowlists** — Each server carries an `allowed_agents: list[str]`. Empty list = fleet-wide allow (the Phase 1 behaviour). Once any slug is listed, only those agents can see, list, or call the server. Disallowed agents get HTTP 404 — the same shape as "doesn't exist," so a restricted server's existence is opaque.
+- **Hot tool-list reload** — A new `/fd/mcp/agent/events` SSE endpoint streams `server_added` / `server_updated` / `server_removed` / `tools_changed` events. Captain-claw agents subscribe on boot and re-register MCP proxy tools the moment you change a server in the admin UI. Reconnects forever with exponential backoff capped at 30 s.
+- **Streaming tool calls** — A new `/fd/mcp/<name>/call_stream` endpoint runs the upstream call as a background task and emits `progress` / `result` / `error` SSE frames as they arrive. Cancels the upstream call cleanly when the client disconnects.
+- **Transport abstraction** — A new `Transport` ABC factors HTTP and stdio behind one interface, so the manager is now wire-protocol-agnostic.
+
+Backward compatible — existing HTTP-only configurations from 0.4.23 keep working unchanged. See `RELEASE_NOTES_0.4.24.md` for the full per-phase breakdown.
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the full changelog.
 
@@ -39,6 +42,7 @@ captain-claw-fd    # http://0.0.0.0:25080
 - **Fleet Communication** — Agents discover peers automatically. Consult (synchronous ask) or delegate (asynchronous queue) tasks to specialist agents. Shared workspace and file transfer across the fleet.
 - **Director Panel** — Unified overview of all agents. Broadcast messages fleet-wide. Per-agent token/cost analytics, trace timelines, datastore browser, file browser, config editor.
 - **Multi-user Auth** — JWT authentication, admin dashboard, rate limiting, and quotas.
+- **MCP Connections** — Add Model Context Protocol servers (HTTP or stdio) once and every entitled agent in the fleet picks up their tools — no per-agent config. Phase 2 adds stdio transport for `npx`/`uvx`-shipped servers, per-agent allowlists, hot tool-list reload over SSE, and streaming tool calls.
 
 ### Cognitive Architecture
 
@@ -90,13 +94,25 @@ Connect multiple Captain Claw instances through a routing hub. Agents delegate t
 
 - **BotPort Swarm** — DAG-based multi-agent orchestration across networked instances. Approval gates, retry with fallback, checkpointing, inter-agent file transfer (up to 50 MB), cron scheduling, and a visual dashboard.
 
-### MCP Server
+### MCP Server (act as an MCP server)
 
 Captain Claw runs as a Model Context Protocol server over stdio — Claude Desktop and other MCP clients can browse sessions, read conversation history, and send prompts to the full agent.
 
 ```bash
 captain-claw-mcp    # stdio, configure in claude_desktop_config.json
 ```
+
+### MCP Client (consume MCP servers via Flight Deck)
+
+The other direction: agents in your fleet call into MCP servers. Add a server once in **Flight Deck → Connections → MCP servers** and every agent the allowlist permits gets the tools auto-registered on boot.
+
+- **HTTP transport** — Streamable-HTTP MCP servers, with optional OAuth2 `client_credentials`, captured `Mcp-Session-Id`, and SSE-response parsing.
+- **stdio transport** — `command` + `args` + `env` for local MCP servers shipped via `npx` / `uvx` (filesystem, sqlite, github, postgres, etc.). Children are spawned lazily, auto-respawned on death, and torn down with SIGTERM/SIGKILL on close.
+- **Per-agent allowlists** — Restrict each server to specific agent slugs. Disallowed agents get HTTP 404 (existence is opaque).
+- **Hot reload** — Agents subscribe to `/fd/mcp/agent/events` (SSE) and re-register proxy tools the moment you change a server — no restart needed.
+- **Streaming calls** — `POST /fd/mcp/<name>/call_stream` emits `progress` / `result` / `error` SSE frames for UIs that want live indicators while a long-running tool runs.
+
+See **USAGE.md → Flight Deck → Connections → MCP servers** for the full endpoint reference and config schema.
 
 ### Safety Guards
 

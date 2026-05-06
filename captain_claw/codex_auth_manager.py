@@ -32,13 +32,13 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
+from captain_claw.fd_client import flight_deck_base, flight_deck_headers
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -154,18 +154,6 @@ def load_tokens_from_disk() -> CodexTokens | None:
     return _parse_auth_json(data)
 
 
-def _flight_deck_base() -> str:
-    """Return the Flight Deck base URL, or ``""`` when not running under FD."""
-    return (os.environ.get("FD_URL") or "").rstrip("/")
-
-
-def _flight_deck_headers() -> dict[str, str]:
-    secret = (os.environ.get("FD_AGENT_SHARED_SECRET") or "").strip()
-    if secret:
-        return {"X-Agent-Secret": secret}
-    return {}
-
-
 class CodexAuthManager:
     """Resolve / cache / refresh Codex OAuth headers for one provider.
 
@@ -194,20 +182,46 @@ class CodexAuthManager:
             self._client = None
 
     async def _fetch_from_fd(self) -> CodexTokens | None:
-        base = _flight_deck_base()
+        base = flight_deck_base()
         if not base:
+            log.warning("Codex auth: FD_URL not set, cannot fetch from FD")
             return None
         url = f"{base}/fd/codex/access_token"
         try:
             client = await self._http()
-            resp = await client.get(url, headers=_flight_deck_headers())
+            resp = await client.get(url, headers=flight_deck_headers())
             if resp.status_code != 200:
-                log.debug("FD /fd/codex/access_token returned %s", resp.status_code)
+                log.warning(
+                    "Codex auth: FD %s returned status=%s body=%r",
+                    url,
+                    resp.status_code,
+                    (resp.text or "")[:200],
+                )
                 return None
-            data = resp.json()
+            try:
+                data = resp.json()
+            except Exception as exc:
+                log.warning(
+                    "Codex auth: FD %s returned non-JSON status=%s content_type=%r body=%r exc=%s",
+                    url,
+                    resp.status_code,
+                    resp.headers.get("content-type"),
+                    (resp.text or "")[:200],
+                    exc,
+                )
+                return None
             access_token = str(data.get("access_token") or "").strip()
             if not access_token:
+                log.warning(
+                    "Codex auth: FD response missing access_token; keys=%r",
+                    list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+                )
                 return None
+            log.info(
+                "Codex auth: fetched tokens from FD",
+                account_id=str(data.get("account_id") or "")[:8],
+                expires_at=data.get("expires_at"),
+            )
             return CodexTokens(
                 access_token=access_token,
                 account_id=str(data.get("account_id") or "").strip(),
@@ -216,18 +230,35 @@ class CodexAuthManager:
                 plan=str(data.get("plan") or ""),
             )
         except Exception as exc:
-            log.debug("Failed to fetch Codex tokens from FD: %s", exc)
+            log.warning(
+                "Codex auth: FD fetch raised %s: %s",
+                type(exc).__name__,
+                exc,
+            )
             return None
 
     async def _load_fresh(self) -> CodexTokens | None:
         """Return a freshly-loaded tokens object, preferring FD when set."""
-        if _flight_deck_base():
+        if flight_deck_base():
             fd_tokens = await self._fetch_from_fd()
             if fd_tokens is not None:
                 return fd_tokens
             # Fall through to disk if FD is unreachable / not configured
             # on the FD host. This keeps local dev smooth.
-        return load_tokens_from_disk()
+            log.warning("Codex auth: FD fetch returned None, falling back to disk")
+        disk_tokens = load_tokens_from_disk()
+        if disk_tokens is None:
+            log.warning(
+                "Codex auth: disk fallback returned None — auth.json missing/unreadable at %s",
+                _CODEX_AUTH_PATH,
+            )
+        else:
+            log.info(
+                "Codex auth: loaded tokens from disk",
+                account_id=disk_tokens.account_id[:8],
+                expires_at=disk_tokens.expires_at,
+            )
+        return disk_tokens
 
     async def get_tokens(self, *, force_refresh: bool = False) -> CodexTokens | None:
         """Return a currently-valid :class:`CodexTokens`, refreshing if stale."""

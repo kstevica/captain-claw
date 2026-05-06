@@ -98,10 +98,13 @@ class GoogleOAuthManager:
            work" the moment the user connects in the FD UI.
         """
         url = (get_config().google_oauth.flight_deck_url or "").strip().rstrip("/")
-        if url:
-            return url
-        env_url = (os.environ.get("FD_URL", "") or "").strip().rstrip("/")
-        return env_url
+        if not url:
+            url = (os.environ.get("FD_URL", "") or "").strip().rstrip("/")
+        # Defensive: strip a stray trailing ``/fd`` (callers add ``/fd/...``
+        # themselves; a base ending in ``/fd`` produces a double prefix).
+        if url.endswith("/fd"):
+            url = url[:-3].rstrip("/")
+        return url
 
     @staticmethod
     def _flight_deck_headers() -> dict[str, str]:
