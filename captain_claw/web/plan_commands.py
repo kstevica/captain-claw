@@ -13,7 +13,13 @@ from typing import TYPE_CHECKING
 
 from captain_claw.config import get_config
 from captain_claw.logging import get_logger
-from captain_claw.plan_mode import Plan, PlanExecutor, PlanGenerator, PlanVerifier
+from captain_claw.plan_mode import (
+    Plan,
+    PlanExecutor,
+    PlanGenerator,
+    PlanVerifier,
+    orchestrate_expander_from_orchestrator,
+)
 from captain_claw.session_orchestrator import SessionOrchestrator, _scan_workspace_tree
 
 if TYPE_CHECKING:
@@ -105,10 +111,12 @@ async def handle_plan_execute_command(server: "WebServer", arg: str) -> str:
         return "No plan loaded. Run `/plan <request>` first or pass a plan name."
 
     verifier = _build_verifier(server)
+    expander = orchestrate_expander_from_orchestrator(server._orchestrator)
     executor = PlanExecutor(
         server._orchestrator,
         broadcast=getattr(server, "_broadcast", None),
         verifier=verifier,
+        expander=expander,
     )
     outcome = await executor.run()
 

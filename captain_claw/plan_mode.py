@@ -13,7 +13,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from captain_claw.instructions import InstructionLoader
 from captain_claw.llm import LLMProvider, Message
@@ -354,10 +354,16 @@ class PlanExecutor:
         *,
         broadcast: Callable[[dict[str, Any]], None] | None = None,
         verifier: PlanVerifier | None = None,
+        expander: "Callable[[OrchestratorTask], Awaitable[list[OrchestratorTask]]] | None" = None,
     ):
         self._orchestrator = orchestrator
         self._broadcast = broadcast
         self._verifier = verifier
+        # If no expander is provided, orchestrate steps fall back to atomic
+        # execution (legacy step-3 behavior). Tests inject a stub; production
+        # wires ``orchestrate_expander_from_orchestrator`` against the
+        # SessionOrchestrator's decomposer.
+        self._expander = expander
 
     async def run(self) -> PlanExecutionResult:
         graph: TaskGraph | None = getattr(self._orchestrator, "_graph", None)
@@ -369,13 +375,30 @@ class PlanExecutor:
                 error="No plan loaded. Run /plan first.",
             )
 
-        coerced = self._coerce_orchestrate_to_atomic(graph)
-        if coerced:
-            log.warning(
-                "PlanExecutor coerced orchestrate steps to atomic "
-                "(step 5 will add real fan-out)",
-                step_ids=coerced,
-            )
+        if self._expander is not None:
+            try:
+                expanded = await self._expand_orchestrate_steps(graph)
+            except Exception as e:
+                log.error("Orchestrate expansion failed",
+                          error=str(e), error_type=type(e).__name__)
+                self._emit("plan_execution_failed", {
+                    "error": f"orchestrate expansion failed: {e}",
+                })
+                return PlanExecutionResult(
+                    ok=False, final_output="", completed_steps=[],
+                    error=f"orchestrate expansion failed: {e}",
+                )
+            if expanded:
+                self._emit("plan_orchestrate_expanded", {"expansions": expanded})
+                graph.refresh()
+        else:
+            coerced = self._coerce_orchestrate_to_atomic(graph)
+            if coerced:
+                log.warning(
+                    "PlanExecutor coerced orchestrate steps to atomic "
+                    "(no expander configured)",
+                    step_ids=coerced,
+                )
 
         self._emit("plan_execution_started", {
             "step_count": graph.task_count,
@@ -505,7 +528,7 @@ class PlanExecutor:
 
     @staticmethod
     def _coerce_orchestrate_to_atomic(graph: TaskGraph) -> list[str]:
-        """Coerce orchestrate-kind steps to atomic for v3 (no fan-out yet).
+        """Fallback when no expander is wired — flatten orchestrate to atomic.
 
         Returns the IDs that were coerced so callers can warn the user.
         """
@@ -516,6 +539,115 @@ class PlanExecutor:
                 coerced.append(tid)
         return coerced
 
+    async def _expand_orchestrate_steps(
+        self, graph: TaskGraph,
+    ) -> list[dict[str, Any]]:
+        """Replace each orchestrate step with parallel sub-tasks + a join.
+
+        For an orchestrate step ``P`` with depends_on=[D] and sub-tasks
+        [S1, S2, ...] returned by the expander:
+          * Each Si is added with ``depends_on=[D]`` so they fan out from
+            where P would have started.
+          * P stays in the graph but becomes ``step_kind="atomic"`` with
+            ``depends_on=[S1, S2, ...]`` — it joins the sub-task outputs.
+            P's description is rewritten as a synthesis instruction.
+          * Tasks that previously depended on P keep doing so — the join
+            preserves the original dependency edges, so no rewiring needed.
+
+        Returns a list of expansion summaries (one per orchestrate step) for
+        broadcast to the UI.
+        """
+        if self._expander is None:
+            return []
+
+        # Snapshot orchestrate steps up front — expansion mutates the graph.
+        orchestrate_ids = [
+            tid for tid, t in graph.tasks.items() if t.step_kind == "orchestrate"
+        ]
+        if not orchestrate_ids:
+            return []
+
+        expansions: list[dict[str, Any]] = []
+        existing_ids: set[str] = set(graph.tasks.keys())
+
+        for parent_id in orchestrate_ids:
+            parent = graph.tasks.get(parent_id)
+            if parent is None:
+                continue
+
+            try:
+                subtasks = await self._expander(parent)
+            except Exception as e:
+                log.error("Expander raised for orchestrate step",
+                          task_id=parent_id, error=str(e))
+                # Coerce this single step to atomic and continue — don't abort
+                # the whole plan because one fan-out couldn't be decomposed.
+                parent.step_kind = "atomic"
+                expansions.append({
+                    "task_id": parent_id,
+                    "expanded": False,
+                    "error": str(e),
+                })
+                continue
+
+            if not subtasks:
+                log.warning("Expander returned no sub-tasks; coercing to atomic",
+                            task_id=parent_id)
+                parent.step_kind = "atomic"
+                expansions.append({
+                    "task_id": parent_id,
+                    "expanded": False,
+                    "error": "expander returned no sub-tasks",
+                })
+                continue
+
+            parent_deps = list(parent.depends_on)
+            sub_ids: list[str] = []
+            for sub in subtasks:
+                # Namespace sub-task ids so they don't collide with the rest
+                # of the plan (or with sub-tasks of another orchestrate step).
+                if not sub.id:
+                    sub.id = f"{parent_id}__sub_{len(sub_ids) + 1}"
+                else:
+                    sub.id = f"{parent_id}__{sub.id}"
+                # Defensive: preserve unique ids even if the expander returned
+                # duplicates or one collides with a pre-existing plan step.
+                base_id = sub.id
+                suffix = 2
+                while sub.id in existing_ids:
+                    sub.id = f"{base_id}_{suffix}"
+                    suffix += 1
+                existing_ids.add(sub.id)
+
+                sub.depends_on = list(parent_deps)
+                sub.step_kind = "atomic"
+                # Inherit timeout/retries from the parent so worker config is
+                # consistent — the parent values came from worker_timeout.
+                if not sub.timeout_seconds:
+                    sub.timeout_seconds = parent.timeout_seconds
+                if not sub.max_retries:
+                    sub.max_retries = parent.max_retries
+                graph.add_task(sub)
+                sub_ids.append(sub.id)
+
+            # Convert parent into a join/synthesis atomic step.
+            original_description = parent.description
+            parent.step_kind = "atomic"
+            parent.depends_on = sub_ids
+            parent.description = (
+                f"Synthesize the outputs of the upstream sub-tasks "
+                f"({', '.join(sub_ids)}) into a single result that satisfies "
+                f"the original step goal:\n\n{original_description}"
+            )
+
+            expansions.append({
+                "task_id": parent_id,
+                "expanded": True,
+                "sub_task_ids": sub_ids,
+            })
+
+        return expansions
+
     def _emit(self, event_name: str, data: dict[str, Any]) -> None:
         if self._broadcast is None:
             return
@@ -524,6 +656,57 @@ class PlanExecutor:
         except Exception as e:
             log.debug("Plan-mode event broadcast failed",
                       event_name=event_name, error=str(e))
+
+
+def orchestrate_expander_from_orchestrator(
+    orchestrator: Any,
+) -> Callable[[OrchestratorTask], Awaitable[list[OrchestratorTask]]]:
+    """Build an expander that calls a SessionOrchestrator's ``_decompose``.
+
+    The returned coroutine takes one orchestrate-kind task and returns a list
+    of atomic sub-tasks (each an ``OrchestratorTask``) ready to splice into
+    the plan graph.
+    """
+    async def expand(task: OrchestratorTask) -> list[OrchestratorTask]:
+        decompose = getattr(orchestrator, "_decompose", None)
+        if decompose is None:
+            log.warning("Orchestrator has no _decompose method")
+            return []
+
+        prompt = task.description.strip() or task.title.strip()
+        if not prompt:
+            log.warning("Orchestrate step has empty description and title",
+                        task_id=task.id)
+            return []
+
+        plan = await decompose(prompt)
+        if not isinstance(plan, dict):
+            return []
+
+        raw_tasks = plan.get("tasks") or []
+        if not isinstance(raw_tasks, list):
+            return []
+
+        sub_tasks: list[OrchestratorTask] = []
+        for raw in raw_tasks:
+            if not isinstance(raw, dict):
+                continue
+            sub = OrchestratorTask.from_dict(raw)
+            if not sub.id and not sub.title:
+                continue
+            # Sub-tasks always run as atomic; the planner's orchestrate
+            # semantics are about fan-out, not nested fan-out.
+            sub.step_kind = "atomic"
+            # Sub-tasks have no acceptance_criteria from the orchestrator
+            # decomposer — verification happens at the join step. Clear any
+            # leftover so the verifier's no-criteria short-circuit applies.
+            sub.acceptance_criteria = ""
+            # Drop deps that would refer to siblings — fan-out is parallel.
+            sub.depends_on = []
+            sub_tasks.append(sub)
+        return sub_tasks
+
+    return expand
 
 
 def parse_json_response(raw: str) -> dict[str, Any] | None:
