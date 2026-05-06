@@ -220,6 +220,10 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
             from captain_claw.web.telegram import handle_approve_command
             result = await handle_approve_command(server, args.strip())
 
+        elif cmd in ("/plan",):
+            from captain_claw.web.plan_commands import handle_plan_command
+            result = await handle_plan_command(server, args.strip())
+
         elif cmd in ("/orchestrate",):
             if not args.strip():
                 result = "Usage: `/orchestrate <request>`"
