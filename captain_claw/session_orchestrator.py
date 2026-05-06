@@ -897,20 +897,8 @@ class SessionOrchestrator:
 
         skipped: list[dict[str, Any]] = []
         for i, td in enumerate(tasks):
-            raw_schema = td.get("output_schema")
-            task = OrchestratorTask(
-                id=str(td.get("id", "")).strip(),
-                title=str(td.get("title", "")).strip(),
-                description=str(td.get("description", "")).strip(),
-                depends_on=list(td.get("depends_on", [])),
-                session_name=str(td.get("session_name", "")).strip(),
-                session_id=str(td.get("session_id", "")).strip(),
-                model_id=str(td.get("model_id", "")).strip(),
-                skills=list(td.get("skills", [])),
-                workspace_outputs=list(td.get("workspace_outputs", [])),
-                workspace_inputs=list(td.get("workspace_inputs", [])),
-                output_schema=raw_schema if isinstance(raw_schema, dict) else None,
-                output_schema_name=str(td.get("output_schema_name", "")).strip(),
+            task = OrchestratorTask.from_dict(
+                td,
                 timeout_seconds=self._worker_timeout,
                 max_retries=self._worker_max_retries,
             )
@@ -2327,26 +2315,9 @@ class SessionOrchestrator:
                 except Exception:
                     pass  # best-effort cleanup
 
-        tasks_out: list[dict[str, Any]] = []
-        for tid, t in self._graph.tasks.items():
-            td: dict[str, Any] = {
-                "id": t.id,
-                "title": t.title,
-                "description": t.description,
-                "depends_on": t.depends_on,
-                "session_name": t.session_name,
-                "session_id": t.session_id,
-                "model_id": t.model_id,
-                "skills": t.skills,
-            }
-            if t.workspace_outputs:
-                td["workspace_outputs"] = t.workspace_outputs
-            if t.workspace_inputs:
-                td["workspace_inputs"] = t.workspace_inputs
-            if t.output_schema:
-                td["output_schema"] = t.output_schema
-                td["output_schema_name"] = t.output_schema_name
-            tasks_out.append(td)
+        tasks_out: list[dict[str, Any]] = [
+            t.to_dict() for t in self._graph.tasks.values()
+        ]
 
         # Auto-detect {{variable}} placeholders and build metadata.
         all_texts = [self._user_input, self._synthesis_instruction]
@@ -2399,20 +2370,8 @@ class SessionOrchestrator:
         graph = TaskGraph(max_parallel=self._max_parallel,
                           timeout_grace_seconds=self._timeout_grace_seconds)
         for td in tasks_data:
-            raw_schema = td.get("output_schema")
-            task = OrchestratorTask(
-                id=str(td.get("id", "")).strip(),
-                title=str(td.get("title", "")).strip(),
-                description=str(td.get("description", "")).strip(),
-                depends_on=list(td.get("depends_on", [])),
-                session_name=str(td.get("session_name", "")).strip(),
-                session_id=str(td.get("session_id", "")).strip(),
-                model_id=str(td.get("model_id", "")).strip(),
-                skills=list(td.get("skills", [])),
-                workspace_outputs=list(td.get("workspace_outputs", [])),
-                workspace_inputs=list(td.get("workspace_inputs", [])),
-                output_schema=raw_schema if isinstance(raw_schema, dict) else None,
-                output_schema_name=str(td.get("output_schema_name", "")).strip(),
+            task = OrchestratorTask.from_dict(
+                td,
                 timeout_seconds=self._worker_timeout,
                 max_retries=self._worker_max_retries,
             )

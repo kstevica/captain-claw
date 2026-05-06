@@ -73,9 +73,91 @@ class OrchestratorTask:
     output_schema_name: str = ""
     _schema_retry_used: bool = field(default=False, repr=False)
     validated_output: dict[str, Any] | list | None = field(default=None, repr=False)
+    # Plan-mode fields.
+    # step_kind distinguishes plan-mode step types:
+    #   "atomic"      — single-step work executed in the main agent session
+    #   "orchestrate" — fan-out work dispatched to SessionOrchestrator
+    #   "verify"      — verification check against acceptance_criteria
+    #   "revise"      — auto-generated revision step replacing a failed one
+    step_kind: str = "atomic"
+    acceptance_criteria: str = ""
+    verification_status: str = "unverified"  # unverified | passed | failed
+    verification_notes: str = ""
+    revision_of: str = ""  # task id this revision replaces, if any
+    revision_count: int = 0  # number of times this step has been auto-revised
 
     def is_terminal(self) -> bool:
         return self.status in _TERMINAL_STATES
+
+    # ------------------------------------------------------------------
+    # Serialization helpers (used by workflow save/load round-trip).
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize task to a JSON-safe dict for workflow persistence.
+
+        Only persists configuration fields, not transient runtime state
+        (status, retries, timestamps, errors).
+        """
+        out: dict[str, Any] = {
+            "id": self.id,
+            "title": self.title,
+            "description": self.description,
+            "depends_on": list(self.depends_on),
+            "session_name": self.session_name,
+            "session_id": self.session_id,
+            "model_id": self.model_id,
+            "skills": list(self.skills),
+        }
+        if self.workspace_outputs:
+            out["workspace_outputs"] = list(self.workspace_outputs)
+        if self.workspace_inputs:
+            out["workspace_inputs"] = list(self.workspace_inputs)
+        if self.output_schema:
+            out["output_schema"] = self.output_schema
+            out["output_schema_name"] = self.output_schema_name
+        # Plan-mode fields are persisted only when set to non-defaults.
+        if self.step_kind and self.step_kind != "atomic":
+            out["step_kind"] = self.step_kind
+        if self.acceptance_criteria:
+            out["acceptance_criteria"] = self.acceptance_criteria
+        if self.revision_of:
+            out["revision_of"] = self.revision_of
+        return out
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: dict[str, Any],
+        *,
+        timeout_seconds: float = 300.0,
+        max_retries: int = 2,
+    ) -> "OrchestratorTask":
+        """Build a task from a serialized dict.
+
+        Caller-supplied ``timeout_seconds`` / ``max_retries`` let workflow
+        loaders apply orchestrator-level defaults.
+        """
+        raw_schema = data.get("output_schema")
+        return cls(
+            id=str(data.get("id", "")).strip(),
+            title=str(data.get("title", "")).strip(),
+            description=str(data.get("description", "")).strip(),
+            depends_on=list(data.get("depends_on", [])),
+            session_name=str(data.get("session_name", "")).strip(),
+            session_id=str(data.get("session_id", "")).strip(),
+            model_id=str(data.get("model_id", "")).strip(),
+            skills=list(data.get("skills", [])),
+            workspace_outputs=list(data.get("workspace_outputs", [])),
+            workspace_inputs=list(data.get("workspace_inputs", [])),
+            output_schema=raw_schema if isinstance(raw_schema, dict) else None,
+            output_schema_name=str(data.get("output_schema_name", "")).strip(),
+            step_kind=str(data.get("step_kind", "atomic")).strip() or "atomic",
+            acceptance_criteria=str(data.get("acceptance_criteria", "")).strip(),
+            revision_of=str(data.get("revision_of", "")).strip(),
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+        )
 
 
 # ---------------------------------------------------------------------------
