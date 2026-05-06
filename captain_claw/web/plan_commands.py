@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from captain_claw.config import get_config
 from captain_claw.logging import get_logger
-from captain_claw.plan_mode import Plan, PlanExecutor, PlanGenerator
+from captain_claw.plan_mode import Plan, PlanExecutor, PlanGenerator, PlanVerifier
 from captain_claw.session_orchestrator import SessionOrchestrator, _scan_workspace_tree
 
 if TYPE_CHECKING:
@@ -104,9 +104,11 @@ async def handle_plan_execute_command(server: "WebServer", arg: str) -> str:
     if getattr(server._orchestrator, "_graph", None) is None:
         return "No plan loaded. Run `/plan <request>` first or pass a plan name."
 
+    verifier = _build_verifier(server)
     executor = PlanExecutor(
         server._orchestrator,
         broadcast=getattr(server, "_broadcast", None),
+        verifier=verifier,
     )
     outcome = await executor.run()
 
@@ -115,21 +117,44 @@ async def handle_plan_execute_command(server: "WebServer", arg: str) -> str:
         details = []
         if outcome.failed_step:
             details.append(f"failed at step `{outcome.failed_step}`")
+        if outcome.verification_failed_step:
+            details.append(
+                f"verification failed at step `{outcome.verification_failed_step}`"
+            )
         if outcome.error:
             details.append(f"error: {outcome.error}")
         if outcome.completed_steps:
             details.append(
-                f"completed before failure: {', '.join(outcome.completed_steps)}"
+                f"completed: {', '.join(outcome.completed_steps)}"
             )
+        if outcome.verified_steps:
+            details.append(f"verified: {', '.join(outcome.verified_steps)}")
         body = " — ".join(details) if details else ""
         tail = f"\n\n{outcome.final_output}" if outcome.final_output else ""
         return f"{head}{(' — ' + body) if body else ''}{tail}"
 
     completed = ", ".join(outcome.completed_steps) if outcome.completed_steps else "—"
+    verified_line = ""
+    if outcome.verified_steps:
+        verified_line = f"\nVerified: {', '.join(outcome.verified_steps)}"
     return (
-        f"✅ Plan executed ({len(outcome.completed_steps)} steps: {completed})\n\n"
+        f"✅ Plan executed ({len(outcome.completed_steps)} steps: {completed})"
+        f"{verified_line}\n\n"
         f"{outcome.final_output}"
     )
+
+
+def _build_verifier(server: "WebServer") -> PlanVerifier | None:
+    """Construct a PlanVerifier using the agent's provider and orchestrator instructions."""
+    if not server.agent:
+        return None
+    provider = getattr(server.agent, "provider", None)
+    if provider is None:
+        return None
+    instructions = None
+    if server._orchestrator is not None:
+        instructions = getattr(server._orchestrator, "_instructions", None)
+    return PlanVerifier(provider=provider, instructions=instructions)
 
 
 def _render_plan_response(plan: Plan, name: str, path: Path) -> str:

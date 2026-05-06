@@ -80,10 +80,11 @@ async def test_run_executes_and_marks_steps_completed():
     assert orch.execute_calls == 1
 
     types = [e["type"] for e in events]
-    assert types == ["plan_execution_started", "plan_execution_completed"]
+    # No verifier configured → verification is a no-op pass.
+    assert types == ["plan_execution_started", "plan_execution_verified"]
     assert events[0]["step_count"] == 2
     assert events[0]["steps"][0]["acceptance_criteria"] == "ok"
-    assert events[1]["has_failures"] is False
+    assert events[-1]["verified"] == ["a", "b"]
 
 
 @pytest.mark.asyncio
@@ -111,6 +112,7 @@ async def test_run_reports_failed_step_with_error_message():
     assert result.error == "boom"
     assert result.completed_steps == ["a"]
     assert result.final_output == "partial output"
+    # Execution-level failure short-circuits before verification.
     assert events[-1]["type"] == "plan_execution_completed"
     assert events[-1]["has_failures"] is True
 

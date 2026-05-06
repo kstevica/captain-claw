@@ -12,20 +12,27 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from captain_claw.instructions import InstructionLoader
 from captain_claw.llm import LLMProvider, Message
 from captain_claw.logging import get_logger
+from captain_claw.output_validation import validate_task_output
 from captain_claw.task_graph import COMPLETED, FAILED, OrchestratorTask, TaskGraph
 
 log = get_logger(__name__)
 
 _PLAN_TIMEOUT_SECONDS = 120.0
 _PLAN_MAX_TOKENS = 16000
+_VERIFY_TIMEOUT_SECONDS = 60.0
+_VERIFY_MAX_TOKENS = 1000
+_VERIFY_OUTPUT_TRUNCATE = 8000  # chars of step output sent to the verifier
 
 _VALID_STEP_KINDS = {"atomic", "orchestrate", "verify", "revise"}
+
+_PASSED = "passed"
+_FAILED = "failed"
 
 
 @dataclass
@@ -186,6 +193,141 @@ class PlanExecutionResult:
     completed_steps: list[str]
     failed_step: str | None = None
     error: str = ""
+    verified_steps: list[str] = field(default_factory=list)
+    verification_failed_step: str | None = None
+    verification_notes: str = ""
+
+
+@dataclass
+class VerificationOutcome:
+    """Result of verifying a single step's output."""
+
+    passed: bool
+    notes: str
+    schema_error: str = ""  # populated when output_schema validation fails
+
+
+class PlanVerifier:
+    """Verify a step's output against its acceptance criteria + optional schema.
+
+    Step 4 of plan-mode. Two-stage gate:
+      1. If ``task.output_schema`` is set, run schema validation first
+         (fast, deterministic). On failure, the step fails immediately.
+      2. Otherwise (or after schema passes), call an LLM judge against
+         ``task.acceptance_criteria``. The judge returns ``{passed, notes}``.
+
+    Steps with no ``acceptance_criteria`` and no ``output_schema`` auto-pass
+    with a note explaining why — the planner is encouraged to set criteria
+    but a missing one shouldn't stall execution.
+    """
+
+    def __init__(
+        self,
+        provider: LLMProvider,
+        instructions: InstructionLoader | None = None,
+        *,
+        timeout_seconds: float = _VERIFY_TIMEOUT_SECONDS,
+        max_tokens: int = _VERIFY_MAX_TOKENS,
+    ):
+        self._provider = provider
+        self._instructions = instructions or InstructionLoader()
+        self._timeout = timeout_seconds
+        self._max_tokens = max_tokens
+
+    async def verify(
+        self,
+        task: OrchestratorTask,
+        output_text: str,
+    ) -> VerificationOutcome:
+        """Verify ``task``'s ``output_text``. Never raises — failures return passed=False."""
+        if task.output_schema:
+            valid, error, _parsed = validate_task_output(output_text, task.output_schema)
+            if not valid:
+                return VerificationOutcome(
+                    passed=False,
+                    notes=f"Schema validation failed: {error}",
+                    schema_error=error or "schema validation failed",
+                )
+
+        criteria = (task.acceptance_criteria or "").strip()
+        if not criteria:
+            return VerificationOutcome(
+                passed=True,
+                notes="No acceptance criteria set — auto-passed.",
+            )
+
+        if not (output_text or "").strip():
+            return VerificationOutcome(
+                passed=False,
+                notes="Step produced no output to verify against the acceptance criteria.",
+            )
+
+        return await self._llm_judge(task, output_text, criteria)
+
+    async def _llm_judge(
+        self,
+        task: OrchestratorTask,
+        output_text: str,
+        criteria: str,
+    ) -> VerificationOutcome:
+        system_prompt = self._instructions.load("plan_mode_verifier_system_prompt.md")
+        user_prompt = self._instructions.render(
+            "plan_mode_verifier_user_prompt.md",
+            title=task.title,
+            description=task.description,
+            acceptance_criteria=criteria,
+            output=output_text[:_VERIFY_OUTPUT_TRUNCATE],
+        )
+        if not system_prompt or not user_prompt:
+            log.error("Verifier prompts missing — auto-passing")
+            return VerificationOutcome(
+                passed=True,
+                notes="Verifier prompts unavailable — defaulted to pass.",
+            )
+
+        messages = [
+            Message(role="system", content=system_prompt),
+            Message(role="user", content=user_prompt),
+        ]
+
+        try:
+            response = await asyncio.wait_for(
+                self._provider.complete(
+                    messages=messages, tools=None, max_tokens=self._max_tokens,
+                ),
+                timeout=self._timeout,
+            )
+        except asyncio.TimeoutError:
+            log.error("Verifier call timed out", task_id=task.id, timeout=self._timeout)
+            return VerificationOutcome(
+                passed=False,
+                notes=f"Verifier timed out after {self._timeout:.0f}s.",
+            )
+        except Exception as e:
+            log.error("Verifier LLM call failed",
+                      task_id=task.id,
+                      error=str(e),
+                      error_type=type(e).__name__)
+            return VerificationOutcome(
+                passed=False,
+                notes=f"Verifier failed: {e}",
+            )
+
+        raw = str(getattr(response, "content", "") or "").strip()
+        parsed = parse_json_response(raw)
+        if parsed is None:
+            log.warning("Verifier returned unparseable JSON",
+                        task_id=task.id, raw_preview=raw[:300])
+            return VerificationOutcome(
+                passed=False,
+                notes="Verifier response could not be parsed as JSON.",
+            )
+
+        passed = bool(parsed.get("passed", False))
+        notes = str(parsed.get("notes", "")).strip() or (
+            "Verifier returned no notes."
+        )
+        return VerificationOutcome(passed=passed, notes=notes)
 
 
 class PlanExecutor:
@@ -196,6 +338,12 @@ class PlanExecutor:
     declares the previous one as a dependency (which is the planner's default
     output), so we lean on it instead of re-implementing worker plumbing.
 
+    Step 4 adds post-execution verification: after the graph runs, completed
+    steps are walked in topological order and each is verified against its
+    ``acceptance_criteria`` (and optional ``output_schema``). The first
+    verification failure stops the walk and returns a failed result so the
+    revision loop in step 6 can pick it up.
+
     ``orchestrate``-kind steps are coerced to ``atomic`` with a warning. Step 5
     will replace this coercion with real fan-out via ``SessionOrchestrator``.
     """
@@ -205,9 +353,11 @@ class PlanExecutor:
         orchestrator: Any,
         *,
         broadcast: Callable[[dict[str, Any]], None] | None = None,
+        verifier: PlanVerifier | None = None,
     ):
         self._orchestrator = orchestrator
         self._broadcast = broadcast
+        self._verifier = verifier
 
     async def run(self) -> PlanExecutionResult:
         graph: TaskGraph | None = getattr(self._orchestrator, "_graph", None)
@@ -256,13 +406,12 @@ class PlanExecutor:
             (tid for tid, t in graph.tasks.items() if t.status == FAILED), None,
         )
 
-        self._emit("plan_execution_completed", {
-            "completed": completed,
-            "failed_step": failed,
-            "has_failures": bool(failed),
-        })
-
         if failed:
+            self._emit("plan_execution_completed", {
+                "completed": completed,
+                "failed_step": failed,
+                "has_failures": True,
+            })
             failed_task = graph.tasks[failed]
             return PlanExecutionResult(
                 ok=False,
@@ -272,11 +421,87 @@ class PlanExecutor:
                 error=failed_task.error or "step failed",
             )
 
+        verified, verify_failed, verify_notes = await self._verify_completed(
+            graph, completed,
+        )
+
+        if verify_failed is not None:
+            self._emit("plan_execution_completed", {
+                "completed": completed,
+                "verified": verified,
+                "verification_failed_step": verify_failed,
+                "verification_notes": verify_notes,
+                "has_failures": True,
+            })
+            return PlanExecutionResult(
+                ok=False,
+                final_output=output or "",
+                completed_steps=completed,
+                verified_steps=verified,
+                verification_failed_step=verify_failed,
+                verification_notes=verify_notes,
+                error=f"verification failed at step '{verify_failed}': {verify_notes}",
+            )
+
+        self._emit("plan_execution_verified", {
+            "completed": completed,
+            "verified": verified,
+        })
+
         return PlanExecutionResult(
             ok=True,
             final_output=output or "",
             completed_steps=completed,
+            verified_steps=verified,
         )
+
+    async def _verify_completed(
+        self,
+        graph: TaskGraph,
+        completed: list[str],
+    ) -> tuple[list[str], str | None, str]:
+        """Walk completed steps in order; verify each. Stop at first failure.
+
+        Returns ``(verified_ids, failed_id_or_None, notes)``. When the verifier
+        is not configured, all completed steps are marked verified=passed and
+        the gate is a no-op.
+        """
+        verified: list[str] = []
+        for tid in completed:
+            task = graph.tasks.get(tid)
+            if task is None:
+                continue
+
+            if self._verifier is None:
+                task.verification_status = _PASSED
+                task.verification_notes = "No verifier configured."
+                verified.append(tid)
+                continue
+
+            output_text = self._extract_output(task)
+            outcome = await self._verifier.verify(task, output_text)
+            task.verification_status = _PASSED if outcome.passed else _FAILED
+            task.verification_notes = outcome.notes
+
+            self._emit("plan_step_verified", {
+                "task_id": tid,
+                "passed": outcome.passed,
+                "notes": outcome.notes,
+            })
+
+            if not outcome.passed:
+                return verified, tid, outcome.notes
+            verified.append(tid)
+
+        return verified, None, ""
+
+    @staticmethod
+    def _extract_output(task: OrchestratorTask) -> str:
+        """Pull the executor's text output off ``task.result`` for verification."""
+        result = task.result
+        if isinstance(result, dict):
+            return str(result.get("output", "") or "")
+        return ""
 
     @staticmethod
     def _coerce_orchestrate_to_atomic(graph: TaskGraph) -> list[str]:
