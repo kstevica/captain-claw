@@ -21,6 +21,7 @@ import {
   Pin,
   ClipboardList,
   Activity,
+  ListChecks,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -34,6 +35,7 @@ import { usePinnedStore } from '../../stores/pinnedStore'
 import { useClipboardStore } from '../../stores/clipboardStore'
 import { useTraceStore, selectSpanCount } from '../../stores/traceStore'
 import { SendContextModal } from './SendContextModal'
+import { PlanCard } from './PlanCard'
 import TraceTimeline from '../observability/TraceTimeline'
 import { uploadFileToAgent, formatSize } from '../../services/fileTransfer'
 import type { ChatMessage } from '../../services/agentChat'
@@ -54,8 +56,17 @@ let attachId = 0
 function nextAttachId() { return `attach-${Date.now()}-${++attachId}` }
 
 export function ChatPanel() {
-  const { sessions, activeChatId, chatOpen, closeChat, switchChat, disconnectChat, sendMessage, cancelTask } =
-    useChatStore()
+  const {
+    sessions,
+    activeChatId,
+    chatOpen,
+    closeChat,
+    switchChat,
+    disconnectChat,
+    sendMessage,
+    cancelTask,
+    setPlanningEnabled,
+  } = useChatStore()
   const localAgents = useLocalAgentStore((s) => s.agents)
   const containers = useContainerStore((s) => s.containers)
   const processes = useProcessStore((s) => s.processes)
@@ -117,6 +128,24 @@ export function ChatPanel() {
           <Forward className="h-4 w-4" />
         </button>
         <button
+          onClick={() => setPlanningEnabled(session.containerId, !session.planningEnabled)}
+          title={
+            session.planningEnabled
+              ? 'Planning mode ON — chats auto-route through /plan + /plan-execute. Click to disable.'
+              : 'Planning mode OFF. Click to auto-route chats through comprehensive planning.'
+          }
+          className={`relative mr-1 rounded p-1 transition-colors ${
+            session.planningEnabled
+              ? 'bg-violet-600/20 text-violet-400'
+              : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
+          }`}
+        >
+          <ListChecks className="h-4 w-4" />
+          {session.planState && session.planState.status === 'running' && (
+            <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-violet-400" />
+          )}
+        </button>
+        <button
           onClick={() => setShowTracePanel(!showTracePanel)}
           title={showTracePanel ? 'Hide traces' : 'Show orchestrator traces'}
           className={`relative mr-1 rounded p-1 transition-colors ${
@@ -157,6 +186,7 @@ export function ChatPanel() {
         /* Chat content */
         <ChatContent
           session={session}
+          containerId={session.containerId}
           onSend={(content) => sendMessage(session.containerId, content)}
           onCancel={() => cancelTask(session.containerId)}
         />
@@ -200,10 +230,12 @@ function useAgentConnection(containerId: string) {
 
 function ChatContent({
   session,
+  containerId,
   onSend,
   onCancel,
 }: {
   session: { containerId: string; containerName: string; messages: ChatMessage[]; connected: boolean; busy: boolean; statusText: string }
+  containerId: string
   onSend: (content: string) => void
   onCancel: () => void
 }) {
@@ -415,8 +447,13 @@ function ChatContent({
         </div>
       )}
 
+      {/* Plan monitor — pinned above the scroll area so it stays visible
+          while messages flow underneath during /plan-execute. */}
+      <PlanCard containerId={containerId} />
+
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-3">
+      <div className="flex-1 overflow-y-auto py-3">
+        <div className="px-4">
         {visibleMessages.length === 0 && session.connected && (
           <div className="mt-12 text-center">
             <MessageSquare className="mx-auto h-8 w-8 text-zinc-700" />
@@ -445,6 +482,7 @@ function ChatContent({
         )}
 
         <div ref={messagesEndRef} />
+        </div>
       </div>
 
       {/* Attachments strip */}
@@ -801,8 +839,10 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
     if (message.approval_request_id && message.approval_resolved) {
       return (
         <div className="mb-3 flex justify-center">
-          <div className="max-w-[85%] rounded-lg bg-zinc-100 dark:bg-zinc-800/40 px-3 py-2">
-            <p className="whitespace-pre-wrap text-xs text-zinc-500 dark:text-zinc-500">{message.content}</p>
+          <div className="max-w-[85%] rounded-lg border border-zinc-200 bg-white px-3 py-2 dark:border-zinc-700/50 dark:bg-zinc-800/40">
+            <div className="fd-markdown text-xs">
+              <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{message.content}</Markdown>
+            </div>
             <span className="text-[10px] text-zinc-400 dark:text-zinc-600 italic">Responded</span>
           </div>
         </div>
@@ -810,8 +850,10 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
     }
     return (
       <div className="mb-3 flex justify-center">
-        <div className="max-w-[85%] rounded-lg bg-zinc-100 dark:bg-zinc-800/40 px-3 py-2">
-          <p className="whitespace-pre-wrap text-xs text-zinc-600 dark:text-zinc-500">{message.content}</p>
+        <div className="max-w-[95%] rounded-lg border border-zinc-200 bg-white px-3 py-2 dark:border-zinc-700/50 dark:bg-zinc-800/40">
+          <div className="fd-markdown text-xs">
+            <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{message.content}</Markdown>
+          </div>
         </div>
       </div>
     )

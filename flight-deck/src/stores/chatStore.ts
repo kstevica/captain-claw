@@ -56,6 +56,49 @@ async function serverLoadMessages(sessionId: string): Promise<ChatMessage[]> {
   } catch { return [] }
 }
 
+// ── Plan-state localStorage persistence ──
+//
+// planState lives in memory (and on the agent), but a browser refresh would
+// otherwise wipe the FD-side view of an in-flight plan. We mirror the slice
+// to localStorage keyed by containerId so the PlanCard re-hydrates immediately
+// on reload — the agent's own websocket stream then keeps it fresh.
+
+interface PersistedPlanSlice {
+  planState: PlanState | null
+  planningEnabled: boolean
+  planCardCollapsed: boolean
+}
+
+function _planLSKey(containerId: string): string {
+  return `fd.plan.${containerId}`
+}
+
+function savePlanSlice(containerId: string, slice: PersistedPlanSlice): void {
+  try {
+    if (!slice.planState && !slice.planningEnabled) {
+      // Nothing worth persisting — drop any stale entry.
+      window.localStorage.removeItem(_planLSKey(containerId))
+      return
+    }
+    window.localStorage.setItem(_planLSKey(containerId), JSON.stringify(slice))
+  } catch { /* quota / private mode — ignore */ }
+}
+
+function loadPlanSlice(containerId: string): PersistedPlanSlice | null {
+  try {
+    const raw = window.localStorage.getItem(_planLSKey(containerId))
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as PersistedPlanSlice
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function clearPlanSlice(containerId: string): void {
+  try { window.localStorage.removeItem(_planLSKey(containerId)) } catch { /* ignore */ }
+}
+
 // Debounced batch persist
 const _msgQueue: Map<string, ChatMessage[]> = new Map()
 let _msgTimer: ReturnType<typeof setTimeout> | null = null
@@ -109,6 +152,51 @@ interface AgentPersonalityInfo {
   description?: string
 }
 
+// ── Plan-mode state ──
+
+export interface PlanStep {
+  id: string
+  title: string
+  step_kind: string
+  acceptance_criteria: string
+  depends_on: string[]
+  status: 'pending' | 'running' | 'completed' | 'verified' | 'failed' | 'revising'
+  verificationPassed?: boolean
+  verificationNotes?: string
+  revisionCount: number
+  // Live runtime fields (populated by orchestrator task_* events)
+  startedAt?: number          // epoch ms
+  endedAt?: number            // epoch ms
+  currentPhase?: string       // 'thinking' | 'tool' | etc
+  currentTool?: string
+  currentText?: string        // latest task_step text
+  tokensIn?: number
+  tokensOut?: number
+  error?: string
+}
+
+export interface PlanRevision {
+  task_id: string
+  revision_count: number
+  rationale: string
+  revised_description: string
+  previous_verification_notes: string
+}
+
+export interface PlanState {
+  startedAt: string
+  startedAtMs: number
+  status: 'running' | 'verified' | 'completed' | 'failed'
+  maxRevisions: number
+  steps: PlanStep[]
+  revisions: PlanRevision[]
+  activeStepId?: string       // currently running step (latest task_started)
+  failedStep?: string
+  verificationFailedStep?: string
+  verificationNotes?: string
+  errorMessage?: string
+}
+
 interface ChatSession {
   containerId: string
   containerName: string
@@ -130,6 +218,10 @@ interface ChatSession {
   avgTokPerSec: number   // running average wall-clock tok/s
   _tokSamples: number    // number of samples for avg calculation
   llmTokPerSec: number   // real LLM generation speed (completion_tokens / llm_latency)
+  // Planning mode
+  planningEnabled: boolean   // optimistic mirror of agent.plan_mode_auto
+  planState: PlanState | null
+  planCardCollapsed: boolean
 }
 
 interface ChatStore {
@@ -147,6 +239,10 @@ interface ChatStore {
   setModel: (containerId: string, selector: string) => void
   setPersonality: (containerId: string, personalityId: string) => void
   respondToApproval: (containerId: string, requestId: string, approved: boolean) => void
+  // Plan-mode actions
+  setPlanningEnabled: (containerId: string, enabled: boolean) => void
+  togglePlanCardCollapsed: (containerId: string) => void
+  dismissPlan: (containerId: string) => void
 }
 
 let msgCounter = 0
@@ -174,6 +270,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
 
     const ws = new AgentChatWS(containerId, host, port, auth)
+    // Re-hydrate any persisted plan slice so the PlanCard reappears instantly
+    // after a page refresh. Live ws events will keep updating it from here.
+    const persisted = loadPlanSlice(containerId)
     const session: ChatSession = {
       containerId,
       containerName,
@@ -194,6 +293,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       avgTokPerSec: 0,
       _tokSamples: 0,
       llmTokPerSec: 0,
+      planningEnabled: persisted?.planningEnabled ?? false,
+      planState: persisted?.planState ?? null,
+      planCardCollapsed: persisted?.planCardCollapsed ?? false,
     }
 
     const sessions = new Map(get().sessions)
@@ -486,12 +588,294 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     // Forward orchestrator trace spans to the trace store for
     // real-time observability in the TraceTimeline component.
+    // Per-task lifecycle events also drive the PlanCard live monitor.
     ws.on('orchestrator_event', (data) => {
-      if (data.event === 'trace_span') {
+      const event = String(data.event ?? '')
+
+      if (event === 'trace_span') {
         const span = data as unknown as TraceSpan
         if (span?.span_id) {
           useTraceStore.getState().handleSpanEvent(containerId, span)
         }
+        return
+      }
+
+      // Plan-mode live monitor: only meaningful while a plan is active.
+      const taskId = String(data.task_id ?? '')
+      if (!taskId) return
+
+      switch (event) {
+        case 'task_started':
+          updatePlan(containerId, (prev) => {
+            if (!prev) return prev
+            const steps = prev.steps.map((s) =>
+              s.id === taskId
+                ? {
+                    ...s,
+                    status: 'running' as const,
+                    startedAt: Date.now(),
+                    error: undefined,
+                  }
+                : s,
+            )
+            return { ...prev, steps, activeStepId: taskId }
+          })
+          break
+
+        case 'task_step':
+          updatePlan(containerId, (prev) => {
+            if (!prev) return prev
+            const phase = data.phase ? String(data.phase) : undefined
+            const tool = data.tool ? String(data.tool) : undefined
+            const text = data.text ? String(data.text) : undefined
+            const steps = prev.steps.map((s) =>
+              s.id === taskId
+                ? {
+                    ...s,
+                    currentPhase: phase ?? s.currentPhase,
+                    currentTool: tool ?? s.currentTool,
+                    currentText: text ?? s.currentText,
+                  }
+                : s,
+            )
+            return { ...prev, steps }
+          })
+          break
+
+        case 'task_completed':
+          updatePlan(containerId, (prev) => {
+            if (!prev) return prev
+            const usage = (data.usage as Record<string, number> | undefined) || undefined
+            const steps = prev.steps.map((s) =>
+              s.id === taskId
+                ? {
+                    ...s,
+                    status: 'completed' as const,
+                    endedAt: Date.now(),
+                    currentPhase: undefined,
+                    currentTool: undefined,
+                    tokensIn: usage?.input_tokens ?? s.tokensIn,
+                    tokensOut: usage?.output_tokens ?? s.tokensOut,
+                  }
+                : s,
+            )
+            const nextActive = prev.activeStepId === taskId ? undefined : prev.activeStepId
+            return { ...prev, steps, activeStepId: nextActive }
+          })
+          break
+
+        case 'task_failed':
+          updatePlan(containerId, (prev) => {
+            if (!prev) return prev
+            const error = String(data.error ?? 'task failed')
+            const steps = prev.steps.map((s) =>
+              s.id === taskId
+                ? {
+                    ...s,
+                    status: 'failed' as const,
+                    endedAt: Date.now(),
+                    error,
+                    currentPhase: undefined,
+                    currentTool: undefined,
+                  }
+                : s,
+            )
+            const nextActive = prev.activeStepId === taskId ? undefined : prev.activeStepId
+            return { ...prev, steps, activeStepId: nextActive }
+          })
+          break
+
+        case 'task_validation_retry':
+          updatePlan(containerId, (prev) => {
+            if (!prev) return prev
+            const reason = data.reason ? String(data.reason) : ''
+            const steps = prev.steps.map((s) =>
+              s.id === taskId
+                ? {
+                    ...s,
+                    currentPhase: 'validating',
+                    currentText: reason ? `Validation retry: ${reason}` : 'Validation retry',
+                  }
+                : s,
+            )
+            return { ...prev, steps }
+          })
+          break
+
+        case 'task_validation_failed':
+          updatePlan(containerId, (prev) => {
+            if (!prev) return prev
+            const notes = data.notes ? String(data.notes) : ''
+            const steps = prev.steps.map((s) =>
+              s.id === taskId
+                ? { ...s, currentText: notes ? `Validation failed: ${notes}` : 'Validation failed' }
+                : s,
+            )
+            return { ...prev, steps }
+          })
+          break
+
+        default:
+          break
+      }
+    })
+
+    // ── Plan-mode events ──────────────────────────────────────────────
+    ws.on('plan_execution_started', (data) => {
+      const rawSteps = (data.steps as Array<Record<string, unknown>>) || []
+      const steps: PlanStep[] = rawSteps.map((s) => ({
+        id: String(s.id ?? ''),
+        title: String(s.title ?? ''),
+        step_kind: String(s.step_kind ?? 'atomic'),
+        acceptance_criteria: String(s.acceptance_criteria ?? ''),
+        depends_on: Array.isArray(s.depends_on) ? (s.depends_on as string[]) : [],
+        status: 'pending',
+        revisionCount: 0,
+      }))
+      updatePlan(containerId, () => ({
+        startedAt: new Date().toISOString(),
+        startedAtMs: Date.now(),
+        status: 'running',
+        maxRevisions: Number(data.max_revisions ?? 0),
+        steps,
+        revisions: [],
+      }))
+      // Auto-expand the plan card when a new plan starts
+      updateSession(containerId, { planCardCollapsed: false })
+    })
+
+    ws.on('plan_orchestrate_expanded', (data) => {
+      const expansions = (data.expansions as Array<Record<string, unknown>>) || []
+      if (expansions.length === 0) return
+      updatePlan(containerId, (prev) => {
+        if (!prev) return prev
+        // Expansions are appended sub-steps; merge by id when present.
+        const byId = new Map(prev.steps.map((s) => [s.id, s]))
+        for (const exp of expansions) {
+          const subSteps = (exp.steps as Array<Record<string, unknown>>) || []
+          for (const s of subSteps) {
+            const id = String(s.id ?? '')
+            if (!id || byId.has(id)) continue
+            byId.set(id, {
+              id,
+              title: String(s.title ?? ''),
+              step_kind: String(s.step_kind ?? 'atomic'),
+              acceptance_criteria: String(s.acceptance_criteria ?? ''),
+              depends_on: Array.isArray(s.depends_on) ? (s.depends_on as string[]) : [],
+              status: 'pending',
+              revisionCount: 0,
+            })
+          }
+        }
+        return { ...prev, steps: Array.from(byId.values()) }
+      })
+    })
+
+    ws.on('plan_step_verified', (data) => {
+      const taskId = String(data.task_id ?? '')
+      const passed = Boolean(data.passed)
+      const notes = String(data.notes ?? '')
+      updatePlan(containerId, (prev) => {
+        if (!prev) return prev
+        const steps = prev.steps.map((s) =>
+          s.id === taskId
+            ? {
+                ...s,
+                status: passed ? ('verified' as const) : ('failed' as const),
+                verificationPassed: passed,
+                verificationNotes: notes,
+              }
+            : s,
+        )
+        return { ...prev, steps }
+      })
+    })
+
+    ws.on('plan_step_revised', (data) => {
+      const taskId = String(data.task_id ?? '')
+      const revision: PlanRevision = {
+        task_id: taskId,
+        revision_count: Number(data.revision_count ?? 0),
+        rationale: String(data.rationale ?? ''),
+        revised_description: String(data.revised_description ?? ''),
+        previous_verification_notes: String(data.previous_verification_notes ?? ''),
+      }
+      updatePlan(containerId, (prev) => {
+        if (!prev) return prev
+        const steps = prev.steps.map((s) =>
+          s.id === taskId
+            ? {
+                ...s,
+                status: 'revising' as const,
+                revisionCount: revision.revision_count,
+                verificationPassed: undefined,
+                verificationNotes: undefined,
+              }
+            : s,
+        )
+        return { ...prev, steps, revisions: [...prev.revisions, revision] }
+      })
+    })
+
+    ws.on('plan_execution_verified', (data) => {
+      const verified = (data.verified as string[]) || []
+      updatePlan(containerId, (prev) => {
+        if (!prev) return prev
+        const verifiedSet = new Set(verified)
+        const steps = prev.steps.map((s) =>
+          verifiedSet.has(s.id) && s.status !== 'verified' ? { ...s, status: 'verified' as const } : s,
+        )
+        return { ...prev, steps, status: 'verified' }
+      })
+    })
+
+    ws.on('plan_execution_completed', (data) => {
+      const completed = (data.completed as string[]) || []
+      const verified = (data.verified as string[]) || []
+      const hasFailures = Boolean(data.has_failures)
+      const failedStep = (data.failed_step as string) || (data.verification_failed_step as string) || undefined
+      const verificationNotes = (data.verification_notes as string) || undefined
+      updatePlan(containerId, (prev) => {
+        if (!prev) return prev
+        const completedSet = new Set(completed)
+        const verifiedSet = new Set(verified)
+        const steps = prev.steps.map((s) => {
+          if (s.id === failedStep) return { ...s, status: 'failed' as const, verificationNotes }
+          if (verifiedSet.has(s.id)) return { ...s, status: 'verified' as const }
+          if (completedSet.has(s.id) && s.status === 'pending') return { ...s, status: 'completed' as const }
+          return s
+        })
+        return {
+          ...prev,
+          steps,
+          status: hasFailures ? 'failed' : 'completed',
+          failedStep: (data.failed_step as string) || prev.failedStep,
+          verificationFailedStep: (data.verification_failed_step as string) || prev.verificationFailedStep,
+          verificationNotes: verificationNotes ?? prev.verificationNotes,
+        }
+      })
+    })
+
+    ws.on('plan_execution_failed', (data) => {
+      const error = String(data.error ?? 'plan execution failed')
+      updatePlan(containerId, (prev) => {
+        if (!prev) return prev
+        return { ...prev, status: 'failed', errorMessage: error }
+      })
+    })
+
+    // Mirror /planning on|off command results into local planningEnabled flag.
+    // Strips markdown so bold/italic don't break substring matches.
+    ws.on('command_result', (data) => {
+      const command = String(data.command ?? '').trim().toLowerCase()
+      if (command !== '/planning' && !command.startsWith('/planning ')) return
+      const content = String(data.content ?? '')
+        .toLowerCase()
+        .replace(/[*_`]+/g, '')
+      if (/auto-route\s+enabled|currently\s+on|planning\s+on\b/.test(content)) {
+        updateSession(containerId, { planningEnabled: true })
+      } else if (/auto-route\s+disabled|currently\s+off|planning\s+off\b/.test(content)) {
+        updateSession(containerId, { planningEnabled: false })
       }
     })
 
@@ -600,6 +984,27 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       updateSession(containerId, { messages })
     }
   },
+
+  setPlanningEnabled: (containerId, enabled) => {
+    const session = get().sessions.get(containerId)
+    if (!session) return
+    // Optimistic update — confirmed/corrected by command_result handler.
+    updateSession(containerId, { planningEnabled: enabled })
+    // Send as a regular chat message so it routes through the slash command
+    // handler (which also returns a command_result we listen to).
+    session.ws.send(enabled ? '/planning on' : '/planning off')
+  },
+
+  togglePlanCardCollapsed: (containerId) => {
+    const session = get().sessions.get(containerId)
+    if (!session) return
+    updateSession(containerId, { planCardCollapsed: !session.planCardCollapsed })
+  },
+
+  dismissPlan: (containerId) => {
+    updateSession(containerId, { planState: null })
+    clearPlanSlice(containerId)
+  },
 }))
 
 // Helpers that update a session inside the map
@@ -610,6 +1015,39 @@ function updateSession(containerId: string, patch: Partial<ChatSession>) {
     const updated = { ...session, ...patch }
     const sessions = new Map(state.sessions)
     sessions.set(containerId, updated)
+    // If any persisted-plan field changed, mirror to localStorage.
+    if (
+      'planState' in patch ||
+      'planningEnabled' in patch ||
+      'planCardCollapsed' in patch
+    ) {
+      savePlanSlice(containerId, {
+        planState: updated.planState,
+        planningEnabled: updated.planningEnabled,
+        planCardCollapsed: updated.planCardCollapsed,
+      })
+    }
+    return { sessions }
+  })
+}
+
+function updatePlan(
+  containerId: string,
+  reducer: (prev: PlanState | null) => PlanState | null,
+) {
+  useChatStore.setState((state) => {
+    const session = state.sessions.get(containerId)
+    if (!session) return state
+    const next = reducer(session.planState)
+    if (next === session.planState) return state
+    const updated = { ...session, planState: next }
+    const sessions = new Map(state.sessions)
+    sessions.set(containerId, updated)
+    savePlanSlice(containerId, {
+      planState: next,
+      planningEnabled: updated.planningEnabled,
+      planCardCollapsed: updated.planCardCollapsed,
+    })
     return { sessions }
   })
 }

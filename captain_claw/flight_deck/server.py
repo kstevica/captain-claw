@@ -1850,7 +1850,16 @@ async def agent_ws_proxy(ws: WebSocket, host: str, port: int, token: str = ""):
     agent_url = f"ws://{host}:{port}/ws{params}"
 
     try:
-        async with websockets.connect(agent_url, max_size=4 * 1024 * 1024) as agent_ws:
+        # ping_interval/ping_timeout keep the upstream link alive through any
+        # intermediaries and surface dead peers fast — without these the proxy
+        # silently drops after a few minutes of idle, forcing the user to
+        # re-click the chat button in FD.
+        async with websockets.connect(
+            agent_url,
+            max_size=4 * 1024 * 1024,
+            ping_interval=20,
+            ping_timeout=10,
+        ) as agent_ws:
             async def client_to_agent():
                 try:
                     while True:

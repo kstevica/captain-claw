@@ -25,6 +25,12 @@ export class AgentChatWS {
   private ws: WebSocket | null = null
   private handlers = new Map<string, Set<EventHandler>>()
   private _connected = false
+  // Auto-reconnect state. The proxy + agent both have keepalives, but transient
+  // network blips (laptop sleep, wifi handoff) still close the socket — we want
+  // FD to silently re-establish so the user doesn't have to re-click "Chat".
+  private _shouldReconnect = false
+  private _reconnectAttempt = 0
+  private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   readonly agentId: string
   readonly host: string
   readonly port: number
@@ -40,8 +46,12 @@ export class AgentChatWS {
   get connected() { return this._connected }
 
   connect() {
-    if (this.ws) this.disconnect()
+    if (this.ws) this._teardownSocket()
+    this._shouldReconnect = true
+    this._openSocket()
+  }
 
+  private _openSocket() {
     // Route through FD backend proxy to avoid CORS
     const tokenParam = this.auth ? `?token=${encodeURIComponent(this.auth)}` : ''
     const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -51,13 +61,16 @@ export class AgentChatWS {
 
     this.ws.onopen = () => {
       this._connected = true
+      this._reconnectAttempt = 0
       this.emit('_connected', {})
     }
 
     this.ws.onclose = () => {
+      const wasConnected = this._connected
       this._connected = false
-      this.emit('_disconnected', {})
       this.ws = null
+      this.emit('_disconnected', { wasConnected })
+      if (this._shouldReconnect) this._scheduleReconnect()
     }
 
     this.ws.onerror = () => {
@@ -76,11 +89,37 @@ export class AgentChatWS {
     }
   }
 
-  disconnect() {
+  private _scheduleReconnect() {
+    if (this._reconnectTimer) return
+    // Exponential backoff capped at 15s. The first retry fires fast (~500ms)
+    // so quick blips feel instant; subsequent retries back off so we don't
+    // hammer a dead agent.
+    const delay = Math.min(15000, 500 * 2 ** this._reconnectAttempt)
+    this._reconnectAttempt++
+    this.emit('_reconnecting', { attempt: this._reconnectAttempt, delayMs: delay })
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null
+      if (!this._shouldReconnect) return
+      this._openSocket()
+    }, delay)
+  }
+
+  private _teardownSocket() {
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer)
+      this._reconnectTimer = null
+    }
     if (this.ws) {
-      this.ws.close()
+      try { this.ws.onclose = null } catch { /* ignore */ }
+      try { this.ws.close() } catch { /* ignore */ }
       this.ws = null
     }
+  }
+
+  disconnect() {
+    this._shouldReconnect = false
+    this._reconnectAttempt = 0
+    this._teardownSocket()
     this._connected = false
   }
 

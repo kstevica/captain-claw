@@ -17,8 +17,12 @@ log = get_logger(__name__)
 
 
 async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketResponse:
-    """Handle WebSocket connections."""
-    ws = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024)
+    """Handle WebSocket connections.
+
+    ``heartbeat=20`` makes aiohttp send a ping every 20s when idle so
+    intermediaries (FD proxy, reverse proxies) don't drop the connection.
+    """
+    ws = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024, heartbeat=20)
     await ws.prepare(request)
 
     from captain_claw.config import get_config
