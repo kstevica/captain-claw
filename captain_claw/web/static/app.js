@@ -148,6 +148,27 @@
             case 'next_steps':
                 renderNextSteps(data.options || []);
                 break;
+            case 'plan_execution_started':
+                handlePlanStarted(data);
+                break;
+            case 'plan_orchestrate_expanded':
+                handlePlanExpanded(data);
+                break;
+            case 'plan_step_verified':
+                handlePlanStepVerified(data);
+                break;
+            case 'plan_step_revised':
+                handlePlanStepRevised(data);
+                break;
+            case 'plan_execution_verified':
+                handlePlanExecutionFinal(data, 'verified');
+                break;
+            case 'plan_execution_completed':
+                handlePlanExecutionFinal(data, 'completed');
+                break;
+            case 'plan_execution_failed':
+                handlePlanExecutionFinal(data, 'failed');
+                break;
             case 'error':
                 addChatMessage('error', data.message);
                 break;
@@ -610,6 +631,197 @@
             );
         }
         el.innerHTML = parts.join('');
+    }
+
+    // ── Plan Mode Card ──────────────────────────────────────
+
+    let activePlanCard = null;
+    let activePlanState = null;
+
+    function handlePlanStarted(data) {
+        chatEmpty.style.display = 'none';
+        const stepsArr = (data.steps || []).map(s => ({
+            id: s.id,
+            title: s.title || s.id,
+            step_kind: s.step_kind || 'atomic',
+            acceptance_criteria: s.acceptance_criteria || '',
+            depends_on: s.depends_on || [],
+            status: 'pending',
+            revision_count: 0,
+            notes: '',
+        }));
+        activePlanState = {
+            steps: stepsArr,
+            stepIndex: Object.fromEntries(stepsArr.map(s => [s.id, s])),
+            max_revisions: data.max_revisions || 0,
+            finalized: false,
+            finalStatus: '',
+            finalMessage: '',
+            revisions: [],
+        };
+        const card = document.createElement('div');
+        card.className = 'plan-card running';
+        activePlanCard = card;
+        chatMessages.appendChild(card);
+        rerenderPlanCard();
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    function handlePlanExpanded(data) {
+        if (!activePlanState || !activePlanCard) return;
+        const expansions = data.expansions || [];
+        for (const exp of expansions) {
+            const parentId = exp.parent_id || exp.parent;
+            const children = exp.children || [];
+            const idx = activePlanState.steps.findIndex(s => s.id === parentId);
+            if (idx === -1) continue;
+            const newSteps = children.map(c => ({
+                id: c.id,
+                title: c.title || c.id,
+                step_kind: c.step_kind || 'atomic',
+                acceptance_criteria: c.acceptance_criteria || '',
+                depends_on: c.depends_on || [],
+                status: 'pending',
+                revision_count: 0,
+                notes: '',
+                expanded_from: parentId,
+            }));
+            activePlanState.steps.splice(idx, 1, ...newSteps);
+        }
+        activePlanState.stepIndex = Object.fromEntries(
+            activePlanState.steps.map(s => [s.id, s])
+        );
+        rerenderPlanCard();
+    }
+
+    function handlePlanStepVerified(data) {
+        if (!activePlanState) return;
+        const step = activePlanState.stepIndex[data.task_id];
+        if (!step) return;
+        step.status = data.passed ? 'verified' : 'failed';
+        step.notes = data.notes || '';
+        rerenderPlanCard();
+    }
+
+    function handlePlanStepRevised(data) {
+        if (!activePlanState) return;
+        const step = activePlanState.stepIndex[data.task_id];
+        if (!step) return;
+        step.status = 'revising';
+        step.revision_count = data.revision_count || (step.revision_count + 1);
+        step.notes = data.rationale || step.notes;
+        activePlanState.revisions.push({
+            task_id: data.task_id,
+            revision_count: step.revision_count,
+            rationale: data.rationale || '',
+        });
+        rerenderPlanCard();
+    }
+
+    function handlePlanExecutionFinal(data, kind) {
+        if (!activePlanState || !activePlanCard) return;
+        activePlanState.finalized = true;
+        if (kind === 'verified') {
+            activePlanState.finalStatus = 'success';
+            activePlanState.finalMessage = `All ${(data.verified || []).length} step(s) verified.`;
+        } else if (kind === 'failed') {
+            activePlanState.finalStatus = 'error';
+            activePlanState.finalMessage = data.error || 'Plan execution failed.';
+        } else {
+            // completed with failures
+            const failed = data.failed_step || data.verification_failed_step;
+            if (data.has_failures) {
+                activePlanState.finalStatus = 'error';
+                let msg = '';
+                if (data.verification_failed_step) {
+                    msg = `Verification failed at step '${data.verification_failed_step}'`;
+                    if (data.revision_aborted) msg += ' (reviser could not produce a revision)';
+                    if (data.verification_notes) msg += `: ${data.verification_notes}`;
+                } else if (data.failed_step) {
+                    msg = `Step '${data.failed_step}' failed at runtime.`;
+                }
+                activePlanState.finalMessage = msg || 'Plan execution stopped.';
+                if (failed) {
+                    const s = activePlanState.stepIndex[failed];
+                    if (s && s.status !== 'failed') {
+                        s.status = 'failed';
+                        if (data.verification_notes) s.notes = data.verification_notes;
+                    }
+                }
+            } else {
+                activePlanState.finalStatus = 'success';
+                activePlanState.finalMessage = `${(data.completed || []).length} step(s) completed.`;
+            }
+        }
+        rerenderPlanCard();
+        // Detach so subsequent plans get their own card.
+        activePlanCard = null;
+        activePlanState = null;
+    }
+
+    function rerenderPlanCard() {
+        if (!activePlanCard || !activePlanState) return;
+        const st = activePlanState;
+        const verifiedCount = st.steps.filter(s => s.status === 'verified').length;
+        const total = st.steps.length;
+        let headerClass = 'plan-card-header';
+        let badge = `${verifiedCount}/${total}`;
+        let stateLabel = 'Running';
+        if (st.finalized) {
+            if (st.finalStatus === 'success') {
+                headerClass += ' success';
+                stateLabel = 'Verified';
+            } else {
+                headerClass += ' error';
+                stateLabel = 'Stopped';
+            }
+        }
+        const escape = (s) => String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+        const stepsHtml = st.steps.map((s, idx) => {
+            const dotClass = `plan-dot plan-status-${s.status}`;
+            const meta = [];
+            if (s.revision_count) meta.push(`revision ${s.revision_count}`);
+            if (s.step_kind && s.step_kind !== 'atomic') meta.push(s.step_kind);
+            if (s.expanded_from) meta.push(`from ${escape(s.expanded_from)}`);
+            const metaHtml = meta.length
+                ? `<span class="plan-step-meta">${escape(meta.join(' · '))}</span>` : '';
+            const notesHtml = s.notes
+                ? `<div class="plan-step-notes">${escape(s.notes)}</div>` : '';
+            return `
+                <div class="plan-step plan-step-${s.status}">
+                    <span class="${dotClass}" title="${escape(s.status)}"></span>
+                    <span class="plan-step-num">${idx + 1}.</span>
+                    <div class="plan-step-body">
+                        <div class="plan-step-title">${escape(s.title)} ${metaHtml}</div>
+                        ${notesHtml}
+                    </div>
+                </div>`;
+        }).join('');
+
+        const revisionsHtml = st.revisions.length
+            ? `<div class="plan-revisions">Revisions: ${st.revisions.length} `
+              + `(${escape(st.revisions.map(r => r.task_id).join(', '))})</div>`
+            : '';
+        const finalHtml = st.finalized && st.finalMessage
+            ? `<div class="plan-final-msg">${escape(st.finalMessage)}</div>`
+            : '';
+
+        activePlanCard.className = 'plan-card' + (st.finalized
+            ? (st.finalStatus === 'success' ? ' done' : ' failed')
+            : ' running');
+        activePlanCard.innerHTML = `
+            <div class="${headerClass}">
+                <span class="plan-card-icon">📋</span>
+                <span class="plan-card-title">Plan execution</span>
+                <span class="plan-card-state">${escape(stateLabel)}</span>
+                <span class="plan-card-badge">${badge}</span>
+            </div>
+            <div class="plan-steps">${stepsHtml}</div>
+            ${revisionsHtml}
+            ${finalHtml}
+        `;
     }
 
     // ── Next Steps ──────────────────────────────────────────
