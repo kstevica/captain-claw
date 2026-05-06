@@ -14,9 +14,11 @@ from typing import TYPE_CHECKING
 from captain_claw.config import get_config
 from captain_claw.logging import get_logger
 from captain_claw.plan_mode import (
+    DEFAULT_MAX_REVISIONS,
     Plan,
     PlanExecutor,
     PlanGenerator,
+    PlanReviser,
     PlanVerifier,
     orchestrate_expander_from_orchestrator,
 )
@@ -111,12 +113,15 @@ async def handle_plan_execute_command(server: "WebServer", arg: str) -> str:
         return "No plan loaded. Run `/plan <request>` first or pass a plan name."
 
     verifier = _build_verifier(server)
+    reviser = _build_reviser(server)
     expander = orchestrate_expander_from_orchestrator(server._orchestrator)
     executor = PlanExecutor(
         server._orchestrator,
         broadcast=getattr(server, "_broadcast", None),
         verifier=verifier,
         expander=expander,
+        reviser=reviser,
+        max_revisions=DEFAULT_MAX_REVISIONS,
     )
     outcome = await executor.run()
 
@@ -137,6 +142,8 @@ async def handle_plan_execute_command(server: "WebServer", arg: str) -> str:
             )
         if outcome.verified_steps:
             details.append(f"verified: {', '.join(outcome.verified_steps)}")
+        if outcome.revisions:
+            details.append(f"revisions attempted: {len(outcome.revisions)}")
         body = " — ".join(details) if details else ""
         tail = f"\n\n{outcome.final_output}" if outcome.final_output else ""
         return f"{head}{(' — ' + body) if body else ''}{tail}"
@@ -145,9 +152,15 @@ async def handle_plan_execute_command(server: "WebServer", arg: str) -> str:
     verified_line = ""
     if outcome.verified_steps:
         verified_line = f"\nVerified: {', '.join(outcome.verified_steps)}"
+    revisions_line = ""
+    if outcome.revisions:
+        revisions_line = (
+            f"\nRevisions: {len(outcome.revisions)} "
+            f"(steps: {', '.join(r['task_id'] for r in outcome.revisions)})"
+        )
     return (
         f"✅ Plan executed ({len(outcome.completed_steps)} steps: {completed})"
-        f"{verified_line}\n\n"
+        f"{verified_line}{revisions_line}\n\n"
         f"{outcome.final_output}"
     )
 
@@ -163,6 +176,18 @@ def _build_verifier(server: "WebServer") -> PlanVerifier | None:
     if server._orchestrator is not None:
         instructions = getattr(server._orchestrator, "_instructions", None)
     return PlanVerifier(provider=provider, instructions=instructions)
+
+
+def _build_reviser(server: "WebServer") -> PlanReviser | None:
+    if not server.agent:
+        return None
+    provider = getattr(server.agent, "provider", None)
+    if provider is None:
+        return None
+    instructions = None
+    if server._orchestrator is not None:
+        instructions = getattr(server._orchestrator, "_instructions", None)
+    return PlanReviser(provider=provider, instructions=instructions)
 
 
 def _render_plan_response(plan: Plan, name: str, path: Path) -> str:
