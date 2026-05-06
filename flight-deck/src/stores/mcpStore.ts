@@ -1,19 +1,29 @@
 import { create } from 'zustand'
 import { useAuthStore } from './authStore'
 
+export type MCPTransport = 'http' | 'stdio'
+
 export interface MCPServer {
   name: string
+  // Common
+  transport?: MCPTransport
+  enabled: boolean
+  allowed_agents?: string[]
+  headers: Record<string, string>
+  added_at?: number
+  initialized?: boolean
+  tools_count?: number
+  last_error?: string | null
+  // HTTP-only
   url: string
   client_id: string
   client_secret: string
   client_secret_set?: boolean
   token_endpoint: string
-  headers: Record<string, string>
-  enabled: boolean
-  added_at?: number
-  initialized?: boolean
-  tools_count?: number
-  last_error?: string | null
+  // stdio-only
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
 }
 
 export interface MCPProbeResult {
@@ -26,12 +36,19 @@ export interface MCPProbeResult {
 
 export interface MCPServerInput {
   name: string
-  url: string
+  transport?: MCPTransport
+  enabled?: boolean
+  allowed_agents?: string[]
+  headers?: Record<string, string>
+  // HTTP
+  url?: string
   client_id?: string
   client_secret?: string
   token_endpoint?: string
-  headers?: Record<string, string>
-  enabled?: boolean
+  // stdio
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
 }
 
 interface MCPStore {

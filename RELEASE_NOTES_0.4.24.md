@@ -1,6 +1,6 @@
 # Captain Claw v0.4.24 Release Notes
 
-**Release title:** Centralised MCP — Phase 2
+**Release title:** Centralised MCP
 
 **Release date:** 2026-05-06
 

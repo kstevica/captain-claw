@@ -1895,6 +1895,7 @@ async def probe_agent(host: str = "localhost", port: int = 23080):
 
 class FleetAgent(BaseModel):
     name: str
+    slug: str = ""  # FD_AGENT_SLUG — what the agent identifies itself as in X-Agent-Slug
     kind: str  # docker | process | local
     host: str = "localhost"
     port: int
@@ -1916,8 +1917,10 @@ async def get_fleet(request: Request, user: dict | None = _optional_user_dep):
             if AUTH_ENABLED and user_id and labels.get(OWNER_LABEL, "") != user_id:
                 continue
             wp = labels.get("flight-deck.web-port", "")
+            _agent_name = labels.get("flight-deck.agent-name", c.name)
             fleet.append(FleetAgent(
-                name=labels.get("flight-deck.agent-name", c.name),
+                name=_agent_name,
+                slug=_slug(_agent_name),
                 kind="docker",
                 host="localhost",
                 port=int(wp) if wp else 0,
@@ -1935,6 +1938,7 @@ async def get_fleet(request: Request, user: dict | None = _optional_user_dep):
         alive = _process_is_alive(slug)
         fleet.append(FleetAgent(
             name=entry.get("name", slug),
+            slug=slug,
             kind="process",
             host="localhost",
             port=entry.get("web_port", 0),
