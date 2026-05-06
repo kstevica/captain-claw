@@ -13,12 +13,12 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from captain_claw.instructions import InstructionLoader
 from captain_claw.llm import LLMProvider, Message
 from captain_claw.logging import get_logger
-from captain_claw.task_graph import OrchestratorTask
+from captain_claw.task_graph import COMPLETED, FAILED, OrchestratorTask, TaskGraph
 
 log = get_logger(__name__)
 
@@ -175,6 +175,130 @@ class PlanGenerator:
 
         summary = str(parsed.get("summary", "")).strip()
         return Plan(summary=summary, user_input=user_input, tasks=tasks)
+
+
+@dataclass
+class PlanExecutionResult:
+    """Outcome of running a plan."""
+
+    ok: bool
+    final_output: str
+    completed_steps: list[str]
+    failed_step: str | None = None
+    error: str = ""
+
+
+class PlanExecutor:
+    """Run a plan whose graph is already loaded into an orchestrator.
+
+    Step 3 of plan-mode: sequential execution of ``atomic`` steps. The DAG
+    runner inside ``SessionOrchestrator`` already serializes when each step
+    declares the previous one as a dependency (which is the planner's default
+    output), so we lean on it instead of re-implementing worker plumbing.
+
+    ``orchestrate``-kind steps are coerced to ``atomic`` with a warning. Step 5
+    will replace this coercion with real fan-out via ``SessionOrchestrator``.
+    """
+
+    def __init__(
+        self,
+        orchestrator: Any,
+        *,
+        broadcast: Callable[[dict[str, Any]], None] | None = None,
+    ):
+        self._orchestrator = orchestrator
+        self._broadcast = broadcast
+
+    async def run(self) -> PlanExecutionResult:
+        graph: TaskGraph | None = getattr(self._orchestrator, "_graph", None)
+        if graph is None or graph.task_count == 0:
+            return PlanExecutionResult(
+                ok=False,
+                final_output="",
+                completed_steps=[],
+                error="No plan loaded. Run /plan first.",
+            )
+
+        coerced = self._coerce_orchestrate_to_atomic(graph)
+        if coerced:
+            log.warning(
+                "PlanExecutor coerced orchestrate steps to atomic "
+                "(step 5 will add real fan-out)",
+                step_ids=coerced,
+            )
+
+        self._emit("plan_execution_started", {
+            "step_count": graph.task_count,
+            "steps": [
+                {
+                    "id": t.id,
+                    "title": t.title,
+                    "step_kind": t.step_kind,
+                    "acceptance_criteria": t.acceptance_criteria,
+                    "depends_on": t.depends_on,
+                }
+                for t in graph.tasks.values()
+            ],
+        })
+
+        try:
+            output = await self._orchestrator.execute()
+        except Exception as e:
+            log.error("Plan execution raised", error=str(e),
+                      error_type=type(e).__name__)
+            self._emit("plan_execution_failed", {"error": str(e)})
+            return PlanExecutionResult(
+                ok=False, final_output="", completed_steps=[], error=str(e),
+            )
+
+        completed = [tid for tid, t in graph.tasks.items() if t.status == COMPLETED]
+        failed = next(
+            (tid for tid, t in graph.tasks.items() if t.status == FAILED), None,
+        )
+
+        self._emit("plan_execution_completed", {
+            "completed": completed,
+            "failed_step": failed,
+            "has_failures": bool(failed),
+        })
+
+        if failed:
+            failed_task = graph.tasks[failed]
+            return PlanExecutionResult(
+                ok=False,
+                final_output=output or "",
+                completed_steps=completed,
+                failed_step=failed,
+                error=failed_task.error or "step failed",
+            )
+
+        return PlanExecutionResult(
+            ok=True,
+            final_output=output or "",
+            completed_steps=completed,
+        )
+
+    @staticmethod
+    def _coerce_orchestrate_to_atomic(graph: TaskGraph) -> list[str]:
+        """Coerce orchestrate-kind steps to atomic for v3 (no fan-out yet).
+
+        Returns the IDs that were coerced so callers can warn the user.
+        """
+        coerced: list[str] = []
+        for tid, task in graph.tasks.items():
+            if task.step_kind == "orchestrate":
+                task.step_kind = "atomic"
+                coerced.append(tid)
+        return coerced
+
+    def _emit(self, event_name: str, data: dict[str, Any]) -> None:
+        if self._broadcast is None:
+            return
+        try:
+            self._broadcast({"type": event_name, **data})
+        except Exception as e:
+            log.debug("Plan-mode event broadcast failed",
+                      event_name=event_name, error=str(e))
 
 
 def parse_json_response(raw: str) -> dict[str, Any] | None:

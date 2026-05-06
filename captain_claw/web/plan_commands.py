@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from captain_claw.config import get_config
 from captain_claw.logging import get_logger
-from captain_claw.plan_mode import Plan, PlanGenerator
+from captain_claw.plan_mode import Plan, PlanExecutor, PlanGenerator
 from captain_claw.session_orchestrator import SessionOrchestrator, _scan_workspace_tree
 
 if TYPE_CHECKING:
@@ -89,6 +89,47 @@ def _save_plan_file(name: str, plan: Plan) -> Path:
     payload = plan.to_workflow_dict(name)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+async def handle_plan_execute_command(server: "WebServer", arg: str) -> str:
+    """Run the currently loaded plan, or load by name first if ``arg`` is given."""
+    if server._orchestrator is None:
+        return "Orchestrator not available."
+
+    if arg.strip():
+        load_result = await server._orchestrator.load_workflow(arg.strip())
+        if not load_result.get("ok"):
+            return load_result.get("error", f"Failed to load plan '{arg.strip()}'.")
+
+    if getattr(server._orchestrator, "_graph", None) is None:
+        return "No plan loaded. Run `/plan <request>` first or pass a plan name."
+
+    executor = PlanExecutor(
+        server._orchestrator,
+        broadcast=getattr(server, "_broadcast", None),
+    )
+    outcome = await executor.run()
+
+    if not outcome.ok:
+        head = "❌ Plan execution stopped"
+        details = []
+        if outcome.failed_step:
+            details.append(f"failed at step `{outcome.failed_step}`")
+        if outcome.error:
+            details.append(f"error: {outcome.error}")
+        if outcome.completed_steps:
+            details.append(
+                f"completed before failure: {', '.join(outcome.completed_steps)}"
+            )
+        body = " — ".join(details) if details else ""
+        tail = f"\n\n{outcome.final_output}" if outcome.final_output else ""
+        return f"{head}{(' — ' + body) if body else ''}{tail}"
+
+    completed = ", ".join(outcome.completed_steps) if outcome.completed_steps else "—"
+    return (
+        f"✅ Plan executed ({len(outcome.completed_steps)} steps: {completed})\n\n"
+        f"{outcome.final_output}"
+    )
 
 
 def _render_plan_response(plan: Plan, name: str, path: Path) -> str:
