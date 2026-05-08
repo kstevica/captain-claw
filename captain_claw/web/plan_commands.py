@@ -15,11 +15,13 @@ from captain_claw.config import get_config
 from captain_claw.logging import get_logger
 from captain_claw.plan_mode import (
     DEFAULT_MAX_REVISIONS,
+    DEFAULT_PLAN_LEVEL,
     Plan,
     PlanExecutor,
     PlanGenerator,
     PlanReviser,
     PlanVerifier,
+    normalize_plan_level,
     orchestrate_expander_from_orchestrator,
 )
 from captain_claw.session_orchestrator import SessionOrchestrator, _scan_workspace_tree
@@ -51,7 +53,19 @@ async def handle_plan_command(server: "WebServer", request: str) -> str:
 
     workspace_tree = _safe_workspace_tree()
 
-    plan = await generator.generate(request, workspace_tree=workspace_tree)
+    # Resolve enrichment per the agent's current plan-mode level. Each level
+    # is cumulative; see ``captain_claw.plan_mode.PLAN_LEVELS``.
+    level = normalize_plan_level(getattr(server.agent, "plan_mode_level", DEFAULT_PLAN_LEVEL))
+    enrichment = await _build_enrichment(level, request)
+
+    plan = await generator.generate(
+        request,
+        workspace_tree=workspace_tree,
+        reflection_block=enrichment["reflection_block"],
+        insights_block=enrichment["insights_block"],
+        personality_block=enrichment["personality_block"],
+        system_prompt_name=enrichment["system_prompt_name"],
+    )
     if plan is None:
         return "Plan generation failed — see server logs for details."
 
@@ -78,6 +92,111 @@ def _safe_workspace_tree() -> str:
     except Exception as e:
         log.debug("Workspace scan for plan failed (non-fatal)", error=str(e))
         return ""
+
+
+# Number of insights pulled from the curated store at the "insightful" level.
+# Mirrors the per-turn budget the main agent uses in its system prompt — eight
+# is enough to surface preferences/decisions/deadlines without flooding the
+# planner with low-relevance facts.
+_PLAN_INSIGHTS_LIMIT = 8
+
+
+async def _build_enrichment(level: str, user_input: str) -> dict[str, str]:
+    """Resolve the four enrichment knobs for the given plan-mode level.
+
+    Returns a dict with keys ``reflection_block``, ``insights_block``,
+    ``personality_block`` and ``system_prompt_name`` — exactly what
+    ``PlanGenerator.generate`` expects. Each block is empty when the level
+    doesn't include it, and the keys are always present so the caller can
+    splat unconditionally.
+
+    Levels are cumulative:
+        plain      → all blocks empty, default planner template.
+        enriched   → reflection only.
+        insightful → reflection + insights.
+        complete   → reflection + insights + persona + planner template
+                     biased toward this agent's role.
+
+    Failures in any single layer (reflections dir missing, insights DB not
+    initialised, personality module raising) are downgraded to empty strings
+    so a misconfigured layer never blocks a plan from being generated.
+    """
+    out: dict[str, str] = {
+        "reflection_block": "",
+        "insights_block": "",
+        "personality_block": "",
+        "system_prompt_name": "plan_mode_system_prompt.md",
+    }
+
+    if level == "plain":
+        return out
+
+    # ── enriched / insightful / complete: reflection ──
+    try:
+        from captain_claw.reflections import (
+            load_latest_reflection,
+            reflection_to_prompt_block,
+        )
+        block = reflection_to_prompt_block(load_latest_reflection())
+        if block.strip():
+            out["reflection_block"] = block
+    except Exception as e:
+        log.debug("Plan reflection enrichment failed (non-fatal)", error=str(e))
+
+    if level == "enriched":
+        return out
+
+    # ── insightful / complete: top-N insights ──
+    try:
+        from captain_claw.insights import get_insights_manager
+        rows = await get_insights_manager().search(
+            user_input, limit=_PLAN_INSIGHTS_LIMIT,
+        )
+        out["insights_block"] = _format_insights_rows(rows)
+    except Exception as e:
+        log.debug("Plan insights enrichment failed (non-fatal)", error=str(e))
+
+    if level == "insightful":
+        return out
+
+    # ── complete: persona + cognitive-mode-aware template ──
+    try:
+        from captain_claw.personality import (
+            load_effective_personality,
+            personality_to_prompt_block,
+        )
+        persona = load_effective_personality()
+        block = personality_to_prompt_block(persona) if persona is not None else ""
+        if block.strip():
+            out["personality_block"] = (
+                "\nAgent persona (you are planning AS this agent):\n"
+                + block
+                + "\n"
+            )
+    except Exception as e:
+        log.debug("Plan persona enrichment failed (non-fatal)", error=str(e))
+
+    out["system_prompt_name"] = "plan_mode_complete_system_prompt.md"
+    return out
+
+
+def _format_insights_rows(rows: list[dict]) -> str:
+    """Render the top-N insights rows as a planner prompt block."""
+    if not rows:
+        return ""
+    lines: list[str] = [
+        "\nRelevant facts about the user (curated insight store; treat as authoritative):",
+    ]
+    for r in rows:
+        category = (r.get("category") or "fact").strip()
+        content = (r.get("content") or "").strip()
+        if not content:
+            continue
+        importance = r.get("importance") or 5
+        lines.append(f"- [{category}, importance {importance}] {content}")
+    if len(lines) == 1:
+        return ""
+    return "\n".join(lines) + "\n"
 
 
 def _plan_name(plan: Plan) -> str:

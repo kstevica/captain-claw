@@ -1,3 +1,6 @@
+{personality_block}
+{reflection_block}
+{insights_block}
 User request:
 {user_input}
 

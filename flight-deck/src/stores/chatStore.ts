@@ -66,8 +66,14 @@ async function serverLoadMessages(sessionId: string): Promise<ChatMessage[]> {
 interface PersistedPlanSlice {
   planState: PlanState | null
   planningEnabled: boolean
+  planLevel: string
   planCardCollapsed: boolean
 }
+
+// Valid plan-mode enrichment levels (cumulative: each adds context on top of
+// the previous). Mirrors PLAN_LEVELS in captain_claw/plan_mode.py.
+export const PLAN_LEVELS = ['plain', 'enriched', 'insightful', 'complete'] as const
+export type PlanLevel = (typeof PLAN_LEVELS)[number]
 
 function _planLSKey(containerId: string): string {
   return `fd.plan.${containerId}`
@@ -75,7 +81,7 @@ function _planLSKey(containerId: string): string {
 
 function savePlanSlice(containerId: string, slice: PersistedPlanSlice): void {
   try {
-    if (!slice.planState && !slice.planningEnabled) {
+    if (!slice.planState && !slice.planningEnabled && (!slice.planLevel || slice.planLevel === 'plain')) {
       // Nothing worth persisting — drop any stale entry.
       window.localStorage.removeItem(_planLSKey(containerId))
       return
@@ -220,6 +226,7 @@ interface ChatSession {
   llmTokPerSec: number   // real LLM generation speed (completion_tokens / llm_latency)
   // Planning mode
   planningEnabled: boolean   // optimistic mirror of agent.plan_mode_auto
+  planLevel: string          // optimistic mirror of agent.plan_mode_level
   planState: PlanState | null
   planCardCollapsed: boolean
 }
@@ -241,6 +248,7 @@ interface ChatStore {
   respondToApproval: (containerId: string, requestId: string, approved: boolean) => void
   // Plan-mode actions
   setPlanningEnabled: (containerId: string, enabled: boolean) => void
+  setPlanLevel: (containerId: string, level: PlanLevel) => void
   togglePlanCardCollapsed: (containerId: string) => void
   dismissPlan: (containerId: string) => void
 }
@@ -294,6 +302,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       _tokSamples: 0,
       llmTokPerSec: 0,
       planningEnabled: persisted?.planningEnabled ?? false,
+      planLevel: persisted?.planLevel ?? 'plain',
       planState: persisted?.planState ?? null,
       planCardCollapsed: persisted?.planCardCollapsed ?? false,
     }
@@ -895,6 +904,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       } else if (/auto-rout(?:e|ing)\s+disabled|auto-rout(?:e|ing):\s*off\b|currently\s+off\b/.test(content)) {
         updateSession(containerId, { planningEnabled: false })
       }
+      // Plan-mode level confirmations:
+      //   "Plan-mode level set to **<name>**."         (after `/planning level <name>`)
+      //   "Plan-mode level: **<name>**. ..."           (after bare `/planning level`)
+      //   "Plan-mode auto-routing: **on** (level: **<name>**). ..."
+      //                                                (after bare `/planning`)
+      // Match all three with one regex over markdown-stripped content.
+      const lvlMatch = content.match(/plan-mode\s+(?:level\s+set\s+to|level:|auto-rout(?:e|ing):[^()]*\(level:)\s*(plain|enriched|insightful|complete)\b/)
+      if (lvlMatch) {
+        updateSession(containerId, { planLevel: lvlMatch[1] })
+      }
     })
 
     // Token generation speed tracking from usage events
@@ -1013,6 +1032,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     session.ws.send(enabled ? '/planning on' : '/planning off')
   },
 
+  setPlanLevel: (containerId, level) => {
+    const session = get().sessions.get(containerId)
+    if (!session) return
+    // Optimistic update — confirmed/corrected by command_result handler.
+    updateSession(containerId, { planLevel: level })
+    session.ws.send(`/planning level ${level}`)
+  },
+
   togglePlanCardCollapsed: (containerId) => {
     const session = get().sessions.get(containerId)
     if (!session) return
@@ -1037,11 +1064,13 @@ function updateSession(containerId: string, patch: Partial<ChatSession>) {
     if (
       'planState' in patch ||
       'planningEnabled' in patch ||
+      'planLevel' in patch ||
       'planCardCollapsed' in patch
     ) {
       savePlanSlice(containerId, {
         planState: updated.planState,
         planningEnabled: updated.planningEnabled,
+        planLevel: updated.planLevel,
         planCardCollapsed: updated.planCardCollapsed,
       })
     }
@@ -1064,6 +1093,7 @@ function updatePlan(
     savePlanSlice(containerId, {
       planState: next,
       planningEnabled: updated.planningEnabled,
+      planLevel: updated.planLevel,
       planCardCollapsed: updated.planCardCollapsed,
     })
     return { sessions }

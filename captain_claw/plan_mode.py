@@ -45,6 +45,31 @@ _FAILED = "failed"
 
 DEFAULT_MAX_REVISIONS = 2
 
+# Plan-mode enrichment levels — cumulative.
+#
+#   plain      → today's behavior: planner sees only the user request +
+#                a workspace tree scan.
+#   enriched   → + the latest reflection block, so the plan honors the
+#                "what I learned about this user" personality layer.
+#   insightful → enriched + top-N matching insights (curated facts), so
+#                the plan can lean on known preferences/decisions/deadlines.
+#   complete   → insightful + the agent's persona block (cognitive-mode-
+#                aware), so the plan also reflects the agent's role bias
+#                (research / coding / writing / etc).
+#
+# Levels are strings rather than an Enum so the same value flows through
+# slash commands, websocket events, JSON storage and the FD UI unchanged.
+PLAN_LEVELS: tuple[str, ...] = ("plain", "enriched", "insightful", "complete")
+DEFAULT_PLAN_LEVEL = "plain"
+
+
+def normalize_plan_level(value: str | None) -> str:
+    """Coerce *value* to a known plan level, falling back to ``DEFAULT_PLAN_LEVEL``."""
+    if not value:
+        return DEFAULT_PLAN_LEVEL
+    v = str(value).strip().lower()
+    return v if v in PLAN_LEVELS else DEFAULT_PLAN_LEVEL
+
 
 @dataclass
 class Plan:
@@ -107,17 +132,32 @@ class PlanGenerator:
         user_input: str,
         *,
         workspace_tree: str = "",
+        reflection_block: str = "",
+        insights_block: str = "",
+        personality_block: str = "",
+        system_prompt_name: str = "plan_mode_system_prompt.md",
     ) -> Plan | None:
-        """Generate a plan for ``user_input``. Returns None on failure."""
+        """Generate a plan for ``user_input``. Returns None on failure.
+
+        The four optional ``*_block`` / ``system_prompt_name`` parameters are
+        the plan-level enrichment knobs — see :data:`PLAN_LEVELS`. The caller
+        (``handle_plan_command`` in ``web/plan_commands.py``) is responsible
+        for rendering each block from its source layer (reflections store,
+        insights DB, personality.py) and choosing the appropriate planner
+        template name. Empty strings collapse cleanly via ``_SafeFormatDict``.
+        """
         if not user_input or not user_input.strip():
             log.warning("PlanGenerator.generate called with empty user_input")
             return None
 
-        system_prompt = self._instructions.load("plan_mode_system_prompt.md")
+        system_prompt = self._instructions.load(system_prompt_name)
         user_prompt = self._instructions.render(
             "plan_mode_user_prompt.md",
             user_input=user_input,
             workspace_tree=workspace_tree or "",
+            reflection_block=reflection_block or "",
+            insights_block=insights_block or "",
+            personality_block=personality_block or "",
         )
         if not system_prompt or not user_prompt:
             log.error("Plan-mode prompts missing or empty")

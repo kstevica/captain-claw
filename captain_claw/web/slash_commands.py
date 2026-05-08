@@ -199,11 +199,40 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
             elif arg == "off":
                 await server.agent.set_plan_mode_auto(False)
                 result = "Plan-mode auto-routing **disabled**."
+            elif arg.startswith("level"):
+                from captain_claw.plan_mode import PLAN_LEVELS, normalize_plan_level
+
+                # Accept "level", "level <name>", or "level=<name>".
+                rest = arg[len("level"):].lstrip(" =").strip()
+                if not rest:
+                    current = getattr(server.agent, "plan_mode_level", "plain")
+                    options = ", ".join(f"`{lvl}`" for lvl in PLAN_LEVELS)
+                    result = (
+                        f"Plan-mode level: **{current}**. "
+                        f"Use `/planning level <name>` where name is one of {options}. "
+                        "Levels are cumulative: plain (no enrichment) → enriched "
+                        "(+ latest reflection) → insightful (+ top insights) → "
+                        "complete (+ persona-aware planner template)."
+                    )
+                else:
+                    requested = rest.split()[0]
+                    normalized = normalize_plan_level(requested)
+                    if normalized != requested.lower():
+                        options = ", ".join(f"`{lvl}`" for lvl in PLAN_LEVELS)
+                        result = (
+                            f"Unknown plan level `{requested}`. "
+                            f"Valid levels: {options}."
+                        )
+                    else:
+                        applied = await server.agent.set_plan_mode_level(normalized)
+                        result = f"Plan-mode level set to **{applied}**."
             else:
                 state = "on" if getattr(server.agent, "plan_mode_auto", False) else "off"
+                level = getattr(server.agent, "plan_mode_level", "plain")
                 result = (
-                    f"Plan-mode auto-routing: **{state}**. "
-                    "Use `/planning on` or `/planning off`. "
+                    f"Plan-mode auto-routing: **{state}** (level: **{level}**). "
+                    "Use `/planning on` or `/planning off` to toggle, or "
+                    "`/planning level <name>` to change enrichment. "
                     "(Pipeline planner+critic mode is set via `/pipeline contracts`.)"
                 )
 

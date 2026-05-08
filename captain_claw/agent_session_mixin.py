@@ -706,9 +706,12 @@ class AgentSessionMixin:
 
     def _sync_runtime_flags_from_session(self) -> None:
         """Load runtime feature flags from active session metadata."""
+        from captain_claw.plan_mode import DEFAULT_PLAN_LEVEL, normalize_plan_level
+
         cfg = get_config()
         pipeline_mode = "loop"
         plan_mode_auto = False
+        plan_mode_level = DEFAULT_PLAN_LEVEL
         monitor_trace_llm = bool(getattr(cfg.ui, "monitor_trace_llm", False))
         monitor_trace_pipeline = bool(getattr(cfg.ui, "monitor_trace_pipeline", True))
         llm_session_logging = bool(getattr(cfg.logging, "llm_session_logging", False))
@@ -722,6 +725,9 @@ class AgentSessionMixin:
                     # Backward compatibility with older session metadata.
                     pipeline_mode = "contracts"
                 plan_mode_auto = bool(planning_meta.get("plan_mode_auto", False))
+                plan_mode_level = normalize_plan_level(
+                    planning_meta.get("plan_mode_level")
+                )
             monitor_meta = self.session.metadata.get("monitor")
             if isinstance(monitor_meta, dict) and "trace_llm" in monitor_meta:
                 monitor_trace_llm = bool(monitor_meta.get("trace_llm", False))
@@ -732,6 +738,7 @@ class AgentSessionMixin:
         self.pipeline_mode = pipeline_mode
         self.planning_enabled = self.pipeline_mode == "contracts"
         self.plan_mode_auto = plan_mode_auto
+        self.plan_mode_level = plan_mode_level
         self.monitor_trace_llm = monitor_trace_llm
         self.monitor_trace_pipeline = monitor_trace_pipeline
         self.llm_session_logging = llm_session_logging
@@ -786,6 +793,26 @@ class AgentSessionMixin:
         planning_meta["updated_at"] = datetime.now(UTC).isoformat()
         if persist:
             await self.session_manager.save_session(self.session)
+
+    async def set_plan_mode_level(self, level: str, persist: bool = True) -> str:
+        """Set plan-mode enrichment level (plain|enriched|insightful|complete).
+
+        Returns the normalized level actually applied. Unknown values are
+        coerced to ``DEFAULT_PLAN_LEVEL`` (``plain``) so the caller never has
+        to validate before calling.
+        """
+        from captain_claw.plan_mode import normalize_plan_level
+
+        normalized = normalize_plan_level(level)
+        self.plan_mode_level = normalized
+        if not self.session:
+            return normalized
+        planning_meta = self.session.metadata.setdefault("planning", {})
+        planning_meta["plan_mode_level"] = normalized
+        planning_meta["updated_at"] = datetime.now(UTC).isoformat()
+        if persist:
+            await self.session_manager.save_session(self.session)
+        return normalized
 
     async def set_monitor_trace_llm(self, enabled: bool, persist: bool = True) -> None:
         """Enable or disable full intermediate LLM tracing in monitor history."""

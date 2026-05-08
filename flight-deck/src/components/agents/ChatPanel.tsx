@@ -27,7 +27,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
-import { useChatStore } from '../../stores/chatStore'
+import { useChatStore, PLAN_LEVELS, type PlanLevel } from '../../stores/chatStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useContainerStore } from '../../stores/containerStore'
 import { useProcessStore } from '../../stores/processStore'
@@ -66,12 +66,27 @@ export function ChatPanel() {
     sendMessage,
     cancelTask,
     setPlanningEnabled,
+    setPlanLevel,
   } = useChatStore()
   const localAgents = useLocalAgentStore((s) => s.agents)
   const containers = useContainerStore((s) => s.containers)
   const processes = useProcessStore((s) => s.processes)
   const [showSendContext, setShowSendContext] = useState(false)
   const [showTracePanel, setShowTracePanel] = useState(false)
+  const [planLevelMenuOpen, setPlanLevelMenuOpen] = useState(false)
+  const planLevelMenuRef = useRef<HTMLDivElement>(null)
+
+  // Click-away handler for the plan-level dropdown.
+  useEffect(() => {
+    if (!planLevelMenuOpen) return
+    function onDocClick(e: MouseEvent) {
+      if (planLevelMenuRef.current && !planLevelMenuRef.current.contains(e.target as Node)) {
+        setPlanLevelMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [planLevelMenuOpen])
   const activeId = activeChatId || ''
   const traceSpanCount = useTraceStore((s) => selectSpanCount(s, activeId))
 
@@ -127,31 +142,95 @@ export function ChatPanel() {
         >
           <Forward className="h-4 w-4" />
         </button>
-        <button
-          onClick={() => setPlanningEnabled(session.containerId, !session.planningEnabled)}
-          title={
-            session.planningEnabled
-              ? 'Planning mode ON — chats auto-route through /plan + /plan-execute. Click to disable.'
-              : 'Planning mode OFF. Click to auto-route chats through comprehensive planning.'
-          }
-          className={`relative mr-1 flex items-center gap-1 rounded px-1.5 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors ${
-            session.planningEnabled
-              ? 'bg-violet-500 text-white shadow-sm shadow-violet-500/40 ring-1 ring-violet-300/60 hover:bg-violet-400'
-              : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
-          }`}
-        >
-          <ListChecks className="h-4 w-4" />
-          {/* Compact ON/OFF label so the toggle state is unambiguous at a
-              glance — the previous bg-violet-600/20 tint was easy to miss
-              and led to repeat-clicks (each emits a /planning command,
-              spamming the chat with duplicate confirmations). */}
-          <span className="leading-none">
-            {session.planningEnabled ? 'ON' : 'OFF'}
-          </span>
-          {session.planState && session.planState.status === 'running' && (
-            <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-emerald-400 ring-2 ring-zinc-900" />
+        {/* Combined plan toggle + level selector. The button shows the current
+            state ("OFF" when planning auto-routing is disabled, otherwise the
+            level abbreviation) and opens a 5-row dropdown: Off + the four
+            enrichment levels. Picking a level enables planning AND sets the
+            level in one click; picking Off disables auto-routing while
+            preserving the previously-chosen level. */}
+        <div className="relative mr-1" ref={planLevelMenuRef}>
+          <button
+            onClick={() => setPlanLevelMenuOpen((o) => !o)}
+            title={
+              session.planningEnabled
+                ? `Planning ON (${session.planLevel}). Click to change level or turn off.`
+                : 'Planning OFF. Click to choose an enrichment level and turn on.'
+            }
+            className={`relative flex items-center gap-1 rounded px-1.5 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors ${
+              session.planningEnabled
+                ? 'bg-violet-500 text-white shadow-sm shadow-violet-500/40 ring-1 ring-violet-300/60 hover:bg-violet-400'
+                : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
+            }`}
+          >
+            <ListChecks className="h-4 w-4" />
+            <span className="leading-none">
+              {session.planningEnabled
+                ? (session.planLevel || 'plain').slice(0, 3)
+                : 'OFF'}
+            </span>
+            <ChevronDown className="h-3 w-3 opacity-70" />
+            {session.planState && session.planState.status === 'running' && (
+              <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-emerald-400 ring-2 ring-zinc-900" />
+            )}
+          </button>
+          {planLevelMenuOpen && (
+            <div className="absolute right-0 top-full z-50 mt-1 w-60 overflow-hidden rounded-md border border-zinc-700 bg-zinc-900 shadow-lg">
+              <button
+                onClick={() => {
+                  // Always send /planning off, even if FD thinks it's already
+                  // off — same staleness concern as the level picker below.
+                  setPlanningEnabled(session.containerId, false)
+                  setPlanLevelMenuOpen(false)
+                }}
+                className={`flex w-full flex-col items-start gap-0.5 border-b border-zinc-800 px-3 py-2 text-left text-xs transition-colors ${
+                  !session.planningEnabled
+                    ? 'bg-zinc-800/80 text-zinc-200'
+                    : 'text-zinc-300 hover:bg-zinc-800'
+                }`}
+              >
+                <span className="font-semibold uppercase tracking-wide">Off</span>
+                <span className="text-[10px] text-zinc-400">Disable plan auto-routing</span>
+              </button>
+              {PLAN_LEVELS.map((lvl) => {
+                const desc: Record<PlanLevel, string> = {
+                  plain: 'No enrichment (default)',
+                  enriched: '+ latest reflection',
+                  insightful: '+ top user insights',
+                  complete: '+ persona-aware planner',
+                }
+                const active = session.planningEnabled && session.planLevel === lvl
+                return (
+                  <button
+                    key={lvl}
+                    onClick={() => {
+                      // Always send both commands unconditionally. Skipping
+                      // them when the FD mirror "looks right" lets a stale
+                      // mirror (e.g., after a ws drop or a missed command_result)
+                      // hide the fact that the agent's plan_mode_auto is still
+                      // off — the user picks a level, the UI shows it active,
+                      // but auto-routing never engages and they have to type
+                      // /plan manually. Both commands are idempotent so the
+                      // double-send when state already matches is harmless.
+                      // Set level first so the /planning on confirmation
+                      // already reflects the new level.
+                      setPlanLevel(session.containerId, lvl)
+                      setPlanningEnabled(session.containerId, true)
+                      setPlanLevelMenuOpen(false)
+                    }}
+                    className={`flex w-full flex-col items-start gap-0.5 border-b border-zinc-800 px-3 py-2 text-left text-xs last:border-b-0 transition-colors ${
+                      active
+                        ? 'bg-violet-500/20 text-violet-200'
+                        : 'text-zinc-300 hover:bg-zinc-800'
+                    }`}
+                  >
+                    <span className="font-semibold uppercase tracking-wide">{lvl}</span>
+                    <span className="text-[10px] text-zinc-400">{desc[lvl]}</span>
+                  </button>
+                )
+              })}
+            </div>
           )}
-        </button>
+        </div>
         <button
           onClick={() => setShowTracePanel(!showTracePanel)}
           title={showTracePanel ? 'Hide traces' : 'Show orchestrator traces'}
