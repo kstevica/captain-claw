@@ -13,17 +13,22 @@
 
 An open-source AI agent with multi-agent orchestration, autonomous cognitive systems, and a full management dashboard. Runs locally, supports every major LLM provider, and ships with 44 built-in tools.
 
-## What's New in 0.4.24
+## What's New in 0.4.25
 
-**Centralised MCP — Phase 2.** The four "known limitations" 0.4.23 flagged are now closed. Flight Deck's MCP control plane is feature-complete enough to drive the full ecosystem of MCP servers across a fleet without per-agent config.
+**Plan mode.** Captain Claw can now plan, execute, verify, and self-revise multi-step work end-to-end. A single user request becomes a reviewable DAG of executable steps, runs under the existing orchestrator, and gates each step through per-step acceptance criteria — with bounded auto-revision when verification fails. Plan mode is wired through Flight Deck's chat as a first-class peer to free-form chat.
 
-- **stdio transport** — Add MCP servers that ship as `npx` / `uvx` child processes (Anthropic's filesystem, sqlite, github, postgres, etc.) directly from the Flight Deck admin UI. New `command` / `args` / `env` fields on each server record. The child is spawned lazily, auto-respawned if it dies, and torn down with SIGTERM (2 s grace) then SIGKILL on close. Concurrent JSON-RPC requests on the same subprocess are correlated by id over a single background reader task.
-- **Per-agent allowlists** — Each server carries an `allowed_agents: list[str]`. Empty list = fleet-wide allow (the Phase 1 behaviour). Once any slug is listed, only those agents can see, list, or call the server. Disallowed agents get HTTP 404 — the same shape as "doesn't exist," so a restricted server's existence is opaque.
-- **Hot tool-list reload** — A new `/fd/mcp/agent/events` SSE endpoint streams `server_added` / `server_updated` / `server_removed` / `tools_changed` events. Captain-claw agents subscribe on boot and re-register MCP proxy tools the moment you change a server in the admin UI. Reconnects forever with exponential backoff capped at 30 s.
-- **Streaming tool calls** — A new `/fd/mcp/<name>/call_stream` endpoint runs the upstream call as a background task and emits `progress` / `result` / `error` SSE frames as they arrive. Cancels the upstream call cleanly when the client disconnects.
-- **Transport abstraction** — A new `Transport` ABC factors HTTP and stdio behind one interface, so the manager is now wire-protocol-agnostic.
+- **`/plan <request>`** — `PlanGenerator` produces a 3-8 step plan with concrete `description` + measurable `acceptance_criteria` for every step. Persisted as a workflow JSON in `workspace/workflows/`, so it round-trips with the existing workflow tools. Deliverable steps are now required to name their output file (e.g. `saved/tmp/<slug>.md`) so the artefact never gets buried in the run transcript.
+- **`/plan-execute`** — `PlanExecutor` runs the plan through the DAG runner, emits live `plan_*` events, and short-circuits the orchestrator's redundant final synthesis pass (`skip_synthesize=True`) — the plan card itself is the deliverable surface.
+- **Two-stage verification gate** — `PlanVerifier` runs optional JSON-schema validation first (fast, deterministic), then an LLM judge against `acceptance_criteria`. Failures stop the walk and surface the verifier's notes in the plan card.
+- **Bounded auto-revision** — `PlanReviser` rewrites the failing step's description (and optionally tightens its acceptance criteria), and `PlanExecutor` resets the failed step + transitive dependents to PENDING before re-running. Default budget: 2 revisions per step.
+- **Orchestrate-kind fan-out** — `step_kind: "orchestrate"` steps are expanded in place via `SessionOrchestrator._decompose`. Sub-tasks run in parallel; the original step becomes an atomic join with the sub-task IDs as deps.
+- **Inline plan card in chat** — Live per-step status, verification chips, revision badges with rationale popovers, collapsible long plans, **persisted to `localStorage`** so a Flight Deck refresh mid-plan repaints the card identically.
+- **`/planning on` toggle** — A bold violet `ON`/`OFF` pill in the chat composer. With it on, every plain-text message you send is auto-routed through `/plan` + `/plan-execute` — no slash commands needed. The pill mirrors the agent's authoritative state both ways and pulses while a plan runs.
+- **Connection resilience** — WebSocket plumbing hardened end-to-end for the long executor + verifier + reviser cycles: agent ⇄ FD `ping_interval=20` keepalive, browser auto-reconnect with exponential backoff, server-side `_send` and receive loop wrapped against `ClientConnectionResetError` so a refresh mid-step doesn't fill the agent log with tracebacks.
+- **Research-aware iteration budget** — `_estimate_task_iterations` learned the shape of multi-source research steps (`reputable sources`, `at least N sources`, `web_search`, `each source` patterns); ceiling raised from 25 → 40 so `gather_sources` stops exhausting its budget mid-research.
+- **Workflow run transcripts viewable** — `workspace/workflows/` is now in the file-preview allow-list, so the Markdown transcripts auto-saved by `_save_run_output` open from the chat without 403.
 
-Backward compatible — existing HTTP-only configurations from 0.4.23 keep working unchanged. See `RELEASE_NOTES_0.4.24.md` for the full per-phase breakdown.
+Backward compatible — existing 0.4.24 configurations keep working unchanged and plan mode stays opt-in even when the toggle is off. See `RELEASE_NOTES_0.4.25.md` for the full per-step breakdown.
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the full changelog.
 

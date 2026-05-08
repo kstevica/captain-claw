@@ -79,6 +79,7 @@ For a quick overview and installation guide, see [README.md](README.md).
 - [Context Compaction](#context-compaction)
 - [Execution Queue](#execution-queue-1)
 - [Orchestrator / DAG Mode](#orchestrator--dag-mode)
+- [Plan Mode](#plan-mode)
 - [BotPort (Agent-to-Agent)](#botport)
 - [Computer](#computer)
   - [Layout](#layout-1)
@@ -3067,6 +3068,65 @@ orchestrator:
   worker_timeout_seconds: 300.0
   worker_max_retries: 2
 ```
+
+---
+
+## Plan Mode
+
+Plan mode (introduced in 0.4.25) layers a reviewable planner, per-step verifier, and bounded auto-revision loop on top of the orchestrator. A single user request becomes an ordered DAG of executable steps, runs through the existing worker pool, and is gated through measurable acceptance criteria — with automatic re-attempts when verification fails.
+
+### Slash commands
+
+- `/plan <request>` — generate a plan and persist it as a workflow JSON in `workspace/workflows/`. Renders a Markdown preview in the chat panel. Does **not** execute.
+- `/plan-execute` — run the most recently generated plan. Streams `plan_*` events to the UI as steps progress / verify / get revised. Skips the orchestrator's final synthesis pass (the plan card is the deliverable surface).
+- `/planning on` — enable auto-routing. Every plain-text message you send afterwards is auto-routed through `/plan` + `/plan-execute` — no slash commands needed.
+- `/planning off` — back to free-form chat. The slash commands above stay available.
+- `/planning` (no arg) — report current state.
+
+### Pipeline stages
+
+1. **`PlanGenerator`** asks the configured agent model for a 3-8 step plan with concrete `description` and one-sentence measurable `acceptance_criteria` per step. The system prompt requires deliverable-producing steps (drafting, writing, summarising, reporting, generating documents) to declare an explicit output filename — preferably `saved/tmp/<slug>.md` — in both the description and the acceptance criteria, so the artefact is never lost inside the run transcript.
+2. **`PlanExecutor`** loads the plan into the orchestrator and calls `execute(skip_synthesize=True)`. The DAG runner already serialises sequential plans because each step declares the previous one as `depends_on`. Run-time failures (worker error / timeout) stop the plan without invoking the reviser — those need orchestrator-level recovery.
+3. **`PlanVerifier`** walks completed steps in topological order:
+   - If `output_schema` is set, fast deterministic JSON-schema validation runs first.
+   - Otherwise (or after schema passes), an LLM judge evaluates the step's output against `acceptance_criteria` and returns `{passed, notes}`.
+   - The first verification failure stops the walk and surfaces the verifier's notes.
+4. **`PlanReviser`** is invoked when verification fails. It sees the failed step's title/description/criteria, the truncated output (8 KB) and the verifier's notes, and returns a sharper `revised_description` (and optionally tighter `revised_acceptance_criteria`). The executor swaps the description in place, increments `revision_count`, and resets the failed step plus all transitive dependents to PENDING so only what's affected re-runs.
+5. **Bounded loop.** `DEFAULT_MAX_REVISIONS = 2` (one initial run + up to two retry cycles). Module constant on `captain_claw.plan_mode`.
+
+### Step kinds
+
+- **`atomic`** (default) — runs in the main session, sequentially relative to its `depends_on`.
+- **`orchestrate`** — the planner expects fan-out. `PlanExecutor._expand_orchestrate_steps` calls the orchestrator's decomposer to turn the parent into N parallel sub-tasks plus an atomic join step that synthesises their outputs. Sub-task IDs are namespaced (`<parent_id>__<sub_id>`) so two orchestrate steps never collide.
+- **`verify`** / **`revise`** — reserved for future explicit verifier/reviser steps inside a plan.
+
+### Plan card in Flight Deck
+
+The chat panel renders a live plan card inline:
+
+- Per-step status chips (`pending` / `running` / `completed` / `failed`) and verification chips (`verified` / `revised` / `verification failed`).
+- Live progress driven by the `plan_execution_started`, `plan_step_verified`, `plan_step_revised`, `plan_execution_verified`, `plan_execution_completed` events.
+- Revision badge with rationale + previous failure notes on hover.
+- **Persistent across refresh** — plan state, planning toggle, and card-collapsed flag are persisted to `localStorage` keyed by `containerId` (`fd.plan.${id}`).
+- Collapsible long plans (one-line summary chip, click to expand).
+
+### Persistence
+
+Generated plans are saved as ordinary workflow JSON under `workspace/workflows/`. They round-trip through `/api/orchestrator/workflows/load`, so any tool that consumes Captain Claw workflows (CLI runner, cron dispatcher, etc.) can re-execute a plan unchanged.
+
+The per-run Markdown transcript (`<workflow>-output-<timestamp>.md`) is auto-saved to the same directory by `_save_run_output`, and `workspace/workflows/` is on the file-preview allow-list so it opens directly from the FD file panel.
+
+### WebSocket resilience
+
+Plan runs are long (executor + verifier + reviser cycles), so the WebSocket plumbing is hardened end-to-end:
+
+- Agent ⇄ Flight Deck proxy upstream uses `ping_interval=20` / `ping_timeout=10` keepalives.
+- The browser client auto-reconnects with exponential backoff (500 ms → 15 s cap), tracks `_shouldReconnect` so explicit disconnects don't bounce, and surfaces a transient banner via the `_reconnecting` event.
+- Server-side `_send` and the agent's WebSocket receive loop both wrap `(ConnectionResetError, ConnectionError, ClientConnectionResetError)` so a browser refresh mid-step doesn't fill the agent log with tracebacks.
+
+### Worker iteration budget
+
+`SessionOrchestrator._estimate_task_iterations` is research-aware: phrases like "reputable / credible / authoritative / reliable / primary sources", "research / gather / collect … sources", "at least N sources", `web_search` mentioned as a tool, and `each <thing>` patterns add weight. The hard ceiling is **40** (raised from 25 in 0.4.25) so multi-source research steps stop exhausting their budget mid-`gather_sources`.
 
 ---
 
