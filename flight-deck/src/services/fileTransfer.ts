@@ -53,6 +53,24 @@ export async function listAgentFiles(host: string, port: number, auth: string): 
   return resp.json()
 }
 
+/** List files modified at-or-after the given timestamp (epoch ms). Used by
+ *  the plan-monitor Files tab to surface files written during a plan run. */
+export async function listAgentFilesSince(
+  host: string,
+  port: number,
+  auth: string,
+  sinceMs: number,
+): Promise<AgentFile[]> {
+  const sinceSec = Math.floor(sinceMs / 1000)
+  const qs = new URLSearchParams({ since: String(sinceSec) })
+  if (auth) qs.set('token', auth)
+  const resp = await fdFileFetch(
+    `${BASE}/agent-files/${encodeURIComponent(host)}/${port}?${qs}`,
+  )
+  if (!resp.ok) throw new Error(`Failed to list files: ${resp.status}`)
+  return resp.json()
+}
+
 export async function transferFile(
   src: AgentEndpoint,
   dst: AgentEndpoint,

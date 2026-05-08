@@ -2485,13 +2485,25 @@ async def agent_rephrase(
 
 
 @app.get("/fd/agent-files/{host}/{port}")
-async def agent_files(host: str, port: int, token: str = "", request: Request = None, user: dict | None = _required_user_dep):
-    """List files from a CC agent (proxied to avoid CORS), merged with workspace scan."""
+async def agent_files(host: str, port: int, token: str = "", since: str = "", request: Request = None, user: dict | None = _required_user_dep):
+    """List files from a CC agent (proxied to avoid CORS), merged with workspace scan.
+
+    The optional ``since=<unix_seconds>`` query param is forwarded to the
+    agent's ``/api/files`` endpoint, which filters by mtime. Used by the
+    plan-monitor "Files" tab to show files touched during a plan run; the
+    workspace-scan merge is skipped when ``since`` is set so unrelated old
+    files don't leak through.
+    """
     import httpx
     registered: list[dict] = []
     # Auto-resolve auth token if the caller didn't provide one
     auth = token or _resolve_agent_auth(port)
-    params = f"?token={auth}" if auth else ""
+    qparts = []
+    if auth:
+        qparts.append(f"token={auth}")
+    if since:
+        qparts.append(f"since={since}")
+    params = ("?" + "&".join(qparts)) if qparts else ""
     url = f"http://{host}:{port}/api/files{params}"
     agent_reachable = False
     try:
@@ -2520,6 +2532,12 @@ async def agent_files(host: str, port: int, token: str = "", request: Request = 
     if not workspace_files:
         if not registered and not agent_reachable:
             raise HTTPException(502, "Cannot connect to agent")
+        return registered
+
+    # When the caller filtered by `since`, the agent already applied the
+    # mtime filter to its own registry. Merging in unfiltered workspace
+    # files would defeat that filter, so we return the agent's view as-is.
+    if since:
         return registered
 
     # Merge: use registered files as base, add workspace files not already listed

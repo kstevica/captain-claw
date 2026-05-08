@@ -9,6 +9,28 @@ from typing import Any
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 
+# Heuristic markers that indicate a "status confirmation" message rather
+# than substantive deliverable content. Used by the deliverable-protection
+# guard below — leading markdown decoration (#, *, >, -, ✅) is stripped,
+# then we look for any of the canonical "I'm done" phrasings.
+_STATUS_CONFIRMATION_PATTERNS = re.compile(
+    r"^[\s#*>\-]*(?:✅|✓|☑)?\s*(?:#+\s*)?"
+    r"(?:"
+    r"task\s+complete"
+    r"|task\s+finished"
+    r"|task\s+done"
+    r"|task\s+accomplished"
+    r"|task\s+successful"
+    r"|completed\s+successfully"
+    r"|done[\s\.\!\:]"
+    r"|i(?:'ve|\s+have)\s+(?:successfully\s+)?(?:saved|written|created|finished|completed|synthes)"
+    r"|i(?:'ll|\s+will)\s+now\s+confirm"
+    r"|here(?:'s|\s+is)\s+(?:a\s+)?(?:summary|confirmation)"
+    r"|summary\s+of\s+(?:what|the\s+work|completion)"
+    r")",
+    re.IGNORECASE,
+)
+
 # Late-import guard: FileRegistry is imported inside execute() to avoid
 # circular imports when the module is loaded before the registry module.
 
@@ -175,11 +197,51 @@ class WriteTool(Tool):
 
             # Detect overwrite — track pre-existing file size so we can
             # warn the LLM that it's overwriting (and suggest edit instead).
+            #
+            # Deliverable-protection guard: when the new content is much
+            # shorter than what's already on disk AND looks like a status
+            # confirmation ("Task Complete ✅", "Done!", "I've successfully
+            # saved...", etc.), refuse the write. This catches the failure
+            # mode where an LLM correctly saves a deliverable in one tool
+            # call, then makes a second write_file call to "narrate" the
+            # completion — destroying the actual deliverable.
             _overwrite_info: str | None = None
             if not append and file_path.exists():
                 try:
                     _prev_size = file_path.stat().st_size
                     _prev_lines = file_path.read_text(encoding="utf-8", errors="replace").count("\n") + 1
+                    new_size = len(content.encode("utf-8"))
+                    # Only fire on substantive shrinks (50%+ reduction) and
+                    # only when the previous file was meaningful (>= 1 KB).
+                    # The pattern check confines us to obvious confirmation
+                    # text — refinement rewrites that happen to be shorter
+                    # do NOT match.
+                    if (
+                        _prev_size >= 1024
+                        and new_size < _prev_size // 2
+                        and _STATUS_CONFIRMATION_PATTERNS.match(content[:160] or "")
+                    ):
+                        log.warning(
+                            "WriteTool refused deliverable overwrite",
+                            path=str(file_path),
+                            prev_size=_prev_size,
+                            new_size=new_size,
+                        )
+                        return ToolResult(
+                            success=False,
+                            content=(
+                                f"❌ Refused to overwrite {path}: the existing "
+                                f"file is {_prev_size} bytes (your new content "
+                                f"is only {new_size} bytes and starts with a "
+                                f"completion-confirmation phrase). The file you "
+                                f"already wrote IS your deliverable — narrate "
+                                f"completion in your text response, NOT by "
+                                f"writing back to the same file. If you really "
+                                f"need to revise, use the edit_file tool for "
+                                f"targeted changes."
+                            ),
+                            error="deliverable_overwrite_refused",
+                        )
                     _overwrite_info = (
                         f"⚠️ Overwrote existing file (was {_prev_lines} lines, "
                         f"{_prev_size} bytes). Consider using the edit tool "

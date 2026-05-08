@@ -187,17 +187,28 @@ async def list_files(server: WebServer, request: web.Request) -> web.Response:
     """GET /api/files — list all registered files with metadata.
 
     Public users are transparently scoped to their own session.
+
+    Optional ``?since=<unix_seconds>`` filter: only return files whose mtime
+    is at-or-after the given timestamp. Used by the plan-monitor "Files" tab
+    to show files created or touched during a plan run.
     """
     from captain_claw.web.public_auth import get_request_session_id
     is_public, pub_session_id = get_request_session_id(request)
     if is_public:
         if not pub_session_id:
             return web.json_response([])
-        return web.json_response(
-            await _collect_session_files(server, pub_session_id)
-        )
+        files = await _collect_session_files(server, pub_session_id)
+    else:
+        files = await _collect_files(server)
 
-    files = await _collect_files(server)
+    since_raw = request.query.get("since", "").strip()
+    if since_raw:
+        try:
+            since_ts = float(since_raw) - 1.0  # absorb mtime/clock skew
+            files = [f for f in files if float(f.get("modified") or 0) >= since_ts]
+        except (TypeError, ValueError):
+            pass
+
     return web.json_response(files)
 
 
@@ -304,7 +315,12 @@ async def _collect_session_files(
 
 
 async def list_session_files(server: WebServer, request: web.Request) -> web.Response:
-    """GET /api/files/session/{session_id} — list files for a specific session."""
+    """GET /api/files/session/{session_id} — list files for a specific session.
+
+    Optional ``?since=<unix_seconds>`` filter: only return files whose mtime
+    is at-or-after the given timestamp. Used by the plan-monitor "Files" tab
+    to show files that were created or touched during the current plan run.
+    """
     session_id = request.match_info.get("session_id", "").strip()
     if not session_id:
         return web.json_response({"error": "Missing session_id"}, status=400)
@@ -319,6 +335,18 @@ async def list_session_files(server: WebServer, request: web.Request) -> web.Res
             )
 
     files = await _collect_session_files(server, session_id)
+
+    since_raw = request.query.get("since", "").strip()
+    if since_raw:
+        try:
+            since_ts = float(since_raw)
+            # Round down by one second to absorb mtime/clock skew between the
+            # FD client (Date.now) and the agent's filesystem.
+            since_ts -= 1.0
+            files = [f for f in files if float(f.get("modified") or 0) >= since_ts]
+        except (TypeError, ValueError):
+            pass
+
     return web.json_response(files)
 
 

@@ -241,6 +241,7 @@ async def handle_plan_execute_command(server: "WebServer", arg: str) -> str:
         expander=expander,
         reviser=reviser,
         max_revisions=DEFAULT_MAX_REVISIONS,
+        cancel_event=getattr(server.agent, "cancel_event", None) if server.agent else None,
     )
     outcome = await executor.run()
 

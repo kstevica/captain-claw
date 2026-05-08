@@ -505,6 +505,7 @@ class PlanExecutor:
         expander: "Callable[[OrchestratorTask], Awaitable[list[OrchestratorTask]]] | None" = None,
         reviser: PlanReviser | None = None,
         max_revisions: int = DEFAULT_MAX_REVISIONS,
+        cancel_event: asyncio.Event | None = None,
     ):
         self._orchestrator = orchestrator
         self._broadcast = broadcast
@@ -516,6 +517,29 @@ class PlanExecutor:
         self._expander = expander
         self._reviser = reviser
         self._max_revisions = max(0, int(max_revisions))
+        # Cancellation support: the worker (agent_orchestration_mixin) reads
+        # and CLEARS this event mid-turn, so PlanExecutor cannot poll it
+        # directly between cycles. Instead, a watcher task awaits the event
+        # once and flips ``_cancel_observed``; that flag stays sticky for the
+        # remainder of the run.
+        self._cancel_event = cancel_event
+        self._cancel_observed = False
+
+    async def _watch_cancel(self, ev: asyncio.Event) -> None:
+        """Sticky observer for the agent cancel_event.
+
+        The orchestration worker reads ``cancel_event`` and CLEARS it once it
+        sees the signal (``agent_orchestration_mixin`` line ~838). That means a
+        plain ``ev.is_set()`` check between cycles is racy: the worker may
+        already have consumed the signal. Awaiting ``ev.wait()`` returns once
+        the event has *ever* been set, so the watcher latches the observation
+        into ``self._cancel_observed`` for the rest of the run.
+        """
+        try:
+            await ev.wait()
+            self._cancel_observed = True
+        except asyncio.CancelledError:
+            pass
 
     async def run(self) -> PlanExecutionResult:
         graph: TaskGraph | None = getattr(self._orchestrator, "_graph", None)
@@ -527,6 +551,55 @@ class PlanExecutor:
                 error="No plan loaded. Run /plan first.",
             )
 
+        # Spin up the cancel watcher (if a cancel_event was supplied) before
+        # any potentially long-running step.
+        watcher_task: asyncio.Task[None] | None = None
+        if self._cancel_event is not None:
+            # Reset state on each run so a stale observation from a prior
+            # plan can't pre-cancel a fresh one.
+            self._cancel_observed = False
+            if self._cancel_event.is_set():
+                # Stale signal from a previous turn — drop it.
+                self._cancel_event.clear()
+            watcher_task = asyncio.create_task(
+                self._watch_cancel(self._cancel_event)
+            )
+
+        try:
+            return await self._run_inner(graph)
+        finally:
+            if watcher_task is not None and not watcher_task.done():
+                watcher_task.cancel()
+                try:
+                    await watcher_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+    def _cancelled_result(
+        self,
+        graph: TaskGraph,
+        revisions: list[dict[str, Any]],
+        last_output: str,
+    ) -> PlanExecutionResult:
+        """Build the result + emit the completion event for a cancelled run."""
+        completed = [
+            tid for tid, t in graph.tasks.items() if t.status == COMPLETED
+        ]
+        self._emit("plan_execution_completed", {
+            "completed": completed,
+            "verified": [],
+            "cancelled": True,
+            "has_failures": False,
+        })
+        return PlanExecutionResult(
+            ok=False,
+            final_output=last_output,
+            completed_steps=completed,
+            error="Plan execution cancelled by user.",
+            revisions=revisions,
+        )
+
+    async def _run_inner(self, graph: TaskGraph) -> PlanExecutionResult:
         if self._expander is not None:
             try:
                 expanded = await self._expand_orchestrate_steps(graph)
@@ -572,6 +645,10 @@ class PlanExecutor:
         # The cycle budget is `max_revisions + 1`: one initial run plus up to
         # ``max_revisions`` retry cycles after revision proposals.
         for _cycle in range(self._max_revisions + 1):
+            # Check before kicking off another (potentially long) graph run.
+            if self._cancel_observed:
+                return self._cancelled_result(graph, revisions, last_output)
+
             try:
                 # skip_synthesize: plan-mode owns its own verification +
                 # per-step result rendering, so the orchestrator's final
@@ -582,6 +659,11 @@ class PlanExecutor:
             except Exception as e:
                 log.error("Plan execution raised", error=str(e),
                           error_type=type(e).__name__)
+                # Cancellation usually surfaces here as the worker bails out
+                # of its iteration loop. Convert to a clean cancel result so
+                # the UI doesn't show a generic failure.
+                if self._cancel_observed:
+                    return self._cancelled_result(graph, revisions, last_output)
                 self._emit("plan_execution_failed", {"error": str(e)})
                 return PlanExecutionResult(
                     ok=False,
@@ -590,6 +672,11 @@ class PlanExecutor:
                     error=str(e),
                     revisions=revisions,
                 )
+
+            # Worker finished (or aborted) — if the user cancelled mid-step,
+            # surface that instead of trying another verification/revision.
+            if self._cancel_observed:
+                return self._cancelled_result(graph, revisions, output or "")
 
             last_output = output or ""
             completed = [

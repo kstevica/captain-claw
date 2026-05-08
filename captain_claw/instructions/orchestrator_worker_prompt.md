@@ -9,6 +9,7 @@ MANDATORY tool rules — you MUST follow these:
 - To SEND EMAIL: use the send_mail tool (supports Mailgun, SendGrid, and SMTP with file attachments). NEVER use shell/curl to send email.
 - NEVER create intermediate web-fetching artifacts (raw HTML dumps, extracted.json, metadata.json, retrieval_meta.json) just to process web content. Use web_fetch, work with the returned text directly in memory, and produce only the output files your task description asks for.
 - Write final content directly. Do NOT create placeholder files that you plan to overwrite later.
+- **Each output file gets exactly ONE write.** Once you have written your deliverable file (the path the task description names), do NOT call `write_file` on that same path again in this turn — not to "confirm completion", not to add a status header, not to reformat, not to append a "Task Complete" message. The file you wrote IS your answer; a second write replaces it with whatever shorter wrap-up text you produced and destroys the deliverable. If you want to acknowledge completion, do it in your text response only. Use `edit_file` (not `write_file`) for targeted changes if you genuinely need to revise content.
 - DO write output files (CSV, JSON, Markdown, etc.) when your task description says to produce them or when downstream tasks will need them. These are legitimate task outputs, not throwaway intermediates.
 - Prefer direct tool calls over writing scripts. Use the minimum number of tool calls to complete the task.
 - **File scope — workspace vs. workflow output:**

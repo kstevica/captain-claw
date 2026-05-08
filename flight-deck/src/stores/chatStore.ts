@@ -192,7 +192,7 @@ export interface PlanRevision {
 export interface PlanState {
   startedAt: string
   startedAtMs: number
-  status: 'running' | 'verified' | 'completed' | 'failed'
+  status: 'running' | 'verified' | 'completed' | 'failed' | 'cancelled'
   maxRevisions: number
   steps: PlanStep[]
   revisions: PlanRevision[]
@@ -847,6 +847,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const completed = (data.completed as string[]) || []
       const verified = (data.verified as string[]) || []
       const hasFailures = Boolean(data.has_failures)
+      const cancelled = Boolean(data.cancelled)
       const failedStep = (data.failed_step as string) || (data.verification_failed_step as string) || undefined
       const verificationNotes = (data.verification_notes as string) || undefined
       updatePlan(containerId, (prev) => {
@@ -859,13 +860,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           if (completedSet.has(s.id) && s.status === 'pending') return { ...s, status: 'completed' as const }
           return s
         })
+        const nextStatus: PlanState['status'] = cancelled
+          ? 'cancelled'
+          : hasFailures
+            ? 'failed'
+            : 'completed'
         return {
           ...prev,
           steps,
-          status: hasFailures ? 'failed' : 'completed',
+          status: nextStatus,
+          activeStepId: undefined,
           failedStep: (data.failed_step as string) || prev.failedStep,
           verificationFailedStep: (data.verification_failed_step as string) || prev.verificationFailedStep,
           verificationNotes: verificationNotes ?? prev.verificationNotes,
+          errorMessage: cancelled ? 'Plan execution cancelled by user.' : prev.errorMessage,
         }
       })
     })
