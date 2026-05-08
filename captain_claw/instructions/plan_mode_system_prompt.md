@@ -14,6 +14,10 @@ Rules:
 - Step IDs are short, lowercase, underscore-separated (e.g., `read_specs`, `write_summary`).
 - Do NOT add a synthesis or "wrap up" step — the verifier handles end-to-end checking against the user's request.
 - If the request is trivial enough for a single step, return one step.
+- **Deliverable steps MUST name their output file.** Any step that drafts, writes, generates, summarizes, reports, or otherwise produces a textual deliverable for the user (a brief, profile, summary, report, analysis, document, etc.) MUST:
+  1. State an explicit output filename in the `description`, e.g. `"...write the result to a new file named saved/tmp/<short-slug>.md"`. The slug is derived from the user's request (kebab-case, ASCII, ≤ 40 chars).
+  2. Reference that exact filename in the `acceptance_criteria`, e.g. `"saved/tmp/<short-slug>.md exists and contains <key sections>"`.
+  Without an explicit filename, the executor returns inline text and the deliverable is lost in the run transcript. Always prefer `saved/tmp/<slug>.md` (or `.txt`) unless the user named a different path.
 
 Respond ONLY with valid JSON matching this schema:
 

@@ -584,6 +584,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         timestamp: new Date().toISOString(),
       }
       addMessage(containerId, msg)
+      // Slash commands run synchronously in the handler — once the
+      // command_result arrives the agent is idle again. Without this
+      // the "Thinking..." spinner stays pinned after `/plan`, `/help`,
+      // `/clear`, etc., because no later token/usage event clears busy.
+      updateSession(containerId, { busy: false, statusText: '' })
     })
 
     // Forward orchestrator trace spans to the trace store for
@@ -866,15 +871,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     // Mirror /planning on|off command results into local planningEnabled flag.
     // Strips markdown so bold/italic don't break substring matches.
+    //
+    // The agent emits "Plan-mode auto-routing **enabled**." or
+    // "Plan-mode auto-routing **disabled**." — match the leading state word
+    // anchored to "auto-routing" so the trailing "Use /planning off to
+    // disable" hint can't trip the opposite branch (the previous patterns
+    // looked for `auto-route\s+enabled`, which never matched because the
+    // word is "auto-routing", and the fallback `/planning\s+off\b/` then
+    // matched the help-text mention of `/planning off` and incorrectly
+    // flipped state to OFF on every enable).
     ws.on('command_result', (data) => {
       const command = String(data.command ?? '').trim().toLowerCase()
       if (command !== '/planning' && !command.startsWith('/planning ')) return
       const content = String(data.content ?? '')
         .toLowerCase()
         .replace(/[*_`]+/g, '')
-      if (/auto-route\s+enabled|currently\s+on|planning\s+on\b/.test(content)) {
+      // Three formats the agent emits:
+      //   "Plan-mode auto-routing **enabled**."           (after `/planning on`)
+      //   "Plan-mode auto-routing **disabled**."          (after `/planning off`)
+      //   "Plan-mode auto-routing: **on|off**. ..."       (after bare `/planning` query)
+      if (/auto-rout(?:e|ing)\s+enabled|auto-rout(?:e|ing):\s*on\b|currently\s+on\b/.test(content)) {
         updateSession(containerId, { planningEnabled: true })
-      } else if (/auto-route\s+disabled|currently\s+off|planning\s+off\b/.test(content)) {
+      } else if (/auto-rout(?:e|ing)\s+disabled|auto-rout(?:e|ing):\s*off\b|currently\s+off\b/.test(content)) {
         updateSession(containerId, { planningEnabled: false })
       }
     })

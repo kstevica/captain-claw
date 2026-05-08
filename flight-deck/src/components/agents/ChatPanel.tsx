@@ -134,15 +134,22 @@ export function ChatPanel() {
               ? 'Planning mode ON — chats auto-route through /plan + /plan-execute. Click to disable.'
               : 'Planning mode OFF. Click to auto-route chats through comprehensive planning.'
           }
-          className={`relative mr-1 rounded p-1 transition-colors ${
+          className={`relative mr-1 flex items-center gap-1 rounded px-1.5 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors ${
             session.planningEnabled
-              ? 'bg-violet-600/20 text-violet-400'
+              ? 'bg-violet-500 text-white shadow-sm shadow-violet-500/40 ring-1 ring-violet-300/60 hover:bg-violet-400'
               : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
           }`}
         >
           <ListChecks className="h-4 w-4" />
+          {/* Compact ON/OFF label so the toggle state is unambiguous at a
+              glance — the previous bg-violet-600/20 tint was easy to miss
+              and led to repeat-clicks (each emits a /planning command,
+              spamming the chat with duplicate confirmations). */}
+          <span className="leading-none">
+            {session.planningEnabled ? 'ON' : 'OFF'}
+          </span>
           {session.planState && session.planState.status === 'running' && (
-            <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-violet-400" />
+            <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-emerald-400 ring-2 ring-zinc-900" />
           )}
         </button>
         <button

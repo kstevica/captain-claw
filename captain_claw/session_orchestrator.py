@@ -51,7 +51,12 @@ _POLL_INTERVAL_SECONDS = 1.0
 
 # Default and ceiling for the worker iteration budget estimator.
 _WORKER_DEFAULT_ITERATIONS = 5
-_WORKER_MAX_ITERATIONS = 25
+# Bumped from 25 → 40. Multi-source research tasks (gather N credible
+# sources, cite, summarise each) consume ~3–5 iterations per source and
+# routinely need 25–35 turns. The previous ceiling stranded research
+# workers mid-fetch with "iteration budget exhausted" while productive
+# tool calls were still being made.
+_WORKER_MAX_ITERATIONS = 40
 # Absolute ceiling for per-item tasks (drafts, emails, fetches per row).
 _WORKER_PER_ITEM_CEILING = 120
 
@@ -90,9 +95,25 @@ _COMPLEXITY_SIGNALS: list[tuple[re.Pattern[str], int]] = [
     # Per-item processing: "fetch/read each article/page/url" or
     # "for each of the N items" — each item needs ~2 iterations
     # (tool call + process result).
-    (re.compile(r"\beach\b.*\b(?:article|page|url|item|link|entry|result)", re.I), 8),
+    (re.compile(r"\beach\b.*\b(?:article|page|url|item|link|entry|result|source)", re.I), 8),
     (re.compile(r"\b(?:web_fetch|fetch|scrape)\b", re.I), 4),
     (re.compile(r"\bcreate\b.*\bdraft", re.I), 3),
+    # Research tasks — collecting "reputable / credible / authoritative
+    # sources" implies a search→fetch→summarise cycle per source. Each
+    # source consumes ~4 iterations (search + fetch + extract + write).
+    # Without this signal, descriptions like "collect at least 5 sources"
+    # only got the +4 fetch bump and ran out of budget mid-research.
+    (re.compile(
+        r"\b(?:reputable|credible|authoritative|reliable|primary)\s+"
+        r"sources?\b",
+        re.I,
+    ), 12),
+    (re.compile(r"\b(?:research|gather|collect)\b.*\bsources?\b", re.I), 8),
+    (re.compile(r"\bcitation|\bcite\b|\breferences?\b", re.I), 2),
+    # Explicit "at least N sources" — scale roughly with the count.
+    (re.compile(r"\bat\s+least\s+(\d+)\s+(?:credible\s+)?sources?\b", re.I), 6),
+    # URL / web search patterns
+    (re.compile(r"\bweb_search\b|\bsearch\s+(?:the\s+)?(?:web|internet)", re.I), 2),
 ]
 
 # ── Binary file output detection ──
@@ -726,6 +747,7 @@ class SessionOrchestrator:
         self,
         task_overrides: dict[str, dict[str, Any]] | None = None,
         variable_values: dict[str, str] | None = None,
+        skip_synthesize: bool = False,
     ) -> str:
         """Execute a previously prepared graph.
 
@@ -738,9 +760,15 @@ class SessionOrchestrator:
             variable_values: Optional mapping of ``{{name}}`` →  value for
                 workflow template variables.  Applied to user_input,
                 synthesis_instruction, and all task titles/descriptions.
+            skip_synthesize: When ``True``, omit the final synthesize LLM
+                call. Plan-mode passes this — each plan step already has its
+                own verified output and the FD plan-card renders the full
+                result, so the synthesize summary is redundant work that
+                makes the chat appear stuck after the plan has finished.
 
         Returns:
-            Final synthesized response string.
+            Final synthesized response string (or a brief completion line
+            when ``skip_synthesize`` is set).
         """
         if self._graph is None:
             return "No prepared graph to execute.  Call prepare() first."
@@ -808,11 +836,23 @@ class SessionOrchestrator:
                         failed=sum(1 for t in graph.tasks.values() if t.status == FAILED))
 
         # 5. SYNTHESIZE
-        self._set_status("Orchestrator: synthesizing results...")
-        self._broadcast_event("synthesizing")
-        synth_span = self._trace_start("synthesize", "Synthesize results")
-        result = await self._synthesize(self._user_input, graph, self._synthesis_instruction)
-        self._trace_end(synth_span, "completed" if result else "failed")
+        if skip_synthesize:
+            # Plan-mode short-circuits: the plan card already shows
+            # per-step status and the workspace artifact is the deliverable.
+            # Surface a compact result line instead of a redundant LLM pass.
+            completed = sum(1 for t in graph.tasks.values() if t.status == COMPLETED)
+            failed = sum(1 for t in graph.tasks.values() if t.status == FAILED)
+            result = (
+                f"Plan execution finished — {completed} step(s) completed"
+                + (f", {failed} failed" if failed else "")
+                + "."
+            )
+        else:
+            self._set_status("Orchestrator: synthesizing results...")
+            self._broadcast_event("synthesizing")
+            synth_span = self._trace_start("synthesize", "Synthesize results")
+            result = await self._synthesize(self._user_input, graph, self._synthesis_instruction)
+            self._trace_end(synth_span, "completed" if result else "failed")
 
         # Save run output to workspace/workflows/.
         output_path = await self._save_run_output(result)

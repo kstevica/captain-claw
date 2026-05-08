@@ -533,7 +533,12 @@ class PlanExecutor:
         # ``max_revisions`` retry cycles after revision proposals.
         for _cycle in range(self._max_revisions + 1):
             try:
-                output = await self._orchestrator.execute()
+                # skip_synthesize: plan-mode owns its own verification +
+                # per-step result rendering, so the orchestrator's final
+                # synthesis pass is redundant work that makes the chat sit
+                # at "Orchestrator: synthesizing results..." after the plan
+                # card already says VERIFIED.
+                output = await self._orchestrator.execute(skip_synthesize=True)
             except Exception as e:
                 log.error("Plan execution raised", error=str(e),
                           error_type=type(e).__name__)

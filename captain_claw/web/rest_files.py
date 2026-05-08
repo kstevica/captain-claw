@@ -76,24 +76,23 @@ def _enrich(logical: str, physical: str, source: str) -> dict[str, Any]:
 
 
 def _is_allowed_path(physical: str) -> bool:
-    """Return True if the physical path is under workspace saved/ or output/."""
+    """Return True if the physical path is under workspace saved/, output/, or workflows/.
+
+    workflows/ holds the per-run Markdown transcripts written by
+    SessionOrchestrator._save_run_output — users open those from the
+    plan/workflow UI so they need to be viewable like saved/output/.
+    """
     try:
         from captain_claw.config import get_config
         cfg = get_config()
         workspace = cfg.resolved_workspace_path()
         resolved = Path(physical).resolve()
-        saved_root = (workspace / "saved").resolve()
-        output_root = (workspace / "output").resolve()
-        try:
-            resolved.relative_to(saved_root)
-            return True
-        except ValueError:
-            pass
-        try:
-            resolved.relative_to(output_root)
-            return True
-        except ValueError:
-            pass
+        for sub in ("saved", "output", "workflows"):
+            try:
+                resolved.relative_to((workspace / sub).resolve())
+                return True
+            except ValueError:
+                continue
     except Exception:
         pass
     return False

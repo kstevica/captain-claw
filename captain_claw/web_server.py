@@ -648,9 +648,29 @@ class WebServer:
             self.clients.discard(ws)
 
     async def _send(self, ws: web.WebSocketResponse, msg: dict[str, Any]) -> None:
-        """Send a message to a single WebSocket client."""
-        if not ws.closed:
+        """Send a message to a single WebSocket client.
+
+        Swallow ``ClientConnectionResetError`` and similar close races —
+        ``ws.closed`` can flip between the check and the actual write when the
+        peer (e.g. FD page refresh) hangs up mid-send. The earlier behavior
+        let those bubble out of slash-command handlers and produced noisy
+        500-style tracebacks for what is a benign client disconnect.
+        """
+        if ws.closed:
+            return
+        try:
             await ws.send_str(json.dumps(msg, default=str))
+        except (ConnectionResetError, ConnectionError):
+            # Peer hung up between the closed-check and the write.
+            pass
+        except Exception as exc:  # noqa: BLE001
+            # aiohttp raises ClientConnectionResetError, which subclasses
+            # ConnectionError on 3.11+ but we keep the broad guard for any
+            # transport-level write failure — losing one frame to a closing
+            # socket should never crash the request handler.
+            from aiohttp.client_exceptions import ClientConnectionResetError
+            if not isinstance(exc, ClientConnectionResetError):
+                raise
 
     # ── Session helpers ──────────────────────────────────────────────
 

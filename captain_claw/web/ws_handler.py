@@ -151,6 +151,12 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
             await server._send(ws, {"type": "replay_batch", "messages": batch})
         await server._send(ws, {"type": "replay_done"})
 
+    # ConnectionResetError comes from aiohttp's internal PONG-on-PING write
+    # when the peer transport is already closing (FD page refresh, network
+    # blip). It surfaces through `async for raw_msg in ws` and would
+    # otherwise dump a 500-style traceback for what is just a clean
+    # disconnect — treat it as end-of-iteration.
+    from aiohttp.client_exceptions import ClientConnectionResetError
     try:
         async for raw_msg in ws:
             if raw_msg.type in (
@@ -164,6 +170,9 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
                 await handle_ws_message(server, ws, data)
             elif raw_msg.type == web.WSMsgType.ERROR:
                 log.error("WebSocket error", error=str(ws.exception()))
+    except (ClientConnectionResetError, ConnectionResetError, ConnectionError):
+        # Peer hung up; nothing to do but exit the receive loop quietly.
+        pass
     finally:
         server.clients.discard(ws)
 
