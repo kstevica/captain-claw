@@ -23,6 +23,7 @@ import ConnectionsPage from './pages/ConnectionsPage'
 import { GPUCloudPage } from './pages/GPUCloudPage'
 import { PromptBuilderPage } from './pages/PromptBuilderPage'
 import { ProjectsPage } from './pages/ProjectsPage'
+import { AppPage } from './pages/AppPage'
 import { useUIStore } from './stores/uiStore'
 import { useAgentStore } from './stores/agentStore'
 import { useAuthStore, checkAuthStatus, refreshAccessToken } from './stores/authStore'
@@ -300,6 +301,7 @@ function AppContent() {
       {view === 'connections' && <ConnectionsPage />}
       {view === 'gpu-cloud' && <GPUCloudPage />}
       {view === 'projects' && <ProjectsPage />}
+      {view === 'app' && <AppPage />}
     </>
   )
 

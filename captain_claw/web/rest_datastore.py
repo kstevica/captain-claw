@@ -605,6 +605,7 @@ async def export_table(server: WebServer, request: web.Request) -> web.Response:
     try:
         result = await mgr.query(
             table_name, limit=cfg.datastore.max_export_rows,
+            bypass_max=True,
         )
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=400)

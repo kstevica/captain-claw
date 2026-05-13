@@ -973,6 +973,7 @@ class DatastoreManager:
         order_by: list[str] | None = None,
         limit: int | None = None,
         offset: int = 0,
+        bypass_max: bool = False,
     ) -> dict[str, Any]:
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
@@ -1019,7 +1020,10 @@ class DatastoreManager:
             order_clause = "ORDER BY " + ", ".join(parts)
 
         # Limit
-        effective_limit = min(limit or cfg.datastore.max_query_rows, cfg.datastore.max_query_rows)
+        if bypass_max:
+            effective_limit = limit if limit is not None else cfg.datastore.max_query_rows
+        else:
+            effective_limit = min(limit or cfg.datastore.max_query_rows, cfg.datastore.max_query_rows)
 
         sql = (
             f'SELECT {select_clause} FROM "{internal}" '
@@ -1327,6 +1331,7 @@ class DatastoreManager:
         result = await self.query(
             table_name, columns=columns, where=where,
             limit=cfg.datastore.max_export_rows,
+            bypass_max=True,
         )
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w", newline="", encoding="utf-8") as f:
@@ -1344,6 +1349,7 @@ class DatastoreManager:
         result = await self.query(
             table_name, columns=columns, where=where,
             limit=cfg.datastore.max_export_rows,
+            bypass_max=True,
         )
         output_path.parent.mkdir(parents=True, exist_ok=True)
         self._write_xlsx(output_path, result["columns"], result["rows"])
@@ -1358,6 +1364,7 @@ class DatastoreManager:
         result = await self.query(
             table_name, columns=columns, where=where,
             limit=cfg.datastore.max_export_rows,
+            bypass_max=True,
         )
         cols = result["columns"]
         rows = [dict(zip(cols, row)) for row in result["rows"]]

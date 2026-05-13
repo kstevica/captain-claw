@@ -27,7 +27,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
-import { useChatStore, PLAN_LEVELS, type PlanLevel } from '../../stores/chatStore'
+import { useChatStore, PLAN_LEVELS, type PlanLevel, type NextStepOption } from '../../stores/chatStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useContainerStore } from '../../stores/containerStore'
 import { useProcessStore } from '../../stores/processStore'
@@ -320,7 +320,7 @@ function ChatContent({
   onSend,
   onCancel,
 }: {
-  session: { containerId: string; containerName: string; messages: ChatMessage[]; connected: boolean; busy: boolean; statusText: string }
+  session: { containerId: string; containerName: string; messages: ChatMessage[]; connected: boolean; busy: boolean; statusText: string; nextStepOptions?: NextStepOption[] }
   containerId: string
   onSend: (content: string) => void
   onCancel: () => void
@@ -571,6 +571,15 @@ function ChatContent({
         </div>
       </div>
 
+      {/* Suggested next steps */}
+      {session.nextStepOptions && session.nextStepOptions.length > 0 && (
+        <NextStepsBar
+          options={session.nextStepOptions}
+          disabled={!session.connected || session.busy}
+          onPick={(action) => onSend(action)}
+        />
+      )}
+
       {/* Attachments strip */}
       {attachments.length > 0 && (
         <div className="border-t border-zinc-800/50 px-3 py-2">
@@ -700,16 +709,70 @@ function AttachmentChip({ attachment, onRemove }: { attachment: Attachment; onRe
   )
 }
 
-/** Convert bare image file paths in message content to markdown images proxied through Flight Deck. */
+function NextStepsBar({
+  options,
+  disabled,
+  onPick,
+}: {
+  options: NextStepOption[]
+  disabled: boolean
+  onPick: (action: string) => void
+}) {
+  return (
+    <div className="border-t border-zinc-200 px-4 py-2 dark:border-zinc-800/50">
+      <div className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500 dark:text-zinc-500">Suggested next steps</div>
+      <div className="flex flex-wrap gap-1.5">
+        {options.map((opt, i) => (
+          <button
+            key={`${i}-${opt.label}`}
+            type="button"
+            disabled={disabled}
+            title={opt.description || opt.action}
+            onClick={() => onPick(opt.action)}
+            className="rounded-full border border-violet-300 bg-violet-50 px-3 py-1 text-xs font-medium text-violet-700 hover:border-violet-400 hover:bg-violet-100 hover:text-violet-800 dark:border-violet-500/30 dark:bg-violet-500/10 dark:font-normal dark:text-violet-200 dark:hover:bg-violet-500/20 dark:hover:text-violet-100 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** Convert agent-local image paths in message content to URLs proxied through Flight Deck. */
 function processImagePaths(content: string, agentHost?: string, agentPort?: number, agentAuth?: string): string {
   if (!agentPort) return content
-  const imagePathRe = /^([`*]*)(\/?(?:\/[\w.@: -]+)+\.(?:png|jpg|jpeg|gif|webp|bmp|svg))([`*]*)$/gm
-  return content.replace(imagePathRe, (_match, _pre, filePath, _post) => {
+
+  const proxyUrl = (filePath: string): string => {
     const params = new URLSearchParams({ path: filePath })
     if (agentAuth) params.set('token', agentAuth)
-    const url = `/fd/agent-file-view/${encodeURIComponent(agentHost || 'localhost')}/${agentPort}?${params}`
-    return `![](${url})`
+    return `/fd/agent-file-view/${encodeURIComponent(agentHost || 'localhost')}/${agentPort}?${params}`
+  }
+
+  // Rewrite agent-local paths inside markdown image syntax: ![alt](path)
+  // Mirrors captain-claw/computer.js: handles file:///, saved/, output/, and absolute /paths.
+  // Leaves http(s)://, data:, blob:, and already-proxied URLs alone.
+  let out = content.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (match, alt, src) => {
+    if (/^(https?:|data:|blob:)/i.test(src)) return match
+    if (src.startsWith('/fd/')) return match
+    let filePath = src
+    if (/^file:\/\/\//i.test(src)) {
+      filePath = '/' + src.replace(/^file:\/\/\//i, '')
+    } else if (/^(saved\/|output\/|\/)/.test(src)) {
+      filePath = src
+    } else {
+      return match
+    }
+    return `![${alt}](${proxyUrl(filePath)})`
   })
+
+  // Also handle bare image paths on their own line (existing behavior).
+  out = out.replace(
+    /^([`*]*)(\/?(?:\/[\w.@: -]+)+\.(?:png|jpg|jpeg|gif|webp|bmp|svg))([`*]*)$/gm,
+    (_m, _pre, filePath) => `![](${proxyUrl(filePath)})`,
+  )
+
+  return out
 }
 
 function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage; sourceName?: string; agentId?: string }) {

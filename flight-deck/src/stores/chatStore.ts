@@ -152,6 +152,12 @@ interface AgentModelInfo {
   selector: string
 }
 
+export interface NextStepOption {
+  label: string
+  action: string
+  description?: string
+}
+
 interface AgentPersonalityInfo {
   id: string
   name: string
@@ -229,6 +235,8 @@ interface ChatSession {
   planLevel: string          // optimistic mirror of agent.plan_mode_level
   planState: PlanState | null
   planCardCollapsed: boolean
+  // Suggested next steps emitted by the agent after a response.
+  nextStepOptions: NextStepOption[]
 }
 
 interface ChatStore {
@@ -305,6 +313,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       planLevel: persisted?.planLevel ?? 'plain',
       planState: persisted?.planState ?? null,
       planCardCollapsed: persisted?.planCardCollapsed ?? false,
+      nextStepOptions: [],
     }
 
     const sessions = new Map(get().sessions)
@@ -434,6 +443,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const { internalFdUrl } = useAuthStore.getState()
       const fdUrl = internalFdUrl || `${window.location.protocol}//${window.location.host}`
       ws.sendJSON({ type: 'peer_agents', agents: peers, self: selfIdentity, fd_url: fdUrl })
+    })
+
+    ws.on('next_steps', (data) => {
+      const raw = (data.options as Array<Record<string, unknown>>) || []
+      const options: NextStepOption[] = raw
+        .map((o) => ({
+          label: String(o.label ?? '').trim(),
+          action: String(o.action ?? '').trim(),
+          description: o.description ? String(o.description) : undefined,
+        }))
+        .filter((o) => o.label && o.action)
+      console.debug('[chatStore] next_steps received', { containerId, rawCount: raw.length, validCount: options.length, options })
+      updateSession(containerId, { nextStepOptions: options })
     })
 
     ws.on('chat_message', (data) => {
@@ -985,7 +1007,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       timestamp: new Date().toISOString(),
     }
     addMessage(containerId, msg)
-    updateSession(containerId, { busy: true, statusText: 'Thinking...', _busyStartedAt: Date.now() })
+    updateSession(containerId, {
+      busy: true,
+      statusText: 'Thinking...',
+      _busyStartedAt: Date.now(),
+      nextStepOptions: [],
+    })
     session.ws.send(content)
   },
 
@@ -1112,7 +1139,7 @@ function clearMessages(containerId: string) {
   useChatStore.setState((state) => {
     const session = state.sessions.get(containerId)
     if (!session) return state
-    const updated = { ...session, messages: [] }
+    const updated = { ...session, messages: [], nextStepOptions: [] }
     const sessions = new Map(state.sessions)
     sessions.set(containerId, updated)
     return { sessions }

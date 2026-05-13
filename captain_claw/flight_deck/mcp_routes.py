@@ -307,6 +307,53 @@ async def proxy_tool_call(
     return {"server": name, "tool": tool_name, "result": result}
 
 
+# ── user-facing: tool list + call for the agent-app runtime ─────────
+
+
+@router.get("/{name}/user_tools")
+async def user_tools_list(
+    name: str,
+    refresh: bool = False,
+    _user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    """User-authed counterpart of ``/{name}/tools``. Used by the
+    Flight-Deck app runtime so the browser can introspect a server
+    without holding an agent shared secret."""
+    record = mcp_storage.get_server(name)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"No MCP server named '{name}'")
+    try:
+        tools = await get_manager().list_tools(name, force_refresh=refresh)
+    except MCPServerError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"server": name, "tools": tools}
+
+
+@router.post("/{name}/user_call")
+async def user_tool_call(
+    name: str,
+    payload: dict = Body(...),
+    _user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    """User-authed counterpart of ``/{name}/call``. Lets the app
+    runtime in the browser invoke MCP tools as the logged-in user
+    (no agent slug, no shared secret)."""
+    record = mcp_storage.get_server(name)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"No MCP server named '{name}'")
+    tool_name = str(payload.get("tool") or payload.get("name") or "").strip()
+    if not tool_name:
+        raise HTTPException(status_code=400, detail="payload.tool is required")
+    arguments = payload.get("arguments") or {}
+    if not isinstance(arguments, dict):
+        raise HTTPException(status_code=400, detail="arguments must be an object")
+    try:
+        result = await get_manager().call_tool(name, tool_name, arguments)
+    except MCPServerError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"server": name, "tool": tool_name, "result": result}
+
+
 # ── agent-facing: streaming tool call (Phase 2.4) ───────────────────
 
 
