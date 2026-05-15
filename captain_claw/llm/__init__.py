@@ -965,11 +965,25 @@ class ChatGPTResponsesProvider(LLMProvider):
     ) -> dict[str, Any]:
         instructions, input_items = _convert_messages_for_responses_api(messages)
         api_tools = _convert_tools_for_responses_api(tools) if tools else []
+        # One-shot tool_choice override, set by the orchestration loop
+        # when it wants to force tool use on a retry (e.g. after a
+        # stall). Consumed and reset here so the very next call returns
+        # to the default ``"auto" if api_tools else "none"`` behavior.
+        override = getattr(self, "_tool_choice_override", None)
+        if override is not None:
+            try:
+                self._tool_choice_override = None
+            except Exception:
+                pass
+        if override and api_tools:
+            resolved_tool_choice = override
+        else:
+            resolved_tool_choice = "auto" if api_tools else "none"
         payload: dict[str, Any] = {
             "model": self.model,
             "input": input_items,
             "tools": api_tools,
-            "tool_choice": "auto" if api_tools else "none",
+            "tool_choice": resolved_tool_choice,
             "parallel_tool_calls": False,
             "store": False,
             "stream": True,
@@ -1746,6 +1760,19 @@ class LiteLLMProvider(LLMProvider):
         }
         if tools:
             kwargs["tools"] = _convert_tools_for_openai_style(tools)
+
+        # One-shot tool_choice override (set by the orchestration loop
+        # on stall retries to force tool use). Only honored when tools
+        # are actually being sent. Consumed and reset so subsequent
+        # calls return to the model's default behavior.
+        override = getattr(self, "_tool_choice_override", None)
+        if override is not None:
+            try:
+                self._tool_choice_override = None
+            except Exception:
+                pass
+            if kwargs.get("tools"):
+                kwargs["tool_choice"] = override
 
         # Anthropic prompt caching: split system message on CACHE_SPLIT marker
         # into static (cached) + dynamic (uncached) blocks, and add a cache

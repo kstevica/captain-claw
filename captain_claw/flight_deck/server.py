@@ -498,10 +498,22 @@ async def lifespan(app: FastAPI):
         set_vastai_manager(_vastai_mgr)
         _register_vastai_wake(_vastai_mgr)
         app.state.vastai_manager = _vastai_mgr
+    # ── Code-app subprocess runtime ──
+    # Lazy-spawn per app on first request; reaper kicks in here.
+    from captain_claw.flight_deck.app_runtime import get_runtime as _get_app_runtime
+    _app_rt = _get_app_runtime()
+    await _app_rt.start()
+    app.state.app_runtime = _app_rt
     yield
     # Shutdown: stop all managed process agents
     print("Flight Deck: stopping managed process agents...")
     _stop_all_processes()
+    # Stop every running code-app subprocess + cancel the idle reaper.
+    if hasattr(app.state, "app_runtime"):
+        try:
+            await app.state.app_runtime.shutdown()
+        except Exception as _exc:
+            print(f"Flight Deck: app_runtime shutdown error: {_exc}")
     if hasattr(app.state, "vastai_manager"):
         await app.state.vastai_manager.shutdown()
     if AUTH_ENABLED and hasattr(app.state, "fd_db"):
@@ -557,6 +569,7 @@ from captain_claw.flight_deck.mcp_routes import router as mcp_router
 from captain_claw.flight_deck.app_routes import router as apps_router
 from captain_claw.flight_deck.app_files_routes import router as app_files_router
 from captain_claw.flight_deck.app_builtin_routes import router as app_builtin_router
+from captain_claw.flight_deck.app_code_routes import router as app_code_router
 
 app.include_router(auth_router)
 app.include_router(settings_router)
@@ -570,9 +583,15 @@ app.include_router(vastai_router)
 app.include_router(prompt_router)
 app.include_router(project_router)
 app.include_router(mcp_router)
-app.include_router(apps_router)
-app.include_router(app_files_router)
-app.include_router(app_builtin_router)
+# Legacy manifest-based app routes. The agent-coded app runtime
+# (``app_code_router``) is the going-forward path; the manifest
+# routes are kept for migration but disabled by default. Re-enable
+# by setting ``FD_LEGACY_MANIFEST_APPS=true``.
+if os.environ.get("FD_LEGACY_MANIFEST_APPS", "false").lower() in ("true", "1", "yes"):
+    app.include_router(apps_router)
+    app.include_router(app_files_router)
+    app.include_router(app_builtin_router)
+app.include_router(app_code_router)
 
 
 # ── Auth dependency helper ──
@@ -4153,9 +4172,24 @@ if STATIC_DIR.is_dir():
     # Serve built React assets
     app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
 
+    # Prefixes that belong to the backend API surface. If a request
+    # targets any of these and we got here, it means no real route
+    # matched — return a proper 404 instead of falling through to
+    # ``index.html``. Serving HTML with a 200 status for unknown API
+    # paths silently breaks clients that ``resp.json()`` the body
+    # (e.g. the agent's app_runner tool), producing opaque
+    # "Expecting value: line 1 column 1 (char 0)" errors that look
+    # like the API returned something nonsensical when really the
+    # route just wasn't registered. Fail loudly here so missing /
+    # stale routes are obvious.
+    _API_PREFIXES = ("fd/", "api/", "ws/")
+
     @app.get("/{path:path}")
     async def spa_catch_all(path: str):
         """Serve the SPA — any non-API path returns index.html."""
+        # Don't shadow unknown API routes with HTML.
+        if path.startswith(_API_PREFIXES):
+            raise HTTPException(status_code=404, detail=f"No route for /{path}")
         file = STATIC_DIR / path
         if file.is_file():
             return FileResponse(file)

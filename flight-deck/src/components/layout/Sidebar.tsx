@@ -23,6 +23,7 @@ import {
 } from 'lucide-react'
 import { useEffect } from 'react'
 import { useAppRuntime } from '../../app-runtime/store'
+import { useAppCodeStore } from '../../stores/appCodeStore'
 import { useUIStore } from '../../stores/uiStore'
 import { APP_VERSION, BUILD_DATE } from '../../version'
 import { useAgentStore } from '../../stores/agentStore'
@@ -48,6 +49,7 @@ const navItems: { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?:
   { id: 'gpu-cloud', icon: Cloud, label: 'GPU Cloud' },
   { id: 'operations', icon: BarChart3, label: 'Stats' },
   { id: 'connections', icon: Plug, label: 'Connections' },
+  { id: 'code-app', icon: LayoutDashboard, label: 'Code Apps' },
   { id: 'admin', icon: Shield, label: 'Admin', adminOnly: true },
 ]
 
@@ -59,8 +61,13 @@ export function Sidebar() {
   const refreshAppList = useAppRuntime((s) => s.refreshAppList)
   const loadAgent = useAppRuntime((s) => s.loadAgent)
   const requestAuthoring = useAppRuntime((s) => s.requestAuthoring)
+  const codeApps = useAppCodeStore((s) => s.apps)
+  const selectedCodeSlug = useAppCodeStore((s) => s.selectedSlug)
+  const refreshCodeApps = useAppCodeStore((s) => s.refresh)
+  const selectCodeSlug = useAppCodeStore((s) => s.selectSlug)
 
   useEffect(() => { refreshAppList() }, [refreshAppList])
+  useEffect(() => { refreshCodeApps() }, [refreshCodeApps])
   const { authEnabled, user: authUser } = useAuthStore()
   const { botportUrl, setBotportUrl } = useConnectionStore()
   const { sessions, chatOpen, switchChat } = useChatStore()
@@ -214,6 +221,40 @@ export function Sidebar() {
               No apps yet — click + New to describe one.
             </p>
           )}
+        </div>
+      )}
+
+      {/* Code-apps (agent-coded Python backends + HTML frontends) */}
+      {sidebarOpen && codeApps.length > 0 && (
+        <div className="border-t border-zinc-800 p-2">
+          <div className="flex items-center justify-between px-1 py-1">
+            <span className="text-xs font-medium uppercase tracking-wider text-zinc-500">
+              Code apps ({codeApps.length})
+            </span>
+          </div>
+          {codeApps.map((a) => {
+            const active = view === 'code-app' && selectedCodeSlug === a.slug
+            const name = String((a.manifest?.['name'] as string) || a.slug)
+            return (
+              <button
+                key={a.slug}
+                onClick={() => { setView('code-app'); selectCodeSlug(a.slug) }}
+                className={`mb-0.5 flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm transition-colors ${
+                  active
+                    ? 'bg-zinc-800 text-zinc-100'
+                    : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'
+                }`}
+                title={a.running ? 'Running' : 'Idle — will spawn on first request'}
+              >
+                <span
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                    a.has_error ? 'bg-red-500' : a.running ? 'bg-emerald-500' : 'bg-zinc-600'
+                  }`}
+                />
+                <span className="min-w-0 flex-1 truncate">{name}</span>
+              </button>
+            )
+          })}
         </div>
       )}
 

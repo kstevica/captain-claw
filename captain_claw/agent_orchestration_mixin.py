@@ -119,6 +119,88 @@ def _eco_select_tools_by_intent(user_input: str) -> frozenset[str]:
     return frozenset(matched)
 
 
+# ── Stall-detection heuristic ───────────────────────────────────────────
+# Some smaller / weaker models reply with intent-only announcements
+# ("Let me look that up…", "I'll fetch the file now.") and stop, instead
+# of actually calling a tool or producing the deliverable. We detect that
+# pattern on a no-tool-calls turn and silently retry with a corrective
+# instruction (and force ``tool_choice="required"`` when tools are
+# available so the retry cannot stall the same way).
+_STALL_FIRST_LINE_RE = _re.compile(
+    r"^\s*(?:"
+    r"let me\b"
+    r"|let's\b"
+    r"|i'?ll\b"
+    r"|i will\b"
+    r"|i'?m going to\b"
+    r"|i am going to\b"
+    r"|i'?m about to\b"
+    r"|proceeding\b"
+    r"|starting\b"
+    r"|working on\b"
+    r"|one (?:moment|sec)\b"
+    r"|(?:just )?a (?:moment|sec(?:ond)?)\b"
+    r"|on it\b"
+    r"|sure[,!.]?\s+(?:let me|i'?ll|i will|one|just)"
+    r")",
+    _re.IGNORECASE,
+)
+# Maximum number of silent stall retries per turn. Two is enough to
+# convert most weak-model stalls into a useful turn without driving an
+# infinite re-roll loop when the model genuinely has nothing to add.
+MAX_STALL_RETRIES = 2
+# Length budget for the stall check. Real stalls are terse single
+# sentences ("Let me look that up.", ~25 chars). Anything longer is
+# only treated as a stall if it has no substantive follow-through
+# beyond the opening intent phrase (see ``_looks_like_stall``).
+_STALL_MAX_LEN = 60
+# Minimum substantive content (chars) AFTER the opening intent sentence
+# required to disqualify a message from being a stall. Used for medium-
+# length messages that open with a stall phrase but actually continue
+# with a real answer (e.g. "Let me explain why X. First, …").
+_STALL_FOLLOWTHROUGH_MIN_CHARS = 40
+
+
+def _looks_like_stall(text: str) -> bool:
+    """Return True when the assistant text reads as an intent-only stall.
+
+    Mirrors the FD-side ``isLikelyStall`` heuristic so the server can
+    pre-empt stalls before they reach the chat UI:
+
+    * Empty / whitespace-only output → stall.
+    * Very short output (≤ ``_STALL_MAX_LEN`` chars) whose first
+      non-empty line opens with an action-announcing phrase → stall.
+    * Longer messages that *open* with an action-announcing phrase but
+      go on to deliver substantive content (≥
+      ``_STALL_FOLLOWTHROUGH_MIN_CHARS`` chars after the first
+      sentence) are NOT stalls — that's a "Let me explain…" answer,
+      not a "Let me look that up" non-answer.
+    """
+    if text is None:
+        return True
+    stripped = str(text).strip()
+    if not stripped:
+        return True
+    first_line = ""
+    for line in stripped.splitlines():
+        ln = line.strip()
+        if ln:
+            first_line = ln
+            break
+    if not first_line:
+        return True
+    if not _STALL_FIRST_LINE_RE.match(first_line):
+        return False
+    if len(stripped) <= _STALL_MAX_LEN:
+        return True
+    # Medium-length message that opens with a stall phrase. Look past
+    # the first sentence and see whether the rest of the message has
+    # substantive content. If yes, it's a real answer.
+    after_first_sentence = _re.split(r"(?<=[.!?])\s+", stripped, maxsplit=1)
+    tail = after_first_sentence[1].strip() if len(after_first_sentence) > 1 else ""
+    return len(tail) < _STALL_FOLLOWTHROUGH_MIN_CHARS
+
+
 class AgentOrchestrationMixin:
     """Core request orchestration: complete() and stream()."""
 
@@ -158,6 +240,11 @@ class AgentOrchestrationMixin:
         self._all_blocked_streak: int = 0
         # Reset tool-avoidance nudge flag (one nudge per turn max).
         self._tool_avoidance_nudged: bool = False
+        # Reset per-turn stall retry counter. Bumped each time we silently
+        # re-roll a no-tool-call response that reads as an intent-only
+        # stall ("Let me…", "I'll fetch…").  Capped by MAX_STALL_RETRIES
+        # so a genuinely-stuck turn still terminates.
+        self._stall_retry_count: int = 0
         # Reset per-turn coverage gate streak.
         self._coverage_gate_streak: int = 0
         self._coverage_gate_prev_missing: int = -1
@@ -1888,6 +1975,53 @@ class AgentOrchestrationMixin:
                     if finalized:
                         return finish(final_text, success=finish_success)
                     continue
+
+            # ── Stall-retry nudge ─────────────────────────────────
+            # Detect when a small/weak model emits an intent-only
+            # announcement ("Let me look that up", "I'll fetch the
+            # file now.") without calling any tool. We silently
+            # re-roll up to ``MAX_STALL_RETRIES`` times with a
+            # corrective instruction, and ask the provider to force
+            # ``tool_choice="required"`` on the retry when tools are
+            # available so the model cannot stall the same way again.
+            # The stall text is committed to the session so the model
+            # can see (and avoid repeating) what it just emitted.
+            _stall_resp_text = str(response.content or "")
+            if (
+                not response.tool_calls
+                and _looks_like_stall(_stall_resp_text)
+                and self._stall_retry_count < MAX_STALL_RETRIES
+            ):
+                self._stall_retry_count += 1
+                _has_tools = bool(tool_defs)
+                _retry_instruction = (
+                    "You announced intent without acting. Do NOT narrate "
+                    "what you're about to do. "
+                    + (
+                        "Call the appropriate tool now to produce the deliverable."
+                        if _has_tools
+                        else "Produce the final answer now."
+                    )
+                )
+                log.warning(
+                    "Stall detected, silent retry",
+                    attempt=self._stall_retry_count,
+                    max_retries=MAX_STALL_RETRIES,
+                    force_tool=_has_tools,
+                    preview=_stall_resp_text[:120],
+                )
+                self._add_session_message(role="assistant", content=_stall_resp_text)
+                self._add_session_message(role="user", content=_retry_instruction)
+                # Force tool use on the very next provider call so the
+                # retry can't repeat the same intent-only stall. The
+                # override is consumed inside the provider payload
+                # builder and resets to "auto" automatically.
+                if _has_tools:
+                    try:
+                        setattr(self.provider, "_tool_choice_override", "required")
+                    except Exception:
+                        pass
+                continue
 
             # ── Tool-avoidance nudge ──────────────────────────────
             # Detect when the LLM dumps actionable content as text

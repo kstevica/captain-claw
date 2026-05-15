@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Notes demo</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 640px;
+      margin: 24px auto;
+      padding: 0 16px;
+      line-height: 1.5;
+    }
+    h1 { margin: 0 0 12px; font-size: 20px; }
+    form { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+    input, textarea, button {
+      font: inherit;
+      padding: 6px 10px;
+      border: 1px solid #aaa3;
+      border-radius: 6px;
+      background: #fff2;
+      color: inherit;
+    }
+    textarea { min-height: 60px; resize: vertical; }
+    button { cursor: pointer; align-self: flex-start; }
+    button.danger { background: transparent; color: #c43; border-color: transparent; }
+    ul { list-style: none; padding: 0; margin: 0; }
+    li {
+      border: 1px solid #aaa3;
+      border-radius: 8px;
+      padding: 8px 12px;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    li .title { font-weight: 600; }
+    li .body { color: #888; font-size: 13px; }
+    .empty { color: #888; font-style: italic; }
+    .err { color: #c43; }
+  </style>
+</head>
+<body>
+  <h1>Notes demo</h1>
+  <form id="new">
+    <input id="title" placeholder="Title" required />
+    <textarea id="body" placeholder="Body (optional)"></textarea>
+    <button type="submit">Add note</button>
+  </form>
+  <ul id="list"><li class="empty">Loading…</li></ul>
+  <div id="err" class="err" style="display:none"></div>
+
+  <script>
+    // All API calls go through the parent FD proxy. We don't embed the
+    // slug here — the embedding URL already routes the iframe's
+    // requests through ``/fd/code-apps/<slug>/api/``.
+    const apiBase = './api';
+
+    const errBox = document.getElementById('err');
+    function showError(msg) {
+      errBox.textContent = msg;
+      errBox.style.display = msg ? 'block' : 'none';
+    }
+
+    async function refresh() {
+      showError('');
+      try {
+        const resp = await fetch(apiBase + '/items');
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const { items } = await resp.json();
+        const ul = document.getElementById('list');
+        if (!items.length) {
+          ul.innerHTML = '<li class="empty">No notes yet.</li>';
+          return;
+        }
+        ul.innerHTML = items.map((it) => `
+          <li>
+            <div>
+              <div class="title">${escapeHtml(it.title || '')}</div>
+              <div class="body">${escapeHtml(it.body || '')}</div>
+            </div>
+            <button class="danger" data-id="${it.id}">Delete</button>
+          </li>
+        `).join('');
+      } catch (e) {
+        showError('Failed to load: ' + e.message);
+      }
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[c]));
+    }
+
+    document.getElementById('new').addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const title = document.getElementById('title').value.trim();
+      const body = document.getElementById('body').value.trim();
+      if (!title) return;
+      try {
+        const resp = await fetch(apiBase + '/items', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title, body }),
+        });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        ev.target.reset();
+        refresh();
+      } catch (e) {
+        showError('Failed to save: ' + e.message);
+      }
+    });
+
+    document.getElementById('list').addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('button[data-id]');
+      if (!btn) return;
+      const id = btn.dataset.id;
+      try {
+        const resp = await fetch(apiBase + '/items/' + encodeURIComponent(id), { method: 'DELETE' });
+        if (!resp.ok && resp.status !== 404) throw new Error('HTTP ' + resp.status);
+        refresh();
+      } catch (e) {
+        showError('Failed to delete: ' + e.message);
+      }
+    });
+
+    refresh();
+  </script>
+</body>
+</html>

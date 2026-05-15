@@ -24,6 +24,7 @@ import { GPUCloudPage } from './pages/GPUCloudPage'
 import { PromptBuilderPage } from './pages/PromptBuilderPage'
 import { ProjectsPage } from './pages/ProjectsPage'
 import { AppPage } from './pages/AppPage'
+import { AppCodePage } from './pages/AppCodePage'
 import { useUIStore } from './stores/uiStore'
 import { useAgentStore } from './stores/agentStore'
 import { useAuthStore, checkAuthStatus, refreshAccessToken } from './stores/authStore'
@@ -134,6 +135,7 @@ registerHydrator((settings) => {
 function AppContent() {
   const view = useUIStore((s) => s.view)
   const chatOpen = useChatStore((s) => s.chatOpen)
+  const chatFullscreen = useChatStore((s) => s.chatFullscreen)
   const { fetchInstances, fetchStats, fetchConcerns, setWsConnected, upsertInstance, removeInstance, updateInstanceActivity } = useAgentStore()
   const addNotification = useNotificationStore((s) => s.add)
 
@@ -302,6 +304,7 @@ function AppContent() {
       {view === 'gpu-cloud' && <GPUCloudPage />}
       {view === 'projects' && <ProjectsPage />}
       {view === 'app' && <AppPage />}
+      {view === 'code-app' && <AppCodePage />}
     </>
   )
 
@@ -395,6 +398,33 @@ function AppContent() {
   }
 
   // ── Desktop layout (unchanged) ──
+  // Fullscreen chat: hides sidebar, director, main content, and tool panels
+  // so the chat (with its left-hand queue panel) gets the full viewport
+  // width. TopBar stays so the user can still toggle UI controls.
+  if (chatFullscreen && chatOpen) {
+    return (
+      <div className="flex h-screen flex-col overflow-hidden">
+        <TopBar
+          directorOpen={directorOpen}
+          onToggleDirector={toggleDirector}
+          onTogglePinned={() => toggleToolPanel('pinned')}
+          onTogglePinnedFiles={() => toggleToolPanel('pinned-files')}
+          onToggleClipboard={() => toggleToolPanel('clipboard')}
+          onToggleShortcuts={() => setShortcutsOpen(!shortcutsOpen)}
+          pinnedOpen={toolPanel === 'pinned'}
+          pinnedFilesOpen={toolPanel === 'pinned-files'}
+          clipboardOpen={toolPanel === 'clipboard'}
+        />
+        <main className="flex-1 overflow-hidden">
+          <div className="h-full w-full">
+            <ChatPanel />
+          </div>
+        </main>
+        {shortcutsOpen && <ShortcutsOverlay onClose={() => setShortcutsOpen(false)} />}
+      </div>
+    )
+  }
+
   return (
     <div className="flex h-screen overflow-hidden">
       <Sidebar />

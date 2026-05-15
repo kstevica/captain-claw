@@ -49,6 +49,19 @@ export function sanitizeAgentContent(raw: string): string {
   text = text.replace(/^\[tool\]\s.*(?:\n(?:\s.*|\(score=.*|\n))*$/gm, '')
   text = text.replace(/^\[user\]\s*(?:COUNCIL ROUND|SUITABILITY).*$/gm, '')
 
+  // Strip INTERNAL CONTEXT envelopes that the agent sometimes echoes from
+  // its own input (CC wraps memory/search tool outputs in
+  // [INTERNAL CONTEXT — reference only, ...] ... [END INTERNAL CONTEXT] so
+  // the model treats them as reference-only; some models regurgitate them
+  // into the visible reply). Strip the full closed block; if unclosed, drop
+  // from the opening marker to the end of the message.
+  text = text.replace(/\[INTERNAL CONTEXT[\s\S]*?\[END INTERNAL CONTEXT\]\s*/gi, '')
+  text = text.replace(/\[INTERNAL CONTEXT[\s\S]*$/gi, '')
+  // Also strip the bare "Continuity note (use only if relevant):" header
+  // line — it's the inner marker of the same envelope and sometimes leaks
+  // on its own without the [INTERNAL CONTEXT] wrapper.
+  text = text.replace(/^Continuity note \(use only if relevant\)\s*:\s*$/gim, '')
+
   // Strip SCALE ADVISORY block (auto-detected scale playbook leaked from agent input)
   text = text.replace(/-{2,}\s*SCALE ADVISORY[\s\S]*?-{2,}\s*END SCALE ADVISORY\s*-{2,}/gi, '')
   // Unterminated SCALE ADVISORY block (agent echoed only the opening)

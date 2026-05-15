@@ -2177,6 +2177,10 @@ class AgentContextMixin:
         # for live peer discovery instead of relying on static pushed peer list.
         from captain_claw.tools.flight_deck import FlightDeckTool
         self.tools.register(FlightDeckTool())
+        # Code-app authoring — always registered; calls return a clear error
+        # if FD_URL isn't available, so registration cost is negligible.
+        from captain_claw.tools.app_runner import AppRunnerTool
+        self.tools.register(AppRunnerTool())
         sft = SummarizeFilesTool()
         uid = getattr(self, "_active_personality_id", None) or getattr(self, "_user_id", None)
         if uid:

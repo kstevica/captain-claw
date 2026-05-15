@@ -254,6 +254,11 @@ class DatastoreManager:
         seen: set[str] = set()
 
         for i, col in enumerate(columns):
+            if not isinstance(col, dict):
+                raise ValueError(
+                    f"Column {i} must be an object with 'name' and 'type' keys "
+                    f"(e.g. {{\"name\": \"title\", \"type\": \"text\"}}), got {type(col).__name__}: {col!r}"
+                )
             col_name = self._safe_name(col.get("name", ""))
             col_type = (col.get("type", "text") or "text").lower().strip()
             if not col_name or col_name.startswith("_"):
@@ -493,6 +498,11 @@ class DatastoreManager:
         valid_columns: set[str],
     ) -> tuple[str, list[Any]]:
         """Build a WHERE clause + params from a structured filter dict."""
+        if not isinstance(where, dict):
+            raise ValueError(
+                f"'where' must be a JSON object like {{\"col\": \"value\"}} or "
+                f"{{\"col\": {{\"op\": \">\", \"value\": 10}}}}, got {type(where).__name__}: {where!r}"
+            )
         clauses: list[str] = []
         params: list[Any] = []
 
@@ -804,7 +814,12 @@ class DatastoreManager:
         col_names = {c.name for c in columns}
 
         inserted = 0
-        for row in rows:
+        for i, row in enumerate(rows):
+            if not isinstance(row, dict):
+                raise ValueError(
+                    f"Row {i} must be a JSON object mapping column names to values "
+                    f"(e.g. {{\"name\": \"Alice\", \"age\": 30}}), got {type(row).__name__}: {row!r}"
+                )
             # Filter to known columns only
             filtered = {self._safe_name(k): v for k, v in row.items() if self._safe_name(k) in col_names}
             if not filtered:
@@ -836,6 +851,11 @@ class DatastoreManager:
         assert self._db is not None
         await self._check_table_protected(safe)
 
+        if not isinstance(set_values, dict):
+            raise ValueError(
+                f"'set_values' must be a JSON object mapping column names to values "
+                f"(e.g. {{\"status\": \"done\"}}), got {type(set_values).__name__}: {set_values!r}"
+            )
         if not set_values:
             raise ValueError("set_values cannot be empty")
 
@@ -932,6 +952,11 @@ class DatastoreManager:
 
         if not where:
             raise ValueError("WHERE clause required. Pass {\"_all\": true} to delete all rows.")
+        if not isinstance(where, dict):
+            raise ValueError(
+                f"'where' must be a JSON object like {{\"col\": \"value\"}} or "
+                f"{{\"_all\": true}}, got {type(where).__name__}: {where!r}"
+            )
 
         if where.get("_all") is True:
             # Check if any rows in the table are row-protected

@@ -105,6 +105,51 @@ function clearPlanSlice(containerId: string): void {
   try { window.localStorage.removeItem(_planLSKey(containerId)) } catch { /* ignore */ }
 }
 
+// ── Queue persistence ──
+//
+// The fullscreen-mode task queue survives a page refresh. We keep it
+// per-container in localStorage so reopening FD picks up exactly where the
+// user left off (pending items still pending, done items still ticked). The
+// in-flight ("dispatched") status is downgraded to "pending" on hydrate —
+// after a refresh we can't know if the agent ever finished it, so re-queue.
+
+interface PersistedQueueSlice {
+  queue: QueuedMessage[]
+  queueAutoMode: boolean
+}
+
+function _queueLSKey(containerId: string): string {
+  return `fd.queue.${containerId}`
+}
+
+function saveQueueSlice(containerId: string, slice: PersistedQueueSlice): void {
+  try {
+    if (slice.queue.length === 0 && !slice.queueAutoMode) {
+      window.localStorage.removeItem(_queueLSKey(containerId))
+      return
+    }
+    window.localStorage.setItem(_queueLSKey(containerId), JSON.stringify(slice))
+  } catch { /* quota / private mode — ignore */ }
+}
+
+function loadQueueSlice(containerId: string): PersistedQueueSlice | null {
+  try {
+    const raw = window.localStorage.getItem(_queueLSKey(containerId))
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as PersistedQueueSlice
+    if (!parsed || !Array.isArray(parsed.queue)) return null
+    // Downgrade any in-flight items back to pending — after a refresh we
+    // have no reliable signal that the agent's reply was received, so
+    // re-dispatch is safer than abandoning the task.
+    parsed.queue = parsed.queue.map((q) =>
+      q.status === 'dispatched' ? { ...q, status: 'pending', dispatchedAt: undefined } : q,
+    )
+    return parsed
+  } catch {
+    return null
+  }
+}
+
 // Debounced batch persist
 const _msgQueue: Map<string, ChatMessage[]> = new Map()
 let _msgTimer: ReturnType<typeof setTimeout> | null = null
@@ -156,6 +201,186 @@ export interface NextStepOption {
   label: string
   action: string
   description?: string
+}
+
+// ── Queued message (fullscreen-mode task queue) ──
+//
+// The chat panel can run in a "fullscreen" mode that exposes a left-hand
+// queue. Each item is dispatched to the agent one at a time. The user marks
+// items done manually, or — in auto mode — FD marks the currently-dispatched
+// item done as soon as the agent emits a non-replay assistant reply, which
+// triggers the next pending item.
+export interface QueuedMessage {
+  id: string
+  content: string
+  status: 'pending' | 'dispatched' | 'done'
+  createdAt: number
+  dispatchedAt?: number
+  completedAt?: number
+}
+
+let _queueCounter = 0
+function nextQueueId() { return `q-${Date.now()}-${++_queueCounter}` }
+
+// ── Auto-mark watchers ──
+//
+// When the agent emits a non-replay assistant reply we DON'T mark the queue
+// item done immediately — the agent may still be running post-turn work
+// (next_steps emission, tool wind-down) and dispatching another message
+// while it's still busy triggers the "Agent is busy processing another
+// request" rejection.
+//
+// Instead, we arm a per-container watcher that fires when either:
+//   - the `next_steps` event arrives (the explicit end-of-turn signal), OR
+//   - a fallback timeout elapses (covers replies that don't emit next_steps).
+//
+// The watcher captures the dispatched queue-item id so a late-arriving event
+// can't mark the wrong item done if the user has already moved on.
+interface AutoCompleteWatch {
+  itemId: string
+  timer: ReturnType<typeof setTimeout>
+}
+const _autoCompleteWatches = new Map<string, AutoCompleteWatch>()
+const AUTO_COMPLETE_FALLBACK_MS = 6000
+
+function armAutoCompleteWatch(containerId: string, itemId: string) {
+  cancelAutoCompleteWatch(containerId)
+  const timer = setTimeout(() => {
+    _autoCompleteWatches.delete(containerId)
+    _fireAutoComplete(containerId, itemId)
+  }, AUTO_COMPLETE_FALLBACK_MS)
+  _autoCompleteWatches.set(containerId, { itemId, timer })
+}
+
+function fireAutoCompleteWatch(containerId: string) {
+  const watch = _autoCompleteWatches.get(containerId)
+  if (!watch) return
+  clearTimeout(watch.timer)
+  _autoCompleteWatches.delete(containerId)
+  _fireAutoComplete(containerId, watch.itemId)
+}
+
+function cancelAutoCompleteWatch(containerId: string) {
+  const watch = _autoCompleteWatches.get(containerId)
+  if (!watch) return
+  clearTimeout(watch.timer)
+  _autoCompleteWatches.delete(containerId)
+}
+
+// ── Stall detection (client-side safety net) ──
+//
+// Some replies are "stalls" — the agent announces intent ("Let me research…")
+// without actually doing anything in the same turn, or the visible content
+// after sanitization is empty (the whole reply was a leaked context block).
+//
+// PRIMARY DEFENSE lives in Captain Claw: the agent orchestration loop
+// detects stalls on a no-tool-calls turn and silently retries up to
+// MAX_STALL_RETRIES times with a corrective prompt + tool_choice="required"
+// forcing (see captain_claw/agent_orchestration_mixin.py:_looks_like_stall).
+// By the time a stall reaches this client, the server has already burned
+// its retry budget on it.
+//
+// This client-side path is the last-line safety net for the residual
+// cases where the server's retries also stalled. We send a single
+// "Continue the task." follow-up so the queue can move on, capped at
+// MAX_STALL_NUDGES per item to avoid infinite loops.
+const _stallNudges = new Map<string, { itemId: string; count: number }>()
+const MAX_STALL_NUDGES = 1
+
+function isLikelyStall(text: string): boolean {
+  const t = (text || '').trim()
+  if (!t) return true            // sanitizer stripped everything → empty
+  if (t.length > 400) return false
+  // Look at the first non-empty line only — long stalls are rare.
+  const firstLine = (t.split(/\r?\n/).find((l) => l.trim()) || '').trim()
+  if (!firstLine) return true
+  const patterns = [
+    /^let me\b/i,
+    /^let'?s\s+/i,
+    /^i'?ll\s+/i,
+    /^i\s+will\s+(now\s+|then\s+|next\s+)?/i,
+    /^i'?m\s+(going to|about to)\s+/i,
+    /^i\s+am\s+(going to|about to)\s+/i,
+    /^proceeding\s+(now|with|to)\b/i,
+    /^starting\s+(now|the|with)\b/i,
+    /^working on\b/i,
+    /^one moment\b/i,
+    /^one sec\b/i,
+  ]
+  // Treat as stall only if the WHOLE message is one short stall-shaped
+  // line (no follow-up content). A reply like "Let me grab that. Here it
+  // is: ..." with 2KB of substance is not a stall.
+  if (t.length > 200) return false
+  return patterns.some((p) => p.test(firstLine))
+}
+
+function resetStallNudges(containerId: string) {
+  _stallNudges.delete(containerId)
+}
+
+function _fireAutoComplete(containerId: string, itemId: string) {
+  const state = useChatStore.getState()
+  const session = state.sessions.get(containerId)
+  if (!session) return
+  // Only fire if auto-mode is still on AND the dispatched item hasn't moved.
+  if (!session.queueAutoMode) return
+  if (session.queueDispatchedId !== itemId) return
+  state.markQueueItemDone(containerId, itemId)
+}
+
+// Heuristic: did the agent's reply actually complete the task, or is it
+// asking the user something? Auto-mode shouldn't tick a queue item done
+// when the agent is mid-flight waiting for a clarification.
+//
+// "Looks complete" rules:
+//  - Strip trailing whitespace and any trailing source-link / footer lines
+//    (CC often appends a "Sources:" block at the bottom).
+//  - If the last non-trivial line ends with "?" → NOT complete.
+//  - If the body contains a confirmation-seeking phrase ("confirm with",
+//    "should I proceed", "do you want me to", "would you like me to",
+//    "let me know if", "please confirm", "reply with") AND the message is
+//    short-ish → NOT complete. We require short-ish to avoid false negatives
+//    on long reports that happen to mention "please confirm" in passing.
+//  - Otherwise → complete.
+function isLikelyTaskComplete(text: string): boolean {
+  const trimmed = (text || '').trim()
+  if (!trimmed) return false
+  // Drop trailing markdown noise: blockquotes, source lists, separators.
+  const lines = trimmed.split(/\r?\n/).map((l) => l.trimEnd())
+  let lastIdx = lines.length - 1
+  while (lastIdx >= 0) {
+    const l = lines[lastIdx].trim()
+    if (!l) { lastIdx--; continue }
+    // Skip trailing source/footer lines so the "?" check sees real prose.
+    if (/^(sources?|references?|links?|notes?)\s*:/i.test(l)) { lastIdx--; continue }
+    if (/^[-*•]\s/.test(l) && lastIdx < lines.length - 1) break
+    break
+  }
+  const lastLine = lastIdx >= 0 ? lines[lastIdx].trim() : ''
+  // Strip trailing punctuation pairings like ?**, ?", ?_
+  const lastChar = lastLine.replace(/[\s*_"'`)\]]+$/g, '').slice(-1)
+  if (lastChar === '?') return false
+  // Confirmation-seeking phrases. Only treat as "waiting" if the message is
+  // reasonably short — a 5KB report that mentions "let me know if" is fine.
+  const lower = trimmed.toLowerCase()
+  const SHORT_LIMIT = 1200
+  if (trimmed.length <= SHORT_LIMIT) {
+    const patterns = [
+      /\bconfirm with\b/,
+      /\bplease confirm\b/,
+      /\b(should|shall) i (proceed|continue|start|begin|run|do)\b/,
+      /\bdo you want me to\b/,
+      /\bwould you like me to\b/,
+      /\bwant me to (proceed|continue|go ahead|run|do)\b/,
+      /\breply with\b/,
+      /\bsay ["“'`]/,
+      /\b(or say|or reply)\b/,
+    ]
+    for (const p of patterns) {
+      if (p.test(lower)) return false
+    }
+  }
+  return true
 }
 
 interface AgentPersonalityInfo {
@@ -237,12 +462,20 @@ interface ChatSession {
   planCardCollapsed: boolean
   // Suggested next steps emitted by the agent after a response.
   nextStepOptions: NextStepOption[]
+  // Queue (fullscreen mode only — but state lives here so it survives
+  // toggling fullscreen on/off without losing user input).
+  queue: QueuedMessage[]
+  queueAutoMode: boolean
+  queueDispatchedId: string | null
 }
 
 interface ChatStore {
   sessions: Map<string, ChatSession>
   activeChatId: string | null
   chatOpen: boolean
+  // Fullscreen mode: hides sidebar/director/main/tool panels and gives the
+  // chat panel the full width. The queue panel is only available here.
+  chatFullscreen: boolean
 
   openChat: (id: string, name: string, host: string, port: number, auth: string) => void
   closeChat: () => void
@@ -259,6 +492,13 @@ interface ChatStore {
   setPlanLevel: (containerId: string, level: PlanLevel) => void
   togglePlanCardCollapsed: (containerId: string) => void
   dismissPlan: (containerId: string) => void
+  // Fullscreen + queue actions
+  toggleChatFullscreen: () => void
+  enqueueQueueMessage: (containerId: string, content: string) => void
+  removeQueueItem: (containerId: string, id: string) => void
+  markQueueItemDone: (containerId: string, id: string) => void
+  toggleQueueAutoMode: (containerId: string) => void
+  clearQueue: (containerId: string) => void
 }
 
 let msgCounter = 0
@@ -268,6 +508,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   sessions: new Map(),
   activeChatId: null,
   chatOpen: false,
+  chatFullscreen: false,
 
   openChat: (containerId, containerName, host, port, auth) => {
     const existing = get().sessions.get(containerId)
@@ -289,6 +530,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // Re-hydrate any persisted plan slice so the PlanCard reappears instantly
     // after a page refresh. Live ws events will keep updating it from here.
     const persisted = loadPlanSlice(containerId)
+    const persistedQueue = loadQueueSlice(containerId)
     const session: ChatSession = {
       containerId,
       containerName,
@@ -314,6 +556,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       planState: persisted?.planState ?? null,
       planCardCollapsed: persisted?.planCardCollapsed ?? false,
       nextStepOptions: [],
+      queue: persistedQueue?.queue ?? [],
+      queueAutoMode: persistedQueue?.queueAutoMode ?? false,
+      queueDispatchedId: null,
     }
 
     const sessions = new Map(get().sessions)
@@ -344,10 +589,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // Wire up event handlers
     ws.on('_connected', () => {
       updateSession(containerId, { connected: true })
+      // If we hydrated a queue with pending items and auto-mode is on, kick
+      // off the first dispatch now that the socket is live.
+      const cur = useChatStore.getState().sessions.get(containerId)
+      if (cur && cur.queueAutoMode && !cur.queueDispatchedId) {
+        tryDispatchNext(containerId)
+      }
     })
 
     ws.on('_disconnected', () => {
       updateSession(containerId, { connected: false, busy: false, statusText: '' })
+      // A dropped socket means we won't see the next_steps event. Cancel
+      // any pending auto-mark — when the agent reconnects, replay or fresh
+      // events will drive the queue forward again.
+      cancelAutoCompleteWatch(containerId)
     })
 
     ws.on('welcome', (data) => {
@@ -456,6 +711,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         .filter((o) => o.label && o.action)
       console.debug('[chatStore] next_steps received', { containerId, rawCount: raw.length, validCount: options.length, options })
       updateSession(containerId, { nextStepOptions: options })
+      // next_steps is the explicit "agent finished its turn" signal — fire
+      // any armed auto-complete watcher now instead of waiting for the
+      // fallback timer.
+      fireAutoCompleteWatch(containerId)
     })
 
     ws.on('chat_message', (data) => {
@@ -477,6 +736,46 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       addMessage(containerId, msg)
       if (data.role === 'assistant' && !data.replay) {
         updateSession(containerId, { busy: false, statusText: '' })
+        // Queue auto-mode: decide what this reply means for the dispatched
+        // queue item.
+        //
+        //   (a) Stall (intent without action / sanitized-to-empty): send a
+        //       "Continue." nudge so the agent advances. Capped at
+        //       MAX_STALL_NUDGES — after that, accept the result.
+        //   (b) Clarifying question: do nothing. The user answers in chat,
+        //       and the agent's next reply gets re-evaluated.
+        //   (c) Real completion: arm the auto-complete watcher (which fires
+        //       on the next_steps event or a fallback timer) so we don't
+        //       race the agent's post-turn work.
+        const cur = useChatStore.getState().sessions.get(containerId)
+        if (cur && cur.queueAutoMode && cur.queueDispatchedId) {
+          const dispatchedId = cur.queueDispatchedId
+          if (isLikelyStall(cleanContent)) {
+            const entry = _stallNudges.get(containerId)
+            const used = entry && entry.itemId === dispatchedId ? entry.count : 0
+            if (used < MAX_STALL_NUDGES) {
+              _stallNudges.set(containerId, { itemId: dispatchedId, count: used + 1 })
+              // Small delay so the nudge lands after any trailing events
+              // (next_steps, status) from the same turn.
+              setTimeout(() => {
+                const s = useChatStore.getState().sessions.get(containerId)
+                // Bail if user already moved on (toggled auto off, removed
+                // the item, or marked it done manually).
+                if (!s || !s.queueAutoMode) return
+                if (s.queueDispatchedId !== dispatchedId) return
+                if (s.busy) return
+                useChatStore.getState().sendMessage(containerId, 'Continue the task.')
+              }, 800)
+            } else {
+              // Out of nudges — treat as completion so the queue moves on.
+              armAutoCompleteWatch(containerId, dispatchedId)
+            }
+          } else if (isLikelyTaskComplete(cleanContent)) {
+            resetStallNudges(containerId)
+            armAutoCompleteWatch(containerId, dispatchedId)
+          }
+          // else: question — do nothing, user will answer.
+        }
       }
     })
 
@@ -1085,7 +1384,108 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     updateSession(containerId, { planState: null })
     clearPlanSlice(containerId)
   },
+
+  toggleChatFullscreen: () => {
+    set((s) => ({ chatFullscreen: !s.chatFullscreen }))
+  },
+
+  enqueueQueueMessage: (containerId, content) => {
+    const trimmed = content.trim()
+    if (!trimmed) return
+    const session = get().sessions.get(containerId)
+    if (!session) return
+    const item: QueuedMessage = {
+      id: nextQueueId(),
+      content: trimmed,
+      status: 'pending',
+      createdAt: Date.now(),
+    }
+    updateSession(containerId, { queue: [...session.queue, item] })
+    // Try to dispatch immediately if nothing else is in flight.
+    tryDispatchNext(containerId)
+  },
+
+  removeQueueItem: (containerId, id) => {
+    const session = get().sessions.get(containerId)
+    if (!session) return
+    // Removing the in-flight item also clears the dispatched marker — the
+    // agent will still finish its work, but FD stops waiting on it.
+    const patch: Partial<ChatSession> = {
+      queue: session.queue.filter((q) => q.id !== id),
+    }
+    if (session.queueDispatchedId === id) {
+      patch.queueDispatchedId = null
+      cancelAutoCompleteWatch(containerId)
+      resetStallNudges(containerId)
+    }
+    updateSession(containerId, patch)
+    if (session.queueDispatchedId === id) tryDispatchNext(containerId)
+  },
+
+  markQueueItemDone: (containerId, id) => {
+    const session = get().sessions.get(containerId)
+    if (!session) return
+    const queue = session.queue.map((q) =>
+      q.id === id && q.status !== 'done'
+        ? { ...q, status: 'done' as const, completedAt: Date.now() }
+        : q,
+    )
+    const patch: Partial<ChatSession> = { queue }
+    if (session.queueDispatchedId === id) {
+      patch.queueDispatchedId = null
+      cancelAutoCompleteWatch(containerId)
+      resetStallNudges(containerId)
+    }
+    updateSession(containerId, patch)
+    tryDispatchNext(containerId)
+  },
+
+  toggleQueueAutoMode: (containerId) => {
+    const session = get().sessions.get(containerId)
+    if (!session) return
+    const next = !session.queueAutoMode
+    updateSession(containerId, { queueAutoMode: next })
+    // Turning auto-mode off cancels any pending watch so it doesn't fire
+    // after the user has switched to manual.
+    if (!next) cancelAutoCompleteWatch(containerId)
+    // Turning auto-mode on while idle should kick the queue.
+    if (next) tryDispatchNext(containerId)
+  },
+
+  clearQueue: (containerId) => {
+    const session = get().sessions.get(containerId)
+    if (!session) return
+    // Drop pending items; leave the in-flight one alone so we don't lose
+    // track of the agent's current task.
+    const queue = session.queue.filter((q) => q.status !== 'pending')
+    updateSession(containerId, { queue })
+  },
 }))
+
+// ── Queue dispatch ──
+//
+// Pulls the next pending item and pushes it through sendMessage so it appears
+// in chat history exactly like a user-typed message. Guarded by:
+//  - no item currently dispatched (queueDispatchedId === null)
+//  - session not busy (don't pile prompts on top of an in-flight one)
+//  - at least one pending item to send
+function tryDispatchNext(containerId: string) {
+  const state = useChatStore.getState()
+  const session = state.sessions.get(containerId)
+  if (!session) return
+  if (session.queueDispatchedId) return
+  if (session.busy) return
+  if (!session.connected) return
+  const next = session.queue.find((q) => q.status === 'pending')
+  if (!next) return
+  const queue = session.queue.map((q) =>
+    q.id === next.id
+      ? { ...q, status: 'dispatched' as const, dispatchedAt: Date.now() }
+      : q,
+  )
+  updateSession(containerId, { queue, queueDispatchedId: next.id })
+  state.sendMessage(containerId, next.content)
+}
 
 // Helpers that update a session inside the map
 function updateSession(containerId: string, patch: Partial<ChatSession>) {
@@ -1107,6 +1507,14 @@ function updateSession(containerId: string, patch: Partial<ChatSession>) {
         planningEnabled: updated.planningEnabled,
         planLevel: updated.planLevel,
         planCardCollapsed: updated.planCardCollapsed,
+      })
+    }
+    // Mirror queue changes so they survive a page refresh. Auto-mode flag
+    // travels with the queue since it changes the UX meaningfully.
+    if ('queue' in patch || 'queueAutoMode' in patch) {
+      saveQueueSlice(containerId, {
+        queue: updated.queue,
+        queueAutoMode: updated.queueAutoMode,
       })
     }
     return { sessions }
