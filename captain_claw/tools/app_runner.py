@@ -184,6 +184,17 @@ class AppRunnerTool(Tool):
         "(it auto-restarts the subprocess), (3) optionally smoke-test "
         "with ``proxy``. Only fall back to ``scaffold`` if the change "
         "is a full rewrite of both files.\n\n"
+        "READING ANOTHER APP'S DATA: each app can publish a public "
+        "data API by adding a ``data_api`` block to its "
+        "``manifest.json`` (endpoint name → {path, method, "
+        "description}). To read across apps from chat, call "
+        "``list`` to see which apps expose what, then ``query_app`` "
+        "to hit a specific endpoint. Apps without a ``data_api`` "
+        "block are private — chat can still read them via "
+        "``query_app`` (the chat agent is treated as the user), but "
+        "OTHER apps calling sibling() will get a 403 until you add "
+        "the data_api block. When scaffolding apps you expect to be "
+        "queried by siblings, include a data_api in the manifest.\n\n"
         "Self-repair loop: after scaffold/edit, call ``proxy`` to "
         "smoke-test. On 5xx, call ``logs`` to read the subprocess "
         "traceback, fix with ``edit_file`` or ``scaffold``, then "
@@ -200,7 +211,7 @@ class AppRunnerTool(Tool):
                 "type": "string",
                 "enum": [
                     "list", "get", "read_source", "scaffold", "edit_file",
-                    "restart", "stop", "logs", "delete", "proxy",
+                    "restart", "stop", "logs", "delete", "proxy", "query_app",
                 ],
                 "description": (
                     "What to do. 'scaffold' writes backend.py + "
@@ -212,7 +223,11 @@ class AppRunnerTool(Tool):
                     "the subprocess. 'logs' tails subprocess stderr/stdout "
                     "+ last_error (call this when a request returned 5xx). "
                     "'proxy' issues any HTTP method against the app backend "
-                    "(use for smoke tests)."
+                    "(use for smoke tests of an app you just authored). "
+                    "'query_app' reads data from another app's published "
+                    "data_api on the user's behalf (use this when chat "
+                    "needs facts FROM an app, e.g. 'how many notes do I "
+                    "have' or 'list contacts whose email is gmail')."
                 ),
             },
             "slug": {
@@ -254,30 +269,46 @@ class AppRunnerTool(Tool):
             "method": {
                 "type": "string",
                 "description": (
-                    "HTTP method for 'proxy' action: GET / POST / PUT / "
-                    "PATCH / DELETE / OPTIONS / HEAD."
+                    "HTTP method for 'proxy' / 'query_app': GET / POST / "
+                    "PUT / PATCH / DELETE / OPTIONS / HEAD. Defaults to "
+                    "GET (or the value declared in the target app's "
+                    "data_api when using 'query_app' with 'endpoint')."
                 ),
             },
             "path": {
                 "type": "string",
                 "description": (
-                    "Path under the app backend for 'proxy' action. The "
-                    "leading slash is optional; '/items' and 'items' both "
-                    "arrive at the backend as '/items'."
+                    "Path under the app backend for 'proxy' / 'query_app'. "
+                    "The leading slash is optional; '/items' and 'items' "
+                    "both arrive at the backend as '/items'. For "
+                    "'query_app' this is optional if you pass 'endpoint' "
+                    "instead."
+                ),
+            },
+            "endpoint": {
+                "type": "string",
+                "description": (
+                    "(query_app only) Named endpoint from the target "
+                    "app's manifest.json 'data_api' block. Use this "
+                    "instead of 'path' when you saw the endpoint name "
+                    "in the 'list' output — saves you from memorising "
+                    "URLs. Example: endpoint='list' or 'search'."
                 ),
             },
             "body": {
                 "type": "string",
                 "description": (
-                    "Request body (string) for 'proxy' action. JSON callers "
-                    "should pre-serialize and set 'Content-Type: application/json' "
-                    "in 'headers'."
+                    "Request body (string) for 'proxy' / 'query_app'. "
+                    "JSON callers should pre-serialize and set "
+                    "'Content-Type: application/json' in 'headers'."
                 ),
             },
             "headers": {
                 "type": "object",
                 "additionalProperties": {"type": "string"},
-                "description": "Extra request headers for 'proxy' action.",
+                "description": (
+                    "Extra request headers for 'proxy' / 'query_app'."
+                ),
             },
             "file": {
                 "type": "string",
@@ -366,6 +397,8 @@ class AppRunnerTool(Tool):
             return await self._delete(httpx, fd_url, token, slug)
         if action == "proxy":
             return await self._proxy(httpx, fd_url, token, slug, kwargs)
+        if action == "query_app":
+            return await self._query_app(httpx, fd_url, token, slug, kwargs)
 
         return ToolResult(
             success=False,
@@ -401,6 +434,22 @@ class AppRunnerTool(Tool):
                 f"v{a.get('version', '?')} — {a.get('name', '?')}"
                 f"{err}{backend}"
             )
+            # Surface any published data_api so the agent knows what
+            # it can call via ``query_app`` without a second request.
+            # Compact 1-line summary per endpoint to keep the listing
+            # readable when many apps are registered.
+            data_api = a.get("data_api") or {}
+            if isinstance(data_api, dict) and data_api:
+                for ep_name, ep in data_api.items():
+                    if not isinstance(ep, dict):
+                        continue
+                    method = str(ep.get("method") or "GET").upper()
+                    path = str(ep.get("path") or "")
+                    desc = str(ep.get("description") or "").strip()
+                    suffix = f" — {desc}" if desc else ""
+                    lines.append(
+                        f"    · data_api.{ep_name}: {method} {path}{suffix}"
+                    )
         return ToolResult(success=True, content="\n".join(lines))
 
     async def _get(self, httpx, fd_url: str, token: str, slug: str) -> ToolResult:
@@ -746,6 +795,149 @@ class AppRunnerTool(Tool):
             error=(
                 f"Backend returned HTTP {resp.status_code} — "
                 f"call action='logs' to inspect the traceback."
+                if is_failure else None
+            ),
+        )
+
+    async def _query_app(
+        self, httpx, fd_url: str, token: str, slug: str, kwargs: dict[str, Any],
+    ) -> ToolResult:
+        """Read another app's data on the user's behalf.
+
+        Functionally similar to ``proxy`` (same FD route, same auth),
+        but framed for read-from-another-app rather than smoke-test-
+        my-own. Two extra things on top of ``proxy``:
+
+        1. Best-effort discovery: if ``path`` is omitted but the
+           target app's manifest declares a ``data_api`` block with
+           exactly one endpoint named via ``endpoint``, we resolve
+           the path/method from there. Lets the agent say
+           ``query_app slug=contacts endpoint=list`` without
+           memorizing routes.
+
+        2. Pretty-printed JSON in the result so the agent can ground
+           directly on the data without re-parsing a raw blob.
+
+        The chat agent calls FD without an ``X-FD-Agent-As`` tag, so
+        the cross-app data_api gate doesn't apply — chat is treated
+        like the user, who already owns every app.
+        """
+        method_in = kwargs.get("method")
+        path_in = kwargs.get("path")
+        endpoint = str(kwargs.get("endpoint") or "").strip()
+        method = str(method_in or "GET").strip().upper()
+        path = str(path_in or "").strip()
+
+        # Endpoint lookup mode.
+        if endpoint and not path:
+            try:
+                async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
+                    resp = await client.get(
+                        f"{fd_url}/fd/code-apps/{slug}",
+                        headers=_auth_headers(token),
+                    )
+            except Exception as e:
+                return ToolResult(success=False, error=f"Cannot reach FD: {e}")
+            if resp.status_code != 200:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"Lookup of '{slug}' failed HTTP "
+                        f"{resp.status_code}: {resp.text[:200]}"
+                    ),
+                )
+            manifest = (resp.json() or {}).get("manifest") or {}
+            data_api = manifest.get("data_api") or {}
+            ep = data_api.get(endpoint) if isinstance(data_api, dict) else None
+            if not isinstance(ep, dict):
+                available = (
+                    sorted(data_api.keys()) if isinstance(data_api, dict) else []
+                )
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"App '{slug}' has no data_api endpoint "
+                        f"named '{endpoint}'. "
+                        + (
+                            f"Available: {', '.join(available)}."
+                            if available
+                            else "It declares no data_api at all."
+                        )
+                    ),
+                )
+            path = str(ep.get("path") or "")
+            if not method_in:
+                method = str(ep.get("method") or "GET").upper()
+
+        if not path:
+            return ToolResult(
+                success=False,
+                error=(
+                    "query_app needs either 'path' (e.g. '/contacts') or "
+                    "'endpoint' (a name from the target app's data_api)."
+                ),
+            )
+        if method not in ("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"):
+            return ToolResult(success=False, error=f"Unsupported method: {method}")
+        if not path.startswith("/"):
+            path = "/" + path
+
+        body = kwargs.get("body")
+        extra_headers = kwargs.get("headers") or {}
+        if not isinstance(extra_headers, dict):
+            return ToolResult(success=False, error="'headers' must be an object")
+        merged_headers = {
+            str(k): str(v) for k, v in extra_headers.items()
+            if k and v is not None
+        }
+        merged_headers.update(_auth_headers(token))
+
+        url = f"{fd_url}/fd/code-apps/{slug}/api{path}"
+        try:
+            async with httpx.AsyncClient(timeout=_PROXY_TIMEOUT_SECONDS) as client:
+                resp = await client.request(
+                    method,
+                    url,
+                    content=body.encode("utf-8") if isinstance(body, str) else body,
+                    headers=merged_headers,
+                )
+        except Exception as e:
+            return ToolResult(success=False, error=f"query_app failed: {e}")
+
+        # Try to pretty-print JSON so the agent grounds on structured
+        # data, not a one-line blob. Fall through to raw text on
+        # parse failure.
+        raw = resp.text
+        rendered = raw
+        try:
+            parsed = resp.json()
+            rendered = json.dumps(parsed, indent=2, ensure_ascii=False, default=str)
+        except Exception:
+            pass
+        if len(rendered) > 12000:
+            rendered = rendered[:12000] + f"\n... (truncated; full length {len(raw)})"
+
+        is_failure = resp.status_code >= 500
+        # 403 from cross-app gate (only fires for app-to-app, but
+        # surface it cleanly in case the user reused query_app from
+        # inside an app context).
+        if resp.status_code == 403:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"App '{slug}' refused the query (HTTP 403). It "
+                    "likely needs a 'data_api' block in its manifest. "
+                    f"Body: {raw[:200]}"
+                ),
+            )
+        return ToolResult(
+            success=not is_failure,
+            content=(
+                f"{method} {slug}{path} → HTTP {resp.status_code}\n\n"
+                f"```json\n{rendered}\n```"
+            ),
+            error=(
+                f"App '{slug}' returned HTTP {resp.status_code}."
                 if is_failure else None
             ),
         )

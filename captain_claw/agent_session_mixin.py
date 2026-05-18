@@ -856,8 +856,19 @@ class AgentSessionMixin:
         tool_calls: list[dict[str, Any]] | None = None,
         tool_arguments: dict[str, Any] | None = None,
         system_hint: str | None = None,
+        reasoning_content: str | None = None,
     ) -> None:
-        """Append message to session with per-message token metadata."""
+        """Append message to session with per-message token metadata.
+
+        For assistant messages, ``reasoning_content`` is pulled from
+        the per-call stash on the agent (set by
+        :meth:`_complete_with_guards` whenever the provider returns
+        thinking-mode output) if not passed explicitly. Stash is
+        consumed (cleared) on use so each assistant message gets the
+        reasoning that produced it, and a later non-LLM-driven
+        ``_add_session_message`` call (e.g. a synthesized stall
+        nudge) doesn't accidentally re-attach a stale value.
+        """
         if not self.session:
             return
         # Attach model label for assistant messages so the UI can display it.
@@ -868,6 +879,19 @@ class AgentSessionMixin:
             model = details.get("model", "")
             if provider and model:
                 model_label = f"{provider}:{model}"
+            # Pull from stash if caller didn't pass one explicitly.
+            # Required for DeepSeek thinking-mode round-trip — see
+            # :class:`LLMResponse.reasoning_content`.
+            if reasoning_content is None:
+                stashed = getattr(self, "_pending_reasoning_content", "") or ""
+                if stashed:
+                    reasoning_content = stashed
+            # Consume the stash unconditionally on assistant writes so
+            # it can't bleed into the next message.
+            try:
+                self._pending_reasoning_content = ""
+            except Exception:
+                pass
         # Compute token count including tool_calls arguments — these
         # are sent to the LLM and must be budgeted accurately.
         _token_text = content
@@ -886,6 +910,7 @@ class AgentSessionMixin:
             token_count=self._count_tokens(_token_text),
             model=model_label,
             system_hint=system_hint,
+            reasoning_content=reasoning_content,
         )
         memory = getattr(self, "memory", None)
         if memory is not None:

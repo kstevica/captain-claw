@@ -3452,6 +3452,12 @@ class AgentContextMixin:
                     tool_call_id=msg.get("tool_call_id"),
                     tool_name=msg.get("tool_name"),
                     tool_calls=msg.get("tool_calls"),
+                    # Preserve the provider's thinking-mode chain so
+                    # ``_convert_messages_for_openai_style`` can echo
+                    # it back on the next API call. DeepSeek strictly
+                    # requires this round-trip; other providers
+                    # ignore the field.
+                    reasoning_content=msg.get("reasoning_content"),
                 )
             )
 

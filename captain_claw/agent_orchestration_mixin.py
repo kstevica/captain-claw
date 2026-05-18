@@ -2150,8 +2150,20 @@ class AgentOrchestrationMixin:
             full_content += chunk
             yield chunk
 
-        # Add assistant response to session
+        # Add assistant response to session. Pull the just-produced
+        # reasoning_content (if any) off the provider so DeepSeek
+        # thinking mode can round-trip it on the next turn. The
+        # provider sets ``last_reasoning_content`` to '' for
+        # non-thinking models, so this is a no-op outside thinking
+        # mode.
         if self.session:
+            _stream_reasoning = getattr(
+                self.provider, "last_reasoning_content", ""
+            ) or ""
+            try:
+                self._pending_reasoning_content = _stream_reasoning
+            except Exception:
+                pass
             self._add_session_message("assistant", full_content)
             await self.session_manager.save_session(self.session)
             memory = getattr(self, "memory", None)

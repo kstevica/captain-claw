@@ -553,8 +553,21 @@ def _build_subprocess_env(*, slug: str) -> dict[str, str]:
 
     We keep the venv's PATH + PYTHONPATH so the worker can import
     captain_claw, but otherwise strip credentials the agent's code
-    has no business seeing. ``FD_APP_SLUG`` is injected so the
-    datastore client knows whose namespace it's writing into.
+    has no business seeing.
+
+    Three pieces are injected for the SDK in
+    :mod:`captain_claw.app_sdk`:
+
+    * ``FD_APP_SLUG`` — so an app knows its own name (used for
+      attribution in cross-app calls).
+    * ``FD_INTERNAL_URL`` — base URL the subprocess uses to reach
+      back into FD when calling sibling apps. Defaults to a localhost
+      address because FD + apps share a host in the dev setup; ops
+      can override via the same env var on the FD process.
+    * ``FD_AGENT_SECRET`` — same shared secret the chat agent uses,
+      so the FD proxy will accept cross-app calls without the app
+      needing a user JWT. See :mod:`agent_secret` for the resolution
+      rules.
     """
     keep = {
         "PATH", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV",
@@ -566,6 +579,27 @@ def _build_subprocess_env(*, slug: str) -> dict[str, str]:
     }
     env = {k: v for k, v in os.environ.items() if k in keep}
     env["FD_APP_SLUG"] = slug
+    # Cross-app SDK bootstrap. If FD itself was started with
+    # FD_INTERNAL_URL set, honor that — multi-host deployments would
+    # need it. Otherwise assume same-host loopback on the standard FD
+    # port. The subprocess only needs to *reach* FD, not match the
+    # public URL.
+    env["FD_INTERNAL_URL"] = os.environ.get(
+        "FD_INTERNAL_URL", "http://127.0.0.1:25080",
+    )
+    try:
+        # Deferred import so a stripped-down test environment without
+        # the flight_deck package on the path still gets a working
+        # subprocess (it just can't do cross-app calls).
+        from captain_claw.flight_deck.agent_secret import (
+            get_or_create_agent_secret,
+        )
+        env["FD_AGENT_SECRET"] = get_or_create_agent_secret()
+    except Exception as exc:
+        log.warning(
+            "Could not resolve agent_secret for subprocess env "
+            "(cross-app SDK will be disabled): %s", exc,
+        )
     return env
 
 
@@ -626,12 +660,18 @@ def list_code_apps() -> list[dict[str, Any]]:
         if not entry.is_dir():
             continue
         manifest = read_app_manifest(entry.name) or {}
+        # ``data_api`` is the publish contract for cross-app reads:
+        # surfacing it at list-time so the chat agent (and other apps,
+        # once we expose a discovery endpoint) can see what's
+        # available without a second round-trip.
         out.append({
             "slug": entry.name,
             "name": manifest.get("name") or entry.name,
             "version": manifest.get("version") or "0.0.0",
             "has_backend": (entry / "backend.py").exists(),
             "has_frontend": (entry / "frontend.html").exists(),
+            "manifest": manifest,
+            "data_api": manifest.get("data_api") or {},
         })
     return out
 

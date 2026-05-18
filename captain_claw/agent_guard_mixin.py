@@ -371,6 +371,21 @@ class AgentGuardMixin:
             turn_usage.setdefault("latency_ms", 0)
             turn_usage["latency_ms"] += _latency_ms
 
+        # Stash thinking-mode reasoning_content for the next
+        # assistant-message persist call. ``_add_session_message``
+        # consumes the stash on writes with role=='assistant'. This
+        # is the only safe hand-off point because the call sites
+        # that ultimately persist the response are scattered (tool
+        # loop, completion mixin, stall handler, etc.) and
+        # threading the value through every helper signature would
+        # be invasive for a thing only DeepSeek currently uses.
+        try:
+            self._pending_reasoning_content = str(
+                getattr(response, "reasoning_content", "") or ""
+            )
+        except Exception:
+            pass
+
         allowed_output, output_error = await self._enforce_guard(
             guard_type="output",
             interaction_label=interaction_label,

@@ -57,8 +57,17 @@ class Session:
         token_count: int | None = None,
         model: str = "",
         system_hint: str | None = None,
+        reasoning_content: str | None = None,
     ) -> str:
-        """Add a message to the session.  Returns the generated message_id."""
+        """Add a message to the session.  Returns the generated message_id.
+
+        ``reasoning_content`` stores the provider's thinking-mode
+        chain-of-thought verbatim (DeepSeek's strict requirement —
+        the field must be replayed on the next turn or the API
+        400s). Only meaningful for assistant messages; ignored for
+        others. Field is omitted from the stored dict when empty so
+        existing sessions stay compact.
+        """
         message_id = uuid.uuid4().hex[:12]
         msg: dict[str, Any] = {
             "message_id": message_id,
@@ -75,6 +84,8 @@ class Session:
             msg["model"] = model
         if system_hint:
             msg["system_hint"] = system_hint
+        if reasoning_content:
+            msg["reasoning_content"] = reasoning_content
         self.messages.append(msg)
         self.updated_at = _utcnow_iso()
         return message_id

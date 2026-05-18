@@ -32,6 +32,14 @@ class Message:
     tool_call_id: str | None = None
     tool_name: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
+    # Provider-side chain-of-thought returned with assistant messages
+    # by thinking-mode models (DeepSeek's ``reasoning_content``,
+    # Anthropic's ``thinking``, etc.). Stored on the assistant
+    # message so it can be echoed back on the next turn — DeepSeek
+    # strictly requires this round-trip ("The reasoning_content in
+    # the thinking mode must be passed back to the API"). Ignored
+    # by providers that don't recognize it.
+    reasoning_content: str | None = None
 
 
 @dataclass
@@ -52,6 +60,11 @@ class LLMResponse:
     model: str = ""
     usage: dict[str, int] = field(default_factory=dict)
     finish_reason: str = ""
+    # Thinking-mode chain-of-thought as returned by the provider.
+    # Empty string when the provider didn't emit one. Propagated so
+    # the orchestration layer can persist it onto the assistant
+    # message and replay it on subsequent turns. See ``Message``.
+    reasoning_content: str = ""
 
 
 @dataclass
@@ -311,6 +324,13 @@ def _normalize_provider_name(provider: str) -> str:
         "litert-lm": "litert",
         "litertlm": "litert",
         "gemma-local": "litert",
+        # DeepSeek aliases — LiteLLM uses the ``deepseek/`` prefix.
+        # Thinking-mode models (e.g. deepseek-reasoner) require us
+        # to round-trip their ``reasoning_content`` field on each
+        # turn; see :func:`_convert_messages_for_openai_style`.
+        "deepseek": "deepseek",
+        "deep-seek": "deepseek",
+        "deepseek-ai": "deepseek",
     }
     return aliases.get(key, key)
 
@@ -492,12 +512,14 @@ def _convert_messages_for_openai_style(messages: list[Message]) -> list[dict[str
             tool_call_id = msg.get("tool_call_id")
             tool_name = msg.get("tool_name")
             tool_calls = msg.get("tool_calls")
+            reasoning_content = msg.get("reasoning_content")
         else:
             role = str(getattr(msg, "role", ""))
             content = str(getattr(msg, "content", ""))
             tool_call_id = getattr(msg, "tool_call_id", None)
             tool_name = getattr(msg, "tool_name", None)
             tool_calls = getattr(msg, "tool_calls", None)
+            reasoning_content = getattr(msg, "reasoning_content", None)
 
         if role not in {"system", "user", "assistant", "tool"}:
             continue
@@ -507,6 +529,17 @@ def _convert_messages_for_openai_style(messages: list[Message]) -> list[dict[str
         elif not content and role not in {"assistant"}:
             content = " "
         entry: dict[str, Any] = {"role": role, "content": content}
+        # DeepSeek thinking mode strictly requires the original
+        # ``reasoning_content`` to round-trip on the assistant
+        # message — otherwise the API errors with "The
+        # reasoning_content in the thinking mode must be passed
+        # back to the API". Other providers (OpenAI, Anthropic via
+        # LiteLLM, Gemini, etc.) ignore unknown fields, so it's
+        # safe to always emit when we have one. Only echo non-empty
+        # values to avoid sending a stray ``""`` that some strict
+        # gateways might reject.
+        if role == "assistant" and isinstance(reasoning_content, str) and reasoning_content:
+            entry["reasoning_content"] = reasoning_content
         if role == "assistant" and isinstance(tool_calls, list) and tool_calls:
             normalized_calls: list[dict[str, Any]] = []
             for idx, raw in enumerate(tool_calls, start=1):
@@ -1693,11 +1726,14 @@ class LiteLLMProvider(LLMProvider):
     ):
         self.provider = _normalize_provider_name(provider)
         # Pull any reasoning-effort suffix off the model name (gpt-5-high
-        # → effort=high, model=gpt-5). Only meaningful for OpenAI's
-        # reasoning-capable models, but we parse it for any provider so
-        # the LiteLLM call doesn't see a fake suffix.
+        # → effort=high, model=gpt-5). Meaningful for OpenAI's
+        # reasoning models AND DeepSeek thinking-mode models — both
+        # accept ``reasoning_effort``. We still strip the suffix for
+        # every provider so the LiteLLM call never sees a fake one.
         _stripped, _effort = _extract_reasoning_effort(model)
-        self.reasoning_effort = _effort if self.provider == "openai" else None
+        self.reasoning_effort = (
+            _effort if self.provider in ("openai", "deepseek") else None
+        )
         self.model = _provider_model_name(self.provider, _stripped or model)
         self.api_key = _resolve_api_key(self.provider, api_key)
         self.base_url = (base_url or "").strip() or None
@@ -1802,10 +1838,28 @@ class LiteLLMProvider(LLMProvider):
             kwargs["extra_headers"] = self.extra_headers
 
         # Reasoning-effort suffix on OpenAI reasoning-capable models
-        # (gpt-5*, o-series). LiteLLM forwards ``reasoning_effort`` to the
-        # OpenAI API as the ``reasoning.effort`` field.
-        if self.reasoning_effort and self.provider == "openai":
+        # (gpt-5*, o-series) and DeepSeek thinking-mode models.
+        # LiteLLM forwards ``reasoning_effort`` to OpenAI as
+        # ``reasoning.effort`` and to DeepSeek as the same field.
+        if self.reasoning_effort and self.provider in ("openai", "deepseek"):
             kwargs["reasoning_effort"] = self.reasoning_effort
+
+        # DeepSeek thinking-mode opt-in. Only the dedicated reasoning
+        # models actually honor it (``deepseek-reasoner``,
+        # ``deepseek-v4-pro``, etc.); other DeepSeek models ignore
+        # the field. We default to *enabled* when an effort level was
+        # provided via the model-name suffix (``deepseek-reasoner-high``)
+        # since the user clearly wanted to think. An ops override
+        # via ``FD_DEEPSEEK_THINKING=off`` disables this if it ever
+        # causes trouble.
+        if self.provider == "deepseek":
+            thinking_on = self.reasoning_effort is not None
+            if os.environ.get("FD_DEEPSEEK_THINKING", "").strip().lower() in ("off", "0", "false"):
+                thinking_on = False
+            if thinking_on:
+                extra = dict(kwargs.get("extra_body") or {})
+                extra.setdefault("thinking", {"type": "enabled"})
+                kwargs["extra_body"] = extra
         return kwargs
 
     async def _collect_streaming_response(
@@ -1958,6 +2012,10 @@ class LiteLLMProvider(LLMProvider):
                 "message": {
                     "content": final_content,
                     "tool_calls": tc_out,
+                    # Preserved verbatim from the provider so the
+                    # orchestration layer can replay it on the next
+                    # turn. DeepSeek's strict API requires this.
+                    "reasoning_content": joined_reasoning,
                 },
                 "finish_reason": finish_reason,
             }],
@@ -2123,6 +2181,7 @@ class LiteLLMProvider(LLMProvider):
                 model=str(_obj_get(response, "model", self.model) or self.model),
                 usage=usage,
                 finish_reason=finish_reason,
+                reasoning_content=str(reasoning_content or ""),
             )
         except Exception as e:
             status_code = _obj_get(e, "status_code", None)
@@ -2160,6 +2219,14 @@ class LiteLLMProvider(LLMProvider):
             estimated = self._estimate_request_tokens(messages, max_tokens or self.max_tokens)
             await self.rate_limiter.acquire(estimated)
 
+        # Reasoning deltas don't get yielded as visible chunks (the
+        # caller expects user-visible text), but we still capture
+        # them so DeepSeek thinking mode can replay them on the next
+        # turn. Stashed on the provider; callers read it after the
+        # generator is exhausted via :attr:`last_reasoning_content`.
+        _reasoning_parts: list[str] = []
+        self.last_reasoning_content = ""
+
         try:
             stream = await acompletion(
                 **self._request_kwargs(
@@ -2172,8 +2239,16 @@ class LiteLLMProvider(LLMProvider):
             )
             async for chunk in stream:
                 delta_obj = _obj_get(_obj_get(chunk, "choices", [{}])[0], "delta", {})
-                # Skip reasoning_content deltas (Grok, DeepSeek, etc.).
-                if _obj_get(delta_obj, "reasoning_content", None):
+                # Accumulate reasoning_content (Grok, DeepSeek, etc.)
+                # without yielding it as user-visible text. Replayed
+                # on the next turn so DeepSeek doesn't 400.
+                _rc = (
+                    _obj_get(delta_obj, "reasoning_content", None)
+                    or _obj_get(delta_obj, "thinking", None)
+                    or _obj_get(delta_obj, "reasoning", None)
+                )
+                if _rc:
+                    _reasoning_parts.append(str(_rc))
                     continue
                 delta = _obj_get(delta_obj, "content", "")
                 if not delta:
@@ -2191,6 +2266,10 @@ class LiteLLMProvider(LLMProvider):
                         yield "".join(text_parts)
                     continue
                 yield str(delta)
+            # Persist the accumulated reasoning so the caller (e.g.
+            # ``stream()`` in the orchestration layer) can stash it
+            # on the just-produced assistant message.
+            self.last_reasoning_content = "".join(_reasoning_parts).strip()
         except Exception as e:
             status_code = _obj_get(e, "status_code", None)
             message = f"{self.provider} streaming failed: {e}"
@@ -2278,12 +2357,19 @@ class LiteLLMProvider(LLMProvider):
             usage = _extract_usage(_obj_get(collected, "usage", None))
             if self.rate_limiter:
                 self.rate_limiter.record_actual(usage.get("total_tokens", 0), estimated)
+            # Pull reasoning_content out of the collected message so
+            # the caller can persist it for the next turn (required
+            # by DeepSeek thinking mode, ignored by others).
+            reasoning_collected = str(
+                _obj_get(choice, "reasoning_content", "") or ""
+            )
             return LLMResponse(
                 content=str(content),
                 tool_calls=tool_calls,
                 model=str(_obj_get(collected, "model", self.model) or self.model),
                 usage=usage,
                 finish_reason=finish_reason,
+                reasoning_content=reasoning_collected,
             )
         except Exception as e:
             status_code = _obj_get(e, "status_code", None)

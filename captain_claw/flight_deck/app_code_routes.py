@@ -59,6 +59,21 @@ _APP_COOKIE_NAME = "fd_app_token"
 # calling on the user's behalf" without minting JWTs for agents.
 _AGENT_SECRET_HEADER = "x-fd-agent-secret"
 
+# Header that a shared-secret caller uses to identify *what* it is:
+#
+# - ``app:<slug>``  — one code-app calling another. The target must
+#   declare a non-empty ``data_api`` block in its manifest, otherwise
+#   the proxy returns 403. This is the cross-app discovery gate.
+# - ``chat`` (or absent) — the user's chat agent. No gating; the
+#   chat agent is acting on the user's behalf and the user already
+#   has full access to all of their apps.
+#
+# Both arrive over the same shared-secret channel so this header is
+# self-asserted, not verified — see the SECURITY note in
+# :func:`_get_code_app_user` and ``app_sdk.py``. Good enough for
+# single-user / single-trust-domain v1.
+_AGENT_AS_HEADER = "x-fd-agent-as"
+
 
 def _fd_auth_enabled() -> bool:
     return os.environ.get("FD_AUTH_ENABLED", "true").lower() in ("true", "1", "yes")
@@ -110,6 +125,7 @@ async def _get_code_app_user(request: Request) -> dict:
     if not _fd_auth_enabled():
         request.state.user_id = "anonymous"
         request.state.fd_token = ""
+        request.state.agent_as = ""
         return {"id": "anonymous"}
 
     # 1. Server-to-server: shared secret from agent process.
@@ -132,6 +148,14 @@ async def _get_code_app_user(request: Request) -> dict:
         # No JWT to re-issue as a cookie — the iframe path would
         # never reach here (the iframe uses cookie auth).
         request.state.fd_token = ""
+        # Stash who the caller claims to be (app:<slug> vs chat).
+        # Route-level handlers (esp. proxy_api) read this to decide
+        # whether to enforce the cross-app data_api gate.
+        request.state.agent_as = (
+            request.headers.get(_AGENT_AS_HEADER)
+            or request.headers.get(_AGENT_AS_HEADER.title())
+            or ""
+        )
         return {"id": on_behalf_of}
 
     # 2-4. JWT paths (header / query / cookie).
@@ -156,6 +180,8 @@ async def _get_code_app_user(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Invalid token")
     request.state.user_id = user_id
     request.state.fd_token = token_str
+    # JWT path = real user via UI. No agent-as tag.
+    request.state.agent_as = ""
     return {"id": user_id}
 
 
@@ -606,8 +632,38 @@ async def proxy_api(
     The subprocess receives the path *relative to ``/api/``* with a
     leading slash, so a request to ``/fd/code-apps/notes/api/items``
     arrives at the user's ``handle()`` as path ``"/items"``.
+
+    **Cross-app gate.** If the caller authenticated via the shared
+    agent secret AND claims to be another code-app
+    (``X-FD-Agent-As: app:<other_slug>``), the target slug must
+    declare a non-empty ``data_api`` block in its manifest. Apps
+    without that opt-in are private to their own frontend and to
+    the user's chat agent. Returns 403 otherwise so the failure is
+    visible at call time, not silently empty.
     """
     _require_app(slug)
+
+    # Enforce the cross-app data_api opt-in before doing any work.
+    agent_as = getattr(request.state, "agent_as", "") or ""
+    if agent_as.startswith("app:"):
+        caller_slug = agent_as.split(":", 1)[1].strip()
+        # Self-calls are pointless but harmless — allow them so an app
+        # can be refactored to use the SDK against itself without
+        # special-casing the loopback path.
+        if caller_slug != slug:
+            target_manifest = app_runtime.read_app_manifest(slug) or {}
+            data_api = target_manifest.get("data_api") or {}
+            if not isinstance(data_api, dict) or not data_api:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"App '{slug}' does not expose a data_api — "
+                        f"app '{caller_slug}' cannot read from it. "
+                        "To allow cross-app reads, add a 'data_api' "
+                        "object to the target's manifest.json listing "
+                        "the endpoints other apps may call."
+                    ),
+                )
 
     body = await request.body()
     headers = {k: v for k, v in request.headers.items()}
