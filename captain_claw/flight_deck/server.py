@@ -83,6 +83,33 @@ class _FDColorFormatter(logging.Formatter):
         return f"[{ts}] {level:<8} {name}  {msg}"
 
 
+class _SuppressShutdownCancelFilter(logging.Filter):
+    """Drop uvicorn's noisy "Exception in ASGI application" tracebacks
+    whose root cause is a ``CancelledError`` raised because uvicorn was
+    shutting down. Each open browser tab (SSE / long-poll / streaming
+    response) produces one such traceback at Ctrl+C — they are expected
+    and harmless, and they crowd out the real exit messages.
+
+    Genuine ASGI exceptions (real bugs) are kept: they have a different
+    root cause and pass through untouched.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno < logging.ERROR:
+            return True
+        if "Exception in ASGI application" not in record.getMessage():
+            return True
+        exc = record.exc_info[1] if record.exc_info else None
+        # Walk the exception chain to the root cause.
+        seen: set[int] = set()
+        while exc is not None and id(exc) not in seen:
+            seen.add(id(exc))
+            if isinstance(exc, asyncio.CancelledError):
+                return False  # drop the record
+            exc = exc.__cause__ or exc.__context__
+        return True
+
+
 def _configure_fd_logging() -> None:
     """Install our colored handler on the root logger and silence dupes."""
     use_color = sys.stderr.isatty() and os.environ.get("NO_COLOR", "") == ""
@@ -101,6 +128,8 @@ def _configure_fd_logging() -> None:
         lg.propagate = True
     # Quiet down access log a touch — INFO level keeps it visible.
     logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    # Suppress the per-stream CancelledError tracebacks during shutdown.
+    logging.getLogger("uvicorn.error").addFilter(_SuppressShutdownCancelFilter())
 
 
 _configure_fd_logging()
@@ -4215,7 +4244,17 @@ def main():
     log.info("Flight Deck starting on http://%s:%s", args.host, args.port)
     # log_config=None: keep our colored formatter from _configure_fd_logging()
     # instead of letting uvicorn slap its default handlers back on.
-    uvicorn.run(app, host=args.host, port=args.port, log_config=None)
+    # timeout_graceful_shutdown: cap the "waiting for connections to close"
+    # phase on Ctrl+C. Without this, in-flight StreamingResponse handlers
+    # (consult SSE, ndjson event streams) keep uvicorn waiting indefinitely
+    # — the user then has to hit Ctrl+C several times to force-exit.
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_config=None,
+        timeout_graceful_shutdown=3,
+    )
 
 
 if __name__ == "__main__":

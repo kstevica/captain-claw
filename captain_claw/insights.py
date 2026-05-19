@@ -29,12 +29,22 @@ log = get_logger(__name__)
 VALID_CATEGORIES = frozenset({
     "contact", "decision", "preference", "fact",
     "deadline", "project", "workflow",
+    # Typed-memory taxonomy additions (see insight_extraction_system_prompt.md):
+    "feedback",   # how the user wants you to work — corrections AND confirmations
+    "reference",  # pointers to where information lives in external systems
 })
 
 # Categories where a silent dedup on import would destroy important
 # personality/decision information. When ``stage_conflicts=True`` these
 # are routed through the pending-review queue instead.
-CONFLICT_STAGED_CATEGORIES = frozenset({"decision", "preference", "workflow"})
+CONFLICT_STAGED_CATEGORIES = frozenset({
+    "decision", "preference", "workflow", "feedback",
+})
+
+# Valid polarity values for `feedback` insights — distinguishes confirmed-good
+# approaches ("yes, keep doing that") from corrections ("stop doing that").
+# Null for non-feedback categories.
+VALID_POLARITIES = frozenset({"positive", "negative"})
 
 # BM25 rank threshold for dedup (FTS5 returns negative ranks; closer to 0 = better).
 _DEDUP_RANK_THRESHOLD = -8.0
@@ -135,6 +145,19 @@ class InsightsManager:
             "CREATE INDEX IF NOT EXISTS idx_insights_project ON insights(project_id)"
         )
 
+        # Migration: Typed-memory taxonomy — add why/how_to_apply/polarity.
+        # Populated for `feedback` and `project` categories; null elsewhere.
+        # `why` = the motivation/reason the user gave so future-you can judge
+        # edge cases; `how_to_apply` = when/where this guidance kicks in;
+        # `polarity` = 'positive'|'negative' for feedback (correction vs confirmation).
+        for col in ("why", "how_to_apply", "polarity"):
+            try:
+                await self._db.execute(
+                    f"ALTER TABLE insights ADD COLUMN {col} TEXT DEFAULT NULL"
+                )
+            except Exception:
+                pass  # column already exists
+
         # Pending-review queue for staged imports (see CONFLICT_STAGED_CATEGORIES).
         # Populated only by ``import_items(stage_conflicts=True)`` when an incoming
         # decision/preference/workflow insight would otherwise be silently deduped.
@@ -187,6 +210,9 @@ class InsightsManager:
         source_message_id: str | None = None,
         supersedes_id: str | None = None,
         project_id: str = "",
+        why: str | None = None,
+        how_to_apply: str | None = None,
+        polarity: str | None = None,
     ) -> str | None:
         """Insert a new insight.  Returns the insight ID, or None if deduped."""
         await self._ensure_db()
@@ -195,6 +221,14 @@ class InsightsManager:
         category = category.lower().strip()
         if category not in VALID_CATEGORIES:
             category = "fact"
+
+        # Normalize polarity — only meaningful for feedback insights.
+        if polarity is not None:
+            polarity = polarity.lower().strip() or None
+            if polarity not in VALID_POLARITIES:
+                polarity = None
+        if category != "feedback":
+            polarity = None
 
         # Dedup: entity_key exact match → supersede existing (preserves lineage).
         if entity_key:
@@ -219,11 +253,13 @@ class InsightsManager:
             """INSERT INTO insights
                (id, content, category, entity_key, importance, source_tool,
                 source_session, created_at, updated_at, expires_at, tags,
-                source_message_id, supersedes_id, project_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                source_message_id, supersedes_id, project_id,
+                why, how_to_apply, polarity)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (insight_id, content, category, entity_key, importance,
              source_tool, source_session, now, now, expires_at, tags,
-             source_message_id, supersedes_id, project_id or ""),
+             source_message_id, supersedes_id, project_id or "",
+             why, how_to_apply, polarity),
         )
         await self._db.commit()
         log.debug("Insight stored", id=insight_id, category=category,
@@ -319,7 +355,10 @@ class InsightsManager:
         await self._ensure_db()
         assert self._db is not None
 
-        allowed = {"content", "category", "importance", "tags", "entity_key", "expires_at"}
+        allowed = {
+            "content", "category", "importance", "tags", "entity_key", "expires_at",
+            "why", "how_to_apply", "polarity",
+        }
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
             return False
@@ -853,7 +892,7 @@ class InsightsManager:
             "id", "content", "category", "entity_key", "importance",
             "source_tool", "source_session", "created_at", "updated_at",
             "expires_at", "tags", "source_message_id", "supersedes_id",
-            "project_id",
+            "project_id", "why", "how_to_apply", "polarity",
         ]
         d: dict[str, Any] = {}
         for i, col in enumerate(cols):
@@ -1017,6 +1056,9 @@ async def extract_insights(
             tags=item.get("tags") or None,
             expires_at=item.get("expires_at") or None,
             source_message_id=source_message_id,
+            why=(item.get("why") or None),
+            how_to_apply=(item.get("how_to_apply") or None),
+            polarity=(item.get("polarity") or None),
         )
         if insight_id:
             stored.append(item)

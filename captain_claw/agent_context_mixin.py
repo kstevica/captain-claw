@@ -1071,7 +1071,22 @@ class AgentContextMixin:
         for i in items:
             imp = i.get("importance", 5)
             cat = i.get("category", "fact")
-            lines.append(f"- [{cat}] (imp:{imp}) {i['content']}")
+            content = i.get("content", "").strip()
+            # Mark feedback polarity so the agent can tell a correction
+            # ("stop doing X") from a confirmation ("keep doing X").
+            polarity = (i.get("polarity") or "").strip().lower()
+            polarity_tag = ""
+            if cat == "feedback" and polarity in ("positive", "negative"):
+                polarity_tag = f"/{polarity[:3]}"  # "/pos" or "/neg"
+            lines.append(f"- [{cat}{polarity_tag}] (imp:{imp}) {content}")
+            # Render Why / How to apply on their own lines so the agent
+            # can judge edge cases rather than blindly applying the rule.
+            why = (i.get("why") or "").strip()
+            how = (i.get("how_to_apply") or "").strip()
+            if why:
+                lines.append(f"    Why: {why}")
+            if how:
+                lines.append(f"    How to apply: {how}")
         return "\n".join(lines)
 
     def _build_insights_block(self) -> str:
@@ -1083,10 +1098,22 @@ class AgentContextMixin:
         if not items:
             return ""
         return (
-            "You have persistent memory of key facts, contacts, decisions, and "
-            "deadlines via the \"insights\" tool. Relevant insights are automatically "
-            "surfaced in context. Use the insights tool to search, add, or manage "
-            "stored knowledge."
+            "You have persistent memory of facts, contacts, decisions, "
+            "deadlines, user preferences, feedback rules, and pointers to "
+            "external systems via the \"insights\" tool. Relevant insights are "
+            "automatically surfaced in context above. Use the insights tool to "
+            "search, add, or manage stored knowledge.\n"
+            "\n"
+            "Working with surfaced insights:\n"
+            "- Treat [feedback/pos] items as approaches the user has confirmed — keep doing them. Treat [feedback/neg] items as corrections — avoid the behavior they describe.\n"
+            "- When a `Why:` line is present, use it to decide whether the rule still applies. If the underlying reason no longer fits the situation, the rule may not apply either — say so rather than rigidly following it.\n"
+            "- Save both successes and failures back into memory. If the user confirms a non-obvious choice you made (\"yes exactly\", or simply accepts it without pushback), that is worth recording as feedback so you don't drift away from it later.\n"
+            "\n"
+            "Verify before recommending from memory:\n"
+            "- Memory captures what was true when it was written; some entries go stale. Before recommending something a memory names — a person, a deadline, a file or document, an external system, a decision — sanity-check that it still applies.\n"
+            "- Quick checks: for a contact, has the user mentioned them more recently? For a deadline, is the date still in the future? For a `reference` to an external system, does that system still exist or have you been told it moved? For a stored fact, does anything in this conversation contradict it?\n"
+            "- If a memory conflicts with what you're seeing now, trust what you're seeing and update or remove the stale memory rather than acting on it.\n"
+            "- Distinguish historical questions (\"what did we decide about X?\") from current-state questions (\"what's the status of X today?\"). Memory is fine for the first; for the second, prefer fresh information."
         )
 
     # ── Project context ─────────────────────────────────────────────
