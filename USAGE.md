@@ -1111,6 +1111,56 @@ Manage persistent relational data tables in a local SQLite database. Create tabl
 
 Enabled by default. Stored at `~/.captain-claw/datastore.db`. Table list is automatically injected into the LLM context when `datastore.inject_table_list` is true.
 
+### app_runner
+
+Scaffold, edit, and operate **Code Apps** — agent-authored mini-apps with a Python `backend.py` and a single-file `frontend.html`, each running as a managed Flight Deck subprocess behind a per-slug Unix domain socket. New in 0.4.26.
+
+| Action | What it does |
+|---|---|
+| `scaffold` | Create a new app from a slug + brief. Writes `backend.py`, `frontend.html`, `manifest.json`. Reserved for new apps and full rewrites — never use on an existing app (it wipes the source). |
+| `read_source` | Load `backend.py` + `frontend.html` of an existing app so you can edit them in place. |
+| `edit_file` | Targeted edit of one file in an app's source. Auto-restarts the subprocess after the write so the next request hits the new code. |
+| `restart` | Stop + spawn fresh. Use after `edit_file` if the auto-restart didn't fire, or to recover from a wedged subprocess. |
+| `logs` | Tail the app's stdout/stderr ring buffer + the on-disk `logs/{stdout,stderr}.log`. Used by the self-repair loop after a 5xx from `proxy`. |
+| `proxy` | Smoke-test by forwarding an HTTP request to the app's subprocess. Returns status/headers/body. The agent calls this after `scaffold` to verify the app actually serves. |
+| `query_app` | Read another app's data via its published `data_api`. Used from chat to answer "how many notes do I have?" without scaffolding a new notes app. |
+| `list` | Enumerate available apps + which ones publish a `data_api`. |
+
+**Self-repair loop.** After `scaffold`, the agent is expected to call `proxy` to smoke-test. On 5xx it calls `logs`, reads the traceback, fixes `backend.py`, then `restart`. The system prompt's app-authoring policy walks the agent through this.
+
+**Cross-app data sharing — `data_api` block.** An app's `manifest.json` declares the read-only endpoints siblings can hit:
+
+```json
+{
+  "data_api": {
+    "contacts": {
+      "path": "/contacts",
+      "method": "GET",
+      "description": "List all contacts as {id, name, email, phone}"
+    }
+  }
+}
+```
+
+Without a `data_api` block, sibling calls return 403. Write endpoints are **not publishable** in v1 — read-only by design.
+
+**Consuming a sibling's data — `app_sdk.sibling()`.** Inside an app's `backend.py`:
+
+```python
+from captain_claw.app_sdk import sibling, SiblingError
+
+try:
+    data = await sibling("contacts").get_json("/contacts")
+except SiblingError:
+    data = []  # sibling missing or unpublished
+```
+
+Auth is handled per-call; the caller just needs the target slug + the path the sibling publishes. `post_json` and raw `request` variants are also available.
+
+**Where apps live.** Each app is a directory under the Flight Deck data root: `<slug>/backend.py`, `<slug>/frontend.html`, `<slug>/manifest.json`, plus a `logs/` subdir written by the runtime. The subprocess runs as its own process group (`SIGTERM → 3s grace → SIGKILL` on shutdown). One subprocess per slug — horizontal scale-out for a single app is not supported in v1.
+
+**App vs visualization rule.** Apps have *writes* (the user expects records to be there next session). Visualizations are read-only output. "Notes app", "todo app", "tracker" → use `app_runner scaffold`. "Chart of these numbers", "dashboard of X", "report" → write a self-contained HTML file via the visualization policy instead. Don't use `localStorage` / `IndexedDB` in code-apps — use the app's `backend.py` + the datastore.
+
 ---
 
 ## Configuration Reference
@@ -3073,7 +3123,7 @@ orchestrator:
 
 ## Plan Mode
 
-Plan mode (introduced in 0.4.25) layers a reviewable planner, per-step verifier, and bounded auto-revision loop on top of the orchestrator. A single user request becomes an ordered DAG of executable steps, runs through the existing worker pool, and is gated through measurable acceptance criteria — with automatic re-attempts when verification fails.
+Plan mode (introduced in 0.4.25, hardened in 0.4.26) layers a reviewable planner, per-step verifier, and bounded auto-revision loop on top of the orchestrator. A single user request becomes an ordered DAG of executable steps, runs through the existing worker pool, and is gated through measurable acceptance criteria — with automatic re-attempts when verification fails.
 
 ### Slash commands
 
