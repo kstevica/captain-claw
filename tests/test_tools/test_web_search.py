@@ -30,7 +30,11 @@ class _FakeClient:
         self.calls: list[dict] = []
 
     async def get(self, url: str, **kwargs):
-        self.calls.append({"url": url, **kwargs})
+        self.calls.append({"url": url, "method": "GET", **kwargs})
+        return self._response
+
+    async def post(self, url: str, **kwargs):
+        self.calls.append({"url": url, "method": "POST", **kwargs})
         return self._response
 
 
@@ -121,5 +125,97 @@ async def test_web_search_fails_when_api_key_missing(monkeypatch):
 
         assert result.success is False
         assert "Missing Brave API key" in (result.error or "")
+    finally:
+        set_config(old_cfg)
+
+
+# ── Tavily provider tests ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_tavily_search_formats_results_and_uses_config_key(monkeypatch):
+    old_cfg = get_config().model_copy(deep=True)
+    cfg = old_cfg.model_copy(deep=True)
+    cfg.tools.web_search.provider = "tavily"
+    cfg.tools.web_search.tavily_api_key = "tvly-cfg-key"
+    cfg.tools.web_search.max_results = 3
+    set_config(cfg)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    try:
+        tool = WebSearchTool()
+        tool.client = _FakeClient(
+            _FakeResponse(
+                {
+                    "results": [
+                        {
+                            "title": "Zagreb travel guide",
+                            "url": "https://example.com/zagreb",
+                            "content": "Visit Zagreb old town and museums.",
+                        },
+                        {
+                            "title": "Split city profile",
+                            "url": "https://example.com/split",
+                            "content": "Split overview and key landmarks.",
+                        },
+                    ]
+                }
+            )
+        )
+
+        result = await tool.execute(query="croatia top cities")
+
+        assert result.success is True
+        assert "[SEARCH ENGINE: Tavily]" in result.content
+        assert "[QUERY: croatia top cities]" in result.content
+        assert "1. Zagreb travel guide" in result.content
+        assert "URL: https://example.com/zagreb" in result.content
+        assert "Snippet: Visit Zagreb old town and museums." in result.content
+
+        call = tool.client.calls[0]
+        assert call["method"] == "POST"
+        assert call["url"] == "https://api.tavily.com/search"
+        assert call["headers"]["Authorization"] == "Bearer tvly-cfg-key"
+        assert call["json"]["max_results"] == 3
+    finally:
+        set_config(old_cfg)
+
+
+@pytest.mark.asyncio
+async def test_tavily_search_uses_env_api_key(monkeypatch):
+    old_cfg = get_config().model_copy(deep=True)
+    cfg = old_cfg.model_copy(deep=True)
+    cfg.tools.web_search.provider = "tavily"
+    cfg.tools.web_search.tavily_api_key = ""
+    set_config(cfg)
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-env-key")
+    try:
+        tool = WebSearchTool()
+        tool.client = _FakeClient(_FakeResponse({"results": []}))
+
+        result = await tool.execute(query="zagreb")
+
+        assert result.success is True
+        call = tool.client.calls[0]
+        assert call["headers"]["Authorization"] == "Bearer tvly-env-key"
+    finally:
+        set_config(old_cfg)
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+
+
+@pytest.mark.asyncio
+async def test_tavily_search_fails_when_api_key_missing(monkeypatch):
+    old_cfg = get_config().model_copy(deep=True)
+    cfg = old_cfg.model_copy(deep=True)
+    cfg.tools.web_search.provider = "tavily"
+    cfg.tools.web_search.tavily_api_key = ""
+    set_config(cfg)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    try:
+        tool = WebSearchTool()
+
+        result = await tool.execute(query="zagreb")
+
+        assert result.success is False
+        assert "Missing Tavily API key" in (result.error or "")
     finally:
         set_config(old_cfg)
