@@ -88,9 +88,9 @@ class WebSearchTool(Tool):
         provider = str(getattr(search_cfg, "provider", "brave") or "brave").strip().lower()
 
         if provider == "tavily":
-            return await self._execute_tavily(
-                q, search_cfg, count=count, search_lang=search_lang,
-            )
+            if any([offset, country.strip(), freshness.strip(), safesearch.strip()]):
+                log.debug("Tavily provider ignores offset/country/freshness/safesearch parameters")
+            return await self._execute_tavily(q, search_cfg, count=count)
 
         if provider != "brave":
             return ToolResult(success=False, error=f"Unsupported web_search provider: {provider}")
@@ -196,7 +196,6 @@ class WebSearchTool(Tool):
         query: str,
         search_cfg: Any,
         count: int | None = None,
-        search_lang: str = "",
     ) -> ToolResult:
         """Execute a Tavily web search."""
         api_key = (
@@ -223,9 +222,6 @@ class WebSearchTool(Tool):
             "search_depth": "basic",
             "include_answer": False,
         }
-        if search_lang.strip():
-            payload["search_lang"] = search_lang.strip()
-
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
