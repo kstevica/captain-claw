@@ -208,10 +208,14 @@ class WebFetchToolConfig(BaseModel):
 
 
 class WebSearchToolConfig(BaseModel):
-    """Web search tool configuration."""
+    """Web search tool configuration.
+
+    Supported providers: 'brave' (default), 'tavily'.
+    """
 
     provider: str = "brave"
     api_key: str = ""
+    tavily_api_key: str = ""
     base_url: str = "https://api.search.brave.com/res/v1/web/search"
     max_results: int = 5
     timeout: int = 20
@@ -1247,6 +1251,16 @@ class Config(BaseSettings):
             )
         if env_brave_key:
             config.tools.web_search.api_key = env_brave_key
+
+        # Tavily API key from env/.env (used when provider=tavily).
+        env_tavily_key = str(getattr(env_overlay.tools.web_search, "tavily_api_key", "")).strip()
+        if not env_tavily_key:
+            env_tavily_key = (
+                str(os.getenv("TAVILY_API_KEY", "")).strip()
+                or str(dotenv_values.get("TAVILY_API_KEY", "")).strip()
+            )
+        if env_tavily_key:
+            config.tools.web_search.tavily_api_key = env_tavily_key
 
         # Security-sensitive override: send_mail credentials from env/.env.
         # MAIL_PROVIDER is handled separately: it ALWAYS overrides the config
