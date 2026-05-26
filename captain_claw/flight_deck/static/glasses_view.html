@@ -27,14 +27,19 @@
   }
   .tts-btn.muted { color: #a88; border-color: #533; }
   .tts-btn.engine { font-size: 11px; opacity: 0.8; }
-  .tts-lang {
-    background: #11161d; color: #cfe;
+  /* Hidden — dropdowns are unusable with Neural Band tap gestures, so
+     language/voice live on /glasses/settings as a button grid instead.
+     The <select>s remain in the DOM purely as state holders so the
+     existing tts module wiring doesn't need to change. */
+  .tts-lang { display: none; }
+  .tts-link {
+    background: transparent; color: #cfe;
     border: 1px solid #2a4; border-radius: 6px;
-    padding: 2px 4px; margin-left: 6px;
-    font: 11px ui-monospace, Menlo, monospace;
-    max-width: 130px;
+    padding: 2px 8px; margin-left: 8px;
+    font: 600 12px ui-monospace, Menlo, monospace;
+    text-decoration: none;
   }
-  .tts-lang:focus { outline: none; border-color: #4fc; }
+  .tts-link:active { background: #1a2820; }
 
   /* First-load audio-gesture notice. Auto-dismisses on first interaction. */
   #gesture-notice {
@@ -141,6 +146,7 @@
   <span>
     <button class="tts-btn" id="tts-toggle" type="button" title="toggle voice">🔊</button>
     <button class="tts-btn" id="tts-mode" type="button" title="stream vs one-shot">📡</button>
+    <a class="tts-link" id="tts-settings" href="#" title="language &amp; voice settings">⚙</a>
     <select class="tts-lang" id="tts-lang" title="voice language" aria-label="voice language"></select>
     <select class="tts-lang" id="tts-voice" title="voice" aria-label="voice"></select>
     <span class="tts-btn engine" id="tts-engine">—</span>
@@ -165,6 +171,18 @@
   const channel = params.get('c') || '';
   const t = params.get('t') || '';
   const qs = t ? ('&t=' + encodeURIComponent(t)) : '';
+
+  // Settings page link — preserves channel + token so "back to glasses"
+  // can return here.
+  (() => {
+    const link = document.getElementById('tts-settings');
+    if (!link) return;
+    const sp = new URLSearchParams();
+    if (channel) sp.set('c', channel);
+    if (t) sp.set('t', t);
+    const qstr = sp.toString();
+    link.href = '/glasses/settings' + (qstr ? '?' + qstr : '');
+  })();
 
   const stack = document.getElementById('stack');
   const conn = document.getElementById('conn');

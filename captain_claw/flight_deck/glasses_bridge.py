@@ -285,6 +285,18 @@ async def glasses_view_page(request: Request, c: str = "") -> HTMLResponse:
     return HTMLResponse(content=html, headers=_NO_CACHE)
 
 
+@router.get("/glasses/settings", response_class=HTMLResponse)
+async def glasses_settings_page(request: Request, c: str = "") -> HTMLResponse:
+    """Settings page for the glasses — picks TTS language + voice via buttons.
+
+    No auth (v1) and no channel required; the channel is only used to build
+    the "back to glasses" link.
+    """
+    path = _STATIC_DIR / "glasses_settings.html"
+    html = path.read_text(encoding="utf-8")
+    return HTMLResponse(content=html, headers=_NO_CACHE)
+
+
 @router.get("/glasses/agents")
 async def glasses_list_agents(request: Request) -> JSONResponse:
     """List Flight Deck **process** agents the mobile page can target.
