@@ -551,12 +551,16 @@ async def glasses_tts(request: Request) -> Response:
     if len(text) > 4000:
         text = text[:4000]
 
+    # Optional per-request overrides from the client; fall back to env.
+    language = str(body.get("language", "")).strip() or os.environ.get("SONIOX_TTS_LANGUAGE", "en")
+    voice = str(body.get("voice", "")).strip() or os.environ.get("SONIOX_TTS_VOICE", "Adrian")
+
     audio_format = os.environ.get("SONIOX_TTS_FORMAT", "mp3").strip().lower()
     mime = _SONIOX_FORMAT_TO_MIME.get(audio_format, "audio/mpeg")
     payload = {
         "model": os.environ.get("SONIOX_TTS_MODEL", "tts-rt-v1"),
-        "language": os.environ.get("SONIOX_TTS_LANGUAGE", "en"),
-        "voice": os.environ.get("SONIOX_TTS_VOICE", "Adrian"),
+        "language": language,
+        "voice": voice,
         "audio_format": audio_format,
         "text": text,
     }
@@ -645,6 +649,10 @@ async def glasses_tts_stream(ws: WebSocket) -> None:
     if len(text) > 4000:
         text = text[:4000]
 
+    # Optional per-request overrides from the client.
+    language = str(client_msg.get("language", "")).strip() or os.environ.get("SONIOX_TTS_LANGUAGE", "en")
+    voice = str(client_msg.get("voice", "")).strip() or os.environ.get("SONIOX_TTS_VOICE", "Adrian")
+
     import base64
     import secrets as _secrets
     import websockets
@@ -654,8 +662,8 @@ async def glasses_tts_stream(ws: WebSocket) -> None:
         "api_key": api_key,
         "stream_id": stream_id,
         "model": os.environ.get("SONIOX_TTS_MODEL", "tts-rt-v1"),
-        "language": os.environ.get("SONIOX_TTS_LANGUAGE", "en"),
-        "voice": os.environ.get("SONIOX_TTS_VOICE", "Adrian"),
+        "language": language,
+        "voice": voice,
         "audio_format": _STREAM_FORMAT,
         "sample_rate": _STREAM_SAMPLE_RATE,
     }

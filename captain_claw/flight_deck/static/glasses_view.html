@@ -27,6 +27,30 @@
   }
   .tts-btn.muted { color: #a88; border-color: #533; }
   .tts-btn.engine { font-size: 11px; opacity: 0.8; }
+  .tts-lang {
+    background: #11161d; color: #cfe;
+    border: 1px solid #2a4; border-radius: 6px;
+    padding: 2px 4px; margin-left: 6px;
+    font: 11px ui-monospace, Menlo, monospace;
+    max-width: 130px;
+  }
+  .tts-lang:focus { outline: none; border-color: #4fc; }
+
+  /* First-load audio-gesture notice. Auto-dismisses on first interaction. */
+  #gesture-notice {
+    position: fixed; top: 44px; left: 50%; transform: translateX(-50%);
+    background: #1a3a1a; color: #d8ffd8;
+    border: 1px solid #4fc; border-radius: 8px;
+    padding: 10px 16px; font-size: 14px; font-weight: 600;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+    z-index: 10; cursor: pointer;
+    transition: opacity .35s, transform .35s;
+    max-width: 88%;
+    text-align: center;
+  }
+  #gesture-notice.hidden {
+    opacity: 0; transform: translate(-50%, -10px); pointer-events: none;
+  }
 
   #stack { display: flex; flex-direction: column; gap: 10px; }
   .msg {
@@ -117,10 +141,14 @@
   <span>
     <button class="tts-btn" id="tts-toggle" type="button" title="toggle voice">🔊</button>
     <button class="tts-btn" id="tts-mode" type="button" title="stream vs one-shot">📡</button>
+    <select class="tts-lang" id="tts-lang" title="voice language" aria-label="voice language"></select>
+    <select class="tts-lang" id="tts-voice" title="voice" aria-label="voice"></select>
     <span class="tts-btn engine" id="tts-engine">—</span>
     <span class="conn off" id="conn">…</span>
   </span>
 </header>
+
+<div id="gesture-notice">🔊 Tap any control above to enable audio</div>
 
 <div id="stack"></div>
 
@@ -278,18 +306,83 @@
   const tts = (() => {
     const toggleBtn = document.getElementById('tts-toggle');
     const modeBtn = document.getElementById('tts-mode');
+    const langSel = document.getElementById('tts-lang');
+    const voiceSel = document.getElementById('tts-voice');
     const engineLabel = document.getElementById('tts-engine');
+    const gestureNotice = document.getElementById('gesture-notice');
     let muted = false;
     let sonioxAvailable = true;         // false on 503 from /glasses/tts*
     let currentAudio = null;             // active <Audio> (one-shot path)
     let currentStream = null;            // active stream context (stream path)
     let queue = Promise.resolve();       // sequential play queue
+    let gestureGranted = false;          // flipped on first user interaction
 
     const MODE_KEY = 'glasses.tts.mode';
+    const LANG_KEY = 'glasses.tts.lang';
+    const VOICE_KEY = 'glasses.tts.voice';
     let mode = (() => {
       try { return localStorage.getItem(MODE_KEY) || 'stream'; }
       catch (_) { return 'stream'; }
     })();
+    let lang = (() => {
+      try { return localStorage.getItem(LANG_KEY) || 'en'; }
+      catch (_) { return 'en'; }
+    })();
+    let voice = (() => {
+      try { return localStorage.getItem(VOICE_KEY) || 'Adrian'; }
+      catch (_) { return 'Adrian'; }
+    })();
+
+    // 60+ Soniox TTS languages (tts-rt-v1). Sorted by display name.
+    const LANGS = [
+      ['af','Afrikaans'], ['sq','Albanian'], ['ar','Arabic'], ['az','Azerbaijani'],
+      ['eu','Basque'], ['be','Belarusian'], ['bn','Bengali'], ['bs','Bosnian'],
+      ['bg','Bulgarian'], ['ca','Catalan'], ['zh','Chinese'], ['hr','Croatian'],
+      ['cs','Czech'], ['da','Danish'], ['nl','Dutch'], ['en','English'],
+      ['et','Estonian'], ['fi','Finnish'], ['fr','French'], ['gl','Galician'],
+      ['de','German'], ['el','Greek'], ['gu','Gujarati'], ['he','Hebrew'],
+      ['hi','Hindi'], ['hu','Hungarian'], ['id','Indonesian'], ['it','Italian'],
+      ['ja','Japanese'], ['kn','Kannada'], ['kk','Kazakh'], ['ko','Korean'],
+      ['lv','Latvian'], ['lt','Lithuanian'], ['mk','Macedonian'], ['ms','Malay'],
+      ['ml','Malayalam'], ['mr','Marathi'], ['no','Norwegian'], ['fa','Persian'],
+      ['pl','Polish'], ['pt','Portuguese'], ['pa','Punjabi'], ['ro','Romanian'],
+      ['ru','Russian'], ['sr','Serbian'], ['sk','Slovak'], ['sl','Slovenian'],
+      ['es','Spanish'], ['sw','Swahili'], ['sv','Swedish'], ['tl','Tagalog'],
+      ['ta','Tamil'], ['te','Telugu'], ['th','Thai'], ['tr','Turkish'],
+      ['uk','Ukrainian'], ['ur','Urdu'], ['vi','Vietnamese'], ['cy','Welsh'],
+    ];
+    LANGS.sort((a, b) => a[1].localeCompare(b[1]));
+    for (const [code, name] of LANGS) {
+      const opt = document.createElement('option');
+      opt.value = code;
+      opt.textContent = name + ' (' + code + ')';
+      langSel.appendChild(opt);
+    }
+    if (!LANGS.find(l => l[0] === lang)) lang = 'en';
+    langSel.value = lang;
+
+    // 28 Soniox voices (all multilingual). Grouped by accent for browsing.
+    const VOICES = [
+      ['Neutral', ['Maya','Daniel','Noah','Nina','Emma','Jack','Adrian','Claire','Grace','Owen','Mina','Kenji']],
+      ['British', ['Oliver','Arthur','Isla','Victoria']],
+      ['American/Spanish', ['Rafael','Mateo','Lucia','Sofia']],
+      ['Australian', ['Cooper','Mason','Ruby','Elise']],
+      ['Indian', ['Arjun','Rohan','Priya','Meera']],
+    ];
+    const VOICE_FLAT = VOICES.flatMap(g => g[1]);
+    for (const [group, names] of VOICES) {
+      const og = document.createElement('optgroup');
+      og.label = group;
+      for (const n of names) {
+        const opt = document.createElement('option');
+        opt.value = n;
+        opt.textContent = n;
+        og.appendChild(opt);
+      }
+      voiceSel.appendChild(og);
+    }
+    if (!VOICE_FLAT.includes(voice)) voice = 'Adrian';
+    voiceSel.value = voice;
 
     function setEngineLabel(s) { engineLabel.textContent = s || ''; }
     function applyModeUi() {
@@ -310,6 +403,20 @@
       }
     }
 
+    function dismissGestureNotice() {
+      if (gestureGranted) return;
+      gestureGranted = true;
+      gestureNotice.classList.add('hidden');
+      // Hide for real after the fade so it can't be tabbed/clicked.
+      setTimeout(() => { gestureNotice.style.display = 'none'; }, 400);
+    }
+    // Any direct tap on the notice itself also counts as a gesture and
+    // unlocks audio — handy on glasses where pointing at controls is hard.
+    gestureNotice.addEventListener('click', () => {
+      try { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); } catch (_) {}
+      dismissGestureNotice();
+    });
+
     toggleBtn.addEventListener('click', () => {
       muted = !muted;
       toggleBtn.textContent = muted ? '🔇' : '🔊';
@@ -318,6 +425,7 @@
       // Tapping the button counts as a user gesture — wake any suspended
       // AudioContext so the next reply can play.
       try { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); } catch (_) {}
+      dismissGestureNotice();
     });
 
     modeBtn.addEventListener('click', () => {
@@ -328,6 +436,24 @@
       stopAll();
       // Same gesture-unlock as above.
       try { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); } catch (_) {}
+      dismissGestureNotice();
+    });
+
+    langSel.addEventListener('change', () => {
+      lang = langSel.value || 'en';
+      try { localStorage.setItem(LANG_KEY, lang); } catch (_) {}
+      // Stop any in-flight clip so the language change applies to the next reply.
+      stopAll();
+      try { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); } catch (_) {}
+      dismissGestureNotice();
+    });
+
+    voiceSel.addEventListener('change', () => {
+      voice = voiceSel.value || 'Adrian';
+      try { localStorage.setItem(VOICE_KEY, voice); } catch (_) {}
+      stopAll();
+      try { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); } catch (_) {}
+      dismissGestureNotice();
     });
 
     // Convert markdown/HTML to clean speakable text.
@@ -376,7 +502,7 @@
           method: 'POST',
           cache: 'no-store',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text }),
+          body: JSON.stringify({ text, language: lang, voice }),
         });
       } catch (e) {
         // Network/CORS/FD-down. Retryable.
@@ -422,7 +548,7 @@
           if (errCode) ttsFail(errCode, errCode === '503' || errCode === '401' || errCode === '403');
           resolve();
         };
-        a.onended = () => finish(null);
+        a.onended = () => { dismissGestureNotice(); finish(null); };
         a.onerror = () => {
           // a.error.code: 1=ABORTED 2=NETWORK 3=DECODE 4=SRC_NOT_SUPPORTED
           const codes = { 1: 'abort', 2: 'net', 3: 'decode', 4: 'codec' };
@@ -496,7 +622,7 @@
         currentStream = api;
 
         ws.onopen = () => {
-          ws.send(JSON.stringify({ text }));
+          ws.send(JSON.stringify({ text, language: lang, voice }));
         };
         ws.onmessage = (ev) => {
           if (cancelled) return;
@@ -539,7 +665,12 @@
           nextStart = startAt + buf.duration;
           scheduled++;
           sources.push(src);
-          src.onended = () => { finished++; tryFinalize(); };
+          src.onended = () => {
+            finished++;
+            // Real audio actually came out — gesture must have been granted.
+            if (finished === 1) dismissGestureNotice();
+            tryFinalize();
+          };
         };
         ws.onerror = () => {
           if (cancelled) return;
