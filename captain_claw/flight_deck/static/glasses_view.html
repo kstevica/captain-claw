@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Glasses view</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; padding: 0; background: #000; color: #eaffea;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 24px; line-height: 1.35; }
+  body { padding: 14px 18px 64px 18px; }
+  header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 14px; color: #6a8;
+    margin-bottom: 10px;
+  }
+  .ssr { color: #ffeb6b; font-weight: 700; letter-spacing: 2px; }
+  .conn { color: #4fc; }
+  .conn.off { color: #f88; }
+
+  #stack { display: flex; flex-direction: column; gap: 10px; }
+  .msg {
+    border-left: 3px solid #2a4;
+    padding: 6px 10px;
+    background: #0a140a;
+    border-radius: 0 8px 8px 0;
+    opacity: 0.55;
+    transition: opacity .25s, transform .25s;
+  }
+  .msg.user { border-left-color: #46a; background: #0a0e1a; color: #cfe; }
+  .msg.agent { border-left-color: #8c4; background: #0a140a; color: #f4ffd0; }
+  .msg.error { border-left-color: #c44; background: #1a0a0a; color: #ffb; }
+  .msg.newest { opacity: 1; font-weight: 600; }
+  .role { display: inline-block; font-size: 14px; color: #8a8; margin-right: 8px; }
+  .text { word-wrap: break-word; overflow-wrap: anywhere; }
+  /* Markdown styling inside .text — kept compact for small screens. */
+  .text p { margin: 0.25em 0; }
+  .text h1, .text h2, .text h3, .text h4 {
+    margin: 0.4em 0 0.2em 0; line-height: 1.2;
+  }
+  .text h1 { font-size: 1.15em; }
+  .text h2 { font-size: 1.08em; }
+  .text h3, .text h4 { font-size: 1.0em; }
+  .text ul, .text ol { margin: 0.25em 0; padding-left: 1.2em; }
+  .text li { margin: 0.1em 0; }
+  .text code {
+    background: #1a1f1a; color: #ffd58a;
+    padding: 1px 5px; border-radius: 4px;
+    font-size: 0.9em;
+  }
+  .text pre {
+    background: #0c100c; border: 1px solid #1c2820;
+    padding: 8px 10px; border-radius: 6px;
+    overflow-x: auto; margin: 0.4em 0;
+  }
+  .text pre code { background: transparent; padding: 0; color: #cfe6cf; }
+  .text blockquote {
+    margin: 0.3em 0; padding-left: 10px;
+    border-left: 3px solid #364; color: #cfd9c4;
+  }
+  .text a { color: #9bf; }
+  .text table {
+    border-collapse: collapse; margin: 0.4em 0;
+    font-size: 0.88em; width: 100%;
+  }
+  .text th, .text td {
+    border: 1px solid #2a3a2a; padding: 4px 8px; text-align: left;
+    vertical-align: top;
+  }
+  .text th { background: #102010; color: #cfeacf; }
+  .text tr:nth-child(even) td { background: #07100a; }
+  .text hr { border: 0; border-top: 1px solid #2a3a2a; margin: 0.5em 0; }
+  .ts {
+    font-size: 12px; color: #677;
+    float: right;
+    /* Float right but don't collide with markdown — give it its own line if needed. */
+  }
+
+  /* ── System status footer ───────────────────────────────────────── */
+  #sysbar {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.85);
+    border-top: 1px solid #1a2820;
+    padding: 4px 12px 6px 12px;
+    font-size: 12px; line-height: 1.25;
+    color: #7a8c7a;
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+  #sysbar .now {
+    color: #9fd; font-weight: 600; letter-spacing: 0.5px;
+  }
+  #sysbar .now.idle { color: #6a7a6a; }
+  #sysbar .now.busy { color: #ffd58a; }
+  #sysbar .now.err  { color: #ff8a8a; }
+  #sysbar .hist {
+    color: #4a5a4a; font-size: 11px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    margin-top: 2px;
+  }
+  #sysbar .hist span { margin-right: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <span>SSR <span class="ssr">{{SSR_TOKEN}}</span> · {{SSR_TS}}</span>
+  <span class="conn off" id="conn">…</span>
+</header>
+
+<div id="stack"></div>
+
+<div id="sysbar">
+  <div class="now idle" id="sysnow">—</div>
+  <div class="hist" id="syshist"></div>
+</div>
+
+<!-- marked for markdown + tables. Fallback to plain text if it fails to load. -->
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" crossorigin="anonymous"></script>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const channel = params.get('c') || '';
+  const t = params.get('t') || '';
+  const qs = t ? ('&t=' + encodeURIComponent(t)) : '';
+
+  const stack = document.getElementById('stack');
+  const conn = document.getElementById('conn');
+  const sysnow = document.getElementById('sysnow');
+  const syshist = document.getElementById('syshist');
+
+  // Configure marked once (GFM enabled → tables, fenced code, autolinks).
+  const hasMarked = (typeof window.marked !== 'undefined');
+  if (hasMarked) {
+    try {
+      marked.setOptions({ gfm: true, breaks: true, headerIds: false, mangle: false });
+    } catch (_) {}
+  }
+  function renderMarkdown(src) {
+    if (hasMarked) {
+      try { return marked.parse(String(src || '')); } catch (_) {}
+    }
+    // Fallback: HTML-escape + newline-to-<br>.
+    const esc = String(src || '').replace(/[&<>"']/g, c => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    })[c]);
+    return esc.replace(/\n/g, '<br>');
+  }
+
+  const MAX_CONTENT = 3;   // last 3 conversation messages on screen
+  const MAX_HIST = 5;      // last 5 status events shown in the footer history
+  const content = [];      // user / agent / error
+  const statuses = [];     // status events { status, ts }
+
+  function fmtTs(iso) {
+    try { return new Date(iso).toLocaleTimeString(); } catch { return ''; }
+  }
+
+  function renderStack() {
+    stack.innerHTML = '';
+    const view = content.slice(-MAX_CONTENT);
+    view.forEach((m, i) => {
+      const div = document.createElement('div');
+      const cls = m.type === 'user' ? 'user' : (m.type === 'error' ? 'error' : 'agent');
+      div.className = 'msg ' + cls + (i === view.length - 1 ? ' newest' : '');
+
+      const role = document.createElement('span');
+      role.className = 'role';
+      role.textContent = m.type === 'user' ? 'YOU' : (m.type === 'error' ? 'ERR' : 'AGENT');
+
+      const ts = document.createElement('span');
+      ts.className = 'ts';
+      ts.textContent = fmtTs(m.ts);
+
+      const txt = document.createElement('div');
+      txt.className = 'text';
+      // Markdown for agent + user (so user-typed *emphasis* etc renders too);
+      // errors stay plain text since they're usually short and may contain
+      // characters that look like markdown but aren't.
+      if (m.type === 'error') {
+        txt.textContent = m.text || '';
+      } else {
+        txt.innerHTML = renderMarkdown(m.text);
+      }
+
+      div.appendChild(role);
+      div.appendChild(ts);
+      div.appendChild(txt);
+      stack.appendChild(div);
+    });
+    window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+  }
+
+  // Map common status strings to colour classes.
+  function statusClass(s) {
+    s = String(s || '').toLowerCase();
+    if (s.includes('think') || s.includes('busy') || s.includes('working')) return 'busy';
+    if (s.includes('error') || s.includes('fail')) return 'err';
+    if (s.includes('ready') || s.includes('done') || s.includes('idle')) return 'idle';
+    if (s.includes('connect') || s.includes('subscribe')) return 'idle';
+    return 'idle';
+  }
+
+  function renderStatus() {
+    const latest = statuses[statuses.length - 1];
+    if (!latest) {
+      sysnow.textContent = '—';
+      sysnow.className = 'now idle';
+      syshist.innerHTML = '';
+      return;
+    }
+    sysnow.textContent = latest.status + '  ·  ' + fmtTs(latest.ts);
+    sysnow.className = 'now ' + statusClass(latest.status);
+    // History: prior statuses, oldest first, dimmed.
+    const prior = statuses.slice(-MAX_HIST - 1, -1);
+    syshist.innerHTML = '';
+    prior.forEach(s => {
+      const span = document.createElement('span');
+      span.textContent = s.status;
+      syshist.appendChild(span);
+    });
+  }
+
+  function push(m) {
+    if (!m || !m.type) return;
+    if (m.type === 'user' || m.type === 'agent' || m.type === 'error') {
+      content.push(m);
+      if (content.length > 30) content.shift();
+      renderStack();
+    } else if (m.type === 'status') {
+      // Skip noisy duplicates (same status text back-to-back).
+      const last = statuses[statuses.length - 1];
+      const s = String(m.status || '');
+      if (!s) return;
+      if (last && last.status === s) {
+        last.ts = m.ts || last.ts;
+      } else {
+        statuses.push({ status: s, ts: m.ts || new Date().toISOString() });
+        if (statuses.length > 50) statuses.shift();
+      }
+      renderStatus();
+    }
+  }
+
+  let ws = null;
+  function openWs() {
+    if (!channel) { conn.textContent = 'no channel'; return; }
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    const url = scheme + '://' + location.host + '/glasses/ws?c=' + encodeURIComponent(channel) + '&role=glasses' + qs;
+    ws = new WebSocket(url);
+    ws.onopen = () => { conn.textContent = '● live'; conn.classList.remove('off'); };
+    ws.onclose = () => { conn.textContent = '○ reconnecting'; conn.classList.add('off'); setTimeout(openWs, 1500); };
+    ws.onerror = () => {};
+    ws.onmessage = (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch { return; }
+      push(m);
+    };
+  }
+
+  openWs();
+})();
+</script>
+</body>
+</html>
