@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 if TYPE_CHECKING:  # for type hints only — avoid runtime import cycles
     import websockets as _ws_lib  # noqa: F401
@@ -328,7 +328,12 @@ async def glasses_list_agents(request: Request) -> JSONResponse:
 
 @router.post("/glasses/send")
 async def glasses_send(request: Request) -> JSONResponse:
-    """Mobile → agent. Body: ``{channel, host, port, text}``."""
+    """Mobile → agent. Body: ``{channel, host, port, text, image_path?}``.
+
+    ``image_path`` is the absolute path returned by ``/glasses/upload-image``;
+    when present, the agent receives it as an attachment (same shape as the
+    captain-claw web UI uses).
+    """
     _check_token(request)
     body = await request.json()
     channel = str(body.get("channel", "")).strip()
@@ -338,15 +343,22 @@ async def glasses_send(request: Request) -> JSONResponse:
     except Exception:
         port = 0
     text = str(body.get("text", "")).strip()
-    if not channel or not port or not text:
-        raise HTTPException(status_code=400, detail="channel, port, text required")
+    image_path = str(body.get("image_path", "")).strip()
+    if not channel or not port:
+        raise HTTPException(status_code=400, detail="channel, port required")
+    if not text and not image_path:
+        raise HTTPException(status_code=400, detail="text or image_path required")
 
     ch = await _get_or_create_channel(channel)
     await _ensure_agent_binding(ch, host, port)
 
     # Echo the user's message onto the bus immediately — mobile and glasses
     # both want to render it without waiting for the agent's first reply.
-    await _broadcast(ch, {"type": "user", "text": text, "ts": _now_iso()})
+    # ``image_path`` is forwarded so the glasses view can show a 📷 marker.
+    user_event: dict = {"type": "user", "text": text, "ts": _now_iso()}
+    if image_path:
+        user_event["image_path"] = image_path
+    await _broadcast(ch, user_event)
 
     # Wait briefly for the agent WS to come up (first send after binding).
     for _ in range(50):  # up to ~5s
@@ -362,12 +374,20 @@ async def glasses_send(request: Request) -> JSONResponse:
     # used the user's plain text, so the context never reaches the channel
     # bus and is invisible to both the glasses view and the mobile log.
     async with ch.send_lock:
+        # Default caption if the user attached an image without text.
+        effective_text = text or ("Please analyze this image." if image_path else text)
         if not ch.context_sent:
-            agent_content = _GLASSES_SYSTEM_CONTEXT + text
+            agent_content = _GLASSES_SYSTEM_CONTEXT + effective_text
             ch.context_sent = True
         else:
-            agent_content = text
-        payload = json.dumps({"type": "chat", "content": agent_content})
+            agent_content = effective_text
+        payload_obj: dict = {"type": "chat", "content": agent_content}
+        if image_path:
+            # Matches the contract in captain_claw/web/ws_handler.py: the
+            # agent reads ``image_path`` and prefixes the prompt with
+            # ``[Attached image: <abs path>]`` before running the chat.
+            payload_obj["image_path"] = image_path
+        payload = json.dumps(payload_obj)
         try:
             await ch.agent_ws.send(payload)
         except Exception as exc:
@@ -376,6 +396,70 @@ async def glasses_send(request: Request) -> JSONResponse:
             ch.context_sent = False
             raise HTTPException(status_code=502, detail=f"agent send failed: {exc}") from exc
     return JSONResponse({"ok": True}, headers=_NO_CACHE)
+
+
+# ── Image upload proxy ────────────────────────────────────────────────
+
+
+@router.post("/glasses/upload-image")
+async def glasses_upload_image(request: Request) -> JSONResponse:
+    """Receive a photo from the mobile bridge and forward it to the bound
+    agent's ``/api/image/upload``.
+
+    Form fields (multipart):
+      - ``file``: the image bytes
+      - ``host``, ``port``: target agent (same values the mobile uses for /glasses/send)
+
+    Returns the agent's JSON response (``{path, filename, size}``). The path
+    lives on the agent's filesystem and is what the mobile then passes back
+    in ``/glasses/send`` as ``image_path``.
+    """
+    _check_token(request)
+    import httpx
+    from starlette.datastructures import UploadFile as _Upload
+
+    form = await request.form()
+    host = str(form.get("host", "")).strip() or "localhost"
+    try:
+        port = int(str(form.get("port", "0")).strip())
+    except Exception:
+        port = 0
+    upload = form.get("file")
+    if not isinstance(upload, _Upload):
+        raise HTTPException(status_code=400, detail="file field required (multipart)")
+    if not port:
+        raise HTTPException(status_code=400, detail="port required")
+
+    # Read into memory. Phones produce 2–10 MB photos — fine in-process.
+    blob = await upload.read()
+    if not blob:
+        raise HTTPException(status_code=400, detail="empty file")
+
+    try:
+        from captain_claw.flight_deck.server import _resolve_agent_auth
+        auth = _resolve_agent_auth(port)
+    except Exception:
+        auth = ""
+    params = f"?token={auth}" if auth else ""
+    target = f"http://{host}:{port}/api/image/upload{params}"
+
+    files = {"file": (upload.filename or "photo.jpg", blob, upload.content_type or "image/jpeg")}
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(target, files=files)
+    except httpx.ConnectError as exc:
+        raise HTTPException(status_code=502, detail=f"cannot reach agent: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"forward failed: {exc}") from exc
+
+    if resp.status_code != 200:
+        # Surface the agent's error verbatim — easier to debug than a generic 502.
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+    try:
+        data = resp.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail="agent returned non-JSON")
+    return JSONResponse(data, headers=_NO_CACHE)
 
 
 # ── WebSocket bus ─────────────────────────────────────────────────────
@@ -421,3 +505,223 @@ async def glasses_ws(ws: WebSocket, c: str = Query(""), role: str = Query("glass
         pass
     finally:
         ch.subscribers.discard(ws)
+
+
+# ── TTS proxy (Soniox fallback) ───────────────────────────────────────
+
+
+# Default to MP3 — broadest browser support, smallest payload. Soniox docs:
+# https://soniox.com/docs/tts/rest-api/generate-speech
+_SONIOX_TTS_URL = "https://tts-rt.soniox.com/tts"
+_SONIOX_FORMAT_TO_MIME = {
+    "mp3": "audio/mpeg",
+    "wav": "audio/wav",
+    "aac": "audio/aac",
+    "opus": "audio/ogg",   # opus in ogg container; most browsers accept ogg
+    "flac": "audio/flac",
+}
+
+
+@router.post("/glasses/tts")
+async def glasses_tts(request: Request) -> Response:
+    """Server-side fallback for browsers that don't have a working
+    ``speechSynthesis``. Proxies to Soniox TTS and returns the raw audio
+    bytes so the glasses view can play it via ``<audio>``.
+
+    Body: ``{text: str}``.  Configuration via env:
+      - ``SONIOX_API_KEY`` (required)
+      - ``SONIOX_TTS_MODEL``    default ``tts-rt-v1``
+      - ``SONIOX_TTS_VOICE``    default ``Adrian``
+      - ``SONIOX_TTS_LANGUAGE`` default ``en``
+      - ``SONIOX_TTS_FORMAT``   default ``mp3``  (one of: mp3, wav, aac, opus, flac)
+    """
+    _check_token(request)
+
+    api_key = os.environ.get("SONIOX_API_KEY", "").strip()
+    if not api_key:
+        # 503 lets the client distinguish "TTS not configured" from real errors.
+        raise HTTPException(status_code=503, detail="SONIOX_API_KEY not set")
+
+    body = await request.json()
+    text = str(body.get("text", "")).strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text required")
+    # Cap to a sensible size — protects against runaway agent replies that
+    # would blow up the TTS bill and latency.
+    if len(text) > 4000:
+        text = text[:4000]
+
+    audio_format = os.environ.get("SONIOX_TTS_FORMAT", "mp3").strip().lower()
+    mime = _SONIOX_FORMAT_TO_MIME.get(audio_format, "audio/mpeg")
+    payload = {
+        "model": os.environ.get("SONIOX_TTS_MODEL", "tts-rt-v1"),
+        "language": os.environ.get("SONIOX_TTS_LANGUAGE", "en"),
+        "voice": os.environ.get("SONIOX_TTS_VOICE", "Adrian"),
+        "audio_format": audio_format,
+        "text": text,
+    }
+
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                _SONIOX_TTS_URL,
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+            )
+    except httpx.ConnectError as exc:
+        raise HTTPException(status_code=502, detail=f"soniox unreachable: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"tts request failed: {exc}") from exc
+
+    if resp.status_code != 200:
+        # Surface Soniox's error verbatim — easier to debug a 401 / quota issue.
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+
+    return Response(
+        content=resp.content,
+        media_type=mime,
+        headers=_NO_CACHE,
+    )
+
+
+# ── TTS streaming proxy (Soniox WebSocket) ────────────────────────────
+
+
+# Defaults tuned for browser Web Audio scheduling: 16-bit signed little-endian
+# PCM at 24 kHz, single channel. Lowest decode overhead on the client and
+# avoids the "first chunk arrives but the decoder is still buffering"
+# problem MP3/Opus can have with chunked input.
+_SONIOX_TTS_WS_URL = "wss://tts-rt.soniox.com/tts-websocket"
+_STREAM_FORMAT = "pcm_s16le"
+_STREAM_SAMPLE_RATE = 24000
+
+
+@router.websocket("/glasses/tts-stream")
+async def glasses_tts_stream(ws: WebSocket) -> None:
+    """Stream TTS audio from Soniox to the glasses with minimal latency.
+
+    Client protocol:
+      - On connect, send a single JSON: ``{"text": "..."}``.
+      - Server replies with a JSON ``info`` message describing the audio:
+        ``{"type":"info","format":"pcm_s16le","sample_rate":24000}``.
+      - Then a stream of **binary** frames: raw little-endian int16 PCM
+        chunks, mono, at the announced sample rate.
+      - Server sends ``{"type":"end"}`` and closes when the stream finishes,
+        or ``{"type":"error","code":...,"message":...}`` on failure.
+    """
+    if not _check_token_ws(ws):
+        await ws.close(code=4401)
+        return
+
+    api_key = os.environ.get("SONIOX_API_KEY", "").strip()
+    await ws.accept()
+    if not api_key:
+        await ws.send_text(json.dumps({
+            "type": "error", "code": 503, "message": "SONIOX_API_KEY not set",
+        }))
+        await ws.close(code=1011)
+        return
+
+    # First client message picks the text to synthesize.
+    try:
+        first = await ws.receive_text()
+        client_msg = json.loads(first)
+    except WebSocketDisconnect:
+        return
+    except Exception:
+        await ws.send_text(json.dumps({"type": "error", "code": 400, "message": "first message must be JSON"}))
+        await ws.close(code=1003)
+        return
+
+    text = str(client_msg.get("text", "")).strip()
+    if not text:
+        await ws.send_text(json.dumps({"type": "error", "code": 400, "message": "text required"}))
+        await ws.close(code=1003)
+        return
+    if len(text) > 4000:
+        text = text[:4000]
+
+    import base64
+    import secrets as _secrets
+    import websockets
+
+    stream_id = "g_" + _secrets.token_hex(4)
+    config = {
+        "api_key": api_key,
+        "stream_id": stream_id,
+        "model": os.environ.get("SONIOX_TTS_MODEL", "tts-rt-v1"),
+        "language": os.environ.get("SONIOX_TTS_LANGUAGE", "en"),
+        "voice": os.environ.get("SONIOX_TTS_VOICE", "Adrian"),
+        "audio_format": _STREAM_FORMAT,
+        "sample_rate": _STREAM_SAMPLE_RATE,
+    }
+
+    try:
+        async with websockets.connect(
+            _SONIOX_TTS_WS_URL,
+            max_size=4 * 1024 * 1024,
+            ping_interval=20,
+            ping_timeout=10,
+        ) as upstream:
+            await upstream.send(json.dumps(config))
+            await upstream.send(json.dumps({
+                "stream_id": stream_id,
+                "text": text,
+                "text_end": True,
+            }))
+
+            # Announce format to the browser before binary frames start.
+            await ws.send_text(json.dumps({
+                "type": "info",
+                "format": _STREAM_FORMAT,
+                "sample_rate": _STREAM_SAMPLE_RATE,
+                "channels": 1,
+            }))
+
+            async for raw in upstream:
+                # Soniox sends JSON envelopes; audio is base64 inside.
+                if isinstance(raw, (bytes, bytearray)):
+                    raw = raw.decode("utf-8", "ignore")
+                try:
+                    msg = json.loads(raw)
+                except Exception:
+                    continue
+
+                err = msg.get("error_code") or msg.get("error")
+                if err:
+                    await ws.send_text(json.dumps({
+                        "type": "error",
+                        "message": str(msg.get("error_message") or err),
+                    }))
+                    break
+
+                audio_b64 = msg.get("audio")
+                if audio_b64:
+                    try:
+                        await ws.send_bytes(base64.b64decode(audio_b64))
+                    except WebSocketDisconnect:
+                        return
+
+                if msg.get("audio_end") or msg.get("terminated") or msg.get("finished"):
+                    break
+
+            try:
+                await ws.send_text(json.dumps({"type": "end"}))
+            except Exception:
+                pass
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:
+        try:
+            await ws.send_text(json.dumps({"type": "error", "message": f"upstream: {exc}"}))
+        except Exception:
+            pass
+    finally:
+        try:
+            await ws.close()
+        except Exception:
+            pass

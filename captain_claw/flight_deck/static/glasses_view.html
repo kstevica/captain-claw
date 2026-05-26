@@ -18,6 +18,15 @@
   .ssr { color: #ffeb6b; font-weight: 700; letter-spacing: 2px; }
   .conn { color: #4fc; }
   .conn.off { color: #f88; }
+  .tts-btn {
+    background: transparent; border: 1px solid #2a4;
+    color: #cfe; border-radius: 6px;
+    padding: 2px 8px; margin-left: 8px;
+    font: 600 12px ui-monospace, Menlo, monospace;
+    cursor: pointer;
+  }
+  .tts-btn.muted { color: #a88; border-color: #533; }
+  .tts-btn.engine { font-size: 11px; opacity: 0.8; }
 
   #stack { display: flex; flex-direction: column; gap: 10px; }
   .msg {
@@ -105,7 +114,12 @@
 <body>
 <header>
   <span>SSR <span class="ssr">{{SSR_TOKEN}}</span> · {{SSR_TS}}</span>
-  <span class="conn off" id="conn">…</span>
+  <span>
+    <button class="tts-btn" id="tts-toggle" type="button" title="toggle voice">🔊</button>
+    <button class="tts-btn" id="tts-mode" type="button" title="stream vs one-shot">📡</button>
+    <span class="tts-btn engine" id="tts-engine">—</span>
+    <span class="conn off" id="conn">…</span>
+  </span>
 </header>
 
 <div id="stack"></div>
@@ -166,7 +180,9 @@
 
       const role = document.createElement('span');
       role.className = 'role';
-      role.textContent = m.type === 'user' ? 'YOU' : (m.type === 'error' ? 'ERR' : 'AGENT');
+      let label = m.type === 'user' ? 'YOU' : (m.type === 'error' ? 'ERR' : 'AGENT');
+      if (m.type === 'user' && m.image_path) label = '📷 ' + label;
+      role.textContent = label;
 
       const ts = document.createElement('span');
       ts.className = 'ts';
@@ -221,16 +237,26 @@
     });
   }
 
+  // True once the WS has finished its backfill (signalled by the bridge's
+  // ``status:"subscribed"`` event). TTS is suppressed before this so a page
+  // reload doesn't re-speak old replies.
+  let liveMode = false;
+
   function push(m) {
     if (!m || !m.type) return;
     if (m.type === 'user' || m.type === 'agent' || m.type === 'error') {
       content.push(m);
       if (content.length > 30) content.shift();
       renderStack();
+      // Speak the agent's reply once we're past the backfill window.
+      if (liveMode && m.type === 'agent' && m.text) {
+        try { tts.speak(m.text); } catch (_) {}
+      }
     } else if (m.type === 'status') {
+      const s = String(m.status || '');
+      if (s === 'subscribed') liveMode = true;
       // Skip noisy duplicates (same status text back-to-back).
       const last = statuses[statuses.length - 1];
-      const s = String(m.status || '');
       if (!s) return;
       if (last && last.status === s) {
         last.ts = m.ts || last.ts;
@@ -242,14 +268,333 @@
     }
   }
 
+  // ── TTS via Soniox. Two paths:
+  //      stream   — WS /glasses/tts-stream, PCM s16le @ 24 kHz, Web Audio
+  //                 scheduler. First-audio latency is ~150–300 ms; the rest
+  //                 of the clip arrives while the start is already playing.
+  //      oneshot  — POST /glasses/tts, full MP3 → <audio>. Simpler but
+  //                 has to wait for the whole file before any sound.
+  //      Default is stream. The toggle is remembered in localStorage.
+  const tts = (() => {
+    const toggleBtn = document.getElementById('tts-toggle');
+    const modeBtn = document.getElementById('tts-mode');
+    const engineLabel = document.getElementById('tts-engine');
+    let muted = false;
+    let sonioxAvailable = true;         // false on 503 from /glasses/tts*
+    let currentAudio = null;             // active <Audio> (one-shot path)
+    let currentStream = null;            // active stream context (stream path)
+    let queue = Promise.resolve();       // sequential play queue
+
+    const MODE_KEY = 'glasses.tts.mode';
+    let mode = (() => {
+      try { return localStorage.getItem(MODE_KEY) || 'stream'; }
+      catch (_) { return 'stream'; }
+    })();
+
+    function setEngineLabel(s) { engineLabel.textContent = s || ''; }
+    function applyModeUi() {
+      modeBtn.textContent = mode === 'stream' ? '📡' : '📦';
+      modeBtn.title = mode === 'stream' ? 'streaming (tap for one-shot)' : 'one-shot (tap for streaming)';
+    }
+    setEngineLabel('soniox');
+    applyModeUi();
+
+    function stopAll() {
+      if (currentAudio) {
+        try { currentAudio.pause(); currentAudio.removeAttribute('src'); currentAudio.load(); } catch (_) {}
+        currentAudio = null;
+      }
+      if (currentStream) {
+        try { currentStream.cancel(); } catch (_) {}
+        currentStream = null;
+      }
+    }
+
+    toggleBtn.addEventListener('click', () => {
+      muted = !muted;
+      toggleBtn.textContent = muted ? '🔇' : '🔊';
+      toggleBtn.classList.toggle('muted', muted);
+      if (muted) stopAll();
+      // Tapping the button counts as a user gesture — wake any suspended
+      // AudioContext so the next reply can play.
+      try { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); } catch (_) {}
+    });
+
+    modeBtn.addEventListener('click', () => {
+      mode = (mode === 'stream') ? 'oneshot' : 'stream';
+      try { localStorage.setItem(MODE_KEY, mode); } catch (_) {}
+      applyModeUi();
+      // Cancel anything in flight so the next message uses the new path.
+      stopAll();
+      // Same gesture-unlock as above.
+      try { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); } catch (_) {}
+    });
+
+    // Convert markdown/HTML to clean speakable text.
+    function plainify(src) {
+      // Strip fenced code blocks (they don't speak well).
+      let s = String(src || '').replace(/```[\s\S]*?```/g, ' code block ');
+      // Strip inline code backticks.
+      s = s.replace(/`([^`]+)`/g, '$1');
+      // Drop markdown emphasis markers + headings + list bullets + links.
+      s = s.replace(/\*\*([^*]+)\*\*/g, '$1')
+           .replace(/\*([^*]+)\*/g, '$1')
+           .replace(/^#{1,6}\s+/gm, '')
+           .replace(/^[\s]*[-*+]\s+/gm, '')
+           .replace(/^[\s]*\d+\.\s+/gm, '')
+           .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+           // Tables: keep cell contents, drop pipes/divider rows.
+           .replace(/^\s*\|?\s*[:\-\s|]+\s*\|?\s*$/gm, '')
+           .replace(/\|/g, ', ');
+      // Collapse whitespace.
+      s = s.replace(/\s+/g, ' ').trim();
+      // Trim insanely long replies — TTS bill / latency guard.
+      if (s.length > 600) s = s.slice(0, 600).replace(/[^.!?]*$/, '') || s.slice(0, 600);
+      return s;
+    }
+
+    // Surface TTS failures via the status footer so we can see them on the
+    // glasses without DevTools. Distinguish permanent (turn off + stop
+    // trying) from transient (retry next reply).
+    function ttsStatusEvent(text) {
+      push({ type: 'status', status: 'tts:' + text, ts: new Date().toISOString() });
+    }
+    function ttsFail(reason, permanent) {
+      if (permanent) {
+        sonioxAvailable = false;
+        setEngineLabel('off:' + reason);
+      } else {
+        setEngineLabel('err:' + reason);
+      }
+      ttsStatusEvent((permanent ? 'off ' : 'err ') + reason);
+    }
+
+    async function playSoniox(text) {
+      let resp;
+      try {
+        resp = await fetch('/glasses/tts' + (t ? '?t=' + encodeURIComponent(t) : ''), {
+          method: 'POST',
+          cache: 'no-store',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+      } catch (e) {
+        // Network/CORS/FD-down. Retryable.
+        ttsFail('net', false);
+        return;
+      }
+      if (resp.status === 503 || resp.status === 401 || resp.status === 403) {
+        // Server config / auth issue — won't fix itself mid-session.
+        ttsFail(String(resp.status), true);
+        return;
+      }
+      if (!resp.ok) {
+        // Other non-200: log and try again next reply.
+        ttsFail(String(resp.status), false);
+        return;
+      }
+      // Success on the HTTP side — clear any prior 'err:' label.
+      setEngineLabel('soniox');
+      const blob = await resp.blob();
+      if (!blob || blob.size === 0) { ttsFail('empty', false); return; }
+      // Surface the MIME the server sent — handy when debugging "no sound
+      // but no error" (usually codec mismatch).
+      const contentType = resp.headers.get('content-type') || '';
+      const url = URL.createObjectURL(blob);
+      await new Promise((resolve) => {
+        const a = new Audio();
+        // Set type via the source element so the browser doesn't have to
+        // sniff — avoids decoder picking the wrong path on some webviews.
+        if (contentType) a.type = contentType;
+        a.src = url;
+        currentAudio = a;
+        let done = false;
+        const finish = (errCode) => {
+          if (done) return;
+          done = true;
+          // Detach the element from the blob URL BEFORE revoking, so any
+          // in-flight fetch is cancelled cleanly instead of logging
+          // ERR_FILE_NOT_FOUND. The revoke is deferred to the next tick
+          // so the pause/load can settle.
+          try { a.pause(); a.removeAttribute('src'); a.load(); } catch (_) {}
+          setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} }, 0);
+          if (currentAudio === a) currentAudio = null;
+          if (errCode) ttsFail(errCode, errCode === '503' || errCode === '401' || errCode === '403');
+          resolve();
+        };
+        a.onended = () => finish(null);
+        a.onerror = () => {
+          // a.error.code: 1=ABORTED 2=NETWORK 3=DECODE 4=SRC_NOT_SUPPORTED
+          const codes = { 1: 'abort', 2: 'net', 3: 'decode', 4: 'codec' };
+          const c = (a.error && codes[a.error.code]) || 'audio';
+          finish(c);
+        };
+        a.play().catch((err) => {
+          const name = (err && err.name) || 'play';
+          finish(name === 'NotAllowedError' ? 'gesture' : 'play');
+        });
+      });
+    }
+
+    // ── Streaming path: WS + Web Audio scheduler ─────────────────────
+    // Lazy-create the AudioContext on first use so it can inherit a user
+    // gesture (mute/mode-toggle clicks above resume() it if suspended).
+    let audioCtx = null;
+    function getCtx(sampleRate) {
+      if (audioCtx) return audioCtx;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      try { audioCtx = new AC({ sampleRate }); }
+      catch (_) { audioCtx = new AC(); }
+      return audioCtx;
+    }
+
+    async function playSonioxStream(text) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) {
+        ttsFail('noaudioctx', false);
+        return playSoniox(text);  // graceful fallback to one-shot
+      }
+
+      const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+      const url = scheme + '://' + location.host + '/glasses/tts-stream'
+                + (t ? '?t=' + encodeURIComponent(t) : '');
+
+      return new Promise((resolve) => {
+        let ws;
+        try { ws = new WebSocket(url); }
+        catch (_) { ttsFail('wsopen', false); return resolve(); }
+        ws.binaryType = 'arraybuffer';
+
+        let ctx = null;
+        let nextStart = 0;
+        let scheduled = 0;
+        let finished = 0;
+        let streamEnded = false;
+        let settled = false;
+        const sources = [];
+        let cancelled = false;
+
+        const settle = () => {
+          if (settled) return;
+          settled = true;
+          if (currentStream === api) currentStream = null;
+          resolve();
+        };
+        const tryFinalize = () => {
+          if (streamEnded && finished >= scheduled) settle();
+        };
+        const api = {
+          cancel() {
+            cancelled = true;
+            streamEnded = true;
+            try { ws.close(); } catch (_) {}
+            for (const s of sources) { try { s.stop(); } catch (_) {} }
+            settle();
+          },
+        };
+        currentStream = api;
+
+        ws.onopen = () => {
+          ws.send(JSON.stringify({ text }));
+        };
+        ws.onmessage = (ev) => {
+          if (cancelled) return;
+          if (typeof ev.data === 'string') {
+            let m; try { m = JSON.parse(ev.data); } catch { return; }
+            if (m.type === 'info') {
+              ctx = getCtx(m.sample_rate || 24000);
+              if (!ctx) { ttsFail('ctx', false); try { ws.close(); } catch (_) {} return settle(); }
+              if (ctx.state === 'suspended') { ctx.resume().catch(() => {}); }
+              nextStart = ctx.currentTime;
+              setEngineLabel('soniox');
+            } else if (m.type === 'error') {
+              const code = String(m.code || '');
+              const perm = (code === '503' || code === '401' || code === '403');
+              ttsFail(code || 'stream', perm);
+              try { ws.close(); } catch (_) {}
+              streamEnded = true;
+              tryFinalize();
+            } else if (m.type === 'end') {
+              streamEnded = true;
+              tryFinalize();
+            }
+            return;
+          }
+          // Binary PCM s16le mono.
+          if (!ctx) return;            // shouldn't happen — info comes first
+          const int16 = new Int16Array(ev.data);
+          if (int16.length === 0) return;
+          const float32 = new Float32Array(int16.length);
+          for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+          const buf = ctx.createBuffer(1, float32.length, ctx.sampleRate);
+          buf.copyToChannel(float32, 0);
+          const src = ctx.createBufferSource();
+          src.buffer = buf;
+          src.connect(ctx.destination);
+          // Tiny safety margin so back-to-back chunks don't clip on slow
+          // schedulers; effectively zero for our use.
+          const startAt = Math.max(ctx.currentTime + 0.01, nextStart);
+          src.start(startAt);
+          nextStart = startAt + buf.duration;
+          scheduled++;
+          sources.push(src);
+          src.onended = () => { finished++; tryFinalize(); };
+        };
+        ws.onerror = () => {
+          if (cancelled) return;
+          // Don't flip the engine off — could be a transient hiccup.
+          ttsFail('wserr', false);
+        };
+        ws.onclose = () => {
+          streamEnded = true;
+          // If we got 0 chunks (e.g. error during setup), fall back to
+          // one-shot for THIS reply so it isn't silent. The 'err:' label
+          // is already set; soniox availability stays true.
+          if (!cancelled && scheduled === 0) {
+            settle();
+            playSoniox(text);
+            return;
+          }
+          tryFinalize();
+        };
+      });
+    }
+
+    async function speakOne(rawText) {
+      if (muted || !sonioxAvailable) return;
+      const text = plainify(rawText);
+      if (!text) return;
+      if (mode === 'stream') {
+        await playSonioxStream(text);
+      } else {
+        await playSoniox(text);
+      }
+    }
+
+    function speak(text) {
+      // Queue so replies play in order, never overlapping.
+      queue = queue.then(() => speakOne(text)).catch(() => {});
+    }
+
+    return { speak };
+  })();
+
   let ws = null;
   function openWs() {
     if (!channel) { conn.textContent = 'no channel'; return; }
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
     const url = scheme + '://' + location.host + '/glasses/ws?c=' + encodeURIComponent(channel) + '&role=glasses' + qs;
     ws = new WebSocket(url);
+    // Reset liveMode on every (re)connect; bridge will set it back to true
+    // when its "subscribed" status arrives after the backfill batch.
+    liveMode = false;
     ws.onopen = () => { conn.textContent = '● live'; conn.classList.remove('off'); };
-    ws.onclose = () => { conn.textContent = '○ reconnecting'; conn.classList.add('off'); setTimeout(openWs, 1500); };
+    ws.onclose = () => {
+      conn.textContent = '○ reconnecting'; conn.classList.add('off');
+      liveMode = false;
+      setTimeout(openWs, 1500);
+    };
     ws.onerror = () => {};
     ws.onmessage = (ev) => {
       let m; try { m = JSON.parse(ev.data); } catch { return; }
