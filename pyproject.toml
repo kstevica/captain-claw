@@ -82,6 +82,12 @@ screen = [
     "numpy>=1.24.0",
     "soniox>=0.1.0",
 ]
+faces = [
+    "insightface>=0.7.3",
+    "onnxruntime>=1.17.0",
+    "sqlite-vec>=0.1.6",
+    "opencv-python-headless>=4.9.0",
+]
 build = [
     "pyinstaller>=6.0.0",
 ]

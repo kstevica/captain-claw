@@ -309,6 +309,35 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .glink-arrow { margin-left: auto; color: var(--text-mut); font-size: 18px; }
+
+  /* ── Face recognition card ─────────────────────────────────────── */
+  .enroll-link {
+    font: 12px ui-monospace, Menlo, monospace;
+    color: var(--accent); text-decoration: none;
+    padding: 4px 8px; border: 1px solid var(--line); border-radius: 999px;
+  }
+  .enroll-link:hover { border-color: var(--accent); background: var(--surface-2); }
+  .face-wrap {
+    position: relative;
+    background: #000; border-radius: 12px; overflow: hidden;
+    aspect-ratio: 3 / 4;
+    border: 1px solid var(--line);
+    margin-top: 8px;
+  }
+  .face-wrap video {
+    width: 100%; height: 100%; object-fit: cover; display: block;
+  }
+  .face-result {
+    margin-top: 10px; padding: 10px 12px;
+    background: var(--surface-2); border: 1px solid var(--line);
+    border-radius: 10px;
+    font-size: 14px; line-height: 1.45;
+    white-space: pre-wrap;
+  }
+  .face-result.ok { border-color: #1a3a25; }
+  .face-result.miss { color: var(--text-dim); }
+  .face-result.err { color: #ff7a8a; border-color: #4a2630; }
+  .face-result strong { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -354,6 +383,23 @@
       <div class="photo-meta" id="photo-meta"></div>
     </div>
   </div>
+</div>
+
+<div class="card" id="face-card">
+  <div class="card-head">
+    <span class="card-label">Face</span>
+    <div class="card-aside">
+      <a class="enroll-link" href="#" id="enroll-link">enroll ↗</a>
+    </div>
+  </div>
+  <div class="face-wrap" id="face-wrap" hidden>
+    <video id="face-video" autoplay playsinline muted></video>
+  </div>
+  <div class="composer-actions" style="margin-top:8px">
+    <button class="send-btn" id="face-btn" type="button">👤 Recognize</button>
+  </div>
+  <div class="face-result" id="face-result" hidden></div>
+  <canvas id="face-canvas" hidden></canvas>
 </div>
 
 <div class="card">
@@ -617,6 +663,122 @@
 
   loadAgents();
   openWs();
+
+  // ── Face recognition ─────────────────────────────────────────────
+  // Two-tap flow: first tap opens the rear camera preview, second tap
+  // captures one frame and POSTs to /face/recognize. The server broadcasts
+  // a person card to the channel bus, so the glasses view picks it up
+  // automatically; the inline result here is a phone-side confirmation.
+  (() => {
+    const enrollLink = document.getElementById('enroll-link');
+    if (enrollLink) {
+      enrollLink.addEventListener('click', (e) => {
+        e.preventDefault();
+        location.href = '/glasses/enroll?c=' + encodeURIComponent(channel);
+      });
+    }
+
+    const faceBtn = document.getElementById('face-btn');
+    const faceWrap = document.getElementById('face-wrap');
+    const faceVideo = document.getElementById('face-video');
+    const faceCanvas = document.getElementById('face-canvas');
+    const faceResult = document.getElementById('face-result');
+    if (!faceBtn) return;
+
+    let stream = null;
+    let armed = false;
+
+    function setResult(html, kind) {
+      faceResult.hidden = false;
+      faceResult.className = 'face-result' + (kind ? ' ' + kind : '');
+      faceResult.innerHTML = html;
+    }
+
+    async function stopStream() {
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+      }
+      faceVideo.srcObject = null;
+      faceWrap.hidden = true;
+    }
+
+    async function arm() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment',
+                   width: { ideal: 1280 }, height: { ideal: 960 } },
+          audio: false,
+        });
+        faceVideo.srcObject = stream;
+        faceWrap.hidden = false;
+        armed = true;
+        faceBtn.textContent = '📸 Capture';
+        setResult('Aim at a face, then tap Capture.', 'miss');
+        // Fire-and-forget warmup the first time, so the model is hot by the
+        // time the user actually captures.
+        fetch('/face/warmup', { method: 'POST' }).catch(() => {});
+      } catch (e) {
+        setResult('Camera error: ' + (e && e.message ? e.message : e), 'err');
+      }
+    }
+
+    async function capture() {
+      if (!stream) return;
+      const w = faceVideo.videoWidth || 1280;
+      const h = faceVideo.videoHeight || 960;
+      faceCanvas.width = w; faceCanvas.height = h;
+      faceCanvas.getContext('2d').drawImage(faceVideo, 0, 0, w, h);
+      const blob = await new Promise(res => faceCanvas.toBlob(res, 'image/jpeg', 0.9));
+      await stopStream();
+      armed = false;
+      faceBtn.textContent = '👤 Recognize';
+      if (!blob) { setResult('Capture failed.', 'err'); return; }
+
+      setResult('Looking up face…', 'miss');
+      const fd = new FormData();
+      fd.append('channel', channel);
+      fd.append('file', blob, 'snap.jpg');
+      try {
+        const r = await fetch('/face/recognize', { method: 'POST', body: fd });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          setResult('Recognize failed: ' + (data.detail || r.statusText), 'err');
+          return;
+        }
+        if (data.person_id) {
+          const pct = Math.round((data.confidence || 0) * 100);
+          setResult(
+            '<strong>' + escapeHtml(data.name || '?') + '</strong>' +
+            ' · ' + pct + '% match · pushed to glasses',
+            'ok'
+          );
+        } else if (data.confidence && data.confidence > 0) {
+          // Detected a face but no confident match.
+          setResult(
+            'Face detected but no match (' +
+            Math.round(data.confidence * 100) + '%).',
+            'miss'
+          );
+        } else {
+          setResult('No face detected.', 'miss');
+        }
+      } catch (e) {
+        setResult('Network error: ' + (e && e.message ? e.message : e), 'err');
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[c]));
+    }
+
+    faceBtn.addEventListener('click', () => {
+      if (!armed) arm();
+      else capture();
+    });
+  })();
 })();
 </script>
 </body>
