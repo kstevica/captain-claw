@@ -28,6 +28,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Eagerly initialise numpy on the **main** thread, at module import time.
+#
+# Recognition + enrollment offload to ``asyncio.to_thread`` so insightface
+# CPU inference doesn't block the event loop. The first call would otherwise
+# trigger numpy's import inside a worker thread, where numpy 2.x's internal
+# cross-imports (numpy → lib → matrixlib → linalg → _typing) can race the
+# import lock and leave ``numpy._typing`` partially initialised. The trace
+# from a fresh Python 3.12 venv looked like:
+#   ImportError: cannot import name 'NDArray' from partially initialized
+#   module 'numpy._typing' (most likely due to a circular import)
+# Importing numpy here, on the main thread, lets it finish init once; every
+# later worker-thread ``import numpy`` is then a cheap cache hit.
+import numpy  # noqa: F401  — load-bearing side effect; do not remove
+
 UTC = timezone.utc
 
 DEFAULT_DB_PATH = Path("~/.captain-claw/face_index.db").expanduser()
