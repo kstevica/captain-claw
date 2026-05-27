@@ -4,6 +4,20 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Glasses bridge — mobile</title>
+
+<!-- ── PWA: installable, standalone, dark theme ─────────────────────── -->
+<link rel="manifest" href="/glasses/manifest.webmanifest">
+<meta name="theme-color" content="#07090d">
+<meta name="color-scheme" content="dark">
+<!-- iOS-specific: respected even when the Web App Manifest is partially
+     ignored on older Safari versions. Together with the manifest these
+     give you the "Add to Home Screen" install + standalone launch. -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Bridge">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<meta name="mobile-web-app-capable" content="yes">
 <style>
   /* ── Design tokens ───────────────────────────────────────────────
      Palette: deep slate background, layered surfaces, electric-cyan
@@ -361,6 +375,13 @@
 
 <script>
 (() => {
+  // ── PWA: register service worker (silent on failure) ──────────────
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker
+      .register('/glasses/sw.js', { scope: '/glasses/' })
+      .catch(() => {});  // no SW = no PWA install prompt, page still works
+  }
+
   const params = new URLSearchParams(location.search);
   function randChannel() { return Math.random().toString(36).slice(2, 10); }
   function sanitize(s) {

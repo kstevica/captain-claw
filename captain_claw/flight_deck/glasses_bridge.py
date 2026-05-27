@@ -297,6 +297,114 @@ async def glasses_settings_page(request: Request, c: str = "") -> HTMLResponse:
     return HTMLResponse(content=html, headers=_NO_CACHE)
 
 
+# ── PWA assets (manifest + service worker) ────────────────────────────
+
+
+# Cached once at import; the dict is JSON-serialised on every request.
+# Kept tiny — manifest is just metadata + icon references.
+# PNG icons (generated from the captain-claw 1024x1024 source). Meta's
+# wearables runtime explicitly does not accept SVG icons for the glasses
+# app launcher — so for the glasses-view manifest we MUST use PNG. Bridge
+# manifest matches for cross-platform consistency.
+_PNG_ICONS = [
+    {"src": "/icon-96.png",  "sizes": "96x96",   "type": "image/png", "purpose": "any"},
+    {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+    {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+]
+
+_PWA_MANIFEST = {
+    "name": "Captain Claw — Glasses Bridge",
+    "short_name": "Bridge",
+    "description": "Mobile bridge for Captain Claw glasses sessions.",
+    "start_url": "/glasses/mobile",
+    "scope": "/glasses/",
+    "display": "standalone",
+    "orientation": "portrait",
+    "background_color": "#07090d",
+    "theme_color": "#5fe3ff",
+    "categories": ["productivity", "utilities"],
+    "icons": _PNG_ICONS,
+}
+
+# Separate manifest for the **glasses view** so Meta's wearables runtime can
+# pick up the app icon. Distinct from the mobile bridge: different start_url,
+# darker theme, named for the glasses-side experience.
+_GLASSES_VIEW_MANIFEST = {
+    "name": "Captain Claw",
+    "short_name": "Claw",
+    "description": "Captain Claw on Meta Ray-Ban Display glasses.",
+    "start_url": "/glasses/view",
+    "scope": "/glasses/",
+    "display": "standalone",
+    "background_color": "#000000",
+    "theme_color": "#5fff9f",
+    "icons": _PNG_ICONS,
+}
+
+
+@router.get("/glasses/manifest.webmanifest")
+async def glasses_pwa_manifest() -> Response:
+    """PWA manifest for the mobile bridge.
+
+    Scoped to ``/glasses/`` so the installed app launches into the bridge,
+    not the rest of Flight Deck.
+    """
+    body = json.dumps(_PWA_MANIFEST).encode("utf-8")
+    return Response(
+        content=body,
+        media_type="application/manifest+json",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@router.get("/glasses/view-manifest.webmanifest")
+async def glasses_view_manifest() -> Response:
+    """Manifest referenced from the glasses view <head>.
+
+    Meta's wearables runtime reads this (and/or the ``<link rel='icon'>``
+    tags) to find the app icon shown in the glasses launcher. Icons are
+    PNG only — SVG is explicitly rejected by Meta.
+    """
+    body = json.dumps(_GLASSES_VIEW_MANIFEST).encode("utf-8")
+    return Response(
+        content=body,
+        media_type="application/manifest+json",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+# Minimal service worker. Intentionally does NOT cache the shell — the whole
+# project hinges on "fresh from server every load" so the freshness probe
+# stays meaningful. Registering an SW is what flips the page from "web page"
+# to "installable PWA" on iOS/Android.
+_PWA_SW = (
+    "// Captain Claw - Glasses Bridge service worker.\n"
+    "// Pass-through fetch only; no caching, no offline shell. Exists purely so\n"
+    "// the page qualifies as a PWA and can be installed to the home screen.\n"
+    "self.addEventListener('install', (e) => { self.skipWaiting(); });\n"
+    "self.addEventListener('activate', (e) => { e.waitUntil(self.clients.claim()); });\n"
+    "self.addEventListener('fetch', () => { /* network handles it */ });\n"
+).encode("utf-8")
+
+
+@router.get("/glasses/sw.js")
+async def glasses_pwa_sw() -> Response:
+    """Service worker for the bridge PWA. Scope is implied by the URL path.
+
+    The ``Service-Worker-Allowed: /glasses/`` header lets the SW control any
+    page under /glasses/ even though Flight Deck serves the bridge HTML at
+    /glasses/mobile (no path mismatch in practice, but harmless to set).
+    """
+    return Response(
+        content=_PWA_SW,
+        media_type="application/javascript",
+        headers={
+            "Cache-Control": "no-cache",
+            "Service-Worker-Allowed": "/glasses/",
+        },
+    )
+
+
 @router.get("/glasses/agents")
 async def glasses_list_agents(request: Request) -> JSONResponse:
     """List Flight Deck **process** agents the mobile page can target.

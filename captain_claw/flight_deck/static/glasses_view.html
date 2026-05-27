@@ -3,7 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Glasses view</title>
+<title>Captain Claw</title>
+
+<!-- ── App icons for Meta Ray-Ban Display launcher ─────────────────────
+     Meta's wearables runtime scans <link rel="icon"> + the manifest for
+     this. PNG only — SVG is explicitly not supported. -->
+<link rel="icon"             href="/icon-192.png"        sizes="192x192" type="image/png">
+<link rel="icon"             href="/icon-96.png"         sizes="96x96"   type="image/png">
+<link rel="icon"             href="/icon-512.png"        sizes="512x512" type="image/png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
+<link rel="manifest" href="/glasses/view-manifest.webmanifest">
+<meta name="theme-color" content="#000000">
+<meta name="color-scheme" content="dark">
 <style>
   /* ── Design tokens — HUD-style for transparent glasses display ──── */
   :root {
@@ -60,6 +71,21 @@
     letter-spacing: 0.08em;
   }
   .pill .ssr { color: var(--warn); }
+  /* App brand pill — distinct purple matches the Captain Claw mark. */
+  .pill.brand {
+    background: linear-gradient(135deg, rgba(134,59,255,0.22), rgba(71,191,255,0.16));
+    border-color: rgba(134,59,255,0.55);
+    color: #efe6ff;
+    text-transform: uppercase;
+    padding: 3px 10px 3px 6px;
+    box-shadow: 0 0 12px rgba(134,59,255,0.25);
+  }
+  .pill.brand .brand-icon {
+    width: 14px; height: 14px;
+    display: inline-block;
+    filter: drop-shadow(0 0 4px rgba(134,59,255,0.6));
+  }
+  .pill.brand .brand-name { font-weight: 700; letter-spacing: 0.14em; }
   .pill.conn { color: var(--hud); border-color: rgba(95,255,159,0.3); }
   .pill.conn::before {
     content: ''; width: 6px; height: 6px; border-radius: 50%;
@@ -257,6 +283,10 @@
 <body>
 <header class="hud">
   <div class="hud-left">
+    <span class="pill brand" title="Captain Claw">
+      <img class="brand-icon" src="/favicon.svg" alt="">
+      <span class="brand-name">Claw</span>
+    </span>
     <span class="pill" title="server-render token / time">
       <span class="ssr">{{SSR_TOKEN}}</span>
     </span>
@@ -272,7 +302,7 @@
   </div>
 </header>
 
-<div id="gesture-notice">🔊 Tap any control to enable audio</div>
+<div id="gesture-notice">🔇 Voice is off — tap 🔊 to enable</div>
 
 <div id="stack"></div>
 
@@ -477,7 +507,11 @@
     const voiceSel = document.getElementById('tts-voice');
     const engineLabel = document.getElementById('tts-engine');
     const gestureNotice = document.getElementById('gesture-notice');
-    let muted = false;
+    // Voice starts OFF — the user must explicitly enable it by tapping 🔊.
+    // This avoids two problems at once: no Soniox calls happen unless the
+    // user wanted them, and the first audio play coincides with a real
+    // user gesture so autoplay policy never blocks.
+    let muted = true;
     let sonioxAvailable = true;         // false on 503 from /glasses/tts*
     let currentAudio = null;             // active <Audio> (one-shot path)
     let currentStream = null;            // active stream context (stream path)
@@ -556,8 +590,14 @@
       modeBtn.textContent = mode === 'stream' ? '📡' : '📦';
       modeBtn.title = mode === 'stream' ? 'streaming (tap for one-shot)' : 'one-shot (tap for streaming)';
     }
-    setEngineLabel('soniox');
+    function applyMutedUi() {
+      toggleBtn.textContent = muted ? '🔇' : '🔊';
+      toggleBtn.classList.toggle('muted', muted);
+      toggleBtn.title = muted ? 'voice is off — tap to enable' : 'voice is on — tap to mute';
+    }
+    setEngineLabel(muted ? 'off' : 'soniox');
     applyModeUi();
+    applyMutedUi();
 
     function stopAll() {
       if (currentAudio) {
@@ -586,13 +626,14 @@
 
     toggleBtn.addEventListener('click', () => {
       muted = !muted;
-      toggleBtn.textContent = muted ? '🔇' : '🔊';
-      toggleBtn.classList.toggle('muted', muted);
+      applyMutedUi();
+      setEngineLabel(muted ? 'off' : (sonioxAvailable ? 'soniox' : 'off'));
       if (muted) stopAll();
       // Tapping the button counts as a user gesture — wake any suspended
       // AudioContext so the next reply can play.
       try { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); } catch (_) {}
-      dismissGestureNotice();
+      // Only dismiss the "enable voice" notice when audio is actually on.
+      if (!muted) dismissGestureNotice();
     });
 
     modeBtn.addEventListener('click', () => {
@@ -601,18 +642,16 @@
       applyModeUi();
       // Cancel anything in flight so the next message uses the new path.
       stopAll();
-      // Same gesture-unlock as above.
+      // Counts as a gesture — useful when the user later unmutes.
       try { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); } catch (_) {}
-      dismissGestureNotice();
+      // Don't dismiss the gesture notice: this button doesn't enable audio.
     });
 
     langSel.addEventListener('change', () => {
       lang = langSel.value || 'en';
       try { localStorage.setItem(LANG_KEY, lang); } catch (_) {}
-      // Stop any in-flight clip so the language change applies to the next reply.
       stopAll();
       try { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); } catch (_) {}
-      dismissGestureNotice();
     });
 
     voiceSel.addEventListener('change', () => {
@@ -620,7 +659,6 @@
       try { localStorage.setItem(VOICE_KEY, voice); } catch (_) {}
       stopAll();
       try { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); } catch (_) {}
-      dismissGestureNotice();
     });
 
     // Convert markdown/HTML to clean speakable text.
@@ -871,6 +909,11 @@
     }
 
     function speak(text) {
+      // Hard short-circuit BEFORE the queue: if voice is off (or Soniox is
+      // unavailable), never schedule a Soniox call at all. This guarantees
+      // zero network traffic to /glasses/tts* while muted, even if multiple
+      // agent replies pile up while the user is deciding to enable voice.
+      if (muted || !sonioxAvailable) return;
       // Queue so replies play in order, never overlapping.
       queue = queue.then(() => speakOne(text)).catch(() => {});
     }
