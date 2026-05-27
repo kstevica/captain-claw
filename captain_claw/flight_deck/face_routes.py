@@ -255,6 +255,15 @@ async def recognize(
             "confidence": result.confidence,
             "bbox": list(result.bbox) if result.bbox else None,
             "card_markdown": result.card_markdown,
+            "faces": [
+                {
+                    "person_id": f.person_id,
+                    "name": f.name,
+                    "confidence": f.confidence,
+                    "bbox": list(f.bbox),
+                }
+                for f in result.faces
+            ],
         },
         headers=_NO_CACHE,
     )

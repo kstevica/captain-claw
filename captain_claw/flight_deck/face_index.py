@@ -73,17 +73,49 @@ def _env_float(name: str, default: float) -> float:
 MATCH_THRESHOLD = _env_float("FACE_MATCH_THRESHOLD", 0.50)
 AMBIGUOUS_THRESHOLD = _env_float("FACE_AMBIGUOUS_THRESHOLD", 0.35)
 
+# Cap on how many faces we look up per recognize call. Keeps latency bounded
+# at parties; faces past this are silently dropped from the result. Override
+# with FACE_MAX_FACES.
+MAX_FACES_PER_FRAME = int(_env_float("FACE_MAX_FACES", 10))
+
 
 # ── Result types ──────────────────────────────────────────────────────
 
 
 @dataclass
+class FaceMatch:
+    """One detected face in a recognize call (primary or otherwise).
+
+    Three states encoded by the combination of fields:
+      - **unknown**: ``person_id is None``, ``name is None`` — either no
+        embeddings in the index or cosine fell below ``AMBIGUOUS_THRESHOLD``.
+      - **ambiguous**: ``person_id`` and ``name`` set, ``confident is False``
+        — a candidate matched but cosine is in the
+        ``AMBIGUOUS_THRESHOLD..MATCH_THRESHOLD`` band. Shown on the card
+        with a "(low confidence)" prefix; no encounter logged.
+      - **confident**: ``person_id`` set, ``confident is True`` — encounter
+        was logged. This is the only state surfaced on the route's
+        top-level ``person_id`` / ``name`` fields.
+    """
+
+    bbox: tuple[int, int, int, int]      # (x, y, w, h)
+    person_id: str | None
+    name: str | None
+    confidence: float                    # cosine similarity, 0.0 if nothing detected
+    confident: bool                      # True only when cosine ≥ MATCH_THRESHOLD
+
+
+@dataclass
 class RecognizeResult:
+    # Primary subject (most-centred face) — kept for backwards compat with
+    # callers that just want one card. None when no faces at all detected.
     person_id: str | None
     name: str | None
     confidence: float
-    bbox: tuple[int, int, int, int] | None  # (x, y, w, h) of detected face
-    card_markdown: str  # always populated — "unknown face" card if no match
+    bbox: tuple[int, int, int, int] | None  # (x, y, w, h) of primary face
+    card_markdown: str                       # rendered card (covers all faces)
+    # Every face we found in the frame, ordered by centeredness (primary first).
+    faces: list[FaceMatch]
 
 
 @dataclass
@@ -407,125 +439,132 @@ class FaceIndex:
     # ── Recognition ──
 
     async def recognize(self, *, image_blob: bytes, channel: str = "") -> RecognizeResult:
-        """Detect the largest face in the image and look it up.
+        """Detect every face in the image and look each one up.
 
-        Records an encounter row only if ``confidence >= MATCH_THRESHOLD``.
-        Always returns a card — for unknown faces, a "stranger" card so the
-        glasses HUD has something to show.
+        The face closest to the image centre is the **primary subject**
+        (full card on the HUD). Other detected faces appear as a compact
+        roster line below the primary.
+
+        Logs one encounter row per **confident** match (``cos ≥
+        MATCH_THRESHOLD``) — a group photo where three friends are matched
+        logs three encounters. Ambiguous matches show on the card but are
+        not logged, so drift doesn't pollute the history.
         """
-        bbox, embedding = await asyncio.to_thread(self._embed_subject, image_blob)
-        if embedding is None:
+        detections = await asyncio.to_thread(self._detect_all, image_blob)
+        if not detections:
             return RecognizeResult(
                 person_id=None,
                 name=None,
                 confidence=0.0,
                 bbox=None,
                 card_markdown="**No face detected.**",
+                faces=[],
             )
 
+        matches: list[FaceMatch] = []
         with self._db_lock:
             conn = self._conn_or_open()
             cur = conn.cursor()
-            # sqlite-vec KNN: distance is L2; since we use normed embeddings,
-            # cosine_sim = 1 - L2_dist^2 / 2. We compute that conversion
-            # inline so the threshold semantics stay readable.
-            rows = cur.execute(
-                """
-                SELECT person_id, distance
-                FROM embeddings
-                WHERE vec MATCH ?
-                ORDER BY distance
-                LIMIT 5
-                """,
-                (_pack_vec(embedding),),
-            ).fetchall()
-
-            if not rows:
-                return RecognizeResult(
-                    person_id=None,
-                    name=None,
-                    confidence=0.0,
+            now = _utcnow_iso()
+            for bbox, embedding in detections:
+                pid, cosine = self._lookup_embedding(cur, embedding)
+                name: str | None = None
+                if pid is not None:
+                    row = cur.execute(
+                        "SELECT name FROM persons WHERE id = ?", (pid,)
+                    ).fetchone()
+                    if row:
+                        name = row["name"]
+                confident = pid is not None and cosine >= MATCH_THRESHOLD
+                if confident:
+                    cur.execute(
+                        "INSERT INTO encounters (person_id, ts, confidence, channel) VALUES (?, ?, ?, ?)",
+                        (pid, now, cosine, channel),
+                    )
+                matches.append(FaceMatch(
                     bbox=bbox,
-                    card_markdown=self._render_unknown_card(),
-                )
-
-            # Aggregate by person_id — take the best (smallest) distance per
-            # person, since one person has multiple reference embeddings.
-            per_person: dict[str, float] = {}
-            for r in rows:
-                pid = r["person_id"]
-                dist = float(r["distance"])
-                if pid not in per_person or dist < per_person[pid]:
-                    per_person[pid] = dist
-
-            best_pid, best_dist = min(per_person.items(), key=lambda kv: kv[1])
-            # L2 → cosine for L2-normalized vectors.
-            cosine = max(-1.0, min(1.0, 1.0 - (best_dist * best_dist) / 2.0))
-
-            if cosine < AMBIGUOUS_THRESHOLD:
-                return RecognizeResult(
-                    person_id=None,
-                    name=None,
+                    person_id=pid,
+                    name=name,
                     confidence=cosine,
-                    bbox=bbox,
-                    card_markdown=self._render_unknown_card(),
-                )
+                    confident=confident,
+                ))
+            conn.commit()
 
-            person = cur.execute(
-                "SELECT id, name, notes FROM persons WHERE id = ?",
-                (best_pid,),
-            ).fetchone()
-            if not person:
-                return RecognizeResult(
-                    person_id=None,
-                    name=None,
-                    confidence=cosine,
-                    bbox=bbox,
-                    card_markdown=self._render_unknown_card(),
-                )
+            # Card composition reads back from the DB for the primary's
+            # notes / encounter count, so we render it while still holding
+            # the lock — same connection, no extra contention.
+            card_markdown = self._render_multi_card(matches, cur)
 
-            confident = cosine >= MATCH_THRESHOLD
-            if confident:
-                cur.execute(
-                    "INSERT INTO encounters (person_id, ts, confidence, channel) VALUES (?, ?, ?, ?)",
-                    (best_pid, _utcnow_iso(), cosine, channel),
-                )
-                conn.commit()
+        # Primary is the first detection (sorted most-centred-first).
+        # Top-level person_id/name surface ONLY the confident match — this
+        # preserves the API contract callers rely on for "I confirmed it
+        # was Ana" semantics. Low-confidence matches show on the card but
+        # leave the top-level fields ``None``.
+        primary = matches[0]
+        return RecognizeResult(
+            person_id=primary.person_id if primary.confident else None,
+            name=primary.name if primary.confident else None,
+            confidence=primary.confidence,
+            bbox=primary.bbox,
+            card_markdown=card_markdown,
+            faces=matches,
+        )
 
-            card = self._render_person_card(
-                person_row=person,
-                confidence=cosine,
-                confident=confident,
-            )
-            return RecognizeResult(
-                person_id=best_pid if confident else None,
-                name=person["name"] if confident else None,
-                confidence=cosine,
-                bbox=bbox,
-                card_markdown=card,
-            )
+    def _lookup_embedding(self, cur, embedding) -> tuple[str | None, float]:
+        """Resolve one embedding against the index.
 
-    def _embed_subject(self, blob: bytes):
-        """Return (bbox, embedding) for the **subject** face in a recognition
-        snapshot, or (None, None).
+        Returns ``(person_id, cosine)``. ``person_id`` is ``None`` when the
+        best cosine falls below ``AMBIGUOUS_THRESHOLD`` (or the index is
+        empty). Pulls the top-5 nearest vectors via sqlite-vec, then
+        collapses to one row per person by keeping each person's best
+        distance — one person typically has several reference embeddings.
+        """
+        rows = cur.execute(
+            """
+            SELECT person_id, distance
+            FROM embeddings
+            WHERE vec MATCH ?
+            ORDER BY distance
+            LIMIT 5
+            """,
+            (_pack_vec(embedding),),
+        ).fetchall()
+        if not rows:
+            return None, 0.0
+        per_person: dict[str, float] = {}
+        for r in rows:
+            pid = r["person_id"]
+            dist = float(r["distance"])
+            if pid not in per_person or dist < per_person[pid]:
+                per_person[pid] = dist
+        best_pid, best_dist = min(per_person.items(), key=lambda kv: kv[1])
+        # L2 → cosine for L2-normalized vectors:  cos = 1 − d² / 2
+        cosine = max(-1.0, min(1.0, 1.0 - (best_dist * best_dist) / 2.0))
+        if cosine < AMBIGUOUS_THRESHOLD:
+            return None, cosine
+        return best_pid, cosine
 
-        Selection policy: the user is aiming the phone at one specific person.
-        The closest-to-center face is the most honest signal; we use area as
-        a soft tiebreaker so tiny background faces near the centre don't win
-        over a clearly framed subject slightly off-centre.
+    def _detect_all(self, blob: bytes):
+        """Detect every face in the image and return them sorted with the
+        most-centred face first.
 
-        Score (lower is better) =
-            (distance from face center to image center) / image_diagonal
+        Returns ``[(bbox, embedding), …]`` where ``bbox`` is ``(x, y, w, h)``
+        in image pixels. Empty list when no faces detected. Capped at
+        ``MAX_FACES_PER_FRAME`` so a crowd photo can't blow the latency
+        budget (the cap drops faces past it, never raises).
+
+        Centeredness scoring (lower = better, primary first):
+            (centre-to-centre distance / image diagonal)
             − 0.25 * sqrt(face_area / image_area)
         """
         app = _load_face_app()
         try:
             bgr = _decode_image_to_bgr(blob)
         except Exception:
-            return None, None
+            return []
         faces = app.get(bgr)
         if not faces:
-            return None, None
+            return []
 
         import math
 
@@ -543,51 +582,83 @@ class FaceIndex:
             return center_dist - 0.25 * math.sqrt(area_frac)
 
         faces.sort(key=score)
-        f = faces[0]
-        x1, y1, x2, y2 = (int(v) for v in f.bbox)
-        bbox = (x1, y1, x2 - x1, y2 - y1)
-        return bbox, f.normed_embedding
+        out: list[tuple[tuple[int, int, int, int], Any]] = []
+        for f in faces[:MAX_FACES_PER_FRAME]:
+            x1, y1, x2, y2 = (int(v) for v in f.bbox)
+            bbox = (x1, y1, x2 - x1, y2 - y1)
+            out.append((bbox, f.normed_embedding))
+        return out
 
     # ── Card rendering ──
 
-    def _render_person_card(
-        self,
-        *,
-        person_row: sqlite3.Row,
-        confidence: float,
-        confident: bool,
-    ) -> str:
-        pid = person_row["id"]
-        name = person_row["name"]
-        notes = (person_row["notes"] or "").strip()
+    def _render_multi_card(self, matches: list[FaceMatch], cur) -> str:
+        """Compose the HUD markdown for a recognize call.
 
-        # Pull encounter stats (we already hold _db_lock during recognize).
-        cur = self._conn_or_open().cursor()
+        Layout:
+          [primary face: full block — name, notes, last seen, count, match%]
+          [if any extra faces: a single roster line — "Also: Bob 72% · stranger"]
+        """
+        primary = matches[0]
+        lines: list[str] = self._render_primary_block(primary, cur)
+
+        if len(matches) > 1:
+            extras = []
+            for m in matches[1:]:
+                pct = max(0, int(m.confidence * 100))
+                if m.name:
+                    suffix = "" if m.confident else " low"
+                    extras.append(f"{m.name} {pct}%{suffix}")
+                elif m.confidence > 0:
+                    extras.append(f"stranger {pct}%")
+                else:
+                    extras.append("stranger")
+            if extras:
+                lines.append("")  # blank line separator
+                lines.append(f"_Also: {' · '.join(extras)}_")
+        return "\n".join(lines)
+
+    def _render_primary_block(self, m: FaceMatch, cur) -> list[str]:
+        """Render the primary subject's lines. Reused inside _render_multi_card."""
+        # No matched person → unknown card. ``confidence > 0`` here means we
+        # detected a face but every candidate fell below AMBIGUOUS_THRESHOLD;
+        # we show the cosine so the user can judge if they should retake.
+        if m.person_id is None:
+            if m.confidence > 0:
+                return [
+                    "**Unknown face**",
+                    f"_match: {int(m.confidence * 100)}% (below threshold)_",
+                ]
+            return [
+                "**Unknown face**",
+                "_Open the enrollment page to add them._",
+            ]
+
+        # Confident or ambiguous — both render the full block; only the
+        # prefix differs.
+        row = cur.execute(
+            "SELECT notes FROM persons WHERE id = ?",
+            (m.person_id,),
+        ).fetchone()
+        notes = ((row["notes"] if row else "") or "").strip()
+
         stats = cur.execute(
-            """
-            SELECT COUNT(*) AS n,
-                   MAX(ts) AS last_seen
-            FROM encounters WHERE person_id = ?
-            """,
-            (pid,),
+            "SELECT COUNT(*) AS n, MAX(ts) AS last_seen FROM encounters WHERE person_id = ?",
+            (m.person_id,),
         ).fetchone()
         n = int(stats["n"] or 0)
         last_seen_iso = stats["last_seen"]
 
-        lines: list[str] = []
-        prefix = "" if confident else "_(low confidence)_ "
-        lines.append(f"{prefix}**{name}**")
+        out: list[str] = []
+        prefix = "" if m.confident else "_(low confidence)_ "
+        out.append(f"{prefix}**{m.name}**")
         if notes:
-            lines.append(notes if len(notes) <= 80 else notes[:77] + "…")
+            out.append(notes if len(notes) <= 80 else notes[:77] + "…")
         if last_seen_iso:
-            lines.append(f"_Last seen: {_humanize_ago(last_seen_iso)}_")
+            out.append(f"_Last seen: {_humanize_ago(last_seen_iso)}_")
         if n > 0:
-            lines.append(f"_Encounters: {n}_")
-        lines.append(f"_match: {int(confidence * 100)}%_")
-        return "\n".join(lines)
-
-    def _render_unknown_card(self) -> str:
-        return "**Unknown face**\n_Open the enrollment page to add them._"
+            out.append(f"_Encounters: {n}_")
+        out.append(f"_match: {int(m.confidence * 100)}%_")
+        return out
 
 
 def _humanize_ago(iso_ts: str) -> str:

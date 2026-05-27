@@ -265,6 +265,84 @@ async def test_recognize_low_confidence_returns_card_without_logging(fresh_index
     assert idx.list_encounters(enrolled.person_id) == []
 
 
+@pytest.mark.asyncio
+async def test_recognize_multiple_faces_logs_each_confident_match(fresh_index):
+    """A group photo with two enrolled people in frame must:
+      - return both names in ``result.faces``
+      - render both on the card (primary block + 'Also:' roster line)
+      - log one encounter row per confident match
+      - have the most-centred face as the primary
+    """
+    idx, app = fresh_index
+
+    # Enroll Ana (seed 0.0) and Bob (seed π) — orthogonal in our 2-D subspace,
+    # so cross-matching is below threshold.
+    blob_enroll_a = _png_bytes(100, 100)
+    app.by_shape = {(100, 100): [FakeFace(bbox=(10, 10, 90, 90), embedding=_embedding(0.0))]}
+    ana = await idx.enroll(name="Ana", notes="", image_blobs=[blob_enroll_a])
+
+    blob_enroll_b = _png_bytes(110, 110)
+    app.by_shape = {(110, 110): [FakeFace(bbox=(10, 10, 100, 100), embedding=_embedding(float(np.pi)))]}
+    bob = await idx.enroll(name="Bob", notes="", image_blobs=[blob_enroll_b])
+
+    # Group photo: Ana off-centre (top-left quadrant), Bob centred. Bob
+    # should win the "primary subject" slot via the centeredness scorer.
+    group_blob = _png_bytes(400, 400)
+    app.by_shape = {
+        (400, 400): [
+            FakeFace(bbox=(20, 20, 100, 100),  embedding=_embedding(0.0)),          # Ana — off-centre
+            FakeFace(bbox=(150, 150, 250, 250), embedding=_embedding(float(np.pi))),# Bob — centred
+        ],
+    }
+    result = await idx.recognize(image_blob=group_blob, channel="party")
+
+    # Primary is Bob (centred), Ana is in the roster.
+    assert result.person_id == bob.person_id
+    assert result.name == "Bob"
+    names_in_frame = sorted([f.name for f in result.faces if f.name])
+    assert names_in_frame == ["Ana", "Bob"]
+
+    # Both confident → two encounter rows (one per person).
+    assert len(idx.list_encounters(ana.person_id)) == 1
+    assert len(idx.list_encounters(bob.person_id)) == 1
+
+    # Card contains the primary block (Bob, bold) AND the Also line for Ana.
+    assert "**Bob**" in result.card_markdown
+    assert "Also" in result.card_markdown
+    assert "Ana" in result.card_markdown
+
+
+@pytest.mark.asyncio
+async def test_recognize_one_known_one_stranger_marks_stranger(fresh_index):
+    """One enrolled face + one unknown face in the same frame: the unknown
+    face appears in the 'Also' line as 'stranger', and only the known
+    person's encounter is logged."""
+    idx, app = fresh_index
+
+    # Enroll Ana only.
+    blob_enroll = _png_bytes(100, 100)
+    app.by_shape = {(100, 100): [FakeFace(bbox=(10, 10, 90, 90), embedding=_embedding(0.0))]}
+    ana = await idx.enroll(name="Ana", notes="", image_blobs=[blob_enroll])
+
+    # Frame: Ana centred, an unknown face (seed π/2 — far from Ana) to the side.
+    frame = _png_bytes(400, 400)
+    app.by_shape = {
+        (400, 400): [
+            FakeFace(bbox=(150, 150, 250, 250), embedding=_embedding(0.0)),
+            FakeFace(bbox=(30, 30, 100, 100),   embedding=_embedding(float(np.pi) / 2.0)),
+        ],
+    }
+    result = await idx.recognize(image_blob=frame, channel="ch")
+
+    assert result.name == "Ana"
+    assert len(result.faces) == 2
+    stranger = [f for f in result.faces if f.name is None]
+    assert len(stranger) == 1
+    # Stranger was not logged.
+    assert len(idx.list_encounters(ana.person_id)) == 1
+    assert "stranger" in result.card_markdown.lower()
+
+
 def test_update_person_notes_round_trips(fresh_index):
     idx, _ = fresh_index
     # Insert a person directly via the underlying connection — bypass enroll

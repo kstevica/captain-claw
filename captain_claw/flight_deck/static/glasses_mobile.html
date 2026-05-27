@@ -396,7 +396,9 @@
     <video id="face-video" autoplay playsinline muted></video>
   </div>
   <div class="composer-actions" style="margin-top:8px">
+    <button class="icon-btn" id="face-flip" type="button" hidden title="flip camera" aria-label="flip camera">🔄</button>
     <button class="send-btn" id="face-btn" type="button">👤 Recognize</button>
+    <button class="icon-btn" id="face-cancel" type="button" hidden title="cancel" aria-label="cancel">✕</button>
   </div>
   <div class="face-result" id="face-result" hidden></div>
   <canvas id="face-canvas" hidden></canvas>
@@ -679,6 +681,8 @@
     }
 
     const faceBtn = document.getElementById('face-btn');
+    const faceFlipBtn = document.getElementById('face-flip');
+    const faceCancelBtn = document.getElementById('face-cancel');
     const faceWrap = document.getElementById('face-wrap');
     const faceVideo = document.getElementById('face-video');
     const faceCanvas = document.getElementById('face-canvas');
@@ -687,11 +691,19 @@
 
     let stream = null;
     let armed = false;
+    let facing = 'environment'; // rear-cam by default for capturing other people
 
     function setResult(html, kind) {
       faceResult.hidden = false;
       faceResult.className = 'face-result' + (kind ? ' ' + kind : '');
       faceResult.innerHTML = html;
+    }
+
+    function setArmedUi(isArmed) {
+      armed = isArmed;
+      faceBtn.textContent = isArmed ? '📸 Capture' : '👤 Recognize';
+      faceFlipBtn.hidden = !isArmed;
+      faceCancelBtn.hidden = !isArmed;
     }
 
     async function stopStream() {
@@ -703,23 +715,52 @@
       faceWrap.hidden = true;
     }
 
+    async function openCamera() {
+      // Used both by initial arm and by the flip button. Closes any
+      // existing stream before opening the next so we don't hold two
+      // tracks open at once (some phones refuse the second getUserMedia
+      // while the first track is still live).
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+      }
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: facing,
+                 width: { ideal: 1280 }, height: { ideal: 960 } },
+        audio: false,
+      });
+      faceVideo.srcObject = stream;
+      faceWrap.hidden = false;
+    }
+
     async function arm() {
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment',
-                   width: { ideal: 1280 }, height: { ideal: 960 } },
-          audio: false,
-        });
-        faceVideo.srcObject = stream;
-        faceWrap.hidden = false;
-        armed = true;
-        faceBtn.textContent = '📸 Capture';
+        await openCamera();
+        setArmedUi(true);
         setResult('Aim at a face, then tap Capture.', 'miss');
         // Fire-and-forget warmup the first time, so the model is hot by the
         // time the user actually captures.
         fetch('/face/warmup', { method: 'POST' }).catch(() => {});
       } catch (e) {
         setResult('Camera error: ' + (e && e.message ? e.message : e), 'err');
+      }
+    }
+
+    async function cancelArm() {
+      await stopStream();
+      setArmedUi(false);
+      setResult('Cancelled.', 'miss');
+    }
+
+    async function flipCamera() {
+      facing = (facing === 'environment') ? 'user' : 'environment';
+      try {
+        await openCamera();
+      } catch (e) {
+        // If the requested camera doesn't exist (e.g. single-cam tablet),
+        // revert the facing flag so the next tap tries the other side.
+        facing = (facing === 'environment') ? 'user' : 'environment';
+        setResult('Camera flip failed: ' + (e && e.message ? e.message : e), 'err');
       }
     }
 
@@ -731,8 +772,7 @@
       faceCanvas.getContext('2d').drawImage(faceVideo, 0, 0, w, h);
       const blob = await new Promise(res => faceCanvas.toBlob(res, 'image/jpeg', 0.9));
       await stopStream();
-      armed = false;
-      faceBtn.textContent = '👤 Recognize';
+      setArmedUi(false);
       if (!blob) { setResult('Capture failed.', 'err'); return; }
 
       setResult('Looking up face…', 'miss');
@@ -746,22 +786,37 @@
           setResult('Recognize failed: ' + (data.detail || r.statusText), 'err');
           return;
         }
-        if (data.person_id) {
-          const pct = Math.round((data.confidence || 0) * 100);
-          setResult(
-            '<strong>' + escapeHtml(data.name || '?') + '</strong>' +
-            ' · ' + pct + '% match · pushed to glasses',
-            'ok'
-          );
-        } else if (data.confidence && data.confidence > 0) {
-          // Detected a face but no confident match.
-          setResult(
-            'Face detected but no match (' +
-            Math.round(data.confidence * 100) + '%).',
-            'miss'
-          );
-        } else {
+        const faces = Array.isArray(data.faces) ? data.faces : [];
+        if (faces.length === 0) {
           setResult('No face detected.', 'miss');
+        } else if (faces.length === 1) {
+          const f = faces[0];
+          const pct = Math.round((f.confidence || 0) * 100);
+          if (f.name) {
+            setResult(
+              '<strong>' + escapeHtml(f.name) + '</strong> · ' +
+              pct + '% match · pushed to glasses',
+              'ok'
+            );
+          } else if (f.confidence > 0) {
+            setResult('Face detected but no match (' + pct + '%).', 'miss');
+          } else {
+            setResult('Face detected but no match.', 'miss');
+          }
+        } else {
+          // Multiple faces — summarize all of them inline.
+          const parts = faces.map(f => {
+            const pct = Math.round((f.confidence || 0) * 100);
+            if (f.name) return '<strong>' + escapeHtml(f.name) + '</strong> ' + pct + '%';
+            if (f.confidence > 0) return 'stranger ' + pct + '%';
+            return 'stranger';
+          });
+          const anyMatched = faces.some(f => f.name);
+          setResult(
+            faces.length + ' faces · ' + parts.join(' · ') +
+            (anyMatched ? ' · pushed to glasses' : ''),
+            anyMatched ? 'ok' : 'miss'
+          );
         }
       } catch (e) {
         setResult('Network error: ' + (e && e.message ? e.message : e), 'err');
@@ -778,6 +833,8 @@
       if (!armed) arm();
       else capture();
     });
+    faceCancelBtn.addEventListener('click', () => { cancelArm(); });
+    faceFlipBtn.addEventListener('click', () => { flipCamera(); });
   })();
 })();
 </script>
