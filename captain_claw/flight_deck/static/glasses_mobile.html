@@ -5,121 +5,359 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Glasses bridge — mobile</title>
 <style>
-  :root { color-scheme: dark; }
-  html, body { margin: 0; padding: 0; background: #0b0f14; color: #e6f0ff;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 17px; line-height: 1.4; }
-  body { padding: 14px 14px env(safe-area-inset-bottom) 14px; }
-  h1 { font-size: 18px; margin: 4px 0 8px; color: #9fb8ff; font-weight: 600; }
-  .row { margin: 8px 0; }
+  /* ── Design tokens ───────────────────────────────────────────────
+     Palette: deep slate background, layered surfaces, electric-cyan
+     accent for primary actions, semantic colours for chat roles.
+     Type: system stack with monospace reserved for IDs & code.
+     Shape: 14px main radius, 10px chips, 22px pill. */
+  :root {
+    color-scheme: dark;
+    --bg:        #07090d;
+    --bg-grad:   radial-gradient(1200px 600px at 50% -200px, #131a26, #07090d 70%);
+    --surface:   #0f141b;
+    --surface-2: #141a23;
+    --line:      #1c2532;
+    --line-hi:   #2a3548;
+    --text:      #e8edf6;
+    --text-dim:  #8693ad;
+    --text-mut:  #5b667c;
+    --accent:    #5fe3ff;
+    --accent-dk: #18465a;
+    --ok:        #4ade80;
+    --warn:      #fbbf24;
+    --err:       #ff6b6b;
+    --user:      #9fb8ff;
+    --agent:     #ffd58a;
+    --r-lg: 16px;
+    --r-md: 12px;
+    --r-sm: 10px;
+    --r-pill: 999px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+                 Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 16px; line-height: 1.45;
+    -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+  }
+  body {
+    background: var(--bg-grad);
+    min-height: 100vh;
+    padding: 16px 16px calc(env(safe-area-inset-bottom) + 16px) 16px;
+    max-width: 720px; margin: 0 auto;
+  }
+  ::selection { background: var(--accent-dk); color: var(--text); }
+
+  /* ── Header ──────────────────────────────────────────────────── */
+  .hdr {
+    display: flex; align-items: center; gap: 10px;
+    margin: 4px 2px 16px;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 17px; font-weight: 700; letter-spacing: -0.01em;
+  }
+  .brand-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent), #b46bff);
+    box-shadow: 0 0 12px rgba(95, 227, 255, 0.5);
+  }
+  .brand-name { color: var(--text); }
+  .brand-name span { color: var(--text-dim); font-weight: 500; }
+  .hdr-status {
+    margin-left: auto;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px 5px 8px; border-radius: var(--r-pill);
+    background: rgba(74, 222, 128, 0.08);
+    border: 1px solid rgba(74, 222, 128, 0.25);
+    font-size: 12px; font-weight: 600; color: var(--ok);
+    letter-spacing: 0.01em;
+  }
+  .hdr-status::before {
+    content: ''; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--ok); box-shadow: 0 0 6px rgba(74, 222, 128, 0.7);
+    animation: dot-pulse 2.4s ease-in-out infinite;
+  }
+  .hdr-status.off {
+    background: rgba(255, 107, 107, 0.08);
+    border-color: rgba(255, 107, 107, 0.25);
+    color: var(--err);
+  }
+  .hdr-status.off::before { background: var(--err); box-shadow: 0 0 6px rgba(255,107,107,0.7); animation: none; }
+  @keyframes dot-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+
+  /* ── Card ────────────────────────────────────────────────────── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--r-lg);
+    padding: 14px;
+    margin-bottom: 12px;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.02) inset,
+                0 8px 24px rgba(0,0,0,0.25);
+  }
+  .card-head {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 10px;
+  }
+  .card-label {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--text-mut);
+  }
+  .card-aside { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+
+  /* ── Channel chip + input ────────────────────────────────────── */
+  .chan-wrap {
+    display: inline-flex; align-items: center;
+    background: var(--surface-2); border: 1px solid var(--line);
+    border-radius: var(--r-pill); padding: 2px 4px 2px 10px;
+    transition: border-color .15s;
+  }
+  .chan-wrap:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(95,227,255,0.12); }
   .chan-input {
-    font: 600 14px/1.2 ui-monospace, Menlo, monospace; color: #cfe;
-    background: #11161d; border: 1px solid #2a3140; border-radius: 6px;
-    padding: 4px 8px; min-width: 110px; width: 140px;
+    font: 600 13px/1.2 ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--accent);
+    background: transparent; border: 0; outline: none;
+    padding: 5px 0; width: 110px;
     -webkit-appearance: none; appearance: none;
   }
-  .chan-input:focus { outline: none; border-color: #4a8; background: #131a22; }
+  .chan-input::placeholder { color: var(--text-mut); }
   .chan-btn {
-    font: 600 12px/1 ui-monospace, Menlo, monospace; color: #9ab;
-    background: #1c2330; border: 1px solid #2a3140; border-radius: 6px;
-    padding: 6px 8px; margin-left: 4px; width: auto;
+    font: 600 13px/1 ui-monospace, Menlo, monospace; color: var(--text-dim);
+    background: transparent; border: 0;
+    width: 26px; height: 26px; border-radius: 50%;
+    padding: 0; margin-left: 4px; cursor: pointer;
     -webkit-tap-highlight-color: transparent;
+    transition: background .12s, color .12s;
   }
-  .chan-btn:active { background: #2a3140; }
-  select, textarea, button {
-    font-size: 17px; width: 100%; box-sizing: border-box;
-    background: #11161d; color: #fff; border: 1px solid #2a3140;
-    border-radius: 8px; padding: 10px 12px;
-  }
-  textarea { min-height: 92px; resize: vertical; }
-  button {
-    background: #1a3d72; border-color: #2b5fa6; color: #fff;
-    font-weight: 600; padding: 12px 14px; margin-top: 8px;
-    -webkit-tap-highlight-color: transparent;
-  }
-  button:active { background: #2b5fa6; }
-  button[disabled] { opacity: 0.5; }
-  .log { margin-top: 10px; background: #0d1218; border: 1px solid #1c2330;
-    border-radius: 8px; padding: 10px; max-height: 240px; overflow-y: auto;
-    font: 14px/1.45 ui-monospace, Menlo, monospace; }
-  .log .u { color: #cfe }
-  .log .a { color: #ffd58a }
-  .log .s { color: #6a7a8a; font-size: 12px }
-  .log .e { color: #ff8a8a }
-  .hint { color: #6a7a8a; font-size: 12px; margin-top: 10px; }
-  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px;
-    background: #1c2330; font-size: 12px; color: #9fb; }
-  .pill.off { color: #d99; }
-  label { display:block; margin-bottom: 4px; color: #9aa8bb; font-size: 13px; }
+  .chan-btn:hover, .chan-btn:active { background: var(--line); color: var(--text); }
 
-  /* ── Photo attach ────────────────────────────────────── */
-  .photo-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
-  .photo-btn {
-    background: #1c2330; border: 1px solid #2a3140; color: #cfe;
-    font-size: 14px; font-weight: 600; padding: 8px 12px; margin: 0;
-    border-radius: 8px; width: auto; flex: 0 0 auto;
+  /* ── Form controls ───────────────────────────────────────────── */
+  label.field-label {
+    display: block; margin-bottom: 8px;
+    font-size: 12px; font-weight: 600; letter-spacing: 0.03em;
+    color: var(--text-dim);
   }
-  .photo-btn:active { background: #2a3140; }
+  select {
+    width: 100%; padding: 12px 36px 12px 14px;
+    background: var(--surface-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: var(--r-md);
+    font-size: 15px; font-weight: 500;
+    -webkit-appearance: none; appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none'><path d='M1 1L6 6L11 1' stroke='%238693ad' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+    background-repeat: no-repeat; background-position: right 14px center;
+    transition: border-color .15s, background-color .15s;
+  }
+  select:focus { outline: none; border-color: var(--accent); }
+  select:disabled { opacity: 0.5; }
+
+  .composer {
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    padding: 4px 4px 4px 4px;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .composer:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(95,227,255,0.12);
+  }
+  textarea {
+    width: 100%; min-height: 90px; resize: none;
+    background: transparent; color: var(--text);
+    border: 0; outline: none; padding: 10px 12px;
+    font-family: inherit; font-size: 16px; line-height: 1.45;
+  }
+  textarea::placeholder { color: var(--text-mut); }
+  .composer-actions {
+    display: flex; align-items: center; gap: 6px;
+    padding: 4px 6px 6px 6px;
+  }
+  .icon-btn {
+    background: transparent; color: var(--text-dim);
+    border: 0; border-radius: var(--r-pill);
+    width: 38px; height: 38px; padding: 0;
+    font-size: 18px; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: background .12s, color .12s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .icon-btn:hover { background: var(--line); }
+  .icon-btn:active { background: var(--line-hi); color: var(--text); }
+
+  .send-btn {
+    margin-left: auto;
+    background: linear-gradient(135deg, var(--accent), #4ab8ff);
+    color: #07090d; font-weight: 700; font-size: 15px;
+    border: 0; border-radius: var(--r-pill);
+    padding: 10px 20px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+    box-shadow: 0 4px 14px rgba(95,227,255,0.25);
+    transition: transform .08s, box-shadow .15s, opacity .15s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .send-btn:active { transform: scale(0.97); box-shadow: 0 2px 8px rgba(95,227,255,0.2); }
+  .send-btn[disabled] {
+    background: var(--line-hi); color: var(--text-mut);
+    box-shadow: none; cursor: not-allowed;
+  }
   #photo-input { display: none; }
+
+  /* ── Photo preview ───────────────────────────────────────────── */
   .photo-preview {
     position: relative; display: none;
-    background: #11161d; border: 1px solid #2a3140; border-radius: 8px;
-    padding: 4px; max-width: 100%;
+    margin: 6px 4px 0;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    padding: 6px; overflow: hidden;
   }
   .photo-preview img {
-    display: block; max-width: 100%; max-height: 140px;
-    border-radius: 6px;
+    display: block; width: 100%; max-height: 200px;
+    object-fit: cover;
+    border-radius: 8px;
   }
   .photo-meta {
-    font: 12px ui-monospace, Menlo, monospace; color: #99a;
-    margin-top: 4px; padding: 0 4px 4px;
+    font: 11px ui-monospace, Menlo, monospace; color: var(--text-mut);
+    margin-top: 6px; padding: 0 4px 2px;
   }
   .photo-remove {
-    position: absolute; top: 6px; right: 6px;
-    background: rgba(0,0,0,0.7); color: #fff;
-    border: 1px solid #444; border-radius: 999px;
-    width: 28px; height: 28px; padding: 0; margin: 0;
-    font-size: 16px; line-height: 26px; text-align: center;
+    position: absolute; top: 12px; right: 12px;
+    background: rgba(7, 9, 13, 0.78);
+    color: var(--text); border: 1px solid var(--line-hi);
+    border-radius: 50%; width: 30px; height: 30px;
+    padding: 0; font-size: 16px; cursor: pointer;
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
   }
+
+  /* ── Activity log ────────────────────────────────────────────── */
+  .log-head {
+    display: flex; align-items: center; gap: 8px;
+    cursor: pointer; user-select: none;
+    padding: 2px 2px 8px;
+  }
+  .log-head .chev {
+    display: inline-block; width: 12px; color: var(--text-mut);
+    transition: transform .18s;
+  }
+  .log.collapsed + .log-head .chev,
+  .log.collapsed-head .chev { transform: rotate(-90deg); }
+  .log {
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    padding: 10px 12px;
+    max-height: 260px; overflow-y: auto;
+    font: 13px/1.55 ui-monospace, "SF Mono", Menlo, monospace;
+    color: var(--text-dim);
+    -webkit-overflow-scrolling: touch;
+  }
+  .log.collapsed { display: none; }
+  .log:empty::after {
+    content: 'no activity yet'; color: var(--text-mut); font-style: italic;
+  }
+  .log > div {
+    padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.03);
+  }
+  .log > div:last-child { border-bottom: 0; }
+  .log .u { color: var(--user); }
+  .log .a { color: var(--agent); }
+  .log .s { color: var(--text-mut); font-size: 12px; }
+  .log .e { color: var(--err); }
+
+  /* ── Footer link ─────────────────────────────────────────────── */
+  .glink-card {
+    margin-top: 16px;
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 14px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    text-decoration: none; color: var(--text);
+    transition: border-color .15s, background .15s;
+  }
+  .glink-card:hover { border-color: var(--accent); background: var(--surface-2); }
+  .glink-icon {
+    width: 36px; height: 36px; border-radius: 10px;
+    background: var(--accent-dk); color: var(--accent);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; flex: 0 0 36px;
+  }
+  .glink-text { display: flex; flex-direction: column; min-width: 0; }
+  .glink-label { font-size: 12px; color: var(--text-mut); font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.08em; }
+  .glink-url {
+    font: 13px ui-monospace, Menlo, monospace; color: var(--text-dim);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .glink-arrow { margin-left: auto; color: var(--text-mut); font-size: 18px; }
 </style>
 </head>
 <body>
-<h1>Glasses bridge</h1>
-<div class="row">
-  channel
-  <input class="chan-input" id="chan" type="text" inputmode="text" autocapitalize="off"
-         autocorrect="off" spellcheck="false" maxlength="40"
-         aria-label="channel id">
-  <button class="chan-btn" id="chan-new" type="button" title="generate random">⟳</button>
-  · <span class="pill off" id="status">disconnected</span>
-</div>
 
-<div class="row">
-  <label for="agent">Target agent</label>
+<header class="hdr">
+  <div class="brand">
+    <span class="brand-dot"></span>
+    <span class="brand-name">Glasses <span>Bridge</span></span>
+  </div>
+  <span class="hdr-status off" id="status" title="connection">offline</span>
+</header>
+
+<div class="card">
+  <div class="card-head">
+    <span class="card-label">Channel</span>
+    <div class="card-aside">
+      <div class="chan-wrap">
+        <input class="chan-input" id="chan" type="text" inputmode="text"
+               autocapitalize="off" autocorrect="off" spellcheck="false"
+               maxlength="40" aria-label="channel id" placeholder="channel">
+        <button class="chan-btn" id="chan-new" type="button" title="generate random">⟳</button>
+      </div>
+    </div>
+  </div>
+  <label class="field-label" for="agent">Target agent</label>
   <select id="agent"></select>
 </div>
 
-<div class="row">
-  <label for="text">Message to send to agent</label>
-  <textarea id="text" placeholder="Type your prompt…" autocomplete="off"></textarea>
-  <div class="photo-row">
-    <button class="photo-btn" id="photo-btn" type="button">📷 Add photo</button>
-    <input id="photo-input" type="file" accept="image/*" capture="environment">
+<div class="card">
+  <div class="card-head">
+    <span class="card-label">Compose</span>
   </div>
-  <div class="photo-preview" id="photo-preview">
-    <button class="photo-remove" id="photo-remove" type="button" title="remove">×</button>
-    <img id="photo-img" alt="">
-    <div class="photo-meta" id="photo-meta"></div>
+  <div class="composer">
+    <textarea id="text" placeholder="Type your prompt…" autocomplete="off" rows="3"></textarea>
+    <div class="composer-actions">
+      <button class="icon-btn" id="photo-btn" type="button" title="attach photo" aria-label="attach photo">📷</button>
+      <input id="photo-input" type="file" accept="image/*" capture="environment">
+      <button class="send-btn" id="send" type="button" disabled>Send →</button>
+    </div>
+    <div class="photo-preview" id="photo-preview">
+      <button class="photo-remove" id="photo-remove" type="button" title="remove">×</button>
+      <img id="photo-img" alt="">
+      <div class="photo-meta" id="photo-meta"></div>
+    </div>
   </div>
 </div>
 
-<button id="send" disabled>Send to agent</button>
-
-<div class="log" id="log"></div>
-
-<div class="hint">
-  Glasses view: <a id="glink" style="color:#9bf" href="#">/glasses/view?c=…</a>
+<div class="card">
+  <div class="log-head" id="log-toggle">
+    <span class="chev">▾</span>
+    <span class="card-label">Activity</span>
+  </div>
+  <div class="log" id="log"></div>
 </div>
+
+<a class="glink-card" id="glink" href="#" target="_blank" rel="noopener">
+  <span class="glink-icon">⌐</span>
+  <span class="glink-text">
+    <span class="glink-label">Glasses view</span>
+    <span class="glink-url" id="glink-url">/glasses/view?c=…</span>
+  </span>
+  <span class="glink-arrow">↗</span>
+</a>
 
 <script>
 (() => {
@@ -140,13 +378,26 @@
   const chanInput = document.getElementById('chan');
   const chanNew = document.getElementById('chan-new');
   const glink = document.getElementById('glink');
+  const glinkUrl = document.getElementById('glink-url');
 
   function syncChannelUi() {
     if (document.activeElement !== chanInput) chanInput.value = channel;
-    glink.href = '/glasses/view?c=' + encodeURIComponent(channel);
-    glink.textContent = '/glasses/view?c=' + channel;
+    const path = '/glasses/view?c=' + encodeURIComponent(channel);
+    glink.href = path;
+    if (glinkUrl) glinkUrl.textContent = '/glasses/view?c=' + channel;
   }
   syncChannelUi();
+
+  // ── Activity log: collapsible header ────────────────────────────
+  (() => {
+    const logToggle = document.getElementById('log-toggle');
+    const logEl = document.getElementById('log');
+    if (!logToggle || !logEl) return;
+    logToggle.addEventListener('click', () => {
+      const collapsed = logEl.classList.toggle('collapsed');
+      logToggle.classList.toggle('collapsed-head', collapsed);
+    });
+  })();
 
   const agentSel = document.getElementById('agent');
   const sendBtn = document.getElementById('send');
@@ -200,9 +451,9 @@
     wsChannel = channel;
     wsManualClose = false;
     ws = new WebSocket(scheme + '://' + location.host + '/glasses/ws?c=' + encodeURIComponent(channel) + '&role=mobile' + qs);
-    ws.onopen = () => { statusEl.textContent = 'connected'; statusEl.classList.remove('off'); };
+    ws.onopen = () => { statusEl.textContent = 'live'; statusEl.classList.remove('off'); };
     ws.onclose = () => {
-      statusEl.textContent = 'disconnected';
+      statusEl.textContent = 'offline';
       statusEl.classList.add('off');
       if (!wsManualClose) setTimeout(() => { if (channel === wsChannel) openWs(); }, 1500);
     };

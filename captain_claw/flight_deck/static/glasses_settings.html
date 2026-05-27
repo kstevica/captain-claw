@@ -5,78 +5,201 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Glasses settings</title>
 <style>
-  :root { color-scheme: dark; }
-  html, body { margin: 0; padding: 0; background: #000; color: #eaffea;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 18px; line-height: 1.35; }
-  body { padding: 12px 14px 80px 14px; }
-  header {
-    display: flex; justify-content: space-between; align-items: baseline;
-    font-size: 14px; color: #6a8;
-    margin-bottom: 10px; gap: 12px; flex-wrap: wrap;
+  /* Settings page — bridges mobile palette (cyan accent) with HUD-style
+     mono so it feels like part of the glasses world but is still
+     readable as a configuration screen on phone or glasses. */
+  :root {
+    color-scheme: dark;
+    --bg:        #07090d;
+    --bg-grad:   radial-gradient(900px 500px at 50% -180px, #131a26, #07090d 70%);
+    --surface:   #0f141b;
+    --surface-2: #141a23;
+    --line:      #1c2532;
+    --line-hi:   #2a3548;
+    --text:      #e8edf6;
+    --text-dim:  #8693ad;
+    --text-mut:  #5b667c;
+    --accent:    #5fe3ff;
+    --accent-dk: #18465a;
+    --hud:       #5fff9f;
+    --warn:      #ffd877;
   }
-  header a { color: #9bf; text-decoration: none; font-weight: 600; }
-  h2 {
-    margin: 14px 0 6px;
-    font-size: 16px; color: #9fb8ff; font-weight: 700;
-    letter-spacing: 0.5px;
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+                 Roboto, sans-serif;
+    font-size: 16px; line-height: 1.4;
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    background: var(--bg-grad);
+    min-height: 100vh;
+    padding: 14px 14px calc(env(safe-area-inset-bottom) + 72px) 14px;
+    max-width: 760px; margin: 0 auto;
+  }
+  ::selection { background: var(--accent-dk); color: var(--text); }
+
+  /* ── Header ─────────────────────────────────────────────────── */
+  .hdr {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 4px 16px;
+    flex-wrap: wrap;
+  }
+  .back {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 8px 14px 8px 10px;
+    background: var(--surface);
+    border: 1px solid var(--line); border-radius: 999px;
+    color: var(--text); text-decoration: none;
+    font-size: 14px; font-weight: 600;
+    transition: border-color .15s, background .15s;
+  }
+  .back:hover { border-color: var(--accent); background: var(--surface-2); }
+  .back .arrow { color: var(--accent); }
+  .summary {
+    margin-left: auto;
+    display: flex; align-items: center; gap: 10px;
+    font: 12px ui-monospace, Menlo, monospace;
+    color: var(--text-dim);
+    flex-wrap: wrap;
+  }
+  .summary .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 999px;
+  }
+  .summary .chip-label { color: var(--text-mut); text-transform: uppercase;
+    letter-spacing: 0.08em; font-size: 10px; font-weight: 700; }
+  .summary .chip-val { color: var(--warn); font-weight: 700; }
+
+  /* ── Sections ───────────────────────────────────────────────── */
+  .section {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 14px;
+    margin-bottom: 14px;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.02) inset,
+                0 8px 24px rgba(0,0,0,0.22);
+  }
+  .section-title {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--text-mut);
+    margin: 0 0 12px;
+  }
+  .section-title::after {
+    content: ''; flex: 1; height: 1px;
+    background: linear-gradient(90deg, var(--line), transparent);
   }
   .group-label {
-    margin: 10px 0 4px;
-    font-size: 12px; color: #6a8;
-    text-transform: uppercase; letter-spacing: 1px;
+    font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--text-mut);
+    margin: 14px 4px 8px;
+    display: flex; align-items: center; gap: 8px;
   }
+  .group-label::before {
+    content: '·';
+    color: var(--accent); font-size: 18px; line-height: 0;
+  }
+  .group-label:first-child { margin-top: 2px; }
+
+  /* ── Pick-button grid ───────────────────────────────────────── */
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
     gap: 8px;
   }
   .grid.voice {
-    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
   }
   .pick {
-    background: #11161d; color: #cfe;
-    border: 1px solid #2a3140; border-radius: 8px;
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 12px;
     padding: 12px 10px;
-    font: 600 15px ui-monospace, Menlo, monospace;
+    font: 600 14px/1.2 -apple-system, BlinkMacSystemFont, sans-serif;
     text-align: center;
-    min-height: 48px;
+    min-height: 52px;
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
-    transition: background .12s, border-color .12s;
+    transition: background .12s, border-color .12s,
+                box-shadow .12s, transform .08s;
   }
-  .pick:active { background: #1a2230; }
+  .pick:hover { border-color: var(--line-hi); }
+  .pick:active { transform: scale(0.97); }
   .pick.selected {
-    background: #0d2a14; color: #d8ffd8;
-    border-color: #4fc;
-    box-shadow: 0 0 0 2px rgba(79,255,191,0.25) inset;
+    background: linear-gradient(180deg, rgba(95,227,255,0.12), rgba(95,227,255,0.04));
+    border-color: var(--accent);
+    color: #d6f6ff;
+    box-shadow: 0 0 0 1px var(--accent) inset,
+                0 4px 16px rgba(95,227,255,0.15);
   }
-  .pick small { display: block; color: #7a8c7a; font-size: 11px; margin-top: 2px; }
+  .pick small {
+    display: block; color: var(--text-mut);
+    font: 500 11px ui-monospace, Menlo, monospace;
+    margin-top: 3px; letter-spacing: 0.04em;
+  }
+  .pick.selected small { color: rgba(95,227,255,0.7); }
+
+  /* ── "Saved" toast ──────────────────────────────────────────── */
   .saved {
-    position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
-    background: #0d2a14; color: #d8ffd8;
-    border: 1px solid #4fc; border-radius: 999px;
-    padding: 8px 18px; font-weight: 600; font-size: 14px;
-    opacity: 0; transition: opacity .25s;
+    position: fixed;
+    bottom: calc(env(safe-area-inset-bottom) + 20px);
+    left: 50%; transform: translate(-50%, 8px);
+    background: var(--surface);
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    padding: 10px 22px;
+    font-weight: 700; font-size: 13px;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.55),
+                0 0 24px rgba(95,227,255,0.18);
+    opacity: 0; transition: opacity .22s, transform .22s;
     pointer-events: none;
+    display: inline-flex; align-items: center; gap: 8px;
   }
-  .saved.show { opacity: 1; }
-  .now { color: #ffeb6b; font-weight: 700; }
+  .saved::before {
+    content: '✓';
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--accent); color: var(--bg);
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 900;
+  }
+  .saved.show { opacity: 1; transform: translate(-50%, 0); }
 </style>
 </head>
 <body>
-<header>
-  <a id="back" href="#">← back to glasses</a>
-  <span>lang <span class="now" id="now-lang">…</span> · voice <span class="now" id="now-voice">…</span></span>
+
+<header class="hdr">
+  <a class="back" id="back" href="#"><span class="arrow">←</span> Glasses</a>
+  <div class="summary">
+    <span class="chip">
+      <span class="chip-label">lang</span>
+      <span class="chip-val" id="now-lang">…</span>
+    </span>
+    <span class="chip">
+      <span class="chip-label">voice</span>
+      <span class="chip-val" id="now-voice">…</span>
+    </span>
+  </div>
 </header>
 
-<h2>Voice language</h2>
-<div class="grid" id="lang-grid"></div>
+<div class="section">
+  <h2 class="section-title">Voice language</h2>
+  <div class="grid" id="lang-grid"></div>
+</div>
 
-<h2>Voice</h2>
-<div id="voice-groups"></div>
+<div class="section">
+  <h2 class="section-title">Voice</h2>
+  <div id="voice-groups"></div>
+</div>
 
-<div class="saved" id="saved">saved</div>
+<div class="saved" id="saved">Saved</div>
 
 <script>
 (() => {

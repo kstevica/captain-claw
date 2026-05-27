@@ -5,156 +5,274 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Glasses view</title>
 <style>
-  :root { color-scheme: dark; }
-  html, body { margin: 0; padding: 0; background: #000; color: #eaffea;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 24px; line-height: 1.35; }
-  body { padding: 14px 18px 64px 18px; }
-  header {
-    display: flex; justify-content: space-between; align-items: baseline;
-    font-size: 14px; color: #6a8;
-    margin-bottom: 10px;
+  /* ── Design tokens — HUD-style for transparent glasses display ──── */
+  :root {
+    color-scheme: dark;
+    --bg:        #000;        /* pure black is most readable on HUD */
+    --ink:       #e8ffe8;
+    --ink-dim:   #7faf8a;
+    --ink-mut:   #4c6f56;
+    --hud:       #5fff9f;     /* primary HUD green */
+    --hud-soft:  rgba(95,255,159,0.18);
+    --hud-glow:  rgba(95,255,159,0.45);
+    --user:      #9bd0ff;
+    --user-bg:   #07111d;
+    --agent:     #f4ffd6;
+    --agent-bg:  #0a140a;
+    --err:       #ff8a8a;
+    --err-bg:    #1a0a0a;
+    --warn:      #ffd877;
+    --line:      #1c2820;
   }
-  .ssr { color: #ffeb6b; font-weight: 700; letter-spacing: 2px; }
-  .conn { color: #4fc; }
-  .conn.off { color: #f88; }
-  .tts-btn {
-    background: transparent; border: 1px solid #2a4;
-    color: #cfe; border-radius: 6px;
-    padding: 2px 8px; margin-left: 8px;
-    font: 600 12px ui-monospace, Menlo, monospace;
-    cursor: pointer;
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--ink);
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    font-size: 24px; line-height: 1.4;
+    -webkit-font-smoothing: antialiased;
   }
-  .tts-btn.muted { color: #a88; border-color: #533; }
-  .tts-btn.engine { font-size: 11px; opacity: 0.8; }
-  /* Hidden — dropdowns are unusable with Neural Band tap gestures, so
-     language/voice live on /glasses/settings as a button grid instead.
-     The <select>s remain in the DOM purely as state holders so the
-     existing tts module wiring doesn't need to change. */
-  .tts-lang { display: none; }
-  .tts-link {
-    background: transparent; color: #cfe;
-    border: 1px solid #2a4; border-radius: 6px;
-    padding: 2px 8px; margin-left: 8px;
-    font: 600 12px ui-monospace, Menlo, monospace;
-    text-decoration: none;
+  body {
+    padding: 56px 18px 76px;
+    transition: padding-bottom .18s ease;
   }
-  .tts-link:active { background: #1a2820; }
+  body.thinking { padding-bottom: 116px; }
+  ::selection { background: var(--hud-soft); color: var(--ink); }
 
-  /* First-load audio-gesture notice. Auto-dismisses on first interaction. */
+  /* ── Floating HUD header bar ───────────────────────────────────── */
+  .hud {
+    position: fixed; top: 0; left: 0; right: 0;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 12px;
+    background: linear-gradient(180deg, rgba(0,0,0,0.92), rgba(0,0,0,0.65) 70%, transparent);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    z-index: 5; gap: 8px;
+    font-size: 11px;
+  }
+  .hud-left, .hud-right { display: flex; align-items: center; gap: 6px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 9px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    font: 600 10px/1 ui-monospace, Menlo, monospace;
+    color: var(--ink-dim);
+    letter-spacing: 0.08em;
+  }
+  .pill .ssr { color: var(--warn); }
+  .pill.conn { color: var(--hud); border-color: rgba(95,255,159,0.3); }
+  .pill.conn::before {
+    content: ''; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--hud); box-shadow: 0 0 6px var(--hud-glow);
+    animation: hud-pulse 2.4s ease-in-out infinite;
+  }
+  .pill.conn.off { color: var(--err); border-color: rgba(255,138,138,0.3); }
+  .pill.conn.off::before { background: var(--err); box-shadow: 0 0 6px rgba(255,138,138,0.6); animation: none; }
+  @keyframes hud-pulse { 0%,100%{opacity:1;} 50%{opacity:0.35;} }
+
+  .tts-btn, .tts-link {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--line);
+    color: var(--ink-dim); border-radius: 999px;
+    width: 28px; height: 28px; padding: 0; margin: 0;
+    font: 13px ui-monospace, Menlo, monospace;
+    display: inline-flex; align-items: center; justify-content: center;
+    text-decoration: none; cursor: pointer;
+    transition: background .12s, color .12s, border-color .12s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .tts-btn:hover, .tts-link:hover { background: var(--hud-soft); color: var(--ink); border-color: rgba(95,255,159,0.35); }
+  .tts-btn:active, .tts-link:active { background: rgba(95,255,159,0.28); }
+  .tts-btn.muted { color: var(--err); border-color: rgba(255,138,138,0.35); }
+  .tts-btn.engine {
+    font-size: 10px; opacity: 0.85; width: auto; padding: 0 8px;
+    letter-spacing: 0.05em;
+  }
+  /* Hidden — selectors live on /glasses/settings as button grids. */
+  .tts-lang { display: none; }
+
+  /* ── First-load audio-gesture notice ───────────────────────────── */
   #gesture-notice {
-    position: fixed; top: 44px; left: 50%; transform: translateX(-50%);
-    background: #1a3a1a; color: #d8ffd8;
-    border: 1px solid #4fc; border-radius: 8px;
-    padding: 10px 16px; font-size: 14px; font-weight: 600;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+    position: fixed; top: 52px; left: 50%; transform: translateX(-50%);
+    background: rgba(13, 26, 17, 0.92);
+    border: 1px solid var(--hud);
+    color: var(--ink); border-radius: 12px;
+    padding: 12px 18px;
+    font: 600 14px/1.3 ui-monospace, Menlo, monospace;
+    box-shadow: 0 0 0 1px rgba(95,255,159,0.15) inset,
+                0 8px 32px rgba(0,0,0,0.7),
+                0 0 24px rgba(95,255,159,0.15);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
     z-index: 10; cursor: pointer;
     transition: opacity .35s, transform .35s;
-    max-width: 88%;
-    text-align: center;
+    max-width: 88%; text-align: center;
+    letter-spacing: 0.02em;
   }
-  #gesture-notice.hidden {
-    opacity: 0; transform: translate(-50%, -10px); pointer-events: none;
-  }
+  #gesture-notice.hidden { opacity: 0; transform: translate(-50%, -10px); pointer-events: none; }
 
-  #stack { display: flex; flex-direction: column; gap: 10px; }
+  /* ── Message stack ─────────────────────────────────────────────── */
+  #stack { display: flex; flex-direction: column; gap: 12px; }
   .msg {
-    border-left: 3px solid #2a4;
-    padding: 6px 10px;
-    background: #0a140a;
-    border-radius: 0 8px 8px 0;
+    padding: 12px 16px;
+    border-radius: 14px;
+    background: var(--agent-bg);
+    border: 1px solid transparent;
     opacity: 0.55;
-    transition: opacity .25s, transform .25s;
+    position: relative;
+    transition: opacity .25s, transform .25s, border-color .25s;
   }
-  .msg.user { border-left-color: #46a; background: #0a0e1a; color: #cfe; }
-  .msg.agent { border-left-color: #8c4; background: #0a140a; color: #f4ffd0; }
-  .msg.error { border-left-color: #c44; background: #1a0a0a; color: #ffb; }
-  .msg.newest { opacity: 1; font-weight: 600; }
-  .role { display: inline-block; font-size: 14px; color: #8a8; margin-right: 8px; }
+  .msg.user  { background: var(--user-bg);  color: var(--user); }
+  .msg.agent { background: var(--agent-bg); color: var(--agent); }
+  .msg.error { background: var(--err-bg);   color: var(--err); }
+  .msg.newest { opacity: 1; }
+  .msg.newest.agent { border-color: rgba(95,255,159,0.25); box-shadow: 0 0 0 1px rgba(95,255,159,0.08) inset; }
+  .msg.newest.user  { border-color: rgba(155,208,255,0.22); }
+  .msg.newest.error { border-color: rgba(255,138,138,0.3); }
+
+  .msg-head {
+    display: flex; align-items: center; justify-content: space-between;
+    font: 600 11px/1 ui-monospace, Menlo, monospace;
+    color: var(--ink-mut); margin-bottom: 6px;
+    letter-spacing: 0.12em; text-transform: uppercase;
+  }
+  .role { display: inline-flex; align-items: center; gap: 6px; }
+  .role .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: currentColor; opacity: 0.65;
+  }
+  .msg.user  .role { color: var(--user); }
+  .msg.agent .role { color: var(--hud); }
+  .msg.error .role { color: var(--err); }
+  .ts { color: var(--ink-mut); font-weight: 500; letter-spacing: 0.05em; }
+
   .text { word-wrap: break-word; overflow-wrap: anywhere; }
-  /* Markdown styling inside .text — kept compact for small screens. */
-  .text p { margin: 0.25em 0; }
+  .text p { margin: 0.3em 0; }
+  .text p:first-child { margin-top: 0; }
+  .text p:last-child { margin-bottom: 0; }
   .text h1, .text h2, .text h3, .text h4 {
-    margin: 0.4em 0 0.2em 0; line-height: 1.2;
+    margin: 0.5em 0 0.2em; line-height: 1.2; font-weight: 700;
   }
   .text h1 { font-size: 1.15em; }
   .text h2 { font-size: 1.08em; }
   .text h3, .text h4 { font-size: 1.0em; }
-  .text ul, .text ol { margin: 0.25em 0; padding-left: 1.2em; }
-  .text li { margin: 0.1em 0; }
+  .text ul, .text ol { margin: 0.3em 0; padding-left: 1.4em; }
+  .text li { margin: 0.15em 0; }
   .text code {
-    background: #1a1f1a; color: #ffd58a;
-    padding: 1px 5px; border-radius: 4px;
-    font-size: 0.9em;
+    background: rgba(255,255,255,0.06); color: var(--warn);
+    padding: 1px 6px; border-radius: 4px; font-size: 0.9em;
   }
   .text pre {
-    background: #0c100c; border: 1px solid #1c2820;
-    padding: 8px 10px; border-radius: 6px;
-    overflow-x: auto; margin: 0.4em 0;
+    background: rgba(0,0,0,0.5); border: 1px solid var(--line);
+    padding: 10px 12px; border-radius: 10px;
+    overflow-x: auto; margin: 0.5em 0;
   }
-  .text pre code { background: transparent; padding: 0; color: #cfe6cf; }
+  .text pre code { background: transparent; padding: 0; color: inherit; }
   .text blockquote {
-    margin: 0.3em 0; padding-left: 10px;
-    border-left: 3px solid #364; color: #cfd9c4;
+    margin: 0.4em 0; padding: 4px 12px;
+    border-left: 3px solid var(--hud); color: var(--ink);
+    background: rgba(95,255,159,0.05);
+    border-radius: 0 8px 8px 0;
   }
-  .text a { color: #9bf; }
+  .text a { color: var(--user); }
   .text table {
-    border-collapse: collapse; margin: 0.4em 0;
-    font-size: 0.88em; width: 100%;
+    border-collapse: separate; border-spacing: 0;
+    margin: 0.5em 0; font-size: 0.9em; width: 100%;
+    border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
   }
   .text th, .text td {
-    border: 1px solid #2a3a2a; padding: 4px 8px; text-align: left;
-    vertical-align: top;
+    padding: 6px 10px; text-align: left; vertical-align: top;
+    border-bottom: 1px solid var(--line);
   }
-  .text th { background: #102010; color: #cfeacf; }
-  .text tr:nth-child(even) td { background: #07100a; }
-  .text hr { border: 0; border-top: 1px solid #2a3a2a; margin: 0.5em 0; }
-  .ts {
-    font-size: 12px; color: #677;
-    float: right;
-    /* Float right but don't collide with markdown — give it its own line if needed. */
+  .text tr:last-child td { border-bottom: 0; }
+  .text th {
+    background: rgba(255,255,255,0.04);
+    font-weight: 700; letter-spacing: 0.04em;
+    text-transform: uppercase; font-size: 0.85em;
+    color: var(--ink-dim);
   }
+  .text tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  .text hr { border: 0; border-top: 1px solid var(--line); margin: 0.6em 0; }
 
-  /* ── System status footer ───────────────────────────────────────── */
+  /* ── Status footer (sysbar) ────────────────────────────────────── */
   #sysbar {
     position: fixed; left: 0; right: 0; bottom: 0;
-    background: rgba(0,0,0,0.85);
-    border-top: 1px solid #1a2820;
-    padding: 4px 12px 6px 12px;
-    font-size: 12px; line-height: 1.25;
-    color: #7a8c7a;
-    backdrop-filter: blur(4px);
-    -webkit-backdrop-filter: blur(4px);
+    background: linear-gradient(0deg, rgba(0,0,0,0.95), rgba(0,0,0,0.7));
+    border-top: 1px solid var(--line);
+    padding: 6px 14px 8px;
+    font: 600 12px/1.25 ui-monospace, Menlo, monospace;
+    color: var(--ink-mut);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    transition: padding .2s ease, background .2s ease,
+                border-color .2s ease, font-size .2s ease,
+                box-shadow .2s ease;
+    z-index: 4;
   }
   #sysbar .now {
-    color: #9fd; font-weight: 600; letter-spacing: 0.5px;
+    display: inline-flex; align-items: center; gap: 7px;
+    color: var(--ink-dim); font-weight: 600; letter-spacing: 0.06em;
   }
-  #sysbar .now.idle { color: #6a7a6a; }
-  #sysbar .now.busy { color: #ffd58a; }
-  #sysbar .now.err  { color: #ff8a8a; }
+  #sysbar .now::before {
+    content: ''; width: 6px; height: 6px; border-radius: 50%;
+    background: currentColor; opacity: 0.6;
+  }
+  #sysbar .now.idle { color: var(--ink-mut); }
+  #sysbar .now.busy { color: var(--warn); }
+  #sysbar .now.err  { color: var(--err); }
   #sysbar .hist {
-    color: #4a5a4a; font-size: 11px;
+    color: var(--ink-mut); opacity: 0.55; font-size: 10px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    margin-top: 2px;
+    margin-top: 3px;
   }
-  #sysbar .hist span { margin-right: 10px; }
+  #sysbar .hist span { margin-right: 12px; }
+
+  /* ── Thinking state ────────────────────────────────────────────── */
+  #sysbar.thinking {
+    padding: 18px 22px 20px;
+    background: linear-gradient(180deg, rgba(45,28,5,0.95), rgba(20,12,2,0.98));
+    border-top: 1px solid rgba(255,200,100,0.4);
+    font-size: 22px;
+    box-shadow: 0 -8px 32px rgba(255, 200, 80, 0.22),
+                0 0 0 1px rgba(255,200,100,0.1) inset;
+  }
+  #sysbar.thinking .now {
+    color: var(--warn);
+    font-size: 22px; font-weight: 700;
+    text-transform: lowercase; letter-spacing: 0.04em;
+    gap: 14px;
+  }
+  #sysbar.thinking .now::before {
+    width: 14px; height: 14px; opacity: 1;
+    box-shadow: 0 0 14px rgba(255, 216, 119, 0.85),
+                0 0 28px rgba(255, 216, 119, 0.4);
+    animation: tk-pulse 1.1s ease-in-out infinite;
+  }
+  #sysbar.thinking .hist { display: none; }
+
+  @keyframes tk-pulse {
+    0%, 100% { transform: scale(0.7); opacity: 0.55; }
+    50%      { transform: scale(1.25); opacity: 1; }
+  }
 </style>
 </head>
 <body>
-<header>
-  <span>SSR <span class="ssr">{{SSR_TOKEN}}</span> · {{SSR_TS}}</span>
-  <span>
+<header class="hud">
+  <div class="hud-left">
+    <span class="pill" title="server-render token / time">
+      <span class="ssr">{{SSR_TOKEN}}</span>
+    </span>
+    <span class="pill conn off" id="conn">…</span>
+  </div>
+  <div class="hud-right">
     <button class="tts-btn" id="tts-toggle" type="button" title="toggle voice">🔊</button>
     <button class="tts-btn" id="tts-mode" type="button" title="stream vs one-shot">📡</button>
     <a class="tts-link" id="tts-settings" href="#" title="language &amp; voice settings">⚙</a>
     <select class="tts-lang" id="tts-lang" title="voice language" aria-label="voice language"></select>
     <select class="tts-lang" id="tts-voice" title="voice" aria-label="voice"></select>
     <span class="tts-btn engine" id="tts-engine">—</span>
-    <span class="conn off" id="conn">…</span>
-  </span>
+  </div>
 </header>
 
-<div id="gesture-notice">🔊 Tap any control above to enable audio</div>
+<div id="gesture-notice">🔊 Tap any control to enable audio</div>
 
 <div id="stack"></div>
 
@@ -224,15 +342,24 @@
       const cls = m.type === 'user' ? 'user' : (m.type === 'error' ? 'error' : 'agent');
       div.className = 'msg ' + cls + (i === view.length - 1 ? ' newest' : '');
 
+      // Header: role badge + timestamp on a single row.
+      const head = document.createElement('div');
+      head.className = 'msg-head';
+
       const role = document.createElement('span');
       role.className = 'role';
-      let label = m.type === 'user' ? 'YOU' : (m.type === 'error' ? 'ERR' : 'AGENT');
-      if (m.type === 'user' && m.image_path) label = '📷 ' + label;
-      role.textContent = label;
+      const dot = document.createElement('span'); dot.className = 'dot';
+      role.appendChild(dot);
+      let label = m.type === 'user' ? 'You' : (m.type === 'error' ? 'Error' : 'Agent');
+      if (m.type === 'user' && m.image_path) label = '📷  ' + label;
+      role.appendChild(document.createTextNode(label));
 
       const ts = document.createElement('span');
       ts.className = 'ts';
       ts.textContent = fmtTs(m.ts);
+
+      head.appendChild(role);
+      head.appendChild(ts);
 
       const txt = document.createElement('div');
       txt.className = 'text';
@@ -245,8 +372,7 @@
         txt.innerHTML = renderMarkdown(m.text);
       }
 
-      div.appendChild(role);
-      div.appendChild(ts);
+      div.appendChild(head);
       div.appendChild(txt);
       stack.appendChild(div);
     });
@@ -263,16 +389,31 @@
     return 'idle';
   }
 
+  // Toggle the prominent "thinking" look on both the sysbar and the body
+  // (the latter so body padding-bottom grows to keep the last message
+  // visible above the enlarged bar).
+  const sysbar = document.getElementById('sysbar');
+  function setThinking(on) {
+    sysbar.classList.toggle('thinking', !!on);
+    document.body.classList.toggle('thinking', !!on);
+  }
+
   function renderStatus() {
     const latest = statuses[statuses.length - 1];
     if (!latest) {
       sysnow.textContent = '—';
       sysnow.className = 'now idle';
       syshist.innerHTML = '';
+      setThinking(false);
       return;
     }
-    sysnow.textContent = latest.status + '  ·  ' + fmtTs(latest.ts);
-    sysnow.className = 'now ' + statusClass(latest.status);
+    const cls = statusClass(latest.status);
+    // While thinking, drop the noisy timestamp — just the verb, big.
+    sysnow.textContent = (cls === 'busy')
+      ? latest.status
+      : (latest.status + '  ·  ' + fmtTs(latest.ts));
+    sysnow.className = 'now ' + cls;
+    setThinking(cls === 'busy');
     // History: prior statuses, oldest first, dimmed.
     const prior = statuses.slice(-MAX_HIST - 1, -1);
     syshist.innerHTML = '';
@@ -294,6 +435,14 @@
       content.push(m);
       if (content.length > 30) content.shift();
       renderStack();
+      // An agent reply (or an error) means thinking is over — shrink the
+      // bar back to the compact look right away, don't wait for the next
+      // status tick which may lag a second or two.
+      if (m.type === 'agent' || m.type === 'error') {
+        statuses.push({ status: 'ready', ts: m.ts || new Date().toISOString() });
+        if (statuses.length > 50) statuses.shift();
+        renderStatus();
+      }
       // Speak the agent's reply once we're past the backfill window.
       if (liveMode && m.type === 'agent' && m.text) {
         try { tts.speak(m.text); } catch (_) {}
@@ -738,9 +887,9 @@
     // Reset liveMode on every (re)connect; bridge will set it back to true
     // when its "subscribed" status arrives after the backfill batch.
     liveMode = false;
-    ws.onopen = () => { conn.textContent = '● live'; conn.classList.remove('off'); };
+    ws.onopen = () => { conn.textContent = 'live'; conn.classList.remove('off'); };
     ws.onclose = () => {
-      conn.textContent = '○ reconnecting'; conn.classList.add('off');
+      conn.textContent = 'reconnecting'; conn.classList.add('off');
       liveMode = false;
       setTimeout(openWs, 1500);
     };
