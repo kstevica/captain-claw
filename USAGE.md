@@ -95,6 +95,7 @@ For a quick overview and installation guide, see [README.md](README.md).
 - [Web UI](#web-ui)
 - [Remote Integrations](#remote-integrations)
   - [Telegram: Per-User Sessions](#telegram-per-user-sessions)
+- [Glasses Bridge (Meta Ray-Ban Display)](#glasses-bridge-meta-ray-ban-display)
 - [OpenAI-Compatible API Proxy](#openai-compatible-api-proxy)
 - [MCP Server](#mcp-server)
 - [Google OAuth, Drive, Calendar, and Gmail](#google-oauth-drive-calendar-and-gmail)
@@ -4432,6 +4433,98 @@ Remote users can use: `/help`, `/config`, `/history`, `/compact`, `/models`, `/s
 Local-only commands (not available remotely): `/exit`, `/approve user`, `/session run`, `/session procreate`, `/session protect`, `/session export`, `/session queue`, `/monitor`, `/cron add/list/history/pause/resume/remove`.
 
 **Telegram-only restrictions:** `/new` and `/sessions` are disabled. Session switching subcommands (`list`, `switch`, `load`, `new`) are disabled.
+
+---
+
+## Glasses Bridge (Meta Ray-Ban Display)
+
+A mobile-web → agent → glasses-web pipeline that lets you talk to any Flight Deck **process** agent from your phone and have its reply rendered (and spoken) on Meta Ray-Ban Display smart glasses.
+
+Three pages, all served by Flight Deck:
+
+| Page | URL | For |
+|---|---|---|
+| Mobile bridge | `/glasses/mobile?c=<channel>` | Your phone — pick agent, type, send |
+| Glasses view | `/glasses/view?c=<channel>` | The glasses — renders the conversation, speaks replies |
+| Settings | `/glasses/settings?c=<channel>` | Pick TTS voice + language |
+
+The mobile bridge is installable as a PWA on iOS and Android.
+
+### Prerequisites
+
+- Flight Deck running: `captain-claw-fd` (binds to `http://0.0.0.0:25080`).
+- A **public HTTPS URL** pointing at Flight Deck — Meta Web Apps require HTTPS:
+  - `cloudflared tunnel --url http://localhost:25080`
+  - `ngrok http 25080`
+- At least one captain-claw **process** agent spawned via Flight Deck → Agents.
+- Optional (for TTS): a Soniox API key. Without it the glasses still render replies visually but won't speak.
+
+```bash
+export SONIOX_API_KEY=sk_…                # required for voice
+export SONIOX_TTS_VOICE=Adrian            # optional, default
+export SONIOX_TTS_LANGUAGE=en             # optional, default
+captain-claw-fd
+```
+
+### Quick start
+
+1. **On your phone**, open `https://<your-tunnel>/glasses/mobile`. It generates a random channel id and bounces to `?c=abc12345`. Optionally install it: iOS Safari → Share → Add to Home Screen; Android Chrome → install prompt or three-dot menu → Install app.
+2. Pick your agent from the dropdown.
+3. **On the glasses**, in the Meta AI mobile app's Web Apps section, add a Web App at `https://<your-tunnel>/glasses/view?c=abc12345` (same channel id) and launch it from the Meta Ray-Ban Display app launcher.
+4. On the glasses, tap **⚙** to open the settings page and pick voice + language with the button grids. Tap **🔊** to turn voice on (it starts off — your tap is the user gesture browsers need for autoplay).
+5. Type on the phone → Send. The message appears on the glasses with a pulsing amber "thinking" status; the reply renders in markdown when ready and (if voice is on) speaks through the phone's audio output (typically the glasses' open-ear speakers when paired as a Bluetooth audio sink).
+
+### Mobile bridge controls
+
+- **Channel chip** — directly editable; type a different channel id and press Enter / tap-out to apply, or tap ⟳ for a fresh random one. The URL stays in sync via `history.replaceState`.
+- **Target agent** — lists running Flight Deck **process** agents (`/fd/processes`). Switching agents tears down the old upstream WS and rebinds.
+- **Composer** — textarea + 📷 photo attach + Send. Photo accepts JPEG/PNG/WebP/GIF/BMP (whitelisted by the agent's `/api/image/upload`). On iPhone, Safari typically returns JPEG so HEIC isn't a concern in practice.
+- **Activity log** — collapsible card; user/agent/status/error coloured rows.
+- **Status pill** — green `live` (animated) / red `offline`.
+
+### Glasses HUD controls
+
+- **🔊 / 🔇** — toggle voice. Starts muted; tapping unmutes and counts as the user gesture autoplay needs.
+- **📡 / 📦** — stream vs one-shot TTS. Streaming is the default (~150–300 ms first-audio latency); one-shot waits for the full MP3 before playing.
+- **⚙** — open settings page (voice + language).
+- **Engine label** — `soniox` when live; `off` when muted or after a server config issue; `off:NNN` permanent on 503/401/403 from the bridge; `err:NNN` retryable on transient failures.
+
+### Bridge endpoints
+
+| Endpoint | What it does |
+|---|---|
+| `GET /glasses` | Redirects to `/glasses/mobile?c=<random>` (zero-config entry) |
+| `GET /glasses/mobile?c=X` | Mobile bridge UI (PWA-installable) |
+| `GET /glasses/view?c=X` | Glasses HUD page (PNG icons + launcher manifest) |
+| `GET /glasses/settings?c=X` | Tap-target voice/language picker |
+| `GET /glasses/agents` | JSON list of running process agents |
+| `POST /glasses/send` | `{channel, host, port, text, image_path?}` — route a message |
+| `POST /glasses/upload-image` | Multipart proxy to agent's `/api/image/upload` |
+| `POST /glasses/tts` | One-shot Soniox TTS (audio bytes for `<audio>`) |
+| `WS /glasses/tts-stream` | Streaming Soniox TTS (PCM s16le @ 24 kHz binary frames) |
+| `WS /glasses/ws?c=X&role=mobile\|glasses` | Channel pub/sub |
+| `GET /glasses/manifest.webmanifest` | PWA manifest for the mobile bridge |
+| `GET /glasses/view-manifest.webmanifest` | Glasses launcher manifest (PNG icons) |
+| `GET /glasses/sw.js` | Minimal service worker (no caching) |
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SONIOX_API_KEY` | _(unset)_ | Required for any TTS. Without it the glasses fall back to silent. |
+| `SONIOX_TTS_MODEL` | `tts-rt-v1` | Soniox TTS model id |
+| `SONIOX_TTS_VOICE` | `Adrian` | Default voice; user can override per-session via the settings page |
+| `SONIOX_TTS_LANGUAGE` | `en` | Default language; user can override per-session via the settings page |
+| `SONIOX_TTS_FORMAT` | `mp3` | One-shot audio format (`mp3` / `wav` / `aac` / `opus` / `flac`). Streaming always uses PCM s16le @ 24 kHz. |
+| `FD_GLASSES_BRIDGE_TOKEN` | _(unset)_ | Optional shared-secret gate. When set, the bridge requires `?t=<token>` on every request. |
+
+### Notes & limitations
+
+- **No microphone access** on the glasses Web Apps SDK as of this release — input has to come from the phone (text + photo). The glasses are output-only.
+- **Process agents only** — the mobile bridge lists Flight Deck process agents (`/fd/processes`), not Docker containers.
+- **Channel sharing = pairing**. Anyone with the URL is in the channel. For private deployments, set `FD_GLASSES_BRIDGE_TOKEN` and append `?t=<token>` to the URLs.
+- **Hidden system context** is injected to the agent on the first message per binding so the model knows the reply will render on a tiny HUD (concise, lead-with-the-answer, no preamble). Never broadcast to the channel — the user only ever sees their plain text in the mobile log.
+- **Voice is off by default** — explicit tap-to-enable, which also serves as the user gesture for browser autoplay.
 
 ---
 
