@@ -344,6 +344,38 @@
       marked.setOptions({ gfm: true, breaks: true, headerIds: false, mangle: false });
     } catch (_) {}
   }
+  // Strip markdown formatting characters before sending text to Soniox TTS.
+  // Soniox pronounces literal asterisks, underscores, and backticks ("star",
+  // "underscore"), so a card like "**Ana** _Last seen: just now_" would be
+  // read out as "star star Ana star star underscore Last seen…". We strip
+  // the formatting tokens but keep the words. Visual rendering is unaffected
+  // because renderMarkdown() runs on the original text.
+  function stripMarkdownForTts(src) {
+    let s = String(src || '');
+    // Inline code: `code` → code   (do before bold/italic so backticks go)
+    s = s.replace(/`+([^`]+)`+/g, '$1');
+    // Bold + italic: ***text*** / ___text___
+    s = s.replace(/(\*{3}|_{3})([^*_\n]+)\1/g, '$2');
+    // Bold: **text** / __text__
+    s = s.replace(/(\*{2}|_{2})([^*_\n]+)\1/g, '$2');
+    // Italic: *text* / _text_   (word-boundary aware so 'snake_case' survives)
+    s = s.replace(/(?<![A-Za-z0-9])\*([^*\n]+?)\*(?![A-Za-z0-9])/g, '$1');
+    s = s.replace(/(?<![A-Za-z0-9])_([^_\n]+?)_(?![A-Za-z0-9])/g, '$1');
+    // Links: [label](url) → label
+    s = s.replace(/\[([^\]\n]+)\]\(([^)\n]+)\)/g, '$1');
+    // Images: ![alt](url) → alt
+    s = s.replace(/!\[([^\]\n]*)\]\(([^)\n]+)\)/g, '$1');
+    // Strip leading list markers + heading hashes at line start.
+    s = s.replace(/^\s*[-*+]\s+/gm, '');
+    s = s.replace(/^\s*\d+\.\s+/gm, '');
+    s = s.replace(/^\s*#{1,6}\s+/gm, '');
+    // Blockquote markers: leading ">"
+    s = s.replace(/^\s*>\s?/gm, '');
+    // Collapse multiple blank lines so Soniox doesn't pause forever.
+    s = s.replace(/\n{2,}/g, '. ').replace(/\s+\n/g, '\n');
+    return s.trim();
+  }
+
   function renderMarkdown(src) {
     if (hasMarked) {
       try { return marked.parse(String(src || '')); } catch (_) {}
@@ -475,7 +507,7 @@
       }
       // Speak the agent's reply once we're past the backfill window.
       if (liveMode && m.type === 'agent' && m.text) {
-        try { tts.speak(m.text); } catch (_) {}
+        try { tts.speak(stripMarkdownForTts(m.text)); } catch (_) {}
       }
     } else if (m.type === 'status') {
       const s = String(m.status || '');
