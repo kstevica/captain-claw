@@ -1,15 +1,25 @@
 """WhatsApp Business Cloud API → channel-bus bridge.
 
-Companion to ``messenger_bridge.py`` — same architectural shape (webhook in,
-channel-bus echo, Send-API forwarding of agent replies), different transport.
+By default, WhatsApp is **standalone**: each WAID gets its own private
+channel (``whatsapp:<waid>``) so user messages don't echo to the glasses
+HUD. Photos handled here bypass the agent entirely — face recognition
+runs and the card lands directly back in the user's WhatsApp thread.
 
-Cross-bridge note
------------------
-WhatsApp and Messenger users with ``/c lounge`` (same channel name) land on
-the **same channel** in ``glasses_bridge``. Each bridge attaches its own
-callback subscriber to that channel, so a single agent reply fans out to
-*every* platform recipient + the glasses HUD. This is intentional: lets
-you keep one conversation across surfaces.
+Cross-bridge fan-out (the same agent reply landing on WhatsApp + glasses
+HUD + Messenger simultaneously) is opt-in:
+
+* Set ``WHATSAPP_DEFAULT_CHANNEL=lounge`` to share by default, or
+* Have the WhatsApp user send ``/c lounge`` to rebind at runtime.
+
+When sharing, each bridge attaches its own callback subscriber to the
+channel; a single agent reply fans out to every platform recipient.
+
+Optional voice reply
+--------------------
+When ``WHATSAPP_AUDIO_REPLY=on``, every substantive bridge reply (agent
+answer, face card) is also synthesized to MP3 via Soniox TTS and sent
+as a WhatsApp audio message after the text. Slash-command replies and
+error messages stay text-only.
 
 Architecture
 ------------
@@ -52,11 +62,23 @@ Setup checklist (Cloud API "test number" tier — free, no business verification
       WHATSAPP_VERIFY_TOKEN=any-string         # any string, also configured
                                                 # on Meta's side
       WHATSAPP_ALLOWED_WAIDS=31612345678,1234567890  # phone numbers, no '+'
-      WHATSAPP_DEFAULT_CHANNEL=lounge          # initial channel
-      WHATSAPP_DEFAULT_AGENT_SLUG=personal     # FD process slug (preferred —
-                                                # survives port reassignment)
-      WHATSAPP_DEFAULT_AGENT_PORT=8765         # legacy / fixed-port fallback
-      # If neither set, the bridge auto-binds to the first alive FD agent.
+
+      # Channel binding (private per-user by default — leave unset to
+      # keep WhatsApp standalone; set to share with glasses/Messenger).
+      # WHATSAPP_DEFAULT_CHANNEL=lounge
+
+      # Agent target (slug strongly preferred — survives FD restarts that
+      # reassign web ports).
+      WHATSAPP_DEFAULT_AGENT_SLUG=personal
+      WHATSAPP_DEFAULT_AGENT_AUTH=tAz6q…       # from agent's config.yaml
+                                                # web.auth_token (only needed
+                                                # when agent isn't in FD's
+                                                # process/Docker registry)
+
+      # Optional MP3 voice reply via Soniox (needs SONIOX_API_KEY).
+      # WHATSAPP_AUDIO_REPLY=on
+      # WHATSAPP_AUDIO_VOICE=Adrian            # default falls back to
+      # WHATSAPP_AUDIO_LANGUAGE=en             # SONIOX_TTS_VOICE / *_LANGUAGE
 """
 
 from __future__ import annotations
@@ -64,7 +86,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import secrets
 from typing import Any
 
 import httpx
@@ -74,7 +95,6 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from captain_claw.flight_deck import face_index
 from captain_claw.flight_deck.glasses_bridge import (
     _GLASSES_SYSTEM_CONTEXT,
-    _broadcast,
     _ensure_agent_binding,
     _get_or_create_channel,
 )
@@ -105,8 +125,22 @@ def _allowed_waids() -> set[str]:
     return {p.strip().lstrip("+") for p in raw.split(",") if p.strip()}
 
 
-def _default_channel() -> str:
-    return _env("WHATSAPP_DEFAULT_CHANNEL") or "whatsapp"
+def _channel_for_waid(waid: str) -> str:
+    """Resolve the channel a fresh WAID lands on.
+
+    * ``WHATSAPP_DEFAULT_CHANNEL`` set → that value (shared mode; same
+      channel id can be opened by the glasses HUD or used by another
+      bridge, e.g. Messenger, for cross-surface fan-out).
+    * Empty/unset → ``whatsapp:<waid>`` — a **per-user private channel**.
+      Nothing else subscribes to this by default, so the conversation
+      stays inside WhatsApp.
+
+    The slash command ``/c <name>`` lets a user override at runtime.
+    """
+    env_default = _env("WHATSAPP_DEFAULT_CHANNEL")
+    if env_default:
+        return env_default
+    return f"whatsapp:{waid}"
 
 
 def _default_agent() -> tuple[str, int, str]:
@@ -244,11 +278,11 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
         return
     if text == "/c":
         await _send_whatsapp_text(
-            waid, f"Channel: {_WAID_CHANNEL.get(waid, _default_channel())}"
+            waid, f"Channel: {_WAID_CHANNEL.get(waid, _channel_for_waid(waid))}"
         )
         return
 
-    channel = _WAID_CHANNEL.setdefault(waid, _default_channel())
+    channel = _WAID_CHANNEL.setdefault(waid, _channel_for_waid(waid))
     ch = await _get_or_create_channel(channel)
     _ensure_whatsapp_forwarding(ch.channel_id)
     _CHANNEL_WAIDS.setdefault(channel, set()).add(waid)
@@ -266,59 +300,49 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
         return
     await _ensure_agent_binding(ch, agent_host, agent_port, agent_auth)
 
-    # 3. Photo? Two-step media fetch, then face recognition + agent upload.
-    image_path: str | None = None
+    # 3. Photo? Face recognition only — no agent involvement, no channel
+    #    broadcast. The card lands directly in the user's WhatsApp thread.
+    #    Returns early so the photo never falls through to the agent flow.
     if mtype == "image":
         media_id = str((message.get("image") or {}).get("id") or "")
-        caption = str((message.get("image") or {}).get("caption") or "").strip()
-        if caption and not text:
-            # WhatsApp delivers image captions separately from text; treat
-            # them as the user's actual prompt for this message.
-            text = caption
-        if media_id:
-            try:
-                blob = await _download_media(media_id)
-            except Exception as exc:
-                await _send_whatsapp_text(waid, f"Couldn't fetch photo: {exc}")
-                blob = None
-            if blob is not None:
-                # Face card auto-broadcasts to the channel; both the glasses
-                # HUD and the user's WhatsApp thread receive it.
-                try:
-                    await face_index.get_index().recognize(
-                        image_blob=blob, channel=channel
-                    )
-                except RuntimeError:
-                    # ``[faces]`` extra not installed — skip silently.
-                    pass
-                try:
-                    image_path = await _forward_image_to_agent(
-                        agent_host, agent_port, blob
-                    )
-                except Exception as exc:
-                    await _send_whatsapp_text(
-                        waid, f"Image forward failed: {exc}"
-                    )
-                    image_path = None
-
-    # 4. If neither text nor a successfully-forwarded image, nothing to do.
-    if not text and not image_path:
+        if not media_id:
+            return
+        try:
+            blob = await _download_media(media_id)
+        except Exception as exc:
+            await _send_whatsapp_text(waid, f"Couldn't fetch photo: {exc}")
+            return
+        try:
+            result = await face_index.get_index().recognize(
+                image_blob=blob,
+                channel="",  # empty → don't log an encounter under any channel
+            )
+        except RuntimeError:
+            # ``[faces]`` optional extra isn't installed.
+            await _send_whatsapp_text(
+                waid,
+                "Face recognition isn't available on this Flight Deck "
+                "(install with: pip install captain-claw[faces]).",
+            )
+            return
+        # Strip markdown for plain WhatsApp; the same plain string is used
+        # for the (optional) audio reply so Soniox doesn't read out
+        # asterisks and underscores.
+        from captain_claw.flight_deck.meta_webhook_bridge import strip_markdown
+        plain = strip_markdown(result.card_markdown) or "Unknown face."
+        await _send_whatsapp_reply(waid, plain)
         return
 
-    # 5. Echo user message to the channel — gives the glasses an instant
-    #    "user said X" line. The WhatsApp thread already shows the original
-    #    on the user's screen; our callback below skips ``user`` events.
-    user_event: dict[str, Any] = {
-        "type": "user",
-        "text": text,
-        "ts": _now_iso(),
-        "via": "whatsapp",
-    }
-    if image_path:
-        user_event["image_path"] = image_path
-    await _broadcast(ch, user_event)
+    # 4. Text only. If empty, nothing to do.
+    if not text:
+        return
 
-    # 6. Send to the agent. Identical shape to /glasses/send / messenger_bridge.
+    # 5. Send to the agent. WhatsApp does NOT broadcast user events to the
+    #    channel bus by default — keeps the conversation inside WhatsApp
+    #    instead of mirroring "user said X" onto the glasses HUD. The
+    #    agent's reply still flows through the channel (that's how
+    #    _agent_pump delivers it back), and the bridge's callback forwards
+    #    it to the WhatsApp thread.
     for _ in range(50):  # up to ~5s
         if ch.agent_ws is not None:
             break
@@ -328,15 +352,12 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
         return
 
     async with ch.send_lock:
-        effective_text = text or ("Please analyze this image." if image_path else text)
         if not ch.context_sent:
-            agent_content = _GLASSES_SYSTEM_CONTEXT + effective_text
+            agent_content = _GLASSES_SYSTEM_CONTEXT + text
             ch.context_sent = True
         else:
-            agent_content = effective_text
+            agent_content = text
         payload_obj: dict[str, Any] = {"type": "chat", "content": agent_content}
-        if image_path:
-            payload_obj["image_path"] = image_path
         try:
             await ch.agent_ws.send(json.dumps(payload_obj))
         except Exception as exc:
@@ -360,6 +381,10 @@ def _rebind_waid(waid: str, new_channel: str) -> None:
 def _ensure_whatsapp_forwarding(channel_id: str) -> None:
     """Wire a WhatsApp Send-API forwarder onto the channel bus.
 
+    Uses ``_send_whatsapp_reply`` (not ``_send_whatsapp_text``) so the
+    optional Soniox audio reply attaches to every agent answer when
+    ``WHATSAPP_AUDIO_REPLY=on``.
+
     Independent of any Messenger callback registered on the same channel —
     both can co-exist (cross-bridge fan-out is intentional).
     """
@@ -367,7 +392,7 @@ def _ensure_whatsapp_forwarding(channel_id: str) -> None:
         channel_id=channel_id,
         wired_set=_WIRED_CHANNELS,
         recipients_for_channel=lambda ch: _CHANNEL_WAIDS.get(ch, ()),
-        send_one=_send_whatsapp_text,
+        send_one=_send_whatsapp_reply,
     )
 
 
@@ -378,10 +403,32 @@ def _ensure_whatsapp_forwarding(channel_id: str) -> None:
 # for agent-side punctuation surprises.
 _MAX_CHUNK = 3500
 
+# Soniox TTS endpoint used to synthesize the optional audio reply.
+_SONIOX_TTS_URL = "https://tts-rt.soniox.com/tts"
+
+# WhatsApp Cloud API caps audio messages at 16 MB. Real synthesized MP3s
+# are far smaller (~10 KB/s), so a couple of minutes of speech fits — but
+# we cap the text length up-front to keep latency sane and bills bounded.
+_TTS_MAX_TEXT = 4000
+
+# Hard cap on synthesized audio bytes before upload. If Soniox ever
+# returns more than this (it shouldn't for sane text lengths), we bail.
+_MAX_AUDIO_BYTES = 12 * 1024 * 1024
+
 
 def _send_url() -> str:
     pid = _env("WHATSAPP_PHONE_NUMBER_ID")
     return f"https://graph.facebook.com/v18.0/{pid}/messages" if pid else ""
+
+
+def _media_url() -> str:
+    pid = _env("WHATSAPP_PHONE_NUMBER_ID")
+    return f"https://graph.facebook.com/v18.0/{pid}/media" if pid else ""
+
+
+def _audio_reply_enabled() -> bool:
+    """Whether to attach a synthesized MP3 to every agent/face reply."""
+    return _env("WHATSAPP_AUDIO_REPLY").lower() in ("on", "true", "yes", "1")
 
 
 async def _mark_read_and_typing(message_id: str) -> None:
@@ -457,6 +504,152 @@ async def _send_whatsapp_text(waid: str, text: str) -> None:
             )
 
 
+# ── Optional audio reply (Soniox TTS → Meta media upload → audio msg) ─
+
+
+async def _synth_audio_mp3(text: str) -> bytes | None:
+    """Synthesize ``text`` to MP3 via Soniox TTS.
+
+    Returns the audio bytes, or ``None`` if Soniox isn't configured or the
+    request fails. Errors don't surface to the user — audio reply is a
+    nicety; if it can't happen, the text reply still goes through.
+    """
+    api_key = os.environ.get("SONIOX_API_KEY", "").strip()
+    if not api_key:
+        return None
+    text = (text or "").strip()
+    if not text:
+        return None
+    if len(text) > _TTS_MAX_TEXT:
+        text = text[:_TTS_MAX_TEXT]
+
+    # Bridge-specific voice/language overrides; fall back to whatever the
+    # glasses TTS already uses so the user gets a consistent voice across
+    # surfaces by default.
+    voice = (
+        _env("WHATSAPP_AUDIO_VOICE")
+        or os.environ.get("SONIOX_TTS_VOICE", "").strip()
+        or "Adrian"
+    )
+    language = (
+        _env("WHATSAPP_AUDIO_LANGUAGE")
+        or os.environ.get("SONIOX_TTS_LANGUAGE", "").strip()
+        or "en"
+    )
+
+    payload = {
+        "model": os.environ.get("SONIOX_TTS_MODEL", "tts-rt-v1"),
+        "language": language,
+        "voice": voice,
+        "audio_format": "mp3",
+        "text": text,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                _SONIOX_TTS_URL,
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+            )
+    except Exception:
+        return None
+    if resp.status_code != 200:
+        return None
+    blob = resp.content
+    if not blob or len(blob) > _MAX_AUDIO_BYTES:
+        return None
+    return blob
+
+
+async def _upload_whatsapp_audio(blob: bytes) -> str:
+    """Upload MP3 bytes to ``/<phone-id>/media`` and return the media id.
+
+    Cloud API requires the messaging_product field in the multipart form
+    body alongside the file. Empty return on failure.
+    """
+    token = _env("WHATSAPP_ACCESS_TOKEN")
+    url = _media_url()
+    if not token or not url:
+        return ""
+    headers = {"Authorization": f"Bearer {token}"}
+    files = {
+        "file": ("reply.mp3", blob, "audio/mpeg"),
+        "messaging_product": (None, "whatsapp"),
+        "type": (None, "audio/mpeg"),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(url, headers=headers, files=files)
+    except Exception:
+        return ""
+    if resp.status_code != 200:
+        return ""
+    try:
+        return str((resp.json() or {}).get("id") or "")
+    except Exception:
+        return ""
+
+
+async def _send_whatsapp_audio(waid: str, text: str) -> None:
+    """Generate + upload + send an audio message containing ``text``.
+
+    Three steps, any of which can fail silently — the text reply path is
+    the source of truth, audio is a UX add-on:
+
+      1. Soniox TTS turns text into MP3
+      2. Meta media upload returns a media_id
+      3. Send API delivers an ``audio`` message referencing that id
+
+    Failure at any step logs nothing and the user just sees the text-only
+    reply they would have received without ``WHATSAPP_AUDIO_REPLY=on``.
+    """
+    blob = await _synth_audio_mp3(text)
+    if not blob:
+        return
+    media_id = await _upload_whatsapp_audio(blob)
+    if not media_id:
+        return
+
+    token = _env("WHATSAPP_ACCESS_TOKEN")
+    url = _send_url()
+    if not token or not url:
+        return
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": waid,
+        "type": "audio",
+        "audio": {"id": media_id},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            await client.post(url, headers=headers, json=payload)
+    except Exception:
+        pass
+
+
+async def _send_whatsapp_reply(waid: str, text: str) -> None:
+    """Send a reply: text always, optional MP3 audio if env opts in.
+
+    Used for substantive replies (agent answers, face cards). Slash
+    command and error responses use ``_send_whatsapp_text`` directly so
+    they stay text-only regardless of the audio-reply flag.
+    """
+    await _send_whatsapp_text(waid, text)
+    if _audio_reply_enabled():
+        # Run audio in the background — it's a 1-3 s round trip through
+        # Soniox + Meta upload + send; the text has already landed so the
+        # user sees something immediately.
+        asyncio.create_task(_send_whatsapp_audio(waid, text))
+
+
 # ── Cloud API: media download (2-step) ────────────────────────────────
 
 
@@ -496,26 +689,9 @@ async def _download_media(media_id: str) -> bytes:
         return blob
 
 
-# ── Agent image upload (same shape as messenger_bridge) ──────────────
-
-
-async def _forward_image_to_agent(host: str, port: int, blob: bytes) -> str:
-    """POST the image bytes to the agent's ``/api/image/upload``. Returns
-    the absolute path on the agent's filesystem that ``/glasses/send``'s
-    ``image_path`` field expects."""
-    try:
-        from captain_claw.flight_deck.server import _resolve_agent_auth
-        auth = _resolve_agent_auth(port)
-    except Exception:
-        auth = ""
-    params = {"token": auth} if auth else {}
-    target = f"http://{host}:{port}/api/image/upload"
-
-    fname = f"whatsapp-{secrets.token_hex(6)}.jpg"
-    files = {"file": (fname, blob, "image/jpeg")}
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(target, files=files, params=params)
-    if resp.status_code != 200:
-        raise RuntimeError(f"agent upload returned {resp.status_code}: {resp.text}")
-    data = resp.json()
-    return str(data.get("path") or "")
+# Note: an earlier ``_forward_image_to_agent`` helper used to push the
+# photo bytes to the agent's ``/api/image/upload`` for LLM analysis. It
+# was removed when the WhatsApp photo path was scoped down to "face
+# recognition only" — the user wants no agent involvement for image
+# messages. If image-→-agent ever returns, the analogous helper in
+# ``messenger_bridge.py`` is the reference implementation.
