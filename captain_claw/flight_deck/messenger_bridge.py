@@ -52,12 +52,9 @@ Setup checklist (single-user, dev-mode app — no Meta review needed)
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
 import json
 import os
 import secrets
-from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -71,8 +68,12 @@ from captain_claw.flight_deck.glasses_bridge import (
     _ensure_agent_binding,
     _get_or_create_channel,
 )
-
-UTC = timezone.utc
+from captain_claw.flight_deck.meta_webhook_bridge import (
+    now_iso as _now_iso,
+    register_channel_callback,
+    verify_hub_challenge,
+    verify_signature,
+)
 
 router = APIRouter()
 
@@ -122,10 +123,6 @@ _WIRED_CHANNELS: set[str] = set()
 _CHANNEL_PSIDS: dict[str, set[str]] = {}
 
 
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
-
-
 # ── Webhook verification (GET) ────────────────────────────────────────
 
 
@@ -140,30 +137,12 @@ async def messenger_verify(request: Request) -> PlainTextResponse:
     mode = request.query_params.get("hub.mode", "")
     token = request.query_params.get("hub.verify_token", "")
     challenge = request.query_params.get("hub.challenge", "")
-    expected = _env("MESSENGER_VERIFY_TOKEN")
-    if mode == "subscribe" and expected and hmac.compare_digest(token, expected):
+    if verify_hub_challenge(mode, token, _env("MESSENGER_VERIFY_TOKEN")):
         return PlainTextResponse(challenge)
     raise HTTPException(status_code=403, detail="verify token mismatch")
 
 
 # ── Webhook handler (POST) ────────────────────────────────────────────
-
-
-def _verify_signature(body: bytes, signature_header: str) -> bool:
-    """Validate the ``X-Hub-Signature-256`` header against MESSENGER_APP_SECRET.
-
-    Meta signs every webhook POST body with HMAC-SHA256 keyed by the app
-    secret. Header format: ``sha256=<hexdigest>``. We refuse any request
-    without a valid signature — public webhook endpoints are spam magnets.
-    """
-    secret = _env("MESSENGER_APP_SECRET")
-    if not secret or not signature_header:
-        return False
-    if not signature_header.startswith("sha256="):
-        return False
-    sent = signature_header.split("=", 1)[1].strip()
-    expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(sent, expected)
 
 
 @router.post("/messenger/webhook")
@@ -175,7 +154,11 @@ async def messenger_webhook(request: Request) -> JSONResponse:
     background tasks for the actual work.
     """
     body = await request.body()
-    if not _verify_signature(body, request.headers.get("x-hub-signature-256", "")):
+    if not verify_signature(
+        body,
+        request.headers.get("x-hub-signature-256", ""),
+        _env("MESSENGER_APP_SECRET"),
+    ):
         raise HTTPException(status_code=401, detail="bad signature")
 
     try:
@@ -330,71 +313,20 @@ def _rebind_psid(psid: str, new_channel: str) -> None:
 
 
 def _ensure_messenger_forwarding(channel_id: str) -> None:
-    """Attach a callback to the channel so agent replies on it also get
-    pushed to every PSID currently bound to that channel.
+    """Wire a Messenger Send-API forwarder onto the channel bus.
 
-    Idempotent: only one callback per channel is ever installed, no matter
-    how many Messenger users join. The callback consults ``_CHANNEL_PSIDS``
-    at delivery time, so adding/removing PSIDs needs no re-wiring.
+    Thin wrapper around the shared registrar — passes Messenger-specific
+    state (``_WIRED_CHANNELS`` + ``_CHANNEL_PSIDS``) and the platform's
+    send function. Cross-bridge fan-out (Messenger + WhatsApp on the same
+    channel) works automatically because each bridge registers its own
+    callback on the same channel's ``callback_subscribers`` list.
     """
-    if channel_id in _WIRED_CHANNELS:
-        return
-
-    async def _forward(payload: dict) -> None:
-        # Forward only outbound content the user would want to see. Skip
-        # ``user`` echoes (already on the user's screen as the message they
-        # just sent) and ``status`` heartbeats (noise on a chat thread).
-        mtype = payload.get("type")
-        if mtype not in ("agent", "error"):
-            return
-        text = str(payload.get("text") or "").strip()
-        if not text:
-            return
-        psids = list(_CHANNEL_PSIDS.get(channel_id, ()))
-        if not psids:
-            return
-        # Strip markdown for chat — Messenger doesn't render it and the
-        # asterisks/underscores look ugly. (Same idea as the TTS strip on
-        # the glasses view, but plainer.)
-        plain = _strip_markdown(text)
-        for psid in psids:
-            try:
-                await _send_messenger_text(psid, plain)
-            except Exception:
-                # Don't let one dead PSID block the others.
-                continue
-
-    # Install. We grab the channel state directly off the global registry
-    # in glasses_bridge — calling _get_or_create_channel here would need
-    # an async path we don't have.
-    from captain_claw.flight_deck.glasses_bridge import _channels  # local import
-
-    ch = _channels.get(channel_id)
-    if ch is None:
-        return
-    ch.callback_subscribers.append(_forward)
-    _WIRED_CHANNELS.add(channel_id)
-
-
-def _strip_markdown(s: str) -> str:
-    """Quick-and-dirty markdown → plain text for Messenger.
-
-    Mirrors ``stripMarkdownForTts`` in glasses_view.html, kept simple. We
-    do not try to be exhaustive — agent replies are short by construction
-    (the glasses system prompt enforces it), so a few unhandled edge cases
-    don't matter much.
-    """
-    import re
-
-    s = re.sub(r"`+([^`]+)`+", r"\1", s)
-    s = re.sub(r"(\*{2}|_{2})([^*_\n]+)\1", r"\2", s)
-    s = re.sub(r"\*([^*\n]+?)\*", r"\1", s)
-    s = re.sub(r"(?<![A-Za-z0-9])_([^_\n]+?)_(?![A-Za-z0-9])", r"\1", s)
-    s = re.sub(r"\[([^\]\n]+)\]\(([^)\n]+)\)", r"\1", s)
-    s = re.sub(r"^\s*[-*+]\s+", "", s, flags=re.M)
-    s = re.sub(r"^\s*\d+\.\s+", "", s, flags=re.M)
-    s = re.sub(r"^\s*#{1,6}\s+", "", s, flags=re.M)
-    return s.strip()
+    register_channel_callback(
+        channel_id=channel_id,
+        wired_set=_WIRED_CHANNELS,
+        recipients_for_channel=lambda ch: _CHANNEL_PSIDS.get(ch, ()),
+        send_one=_send_messenger_text,
+    )
 
 
 # ── Send API helpers ──────────────────────────────────────────────────
