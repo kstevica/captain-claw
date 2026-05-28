@@ -179,6 +179,13 @@ _WIRED_CHANNELS: set[str] = set()
 # by the per-channel callback, so ``/c`` rebinds take effect immediately.
 _CHANNEL_WAIDS: dict[str, set[str]] = {}
 
+# Last-seen inbound message id per WAID. WhatsApp's typing-indicator API
+# requires the wamid of a *real* user message — there's no "show typing"
+# call without one — so we cache the most recent one to re-fire the
+# indicator after sending intermediate status text (e.g. "Generating
+# audio…"). Cleared implicitly on FD restart; no persistence needed.
+_WAID_LAST_MESSAGE_ID: dict[str, str] = {}
+
 
 # ── Webhook verification (GET) ────────────────────────────────────────
 
@@ -267,6 +274,10 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
     # delay the rest of the handler.
     inbound_message_id = str(message.get("id") or "").strip()
     if inbound_message_id:
+        # Cache for later — the audio-reply path re-fires the typing
+        # indicator after sending intermediate status text, and the API
+        # needs a real wamid to reference.
+        _WAID_LAST_MESSAGE_ID[waid] = inbound_message_id
         asyncio.create_task(_mark_read_and_typing(inbound_message_id))
 
     # 1. Slash command first — never falls through to the agent.
@@ -641,13 +652,31 @@ async def _send_whatsapp_reply(waid: str, text: str) -> None:
     Used for substantive replies (agent answers, face cards). Slash
     command and error responses use ``_send_whatsapp_text`` directly so
     they stay text-only regardless of the audio-reply flag.
+
+    Audio path order of operations
+    ------------------------------
+    1. Send the text reply (user can read immediately).
+    2. Send "🎙 Generating audio…" as a status breadcrumb so the user
+       knows audio is coming and isn't just stuck waiting.
+    3. Re-fire the typing indicator — sending step-2's text cleared the
+       one we triggered on inbound, so the dots disappeared. The Cloud
+       API requires a real user wamid to attach the indicator to; we
+       pull the cached last message id for this WAID.
+    4. Synthesize, upload, send audio (background — 1-3 s typically).
+
+    Failures inside any step are silent; the user just sees the text-only
+    reply in the worst case.
     """
     await _send_whatsapp_text(waid, text)
-    if _audio_reply_enabled():
-        # Run audio in the background — it's a 1-3 s round trip through
-        # Soniox + Meta upload + send; the text has already landed so the
-        # user sees something immediately.
-        asyncio.create_task(_send_whatsapp_audio(waid, text))
+    if not _audio_reply_enabled():
+        return
+
+    # Status breadcrumb + typing re-trigger, then audio in the background.
+    await _send_whatsapp_text(waid, "🎙 Generating audio…")
+    last_msg_id = _WAID_LAST_MESSAGE_ID.get(waid, "")
+    if last_msg_id:
+        asyncio.create_task(_mark_read_and_typing(last_msg_id))
+    asyncio.create_task(_send_whatsapp_audio(waid, text))
 
 
 # ── Cloud API: media download (2-step) ────────────────────────────────
