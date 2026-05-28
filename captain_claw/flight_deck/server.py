@@ -22,6 +22,20 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+# Load a project-local ``.env`` into ``os.environ`` early — before any
+# captain_claw submodule imports — so env-driven bridges (Messenger,
+# WhatsApp) and threshold-tunable subsystems (face_index) see values
+# placed in a CWD-relative ``.env`` without needing the user to source
+# the file from the shell or wire systemd ``EnvironmentFile=`` entries.
+#
+# python-dotenv is already a core dep. ``load_dotenv()`` with no args
+# walks up from the CWD looking for ``.env`` and is a no-op if not found.
+# ``override=False`` (the default) preserves any value already set in
+# the real environment — shell exports win over the file, which is the
+# behaviour everyone expects.
+from dotenv import load_dotenv
+load_dotenv()
+
 import logging
 
 from captain_claw.flight_deck.auth import get_current_user, get_optional_user, get_ws_user, set_auth_db
