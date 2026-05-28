@@ -303,21 +303,97 @@ async def glasses_view_page(request: Request, c: str = "") -> HTMLResponse:
 
 
 @router.get("/glasses/input", response_class=HTMLResponse)
-async def glasses_input_page(request: Request, c: str = "") -> HTMLResponse:
+async def glasses_input_page(
+    request: Request,
+    c: str = "",
+    perms: str = "",
+) -> HTMLResponse:
     """Experimental input page rendered inside the Ray-Ban Display webview.
 
     Public docs (May 2026) say third-party webviews on the Display can't
     receive mic, camera, or system-level dictation — Neural-Band handwriting
     and "Hey Meta" voice both route to Meta-owned destinations. This page
-    probes that empirically: three different input mechanisms side by side,
-    a Web-Speech-API button, and an on-screen event log so failures are
-    actionable without dev tools.
+    probes that empirically.
+
+    Query params
+    ------------
+    c
+        Channel id. Required.
+    perms
+        ``"1"`` to inject candidate permission-meta-tags into the page head
+        before serving. We don't know the real format Meta would accept (if
+        any), so we splice several variants at once — if *any* shape works,
+        we'll see the speech-recognition probe flip from ``service-not-allowed``
+        to ``onresult``. Empty / ``"0"`` serves the baseline page so a
+        side-by-side comparison is one URL away.
     """
     if not c:
         raise HTTPException(status_code=400, detail="missing channel ?c=")
     path = _STATIC_DIR / "glasses_input.html"
     html = path.read_text(encoding="utf-8")
+    html = html.replace("<!-- INJECT_META -->", _build_perm_meta(perms))
     return HTMLResponse(content=html, headers=_NO_CACHE)
+
+
+# Candidate permission-meta-tag shapes. None are documented by Meta — these
+# are educated guesses based on PWA / Apple / OpenGraph conventions plus the
+# leaked "MetaGlassSDK" name from the dictation error. The webview parses
+# <meta> tags at navigation time, so we can't add them dynamically from JS;
+# they have to be in the HTML the server returns.
+_PERM_META_CANDIDATES = (
+    '<meta name="meta-glasses-permissions" content="dictation microphone camera">',
+    '<meta name="meta-glass-permissions" content="dictation microphone camera">',
+    '<meta name="meta-permissions" content="dictation microphone camera">',
+    '<meta name="MetaGlassSDK-permissions" content="dictation microphone camera">',
+    '<meta name="x-meta-glasses-permissions" content="dictation microphone camera">',
+    '<meta name="permissions" content="dictation microphone camera">',
+    '<meta name="capabilities" content="dictation microphone camera">',
+    '<meta http-equiv="Permissions-Policy" content="microphone=*, camera=*, speaker-selection=*">',
+    '<meta http-equiv="Feature-Policy" content="microphone *; camera *">',
+)
+
+
+def _build_perm_meta(flag: str) -> str:
+    """Build the meta-tag splice. Empty when ``flag`` is falsy."""
+    if str(flag).strip() not in ("1", "true", "yes"):
+        return ""
+    return "\n  ".join(_PERM_META_CANDIDATES)
+
+
+@router.post("/glasses/input-log")
+async def glasses_input_log(request: Request) -> JSONResponse:
+    """Persist a probe log to /tmp so we can read it on the dev box.
+
+    The glasses don't expose dev tools, so a "save to file" sink is the
+    only way to get structured output off-device. Body shape::
+
+        { "text": "<the log body>", "label": "optional-suffix" }
+
+    Files land at ``/tmp/glasses-input-<UTC-ts>[-<label>].log``. Size cap:
+    256 KB — generous for a debug log, refuses anything larger.
+    """
+    _check_token(request)
+    body = await request.json()
+    text = str(body.get("text", ""))
+    if not text:
+        raise HTTPException(status_code=400, detail="text required")
+    if len(text.encode("utf-8")) > 256 * 1024:
+        raise HTTPException(status_code=413, detail="log > 256 KB")
+    # Sanitize the optional label — only alnum, dash, underscore allowed.
+    import re
+
+    label = re.sub(r"[^A-Za-z0-9_-]", "", str(body.get("label", "")))[:40]
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    fname = f"glasses-input-{ts}" + (f"-{label}" if label else "") + ".log"
+    out_path = Path("/tmp") / fname
+    try:
+        out_path.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"write failed: {exc}") from exc
+    return JSONResponse(
+        {"ok": True, "path": str(out_path), "bytes": len(text.encode("utf-8"))},
+        headers=_NO_CACHE,
+    )
 
 
 @router.get("/glasses/settings", response_class=HTMLResponse)

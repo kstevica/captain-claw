@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- INJECT_META -->
 <title>Glasses · input probe</title>
 <style>
   /* Black HUD palette so this page reads on the Ray-Ban Display projector. */
@@ -265,6 +266,22 @@
     <div class="status" id="s6">Tap any link and tell me if anything opened.</div>
   </div>
 
+  <!-- ── Test 7: Meta globals probe ─────────────────────────── -->
+  <div class="section" id="sec-7">
+    <h2>Test 7 · MetaGlassSDK probe</h2>
+    <p class="hint">The dictation error mentioned <code>MetaGlassSDK</code>.
+       That string came from a JS object Meta injects into the page. Scan
+       <code>window</code>, <code>navigator</code>, and <code>document</code>
+       for anything that smells of Meta and dump the surface. Read-only — we
+       don't invoke anything.</p>
+    <div class="row">
+      <button class="btn" id="probe-globals">Scan globals</button>
+      <button class="btn secondary" id="reload-perms">Reload with perm tags</button>
+    </div>
+    <div class="status" id="s7">Idle.</div>
+    <div class="log" id="globals-log" style="margin-top:8px; max-height:260px"></div>
+  </div>
+
   <!-- ── Debug log ──────────────────────────────────────────── -->
   <div class="section">
     <h2>Debug log</h2>
@@ -274,6 +291,7 @@
     <div class="log-actions">
       <button id="log-copy" type="button">Copy</button>
       <button id="log-send" type="button">Send to channel</button>
+      <button id="log-save" type="button">Save to FD /tmp</button>
       <button id="log-clear" type="button">Clear</button>
     </div>
   </div>
@@ -327,6 +345,35 @@
   document.getElementById('log-send').addEventListener('click', async () => {
     const txt = Array.from(logEl.children).map(n => n.textContent).join('\n');
     await sendToChannel('```\n' + txt + '\n```', 'log');
+  });
+  document.getElementById('log-save').addEventListener('click', async () => {
+    // Persist the full log to /tmp on the FD box so we can read it without
+    // dev tools on the glasses. Includes the globals-scan output too if
+    // the user has run that probe.
+    const main = Array.from(logEl.children).map(n => n.textContent).join('\n');
+    const globals = Array.from(document.getElementById('globals-log').children)
+                         .map(n => n.textContent).join('\n');
+    const body = main + (globals ? '\n\n========== GLOBALS ==========\n' + globals : '');
+    log('evt', 'log · POST /glasses/input-log (' + body.length + ' bytes)');
+    try {
+      const r = await fetch('/glasses/input-log', {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: body,
+          label: 'ch_' + (channel || 'unknown'),
+        }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data.ok) {
+        log('ok', 'log · saved to ' + data.path + ' (' + data.bytes + ' bytes)');
+      } else {
+        log('err', 'log · save failed ' + r.status + ' ' + (data.detail || ''));
+      }
+    } catch (e) {
+      log('err', 'log · network error ' + (e && e.message ? e.message : e));
+    }
   });
 
   // ── Send helper ──────────────────────────────────────────────────
@@ -489,6 +536,157 @@
     log('evt', 'document.activeElement after focus = ' +
         (document.activeElement ? document.activeElement.id || document.activeElement.tagName : 'null'));
   }, 200);
+
+  // ── Meta globals probe ───────────────────────────────────────────
+  //
+  // The "MetaGlassSDK dictation not available" error implies there's a
+  // JS object on the page with that name. Find it and any sibling
+  // Meta-injected objects. Output goes into the #globals-log block as
+  // structured text so we can paste it back.
+  //
+  // Strategy:
+  //   1. Walk own + prototype property names of window with a regex match
+  //      on /meta|glass|ray|sdk|fb|mess|cortex/i (cortex = Meta's internal
+  //      AI codename, worth a try).
+  //   2. For each match, read typeof and (for objects) one level of
+  //      own-property names + their typeofs. No invocation, no descent
+  //      beyond one level — keeps output bounded.
+  //   3. Same scan against navigator + document.
+  //   4. Dump location.origin, document.referrer, performance navigation
+  //      timing, and the userAgentData if present.
+  //
+  // Wrapped in try/catch per access — some props throw on read in
+  // restricted contexts and we don't want a single bad property to abort.
+  const NAME_RX = /meta|glass|ray|sdk|fb|messenger|whatsapp|cortex|wearable/i;
+  const gLog = document.getElementById('globals-log');
+
+  function gPush(line, kind) {
+    const d = document.createElement('div');
+    if (kind) d.className = 'l-' + kind;
+    d.textContent = line;
+    gLog.appendChild(d);
+  }
+
+  function safeTypeof(obj, key) {
+    try { return typeof obj[key]; } catch (e) { return 'throws:' + (e.name || 'Error'); }
+  }
+  function safeRead(obj, key) {
+    try { return obj[key]; } catch (e) { return undefined; }
+  }
+  function ownNames(obj) {
+    try { return Object.getOwnPropertyNames(obj); } catch (_) { return []; }
+  }
+
+  function scanOne(label, root) {
+    if (root == null) { gPush('· ' + label + ' = ' + root); return; }
+    const seen = new Set();
+    let proto = root;
+    // Walk own names along the prototype chain so we catch native objects
+    // whose interesting props live on the prototype.
+    let depth = 0;
+    while (proto && depth < 4) {
+      for (const k of ownNames(proto)) {
+        if (seen.has(k)) continue;
+        seen.add(k);
+        if (!NAME_RX.test(k)) continue;
+        const t = safeTypeof(root, k);
+        gPush('· ' + label + '.' + k + ' :: ' + t, 'evt');
+        if (t === 'object' || t === 'function') {
+          const v = safeRead(root, k);
+          if (v && typeof v === 'object') {
+            const keys = ownNames(v).slice(0, 40);
+            for (const sk of keys) {
+              gPush('    · .' + sk + ' :: ' + safeTypeof(v, sk));
+            }
+            if (ownNames(v).length > 40) {
+              gPush('    · …(+' + (ownNames(v).length - 40) + ' more)');
+            }
+          }
+        }
+      }
+      try { proto = Object.getPrototypeOf(proto); } catch (_) { proto = null; }
+      depth++;
+    }
+  }
+
+  function setS7(msg, kind) {
+    const s = document.getElementById('s7');
+    s.className = 'status' + (kind ? ' ' + kind : '');
+    s.textContent = msg;
+  }
+
+  document.getElementById('probe-globals').addEventListener('click', () => {
+    gLog.innerHTML = '';
+    setS7('Scanning…');
+    gPush('=== Meta-injected globals (' + new Date().toISOString() + ') ===', 'ok');
+    gPush('location.origin = ' + location.origin);
+    gPush('location.href   = ' + location.href);
+    gPush('document.referrer = ' + (document.referrer || '(empty)'));
+    try {
+      const uad = navigator.userAgentData;
+      if (uad) {
+        gPush('navigator.userAgentData.brands = ' + JSON.stringify(uad.brands || []));
+        gPush('navigator.userAgentData.platform = ' + (uad.platform || ''));
+        gPush('navigator.userAgentData.mobile = ' + uad.mobile);
+      } else {
+        gPush('navigator.userAgentData = absent');
+      }
+    } catch (e) { gPush('userAgentData threw: ' + e.message, 'err'); }
+
+    // Performance navigation entries sometimes carry server-set headers
+    // or response details that show what the webview saw.
+    try {
+      const nav = performance.getEntriesByType('navigation')[0];
+      if (nav) {
+        gPush('nav.type = ' + nav.type + '  protocol = ' + (nav.nextHopProtocol || '?'));
+        gPush('nav.transferSize = ' + nav.transferSize + ' encodedBodySize=' + nav.encodedBodySize);
+      }
+    } catch (_) {}
+
+    gPush('--- window matches ---');
+    scanOne('window', window);
+    gPush('--- navigator matches ---');
+    scanOne('navigator', navigator);
+    gPush('--- document matches ---');
+    scanOne('document', document);
+
+    // Brute-force enumerate ALL own names of window so we don't miss
+    // anything weirdly-named. Names only, not values.
+    gPush('--- window own-name dump (filtered) ---');
+    try {
+      const all = Object.getOwnPropertyNames(window).filter(n => NAME_RX.test(n));
+      if (all.length === 0) gPush('· no matches');
+      else for (const n of all) gPush('· window.' + n + ' :: ' + safeTypeof(window, n));
+    } catch (e) { gPush('own-name dump threw: ' + e.message, 'err'); }
+
+    // For thoroughness, print the first 20 globals that AREN'T on a stock
+    // window — anything not in this list is potentially Meta-injected.
+    // (We can't easily diff against vanilla here, but listing the first
+    // N alphabetically gives us a starting point to eyeball.)
+    setS7('Scan complete. Save log to /tmp to read the dump off-device.', 'ok');
+    log('ok', 'globals · scan complete');
+  });
+
+  document.getElementById('reload-perms').addEventListener('click', () => {
+    // Re-open the page with ?perms=1 so the server injects candidate
+    // permission meta tags into the head. Meta tags are parsed at
+    // navigation time, so a JS-only injection won't help — full reload
+    // is required to test the hypothesis.
+    const sp = new URLSearchParams(location.search);
+    if (sp.get('perms') === '1') {
+      sp.delete('perms');
+      log('evt', 'perms · reloading WITHOUT perm tags (baseline)');
+    } else {
+      sp.set('perms', '1');
+      log('evt', 'perms · reloading WITH perm tags injected');
+    }
+    location.href = location.pathname + '?' + sp.toString();
+  });
+
+  // Surface the current perms mode in the log on every load — easy way
+  // to tell from saved logs which run was which.
+  log('evt', 'perms mode = ' +
+      (new URLSearchParams(location.search).get('perms') === '1' ? 'DECLARED' : 'baseline'));
 })();
 </script>
 </body>
