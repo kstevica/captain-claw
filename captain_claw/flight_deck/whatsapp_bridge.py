@@ -228,6 +228,13 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
     if mtype == "text":
         text = str((message.get("text") or {}).get("body") or "").strip()
 
+    # Acknowledge receipt visually as soon as possible. The "typing…" stays
+    # until the agent's reply lands (or ~25 s). Background task so it can't
+    # delay the rest of the handler.
+    inbound_message_id = str(message.get("id") or "").strip()
+    if inbound_message_id:
+        asyncio.create_task(_mark_read_and_typing(inbound_message_id))
+
     # 1. Slash command first — never falls through to the agent.
     if text.startswith("/c "):
         new_ch = text[3:].strip()
@@ -375,6 +382,43 @@ _MAX_CHUNK = 3500
 def _send_url() -> str:
     pid = _env("WHATSAPP_PHONE_NUMBER_ID")
     return f"https://graph.facebook.com/v18.0/{pid}/messages" if pid else ""
+
+
+async def _mark_read_and_typing(message_id: str) -> None:
+    """Mark an inbound WhatsApp message as read AND show the typing indicator.
+
+    The Cloud API exposes both via the same POST to ``/<phone-id>/messages``
+    when ``status: "read"`` is paired with ``typing_indicator: {type: "text"}``.
+    Effect on the user's chat:
+
+      * Blue double-tick on the message they just sent (read receipt)
+      * "typing…" appears under the business name in the header
+
+    The typing indicator auto-clears the moment we send the agent's reply
+    (or after ~25 s of inactivity). Fire-and-forget — best-effort UX, never
+    blocks the main message flow.
+    """
+    token = _env("WHATSAPP_ACCESS_TOKEN")
+    url = _send_url()
+    if not token or not url or not message_id:
+        return
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "message_id": message_id,
+        "typing_indicator": {"type": "text"},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(url, headers=headers, json=payload)
+    except Exception:
+        # Pure UX nicety; if Meta returns an error or the network is flaky,
+        # the conversation still works — just no read tick / typing dots.
+        pass
 
 
 async def _send_whatsapp_text(waid: str, text: str) -> None:

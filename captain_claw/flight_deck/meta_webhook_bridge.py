@@ -18,12 +18,15 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
 import re
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timezone
 
 UTC = timezone.utc
+
+_log = logging.getLogger(__name__)
 
 
 def now_iso() -> str:
@@ -155,8 +158,16 @@ def register_channel_callback(
         for rid in ids:
             try:
                 await send_one(rid, plain)
-            except Exception:
-                # One dead recipient must not block the others.
+            except Exception as exc:
+                # Log but don't propagate — one dead recipient must not
+                # block the others. Without this log, send failures
+                # (expired tokens, Graph API errors, etc.) are completely
+                # invisible and "no reply on WhatsApp" looks like a bug
+                # in the bridge instead of an upstream API problem.
+                _log.warning(
+                    "channel-callback send failed (channel=%s recipient=%s): %s",
+                    channel_id, rid, exc,
+                )
                 continue
 
     ch.callback_subscribers.append(_forward)
@@ -182,18 +193,26 @@ def resolve_agent_target(
 
     Resolution priority
     -------------------
-    1. ``<port_env>`` set and parseable as int > 0
-       → legacy fixed-port mode. Used when the bridge points at an agent
-       FD doesn't manage (rare). ``<host_env>`` honoured here.
-    2. ``<slug_env>`` set
+    1. ``<slug_env>`` set
        → look up that slug in FD's process registry, return its current
-       ``web_port`` if alive. Returns ``(localhost, 0)`` if the named
+       ``web_port`` if alive. Returns ``(localhost, 0, auth)`` if the named
        slug isn't running — explicit binding means "this agent or
        nothing"; we don't auto-pick a different agent.
+    2. ``<port_env>`` set and parseable as int > 0
+       → legacy fixed-port mode. Used when the bridge points at an agent
+       FD doesn't manage (rare). ``<host_env>`` honoured here.
     3. Neither set
        → return the first alive agent in the registry that has a
        ``web_port``. Single-agent users get zero-config; multi-agent
        users should set the slug env var.
+
+    Why slug beats port
+    -------------------
+    A stale ``DEFAULT_AGENT_PORT`` left behind from an old config silently
+    pointing at FD's own port (e.g. 8765) used to override the slug
+    binding and route WS traffic to FD itself — which has no ``/ws``
+    route, so the connection was rejected with 403. Slug-first prevents
+    that footgun: the modern, explicit binding wins.
 
     Returns ``(host, port, auth)``. ``port == 0`` means "no agent available"
     — caller should bail and tell the user. ``auth`` is the env-supplied
@@ -213,9 +232,36 @@ def resolve_agent_target(
     host_default = (os.environ.get(host_env, "").strip() or "localhost") if host_env else "localhost"
     # Auth override (empty when not configured — caller treats as "use FD lookup").
     auth_override = os.environ.get(auth_env, "").strip() if auth_env else ""
-
-    # 1. Legacy fixed port wins if both are set.
+    slug = os.environ.get(slug_env, "").strip()
     raw_port = os.environ.get(port_env, "").strip()
+
+    # 1. Slug-first: try FD's process registry. Lazy import so this module
+    # stays importable even when server.py isn't (e.g. in isolated tests).
+    registry: dict[str, dict] | None
+    try:
+        from captain_claw.flight_deck.server import (
+            _load_process_registry,
+            _process_is_alive,
+        )
+        registry = _load_process_registry()
+    except Exception:
+        registry = None
+
+    if slug and registry is not None:
+        # Explicit slug: this agent or nothing. No fallback to "first alive"
+        # — that would be surprise routing on misconfig.
+        entry = registry.get(slug)
+        if entry and _process_is_alive(slug):
+            try:
+                port = int(entry.get("web_port", 0) or 0)
+            except (TypeError, ValueError):
+                port = 0
+            return "localhost", port, auth_override
+        # Slug set but not running — fall through to port_env as last-resort,
+        # since the user explicitly named a target.
+        return "localhost", 0, auth_override
+
+    # 2. Legacy fixed port — only consulted when slug is unset.
     if raw_port:
         try:
             port = int(raw_port)
@@ -224,46 +270,19 @@ def resolve_agent_target(
         if port > 0:
             return host_default, port, auth_override
 
-    # 2/3. Need FD's process registry. Lazy import so this module stays
-    # importable even when server.py isn't (e.g. in isolated tests).
-    try:
-        from captain_claw.flight_deck.server import (
-            _load_process_registry,
-            _process_is_alive,
-        )
-    except Exception:
-        return "localhost", 0, auth_override
-
-    try:
-        registry = _load_process_registry()
-    except Exception:
-        return "localhost", 0, auth_override
-
-    slug = os.environ.get(slug_env, "").strip()
-    if slug:
-        # Explicit slug: this agent or nothing. No fallback — surprise
-        # routing to a different agent on misconfig is worse than failing.
-        entry = registry.get(slug)
-        if not entry or not _process_is_alive(slug):
-            return "localhost", 0, auth_override
-        try:
-            port = int(entry.get("web_port", 0) or 0)
-        except (TypeError, ValueError):
-            port = 0
-        return "localhost", port, auth_override
-
     # 3. Auto-pick first running agent with a web port. Iteration order
     # is dict-insertion order (Python 3.7+) — FD writes the registry
     # alphabetically, so the choice is stable across calls until a new
     # agent is spawned.
-    for cand_slug, entry in registry.items():
-        if not _process_is_alive(cand_slug):
-            continue
-        try:
-            port = int(entry.get("web_port", 0) or 0)
-        except (TypeError, ValueError):
-            continue
-        if port > 0:
-            return "localhost", port, auth_override
+    if registry is not None:
+        for cand_slug, entry in registry.items():
+            if not _process_is_alive(cand_slug):
+                continue
+            try:
+                port = int(entry.get("web_port", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if port > 0:
+                return "localhost", port, auth_override
 
     return "localhost", 0, auth_override
