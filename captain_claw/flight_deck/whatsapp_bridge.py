@@ -53,8 +53,10 @@ Setup checklist (Cloud API "test number" tier — free, no business verification
                                                 # on Meta's side
       WHATSAPP_ALLOWED_WAIDS=31612345678,1234567890  # phone numbers, no '+'
       WHATSAPP_DEFAULT_CHANNEL=lounge          # initial channel
-      WHATSAPP_DEFAULT_AGENT_HOST=localhost    # optional, default localhost
-      WHATSAPP_DEFAULT_AGENT_PORT=8765         # required: your agent's WS port
+      WHATSAPP_DEFAULT_AGENT_SLUG=personal     # FD process slug (preferred —
+                                                # survives port reassignment)
+      WHATSAPP_DEFAULT_AGENT_PORT=8765         # legacy / fixed-port fallback
+      # If neither set, the bridge auto-binds to the first alive FD agent.
 """
 
 from __future__ import annotations
@@ -79,6 +81,7 @@ from captain_claw.flight_deck.glasses_bridge import (
 from captain_claw.flight_deck.meta_webhook_bridge import (
     now_iso as _now_iso,
     register_channel_callback,
+    resolve_agent_target,
     verify_hub_challenge,
     verify_signature,
 )
@@ -107,12 +110,18 @@ def _default_channel() -> str:
 
 
 def _default_agent() -> tuple[str, int]:
-    host = _env("WHATSAPP_DEFAULT_AGENT_HOST") or "localhost"
-    try:
-        port = int(_env("WHATSAPP_DEFAULT_AGENT_PORT") or "0")
-    except ValueError:
-        port = 0
-    return host, port
+    """Resolve the target agent fresh on every call.
+
+    Prefers ``WHATSAPP_DEFAULT_AGENT_SLUG`` (looked up in Flight Deck's
+    process registry — survives FD restarts that reassign web ports).
+    Falls back to ``WHATSAPP_DEFAULT_AGENT_PORT`` for legacy / out-of-FD
+    setups, then to "first alive agent" for single-agent boxes.
+    """
+    return resolve_agent_target(
+        slug_env="WHATSAPP_DEFAULT_AGENT_SLUG",
+        port_env="WHATSAPP_DEFAULT_AGENT_PORT",
+        host_env="WHATSAPP_DEFAULT_AGENT_HOST",
+    )
 
 
 # ── Per-WAID state (mirrors messenger_bridge for cross-bridge symmetry) ──
@@ -237,7 +246,10 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
     agent_host, agent_port = _default_agent()
     if not agent_port:
         await _send_whatsapp_text(
-            waid, "Bridge offline: WHATSAPP_DEFAULT_AGENT_PORT not configured."
+            waid,
+            "Bridge offline: no agent available. Set WHATSAPP_DEFAULT_AGENT_SLUG "
+            "(preferred) or WHATSAPP_DEFAULT_AGENT_PORT, or make sure at least "
+            "one Flight Deck agent is running.",
         )
         return
     await _ensure_agent_binding(ch, agent_host, agent_port)

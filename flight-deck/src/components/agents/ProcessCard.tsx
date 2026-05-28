@@ -443,6 +443,22 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
               <div className="flex items-center gap-2">
                 {proc.pid && <span className="text-xs text-zinc-500 font-mono">PID {proc.pid}</span>}
                 <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-xs font-mono text-emerald-400/80">:{proc.web_port}</span>
+                {/*
+                  Slug pill — copy-paste target for env vars that need to
+                  pin to this agent (MESSENGER_DEFAULT_AGENT_SLUG /
+                  WHATSAPP_DEFAULT_AGENT_SLUG / FleetView referencing).
+                  The slug is stable across FD restarts even when the web
+                  port floats. Click copies to clipboard.
+                */}
+                <button
+                  type="button"
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={() => navigator.clipboard.writeText(proc.slug).catch(() => {})}
+                  title={`Slug: ${proc.slug} — click to copy`}
+                  className="rounded bg-zinc-800 px-1.5 py-0.5 text-xs font-mono text-cyan-400/80 hover:bg-zinc-700 hover:text-cyan-300 transition-colors"
+                >
+                  {proc.slug}
+                </button>
                 <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${badgeCls}`}>
                   {isRunning && (
                     <span className="relative flex h-1.5 w-1.5">

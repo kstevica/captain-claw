@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import re
 from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, timezone
@@ -160,3 +161,98 @@ def register_channel_callback(
 
     ch.callback_subscribers.append(_forward)
     wired_set.add(channel_id)
+
+
+# ── Agent target resolution ───────────────────────────────────────────
+
+
+def resolve_agent_target(
+    *,
+    slug_env: str,
+    port_env: str,
+    host_env: str = "",
+) -> tuple[str, int]:
+    """Resolve a (host, port) for the bridge's outbound agent connection.
+
+    Flight Deck reassigns web ports on every agent spawn — a fixed port
+    in the bridge's env breaks the moment FD restarts the agent. Binding
+    by **agent slug** instead and looking up the current port at message
+    receive time survives that.
+
+    Resolution priority
+    -------------------
+    1. ``<port_env>`` set and parseable as int > 0
+       → legacy fixed-port mode. Used when the bridge points at an agent
+       FD doesn't manage (rare). ``<host_env>`` honoured here.
+    2. ``<slug_env>`` set
+       → look up that slug in FD's process registry, return its current
+       ``web_port`` if alive. Returns ``(localhost, 0)`` if the named
+       slug isn't running — explicit binding means "this agent or
+       nothing"; we don't auto-pick a different agent.
+    3. Neither set
+       → return the first alive agent in the registry that has a
+       ``web_port``. Single-agent users get zero-config; multi-agent
+       users should set the slug env var.
+
+    Returns ``(host, port)``. ``port == 0`` means "no agent available"
+    — caller should bail and tell the user.
+
+    Called per inbound message, not cached. The registry lookup is a
+    JSON read off disk — sub-millisecond and fresh every time, so port
+    floats between agent restarts are picked up automatically.
+    """
+    host_default = (os.environ.get(host_env, "").strip() or "localhost") if host_env else "localhost"
+
+    # 1. Legacy fixed port wins if both are set.
+    raw_port = os.environ.get(port_env, "").strip()
+    if raw_port:
+        try:
+            port = int(raw_port)
+        except ValueError:
+            port = 0
+        if port > 0:
+            return host_default, port
+
+    # 2/3. Need FD's process registry. Lazy import so this module stays
+    # importable even when server.py isn't (e.g. in isolated tests).
+    try:
+        from captain_claw.flight_deck.server import (
+            _load_process_registry,
+            _process_is_alive,
+        )
+    except Exception:
+        return "localhost", 0
+
+    try:
+        registry = _load_process_registry()
+    except Exception:
+        return "localhost", 0
+
+    slug = os.environ.get(slug_env, "").strip()
+    if slug:
+        # Explicit slug: this agent or nothing. No fallback — surprise
+        # routing to a different agent on misconfig is worse than failing.
+        entry = registry.get(slug)
+        if not entry or not _process_is_alive(slug):
+            return "localhost", 0
+        try:
+            port = int(entry.get("web_port", 0) or 0)
+        except (TypeError, ValueError):
+            port = 0
+        return "localhost", port
+
+    # 3. Auto-pick first running agent with a web port. Iteration order
+    # is dict-insertion order (Python 3.7+) — FD writes the registry
+    # alphabetically, so the choice is stable across calls until a new
+    # agent is spawned.
+    for cand_slug, entry in registry.items():
+        if not _process_is_alive(cand_slug):
+            continue
+        try:
+            port = int(entry.get("web_port", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if port > 0:
+            return "localhost", port
+
+    return "localhost", 0

@@ -71,6 +71,7 @@ from captain_claw.flight_deck.glasses_bridge import (
 from captain_claw.flight_deck.meta_webhook_bridge import (
     now_iso as _now_iso,
     register_channel_callback,
+    resolve_agent_target,
     verify_hub_challenge,
     verify_signature,
 )
@@ -96,12 +97,18 @@ def _default_channel() -> str:
 
 
 def _default_agent() -> tuple[str, int]:
-    host = _env("MESSENGER_DEFAULT_AGENT_HOST") or "localhost"
-    try:
-        port = int(_env("MESSENGER_DEFAULT_AGENT_PORT") or "0")
-    except ValueError:
-        port = 0
-    return host, port
+    """Resolve the target agent fresh on every call.
+
+    Prefers ``MESSENGER_DEFAULT_AGENT_SLUG`` (looked up in Flight Deck's
+    process registry — survives FD restarts that reassign web ports).
+    Falls back to ``MESSENGER_DEFAULT_AGENT_PORT`` for legacy / out-of-FD
+    setups, then to "first alive agent" for single-agent boxes.
+    """
+    return resolve_agent_target(
+        slug_env="MESSENGER_DEFAULT_AGENT_SLUG",
+        port_env="MESSENGER_DEFAULT_AGENT_PORT",
+        host_env="MESSENGER_DEFAULT_AGENT_HOST",
+    )
 
 
 # ── Per-PSID state ────────────────────────────────────────────────────
