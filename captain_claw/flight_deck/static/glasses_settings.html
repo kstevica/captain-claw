@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Glasses settings</title>
+<style>
+  /* Settings page — bridges mobile palette (cyan accent) with HUD-style
+     mono so it feels like part of the glasses world but is still
+     readable as a configuration screen on phone or glasses. */
+  :root {
+    color-scheme: dark;
+    --bg:        #07090d;
+    --bg-grad:   radial-gradient(900px 500px at 50% -180px, #131a26, #07090d 70%);
+    --surface:   #0f141b;
+    --surface-2: #141a23;
+    --line:      #1c2532;
+    --line-hi:   #2a3548;
+    --text:      #e8edf6;
+    --text-dim:  #8693ad;
+    --text-mut:  #5b667c;
+    --accent:    #5fe3ff;
+    --accent-dk: #18465a;
+    --hud:       #5fff9f;
+    --warn:      #ffd877;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+                 Roboto, sans-serif;
+    font-size: 16px; line-height: 1.4;
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    background: var(--bg-grad);
+    min-height: 100vh;
+    padding: 14px 14px calc(env(safe-area-inset-bottom) + 72px) 14px;
+    max-width: 760px; margin: 0 auto;
+  }
+  ::selection { background: var(--accent-dk); color: var(--text); }
+
+  /* ── Header ─────────────────────────────────────────────────── */
+  .hdr {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 4px 16px;
+    flex-wrap: wrap;
+  }
+  .back {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 8px 14px 8px 10px;
+    background: var(--surface);
+    border: 1px solid var(--line); border-radius: 999px;
+    color: var(--text); text-decoration: none;
+    font-size: 14px; font-weight: 600;
+    transition: border-color .15s, background .15s;
+  }
+  .back:hover { border-color: var(--accent); background: var(--surface-2); }
+  .back .arrow { color: var(--accent); }
+  .summary {
+    margin-left: auto;
+    display: flex; align-items: center; gap: 10px;
+    font: 12px ui-monospace, Menlo, monospace;
+    color: var(--text-dim);
+    flex-wrap: wrap;
+  }
+  .summary .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 999px;
+  }
+  .summary .chip-label { color: var(--text-mut); text-transform: uppercase;
+    letter-spacing: 0.08em; font-size: 10px; font-weight: 700; }
+  .summary .chip-val { color: var(--warn); font-weight: 700; }
+
+  /* ── Sections ───────────────────────────────────────────────── */
+  .section {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 14px;
+    margin-bottom: 14px;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.02) inset,
+                0 8px 24px rgba(0,0,0,0.22);
+  }
+  .section-title {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--text-mut);
+    margin: 0 0 12px;
+  }
+  .section-title::after {
+    content: ''; flex: 1; height: 1px;
+    background: linear-gradient(90deg, var(--line), transparent);
+  }
+  .group-label {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--text-mut);
+    margin: 14px 4px 8px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .group-label::before {
+    content: '·';
+    color: var(--accent); font-size: 18px; line-height: 0;
+  }
+  .group-label:first-child { margin-top: 2px; }
+
+  /* ── Pick-button grid ───────────────────────────────────────── */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+    gap: 8px;
+  }
+  .grid.voice {
+    grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
+  }
+  .pick {
+    background: var(--surface-2);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 12px 10px;
+    font: 600 14px/1.2 -apple-system, BlinkMacSystemFont, sans-serif;
+    text-align: center;
+    min-height: 52px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    transition: background .12s, border-color .12s,
+                box-shadow .12s, transform .08s;
+  }
+  .pick:hover { border-color: var(--line-hi); }
+  .pick:active { transform: scale(0.97); }
+  .pick.selected {
+    background: linear-gradient(180deg, rgba(95,227,255,0.12), rgba(95,227,255,0.04));
+    border-color: var(--accent);
+    color: #d6f6ff;
+    box-shadow: 0 0 0 1px var(--accent) inset,
+                0 4px 16px rgba(95,227,255,0.15);
+  }
+  .pick small {
+    display: block; color: var(--text-mut);
+    font: 500 11px ui-monospace, Menlo, monospace;
+    margin-top: 3px; letter-spacing: 0.04em;
+  }
+  .pick.selected small { color: rgba(95,227,255,0.7); }
+
+  /* ── "Saved" toast ──────────────────────────────────────────── */
+  .saved {
+    position: fixed;
+    bottom: calc(env(safe-area-inset-bottom) + 20px);
+    left: 50%; transform: translate(-50%, 8px);
+    background: var(--surface);
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    padding: 10px 22px;
+    font-weight: 700; font-size: 13px;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.55),
+                0 0 24px rgba(95,227,255,0.18);
+    opacity: 0; transition: opacity .22s, transform .22s;
+    pointer-events: none;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .saved::before {
+    content: '✓';
+    width: 16px; height: 16px; border-radius: 50%;
+    background: var(--accent); color: var(--bg);
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 900;
+  }
+  .saved.show { opacity: 1; transform: translate(-50%, 0); }
+</style>
+</head>
+<body>
+
+<header class="hdr">
+  <a class="back" id="back" href="#"><span class="arrow">←</span> Glasses</a>
+  <div class="summary">
+    <span class="chip">
+      <span class="chip-label">lang</span>
+      <span class="chip-val" id="now-lang">…</span>
+    </span>
+    <span class="chip">
+      <span class="chip-label">voice</span>
+      <span class="chip-val" id="now-voice">…</span>
+    </span>
+  </div>
+</header>
+
+<div class="section">
+  <h2 class="section-title">Voice</h2>
+  <div id="voice-groups"></div>
+</div>
+
+<div class="section">
+  <h2 class="section-title">Voice language</h2>
+  <div class="grid" id="lang-grid"></div>
+</div>
+
+<div class="saved" id="saved">Saved</div>
+
+<script>
+(() => {
+  const LANG_KEY = 'glasses.tts.lang';
+  const VOICE_KEY = 'glasses.tts.voice';
+
+  const params = new URLSearchParams(location.search);
+  const channel = params.get('c') || '';
+  const t = params.get('t') || '';
+  const backUrl = '/glasses/view'
+    + (channel ? '?c=' + encodeURIComponent(channel) : '')
+    + (t ? (channel ? '&' : '?') + 't=' + encodeURIComponent(t) : '');
+  document.getElementById('back').href = backUrl;
+
+  // ── Data ─────────────────────────────────────────────────────────
+  const LANGS = [
+    ['af','Afrikaans'], ['sq','Albanian'], ['ar','Arabic'], ['az','Azerbaijani'],
+    ['eu','Basque'], ['be','Belarusian'], ['bn','Bengali'], ['bs','Bosnian'],
+    ['bg','Bulgarian'], ['ca','Catalan'], ['zh','Chinese'], ['hr','Croatian'],
+    ['cs','Czech'], ['da','Danish'], ['nl','Dutch'], ['en','English'],
+    ['et','Estonian'], ['fi','Finnish'], ['fr','French'], ['gl','Galician'],
+    ['de','German'], ['el','Greek'], ['gu','Gujarati'], ['he','Hebrew'],
+    ['hi','Hindi'], ['hu','Hungarian'], ['id','Indonesian'], ['it','Italian'],
+    ['ja','Japanese'], ['kn','Kannada'], ['kk','Kazakh'], ['ko','Korean'],
+    ['lv','Latvian'], ['lt','Lithuanian'], ['mk','Macedonian'], ['ms','Malay'],
+    ['ml','Malayalam'], ['mr','Marathi'], ['no','Norwegian'], ['fa','Persian'],
+    ['pl','Polish'], ['pt','Portuguese'], ['pa','Punjabi'], ['ro','Romanian'],
+    ['ru','Russian'], ['sr','Serbian'], ['sk','Slovak'], ['sl','Slovenian'],
+    ['es','Spanish'], ['sw','Swahili'], ['sv','Swedish'], ['tl','Tagalog'],
+    ['ta','Tamil'], ['te','Telugu'], ['th','Thai'], ['tr','Turkish'],
+    ['uk','Ukrainian'], ['ur','Urdu'], ['vi','Vietnamese'], ['cy','Welsh'],
+  ];
+  LANGS.sort((a, b) => a[1].localeCompare(b[1]));
+
+  const VOICES = [
+    ['Neutral', ['Maya','Daniel','Noah','Nina','Emma','Jack','Adrian','Claire','Grace','Owen','Mina','Kenji']],
+    ['British', ['Oliver','Arthur','Isla','Victoria']],
+    ['American/Spanish', ['Rafael','Mateo','Lucia','Sofia']],
+    ['Australian', ['Cooper','Mason','Ruby','Elise']],
+    ['Indian', ['Arjun','Rohan','Priya','Meera']],
+  ];
+
+  // ── State ────────────────────────────────────────────────────────
+  let lang  = (() => { try { return localStorage.getItem(LANG_KEY)  || 'en';     } catch (_) { return 'en'; } })();
+  let voice = (() => { try { return localStorage.getItem(VOICE_KEY) || 'Adrian'; } catch (_) { return 'Adrian'; } })();
+  if (!LANGS.find(l => l[0] === lang)) lang = 'en';
+  if (!VOICES.flatMap(g => g[1]).includes(voice)) voice = 'Adrian';
+
+  const nowLang = document.getElementById('now-lang');
+  const nowVoice = document.getElementById('now-voice');
+  const saved = document.getElementById('saved');
+  let savedTimer = null;
+
+  function refreshNow() {
+    const langName = (LANGS.find(l => l[0] === lang) || ['', lang])[1];
+    nowLang.textContent = lang + ' (' + langName + ')';
+    nowVoice.textContent = voice;
+  }
+  function flashSaved() {
+    saved.classList.add('show');
+    if (savedTimer) clearTimeout(savedTimer);
+    savedTimer = setTimeout(() => saved.classList.remove('show'), 900);
+  }
+  function markSelected(container, dataKey, value) {
+    for (const btn of container.querySelectorAll('.pick')) {
+      btn.classList.toggle('selected', btn.dataset[dataKey] === value);
+    }
+  }
+
+  // ── Language grid ───────────────────────────────────────────────
+  const langGrid = document.getElementById('lang-grid');
+  for (const [code, name] of LANGS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'pick';
+    b.dataset.lang = code;
+    b.innerHTML = name + '<small>' + code + '</small>';
+    b.addEventListener('click', () => {
+      lang = code;
+      try { localStorage.setItem(LANG_KEY, lang); } catch (_) {}
+      markSelected(langGrid, 'lang', lang);
+      refreshNow();
+      flashSaved();
+    });
+    langGrid.appendChild(b);
+  }
+  markSelected(langGrid, 'lang', lang);
+
+  // ── Voice grid (grouped) ────────────────────────────────────────
+  const voiceGroups = document.getElementById('voice-groups');
+  for (const [groupName, names] of VOICES) {
+    const label = document.createElement('div');
+    label.className = 'group-label';
+    label.textContent = groupName;
+    voiceGroups.appendChild(label);
+    const grid = document.createElement('div');
+    grid.className = 'grid voice';
+    for (const n of names) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pick';
+      b.dataset.voice = n;
+      b.textContent = n;
+      b.addEventListener('click', () => {
+        voice = n;
+        try { localStorage.setItem(VOICE_KEY, voice); } catch (_) {}
+        // Re-scan all groups, only one button at a time should be selected.
+        for (const g of voiceGroups.querySelectorAll('.grid.voice')) {
+          markSelected(g, 'voice', voice);
+        }
+        refreshNow();
+        flashSaved();
+      });
+      grid.appendChild(b);
+    }
+    voiceGroups.appendChild(grid);
+    markSelected(grid, 'voice', voice);
+  }
+
+  refreshNow();
+})();
+</script>
+</body>
+</html>

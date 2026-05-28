@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Glasses · person</title>
+<style>
+  /* Shares the palette of glasses_enroll.html / glasses_settings.html. */
+  :root {
+    color-scheme: dark;
+    --bg:        #07090d;
+    --bg-grad:   radial-gradient(900px 500px at 50% -180px, #131a26, #07090d 70%);
+    --surface:   #0f141b;
+    --surface-2: #141a23;
+    --line:      #1c2532;
+    --text:      #e8edf6;
+    --text-dim:  #8693ad;
+    --text-mut:  #5b667c;
+    --accent:    #5fe3ff;
+    --accent-dk: #18465a;
+    --hud:       #5fff9f;
+    --warn:      #ffd877;
+    --err:       #ff7a8a;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+                 Roboto, sans-serif;
+    font-size: 16px; line-height: 1.4;
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    background: var(--bg-grad);
+    min-height: 100vh;
+    padding: 14px 14px calc(env(safe-area-inset-bottom) + 72px) 14px;
+    max-width: 760px; margin: 0 auto;
+  }
+  .hdr {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 4px 16px; flex-wrap: wrap;
+  }
+  .back {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 8px 14px 8px 10px;
+    background: var(--surface);
+    border: 1px solid var(--line); border-radius: 999px;
+    color: var(--text); text-decoration: none;
+    font-size: 14px; font-weight: 600;
+  }
+  .back .arrow { color: var(--accent); }
+  h1 { font-size: 18px; margin: 0; font-weight: 700; }
+
+  .section {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 14px;
+    margin-bottom: 14px;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.02) inset,
+                0 8px 24px rgba(0,0,0,0.22);
+  }
+  .section-title {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--text-mut);
+    margin: 0 0 12px;
+  }
+
+  .profile-name { font-size: 22px; font-weight: 700; }
+  .profile-notes {
+    margin-top: 6px; color: var(--text-dim);
+    white-space: pre-wrap;
+  }
+  .profile-meta {
+    margin-top: 10px;
+    display: flex; gap: 8px; flex-wrap: wrap;
+  }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px;
+    background: var(--surface-2); border: 1px solid var(--line);
+    border-radius: 999px;
+    font: 11px ui-monospace, Menlo, monospace; color: var(--text-dim);
+  }
+  .chip b { color: var(--accent); font-weight: 700; }
+
+  .enc-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 12px;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .enc-row:last-child { border-bottom: none; }
+  .enc-ts { font-size: 14px; }
+  .enc-ago {
+    font: 11px ui-monospace, Menlo, monospace; color: var(--text-mut);
+    margin-top: 2px;
+  }
+  .enc-conf {
+    font: 12px ui-monospace, Menlo, monospace;
+    color: var(--hud);
+  }
+  .enc-channel {
+    font: 11px ui-monospace, Menlo, monospace;
+    color: var(--text-mut);
+    max-width: 100px; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .status {
+    padding: 10px 12px;
+    background: var(--surface-2); border: 1px solid var(--line);
+    border-radius: 10px;
+    font: 13px ui-monospace, Menlo, monospace;
+    color: var(--text-dim);
+  }
+  .status.err { color: var(--err); border-color: #4a2630; }
+</style>
+</head>
+<body>
+  <div class="hdr">
+    <a class="back" href="/glasses/enroll" id="back-link">
+      <span class="arrow">←</span> Roster
+    </a>
+    <h1 id="page-title">Person</h1>
+  </div>
+
+  <div class="section" id="profile-section">
+    <div class="section-title">Profile</div>
+    <div id="profile"><div class="status">Loading…</div></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Encounters</div>
+    <div id="encounters"><div class="status">Loading…</div></div>
+  </div>
+
+<script>
+(() => {
+  'use strict';
+
+  const $ = (id) => document.getElementById(id);
+
+  // ``/glasses/persons/p_abcd1234`` — last path segment is the id.
+  const parts = location.pathname.split('/').filter(Boolean);
+  const personId = decodeURIComponent(parts[parts.length - 1] || '');
+
+  function humanizeAgo(iso) {
+    if (!iso) return '';
+    const t = Date.parse(iso);
+    if (!t) return iso;
+    const secs = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (secs < 60) return 'just now';
+    if (secs < 3600) return (secs / 60 | 0) + 'm ago';
+    if (secs < 86400) return (secs / 3600 | 0) + 'h ago';
+    const days = secs / 86400 | 0;
+    if (days < 30) return days + 'd ago';
+    const months = days / 30 | 0;
+    if (months < 12) return months + 'mo ago';
+    return (days / 365 | 0) + 'y ago';
+  }
+
+  function fmtTs(iso) {
+    if (!iso) return '';
+    try {
+      const d = new Date(iso);
+      // Compact local format: 2026-05-27 14:32
+      const pad = (n) => String(n).padStart(2, '0');
+      return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+             ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+    } catch (_) { return iso; }
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }[c]));
+  }
+
+  async function loadProfile() {
+    const el = $('profile');
+    try {
+      const [pr, lr] = await Promise.all([
+        fetch('/face/persons/' + encodeURIComponent(personId)),
+        fetch('/face/persons'),
+      ]);
+      if (!pr.ok) {
+        el.innerHTML = '<div class="status err">Person not found.</div>';
+        return null;
+      }
+      const p = await pr.json();
+      // The /face/persons list has sample/encounter counts; fish ours out.
+      let extra = { samples: 0, encounters: 0 };
+      if (lr.ok) {
+        const all = await lr.json();
+        const me = (all || []).find(x => x.id === personId);
+        if (me) extra = me;
+      }
+      $('page-title').textContent = p.name || 'Person';
+      document.title = 'Glasses · ' + (p.name || 'Person');
+      el.innerHTML =
+        '<div class="profile-name"></div>' +
+        '<div class="profile-notes"></div>' +
+        '<div class="profile-meta">' +
+          '<span class="chip">samples · <b></b></span>' +
+          '<span class="chip">encounters · <b></b></span>' +
+          '<span class="chip">id · <b></b></span>' +
+        '</div>';
+      el.querySelector('.profile-name').textContent = p.name || '';
+      el.querySelector('.profile-notes').textContent = p.notes || '';
+      const chips = el.querySelectorAll('.chip b');
+      chips[0].textContent = String(extra.samples || 0);
+      chips[1].textContent = String(extra.encounters || 0);
+      chips[2].textContent = p.id;
+      return p;
+    } catch (e) {
+      el.innerHTML = '<div class="status err">Load error: ' + escapeHtml(e.message) + '</div>';
+      return null;
+    }
+  }
+
+  async function loadEncounters() {
+    const el = $('encounters');
+    try {
+      const r = await fetch('/face/persons/' + encodeURIComponent(personId) + '/encounters?limit=200');
+      if (!r.ok) {
+        el.innerHTML = '<div class="status err">Failed to load encounters.</div>';
+        return;
+      }
+      const rows = await r.json();
+      if (!rows.length) {
+        el.innerHTML = '<div class="status">No encounters yet.</div>';
+        return;
+      }
+      el.innerHTML = '';
+      rows.forEach(e => {
+        const row = document.createElement('div');
+        row.className = 'enc-row';
+        row.innerHTML =
+          '<div>' +
+            '<div class="enc-ts"></div>' +
+            '<div class="enc-ago"></div>' +
+          '</div>' +
+          '<div class="enc-conf"></div>' +
+          '<div class="enc-channel"></div>';
+        row.querySelector('.enc-ts').textContent = fmtTs(e.ts);
+        row.querySelector('.enc-ago').textContent = humanizeAgo(e.ts);
+        row.querySelector('.enc-conf').textContent =
+          Math.round((e.confidence || 0) * 100) + '%';
+        row.querySelector('.enc-channel').textContent =
+          e.channel ? '#' + e.channel : '';
+        el.appendChild(row);
+      });
+    } catch (e) {
+      el.innerHTML = '<div class="status err">Load error: ' + escapeHtml(e.message) + '</div>';
+    }
+  }
+
+  if (!personId) {
+    $('profile').innerHTML = '<div class="status err">Missing person id in URL.</div>';
+    $('encounters').innerHTML = '';
+  } else {
+    loadProfile();
+    loadEncounters();
+  }
+})();
+</script>
+</body>
+</html>
