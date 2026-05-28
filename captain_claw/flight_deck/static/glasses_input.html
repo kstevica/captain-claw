@@ -1,0 +1,495 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Glasses · input probe</title>
+<style>
+  /* Black HUD palette so this page reads on the Ray-Ban Display projector. */
+  :root {
+    color-scheme: dark;
+    --bg:        #000;
+    --surface:   #0e1116;
+    --line:      #1f2733;
+    --line-hi:   #2c3a4f;
+    --text:      #e8edf6;
+    --text-dim:  #8693ad;
+    --text-mut:  #5b667c;
+    --accent:    #5fe3ff;
+    --hud:       #5fff9f;
+    --warn:      #ffd877;
+    --err:       #ff7a8a;
+    --ok-bg:     rgba(95,255,159,0.10);
+    --err-bg:    rgba(255,138,138,0.10);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+                 Roboto, sans-serif;
+    font-size: 16px; line-height: 1.4;
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    min-height: 100vh;
+    padding: 12px 12px calc(env(safe-area-inset-bottom) + 60px) 12px;
+    max-width: 760px; margin: 0 auto;
+  }
+
+  /* Header */
+  .hdr { display: flex; align-items: center; gap: 10px; padding: 6px 4px 12px; }
+  .back {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 12px 6px 9px;
+    background: var(--surface);
+    border: 1px solid var(--line); border-radius: 999px;
+    color: var(--text); text-decoration: none;
+    font-size: 13px; font-weight: 600;
+  }
+  .back .arrow { color: var(--accent); }
+  h1 { font-size: 16px; margin: 0; font-weight: 700; letter-spacing: 0.01em; }
+  .chan {
+    margin-left: auto;
+    font: 11px ui-monospace, Menlo, monospace; color: var(--text-mut);
+    padding: 4px 10px; background: var(--surface);
+    border: 1px solid var(--line); border-radius: 999px;
+  }
+  .chan b { color: var(--accent); font-weight: 700; }
+
+  .section {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 12px;
+    margin-bottom: 10px;
+  }
+  .section h2 {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--text-mut);
+    margin: 0 0 8px;
+  }
+  .section .hint {
+    font-size: 12px; color: var(--text-dim);
+    margin: 0 0 8px;
+  }
+
+  /* Inputs */
+  input[type=text], textarea, .ce {
+    width: 100%; padding: 10px 12px;
+    background: #0a0f15; color: var(--text);
+    border: 1px solid var(--line-hi); border-radius: 10px;
+    font: 15px -apple-system, sans-serif;
+    outline: none;
+    min-height: 42px;
+  }
+  input[type=text]:focus, textarea:focus, .ce:focus {
+    border-color: var(--accent);
+    background: #0d141d;
+  }
+  textarea { resize: vertical; min-height: 60px; }
+  .ce[contenteditable=true]:empty::before {
+    content: attr(data-placeholder);
+    color: var(--text-mut);
+  }
+
+  .row {
+    display: flex; gap: 8px; margin-top: 8px; align-items: center;
+  }
+  button.btn {
+    flex: 1 1 auto;
+    padding: 10px 14px;
+    background: var(--accent); color: #001823;
+    border: 1px solid var(--accent); border-radius: 10px;
+    font: 600 14px -apple-system, sans-serif;
+    cursor: pointer;
+  }
+  button.btn.secondary {
+    background: transparent; color: var(--text);
+    border-color: var(--line-hi);
+  }
+  button.btn.warn { background: var(--warn); color: #2a1f00; border-color: var(--warn); }
+  button.btn.muted { background: transparent; color: var(--text-dim); border-color: var(--line); }
+
+  .status {
+    margin-top: 8px; padding: 8px 10px;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 8px;
+    font: 12px ui-monospace, Menlo, monospace;
+    color: var(--text-dim);
+    min-height: 30px;
+    white-space: pre-wrap;
+  }
+  .status.ok  { color: var(--hud); background: var(--ok-bg);  border-color: rgba(95,255,159,0.30); }
+  .status.err { color: var(--err); background: var(--err-bg); border-color: rgba(255,138,138,0.30); }
+
+  /* Tap probe */
+  .tap-target {
+    padding: 18px;
+    background: linear-gradient(135deg, rgba(95,227,255,0.10), rgba(95,255,159,0.06));
+    border: 1px dashed var(--line-hi);
+    border-radius: 12px;
+    text-align: center;
+    font-weight: 600; color: var(--accent);
+    cursor: pointer;
+  }
+  .tap-target:active { background: rgba(95,227,255,0.18); }
+
+  /* Intent links */
+  .intent-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    gap: 6px;
+  }
+  .intent-grid a {
+    display: block;
+    padding: 8px 10px;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 8px;
+    color: var(--accent); text-decoration: none;
+    font: 12px ui-monospace, Menlo, monospace;
+    text-align: center;
+  }
+  .intent-grid a:active { background: var(--line); }
+
+  /* Debug log */
+  .log {
+    background: #050709; border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font: 11px ui-monospace, Menlo, monospace;
+    color: var(--text-dim);
+    max-height: 220px; overflow-y: auto;
+    white-space: pre-wrap;
+  }
+  .log .l-evt  { color: var(--text); }
+  .log .l-ok   { color: var(--hud); }
+  .log .l-err  { color: var(--err); }
+  .log .l-warn { color: var(--warn); }
+  .log-actions {
+    display: flex; gap: 6px; margin-top: 6px;
+  }
+  .log-actions button {
+    background: transparent; color: var(--text-mut);
+    border: 1px solid var(--line); border-radius: 6px;
+    padding: 4px 8px; font-size: 11px; cursor: pointer;
+  }
+  .log-actions button:hover { border-color: var(--accent); color: var(--text); }
+</style>
+</head>
+<body>
+  <div class="hdr">
+    <a class="back" href="#" id="back-link">
+      <span class="arrow">←</span> View
+    </a>
+    <h1>Input probe</h1>
+    <div class="chan">ch · <b id="chan-id">…</b></div>
+  </div>
+
+  <!-- ── Test 1 ─────────────────────────────────────────────── -->
+  <div class="section" id="sec-1">
+    <h2>Test 1 · &lt;input&gt;</h2>
+    <p class="hint">Plain text input with autofocus. If a system keyboard appears or
+       Neural-Band handwriting writes here, this is the path.</p>
+    <input id="t1" type="text" autocomplete="off" autocapitalize="off"
+           autocorrect="off" spellcheck="false"
+           placeholder="Type / dictate / handwrite here">
+    <div class="row">
+      <button class="btn" data-send="t1">Send →</button>
+      <button class="btn secondary" data-clear="t1">Clear</button>
+    </div>
+    <div class="status" id="s1">Idle.</div>
+  </div>
+
+  <!-- ── Test 2 ─────────────────────────────────────────────── -->
+  <div class="section" id="sec-2">
+    <h2>Test 2 · &lt;textarea&gt;</h2>
+    <p class="hint">Multi-line. Some restricted webviews show different keyboard
+       affordances for textareas than for inputs.</p>
+    <textarea id="t2" rows="2" placeholder="Multi-line input"></textarea>
+    <div class="row">
+      <button class="btn" data-send="t2">Send →</button>
+      <button class="btn secondary" data-clear="t2">Clear</button>
+    </div>
+    <div class="status" id="s2">Idle.</div>
+  </div>
+
+  <!-- ── Test 3 ─────────────────────────────────────────────── -->
+  <div class="section" id="sec-3">
+    <h2>Test 3 · contentEditable div</h2>
+    <p class="hint">Looks unlike a form element — useful if &lt;input&gt;/&lt;textarea&gt; are
+       sandboxed away from native input.</p>
+    <div class="ce" id="t3" contenteditable="true"
+         data-placeholder="Editable region"></div>
+    <div class="row">
+      <button class="btn" data-send="t3">Send →</button>
+      <button class="btn secondary" data-clear="t3">Clear</button>
+    </div>
+    <div class="status" id="s3">Idle.</div>
+  </div>
+
+  <!-- ── Test 4 ─────────────────────────────────────────────── -->
+  <div class="section" id="sec-4">
+    <h2>Test 4 · webkitSpeechRecognition</h2>
+    <p class="hint">Doesn't require getUserMedia on all platforms. Tap and speak.
+       Error code surfaces in the debug log.</p>
+    <div class="row">
+      <button class="btn warn" id="voice-btn">🎤 Start voice</button>
+      <button class="btn secondary" id="voice-stop">Stop</button>
+    </div>
+    <div class="status" id="s4">Idle.</div>
+    <div class="status" id="t4-result" style="margin-top:6px">(transcript will appear here)</div>
+    <div class="row" style="margin-top:6px">
+      <button class="btn" data-send="t4-result">Send transcript →</button>
+    </div>
+  </div>
+
+  <!-- ── Test 5: tap probe ──────────────────────────────────── -->
+  <div class="section" id="sec-5">
+    <h2>Test 5 · click probe</h2>
+    <p class="hint">Confirms that tap events even fire reliably on the Display.</p>
+    <div class="tap-target" id="tap">Tap me ← (any kind of pointer)</div>
+    <div class="status" id="s5">No taps yet.</div>
+  </div>
+
+  <!-- ── Test 6: intent / scheme links ──────────────────────── -->
+  <div class="section" id="sec-6">
+    <h2>Test 6 · scheme links</h2>
+    <p class="hint">Probes whether the webview can launch native handlers
+       (which we could later use as roundabout input paths).</p>
+    <div class="intent-grid">
+      <a href="tel:+10000000000" id="sl-tel">tel:</a>
+      <a href="sms:+10000000000?body=hi" id="sl-sms">sms:</a>
+      <a href="mailto:hi@example.com" id="sl-mailto">mailto:</a>
+      <a href="intent://test#Intent;scheme=https;package=com.android.chrome;end" id="sl-intent">intent://</a>
+    </div>
+    <div class="status" id="s6">Tap any link and tell me if anything opened.</div>
+  </div>
+
+  <!-- ── Debug log ──────────────────────────────────────────── -->
+  <div class="section">
+    <h2>Debug log</h2>
+    <p class="hint">Every event in this page is appended below. Read it on the
+       glasses without dev tools.</p>
+    <div class="log" id="log"></div>
+    <div class="log-actions">
+      <button id="log-copy" type="button">Copy</button>
+      <button id="log-send" type="button">Send to channel</button>
+      <button id="log-clear" type="button">Clear</button>
+    </div>
+  </div>
+
+<script>
+(() => {
+  'use strict';
+
+  // ── Channel + back link ──────────────────────────────────────────
+  const params = new URLSearchParams(location.search);
+  const channel = (params.get('c') || '').trim();
+  document.getElementById('chan-id').textContent = channel || '(none)';
+  document.getElementById('back-link').href =
+    '/glasses/view?c=' + encodeURIComponent(channel);
+
+  // ── Debug log ────────────────────────────────────────────────────
+  const logEl = document.getElementById('log');
+  function ts() {
+    const d = new Date();
+    return d.toLocaleTimeString() + '.' +
+           String(d.getMilliseconds()).padStart(3, '0');
+  }
+  function log(kind, msg) {
+    const line = document.createElement('div');
+    line.className = 'l-' + (kind || 'evt');
+    line.textContent = ts() + '  ' + msg;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // Capture early — page-load capability snapshot.
+  log('evt', 'page loaded · ua=' + (navigator.userAgent || 'unknown'));
+  log('evt', 'has speechRecognition=' +
+    !!(window.SpeechRecognition || window.webkitSpeechRecognition));
+  log('evt', 'has navigator.mediaDevices=' + !!navigator.mediaDevices);
+  log('evt', 'has clipboard=' + !!navigator.clipboard);
+
+  document.getElementById('log-clear').addEventListener('click', () => {
+    logEl.innerHTML = '';
+    log('evt', 'log cleared');
+  });
+  document.getElementById('log-copy').addEventListener('click', async () => {
+    const txt = Array.from(logEl.children).map(n => n.textContent).join('\n');
+    try {
+      await navigator.clipboard.writeText(txt);
+      log('ok', 'copied ' + txt.length + ' chars to clipboard');
+    } catch (e) {
+      log('err', 'clipboard failed: ' + (e && e.message ? e.message : e));
+    }
+  });
+  document.getElementById('log-send').addEventListener('click', async () => {
+    const txt = Array.from(logEl.children).map(n => n.textContent).join('\n');
+    await sendToChannel('```\n' + txt + '\n```', 'log');
+  });
+
+  // ── Send helper ──────────────────────────────────────────────────
+  async function sendToChannel(text, source) {
+    if (!channel) {
+      log('err', 'no channel — open page with ?c=<id>');
+      return false;
+    }
+    if (!text || !text.trim()) {
+      log('warn', source + ' · empty text, not sending');
+      return false;
+    }
+    log('evt', source + ' · POST /glasses/send (' + text.length + ' chars)');
+    try {
+      const r = await fetch('/glasses/send', {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel, text }),
+      });
+      if (!r.ok) {
+        const detail = await r.text().catch(() => '');
+        log('err', source + ' · send failed ' + r.status + ' ' + detail);
+        return false;
+      }
+      log('ok', source + ' · sent');
+      return true;
+    } catch (e) {
+      log('err', source + ' · network error: ' + (e && e.message ? e.message : e));
+      return false;
+    }
+  }
+
+  function setStatus(id, msg, kind) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.className = 'status' + (kind ? ' ' + kind : '');
+    el.textContent = msg;
+  }
+
+  // ── Per-input event instrumentation ──────────────────────────────
+  // We wire focus/blur/keydown/input/change on each test field so the log
+  // tells us exactly what the webview surfaces (focus events especially —
+  // a tap that doesn't produce a focus event = sandbox blocking).
+  ['t1', 't2', 't3'].forEach(id => {
+    const el = document.getElementById(id);
+    el.addEventListener('focus', () => log('evt', id + ' · focus'));
+    el.addEventListener('blur',  () => log('evt', id + ' · blur'));
+    el.addEventListener('keydown', (e) =>
+      log('evt', id + ' · keydown key=' + JSON.stringify(e.key) +
+                 ' code=' + JSON.stringify(e.code)));
+    el.addEventListener('input', (e) => {
+      const val = id === 't3' ? el.textContent : el.value;
+      log('evt', id + ' · input (' + (val || '').length + ' chars)');
+    });
+    el.addEventListener('compositionstart',  () => log('evt', id + ' · compositionstart'));
+    el.addEventListener('compositionupdate', (e) => log('evt', id + ' · compositionupdate "' + e.data + '"'));
+    el.addEventListener('compositionend',    (e) => log('evt', id + ' · compositionend "' + e.data + '"'));
+  });
+
+  // ── Send / clear buttons ─────────────────────────────────────────
+  document.querySelectorAll('[data-send]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.getAttribute('data-send');
+      const el = document.getElementById(id);
+      const val = (id === 't3') ? el.textContent : el.value;
+      const statusId = id === 't4-result' ? 's4' : 's' + id.slice(1, 2);
+      setStatus(statusId, 'Sending…');
+      const ok = await sendToChannel((val || '').trim(), id);
+      setStatus(statusId, ok ? 'Sent.' : 'Send failed (see log).', ok ? 'ok' : 'err');
+    });
+  });
+  document.querySelectorAll('[data-clear]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.getAttribute('data-clear');
+      const el = document.getElementById(id);
+      if (id === 't3') el.textContent = '';
+      else el.value = '';
+      log('evt', id + ' · cleared');
+    });
+  });
+
+  // ── webkitSpeechRecognition ──────────────────────────────────────
+  const Recog = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const t4Result = document.getElementById('t4-result');
+  let recog = null;
+
+  document.getElementById('voice-btn').addEventListener('click', () => {
+    if (!Recog) {
+      setStatus('s4', 'SpeechRecognition API not present.', 'err');
+      log('err', 'voice · no SpeechRecognition constructor');
+      return;
+    }
+    try {
+      recog = new Recog();
+      recog.continuous = false;
+      recog.interimResults = true;
+      recog.lang = navigator.language || 'en-US';
+      recog.onstart   = ()  => { setStatus('s4', 'Listening…');             log('evt', 'voice · onstart'); };
+      recog.onaudiostart = () =>                                            log('evt', 'voice · onaudiostart');
+      recog.onsoundstart = () =>                                            log('evt', 'voice · onsoundstart');
+      recog.onspeechstart = () =>                                           log('evt', 'voice · onspeechstart');
+      recog.onspeechend = () =>                                             log('evt', 'voice · onspeechend');
+      recog.onend     = ()  => {                                            log('evt', 'voice · onend'); };
+      recog.onerror   = (e) => {
+        setStatus('s4', 'Error: ' + e.error, 'err');
+        log('err', 'voice · onerror ' + e.error +
+            (e.message ? ' (' + e.message + ')' : ''));
+      };
+      recog.onresult  = (e) => {
+        let txt = '';
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          txt += e.results[i][0].transcript;
+        }
+        t4Result.textContent = txt;
+        log('ok', 'voice · onresult "' + txt + '"' +
+            ' (final=' + e.results[e.results.length - 1].isFinal + ')');
+      };
+      recog.start();
+      log('evt', 'voice · start() called, lang=' + recog.lang);
+    } catch (e) {
+      setStatus('s4', 'start() threw: ' + e.message, 'err');
+      log('err', 'voice · start threw ' + e.message);
+    }
+  });
+  document.getElementById('voice-stop').addEventListener('click', () => {
+    if (recog) {
+      try { recog.stop(); log('evt', 'voice · stop()'); }
+      catch (e) { log('err', 'voice · stop threw ' + e.message); }
+    } else {
+      log('warn', 'voice · stop with no active recogniser');
+    }
+  });
+
+  // ── Tap probe ────────────────────────────────────────────────────
+  let tapCount = 0;
+  const tap = document.getElementById('tap');
+  ['click', 'pointerdown', 'touchstart'].forEach(evt => {
+    tap.addEventListener(evt, (e) => {
+      tapCount++;
+      setStatus('s5', evt + ' fired (#' + tapCount + ')', 'ok');
+      log('ok', 'tap · ' + evt + ' x=' + (e.clientX|0) + ' y=' + (e.clientY|0));
+    }, { passive: true });
+  });
+
+  // ── Intent / scheme links ────────────────────────────────────────
+  ['sl-tel', 'sl-sms', 'sl-mailto', 'sl-intent'].forEach(id => {
+    const a = document.getElementById(id);
+    if (!a) return;
+    a.addEventListener('click', () => log('evt', 'scheme · clicked ' + a.id + ' → ' + a.href));
+  });
+
+  // ── Focus the first input proactively. If focus IS allowed but only
+  // ── on user gesture, this will silently fail and the field just stays
+  // ── unfocused — which is itself a useful signal in the log.
+  setTimeout(() => {
+    const t1 = document.getElementById('t1');
+    try { t1.focus(); log('evt', 't1 · programmatic focus() attempted'); }
+    catch (e) { log('warn', 't1 · focus threw ' + e.message); }
+    log('evt', 'document.activeElement after focus = ' +
+        (document.activeElement ? document.activeElement.id || document.activeElement.tagName : 'null'));
+  }, 200);
+})();
+</script>
+</body>
+</html>

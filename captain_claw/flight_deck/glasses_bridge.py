@@ -27,6 +27,7 @@ import json
 import os
 import secrets
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -99,6 +100,11 @@ class _ChannelState:
     # message sent to the currently bound agent. Reset on every rebind so a
     # freshly-picked agent gets the context too.
     context_sent: bool = False
+    # External (non-WebSocket) subscribers — each is an async callable that
+    # gets every broadcast payload. Used by ``messenger_bridge`` to forward
+    # agent replies back out to a Messenger PSID. Failures are isolated:
+    # one raising callback never stops the WS broadcast.
+    callback_subscribers: list[Callable[[dict], Awaitable[None]]] = field(default_factory=list)
 
 
 _channels: dict[str, _ChannelState] = {}
@@ -149,6 +155,17 @@ async def _broadcast(ch: _ChannelState, payload: dict) -> None:
             stale.append(ws)
     for ws in stale:
         ch.subscribers.discard(ws)
+    # External (non-WS) subscribers — e.g. messenger_bridge forwarding agent
+    # replies to a Messenger PSID. Each callback runs in isolation; one
+    # raising never affects the others or the WS broadcast above.
+    for cb in list(ch.callback_subscribers):
+        try:
+            await cb(payload)
+        except Exception:
+            # Silently ignore — these are best-effort cross-platform fan-out.
+            # A real diagnostic would noisily log, but the channel bus is
+            # deliberately quiet (the glasses can't show logs anyway).
+            pass
 
 
 # ── Outbound agent-WS pump ────────────────────────────────────────────
@@ -282,6 +299,24 @@ async def glasses_view_page(request: Request, c: str = "") -> HTMLResponse:
     # returns the same token means the HTML was cached on device.
     token = secrets.token_hex(3).upper()
     html = html.replace("{{SSR_TOKEN}}", token).replace("{{SSR_TS}}", _now_iso())
+    return HTMLResponse(content=html, headers=_NO_CACHE)
+
+
+@router.get("/glasses/input", response_class=HTMLResponse)
+async def glasses_input_page(request: Request, c: str = "") -> HTMLResponse:
+    """Experimental input page rendered inside the Ray-Ban Display webview.
+
+    Public docs (May 2026) say third-party webviews on the Display can't
+    receive mic, camera, or system-level dictation — Neural-Band handwriting
+    and "Hey Meta" voice both route to Meta-owned destinations. This page
+    probes that empirically: three different input mechanisms side by side,
+    a Web-Speech-API button, and an on-screen event log so failures are
+    actionable without dev tools.
+    """
+    if not c:
+        raise HTTPException(status_code=400, detail="missing channel ?c=")
+    path = _STATIC_DIR / "glasses_input.html"
+    html = path.read_text(encoding="utf-8")
     return HTMLResponse(content=html, headers=_NO_CACHE)
 
 
@@ -457,19 +492,36 @@ async def glasses_send(request: Request) -> JSONResponse:
     _check_token(request)
     body = await request.json()
     channel = str(body.get("channel", "")).strip()
-    host = str(body.get("host", "")).strip() or "localhost"
+    host = str(body.get("host", "")).strip()
     try:
         port = int(body.get("port", 0))
     except Exception:
         port = 0
     text = str(body.get("text", "")).strip()
     image_path = str(body.get("image_path", "")).strip()
-    if not channel or not port:
-        raise HTTPException(status_code=400, detail="channel, port required")
+    if not channel:
+        raise HTTPException(status_code=400, detail="channel required")
     if not text and not image_path:
         raise HTTPException(status_code=400, detail="text or image_path required")
 
     ch = await _get_or_create_channel(channel)
+    # Fall back to the channel's existing agent binding when host/port aren't
+    # supplied. Lets ``glasses_input.html`` (and any other minimal client)
+    # POST with just {channel, text} provided the channel was already bound
+    # via /glasses/send or messenger_bridge. If no binding exists either,
+    # we error with a clear diagnostic instead of silently defaulting.
+    if not port:
+        if ch.bound_port:
+            host = ch.bound_host or "localhost"
+            port = ch.bound_port
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="port required (no existing agent binding for this channel — "
+                       "send a message from the bridge or messenger first)",
+            )
+    if not host:
+        host = "localhost"
     await _ensure_agent_binding(ch, host, port)
 
     # Echo the user's message onto the bus immediately — mobile and glasses

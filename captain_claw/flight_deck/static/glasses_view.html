@@ -295,6 +295,7 @@
   <div class="hud-right">
     <button class="tts-btn" id="tts-toggle" type="button" title="toggle voice">🔊</button>
     <button class="tts-btn" id="tts-mode" type="button" title="stream vs one-shot">📡</button>
+    <a class="tts-link" id="input-probe" href="#" title="input probe">✎</a>
     <a class="tts-link" id="tts-settings" href="#" title="language &amp; voice settings">⚙</a>
     <select class="tts-lang" id="tts-lang" title="voice language" aria-label="voice language"></select>
     <select class="tts-lang" id="tts-voice" title="voice" aria-label="voice"></select>
@@ -330,6 +331,20 @@
     if (t) sp.set('t', t);
     const qstr = sp.toString();
     link.href = '/glasses/settings' + (qstr ? '?' + qstr : '');
+  })();
+
+  // Input-probe link — experimental page testing whether the Display webview
+  // accepts text input (focus, system keyboard, dictation, handwriting…).
+  // Preserves channel so the probe can post back to /glasses/send without
+  // needing its own agent picker.
+  (() => {
+    const link = document.getElementById('input-probe');
+    if (!link) return;
+    const sp = new URLSearchParams();
+    if (channel) sp.set('c', channel);
+    if (t) sp.set('t', t);
+    const qstr = sp.toString();
+    link.href = '/glasses/input' + (qstr ? '?' + qstr : '');
   })();
 
   const stack = document.getElementById('stack');
@@ -399,10 +414,23 @@
   function renderStack() {
     stack.innerHTML = '';
     const view = content.slice(-MAX_CONTENT);
+    // Find the highest index of a user message in the visible slice so we
+    // can keep it readable even after the agent has replied. Without this,
+    // a user message at index N-2 drops to opacity:0.55 the moment the
+    // agent reply lands at N-1 — on the Ray-Ban Display projector that
+    // makes the (already-dark) user-bg essentially invisible. UX: a user
+    // always wants to see what they just typed; older user messages can
+    // still fade normally, only the most recent one gets the lift.
+    let lastUserIdx = -1;
+    for (let j = view.length - 1; j >= 0; j--) {
+      if (view[j] && view[j].type === 'user') { lastUserIdx = j; break; }
+    }
     view.forEach((m, i) => {
       const div = document.createElement('div');
       const cls = m.type === 'user' ? 'user' : (m.type === 'error' ? 'error' : 'agent');
-      div.className = 'msg ' + cls + (i === view.length - 1 ? ' newest' : '');
+      const isNewest = i === view.length - 1;
+      const isLastUser = i === lastUserIdx;
+      div.className = 'msg ' + cls + (isNewest || isLastUser ? ' newest' : '');
 
       // Header: role badge + timestamp on a single row.
       const head = document.createElement('div');
