@@ -109,17 +109,22 @@ def _default_channel() -> str:
     return _env("WHATSAPP_DEFAULT_CHANNEL") or "whatsapp"
 
 
-def _default_agent() -> tuple[str, int]:
+def _default_agent() -> tuple[str, int, str]:
     """Resolve the target agent fresh on every call.
 
     Prefers ``WHATSAPP_DEFAULT_AGENT_SLUG`` (looked up in Flight Deck's
     process registry — survives FD restarts that reassign web ports).
     Falls back to ``WHATSAPP_DEFAULT_AGENT_PORT`` for legacy / out-of-FD
     setups, then to "first alive agent" for single-agent boxes.
+
+    Returns ``(host, port, auth)``. ``auth`` is the env-supplied override
+    (``WHATSAPP_DEFAULT_AGENT_AUTH``); empty string when not set, in which
+    case the bridge falls back to FD's registry-based lookup.
     """
     return resolve_agent_target(
         slug_env="WHATSAPP_DEFAULT_AGENT_SLUG",
         port_env="WHATSAPP_DEFAULT_AGENT_PORT",
+        auth_env="WHATSAPP_DEFAULT_AGENT_AUTH",
         host_env="WHATSAPP_DEFAULT_AGENT_HOST",
     )
 
@@ -243,7 +248,7 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
 
     # 2. Bind agent. Same fixed-target rule as messenger_bridge: env-var
     #    picks a single agent per platform; WhatsApp users don't pick.
-    agent_host, agent_port = _default_agent()
+    agent_host, agent_port, agent_auth = _default_agent()
     if not agent_port:
         await _send_whatsapp_text(
             waid,
@@ -252,7 +257,7 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
             "one Flight Deck agent is running.",
         )
         return
-    await _ensure_agent_binding(ch, agent_host, agent_port)
+    await _ensure_agent_binding(ch, agent_host, agent_port, agent_auth)
 
     # 3. Photo? Two-step media fetch, then face recognition + agent upload.
     image_path: str | None = None

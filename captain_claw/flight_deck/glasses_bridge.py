@@ -88,6 +88,12 @@ class _ChannelState:
     # the same channel reuse the same outbound link unless the target changes.
     bound_host: str | None = None
     bound_port: int | None = None
+    # Optional explicit auth override. When set (non-empty), ``_agent_pump``
+    # uses this instead of calling ``_resolve_agent_auth(port)`` — lets a
+    # bridge supply an auth token from its own env var when the agent
+    # isn't registered in FD's process/Docker registry (e.g. agents started
+    # manually with a known ``auth_token`` in their config.yaml).
+    bound_auth: str | None = None
     agent_ws_task: asyncio.Task | None = None
     agent_ws: Any | None = None  # websockets.WebSocketClientProtocol
     # Last N messages for backfill when a new subscriber joins (e.g. glasses
@@ -180,12 +186,18 @@ async def _agent_pump(ch: _ChannelState, host: str, port: int) -> None:
     """
     import websockets
 
-    # Resolve auth token via the same helper Flight Deck uses everywhere.
-    try:
-        from captain_claw.flight_deck.server import _resolve_agent_auth
-        auth = _resolve_agent_auth(port)
-    except Exception:
-        auth = ""
+    # Explicit override (set via bridge env vars) wins. Falls back to the
+    # registry-based lookup FD uses everywhere else. The override exists
+    # because not every agent is in FD's process/Docker registry — agents
+    # started manually with a known auth_token in their config.yaml need
+    # a way to plumb that through without a registry roundtrip.
+    auth = (ch.bound_auth or "").strip()
+    if not auth:
+        try:
+            from captain_claw.flight_deck.server import _resolve_agent_auth
+            auth = _resolve_agent_auth(port)
+        except Exception:
+            auth = ""
     params = f"?token={auth}" if auth else ""
     agent_url = f"ws://{host}:{port}/ws{params}"
 
@@ -243,13 +255,34 @@ async def _agent_pump(ch: _ChannelState, host: str, port: int) -> None:
         ch.agent_ws = None
 
 
-async def _ensure_agent_binding(ch: _ChannelState, host: str, port: int) -> None:
+async def _ensure_agent_binding(
+    ch: _ChannelState,
+    host: str,
+    port: int,
+    auth: str | None = None,
+) -> None:
     """Bind the channel to (host, port). Spawns the pump task if needed.
 
+    Parameters
+    ----------
+    auth
+        Optional explicit auth token. When given (non-empty), the pump
+        will use this verbatim instead of calling
+        ``_resolve_agent_auth(port)``. Lets bridges supply a token from
+        an env var when the agent isn't in FD's registry.
+
     If the channel was already bound to a different target, cancel the old
-    pump first.
+    pump first. A change in ``auth`` alone also rebinds, since the existing
+    websocket would still be using the stale token.
     """
-    if ch.bound_host == host and ch.bound_port == port and ch.agent_ws_task and not ch.agent_ws_task.done():
+    same_target = (
+        ch.bound_host == host
+        and ch.bound_port == port
+        and (ch.bound_auth or None) == (auth or None)
+        and ch.agent_ws_task
+        and not ch.agent_ws_task.done()
+    )
+    if same_target:
         return  # already wired up
 
     # Tear down any prior binding.
@@ -262,6 +295,7 @@ async def _ensure_agent_binding(ch: _ChannelState, host: str, port: int) -> None
 
     ch.bound_host = host
     ch.bound_port = port
+    ch.bound_auth = (auth or "").strip() or None
     # Fresh agent → it hasn't seen our glasses context yet.
     ch.context_sent = False
     ch.agent_ws_task = asyncio.create_task(_agent_pump(ch, host, port))

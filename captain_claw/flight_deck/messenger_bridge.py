@@ -96,17 +96,22 @@ def _default_channel() -> str:
     return _env("MESSENGER_DEFAULT_CHANNEL") or "messenger"
 
 
-def _default_agent() -> tuple[str, int]:
+def _default_agent() -> tuple[str, int, str]:
     """Resolve the target agent fresh on every call.
 
     Prefers ``MESSENGER_DEFAULT_AGENT_SLUG`` (looked up in Flight Deck's
     process registry — survives FD restarts that reassign web ports).
     Falls back to ``MESSENGER_DEFAULT_AGENT_PORT`` for legacy / out-of-FD
     setups, then to "first alive agent" for single-agent boxes.
+
+    Returns ``(host, port, auth)``. ``auth`` is the env-supplied override
+    (``MESSENGER_DEFAULT_AGENT_AUTH``); empty string when not set, in which
+    case the bridge falls back to FD's registry-based lookup.
     """
     return resolve_agent_target(
         slug_env="MESSENGER_DEFAULT_AGENT_SLUG",
         port_env="MESSENGER_DEFAULT_AGENT_PORT",
+        auth_env="MESSENGER_DEFAULT_AGENT_AUTH",
         host_env="MESSENGER_DEFAULT_AGENT_HOST",
     )
 
@@ -224,13 +229,16 @@ async def _handle_message(psid: str, message: dict[str, Any]) -> None:
     _CHANNEL_PSIDS.setdefault(channel, set()).add(psid)
 
     # 2. Bind agent (default for this PSID — Messenger user doesn't pick).
-    agent_host, agent_port = _default_agent()
+    agent_host, agent_port, agent_auth = _default_agent()
     if not agent_port:
         await _send_messenger_text(
-            psid, "Bridge offline: MESSENGER_DEFAULT_AGENT_PORT not configured."
+            psid,
+            "Bridge offline: no agent available. Set MESSENGER_DEFAULT_AGENT_SLUG "
+            "(preferred) or MESSENGER_DEFAULT_AGENT_PORT, or make sure at least "
+            "one Flight Deck agent is running.",
         )
         return
-    await _ensure_agent_binding(ch, agent_host, agent_port)
+    await _ensure_agent_binding(ch, agent_host, agent_port, agent_auth)
 
     # 3. Handle photo attachments: face recognition first (so the card lands
     #    on the channel before the agent reply), then forward to the agent.

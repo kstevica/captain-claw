@@ -170,9 +170,10 @@ def resolve_agent_target(
     *,
     slug_env: str,
     port_env: str,
+    auth_env: str = "",
     host_env: str = "",
-) -> tuple[str, int]:
-    """Resolve a (host, port) for the bridge's outbound agent connection.
+) -> tuple[str, int, str]:
+    """Resolve a (host, port, auth) for the bridge's outbound agent connection.
 
     Flight Deck reassigns web ports on every agent spawn — a fixed port
     in the bridge's env breaks the moment FD restarts the agent. Binding
@@ -194,14 +195,24 @@ def resolve_agent_target(
        ``web_port``. Single-agent users get zero-config; multi-agent
        users should set the slug env var.
 
-    Returns ``(host, port)``. ``port == 0`` means "no agent available"
-    — caller should bail and tell the user.
+    Returns ``(host, port, auth)``. ``port == 0`` means "no agent available"
+    — caller should bail and tell the user. ``auth`` is the env-supplied
+    override (empty string if ``auth_env`` not set or unset); when empty,
+    downstream falls back to ``_resolve_agent_auth(port)`` against FD's
+    process/Docker registry.
+
+    The auth override exists because not every agent is in FD's registry:
+    agents started manually have their ``auth_token`` only in their own
+    ``config.yaml``. Letting the user paste it into ``.env`` is simpler
+    than reading the agent's config file from FD's side.
 
     Called per inbound message, not cached. The registry lookup is a
     JSON read off disk — sub-millisecond and fresh every time, so port
     floats between agent restarts are picked up automatically.
     """
     host_default = (os.environ.get(host_env, "").strip() or "localhost") if host_env else "localhost"
+    # Auth override (empty when not configured — caller treats as "use FD lookup").
+    auth_override = os.environ.get(auth_env, "").strip() if auth_env else ""
 
     # 1. Legacy fixed port wins if both are set.
     raw_port = os.environ.get(port_env, "").strip()
@@ -211,7 +222,7 @@ def resolve_agent_target(
         except ValueError:
             port = 0
         if port > 0:
-            return host_default, port
+            return host_default, port, auth_override
 
     # 2/3. Need FD's process registry. Lazy import so this module stays
     # importable even when server.py isn't (e.g. in isolated tests).
@@ -221,12 +232,12 @@ def resolve_agent_target(
             _process_is_alive,
         )
     except Exception:
-        return "localhost", 0
+        return "localhost", 0, auth_override
 
     try:
         registry = _load_process_registry()
     except Exception:
-        return "localhost", 0
+        return "localhost", 0, auth_override
 
     slug = os.environ.get(slug_env, "").strip()
     if slug:
@@ -234,12 +245,12 @@ def resolve_agent_target(
         # routing to a different agent on misconfig is worse than failing.
         entry = registry.get(slug)
         if not entry or not _process_is_alive(slug):
-            return "localhost", 0
+            return "localhost", 0, auth_override
         try:
             port = int(entry.get("web_port", 0) or 0)
         except (TypeError, ValueError):
             port = 0
-        return "localhost", port
+        return "localhost", port, auth_override
 
     # 3. Auto-pick first running agent with a web port. Iteration order
     # is dict-insertion order (Python 3.7+) — FD writes the registry
@@ -253,6 +264,6 @@ def resolve_agent_target(
         except (TypeError, ValueError):
             continue
         if port > 0:
-            return "localhost", port
+            return "localhost", port, auth_override
 
-    return "localhost", 0
+    return "localhost", 0, auth_override
