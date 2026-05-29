@@ -20,6 +20,7 @@ import {
   FileText,
   FolderKanban,
   LayoutDashboard,
+  AlarmClock,
 } from 'lucide-react'
 import { useEffect } from 'react'
 import { useAppRuntime } from '../../app-runtime/store'
@@ -47,6 +48,7 @@ const navItems: { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?:
   { id: 'skills', icon: Sparkles, label: 'Skills' },
   { id: 'games', icon: Gamepad2, label: 'Games' },
   { id: 'gpu-cloud', icon: Cloud, label: 'GPU Cloud' },
+  { id: 'scheduler', icon: AlarmClock, label: 'Scheduler' },
   { id: 'operations', icon: BarChart3, label: 'Stats' },
   { id: 'connections', icon: Plug, label: 'Connections' },
   { id: 'code-app', icon: LayoutDashboard, label: 'Code Apps' },

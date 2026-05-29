@@ -126,6 +126,24 @@ async def _get_or_create_channel(channel_id: str) -> _ChannelState:
         return ch
 
 
+async def _remove_channel(channel_id: str) -> None:
+    """Tear down a channel: cancel its agent pump and drop it from the
+    registry. Used by the FD scheduler for ephemeral per-job-run channels
+    (``sched:<job>:<run>``) so they don't accumulate in ``_channels`` after
+    a scheduled prompt has been answered."""
+    async with _channels_lock:
+        ch = _channels.pop(channel_id, None)
+    if ch is None:
+        return
+    task = ch.agent_ws_task
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
 def _check_token(request: Request) -> None:
     """Optional shared-secret gate (v1 simple)."""
     required = os.environ.get("FD_GLASSES_BRIDGE_TOKEN", "").strip()
@@ -677,6 +695,33 @@ async def glasses_send(request: Request) -> JSONResponse:
             # context — let the next attempt resend it.
             ch.context_sent = False
             raise HTTPException(status_code=502, detail=f"agent send failed: {exc}") from exc
+    return JSONResponse({"ok": True}, headers=_NO_CACHE)
+
+
+@router.post("/channel/push")
+async def channel_push(request: Request) -> JSONResponse:
+    """Push a message onto a channel without going through an agent.
+
+    Body: ``{channel, text, source?}``. Broadcasts a ``type:"agent"`` event
+    so every subscriber on the channel renders it — the glasses HUD over
+    WebSocket, plus any bridge (WhatsApp/Messenger) whose callback is bound
+    to that channel. This is the delivery primitive for proactive push from
+    external callers / the FD scheduler when they already have the final
+    text and don't need an agent turn.
+    """
+    _check_token(request)
+    body = await request.json()
+    channel = str(body.get("channel", "")).strip()
+    text = str(body.get("text", "")).strip()
+    if not channel or not text:
+        raise HTTPException(status_code=400, detail="channel and text required")
+    ch = await _get_or_create_channel(channel)
+    await _broadcast(ch, {
+        "type": "agent",
+        "text": text,
+        "source": str(body.get("source", "") or "channel_push"),
+        "ts": _now_iso(),
+    })
     return JSONResponse({"ok": True}, headers=_NO_CACHE)
 
 

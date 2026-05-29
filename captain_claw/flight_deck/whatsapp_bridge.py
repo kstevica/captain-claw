@@ -95,6 +95,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from captain_claw.flight_deck import face_index
 from captain_claw.flight_deck.glasses_bridge import (
     _GLASSES_SYSTEM_CONTEXT,
+    _check_token,
     _ensure_agent_binding,
     _get_or_create_channel,
 )
@@ -185,6 +186,40 @@ _CHANNEL_WAIDS: dict[str, set[str]] = {}
 # indicator after sending intermediate status text (e.g. "Generating
 # audio…"). Cleared implicitly on FD restart; no persistence needed.
 _WAID_LAST_MESSAGE_ID: dict[str, str] = {}
+
+# Per-WAID proactive-push mute. Maps WAID → epoch seconds until which
+# pushes are suppressed (math.inf = muted indefinitely). Set via the
+# ``/mute [duration]`` slash command, cleared via ``/unmute``. Mute ONLY
+# affects proactive pushes (the FD scheduler and the /whatsapp/push
+# endpoint) — direct replies to a message the user just sent always go
+# through, so muting never makes the bot feel broken in active use.
+_MUTED_UNTIL: dict[str, float] = {}
+
+
+def is_push_muted(waid: str) -> bool:
+    """Whether proactive pushes to this WAID are currently suppressed."""
+    import time as _time
+    until = _MUTED_UNTIL.get(waid)
+    if until is None:
+        return False
+    if until == float("inf"):
+        return True
+    if _time.time() < until:
+        return True
+    # Expired — clean up so the dict doesn't grow unbounded.
+    _MUTED_UNTIL.pop(waid, None)
+    return False
+
+
+def _parse_duration_seconds(text: str) -> float | None:
+    """Parse ``30m`` / ``2h`` / ``1d`` → seconds. None if unparseable/empty."""
+    import re as _re
+    m = _re.fullmatch(r"\s*(\d+)\s*([mhd])\s*", text or "", _re.I)
+    if not m:
+        return None
+    n = int(m.group(1))
+    unit = m.group(2).lower()
+    return n * {"m": 60, "h": 3600, "d": 86400}[unit]
 
 
 # ── Webhook verification (GET) ────────────────────────────────────────
@@ -291,6 +326,29 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
         await _send_whatsapp_text(
             waid, f"Channel: {_WAID_CHANNEL.get(waid, _channel_for_waid(waid))}"
         )
+        return
+    if text.startswith("/mute"):
+        # "/mute" → forever; "/mute 2h" → until now+2h.
+        arg = text[len("/mute"):].strip()
+        if arg:
+            secs = _parse_duration_seconds(arg)
+            if secs is None:
+                await _send_whatsapp_text(
+                    waid, "Usage: /mute  or  /mute 30m | 2h | 1d"
+                )
+                return
+            import time as _t
+            _MUTED_UNTIL[waid] = _t.time() + secs
+            await _send_whatsapp_text(waid, f"🔕 Proactive pushes muted for {arg}.")
+        else:
+            _MUTED_UNTIL[waid] = float("inf")
+            await _send_whatsapp_text(
+                waid, "🔕 Proactive pushes muted. Send /unmute to resume."
+            )
+        return
+    if text == "/unmute":
+        _MUTED_UNTIL.pop(waid, None)
+        await _send_whatsapp_text(waid, "🔔 Proactive pushes resumed.")
         return
 
     channel = _WAID_CHANNEL.setdefault(waid, _channel_for_waid(waid))
@@ -902,6 +960,51 @@ async def _send_whatsapp_reply(waid: str, text: str) -> None:
     if last_msg_id:
         asyncio.create_task(_mark_read_and_typing(last_msg_id))
     asyncio.create_task(_send_whatsapp_audio(waid, text))
+
+
+async def push_to_waid(waid: str, text: str) -> bool:
+    """Proactive push entrypoint (FD scheduler + /whatsapp/push endpoint).
+
+    Differs from ``_send_whatsapp_reply`` in two ways:
+      * Honours the per-WAID mute set by ``/mute`` — returns ``False``
+        without sending if muted.
+      * Enforces the allowlist (a proactive push to a non-allowed number
+        would be unsolicited messaging — never do it).
+
+    Returns ``True`` if the message was sent, ``False`` if suppressed
+    (muted / not allowed / empty). Uses ``_send_whatsapp_reply`` under the
+    hood, so the optional audio reply still applies.
+    """
+    waid = (waid or "").lstrip("+").strip()
+    text = (text or "").strip()
+    if not waid or not text:
+        return False
+    if waid not in _allowed_waids():
+        return False
+    if is_push_muted(waid):
+        return False
+    await _send_whatsapp_reply(waid, text)
+    return True
+
+
+@router.post("/whatsapp/push")
+async def whatsapp_push(request: Request) -> JSONResponse:
+    """Proactive push delivery primitive. Body: ``{to, text}``.
+
+    Token-gated (``FD_GLASSES_BRIDGE_TOKEN`` when set) AND allowlist-gated.
+    Respects ``/mute``. This is what external triggers / the FD scheduler
+    call when they have final text ready for a specific WhatsApp number.
+    """
+    _check_token(request)
+    body = await request.json()
+    to = str(body.get("to", "")).strip()
+    text = str(body.get("text", "")).strip()
+    if not to or not text:
+        raise HTTPException(status_code=400, detail="to and text required")
+    sent = await push_to_waid(to, text)
+    return JSONResponse(
+        {"ok": sent, "suppressed": (not sent)}, headers=_NO_CACHE
+    )
 
 
 # ── Cloud API: media download (2-step) ────────────────────────────────

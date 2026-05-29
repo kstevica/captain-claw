@@ -547,7 +547,23 @@ async def lifespan(app: FastAPI):
     _app_rt = _get_app_runtime()
     await _app_rt.start()
     app.state.app_runtime = _app_rt
+    # ── FD scheduler (proactive push: agent prompts on a timer → WhatsApp /
+    # channel). Disable with FD_SCHEDULER_DISABLED=true. ──
+    if os.environ.get("FD_SCHEDULER_DISABLED", "").lower() not in ("true", "1", "yes"):
+        from captain_claw.flight_deck.fd_scheduler import scheduler_loop as _sched_loop
+        _sched_stop = asyncio.Event()
+        app.state.scheduler_stop = _sched_stop
+        app.state.scheduler_task = asyncio.create_task(_sched_loop(_sched_stop))
+        print("Flight Deck: scheduler started")
     yield
+    # Stop the scheduler loop first so it doesn't fire mid-shutdown.
+    if hasattr(app.state, "scheduler_stop"):
+        app.state.scheduler_stop.set()
+        if hasattr(app.state, "scheduler_task"):
+            try:
+                await asyncio.wait_for(app.state.scheduler_task, timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                pass
     # Shutdown: stop all managed process agents
     print("Flight Deck: stopping managed process agents...")
     _stop_all_processes()
@@ -617,6 +633,7 @@ from captain_claw.flight_deck.glasses_bridge import router as glasses_router
 from captain_claw.flight_deck.face_routes import router as face_router
 from captain_claw.flight_deck.messenger_bridge import router as messenger_router
 from captain_claw.flight_deck.whatsapp_bridge import router as whatsapp_router
+from captain_claw.flight_deck.fd_scheduler import router as scheduler_router
 
 app.include_router(auth_router)
 app.include_router(settings_router)
@@ -643,6 +660,7 @@ app.include_router(glasses_router)
 app.include_router(face_router)
 app.include_router(messenger_router)
 app.include_router(whatsapp_router)
+app.include_router(scheduler_router)
 
 
 # ── Auth dependency helper ──
