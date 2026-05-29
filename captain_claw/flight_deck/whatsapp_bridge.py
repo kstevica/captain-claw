@@ -311,9 +311,10 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
         return
     await _ensure_agent_binding(ch, agent_host, agent_port, agent_auth)
 
-    # 3. Photo? Face recognition only — no agent involvement, no channel
-    #    broadcast. The card lands directly in the user's WhatsApp thread.
-    #    Returns early so the photo never falls through to the agent flow.
+    # 3. Multi-type dispatch. Images terminate here (face-only); the other
+    #    non-text types translate to text (formatted FYI for location /
+    #    contacts, transcription for voice notes) and fall through to the
+    #    shared agent send at the bottom.
     if mtype == "image":
         media_id = str((message.get("image") or {}).get("id") or "")
         if not media_id:
@@ -329,20 +330,56 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
                 channel="",  # empty → don't log an encounter under any channel
             )
         except RuntimeError:
-            # ``[faces]`` optional extra isn't installed.
             await _send_whatsapp_text(
                 waid,
                 "Face recognition isn't available on this Flight Deck "
                 "(install with: pip install captain-claw[faces]).",
             )
             return
-        # Strip markdown for plain WhatsApp; the same plain string is used
-        # for the (optional) audio reply so Soniox doesn't read out
-        # asterisks and underscores.
         from captain_claw.flight_deck.meta_webhook_bridge import strip_markdown
         plain = strip_markdown(result.card_markdown) or "Unknown face."
         await _send_whatsapp_reply(waid, plain)
-        return
+        return  # photos never reach the agent
+
+    if mtype == "location":
+        # Build the FYI text and let the standard flow forward it to the agent.
+        loc = message.get("location") or {}
+        text = _format_location_as_text(loc)
+
+    elif mtype == "contacts":
+        text = _format_contacts_as_text(message.get("contacts") or [])
+
+    elif mtype == "audio":
+        audio = message.get("audio") or {}
+        media_id = str(audio.get("id") or "")
+        if not media_id:
+            return
+        mime = str(audio.get("mime_type") or "audio/ogg")
+        # Tell the user we're working on it — voice notes can take a few
+        # seconds end-to-end (download + Soniox upload + transcribe + poll).
+        await _send_whatsapp_text(waid, "🎙 Transcribing voice note…")
+        if inbound_message_id:
+            # Re-fire the typing indicator; the status text we just sent
+            # cleared the initial one.
+            asyncio.create_task(_mark_read_and_typing(inbound_message_id))
+        try:
+            blob = await _download_media(media_id)
+        except Exception as exc:
+            await _send_whatsapp_text(waid, f"Couldn't fetch voice note: {exc}")
+            return
+        transcript = await _transcribe_soniox(blob, mime)
+        if not transcript:
+            await _send_whatsapp_text(
+                waid,
+                "Couldn't transcribe that — Soniox returned no text. "
+                "Try sending the message again, or speak more clearly.",
+            )
+            return
+        # Send the transcript back to the user clearly marked so they know
+        # this is what the agent is seeing.
+        await _send_whatsapp_text(waid, f"🎙 Transcription:\n\n\"{transcript}\"")
+        # Forward to the agent as if the user had typed it.
+        text = transcript
 
     # 4. Text only. If empty, nothing to do.
     if not text:
@@ -374,6 +411,194 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
         except Exception as exc:
             ch.context_sent = False
             await _send_whatsapp_text(waid, f"Send failed: {exc}")
+
+
+# ── Non-text inbound formatters ──────────────────────────────────────
+
+
+def _format_location_as_text(loc: dict[str, Any]) -> str:
+    """Render a WhatsApp location payload as agent-friendly text.
+
+    Schema (from Cloud API webhook):
+      ``{latitude, longitude, name?, address?}``
+
+    Prefixes the result with ``[FYI: …]`` so the agent treats it as
+    context, not as a question requiring an answer (the system prompt
+    sets the tone; the agent picks the angle).
+    """
+    lat = loc.get("latitude")
+    lng = loc.get("longitude")
+    name = str(loc.get("name") or "").strip()
+    address = str(loc.get("address") or "").strip()
+    lines: list[str] = ["[FYI: user shared a location]"]
+    if name:
+        lines.append(f"📍 {name}")
+    if address:
+        lines.append(f"Address: {address}")
+    if lat is not None and lng is not None:
+        lines.append(f"Coordinates: {lat}, {lng}")
+        lines.append(f"Map: https://www.google.com/maps?q={lat},{lng}")
+    return "\n".join(lines)
+
+
+def _format_contacts_as_text(contacts: list[dict[str, Any]]) -> str:
+    """Render a WhatsApp contacts payload as agent-friendly text.
+
+    The Cloud API delivers contacts as a list (a single share can
+    contain several vCards) with ``name``, ``phones``, ``emails`` and
+    optionally ``addresses``, ``urls``. We surface the fields a casual
+    "FYI" most likely needs and skip the rest.
+    """
+    lines: list[str] = ["[FYI: user shared a contact]"]
+    for c in contacts or []:
+        name = str((c.get("name") or {}).get("formatted_name") or "").strip()
+        if name:
+            lines.append(f"👤 {name}")
+        for phone in c.get("phones") or []:
+            num = str(phone.get("phone") or "").strip()
+            ptype = str(phone.get("type") or "").strip().lower()
+            if num:
+                lines.append(f"📞 {num}" + (f" ({ptype})" if ptype else ""))
+        for email in c.get("emails") or []:
+            addr = str(email.get("email") or "").strip()
+            etype = str(email.get("type") or "").strip().lower()
+            if addr:
+                lines.append(f"✉️ {addr}" + (f" ({etype})" if etype else ""))
+        for org in [c.get("org") or {}]:
+            company = str(org.get("company") or "").strip()
+            title = str(org.get("title") or "").strip()
+            if company or title:
+                lines.append("🏢 " + (f"{title}, {company}" if title and company else (title or company)))
+    return "\n".join(lines)
+
+
+# ── Soniox STT (async REST) ──────────────────────────────────────────
+
+
+# Soniox async transcription is a 3-step REST dance:
+#   1. POST /v1/files               — upload audio, get file_id
+#   2. POST /v1/transcriptions      — create job referencing file_id
+#   3. GET  /v1/transcriptions/{id} — poll until status=completed
+#   4. GET  /v1/transcriptions/{id}/transcript — fetch the text
+# Plus DELETEs on both file and transcription to keep the user's Soniox
+# storage clean. Source of the schema:
+#   https://github.com/soniox/soniox_examples/blob/master/speech_to_text/python/soniox_async.py
+_SONIOX_API_BASE = "https://api.soniox.com"
+_SONIOX_STT_MODEL = "stt-async-v4"
+_SONIOX_STT_POLL_MAX = 60  # 60 × 1 s = up to 60 s per WhatsApp voice note
+
+
+async def _transcribe_soniox(audio_bytes: bytes, mime_type: str = "audio/ogg") -> str:
+    """Transcribe audio bytes via Soniox async REST. Empty string on any
+    failure — caller decides how to communicate that to the user.
+
+    Language hints default to ``WHATSAPP_AUDIO_LANGUAGE`` / ``SONIOX_TTS_LANGUAGE``
+    (single language). For multi-language users, set
+    ``WHATSAPP_STT_LANGUAGES=en,es,hr`` to bias the model.
+    """
+    api_key = os.environ.get("SONIOX_API_KEY", "").strip()
+    if not api_key or not audio_bytes:
+        return ""
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    # Language hints: comma-sep override, else fall back to TTS language env.
+    raw_hints = _env("WHATSAPP_STT_LANGUAGES")
+    if raw_hints:
+        language_hints = [h.strip() for h in raw_hints.split(",") if h.strip()]
+    else:
+        lang = (
+            _env("WHATSAPP_AUDIO_LANGUAGE")
+            or os.environ.get("SONIOX_TTS_LANGUAGE", "").strip()
+            or "en"
+        )
+        language_hints = [lang]
+
+    file_id = ""
+    transcription_id = ""
+    transcript_text = ""
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            # 1. Upload file
+            try:
+                up = await client.post(
+                    f"{_SONIOX_API_BASE}/v1/files",
+                    headers=headers,
+                    files={"file": ("audio", audio_bytes, mime_type or "audio/ogg")},
+                )
+                up.raise_for_status()
+                file_id = str(up.json().get("id") or "")
+                if not file_id:
+                    return ""
+            except Exception:
+                return ""
+
+            # 2. Create transcription
+            try:
+                cr = await client.post(
+                    f"{_SONIOX_API_BASE}/v1/transcriptions",
+                    headers={**headers, "Content-Type": "application/json"},
+                    json={
+                        "model": _SONIOX_STT_MODEL,
+                        "file_id": file_id,
+                        "language_hints": language_hints,
+                        "enable_language_identification": True,
+                    },
+                )
+                cr.raise_for_status()
+                transcription_id = str(cr.json().get("id") or "")
+                if not transcription_id:
+                    return ""
+            except Exception:
+                return ""
+
+            # 3. Poll for completion (Soniox example uses 1 s interval)
+            for _ in range(_SONIOX_STT_POLL_MAX):
+                try:
+                    p = await client.get(
+                        f"{_SONIOX_API_BASE}/v1/transcriptions/{transcription_id}",
+                        headers=headers,
+                    )
+                    p.raise_for_status()
+                    status = str(p.json().get("status") or "")
+                except Exception:
+                    break
+                if status == "completed":
+                    break
+                if status == "error":
+                    break
+                await asyncio.sleep(1)
+            else:
+                # Loop exited without break → polled out without completion.
+                pass
+
+            # 4. Fetch the actual text
+            try:
+                tr = await client.get(
+                    f"{_SONIOX_API_BASE}/v1/transcriptions/{transcription_id}/transcript",
+                    headers=headers,
+                )
+                if tr.status_code == 200:
+                    transcript_text = str((tr.json() or {}).get("text") or "").strip()
+            except Exception:
+                pass
+
+            # 5. Cleanup — fire-and-forget; failures don't matter to the caller.
+            for path in (
+                f"/v1/transcriptions/{transcription_id}" if transcription_id else "",
+                f"/v1/files/{file_id}" if file_id else "",
+            ):
+                if not path:
+                    continue
+                try:
+                    await client.delete(f"{_SONIOX_API_BASE}{path}", headers=headers)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return transcript_text
 
 
 def _rebind_waid(waid: str, new_channel: str) -> None:
