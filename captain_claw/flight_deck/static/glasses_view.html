@@ -361,9 +361,12 @@
   }
   .chip.active .count { opacity: 0.85; }
 
-  /* The scrollable body of each content view. */
+  /* The scrollable body of each content view. min-height:0 lets this flex
+     item shrink below its content so overflow-y actually scrolls (the
+     classic flexbox scroll gotcha) on stricter WebKit engines too. */
   .vscroll {
-    flex: 1 1 auto; overflow-y: auto; overflow-x: hidden;
+    flex: 1 1 auto; min-height: 0;
+    overflow-y: auto; overflow-x: hidden;
     padding: 14px 14px 28px;
     -webkit-overflow-scrolling: touch;
   }
@@ -472,8 +475,13 @@
   }
   .file-md ul, .file-md ol { padding-left: 1.4em; }
   .file-frame {
-    width: 100%; border: 0; background: #fff; border-radius: 10px;
-    min-height: 70vh;
+    display: block; width: 100%; border: 0; background: #fff;
+    border-radius: 10px;
+    /* Height is set from the document's own content height (posted by the
+       injected script) so the whole file flows into the scrollable view and
+       the outer .vscroll — not the iframe — does the scrolling. The floor
+       just avoids a flash before that first message arrives. */
+    min-height: 200px;
   }
 
   /* Source badge on a chat message (which channel the user wrote from). */
@@ -1307,19 +1315,29 @@
       .replace(/\n/g, '<br>');
   }
 
-  // Injected into every .html file shown in the iframe so nothing renders
-  // below 16px on the glasses — a base default plus a post-load pass that
-  // bumps any element whose computed size is still under 16px (covers docs
-  // with explicit small px sizes that a base rule alone can't reach).
+  // Injected into every .html file shown in the iframe. Two jobs:
+  //   1. Minimum 16px text (base rule + a pass that bumps any element whose
+  //      computed size is still under 16px — covers explicit small px sizes).
+  //   2. Post the document's content height back to the parent so the iframe
+  //      can be sized to fit. Without this the iframe stays a fixed height and
+  //      only scrolls internally (unreliable on the glasses); sizing it to its
+  //      content lets the outer .vscroll do the scrolling like markdown does.
   const HTML_MIN_SIZE = 16;
   const HTML_CLAMP =
     '<style>html{-webkit-text-size-adjust:100%;text-size-adjust:100%;}' +
-    'body{font-size:' + HTML_MIN_SIZE + 'px;line-height:1.5;}</style>' +
-    '<script>(function(){function clamp(){try{var e=document.querySelectorAll("*");' +
+    'html,body{margin:0;}body{font-size:' + HTML_MIN_SIZE + 'px;line-height:1.5;}</style>' +
+    '<script>(function(){' +
+    'function clamp(){try{var e=document.querySelectorAll("*");' +
     'for(var i=0;i<e.length;i++){var s=parseFloat(getComputedStyle(e[i]).fontSize);' +
     'if(s&&s<' + HTML_MIN_SIZE + '){e[i].style.fontSize="' + HTML_MIN_SIZE + 'px";}}}catch(_){}}' +
-    'if(document.readyState!=="loading"){clamp();}else{' +
-    'document.addEventListener("DOMContentLoaded",clamp);}})();<\/script>';
+    'function postH(){try{var b=document.body,d=document.documentElement;' +
+    'var h=Math.max(d?d.scrollHeight:0,b?b.scrollHeight:0,b?b.offsetHeight:0);' +
+    'parent.postMessage({__glassesFrameHeight:h},"*");}catch(_){}}' +
+    'function run(){clamp();postH();}' +
+    'if(document.readyState!=="loading"){run();}else{document.addEventListener("DOMContentLoaded",run);}' +
+    'window.addEventListener("load",postH);window.addEventListener("resize",postH);' +
+    'setTimeout(postH,300);setTimeout(postH,1200);' +   // re-measure after late fonts/images
+    '})();<\/script>';
 
   const stack = document.getElementById('stack');
   const dsView = document.getElementById('ds-view');
@@ -1544,6 +1562,17 @@
   const filesListEl = document.getElementById('files-list');
   const filesContentEl = document.getElementById('files-content');
   let filesActive = '';
+  let filesFrame = null;   // the live .html iframe, sized from its content
+
+  // Size the .html iframe to the content height its injected script reports,
+  // so the document flows into the scrollable view (the outer .vscroll
+  // scrolls) instead of scrolling inside a fixed-height frame.
+  window.addEventListener('message', (e) => {
+    const h = e && e.data && e.data.__glassesFrameHeight;
+    if (typeof h === 'number' && h > 0 && filesFrame) {
+      filesFrame.style.height = h + 'px';
+    }
+  });
 
   async function loadFiles() {
     filesLoaded = true;
@@ -1587,17 +1616,19 @@
     const content = (data && data.content) || '';
     const ext = (f.extension || '').toLowerCase();
     filesContentEl.innerHTML = '';
+    filesFrame = null;   // drop any prior frame so stale height messages no-op
     if (ext === '.html' || ext === '.htm') {
       // Sandboxed iframe so the document renders with its own markup/styles
       // in isolation and can't reach into (or restyle) the HUD. allow-scripts
       // (without allow-same-origin) keeps it on a unique origin — it can run
-      // its own scripts, including our injected 16px-minimum clamp, but can't
-      // touch the parent page, cookies, or storage.
+      // its own scripts, including our injected clamp + height reporter, but
+      // can't touch the parent page, cookies, or storage.
       const frame = document.createElement('iframe');
       frame.className = 'file-frame';
       frame.setAttribute('sandbox', 'allow-scripts');
       frame.srcdoc = content + HTML_CLAMP;
       filesContentEl.appendChild(frame);
+      filesFrame = frame;   // its postMessage(height) drives frame.style.height
     } else {
       const div = document.createElement('div');
       div.className = 'file-md';

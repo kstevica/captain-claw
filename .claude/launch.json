@@ -4,13 +4,18 @@
     {
       "name": "website",
       "runtimeExecutable": "/bin/bash",
-      "runtimeArgs": ["/Users/kstevica/captain-claw/website/start-preview.sh"],
+      "runtimeArgs": [
+        "/Users/kstevica/captain-claw/website/start-preview.sh"
+      ],
       "port": 4321
     },
     {
       "name": "flight-deck",
       "runtimeExecutable": "/bin/bash",
-      "runtimeArgs": ["-c", "source ~/.nvm/nvm.sh && cd /Users/kstevica/Dev/captain-claw/flight-deck && npx vite --port 5173"],
+      "runtimeArgs": [
+        "-c",
+        "source ~/.nvm/nvm.sh && cd /Users/kstevica/Dev/captain-claw/flight-deck && npx vite --port 5173"
+      ],
       "port": 5173
     }
   ]
