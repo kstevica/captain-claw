@@ -361,17 +361,24 @@
   }
   .chip.active .count { opacity: 0.85; }
 
-  /* The scrollable body of each content view. min-height:0 lets this flex
-     item shrink below its content so overflow-y actually scrolls (the
-     classic flexbox scroll gotcha) on stricter WebKit engines too. */
-  .vscroll {
+  /* File viewer scroll body — mirrors the datastore .record-pager/.record-page
+     pair (the only structure that scrolls on the glasses webview). The flex
+     CONTAINER grows to fill the view; the inner .file-page is stretched to the
+     container's height (cross-axis stretch) so it has a definite height and
+     overflow-y actually scrolls. Putting overflow on a main-axis flex-grow
+     item directly (the old .vscroll) does NOT scroll on the Ray-Ban Display. */
+  .file-pager {
     flex: 1 1 auto; min-height: 0;
+    display: flex; overflow: hidden;
+  }
+  .file-page {
+    flex: 1 1 100%; min-height: 0; width: 100%; max-width: 100%;
     overflow-y: auto; overflow-x: hidden;
     padding: 14px 14px 28px;
     -webkit-overflow-scrolling: touch;
   }
-  .vscroll::-webkit-scrollbar { width: 6px; }
-  .vscroll::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+  .file-page::-webkit-scrollbar { width: 6px; }
+  .file-page::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
 
   .vnote {
     color: var(--ink-mut); font-size: 14px; text-align: center;
@@ -479,7 +486,7 @@
     border-radius: 10px;
     /* Height is set from the document's own content height (posted by the
        injected script) so the whole file flows into the scrollable view and
-       the outer .vscroll — not the iframe — does the scrolling. The floor
+       the outer .file-page — not the iframe — does the scrolling. The floor
        just avoids a flash before that first message arrives. */
     min-height: 200px;
   }
@@ -541,11 +548,18 @@
   </div>
 </div>
 
-<!-- ── Files view: .md/.html selector + scrollable content ────────────── -->
+<!-- ── Files view: .md/.html selector + scrollable content ──────────────
+     Uses the SAME pager/page encapsulation as the datastore view, because
+     that's what scrolls reliably on the Meta Ray-Ban Display webview: the
+     scroller (.file-page) gets a definite height from cross-axis stretch
+     inside the flex container, instead of relying on main-axis flex-grow on
+     the scroller itself (which the glasses WebKit doesn't make scrollable). -->
 <div class="contentview" id="files-view">
   <div class="selector" id="files-list"></div>
-  <div class="vscroll" id="files-content">
-    <div class="vnote">Loading files…</div>
+  <div class="file-pager">
+    <div class="file-page" id="files-content">
+      <div class="vnote">Loading files…</div>
+    </div>
   </div>
 </div>
 
@@ -1321,7 +1335,7 @@
   //   2. Post the document's content height back to the parent so the iframe
   //      can be sized to fit. Without this the iframe stays a fixed height and
   //      only scrolls internally (unreliable on the glasses); sizing it to its
-  //      content lets the outer .vscroll do the scrolling like markdown does.
+  //      content lets the outer .file-page do the scrolling like markdown does.
   const HTML_MIN_SIZE = 16;
   const HTML_CLAMP =
     '<style>html{-webkit-text-size-adjust:100%;text-size-adjust:100%;}' +
@@ -1565,7 +1579,7 @@
   let filesFrame = null;   // the live .html iframe, sized from its content
 
   // Size the .html iframe to the content height its injected script reports,
-  // so the document flows into the scrollable view (the outer .vscroll
+  // so the document flows into the scrollable view (the outer .file-page
   // scrolls) instead of scrolling inside a fixed-height frame.
   window.addEventListener('message', (e) => {
     const h = e && e.data && e.data.__glassesFrameHeight;
