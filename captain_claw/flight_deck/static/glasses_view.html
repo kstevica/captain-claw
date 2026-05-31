@@ -545,7 +545,7 @@
      Each record fills the screen, every field is its own card, and the user
      swipes left/right (or taps ‹ ›) to move between records. -->
 <div class="contentview" id="ds-view">
-  <div class="selector" id="ds-tables"></div>
+  <div class="selector" id="ds-tables" tabindex="0"></div>
   <div class="recordbar" id="ds-pos"></div>
   <div class="record-pager" id="ds-rows">
     <div class="vnote">Loading tables…</div>
@@ -559,7 +559,7 @@
      .record-page inside that pager — exactly like a single datastore record.
      ``#files-content`` IS the pager; openFile() builds the .record-page. -->
 <div class="contentview" id="files-view">
-  <div class="selector" id="files-list"></div>
+  <div class="selector" id="files-list" tabindex="0"></div>
   <div class="record-pager" id="files-content">
     <div class="vnote">Loading files…</div>
   </div>
@@ -1499,19 +1499,26 @@
     }
     if (!tables.length) { note(dsRowsEl, 'No tables in the datastore yet.'); return; }
     tables.forEach((tb, i) => {
-      const chip = document.createElement('button');
+      // A <div> (not <button>) so the glasses focus-walk picks it up — it
+      // only lands on tabindexed <div>s, the way the content cards work;
+      // native <button>s are skipped. role+keydown keep it act like a button.
+      const chip = document.createElement('div');
       chip.className = 'chip' + (i === 0 ? ' active' : '');
-      chip.tabIndex = 0;   // explicit tabindex so the glasses focus-walk lands
-                           // on the pill (native button focus is skipped there)
+      chip.setAttribute('role', 'button');
+      chip.setAttribute('tabindex', '0');
       chip.appendChild(document.createTextNode(tb.name));
       const cnt = document.createElement('span');
       cnt.className = 'count';
       cnt.textContent = tb.row_count;
       chip.appendChild(cnt);
-      chip.addEventListener('click', () => {
+      const select = () => {
         [...dsTablesEl.children].forEach(c => c.classList.remove('active'));
         chip.classList.add('active');
         loadRows(tb.name);
+      };
+      chip.addEventListener('click', select);
+      chip.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(); }
       });
       dsTablesEl.appendChild(chip);
     });
@@ -1621,16 +1628,23 @@
     }
     if (!files.length) { note(filesContentEl, 'No .md or .html files yet.'); return; }
     files.forEach((f, i) => {
-      const chip = document.createElement('button');
+      // A <div> (not <button>) so the glasses focus-walk picks it up — it only
+      // lands on tabindexed <div>s like the content cards; native <button>s are
+      // skipped. role+keydown keep it acting like a button (tap / Enter / Space).
+      const chip = document.createElement('div');
       chip.className = 'chip' + (i === 0 ? ' active' : '');
-      chip.tabIndex = 0;   // explicit: the glasses focus-walk only lands on
-                           // elements with a tabindex, not native buttons
+      chip.setAttribute('role', 'button');
+      chip.setAttribute('tabindex', '0');
       chip.textContent = f.filename || f.logical || '(file)';
       chip.title = f.logical || f.filename || '';
-      chip.addEventListener('click', () => {
+      const select = () => {
         [...filesListEl.children].forEach(c => c.classList.remove('active'));
         chip.classList.add('active');
         openFile(f);
+      };
+      chip.addEventListener('click', select);
+      chip.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(); }
       });
       filesListEl.appendChild(chip);
     });
