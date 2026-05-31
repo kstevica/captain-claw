@@ -376,6 +376,19 @@
     background: var(--agent-bg); border: 1px solid var(--line);
     border-radius: 12px; padding: 12px 14px; margin-bottom: 12px;
   }
+  /* Focus ring for the keyboard/NeuralBand focus walk through the file
+     viewer's focusable scroller + cards (matches the datastore's focus look).
+     Plain :focus (not :focus-visible) so gesture-driven focus always shows. */
+  .record-page:focus, .card:focus {
+    outline: 2px solid var(--hud);
+    outline-offset: -2px;
+  }
+  /* Per-block focus stops inside a markdown file (paragraphs, headings, …). */
+  .file-md > *:focus {
+    outline: 2px solid var(--hud);
+    outline-offset: 3px;
+    border-radius: 6px;
+  }
   .card-id {
     font: 700 11px/1 ui-monospace, Menlo, monospace;
     color: var(--hud); letter-spacing: 0.1em; text-transform: uppercase;
@@ -1620,16 +1633,21 @@
     filesFrame = null;   // drop any prior frame so stale height messages no-op
     // One file = one .record-page inside the pager, exactly like a datastore
     // record. The .record-page is the proven-on-glasses vertical scroller.
-    // Crucially it's given MULTIPLE .card children (header / content / footer),
-    // matching a datastore record — that's what the NeuralBand up/down keys
-    // seem to need to drive the scroller on the glasses.
+    //
+    // The glasses navigate by FOCUS (the NeuralBand down gesture moves focus to
+    // the next focusable element, and the webview scrolls focused elements into
+    // view) — plain <div>s aren't focusable, so the content never received
+    // focus and nothing scrolled. We make the scroller AND each card focusable
+    // (tabindex=0) so the down gesture can land on them and walk down the file.
     filesContentEl.innerHTML = '';
     const page = document.createElement('div');
     page.className = 'record-page';
+    page.tabIndex = 0;
 
     // Header card — the filename, above the content.
     const topCard = document.createElement('div');
     topCard.className = 'card';
+    topCard.tabIndex = 0;
     const topK = document.createElement('div');
     topK.className = 'field-k';
     topK.textContent = 'FILE';
@@ -1643,6 +1661,7 @@
     // Content card — the rendered file is encapsulated in its own .card.
     const contentCard = document.createElement('div');
     contentCard.className = 'card';
+    contentCard.tabIndex = 0;
     if (ext === '.html' || ext === '.htm') {
       // Sandboxed iframe so the document renders with its own markup/styles
       // in isolation and can't reach into (or restyle) the HUD. allow-scripts
@@ -1659,6 +1678,10 @@
       const div = document.createElement('div');
       div.className = 'file-md';
       div.innerHTML = renderMd(content);
+      // Make each top-level block (heading, paragraph, list, table, …) a focus
+      // stop so the NeuralBand down-gesture walks through long prose smoothly —
+      // the same way it steps through a datastore record's many small cards.
+      for (const child of div.children) child.tabIndex = 0;
       contentCard.appendChild(div);
     }
     page.appendChild(contentCard);
@@ -1667,6 +1690,7 @@
     // child (header/content/footer) like a multi-field datastore record.
     const bottomCard = document.createElement('div');
     bottomCard.className = 'card';
+    bottomCard.tabIndex = 0;
     const botV = document.createElement('div');
     botV.className = 'field-v empty';
     botV.style.textAlign = 'center';
