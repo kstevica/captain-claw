@@ -331,45 +331,87 @@
   }
   .contentview.show { display: flex; }
 
-  /* Horizontal selector strip — tables or files, sticky at the top. */
-  .selector {
-    flex: 0 0 auto;
-    display: flex; gap: 8px; overflow-x: auto; overflow-y: hidden;
-    padding: 8px 14px; border-bottom: 1px solid var(--line);
-    background: linear-gradient(180deg, rgba(10,20,12,0.9), rgba(0,0,0,0.6));
+  /* ── Two-step navigation: step-1 menu → step-2 content ───────────────
+     Each content view (datastore / files) holds two panes. Only one shows
+     at a time. Step 1 is a full-screen vertical list of buttons (tables or
+     files); picking one slides to step 2 (the content), which carries a
+     back button to return to the list. */
+  .pane {
+    display: none; flex-direction: column;
+    flex: 1 1 auto; min-height: 0;
+  }
+  .pane.show { display: flex; }
+
+  /* Step-1 menu: full-width buttons stacked vertically, centered labels.
+     Owns its own vertical scroll so a long table/file list stays reachable. */
+  .menu {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto;
+    display: flex; flex-direction: column; align-items: stretch;
+    gap: 12px; padding: 18px 16px 28px;
     scrollbar-width: thin;
   }
-  .selector::-webkit-scrollbar { height: 5px; }
-  .selector::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
-  .chip {
+  .menu::-webkit-scrollbar { width: 6px; }
+  .menu::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+  /* A <div role=button> (not a native <button>) so the glasses focus-walk
+     lands on it — the Meta Ray-Ban Display only steps focus onto tabindexed
+     <div>s and skips <button>s. */
+  .menu-item {
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    width: 100%; padding: 18px 16px;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--line); color: var(--ink);
+    border-radius: 14px;
+    font: 600 20px/1.25 ui-monospace, Menlo, monospace;
+    text-align: center; white-space: normal; word-break: break-word;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+    transition: background .12s, color .12s, border-color .12s;
+  }
+  .menu-item:hover { background: var(--hud-soft); border-color: rgba(95,255,159,0.35); }
+  .menu-item:focus {
+    outline: 2px solid var(--hud); outline-offset: 2px;
+    background: var(--hud-soft); border-color: var(--hud);
+  }
+  .menu-item .count {
+    opacity: 0.7; font-weight: 500; font-size: 0.8em; color: var(--ink-dim);
+  }
+
+  /* Step-2 back bar: a back button + the current table/file title. */
+  .backbar {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 12px;
+    padding: 8px 14px; border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(10,20,12,0.9), rgba(0,0,0,0.6));
+  }
+  .back-btn {
     flex: 0 0 auto;
-    background: rgba(255,255,255,0.04);
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 8px 16px;
+    background: rgba(255,255,255,0.05);
     border: 1px solid var(--line); color: var(--ink-dim);
-    border-radius: 999px; padding: 6px 14px;
-    font: 600 13px/1 ui-monospace, Menlo, monospace;
+    border-radius: 999px;
+    font: 600 14px/1 ui-monospace, Menlo, monospace;
     cursor: pointer; white-space: nowrap;
     -webkit-tap-highlight-color: transparent;
     transition: background .12s, color .12s, border-color .12s;
   }
-  .chip:hover { background: var(--hud-soft); color: var(--ink); }
-  /* Focus ring for the NeuralBand/keyboard focus-walk over the selector pills,
-     so the focused pill is visible (matches the content focus ring). */
-  .chip:focus {
-    outline: 2px solid var(--hud);
-    outline-offset: 2px;
+  .back-btn:hover { background: var(--hud-soft); color: var(--ink); }
+  .back-btn:focus {
+    outline: 2px solid var(--hud); outline-offset: 2px;
+    background: var(--hud-soft); color: var(--ink); border-color: var(--hud);
   }
-  .chip.active {
-    color: var(--bg); background: var(--hud);
-    border-color: var(--hud); box-shadow: 0 0 10px var(--hud-glow);
+  .backbar .title {
+    flex: 1 1 auto; min-width: 0;
+    font: 600 16px/1.2 ui-monospace, Menlo, monospace;
+    color: var(--hud); letter-spacing: 0.04em;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .chip .count {
-    opacity: 0.7; font-weight: 500; margin-left: 6px; font-size: 0.85em;
+  .backbar .title .count {
+    opacity: 0.7; font-weight: 500; font-size: 0.8em;
+    color: var(--ink-dim); margin-left: 6px;
   }
-  .chip.active .count { opacity: 0.85; }
 
   /* The file viewer reuses the datastore .record-pager / .record-page pair
      (see that block below) — it's the only encapsulation that both scrolls
-     and keeps the selector usable on the Meta Ray-Ban Display webview. */
+     and keeps the content usable on the Meta Ray-Ban Display webview. */
 
   .vnote {
     color: var(--ink-mut); font-size: 14px; text-align: center;
@@ -541,27 +583,49 @@
   <div class="hist" id="syshist"></div>
 </div>
 
-<!-- ── Datastore view: table selector + one record per screen ─────────────
-     Each record fills the screen, every field is its own card, and the user
-     swipes left/right (or taps ‹ ›) to move between records. -->
+<!-- ── Datastore view: two steps ──────────────────────────────────────────
+     Step 1 (#ds-pane-select): a vertical menu of table buttons.
+     Step 2 (#ds-pane-content): the chosen table's records — one per screen,
+     every field its own card, swipe left/right (or ‹ ›) between records — with
+     a back button to return to the table list. -->
 <div class="contentview" id="ds-view">
-  <div class="selector" id="ds-tables" tabindex="0"></div>
-  <div class="recordbar" id="ds-pos"></div>
-  <div class="record-pager" id="ds-rows">
-    <div class="vnote">Loading tables…</div>
+  <div class="pane show" id="ds-pane-select">
+    <div class="menu" id="ds-tables">
+      <div class="vnote">Loading tables…</div>
+    </div>
+  </div>
+  <div class="pane" id="ds-pane-content">
+    <div class="backbar">
+      <div class="back-btn" id="ds-back" role="button" tabindex="0">‹ Tables</div>
+      <div class="title" id="ds-title"></div>
+    </div>
+    <div class="recordbar" id="ds-pos"></div>
+    <div class="record-pager" id="ds-rows">
+      <div class="vnote">Pick a table.</div>
+    </div>
   </div>
 </div>
 
-<!-- ── Files view: .md/.html selector + scrollable content ──────────────
-     Structured IDENTICALLY to the datastore view (the only layout that
-     scrolls + selects reliably on the Meta Ray-Ban Display webview): a
-     .selector strip of pills, then a .record-pager. Each open file is one
-     .record-page inside that pager — exactly like a single datastore record.
-     ``#files-content`` IS the pager; openFile() builds the .record-page. -->
+<!-- ── Files view: two steps ──────────────────────────────────────────────
+     Step 1 (#files-pane-select): a vertical menu of .md/.html file buttons.
+     Step 2 (#files-pane-content): the chosen file's scrollable content — one
+     .record-page in the pager, exactly like a single datastore record — with a
+     back button to return to the file list. ``#files-content`` IS the pager;
+     openFile() builds the .record-page. -->
 <div class="contentview" id="files-view">
-  <div class="selector" id="files-list" tabindex="0"></div>
-  <div class="record-pager" id="files-content">
-    <div class="vnote">Loading files…</div>
+  <div class="pane show" id="files-pane-select">
+    <div class="menu" id="files-list">
+      <div class="vnote">Loading files…</div>
+    </div>
+  </div>
+  <div class="pane" id="files-pane-content">
+    <div class="backbar">
+      <div class="back-btn" id="files-back" role="button" tabindex="0">‹ Files</div>
+      <div class="title" id="files-title"></div>
+    </div>
+    <div class="record-pager" id="files-content">
+      <div class="vnote">Pick a file.</div>
+    </div>
   </div>
 </div>
 
@@ -1401,11 +1465,43 @@
     return body;
   }
 
-  // ── Datastore: table chips → one record per screen, swipe L/R ──────
+  // Wire a focusable <div role=button> for both tap and the glasses select
+  // gesture (which arrives as Enter/Space on the focused element).
+  function onActivate(el, fn) {
+    el.addEventListener('click', fn);
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); }
+    });
+  }
+
+  // ── Datastore: table menu (step 1) → one record per screen (step 2) ──
   const dsTablesEl = document.getElementById('ds-tables');
   const dsRowsEl = document.getElementById('ds-rows');
   const dsPosEl = document.getElementById('ds-pos');
+  const dsPaneSelect = document.getElementById('ds-pane-select');
+  const dsPaneContent = document.getElementById('ds-pane-content');
+  const dsTitleEl = document.getElementById('ds-title');
+  const dsBackEl = document.getElementById('ds-back');
   let dsActive = '';
+
+  // Step toggling. Returning to the list keeps the menu intact (no reload),
+  // so going back is instant.
+  function showDsSelect() {
+    dsPaneContent.classList.remove('show');
+    dsPaneSelect.classList.add('show');
+  }
+  function showDsContent(table, count) {
+    dsTitleEl.innerHTML = '';
+    dsTitleEl.appendChild(document.createTextNode(table));
+    if (count !== undefined && count !== null) {
+      const c = document.createElement('span');
+      c.className = 'count'; c.textContent = count;
+      dsTitleEl.appendChild(c);
+    }
+    dsPaneSelect.classList.remove('show');
+    dsPaneContent.classList.add('show');
+  }
+  onActivate(dsBackEl, showDsSelect);
   let dsCount = 0;     // record pages currently rendered
   let dsIdx = 0;       // index of the record currently in view (display)
   let dsTarget = 0;    // index the nav buttons step from (stable across clicks)
@@ -1487,42 +1583,32 @@
 
   async function loadTables() {
     dsLoaded = true;
-    note(dsRowsEl, 'Loading tables…');
-    dsTablesEl.innerHTML = '';
-    dsPosEl.innerHTML = '';
+    note(dsTablesEl, 'Loading tables…');
+    showDsSelect();
     let tables;
     try {
       tables = await getJSON('/glasses/datastore/tables?' + cq + tq) || [];
     } catch (e) {
-      note(dsRowsEl, 'Could not load datastore: ' + e.message, true);
+      note(dsTablesEl, 'Could not load datastore: ' + e.message, true);
       return;
     }
-    if (!tables.length) { note(dsRowsEl, 'No tables in the datastore yet.'); return; }
-    tables.forEach((tb, i) => {
-      // A <div> (not <button>) so the glasses focus-walk picks it up — it
-      // only lands on tabindexed <div>s, the way the content cards work;
-      // native <button>s are skipped. role+keydown keep it act like a button.
-      const chip = document.createElement('div');
-      chip.className = 'chip' + (i === 0 ? ' active' : '');
-      chip.setAttribute('role', 'button');
-      chip.setAttribute('tabindex', '0');
-      chip.appendChild(document.createTextNode(tb.name));
+    if (!tables.length) { note(dsTablesEl, 'No tables in the datastore yet.'); return; }
+    dsTablesEl.innerHTML = '';
+    tables.forEach((tb) => {
+      // A <div role=button> (not a native <button>) so the glasses focus-walk
+      // lands on it — the Display only steps focus onto tabindexed <div>s.
+      const item = document.createElement('div');
+      item.className = 'menu-item';
+      item.setAttribute('role', 'button');
+      item.setAttribute('tabindex', '0');
+      item.appendChild(document.createTextNode(tb.name));
       const cnt = document.createElement('span');
       cnt.className = 'count';
       cnt.textContent = tb.row_count;
-      chip.appendChild(cnt);
-      const select = () => {
-        [...dsTablesEl.children].forEach(c => c.classList.remove('active'));
-        chip.classList.add('active');
-        loadRows(tb.name);
-      };
-      chip.addEventListener('click', select);
-      chip.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(); }
-      });
-      dsTablesEl.appendChild(chip);
+      item.appendChild(cnt);
+      onActivate(item, () => { showDsContent(tb.name, tb.row_count); loadRows(tb.name); });
+      dsTablesEl.appendChild(item);
     });
-    loadRows(tables[0].name);
   }
 
   async function loadRows(table) {
@@ -1583,11 +1669,26 @@
     updatePos(0);
   }
 
-  // ── Files: .md / .html chips → scrollable content ──────────────────
+  // ── Files: file menu (step 1) → scrollable content (step 2) ────────
   const filesListEl = document.getElementById('files-list');
   const filesContentEl = document.getElementById('files-content');
+  const filesPaneSelect = document.getElementById('files-pane-select');
+  const filesPaneContent = document.getElementById('files-pane-content');
+  const filesTitleEl = document.getElementById('files-title');
+  const filesBackEl = document.getElementById('files-back');
   let filesActive = '';
   let filesFrame = null;   // the live .html iframe, sized from its content
+
+  function showFilesSelect() {
+    filesPaneContent.classList.remove('show');
+    filesPaneSelect.classList.add('show');
+  }
+  function showFilesContent(title) {
+    filesTitleEl.textContent = title || '';
+    filesPaneSelect.classList.remove('show');
+    filesPaneContent.classList.add('show');
+  }
+  onActivate(filesBackEl, showFilesSelect);
 
   // Size the .html iframe to the content height its injected script reports,
   // so the document flows into the scrollable view (the outer .record-page
@@ -1617,38 +1718,30 @@
 
   async function loadFiles() {
     filesLoaded = true;
-    note(filesContentEl, 'Loading files…');
-    filesListEl.innerHTML = '';
+    note(filesListEl, 'Loading files…');
+    showFilesSelect();
     let files;
     try {
       files = await getJSON('/glasses/files?' + cq + tq) || [];
     } catch (e) {
-      note(filesContentEl, 'Could not load files: ' + e.message, true);
+      note(filesListEl, 'Could not load files: ' + e.message, true);
       return;
     }
-    if (!files.length) { note(filesContentEl, 'No .md or .html files yet.'); return; }
-    files.forEach((f, i) => {
-      // A <div> (not <button>) so the glasses focus-walk picks it up — it only
-      // lands on tabindexed <div>s like the content cards; native <button>s are
-      // skipped. role+keydown keep it acting like a button (tap / Enter / Space).
-      const chip = document.createElement('div');
-      chip.className = 'chip' + (i === 0 ? ' active' : '');
-      chip.setAttribute('role', 'button');
-      chip.setAttribute('tabindex', '0');
-      chip.textContent = f.filename || f.logical || '(file)';
-      chip.title = f.logical || f.filename || '';
-      const select = () => {
-        [...filesListEl.children].forEach(c => c.classList.remove('active'));
-        chip.classList.add('active');
-        openFile(f);
-      };
-      chip.addEventListener('click', select);
-      chip.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(); }
-      });
-      filesListEl.appendChild(chip);
+    if (!files.length) { note(filesListEl, 'No .md or .html files yet.'); return; }
+    filesListEl.innerHTML = '';
+    files.forEach((f) => {
+      // A <div role=button> (not a native <button>) so the glasses focus-walk
+      // lands on it — the Display only steps focus onto tabindexed <div>s.
+      const item = document.createElement('div');
+      item.className = 'menu-item';
+      item.setAttribute('role', 'button');
+      item.setAttribute('tabindex', '0');
+      const name = f.filename || f.logical || '(file)';
+      item.textContent = name;
+      item.title = f.logical || f.filename || '';
+      onActivate(item, () => { showFilesContent(name); openFile(f); });
+      filesListEl.appendChild(item);
     });
-    openFile(files[0]);
   }
 
   async function openFile(f) {
