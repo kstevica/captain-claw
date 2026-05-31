@@ -1583,6 +1583,11 @@
       return;
     }
     if (!files.length) { note(filesContentEl, 'No .md or .html files yet.'); return; }
+    // TEST: show only the first (most recent) file so the selector has a
+    // single pill and never horizontally scrolls — matching the single-table
+    // datastore case, to check whether a horizontally-scrollable selector is
+    // what blocks NeuralBand navigation from reaching #files-list on glasses.
+    files = files.slice(0, 1);
     files.forEach((f, i) => {
       const chip = document.createElement('button');
       chip.className = 'chip' + (i === 0 ? ' active' : '');
