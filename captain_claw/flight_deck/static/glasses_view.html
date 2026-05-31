@@ -1584,6 +1584,22 @@
     }
   });
 
+  // Left/right (NeuralBand → ArrowLeft/ArrowRight) jump the open file to its
+  // top / bottom — but ONLY while focus is inside the file content, so the
+  // gesture doesn't hijack anything else (chat, datastore record paging, the
+  // file selector pills). Down/up keep doing the focus-walk through blocks.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    if (!filesContentEl.contains(document.activeElement)) return;
+    const page = filesContentEl.querySelector('.record-page');
+    if (!page) return;
+    page.scrollTo({
+      top: e.key === 'ArrowLeft' ? 0 : page.scrollHeight,
+      behavior: 'smooth',
+    });
+    e.preventDefault();
+  });
+
   async function loadFiles() {
     filesLoaded = true;
     note(filesContentEl, 'Loading files…');
@@ -1596,11 +1612,6 @@
       return;
     }
     if (!files.length) { note(filesContentEl, 'No .md or .html files yet.'); return; }
-    // TEST: show only the first (most recent) file so the selector has a
-    // single pill and never horizontally scrolls — matching the single-table
-    // datastore case, to check whether a horizontally-scrollable selector is
-    // what blocks NeuralBand navigation from reaching #files-list on glasses.
-    files = files.slice(0, 1);
     files.forEach((f, i) => {
       const chip = document.createElement('button');
       chip.className = 'chip' + (i === 0 ? ' active' : '');
