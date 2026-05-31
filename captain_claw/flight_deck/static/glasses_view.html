@@ -361,24 +361,9 @@
   }
   .chip.active .count { opacity: 0.85; }
 
-  /* File viewer scroll body — mirrors the datastore .record-pager/.record-page
-     pair (the only structure that scrolls on the glasses webview). The flex
-     CONTAINER grows to fill the view; the inner .file-page is stretched to the
-     container's height (cross-axis stretch) so it has a definite height and
-     overflow-y actually scrolls. Putting overflow on a main-axis flex-grow
-     item directly (the old .vscroll) does NOT scroll on the Ray-Ban Display. */
-  .file-pager {
-    flex: 1 1 auto; min-height: 0;
-    display: flex; overflow: hidden;
-  }
-  .file-page {
-    flex: 1 1 100%; min-height: 0; width: 100%; max-width: 100%;
-    overflow-y: auto; overflow-x: hidden;
-    padding: 14px 14px 28px;
-    -webkit-overflow-scrolling: touch;
-  }
-  .file-page::-webkit-scrollbar { width: 6px; }
-  .file-page::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+  /* The file viewer reuses the datastore .record-pager / .record-page pair
+     (see that block below) — it's the only encapsulation that both scrolls
+     and keeps the selector usable on the Meta Ray-Ban Display webview. */
 
   .vnote {
     color: var(--ink-mut); font-size: 14px; text-align: center;
@@ -486,7 +471,7 @@
     border-radius: 10px;
     /* Height is set from the document's own content height (posted by the
        injected script) so the whole file flows into the scrollable view and
-       the outer .file-page — not the iframe — does the scrolling. The floor
+       the outer .record-page — not the iframe — does the scrolling. The floor
        just avoids a flash before that first message arrives. */
     min-height: 200px;
   }
@@ -549,17 +534,15 @@
 </div>
 
 <!-- ── Files view: .md/.html selector + scrollable content ──────────────
-     Uses the SAME pager/page encapsulation as the datastore view, because
-     that's what scrolls reliably on the Meta Ray-Ban Display webview: the
-     scroller (.file-page) gets a definite height from cross-axis stretch
-     inside the flex container, instead of relying on main-axis flex-grow on
-     the scroller itself (which the glasses WebKit doesn't make scrollable). -->
+     Structured IDENTICALLY to the datastore view (the only layout that
+     scrolls + selects reliably on the Meta Ray-Ban Display webview): a
+     .selector strip of pills, then a .record-pager. Each open file is one
+     .record-page inside that pager — exactly like a single datastore record.
+     ``#files-content`` IS the pager; openFile() builds the .record-page. -->
 <div class="contentview" id="files-view">
   <div class="selector" id="files-list"></div>
-  <div class="file-pager">
-    <div class="file-page" id="files-content">
-      <div class="vnote">Loading files…</div>
-    </div>
+  <div class="record-pager" id="files-content">
+    <div class="vnote">Loading files…</div>
   </div>
 </div>
 
@@ -1335,7 +1318,7 @@
   //   2. Post the document's content height back to the parent so the iframe
   //      can be sized to fit. Without this the iframe stays a fixed height and
   //      only scrolls internally (unreliable on the glasses); sizing it to its
-  //      content lets the outer .file-page do the scrolling like markdown does.
+  //      content lets the outer .record-page do the scrolling like markdown does.
   const HTML_MIN_SIZE = 16;
   const HTML_CLAMP =
     '<style>html{-webkit-text-size-adjust:100%;text-size-adjust:100%;}' +
@@ -1579,7 +1562,7 @@
   let filesFrame = null;   // the live .html iframe, sized from its content
 
   // Size the .html iframe to the content height its injected script reports,
-  // so the document flows into the scrollable view (the outer .file-page
+  // so the document flows into the scrollable view (the outer .record-page
   // scrolls) instead of scrolling inside a fixed-height frame.
   window.addEventListener('message', (e) => {
     const h = e && e.data && e.data.__glassesFrameHeight;
@@ -1629,8 +1612,12 @@
     if (f.physical !== filesActive) return;
     const content = (data && data.content) || '';
     const ext = (f.extension || '').toLowerCase();
-    filesContentEl.innerHTML = '';
     filesFrame = null;   // drop any prior frame so stale height messages no-op
+    // One file = one .record-page inside the pager, exactly like a datastore
+    // record. The .record-page is the proven-on-glasses vertical scroller.
+    filesContentEl.innerHTML = '';
+    const page = document.createElement('div');
+    page.className = 'record-page';
     if (ext === '.html' || ext === '.htm') {
       // Sandboxed iframe so the document renders with its own markup/styles
       // in isolation and can't reach into (or restyle) the HUD. allow-scripts
@@ -1641,15 +1628,16 @@
       frame.className = 'file-frame';
       frame.setAttribute('sandbox', 'allow-scripts');
       frame.srcdoc = content + HTML_CLAMP;
-      filesContentEl.appendChild(frame);
+      page.appendChild(frame);
       filesFrame = frame;   // its postMessage(height) drives frame.style.height
     } else {
       const div = document.createElement('div');
       div.className = 'file-md';
       div.innerHTML = renderMd(content);
-      filesContentEl.appendChild(div);
+      page.appendChild(div);
     }
-    filesContentEl.scrollTop = 0;
+    filesContentEl.appendChild(page);
+    page.scrollTop = 0;
   }
 })();
 </script>
