@@ -383,13 +383,13 @@
   }
   .field { margin: 6px 0; }
   .field-k {
-    font: 600 11px/1.2 ui-monospace, Menlo, monospace;
+    font: 600 16px/1.2 ui-monospace, Menlo, monospace;
     color: var(--ink-mut); text-transform: uppercase; letter-spacing: 0.08em;
-    margin-bottom: 2px;
+    margin-bottom: 4px;
   }
   .field-v {
     color: var(--ink); word-wrap: break-word; overflow-wrap: anywhere;
-    white-space: pre-wrap; font-size: 15px;
+    white-space: pre-wrap; font-size: 20px;
   }
   .field-v.empty { color: var(--ink-mut); font-style: italic; }
 
@@ -1615,9 +1615,29 @@
     filesFrame = null;   // drop any prior frame so stale height messages no-op
     // One file = one .record-page inside the pager, exactly like a datastore
     // record. The .record-page is the proven-on-glasses vertical scroller.
+    // Crucially it's given MULTIPLE .card children (header / content / footer),
+    // matching a datastore record — that's what the NeuralBand up/down keys
+    // seem to need to drive the scroller on the glasses.
     filesContentEl.innerHTML = '';
     const page = document.createElement('div');
     page.className = 'record-page';
+
+    // Header card — the filename, above the content.
+    const topCard = document.createElement('div');
+    topCard.className = 'card';
+    const topK = document.createElement('div');
+    topK.className = 'field-k';
+    topK.textContent = 'FILE';
+    const topV = document.createElement('div');
+    topV.className = 'field-v';
+    topV.textContent = f.filename || f.logical || '';
+    topCard.appendChild(topK);
+    topCard.appendChild(topV);
+    page.appendChild(topCard);
+
+    // Content card — the rendered file is encapsulated in its own .card.
+    const contentCard = document.createElement('div');
+    contentCard.className = 'card';
     if (ext === '.html' || ext === '.htm') {
       // Sandboxed iframe so the document renders with its own markup/styles
       // in isolation and can't reach into (or restyle) the HUD. allow-scripts
@@ -1628,14 +1648,27 @@
       frame.className = 'file-frame';
       frame.setAttribute('sandbox', 'allow-scripts');
       frame.srcdoc = content + HTML_CLAMP;
-      page.appendChild(frame);
+      contentCard.appendChild(frame);
       filesFrame = frame;   // its postMessage(height) drives frame.style.height
     } else {
       const div = document.createElement('div');
       div.className = 'file-md';
       div.innerHTML = renderMd(content);
-      page.appendChild(div);
+      contentCard.appendChild(div);
     }
+    page.appendChild(contentCard);
+
+    // Footer card — below the content. Gives the record-page a third .card
+    // child (header/content/footer) like a multi-field datastore record.
+    const bottomCard = document.createElement('div');
+    bottomCard.className = 'card';
+    const botV = document.createElement('div');
+    botV.className = 'field-v empty';
+    botV.style.textAlign = 'center';
+    botV.textContent = '— end of file —';
+    bottomCard.appendChild(botV);
+    page.appendChild(bottomCard);
+
     filesContentEl.appendChild(page);
     page.scrollTop = 0;
   }
