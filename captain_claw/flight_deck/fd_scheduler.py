@@ -251,7 +251,7 @@ def _new_job_id() -> str:
     return "job_" + secrets.token_hex(5)
 
 
-_VALID_DELIVERY = {"whatsapp", "channel"}
+_VALID_DELIVERY = {"whatsapp", "channel", "telegram"}
 
 
 class SchedulerStore:
@@ -574,6 +574,18 @@ async def _deliver(kind: str, target: str, text: str) -> tuple[bool, str]:
             "ts": datetime.now(timezone.utc).isoformat(),
         })
         return (True, "ok")
+    if kind == "telegram":
+        # target is a comma-separated list of chat_ids (single or multi).
+        # Strip markdown to plain text — Telegram rejects unbalanced markdown.
+        from captain_claw.flight_deck.meta_webhook_bridge import strip_markdown
+        from captain_claw.flight_deck.telegram_out import send_telegram_multi
+        chat_ids = [c.strip() for c in str(target).split(",") if c.strip()]
+        if not chat_ids:
+            return (False, "error:no telegram chat_ids")
+        sent, total = await send_telegram_multi(chat_ids, strip_markdown(text))
+        if sent == 0:
+            return (False, f"error:telegram 0/{total} delivered")
+        return (True, f"ok ({sent}/{total})")
     return (False, f"error:unknown delivery_kind {kind}")
 
 
@@ -679,6 +691,18 @@ async def scheduler_loop(stop_event: asyncio.Event) -> None:
 async def list_jobs(request: Request) -> JSONResponse:
     _check_token(request)
     return JSONResponse(get_store().list(), headers=_NO_CACHE)
+
+
+@router.get("/scheduler/recipients")
+async def list_recipients(request: Request) -> JSONResponse:
+    """Named delivery recipients for the UI pickers.
+
+    Currently surfaces Telegram recipients parsed from ``TELEGRAM_RECIPIENTS``.
+    WhatsApp uses a single allowlisted number so it doesn't need a picker.
+    """
+    _check_token(request)
+    from captain_claw.flight_deck.telegram_out import list_recipients as _tg
+    return JSONResponse({"telegram": _tg()}, headers=_NO_CACHE)
 
 
 @router.post("/scheduler/jobs")

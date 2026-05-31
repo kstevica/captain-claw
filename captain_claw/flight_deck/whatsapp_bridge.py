@@ -95,6 +95,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from captain_claw.flight_deck import face_index
 from captain_claw.flight_deck.glasses_bridge import (
     _GLASSES_SYSTEM_CONTEXT,
+    _broadcast,
     _check_token,
     _ensure_agent_binding,
     _get_or_create_channel,
@@ -415,7 +416,7 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
         mime = str(audio.get("mime_type") or "audio/ogg")
         # Tell the user we're working on it — voice notes can take a few
         # seconds end-to-end (download + Soniox upload + transcribe + poll).
-        await _send_whatsapp_text(waid, "🎙 Transcribing voice note…")
+        await _send_whatsapp_text(waid, "🎙 Transcribing voice note…", mirror=True)
         if inbound_message_id:
             # Re-fire the typing indicator; the status text we just sent
             # cleared the initial one.
@@ -423,7 +424,7 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
         try:
             blob = await _download_media(media_id)
         except Exception as exc:
-            await _send_whatsapp_text(waid, f"Couldn't fetch voice note: {exc}")
+            await _send_whatsapp_text(waid, f"Couldn't fetch voice note: {exc}", mirror=True)
             return
         transcript = await _transcribe_soniox(blob, mime)
         if not transcript:
@@ -431,11 +432,12 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
                 waid,
                 "Couldn't transcribe that — Soniox returned no text. "
                 "Try sending the message again, or speak more clearly.",
+                mirror=True,
             )
             return
         # Send the transcript back to the user clearly marked so they know
         # this is what the agent is seeing.
-        await _send_whatsapp_text(waid, f"🎙 Transcription:\n\n\"{transcript}\"")
+        await _send_whatsapp_text(waid, f"🎙 Transcription:\n\n\"{transcript}\"", mirror=True)
         # Forward to the agent as if the user had typed it.
         text = transcript
 
@@ -443,12 +445,21 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
     if not text:
         return
 
-    # 5. Send to the agent. WhatsApp does NOT broadcast user events to the
-    #    channel bus by default — keeps the conversation inside WhatsApp
-    #    instead of mirroring "user said X" onto the glasses HUD. The
-    #    agent's reply still flows through the channel (that's how
-    #    _agent_pump delivers it back), and the bridge's callback forwards
-    #    it to the WhatsApp thread.
+    # 5. Mirror the user's message onto the channel bus so the glasses HUD
+    #    shows what arrived over WhatsApp (matches mobile + messenger). The
+    #    ``via`` tag lets the view badge the source. This does NOT echo back
+    #    to WhatsApp: the forwarding callback only relays ``agent``/``error``
+    #    events, never ``user`` ones (see meta_webhook_bridge._forward).
+    await _broadcast(ch, {
+        "type": "user",
+        "text": text,
+        "ts": _now_iso(),
+        "via": "whatsapp",
+    })
+
+    # 6. Send to the agent. The agent's reply flows back through the channel
+    #    (that's how _agent_pump delivers it), and the bridge's callback
+    #    forwards it to the WhatsApp thread.
     for _ in range(50):  # up to ~5s
         if ch.agent_ws is not None:
             break
@@ -762,15 +773,39 @@ async def _mark_read_and_typing(message_id: str) -> None:
         pass
 
 
-async def _send_whatsapp_text(waid: str, text: str) -> None:
+async def _send_whatsapp_text(waid: str, text: str, *, mirror: bool = False) -> None:
     """POST a text message to the Cloud API. No-op if config is missing —
-    the glasses HUD will still show the agent reply via the channel bus."""
+    the glasses HUD will still show the agent reply via the channel bus.
+
+    When ``mirror`` is set, the same text is also broadcast onto this WAID's
+    channel bus as a ``system`` breadcrumb so the glasses view shows the
+    bot's own status replies (e.g. "transcribing…", "transcription: …").
+    Mirroring is opt-in precisely because the agent-reply path routes through
+    here too (via ``_send_whatsapp_reply``) and is already on the bus — only
+    bridge-originated status lines pass ``mirror=True`` to avoid duplicates.
+    The ``system`` type is never re-forwarded to WhatsApp/Messenger, so this
+    can't echo back to the user (see meta_webhook_bridge._forward)."""
+    text = text.strip()
+    if not text:
+        return
+
+    if mirror:
+        channel = _WAID_CHANNEL.get(waid)
+        if channel:
+            try:
+                ch = await _get_or_create_channel(channel)
+                await _broadcast(ch, {
+                    "type": "system",
+                    "text": text,
+                    "ts": _now_iso(),
+                    "via": "whatsapp",
+                })
+            except Exception:
+                pass  # best-effort mirror; never block the WhatsApp send
+
     token = _env("WHATSAPP_ACCESS_TOKEN")
     url = _send_url()
     if not token or not url:
-        return
-    text = text.strip()
-    if not text:
         return
 
     chunks: list[str] = []

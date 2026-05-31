@@ -725,6 +725,206 @@ async def channel_push(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True}, headers=_NO_CACHE)
 
 
+# ── Agent content proxy (datastore + files) ───────────────────────────
+#
+# The glasses view can show more than the live chat: the bound agent's
+# datastore tables (rows as cards) and its .md/.html files. Those live on
+# the *agent*, not in Flight Deck, so we proxy read-only GETs to the agent
+# the channel is already bound to. No new auth surface — we reuse the same
+# token resolution the WS pump uses, and only ever issue GETs.
+
+
+async def _resolve_channel_agent_auth(ch: _ChannelState) -> str:
+    """Token for the channel's bound agent. Explicit bind-auth wins, else
+    the registry lookup FD uses everywhere (mirrors ``_agent_pump``)."""
+    auth = (ch.bound_auth or "").strip()
+    if not auth and ch.bound_port:
+        try:
+            from captain_claw.flight_deck.server import _resolve_agent_auth
+            auth = _resolve_agent_auth(ch.bound_port)
+        except Exception:
+            auth = ""
+    return auth or ""
+
+
+def _resolve_default_agent() -> tuple[str, int, str] | None:
+    """Pick a running agent to read datastore/files from when the channel
+    isn't bound yet (glasses opened before any message established a
+    binding). Prefers the process registry — the same set the mobile picker
+    shows — then a labelled Docker container. Returns ``(host, port, auth)``
+    or ``None`` when nothing is running.
+
+    The choice is a best-effort default: once the channel is actually bound
+    (the user sends a message), ``_agent_get`` uses that exact agent instead.
+    """
+    try:
+        from captain_claw.flight_deck.server import (
+            _load_process_registry,
+            _process_is_alive,
+        )
+        for slug, entry in _load_process_registry().items():
+            try:
+                if not _process_is_alive(slug):
+                    continue
+                port = int(entry.get("web_port", 0) or 0)
+            except Exception:
+                continue
+            if port:
+                return ("localhost", port, str(entry.get("web_auth", "") or ""))
+    except Exception:
+        pass
+
+    try:
+        from captain_claw.flight_deck.server import CONTAINER_LABEL, get_docker
+        client = get_docker()
+        for c in client.containers.list(filters={"label": CONTAINER_LABEL}):
+            labels = c.labels or {}
+            wp = labels.get("flight-deck.web-port", "")
+            if wp:
+                return ("localhost", int(wp), str(labels.get("flight-deck.web-auth", "") or ""))
+    except Exception:
+        pass
+
+    return None
+
+
+async def _agent_get(
+    ch: _ChannelState, path: str, params: dict | None = None,
+) -> Response:
+    """Proxy a read-only GET to the channel's agent and relay the response.
+
+    Uses the channel's bound agent when one exists; otherwise falls back to
+    a running agent (so the datastore/files views work even before the first
+    message binds the channel). Raises 503 only when no agent is running at
+    all."""
+    if ch.bound_port:
+        host = ch.bound_host or "localhost"
+        port = ch.bound_port
+        auth = await _resolve_channel_agent_auth(ch)
+    else:
+        fallback = _resolve_default_agent()
+        if not fallback:
+            raise HTTPException(
+                status_code=503,
+                detail="no agent running — start an agent in Flight Deck first",
+            )
+        host, port, auth = fallback
+    query = dict(params or {})
+    if auth:
+        query["token"] = auth
+    url = f"http://{host}:{port}{path}"
+
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, params=query)
+    except httpx.ConnectError as exc:
+        raise HTTPException(status_code=502, detail=f"cannot reach agent: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"agent request failed: {exc}") from exc
+
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type=resp.headers.get("content-type", "application/json"),
+        headers=_NO_CACHE,
+    )
+
+
+# Files surfaced in the glasses "Files" view — documents the user actually
+# reads, not source/config. Kept deliberately narrow per the request (.md
+# + .html). Matched case-insensitively against each entry's extension.
+_GLASSES_FILE_EXTS = {".md", ".markdown", ".html", ".htm"}
+
+
+@router.get("/glasses/datastore/tables")
+async def glasses_ds_tables(request: Request, c: str = "") -> Response:
+    """List the bound agent's datastore tables (name, columns, row_count)."""
+    _check_token(request)
+    if not c:
+        raise HTTPException(status_code=400, detail="missing channel ?c=")
+    ch = await _get_or_create_channel(c)
+    return await _agent_get(ch, "/api/datastore/tables")
+
+
+@router.get("/glasses/datastore/rows")
+async def glasses_ds_rows(
+    request: Request, c: str = "", table: str = "",
+    limit: int = 200, offset: int = 0,
+) -> Response:
+    """Rows for one table. The agent returns ``{columns, rows, total, ...}``
+    with rows already shaped as ``{col: value}`` dicts."""
+    _check_token(request)
+    if not c:
+        raise HTTPException(status_code=400, detail="missing channel ?c=")
+    if not table:
+        raise HTTPException(status_code=400, detail="missing ?table=")
+    ch = await _get_or_create_channel(c)
+    return await _agent_get(
+        ch,
+        f"/api/datastore/tables/{table}/rows",
+        {"limit": max(1, min(int(limit), 500)), "offset": max(0, int(offset))},
+    )
+
+
+@router.get("/glasses/files")
+async def glasses_files(request: Request, c: str = "") -> JSONResponse:
+    """List the bound agent's readable documents, filtered to .md / .html.
+
+    The agent's ``/api/files`` returns the full registry; we slim each entry
+    to what the glasses view needs and drop anything outside the document
+    allow-list so the selector stays short on a tiny screen.
+    """
+    _check_token(request)
+    if not c:
+        raise HTTPException(status_code=400, detail="missing channel ?c=")
+    ch = await _get_or_create_channel(c)
+    resp = await _agent_get(ch, "/api/files")
+    try:
+        entries = json.loads(resp.body)
+    except Exception:
+        # Relay the agent's error body (already JSON) unchanged.
+        return JSONResponse(
+            json.loads(resp.body or b"[]"), status_code=resp.status_code,
+            headers=_NO_CACHE,
+        )
+    if not isinstance(entries, list):
+        return JSONResponse([], headers=_NO_CACHE)
+    out: list[dict] = []
+    for f in entries:
+        if not isinstance(f, dict):
+            continue
+        ext = str(f.get("extension", "")).lower()
+        if ext not in _GLASSES_FILE_EXTS:
+            continue
+        if not f.get("exists", True):
+            continue
+        out.append({
+            "logical": f.get("logical", ""),
+            "physical": f.get("physical", ""),
+            "filename": f.get("filename", ""),
+            "extension": ext,
+            "size": f.get("size", 0),
+            "modified": f.get("modified", 0),
+        })
+    out.sort(key=lambda f: float(f.get("modified") or 0), reverse=True)
+    return JSONResponse(out, headers=_NO_CACHE)
+
+
+@router.get("/glasses/files/content")
+async def glasses_file_content(
+    request: Request, c: str = "", path: str = "",
+) -> Response:
+    """Text content of one .md / .html file from the bound agent."""
+    _check_token(request)
+    if not c:
+        raise HTTPException(status_code=400, detail="missing channel ?c=")
+    if not path:
+        raise HTTPException(status_code=400, detail="missing ?path=")
+    ch = await _get_or_create_channel(c)
+    return await _agent_get(ch, "/api/files/content", {"path": path})
+
+
 # ── Image upload proxy ────────────────────────────────────────────────
 
 

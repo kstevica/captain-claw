@@ -150,6 +150,14 @@
   .msg.user  { background: var(--user-bg);  color: var(--user); }
   .msg.agent { background: var(--agent-bg); color: var(--agent); }
   .msg.error { background: var(--err-bg);   color: var(--err); }
+  /* System breadcrumbs — bridge status mirrored from another channel
+     (e.g. WhatsApp "transcribing…" / "transcription: …"). Visually quieter
+     than a real turn: dashed border, muted ink, never spoken by TTS. */
+  .msg.system {
+    background: rgba(255,255,255,0.02);
+    border: 1px dashed var(--line); color: var(--ink-dim);
+  }
+  .msg.system .role { color: var(--ink-dim); }
   .msg.newest { opacity: 1; }
   .msg.newest.agent { border-color: rgba(95,255,159,0.25); box-shadow: 0 0 0 1px rgba(95,255,159,0.08) inset; }
   .msg.newest.user  { border-color: rgba(155,208,255,0.22); }
@@ -234,12 +242,19 @@
     z-index: 4;
   }
   #sysbar .now {
-    display: inline-flex; align-items: center; gap: 7px;
+    display: flex; align-items: center; gap: 7px;
     color: var(--ink-dim); font-weight: 600; letter-spacing: 0.06em;
+    font-size: 16px;
   }
   #sysbar .now::before {
     content: ''; width: 6px; height: 6px; border-radius: 50%;
-    background: currentColor; opacity: 0.6;
+    background: currentColor; opacity: 0.6; flex: 0 0 auto;
+  }
+  /* Clock pinned to the right edge of the footer; tabular figures so the
+     seconds don't jitter the layout as they tick. */
+  #sysbar .now-time {
+    margin-left: auto; flex: 0 0 auto;
+    font-variant-numeric: tabular-nums; letter-spacing: 0.04em;
   }
   #sysbar .now.idle { color: var(--ink-mut); }
   #sysbar .now.busy { color: var(--warn); }
@@ -278,6 +293,196 @@
     0%, 100% { transform: scale(0.7); opacity: 0.55; }
     50%      { transform: scale(1.25); opacity: 1; }
   }
+
+  /* ── Mode switcher (chat / datastore / files) ──────────────────────
+     Sits in the HUD-left. Three compact toggle buttons; the active one
+     glows HUD-green so the current surface is obvious at a glance. */
+  .modebar { display: inline-flex; align-items: center; gap: 4px; }
+  .mode-btn {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--line);
+    color: var(--ink-dim); border-radius: 999px;
+    height: 24px; min-width: 28px; padding: 0 8px; margin: 0;
+    font: 12px ui-monospace, Menlo, monospace;
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
+    transition: background .12s, color .12s, border-color .12s;
+  }
+  .mode-btn:hover { background: var(--hud-soft); color: var(--ink); }
+  .mode-btn.active {
+    color: var(--bg); background: var(--hud);
+    border-color: var(--hud);
+    box-shadow: 0 0 10px var(--hud-glow);
+    font-weight: 700;
+  }
+
+  /* ── Content views (datastore / files) ─────────────────────────────
+     Full-screen overlays that sit below the HUD (which stays on top so
+     the switcher is always reachable). Each owns its own vertical scroll
+     so the chat's body-scroll behaviour is untouched underneath. */
+  .contentview {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 3; background: var(--bg);
+    padding-top: 46px;
+    /* Reserve room for the status footer (sysbar) so it shows on every page
+       without covering the scrollable content underneath it. */
+    padding-bottom: 52px;
+    display: none; flex-direction: column;
+  }
+  .contentview.show { display: flex; }
+
+  /* Horizontal selector strip — tables or files, sticky at the top. */
+  .selector {
+    flex: 0 0 auto;
+    display: flex; gap: 8px; overflow-x: auto; overflow-y: hidden;
+    padding: 8px 14px; border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(10,20,12,0.9), rgba(0,0,0,0.6));
+    scrollbar-width: thin;
+  }
+  .selector::-webkit-scrollbar { height: 5px; }
+  .selector::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+  .chip {
+    flex: 0 0 auto;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--line); color: var(--ink-dim);
+    border-radius: 999px; padding: 6px 14px;
+    font: 600 13px/1 ui-monospace, Menlo, monospace;
+    cursor: pointer; white-space: nowrap;
+    -webkit-tap-highlight-color: transparent;
+    transition: background .12s, color .12s, border-color .12s;
+  }
+  .chip:hover { background: var(--hud-soft); color: var(--ink); }
+  .chip.active {
+    color: var(--bg); background: var(--hud);
+    border-color: var(--hud); box-shadow: 0 0 10px var(--hud-glow);
+  }
+  .chip .count {
+    opacity: 0.7; font-weight: 500; margin-left: 6px; font-size: 0.85em;
+  }
+  .chip.active .count { opacity: 0.85; }
+
+  /* The scrollable body of each content view. */
+  .vscroll {
+    flex: 1 1 auto; overflow-y: auto; overflow-x: hidden;
+    padding: 14px 14px 28px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .vscroll::-webkit-scrollbar { width: 6px; }
+  .vscroll::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+
+  .vnote {
+    color: var(--ink-mut); font-size: 14px; text-align: center;
+    padding: 28px 16px; line-height: 1.5;
+  }
+  .vnote.err { color: var(--err); }
+
+  /* ── Datastore row cards ───────────────────────────────────────────── */
+  .card {
+    background: var(--agent-bg); border: 1px solid var(--line);
+    border-radius: 12px; padding: 12px 14px; margin-bottom: 12px;
+  }
+  .card-id {
+    font: 700 11px/1 ui-monospace, Menlo, monospace;
+    color: var(--hud); letter-spacing: 0.1em; text-transform: uppercase;
+    margin-bottom: 8px; display: inline-block;
+  }
+  .field { margin: 6px 0; }
+  .field-k {
+    font: 600 11px/1.2 ui-monospace, Menlo, monospace;
+    color: var(--ink-mut); text-transform: uppercase; letter-spacing: 0.08em;
+    margin-bottom: 2px;
+  }
+  .field-v {
+    color: var(--ink); word-wrap: break-word; overflow-wrap: anywhere;
+    white-space: pre-wrap; font-size: 15px;
+  }
+  .field-v.empty { color: var(--ink-mut); font-style: italic; }
+
+  /* ── Datastore record pager (one record per screen, swipe L/R) ──────── */
+  .recordbar {
+    flex: 0 0 auto;
+    display: flex; align-items: center; gap: 10px;
+    padding: 7px 14px; border-bottom: 1px solid var(--line);
+    background: rgba(0,0,0,0.45);
+    font: 600 12px/1 ui-monospace, Menlo, monospace; color: var(--ink-dim);
+  }
+  .recordbar:empty { display: none; }
+  .recordbar .nav {
+    background: rgba(255,255,255,0.04); border: 1px solid var(--line);
+    color: var(--ink-dim); border-radius: 999px;
+    width: 28px; height: 28px; padding: 0; flex: 0 0 auto;
+    display: inline-flex; align-items: center; justify-content: center;
+    cursor: pointer; font-size: 15px; -webkit-tap-highlight-color: transparent;
+    transition: background .12s, color .12s;
+  }
+  .recordbar .nav:disabled { opacity: 0.3; cursor: default; }
+  .recordbar .nav:not(:disabled):hover { background: var(--hud-soft); color: var(--ink); }
+  .recordbar .pos { color: var(--hud); letter-spacing: 0.06em; min-width: 56px; text-align: center; }
+  .recordbar .dots { display: flex; gap: 5px; overflow: hidden; flex: 1 1 auto; }
+  .recordbar .dots .d {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--line); flex: 0 0 auto;
+  }
+  .recordbar .dots .d.on { background: var(--hud); box-shadow: 0 0 6px var(--hud-glow); }
+  .recordbar .hint { margin-left: auto; color: var(--ink-mut); font-size: 10px; font-weight: 500; }
+
+  .record-pager {
+    flex: 1 1 auto; display: flex;
+    overflow-x: auto; overflow-y: hidden;
+    scroll-snap-type: x mandatory;
+    scroll-behavior: smooth;
+    -webkit-overflow-scrolling: touch;
+  }
+  .record-pager::-webkit-scrollbar { height: 0; width: 0; }
+  .record-pager > .vnote { flex: 1 0 100%; }
+  .record-page {
+    flex: 0 0 100%; width: 100%; max-width: 100%;
+    scroll-snap-align: center;
+    overflow-y: auto; overflow-x: hidden;
+    padding: 14px 14px 28px;
+  }
+  .record-page::-webkit-scrollbar { width: 6px; }
+  .record-page::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+  .rec-id {
+    font: 700 12px/1 ui-monospace, Menlo, monospace; color: var(--hud);
+    letter-spacing: 0.1em; text-transform: uppercase;
+    margin-bottom: 12px; display: inline-block;
+  }
+
+  /* ── File viewer ───────────────────────────────────────────────────── */
+  .file-md { color: var(--ink); }
+  .file-md h1, .file-md h2, .file-md h3 { color: var(--agent); line-height: 1.2; }
+  .file-md h1 { font-size: 1.25em; }
+  .file-md h2 { font-size: 1.12em; }
+  .file-md pre {
+    background: rgba(0,0,0,0.5); border: 1px solid var(--line);
+    padding: 10px 12px; border-radius: 10px; overflow-x: auto;
+  }
+  .file-md code { background: rgba(255,255,255,0.06); color: var(--warn);
+    padding: 1px 6px; border-radius: 4px; font-size: 0.9em; }
+  .file-md pre code { background: transparent; padding: 0; }
+  .file-md a { color: var(--user); }
+  .file-md table { border-collapse: collapse; width: 100%; margin: 0.5em 0; }
+  .file-md th, .file-md td { border: 1px solid var(--line); padding: 6px 10px; }
+  .file-md img { max-width: 100%; height: auto; }
+  .file-md blockquote {
+    margin: 0.5em 0; padding: 4px 14px;
+    border-left: 3px solid var(--hud); color: var(--ink);
+    background: rgba(95,255,159,0.05); border-radius: 0 8px 8px 0;
+  }
+  .file-md ul, .file-md ol { padding-left: 1.4em; }
+  .file-frame {
+    width: 100%; border: 0; background: #fff; border-radius: 10px;
+    min-height: 70vh;
+  }
+
+  /* Source badge on a chat message (which channel the user wrote from). */
+  .via {
+    font: 600 9px/1 ui-monospace, Menlo, monospace;
+    color: var(--ink-mut); border: 1px solid var(--line);
+    border-radius: 999px; padding: 2px 6px; margin-left: 8px;
+    text-transform: uppercase; letter-spacing: 0.08em;
+  }
 </style>
 </head>
 <body>
@@ -291,6 +496,11 @@
       <span class="ssr">{{SSR_TOKEN}}</span>
     </span>
     <span class="pill conn off" id="conn">…</span>
+    <span class="modebar" role="tablist" aria-label="view">
+      <button class="mode-btn active" id="mode-chat" type="button" title="chat" aria-label="chat">💬</button>
+      <button class="mode-btn" id="mode-ds" type="button" title="datastore" aria-label="datastore">🗄</button>
+      <button class="mode-btn" id="mode-files" type="button" title="files" aria-label="files">📄</button>
+    </span>
   </div>
   <div class="hud-right">
     <button class="tts-btn" id="tts-toggle" type="button" title="toggle voice">🔊</button>
@@ -310,6 +520,25 @@
 <div id="sysbar">
   <div class="now idle" id="sysnow">—</div>
   <div class="hist" id="syshist"></div>
+</div>
+
+<!-- ── Datastore view: table selector + one record per screen ─────────────
+     Each record fills the screen, every field is its own card, and the user
+     swipes left/right (or taps ‹ ›) to move between records. -->
+<div class="contentview" id="ds-view">
+  <div class="selector" id="ds-tables"></div>
+  <div class="recordbar" id="ds-pos"></div>
+  <div class="record-pager" id="ds-rows">
+    <div class="vnote">Loading tables…</div>
+  </div>
+</div>
+
+<!-- ── Files view: .md/.html selector + scrollable content ────────────── -->
+<div class="contentview" id="files-view">
+  <div class="selector" id="files-list"></div>
+  <div class="vscroll" id="files-content">
+    <div class="vnote">Loading files…</div>
+  </div>
 </div>
 
 <!-- marked for markdown + tables. Fallback to plain text if it fails to load. -->
@@ -410,6 +639,16 @@
   function fmtTs(iso) {
     try { return new Date(iso).toLocaleTimeString(); } catch { return ''; }
   }
+  // Live 24-hour wall clock (HH:MM, no seconds) for the status footer.
+  // Reads the current time, not a status timestamp — it's refreshed on an
+  // interval so it always shows "now".
+  function fmtClock() {
+    try {
+      return new Date().toLocaleTimeString('en-GB', {
+        hour: '2-digit', minute: '2-digit', hour12: false,
+      });
+    } catch { return ''; }
+  }
 
   function renderStack() {
     stack.innerHTML = '';
@@ -427,7 +666,9 @@
     }
     view.forEach((m, i) => {
       const div = document.createElement('div');
-      const cls = m.type === 'user' ? 'user' : (m.type === 'error' ? 'error' : 'agent');
+      const cls = m.type === 'user' ? 'user'
+        : (m.type === 'error' ? 'error'
+        : (m.type === 'system' ? 'system' : 'agent'));
       const isNewest = i === view.length - 1;
       const isLastUser = i === lastUserIdx;
       div.className = 'msg ' + cls + (isNewest || isLastUser ? ' newest' : '');
@@ -440,9 +681,21 @@
       role.className = 'role';
       const dot = document.createElement('span'); dot.className = 'dot';
       role.appendChild(dot);
-      let label = m.type === 'user' ? 'You' : (m.type === 'error' ? 'Error' : 'Agent');
+      let label = m.type === 'user' ? 'You'
+        : (m.type === 'error' ? 'Error'
+        : (m.type === 'system' ? 'System' : 'Agent'));
       if (m.type === 'user' && m.image_path) label = '📷  ' + label;
       role.appendChild(document.createTextNode(label));
+
+      // Source badge — where a user message arrived from (WhatsApp,
+      // Messenger, …). Lets the wearer see at a glance that a message on
+      // the HUD came in over another channel, not the mobile bridge.
+      if (m.via) {
+        const via = document.createElement('span');
+        via.className = 'via';
+        via.textContent = m.via;
+        role.appendChild(via);
+      }
 
       const ts = document.createElement('span');
       ts.className = 'ts';
@@ -456,7 +709,9 @@
       // Markdown for agent + user (so user-typed *emphasis* etc renders too);
       // errors stay plain text since they're usually short and may contain
       // characters that look like markdown but aren't.
-      if (m.type === 'error') {
+      if (m.type === 'error' || m.type === 'system') {
+        // Plain text — errors and bridge breadcrumbs (a transcription may
+        // contain characters that look like markdown but aren't).
         txt.textContent = m.text || '';
       } else {
         txt.innerHTML = renderMarkdown(m.text);
@@ -498,11 +753,20 @@
       return;
     }
     const cls = statusClass(latest.status);
-    // While thinking, drop the noisy timestamp — just the verb, big.
-    sysnow.textContent = (cls === 'busy')
-      ? latest.status
-      : (latest.status + '  ·  ' + fmtTs(latest.ts));
     sysnow.className = 'now ' + cls;
+    sysnow.innerHTML = '';
+    const st = document.createElement('span');
+    st.className = 'now-status';
+    st.textContent = latest.status;
+    sysnow.appendChild(st);
+    // Right-aligned 24h clock. Dropped while thinking — the bar enlarges to
+    // show just the verb, big (existing design).
+    if (cls !== 'busy') {
+      const tm = document.createElement('span');
+      tm.className = 'now-time';
+      tm.textContent = fmtClock();
+      sysnow.appendChild(tm);
+    }
     setThinking(cls === 'busy');
     // History: prior statuses, oldest first, dimmed.
     const prior = statuses.slice(-MAX_HIST - 1, -1);
@@ -514,6 +778,13 @@
     });
   }
 
+  // Tick the footer clock every 10 s so it stays current without a status
+  // event. Only touches the time span when one is present (idle "—" has none).
+  setInterval(() => {
+    const tm = document.querySelector('#sysnow .now-time');
+    if (tm) tm.textContent = fmtClock();
+  }, 10000);
+
   // True once the WS has finished its backfill (signalled by the bridge's
   // ``status:"subscribed"`` event). TTS is suppressed before this so a page
   // reload doesn't re-speak old replies.
@@ -521,7 +792,7 @@
 
   function push(m) {
     if (!m || !m.type) return;
-    if (m.type === 'user' || m.type === 'agent' || m.type === 'error') {
+    if (m.type === 'user' || m.type === 'agent' || m.type === 'error' || m.type === 'system') {
       content.push(m);
       if (content.length > 30) content.shift();
       renderStack();
@@ -1004,6 +1275,337 @@
   }
 
   openWs();
+})();
+</script>
+
+<!-- ── Content views: mode switching + datastore / files rendering ──────
+     Independent of the chat IIFE above. The chat WebSocket keeps running
+     underneath while a content view is shown, so switching back is instant
+     and never drops live messages. All data is proxied through Flight Deck
+     to the agent this channel is bound to (/glasses/datastore/*, /glasses/
+     files*); nothing is fetched until its tab is first opened. -->
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const channel = params.get('c') || '';
+  const t = params.get('t') || '';
+  const cq = 'c=' + encodeURIComponent(channel);
+  const tq = t ? ('&t=' + encodeURIComponent(t)) : '';
+
+  const hasMarked = (typeof window.marked !== 'undefined');
+  // Ensure GFM is on for this renderer too (tables, fenced code, autolinks).
+  // The chat IIFE already calls setOptions, but marked's config is global so
+  // setting it here as well is harmless and keeps the file viewer self-
+  // contained — markdown tables render even if that call ever moves.
+  if (hasMarked) {
+    try { marked.setOptions({ gfm: true, breaks: true, headerIds: false, mangle: false }); } catch (_) {}
+  }
+  function renderMd(src) {
+    if (hasMarked) { try { return marked.parse(String(src || '')); } catch (_) {} }
+    return String(src || '')
+      .replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
+      .replace(/\n/g, '<br>');
+  }
+
+  // Injected into every .html file shown in the iframe so nothing renders
+  // below 16px on the glasses — a base default plus a post-load pass that
+  // bumps any element whose computed size is still under 16px (covers docs
+  // with explicit small px sizes that a base rule alone can't reach).
+  const HTML_MIN_SIZE = 16;
+  const HTML_CLAMP =
+    '<style>html{-webkit-text-size-adjust:100%;text-size-adjust:100%;}' +
+    'body{font-size:' + HTML_MIN_SIZE + 'px;line-height:1.5;}</style>' +
+    '<script>(function(){function clamp(){try{var e=document.querySelectorAll("*");' +
+    'for(var i=0;i<e.length;i++){var s=parseFloat(getComputedStyle(e[i]).fontSize);' +
+    'if(s&&s<' + HTML_MIN_SIZE + '){e[i].style.fontSize="' + HTML_MIN_SIZE + 'px";}}}catch(_){}}' +
+    'if(document.readyState!=="loading"){clamp();}else{' +
+    'document.addEventListener("DOMContentLoaded",clamp);}})();<\/script>';
+
+  const stack = document.getElementById('stack');
+  const dsView = document.getElementById('ds-view');
+  const filesView = document.getElementById('files-view');
+  const btnChat = document.getElementById('mode-chat');
+  const btnDs = document.getElementById('mode-ds');
+  const btnFiles = document.getElementById('mode-files');
+
+  let dsLoaded = false, filesLoaded = false;
+
+  function setMode(next) {
+    btnChat.classList.toggle('active', next === 'chat');
+    btnDs.classList.toggle('active', next === 'ds');
+    btnFiles.classList.toggle('active', next === 'files');
+    dsView.classList.toggle('show', next === 'ds');
+    filesView.classList.toggle('show', next === 'files');
+    // Hide only the chat message stack when a content view is up (so the
+    // chat's body-scroll can't peek through). The status footer stays
+    // visible on every page — content views reserve room for it via
+    // padding-bottom.
+    stack.style.display = (next === 'chat') ? '' : 'none';
+    if (next === 'ds' && !dsLoaded) loadTables();
+    if (next === 'files' && !filesLoaded) loadFiles();
+  }
+  btnChat.addEventListener('click', () => setMode('chat'));
+  btnDs.addEventListener('click', () => setMode('ds'));
+  btnFiles.addEventListener('click', () => setMode('files'));
+
+  function note(el, text, isErr) {
+    el.innerHTML = '';
+    const d = document.createElement('div');
+    d.className = 'vnote' + (isErr ? ' err' : '');
+    d.textContent = text;
+    el.appendChild(d);
+  }
+
+  async function getJSON(url) {
+    const r = await fetch(url, { cache: 'no-store' });
+    let body = null;
+    try { body = await r.json(); } catch (_) {}
+    if (!r.ok) {
+      const msg = (body && (body.detail || body.error)) || ('HTTP ' + r.status);
+      throw new Error(msg);
+    }
+    return body;
+  }
+
+  // ── Datastore: table chips → one record per screen, swipe L/R ──────
+  const dsTablesEl = document.getElementById('ds-tables');
+  const dsRowsEl = document.getElementById('ds-rows');
+  const dsPosEl = document.getElementById('ds-pos');
+  let dsActive = '';
+  let dsCount = 0;     // record pages currently rendered
+  let dsIdx = 0;       // index of the record currently in view (display)
+  let dsTarget = 0;    // index the nav buttons step from (stable across clicks)
+  let dsProgUntil = 0; // while a programmatic smooth-scroll is animating, the
+                       // scroll handler must not adopt intermediate offsets as
+                       // the new target — otherwise rapid ‹ › taps drift.
+
+  // Build the position bar: ‹ prev / next ›, "n / m", and dots (when the
+  // row count is small enough to fit). Returns nothing; wires the buttons.
+  function buildPosBar(total) {
+    dsPosEl.innerHTML = '';
+    if (!dsCount) return;
+    const prev = document.createElement('button');
+    prev.className = 'nav'; prev.textContent = '‹'; prev.title = 'previous record';
+    prev.addEventListener('click', () => goTo(dsTarget - 1));
+    const next = document.createElement('button');
+    next.className = 'nav'; next.textContent = '›'; next.title = 'next record';
+    next.addEventListener('click', () => goTo(dsTarget + 1));
+    const pos = document.createElement('span');
+    pos.className = 'pos'; pos.id = 'ds-pos-text';
+    const dots = document.createElement('span');
+    dots.className = 'dots'; dots.id = 'ds-pos-dots';
+    // Dots only when they comfortably fit; otherwise the n/m counter alone.
+    if (dsCount <= 18) {
+      for (let i = 0; i < dsCount; i++) {
+        const d = document.createElement('span');
+        d.className = 'd';
+        dots.appendChild(d);
+      }
+    }
+    dsPosEl.appendChild(prev);
+    dsPosEl.appendChild(pos);
+    dsPosEl.appendChild(next);
+    dsPosEl.appendChild(dots);
+    if (total > dsCount) {
+      const hint = document.createElement('span');
+      hint.className = 'hint';
+      hint.textContent = 'first ' + dsCount + ' of ' + total;
+      dsPosEl.appendChild(hint);
+    }
+  }
+
+  function updatePos(idx) {
+    dsIdx = Math.max(0, Math.min(idx, dsCount - 1));
+    const posText = document.getElementById('ds-pos-text');
+    if (posText) posText.textContent = (dsIdx + 1) + ' / ' + dsCount;
+    const dots = document.getElementById('ds-pos-dots');
+    if (dots) {
+      [...dots.children].forEach((d, i) => d.classList.toggle('on', i === dsIdx));
+    }
+    const navs = dsPosEl.querySelectorAll('.nav');
+    if (navs[0]) navs[0].disabled = (dsIdx <= 0);
+    if (navs[1]) navs[1].disabled = (dsIdx >= dsCount - 1);
+  }
+
+  function goTo(idx) {
+    const clamped = Math.max(0, Math.min(idx, dsCount - 1));
+    dsTarget = clamped;
+    const w = dsRowsEl.clientWidth || 1;
+    dsProgUntil = Date.now() + 700;   // ignore scroll-derived target until settled
+    dsRowsEl.scrollTo({ left: clamped * w, behavior: 'smooth' });
+    updatePos(clamped);
+  }
+
+  // Track swipes: derive the current record from the pager's scroll offset.
+  // A manual swipe also becomes the new nav target, but only once any
+  // programmatic smooth-scroll has settled (so button taps aren't clobbered).
+  let dsScrollRaf = 0;
+  dsRowsEl.addEventListener('scroll', () => {
+    if (dsScrollRaf) return;
+    dsScrollRaf = requestAnimationFrame(() => {
+      dsScrollRaf = 0;
+      const w = dsRowsEl.clientWidth || 1;
+      const idx = Math.round(dsRowsEl.scrollLeft / w);
+      updatePos(idx);
+      if (Date.now() > dsProgUntil) dsTarget = idx;
+    });
+  });
+
+  async function loadTables() {
+    dsLoaded = true;
+    note(dsRowsEl, 'Loading tables…');
+    dsTablesEl.innerHTML = '';
+    dsPosEl.innerHTML = '';
+    let tables;
+    try {
+      tables = await getJSON('/glasses/datastore/tables?' + cq + tq) || [];
+    } catch (e) {
+      note(dsRowsEl, 'Could not load datastore: ' + e.message, true);
+      return;
+    }
+    if (!tables.length) { note(dsRowsEl, 'No tables in the datastore yet.'); return; }
+    tables.forEach((tb, i) => {
+      const chip = document.createElement('button');
+      chip.className = 'chip' + (i === 0 ? ' active' : '');
+      chip.appendChild(document.createTextNode(tb.name));
+      const cnt = document.createElement('span');
+      cnt.className = 'count';
+      cnt.textContent = tb.row_count;
+      chip.appendChild(cnt);
+      chip.addEventListener('click', () => {
+        [...dsTablesEl.children].forEach(c => c.classList.remove('active'));
+        chip.classList.add('active');
+        loadRows(tb.name);
+      });
+      dsTablesEl.appendChild(chip);
+    });
+    loadRows(tables[0].name);
+  }
+
+  async function loadRows(table) {
+    dsActive = table;
+    note(dsRowsEl, 'Loading ' + table + '…');
+    let data;
+    try {
+      data = await getJSON('/glasses/datastore/rows?' + cq +
+        '&table=' + encodeURIComponent(table) + tq);
+    } catch (e) {
+      dsPosEl.innerHTML = '';
+      note(dsRowsEl, 'Could not load rows: ' + e.message, true);
+      return;
+    }
+    if (table !== dsActive) return;   // a newer chip selection superseded this
+    const cols = (data && data.columns) || [];
+    const rows = (data && data.rows) || [];
+    if (!rows.length) {
+      dsPosEl.innerHTML = '';
+      note(dsRowsEl, 'Table “' + table + '” has no rows.');
+      return;
+    }
+    // One record per page; every field is its own card on that page.
+    dsRowsEl.innerHTML = '';
+    rows.forEach((row, ri) => {
+      const page = document.createElement('div');
+      page.className = 'record-page';
+      const idEl = document.createElement('div');
+      idEl.className = 'rec-id';
+      idEl.textContent = (row._id !== undefined) ? ('#' + row._id) : ('Record ' + (ri + 1));
+      page.appendChild(idEl);
+      cols.forEach(col => {
+        if (col === '_id') return;
+        const card = document.createElement('div');
+        card.className = 'card';
+        const k = document.createElement('div');
+        k.className = 'field-k';
+        k.textContent = col;
+        const v = document.createElement('div');
+        v.className = 'field-v';
+        const val = row[col];
+        if (val === null || val === undefined || val === '') {
+          v.classList.add('empty');
+          v.textContent = '—';
+        } else {
+          v.textContent = (typeof val === 'object') ? JSON.stringify(val) : String(val);
+        }
+        card.appendChild(k);
+        card.appendChild(v);
+        page.appendChild(card);
+      });
+      dsRowsEl.appendChild(page);
+    });
+    dsCount = rows.length;
+    dsTarget = 0;
+    dsRowsEl.scrollLeft = 0;
+    buildPosBar((data && data.total) || rows.length);
+    updatePos(0);
+  }
+
+  // ── Files: .md / .html chips → scrollable content ──────────────────
+  const filesListEl = document.getElementById('files-list');
+  const filesContentEl = document.getElementById('files-content');
+  let filesActive = '';
+
+  async function loadFiles() {
+    filesLoaded = true;
+    note(filesContentEl, 'Loading files…');
+    filesListEl.innerHTML = '';
+    let files;
+    try {
+      files = await getJSON('/glasses/files?' + cq + tq) || [];
+    } catch (e) {
+      note(filesContentEl, 'Could not load files: ' + e.message, true);
+      return;
+    }
+    if (!files.length) { note(filesContentEl, 'No .md or .html files yet.'); return; }
+    files.forEach((f, i) => {
+      const chip = document.createElement('button');
+      chip.className = 'chip' + (i === 0 ? ' active' : '');
+      chip.textContent = f.filename || f.logical || '(file)';
+      chip.title = f.logical || f.filename || '';
+      chip.addEventListener('click', () => {
+        [...filesListEl.children].forEach(c => c.classList.remove('active'));
+        chip.classList.add('active');
+        openFile(f);
+      });
+      filesListEl.appendChild(chip);
+    });
+    openFile(files[0]);
+  }
+
+  async function openFile(f) {
+    filesActive = f.physical;
+    note(filesContentEl, 'Loading ' + (f.filename || '') + '…');
+    let data;
+    try {
+      data = await getJSON('/glasses/files/content?' + cq +
+        '&path=' + encodeURIComponent(f.physical) + tq);
+    } catch (e) {
+      note(filesContentEl, 'Could not load file: ' + e.message, true);
+      return;
+    }
+    if (f.physical !== filesActive) return;
+    const content = (data && data.content) || '';
+    const ext = (f.extension || '').toLowerCase();
+    filesContentEl.innerHTML = '';
+    if (ext === '.html' || ext === '.htm') {
+      // Sandboxed iframe so the document renders with its own markup/styles
+      // in isolation and can't reach into (or restyle) the HUD. allow-scripts
+      // (without allow-same-origin) keeps it on a unique origin — it can run
+      // its own scripts, including our injected 16px-minimum clamp, but can't
+      // touch the parent page, cookies, or storage.
+      const frame = document.createElement('iframe');
+      frame.className = 'file-frame';
+      frame.setAttribute('sandbox', 'allow-scripts');
+      frame.srcdoc = content + HTML_CLAMP;
+      filesContentEl.appendChild(frame);
+    } else {
+      const div = document.createElement('div');
+      div.className = 'file-md';
+      div.innerHTML = renderMd(content);
+      filesContentEl.appendChild(div);
+    }
+    filesContentEl.scrollTop = 0;
+  }
 })();
 </script>
 </body>
