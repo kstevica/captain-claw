@@ -352,6 +352,12 @@
     transition: background .12s, color .12s, border-color .12s;
   }
   .chip:hover { background: var(--hud-soft); color: var(--ink); }
+  /* Focus ring for the NeuralBand/keyboard focus-walk over the selector pills,
+     so the focused pill is visible (matches the content focus ring). */
+  .chip:focus {
+    outline: 2px solid var(--hud);
+    outline-offset: 2px;
+  }
   .chip.active {
     color: var(--bg); background: var(--hud);
     border-color: var(--hud); box-shadow: 0 0 10px var(--hud-glow);
@@ -1495,6 +1501,8 @@
     tables.forEach((tb, i) => {
       const chip = document.createElement('button');
       chip.className = 'chip' + (i === 0 ? ' active' : '');
+      chip.tabIndex = 0;   // explicit tabindex so the glasses focus-walk lands
+                           // on the pill (native button focus is skipped there)
       chip.appendChild(document.createTextNode(tb.name));
       const cnt = document.createElement('span');
       cnt.className = 'count';
@@ -1615,6 +1623,8 @@
     files.forEach((f, i) => {
       const chip = document.createElement('button');
       chip.className = 'chip' + (i === 0 ? ' active' : '');
+      chip.tabIndex = 0;   // explicit: the glasses focus-walk only lands on
+                           // elements with a tabindex, not native buttons
       chip.textContent = f.filename || f.logical || '(file)';
       chip.title = f.logical || f.filename || '';
       chip.addEventListener('click', () => {
