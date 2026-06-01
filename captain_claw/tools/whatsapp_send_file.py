@@ -1,53 +1,69 @@
-"""Send a stored app file to a WhatsApp chat via Flight Deck.
+"""Send a file the agent saved to a WhatsApp chat as a document.
 
-The agent saves files into its Flight Deck *app_files* store (the same
-files surfaced in the Flight Deck / glasses web app). This tool delivers
-one of those files to a WhatsApp chat as a *document*, going through the
-Flight Deck WhatsApp bridge (which owns the Meta Cloud API credentials).
+Agent-generated files live on the agent's own filesystem under
+``<workspace>/saved/<category>/<session>/<filename>`` (the same files
+shown in the Flight Deck / glasses file list). This tool runs *inside*
+the agent process: it resolves one of those files, reads its bytes, and
+sends it to a WhatsApp chat as a document via the Meta Cloud API.
 
 Two actions:
   * ``list`` — list the agent's saved files (newest first) so the agent can
     discover which one the user means ("that last report").
-  * ``send`` — deliver a file. Identify it by ``file_id``, by ``filename``
-    (fuzzy, case-insensitive, newest match wins), or ``latest`` for the most
-    recently saved file.
+  * ``send`` — deliver a file. Identify it by ``path`` (what the agent knows,
+    e.g. ``showcase/<session>/report.docx``), by ``filename`` (fuzzy, newest
+    match wins), or ``latest`` for the most recently saved file.
 
 Recipient resolution for ``send``:
   * An explicit ``to`` (phone number, digits only, no ``+``) wins.
   * Otherwise the *current* WhatsApp chat — captured per session when the
     conversation arrived over WhatsApp (``session.metadata['whatsapp_waid']``).
 
-Requirements: the agent must run under Flight Deck (``FD_URL`` +
-``FD_AGENT_SLUG``) with WhatsApp configured on the Flight Deck side.
-WhatsApp only permits free-form documents within 24h of the recipient's
-last message; out-of-window sends are rejected by Meta and surfaced here
-as a clear error.
+Requirements: ``WHATSAPP_ACCESS_TOKEN`` + ``WHATSAPP_PHONE_NUMBER_ID`` in the
+environment (inherited from Flight Deck). WhatsApp only permits free-form
+documents within 24h of the recipient's last message; out-of-window sends
+are rejected by Meta and surfaced here as a clear error.
 """
 
 from __future__ import annotations
 
-import json
+import mimetypes
+import os
+from pathlib import Path
 from typing import Any
 
-from captain_claw.fd_client import FDClient, flight_deck_base, flight_deck_slug
+import httpx
+
 from captain_claw.tools.registry import Tool, ToolResult
+
+# WhatsApp Cloud API caps documents at 100 MB; stay just under.
+_MAX_DOC_BYTES = 95 * 1024 * 1024
+_GRAPH_BASE = "https://graph.facebook.com/v18.0"
+
+
+def _env(name: str) -> str:
+    return (os.environ.get(name) or "").strip()
+
+
+def _allowed_waids() -> set[str]:
+    raw = _env("WHATSAPP_ALLOWED_WAIDS")
+    return {p.strip().lstrip("+") for p in raw.split(",") if p.strip()} if raw else set()
 
 
 class WhatsAppSendFileTool(Tool):
-    """List and deliver app_files documents to a WhatsApp chat."""
+    """List and deliver a saved file to a WhatsApp chat as a document."""
 
     name = "whatsapp_send_file"
-    timeout_seconds = 120.0
+    timeout_seconds = 180.0
     description = (
-        "Send a file the agent saved (in its Flight Deck files) to a WhatsApp "
-        "chat as a document. Use this whenever the user wants a file delivered "
-        "over WhatsApp — e.g. 'send me that report on WhatsApp', 'whatsapp me "
-        "the invoice', 'get me the last report'. By default it sends into the "
-        "current WhatsApp chat; pass 'to' (phone number, digits only, no '+') "
-        "to send to a specific number. Identify the file by 'file_id', by "
-        "'filename' (fuzzy match), or set 'latest' for the most recently saved "
-        "file. If unsure which file the user means, first call with "
-        "action='list' to see available files, then send. WhatsApp only allows "
+        "Send a file the agent saved to a WhatsApp chat as a document. Use "
+        "this whenever the user wants a file delivered over WhatsApp — e.g. "
+        "'send me that report on WhatsApp', 'whatsapp me the document', 'get "
+        "me that word document here'. By default it sends into the current "
+        "WhatsApp chat; pass 'to' (phone number, digits only, no '+') to send "
+        "to a specific number. Identify the file by 'path' (e.g. "
+        "'showcase/<session>/report.docx'), by 'filename' (fuzzy match), or "
+        "set 'latest' for the most recently saved file. If unsure which file "
+        "the user means, call action='list' first. WhatsApp only allows "
         "sending within 24 hours of the recipient's last message."
     )
     parameters = {
@@ -61,23 +77,23 @@ class WhatsAppSendFileTool(Tool):
                     "agent's saved files so you can pick which to send."
                 ),
             },
-            "file_id": {
+            "path": {
                 "type": "string",
-                "description": "Flight Deck file id of the file to send.",
+                "description": (
+                    "Path of the saved file to send, as the agent knows it "
+                    "(e.g. 'showcase/<session>/report.docx' or an absolute path)."
+                ),
             },
             "filename": {
                 "type": "string",
                 "description": (
-                    "Filename (or part of it) to send. Fuzzy, case-insensitive; "
-                    "the newest match wins. Used when 'file_id' is not given."
+                    "Filename (or part of it) to find among saved files. "
+                    "Fuzzy, case-insensitive; newest match wins."
                 ),
             },
             "latest": {
                 "type": "boolean",
-                "description": (
-                    "Send the most recently saved file. Handy for 'send me the "
-                    "last report' when no exact name is known."
-                ),
+                "description": "Send the most recently saved file.",
             },
             "to": {
                 "type": "string",
@@ -94,63 +110,54 @@ class WhatsAppSendFileTool(Tool):
         "required": [],
     }
 
+    # ── entry ─────────────────────────────────────────────────────────
+
     async def execute(self, **kwargs: Any) -> ToolResult:
         action = str(kwargs.get("action") or "send").strip().lower()
-
-        # Must run under Flight Deck to reach the WhatsApp bridge / file store.
-        if not flight_deck_base():
-            return ToolResult(
-                success=False,
-                error=(
-                    "Not running under Flight Deck (FD_URL unset); cannot "
-                    "reach WhatsApp or the file store."
-                ),
-            )
-        agent_id = flight_deck_slug()
-        if not agent_id:
-            return ToolResult(
-                success=False,
-                error="FD_AGENT_SLUG not set; cannot locate this agent's files.",
-            )
+        saved_base = self._saved_base(kwargs)
 
         if action == "list":
-            return await self._list(agent_id)
-        return await self._send(agent_id, kwargs)
+            files = self._scan(saved_base)
+            if not files:
+                return ToolResult(success=True, content="No saved files found.")
+            lines = [
+                f"- {logical}  ({p.stat().st_size} bytes)"
+                for p, logical in files[:50]
+            ]
+            return ToolResult(
+                success=True,
+                content="Saved files (newest first):\n" + "\n".join(lines),
+            )
 
-    async def _list(self, agent_id: str) -> ToolResult:
-        ok, data, err = await self._post("/whatsapp/list-files", {"agent_id": agent_id})
-        if not ok:
-            return ToolResult(success=False, error=f"Could not list files: {err}")
-        files = data.get("files") or []
-        if not files:
-            return ToolResult(success=True, content="No saved files found.")
-        lines = [
-            f"- {f.get('filename')} (id={f.get('file_id')}, {f.get('size')} bytes, "
-            f"{f.get('uploaded_at')})"
-            for f in files
-        ]
-        return ToolResult(
-            success=True,
-            content="Saved files (newest first):\n" + "\n".join(lines),
-        )
+        return await self._send(kwargs, saved_base)
 
-    async def _send(self, agent_id: str, kwargs: dict[str, Any]) -> ToolResult:
-        file_id = str(kwargs.get("file_id") or "").strip()
+    # ── send ──────────────────────────────────────────────────────────
+
+    async def _send(self, kwargs: dict[str, Any], saved_base: Path | None) -> ToolResult:
+        token = _env("WHATSAPP_ACCESS_TOKEN")
+        pid = _env("WHATSAPP_PHONE_NUMBER_ID")
+        if not token or not pid:
+            return ToolResult(
+                success=False,
+                error="WhatsApp not configured (WHATSAPP_ACCESS_TOKEN / WHATSAPP_PHONE_NUMBER_ID).",
+            )
+
+        path_arg = str(kwargs.get("path") or "").strip()
         filename = str(kwargs.get("filename") or "").strip()
         latest = bool(kwargs.get("latest"))
         to = str(kwargs.get("to") or "").lstrip("+").strip()
         caption = str(kwargs.get("caption") or "").strip()
 
-        if not file_id and not filename and not latest:
+        if not path_arg and not filename and not latest:
             return ToolResult(
                 success=False,
                 error=(
-                    "Specify which file to send: 'file_id', 'filename', or "
+                    "Specify which file to send: 'path', 'filename', or "
                     "latest=true. Use action='list' to see available files."
                 ),
             )
 
-        # Recipient: explicit 'to' wins, else the current WhatsApp chat.
+        # Resolve recipient: explicit 'to' wins, else the current WhatsApp chat.
         if not to:
             session = kwargs.get("_session")
             meta = getattr(session, "metadata", None) if session is not None else None
@@ -164,38 +171,174 @@ class WhatsAppSendFileTool(Tool):
                     "no 'to' number was provided."
                 ),
             )
+        allowed = _allowed_waids()
+        if allowed and to not in allowed:
+            return ToolResult(
+                success=False,
+                error=f"Recipient {to} is not in WHATSAPP_ALLOWED_WAIDS.",
+            )
 
-        payload: dict[str, Any] = {"agent_id": agent_id, "to": to, "caption": caption}
-        if file_id:
-            payload["file_id"] = file_id
-        if filename:
-            payload["filename"] = filename
-        if latest:
-            payload["latest"] = True
-
-        ok, data, err = await self._post("/whatsapp/send-file", payload)
-        if ok and data.get("ok"):
-            sent_name = data.get("filename") or filename or file_id or "file"
-            return ToolResult(success=True, content=f"Sent '{sent_name}' to WhatsApp {to}.")
-        detail = err or str(data.get("error") or data.get("detail") or "").strip()
-        return ToolResult(success=False, error=f"WhatsApp send failed: {detail or 'unknown error'}")
-
-    async def _post(
-        self, path: str, payload: dict[str, Any]
-    ) -> tuple[bool, dict[str, Any], str]:
-        """POST to a Flight Deck endpoint. Returns (ok, json, error)."""
-        fd = FDClient(timeout=120.0)
+        # Resolve the file on the agent's filesystem.
+        resolved = self._resolve_file(kwargs, saved_base, path_arg, filename, latest)
+        if resolved is None:
+            hint = path_arg or filename or "latest"
+            return ToolResult(
+                success=False,
+                error=f"Could not find a saved file for '{hint}'. Try action='list'.",
+            )
         try:
-            resp = await fd.post(path, json=payload)
+            blob = resolved.read_bytes()
         except Exception as exc:
-            return False, {}, f"Failed to reach Flight Deck: {exc}"
-        finally:
-            await fd.close()
+            return ToolResult(success=False, error=f"Could not read file: {exc}")
+        if not blob:
+            return ToolResult(success=False, error="File is empty.")
+        if len(blob) > _MAX_DOC_BYTES:
+            return ToolResult(
+                success=False,
+                error=f"File is {len(blob)} bytes; WhatsApp documents max ~100 MB.",
+            )
+
+        out_name = resolved.name
+        mime = mimetypes.guess_type(out_name)[0] or "application/octet-stream"
+
+        media_id, err = await self._meta_upload(token, pid, blob, out_name, mime)
+        if not media_id:
+            return ToolResult(success=False, error=f"WhatsApp upload failed: {err}")
+        ok, err = await self._meta_send(token, pid, to, media_id, out_name, caption)
+        if not ok:
+            return ToolResult(success=False, error=f"WhatsApp send failed: {err}")
+        return ToolResult(success=True, content=f"Sent '{out_name}' to WhatsApp {to}.")
+
+    # ── filesystem resolution ──────────────────────────────────────────
+
+    @staticmethod
+    def _saved_base(kwargs: dict[str, Any]) -> Path | None:
+        base = kwargs.get("_saved_base_path")
+        if base:
+            return Path(base)
+        runtime = kwargs.get("_runtime_base_path")
+        return (Path(runtime) / "saved") if runtime else None
+
+    def _resolve_file(
+        self,
+        kwargs: dict[str, Any],
+        saved_base: Path | None,
+        path_arg: str,
+        filename: str,
+        latest: bool,
+    ) -> Path | None:
+        # 1. Explicit path: try the file registry, then plausible bases.
+        if path_arg:
+            registry = kwargs.get("_file_registry")
+            if registry is not None:
+                try:
+                    physical = registry.resolve(path_arg)
+                except Exception:
+                    physical = None
+                if physical and Path(physical).is_file():
+                    return Path(physical)
+            cand = Path(path_arg).expanduser()
+            if cand.is_absolute() and cand.is_file():
+                return cand
+            stripped = path_arg[len("saved/"):] if path_arg.startswith("saved/") else path_arg
+            for base in (saved_base, kwargs.get("_runtime_base_path")):
+                if base:
+                    for rel in (path_arg, stripped):
+                        p = (Path(base) / rel).resolve()
+                        if p.is_file():
+                            return p
+            # Fall through to filename match on the basename.
+            filename = filename or Path(path_arg).name
+
+        files = self._scan(saved_base)
+        if not files:
+            return None
+        # 2. Fuzzy filename match (newest first).
+        if filename:
+            fl = filename.lower()
+            exact = [p for p, _ in files if p.name.lower() == fl]
+            if exact:
+                return exact[0]
+            sub = [p for p, _ in files if fl in p.name.lower()]
+            if sub:
+                return sub[0]
+            return None
+        # 3. Latest overall.
+        if latest:
+            return files[0][0]
+        return None
+
+    @staticmethod
+    def _scan(saved_base: Path | None) -> list[tuple[Path, str]]:
+        """Return (path, logical_path) for saved files, newest first."""
+        if not saved_base or not Path(saved_base).is_dir():
+            return []
+        base = Path(saved_base)
+        out: list[tuple[float, Path, str]] = []
+        for p in base.rglob("*"):
+            if not p.is_file():
+                continue
+            try:
+                mtime = p.stat().st_mtime
+                logical = str(p.relative_to(base))
+            except (OSError, ValueError):
+                continue
+            out.append((mtime, p, logical))
+        out.sort(key=lambda t: t[0], reverse=True)
+        return [(p, logical) for _, p, logical in out]
+
+    # ── Meta Cloud API ─────────────────────────────────────────────────
+
+    @staticmethod
+    async def _meta_upload(
+        token: str, pid: str, blob: bytes, filename: str, mime: str
+    ) -> tuple[str, str]:
+        url = f"{_GRAPH_BASE}/{pid}/media"
+        files = {
+            "file": (filename or "file", blob, mime),
+            "messaging_product": (None, "whatsapp"),
+            "type": (None, mime),
+        }
         try:
-            data = resp.json()
-        except (json.JSONDecodeError, ValueError):
-            data = {}
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                resp = await client.post(
+                    url, headers={"Authorization": f"Bearer {token}"}, files=files
+                )
+        except Exception as exc:
+            return "", f"upload request failed: {exc}"
         if resp.status_code != 200:
-            detail = str(data.get("error") or data.get("detail") or resp.text or "").strip()
-            return False, data, detail or f"HTTP {resp.status_code}"
-        return True, data, ""
+            return "", f"upload rejected ({resp.status_code}): {resp.text[:300]}"
+        try:
+            return str((resp.json() or {}).get("id") or ""), ""
+        except Exception:
+            return "", "upload returned no id"
+
+    @staticmethod
+    async def _meta_send(
+        token: str, pid: str, to: str, media_id: str, filename: str, caption: str
+    ) -> tuple[bool, str]:
+        document: dict[str, Any] = {"id": media_id, "filename": filename or "file"}
+        if caption:
+            document["caption"] = caption
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "document",
+            "document": document,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{_GRAPH_BASE}/{pid}/messages",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+        except Exception as exc:
+            return False, f"send request failed: {exc}"
+        if resp.status_code != 200:
+            return False, f"send rejected ({resp.status_code}): {resp.text[:400]}"
+        return True, ""
