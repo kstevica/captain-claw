@@ -39,6 +39,37 @@ from captain_claw.tools.registry import Tool, ToolResult
 _MAX_DOC_BYTES = 95 * 1024 * 1024
 _GRAPH_BASE = "https://graph.facebook.com/v18.0"
 
+# Meta's Cloud API rejects any document MIME outside a fixed allowlist
+# (error #100), and the host's mimetypes DB can't be trusted to produce
+# the exact strings Meta wants (e.g. .pptx). Map the common cases
+# explicitly; this is the canonical Meta-accepted set for documents.
+_MIME_BY_EXT = {
+    ".pdf": "application/pdf",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".txt": "text/plain",
+}
+# Text-based formats Meta doesn't list individually but accepts when sent
+# as text/plain documents (the file keeps its name/extension for the user).
+_TEXT_EXT = {
+    ".md", ".markdown", ".html", ".htm", ".csv", ".tsv", ".json", ".log",
+    ".py", ".js", ".ts", ".css", ".xml", ".yaml", ".yml", ".rtf",
+}
+
+
+def _guess_doc_mime(filename: str) -> str:
+    """Return a WhatsApp-accepted document MIME for *filename*."""
+    ext = Path(filename).suffix.lower()
+    if ext in _MIME_BY_EXT:
+        return _MIME_BY_EXT[ext]
+    if ext in _TEXT_EXT:
+        return "text/plain"
+    return mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
 
 def _env(name: str) -> str:
     return (os.environ.get(name) or "").strip()
@@ -199,7 +230,7 @@ class WhatsAppSendFileTool(Tool):
             )
 
         out_name = resolved.name
-        mime = mimetypes.guess_type(out_name)[0] or "application/octet-stream"
+        mime = _guess_doc_mime(out_name)
 
         media_id, err = await self._meta_upload(token, pid, blob, out_name, mime)
         if not media_id:
