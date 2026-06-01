@@ -31,9 +31,14 @@ _CONTENT_FETCH_TOOLS: frozenset[str] = frozenset({
 })
 
 # ── Eco-mode: core tools always sent with full definitions ──
+# Google tools are listed here so they're always offered to the LLM when
+# present, but they only reach ``tool_defs`` after passing the
+# ``requires_google`` gate in the registry — so when Google OAuth is
+# disconnected they're filtered out upstream and never kept regardless.
 _ECO_CORE_TOOLS: frozenset[str] = frozenset({
     "shell", "read", "write", "edit", "glob",
     "web_fetch", "web_search",
+    "google_mail", "google_drive", "google_calendar",
 })
 
 # ── Nano-mode: barebone tool allowlist for tiny local models. ──
