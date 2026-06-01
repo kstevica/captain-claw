@@ -435,6 +435,7 @@ class ToolsConfig(BaseModel):
         "image_ocr",
         "image_vision",
         "send_mail",
+        "whatsapp_send_file",
         "google_drive",
         "google_calendar",
         "google_mail",

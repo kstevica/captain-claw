@@ -86,6 +86,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 from typing import Any
 
 import httpx
@@ -95,6 +96,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from captain_claw.flight_deck import face_index
 from captain_claw.flight_deck.glasses_bridge import (
     _GLASSES_SYSTEM_CONTEXT,
+    _NO_CACHE,
     _broadcast,
     _check_token,
     _ensure_agent_binding,
@@ -474,7 +476,13 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
             ch.context_sent = True
         else:
             agent_content = text
-        payload_obj: dict[str, Any] = {"type": "chat", "content": agent_content}
+        # Tag the message with the originating WAID so the agent can target
+        # "the current WhatsApp chat" (e.g. whatsapp_send_file with no 'to').
+        payload_obj: dict[str, Any] = {
+            "type": "chat",
+            "content": agent_content,
+            "whatsapp_waid": waid,
+        }
         try:
             await ch.agent_ws.send(json.dumps(payload_obj))
         except Exception as exc:
@@ -1040,6 +1048,226 @@ async def whatsapp_push(request: Request) -> JSONResponse:
     return JSONResponse(
         {"ok": sent, "suppressed": (not sent)}, headers=_NO_CACHE
     )
+
+
+# ── Cloud API: send document (agent file → WhatsApp) ──────────────────
+
+
+async def _upload_whatsapp_document(
+    blob: bytes, filename: str, mime: str
+) -> tuple[str, str]:
+    """Upload document bytes to ``/<phone-id>/media``.
+
+    Returns ``(media_id, "")`` on success or ``("", error)`` on failure.
+    Mirrors ``_upload_whatsapp_audio`` but surfaces the Meta error detail
+    so the caller can report *why* a send failed.
+    """
+    token = _env("WHATSAPP_ACCESS_TOKEN")
+    url = _media_url()
+    if not token or not url:
+        return "", "WhatsApp not configured (missing access token or phone number id)"
+    mime = (mime or "application/octet-stream").strip()
+    headers = {"Authorization": f"Bearer {token}"}
+    files = {
+        "file": (filename or "file", blob, mime),
+        "messaging_product": (None, "whatsapp"),
+        "type": (None, mime),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(url, headers=headers, files=files)
+    except Exception as exc:
+        return "", f"media upload request failed: {exc}"
+    if resp.status_code != 200:
+        return "", f"media upload rejected ({resp.status_code}): {resp.text[:300]}"
+    try:
+        media_id = str((resp.json() or {}).get("id") or "")
+    except Exception:
+        media_id = ""
+    if not media_id:
+        return "", "media upload returned no id"
+    return media_id, ""
+
+
+async def _send_whatsapp_document(
+    waid: str, media_id: str, filename: str, caption: str = ""
+) -> tuple[bool, str]:
+    """Send a ``document`` message referencing an uploaded media id.
+
+    Returns ``(True, "")`` on success or ``(False, error)`` on failure. The
+    most common failure is sending outside WhatsApp's 24-hour customer-
+    service window — Meta rejects with a re-engagement error, passed
+    through here verbatim so the agent can tell the user why.
+    """
+    token = _env("WHATSAPP_ACCESS_TOKEN")
+    url = _send_url()
+    if not token or not url:
+        return False, "WhatsApp not configured (missing access token or phone number id)"
+    document: dict[str, Any] = {"id": media_id, "filename": filename or "file"}
+    if caption.strip():
+        document["caption"] = caption.strip()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": waid,
+        "type": "document",
+        "document": document,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+    except Exception as exc:
+        return False, f"send request failed: {exc}"
+    if resp.status_code != 200:
+        return False, f"send rejected ({resp.status_code}): {resp.text[:400]}"
+    return True, ""
+
+
+def _authorize_agent_file_call(request: Request) -> None:
+    """Authorize an agent's file-send call: loopback or shared secret.
+
+    Mirrors ``google_oauth_routes._authorize_agent_call`` — agents run on
+    the same host as Flight Deck (loopback is trusted); a cross-host agent
+    must present ``X-Agent-Secret`` matching ``FD_AGENT_SHARED_SECRET``.
+    Deliberately NOT ``_check_token`` (that gate is for the glasses bridge
+    token, which agents don't carry).
+    """
+    secret = _env("FD_AGENT_SHARED_SECRET")
+    if secret:
+        provided = request.headers.get("X-Agent-Secret", "")
+        if provided and secrets.compare_digest(provided, secret):
+            return
+    client_host = request.client.host if request.client else ""
+    if client_host in ("127.0.0.1", "::1", "localhost"):
+        return
+    raise HTTPException(status_code=401, detail="Unauthorized agent call")
+
+
+@router.post("/whatsapp/send-file")
+async def whatsapp_send_file(request: Request) -> JSONResponse:
+    """Send a stored app file to a WhatsApp chat as a document.
+
+    Body: ``{agent_id, to, file_id?, filename?, caption?}``.
+
+      * ``agent_id`` — FD agent slug whose app_files store holds the file.
+      * ``to`` — recipient WAID (phone number, no '+'); allow-list enforced.
+      * ``file_id`` or ``filename`` — which stored file to send.
+      * ``caption`` — optional caption shown under the document.
+
+    Agent-authorized (loopback / ``X-Agent-Secret``). Allow-list enforced so
+    a file can only reach a pre-approved number. v1 relies on WhatsApp's
+    24-hour service window; out-of-window sends return the Meta error.
+    """
+    _authorize_agent_file_call(request)
+    body = await request.json()
+    agent_id = str(body.get("agent_id", "")).strip()
+    to = str(body.get("to", "")).lstrip("+").strip()
+    file_id = str(body.get("file_id", "")).strip()
+    filename_req = str(body.get("filename", "")).strip()
+    caption = str(body.get("caption", "")).strip()
+    latest = bool(body.get("latest"))
+
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id required")
+    if not to:
+        raise HTTPException(status_code=400, detail="recipient 'to' required")
+    if not file_id and not filename_req and not latest:
+        raise HTTPException(
+            status_code=400, detail="file_id, filename, or latest required"
+        )
+
+    # Allow-list gate — never send a file to an unapproved number.
+    allowed = _allowed_waids()
+    if allowed and to not in allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=f"recipient {to} is not in WHATSAPP_ALLOWED_WAIDS",
+        )
+
+    # Resolve the file from the agent's app_files store. ``store.list`` is
+    # newest-first, so a fuzzy filename match (or ``latest``) picks the most
+    # recent candidate — what "send me that last report" means.
+    from captain_claw.flight_deck import app_files
+
+    store = app_files.get_store()
+    meta = store.get_meta(agent_id, file_id) if file_id else None
+    if meta is None and (filename_req or latest):
+        files = store.list(agent_id)  # newest-first
+        if filename_req:
+            fl = filename_req.lower()
+            matches = [m for m in files if m.filename.lower() == fl] or [
+                m for m in files if fl in m.filename.lower()
+            ]
+            meta = matches[0] if matches else None
+        elif latest and files:
+            meta = files[0]
+        if meta is not None:
+            file_id = meta.file_id
+    if meta is None:
+        raise HTTPException(status_code=404, detail="file not found for this agent")
+    path = store.get_path(agent_id, file_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail="file bytes missing")
+    try:
+        blob = path.read_bytes()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"could not read file: {exc}")
+
+    media_id, up_err = await _upload_whatsapp_document(blob, meta.filename, meta.mime)
+    if not media_id:
+        return JSONResponse(
+            {"ok": False, "error": up_err}, status_code=502, headers=_NO_CACHE
+        )
+
+    ok, send_err = await _send_whatsapp_document(to, media_id, meta.filename, caption)
+    if not ok:
+        return JSONResponse(
+            {"ok": False, "error": send_err}, status_code=502, headers=_NO_CACHE
+        )
+
+    return JSONResponse(
+        {"ok": True, "to": to, "filename": meta.filename, "file_id": file_id},
+        headers=_NO_CACHE,
+    )
+
+
+@router.post("/whatsapp/list-files")
+async def whatsapp_list_files(request: Request) -> JSONResponse:
+    """List an agent's stored app files (newest first) for the send-file flow.
+
+    Body: ``{agent_id, limit?}``. Agent-authorized (loopback / shared
+    secret). Lets the agent discover which file to send when the user
+    refers to it loosely ("that last report") rather than by id.
+    """
+    _authorize_agent_file_call(request)
+    body = await request.json()
+    agent_id = str(body.get("agent_id", "")).strip()
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id required")
+    try:
+        limit = int(body.get("limit") or 50)
+    except (TypeError, ValueError):
+        limit = 50
+    limit = max(1, min(limit, 200))
+
+    from captain_claw.flight_deck import app_files
+
+    metas = app_files.get_store().list(agent_id)[:limit]
+    files = [
+        {
+            "file_id": m.file_id,
+            "filename": m.filename,
+            "mime": m.mime,
+            "size": m.size,
+            "uploaded_at": m.uploaded_at,
+        }
+        for m in metas
+    ]
+    return JSONResponse({"ok": True, "files": files}, headers=_NO_CACHE)
 
 
 # ── Cloud API: media download (2-step) ────────────────────────────────

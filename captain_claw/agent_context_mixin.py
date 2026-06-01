@@ -85,6 +85,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "pptx_extract": "single .pptx → markdown (ONLY .pptx, never .pdf; for multiple files use summarize_files)",
     "pocket_tts": "text-to-speech MP3",
     "send_mail": "send emails via SMTP",
+    "whatsapp_send_file": "send a saved file to a WhatsApp chat (defaults to current chat)",
     "clipboard": "read/write system clipboard",
     "gws": "Google Workspace: Drive, Docs, Calendar, Gmail",
     "datastore": "persistent relational tables",
@@ -2085,6 +2086,7 @@ class AgentContextMixin:
             SummarizeFilesTool,
             InsightsTool,
             CronTool,
+            WhatsAppSendFileTool,
         )
 
         config = get_config()
@@ -2130,6 +2132,8 @@ class AgentContextMixin:
                 self.tools.register(GoogleCalendarTool(), metadata={"requires_google": True})
             elif tool_name == "google_mail":
                 self.tools.register(GoogleMailTool(), metadata={"requires_google": True})
+            elif tool_name == "whatsapp_send_file":
+                self.tools.register(WhatsAppSendFileTool())
             elif tool_name == "gws":
                 self.tools.register(GwsTool())
             elif tool_name == "todo":

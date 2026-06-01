@@ -39,6 +39,7 @@ _ECO_CORE_TOOLS: frozenset[str] = frozenset({
     "shell", "read", "write", "edit", "glob",
     "web_fetch", "web_search",
     "google_mail", "google_drive", "google_calendar",
+    "whatsapp_send_file",
 })
 
 # ── Nano-mode: barebone tool allowlist for tiny local models. ──

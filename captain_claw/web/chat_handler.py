@@ -144,6 +144,7 @@ async def handle_chat(
     image_paths: list[str] | None = None,
     file_paths: list[str] | None = None,
     rewind_to: str | None = None,
+    whatsapp_waid: str | None = None,
 ) -> None:
     """Process a chat message through the agent.
 
@@ -192,6 +193,14 @@ async def handle_chat(
             })
             return
         agent = server.agent
+
+    # ── Remember the originating WhatsApp chat (if any) ──
+    # Lets tools like whatsapp_send_file default to "the current chat".
+    if whatsapp_waid and getattr(agent, "session", None) is not None:
+        try:
+            agent.session.metadata["whatsapp_waid"] = whatsapp_waid
+        except Exception:
+            pass
 
     # ── History branching: rewind session to a prior point ──
     if rewind_to and agent.session:
