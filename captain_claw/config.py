@@ -485,6 +485,7 @@ class ToolsConfig(BaseModel):
         "read", "write", "edit", "personality", "botport", "playbooks",
         "browser", "datastore", "direct_api", "cron",
         "google_drive", "google_calendar", "google_mail",
+        "whatsapp_send_file",
     })
 
     @model_validator(mode="after")
