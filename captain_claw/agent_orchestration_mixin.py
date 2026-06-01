@@ -40,6 +40,11 @@ _ECO_CORE_TOOLS: frozenset[str] = frozenset({
     "web_fetch", "web_search",
     "google_mail", "google_drive", "google_calendar",
     "whatsapp_send_file",
+    # Fleet awareness: always let an agent see/consult/delegate to peers.
+    # ``flight_deck`` self-discovers peers via /fd/fleet, so it works
+    # whenever FD_URL is set and a peer is running. Without this, eco mode
+    # hides it and the agent wrongly reports it "can't reach other agents".
+    "flight_deck",
 })
 
 # ── Nano-mode: barebone tool allowlist for tiny local models. ──
