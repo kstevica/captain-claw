@@ -1162,6 +1162,40 @@ Auth is handled per-call; the caller just needs the target slug + the path the s
 
 **App vs visualization rule.** Apps have *writes* (the user expects records to be there next session). Visualizations are read-only output. "Notes app", "todo app", "tracker" → use `app_runner scaffold`. "Chart of these numbers", "dashboard of X", "report" → write a self-contained HTML file via the visualization policy instead. Don't use `localStorage` / `IndexedDB` in code-apps — use the app's `backend.py` + the datastore.
 
+### whatsapp_send_file
+
+Send a file the agent saved (its `saved/` workspace) to a WhatsApp chat as a document, via the Flight Deck WhatsApp bridge. Requires `WHATSAPP_ACCESS_TOKEN` + `WHATSAPP_PHONE_NUMBER_ID` (inherited from Flight Deck). WhatsApp only allows free-form documents within 24h of the recipient's last message.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | no | `send` (default) or `list` (show saved files) |
+| `path` | string | no | Path of the saved file to send (e.g. `showcase/<session>/report.docx`) |
+| `filename` | string | no | Filename (fuzzy, case-insensitive; newest match) when `path` is not given |
+| `latest` | boolean | no | Send the most recently saved file |
+| `to` | string | no | Recipient number (digits only, no `+`). Omit to reply into the current WhatsApp chat |
+| `caption` | string | no | Caption shown under the document |
+
+Office/PDF use Meta-accepted MIME types; text formats (`.md/.html/.py/.csv/…`) are sent as `text/plain`. Allow-list enforced (`WHATSAPP_ALLOWED_WAIDS`).
+
+### intentions
+
+Record and manage **intentions** — future actions under consideration. `origin='user'` saves a note-to-self; `origin='agent'` records an action the agent intends to take (low-risk → announced, normal/high → asks permission). Approved repeatable intentions materialise into Flight Deck scheduler jobs; declines are remembered so they aren't re-proposed. A proactive generator can propose intentions automatically (opt-in via `intentions.auto_generate`).
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `create`, `list`, `update`, `snooze`, `cancel`, `done`, `resolve` |
+| `origin` | string | no | `user` (note-to-self) or `agent` (proactive action) |
+| `title` | string | for create | Short summary |
+| `why` | string | no | Motivation (recommended) |
+| `risk` | string | no | `low` (announced) / `normal` / `high` (asks permission) |
+| `repeat` | string | no | Recurrence, e.g. `weekly mon 09:00` |
+| `action_prompt` | string | no | Prompt to run when an agent intention executes/recurs |
+| `verdict` | string | for resolve | User's answer — `yes`/`no`/`later`/`stop` (freeform ok) |
+| `decision_id` | string | no | Which pending decision to resolve (omit for the most recent) |
+| `intention_id` | string | for update/snooze/cancel/done | Target intention id |
+
+Decisions can also be resolved from the **Intentions** panel on each agent card in Flight Deck (Approve / Decline / Later / Stop).
+
 ---
 
 ## Configuration Reference

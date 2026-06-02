@@ -15,23 +15,20 @@
 
 An open-source AI agent with multi-agent orchestration, autonomous cognitive systems, and a full management dashboard. Runs locally, supports every major LLM provider, and ships with 44 built-in tools.
 
-## What's New in 0.4.27
+## What's New in 0.4.28
 
-**Glasses Bridge.** Captain Claw 0.4.27 introduces a mobile-web → agent → glasses-web pipeline that lets you talk to any Flight Deck agent from your phone and have its reply rendered (and spoken) on Meta Ray-Ban Display smart glasses. Plus **Tavily** as a web-search provider — thank you to the Tavily team for the excellent API.
+**WhatsApp PA & Intentions.** Captain Claw 0.4.28 turns WhatsApp into a real two-way personal-assistant channel, adds a brand-new **Intentions** primitive (proactive, permissioned future actions), and ships a proactive **scheduler**, **glasses dashboard**, and **face recognition** — plus a wave of agent-reliability fixes.
 
-- **Glasses Bridge** (`captain_claw/flight_deck/glasses_bridge.py`) — three pages tied together by a channel-based pub/sub bus in Flight Deck:
-  - **Mobile bridge** at `/glasses/mobile` — pick a process agent, type, optionally attach a photo, hit Send. Installable as a PWA on iOS (Share → Add to Home Screen) and Android (install prompt). Standalone mode, dark theme, scoped to `/glasses/`. Editable channel id in the URL so anyone with the link is in.
-  - **Glasses view** at `/glasses/view?c=<channel>` — floating HUD bar with brand pill + SSR freshness token + live indicator, last 3 messages rendered with full markdown including tables, prominent pulsing "thinking" state when the agent is busy, compact return when the answer arrives.
-  - **Settings page** at `/glasses/settings?c=<channel>` — tap-target button grids for voice (28) and language (60+), grouped by accent (Neutral / British / American-Spanish / Australian / Indian). Replaces native `<select>` dropdowns which are essentially unusable with Neural Band gestures.
-- **Soniox TTS streaming** (`WS /glasses/tts-stream`) — first-audio latency 150–300 ms via PCM s16le chunks scheduled through Web Audio API; auto-fallback to one-shot MP3 (`POST /glasses/tts`) if streaming hiccups. Toggle stream/one-shot in the glasses header (📡 / 📦), persisted across reloads. 60+ languages, 28 multilingual voices.
-- **Voice off by default** with an explicit `🔇 Voice is off — tap 🔊 to enable` banner. Tapping `🔊` doubles as the user gesture that satisfies browser autoplay policy. Zero `/glasses/tts*` traffic while muted.
-- **Photo attachment** — paperclip in the mobile composer triggers camera or gallery (`capture="environment"`); bridge proxies the multipart upload to the chosen agent's `/api/image/upload` and includes the resulting path in the chat. Agent sees the image as the familiar `[Attached image: …]` prefix.
-- **Hidden glasses system context** — first message of every channel→agent binding gets a prepended `[SYSTEM CONTEXT — do not echo]` block telling the model the reply will render on a tiny HUD. Sent to the agent only; never broadcast to the channel bus.
-- **Captain Claw launcher icons** — PNG icons (96 / 180 / 192 / 512) wired into the glasses view head and a separate `/glasses/view-manifest.webmanifest` so Meta's wearables runtime shows the brand mark instead of the default fallback (Meta does not accept SVG).
-- **Tavily web-search provider** — `web_search` now supports `provider: tavily` alongside the default `brave`. Set `TAVILY_API_KEY` in env / `.env` or `tools.web_search.tavily_api_key` in config. Transparent to the agent — same tool, same `query` parameter.
-- **`meta-glasses-test/`** — standalone stdlib freshness probe for verifying the "fresh from server every load" behaviour of the glasses webview, separate from the agent stack.
+- **WhatsApp bridge — two-way PA** (`captain_claw/flight_deck/whatsapp_bridge.py`): inbound text, **voice notes** (Soniox STT), location & contacts; outbound text, optional **voice replies** (Soniox TTS), and now **document sending** (`whatsapp_send_file` tool — send a saved file to the current chat or any number, with a robust MIME map for pptx/docx/xlsx/pdf/text). Allowlist-gated, with `/c` `/mute` slash commands.
+- **Caption-routed inbound images** — a photo is no longer force-fed to face recognition. Its caption routes it: *"who is this?"* → face recognition, *"summarise this"* → the agent's vision, *"remember this is Alice"* → **face enrollment**. A bare photo asks what to do. Face recognition stays entirely on Flight Deck.
+- **Intentions** (`captain_claw/intentions.py`, `intentions` tool, Flight Deck panel) — a control-plane layer between *noticing* (insights) and *doing* (cron). **User intentions** are notes-to-self resurfaced in context; **agent intentions** are proactive actions the agent **announces** (low-risk) or **asks permission** for (anything that sends/changes data). A channel-agnostic decision bus resolves them by WhatsApp reply *or* Flight Deck button; approving a repeatable one **materialises a scheduler job**; declining writes a negative-feedback insight so it won't re-propose. An opt-in **Phase 3 generator** proactively proposes intentions from your recent activity (cooldown + quiet-hours + per-day cap + proactivity dial).
+- **Flight Deck scheduler** (`captain_claw/flight_deck/fd_scheduler.py`) — recurring/one-shot jobs that run an agent turn and push the result to WhatsApp / glasses / Telegram, with quiet-hours support.
+- **Glasses dashboard & face recognition** — multi-face recognition with enrollment, plus a Flight Deck file-preview dashboard.
+- **Fleet collaboration** — the `flight_deck` tool (list / consult / delegate / spawn peers) is always offered so an agent can reliably reach other agents (`"ask deepseek what's new"`).
+- **Reliable tool availability in Eco mode** — Google (Gmail/Drive/Calendar), WhatsApp, intentions, and the fleet tool are now always offered, fixing cases where Eco mode silently hid them.
+- **Reliability** — agents on thinking-mode models (e.g. DeepSeek thinking) no longer crash when a forced `tool_choice` is rejected; the call transparently retries without it.
 
-Backward compatible — existing 0.4.26 setups keep working unchanged. Glasses Bridge is dormant unless you visit `/glasses/*`. Tavily is opt-in; the default web-search provider remains Brave. See [RELEASE_NOTES_0.4.27.md](RELEASE_NOTES_0.4.27.md) for the full breakdown and the **How to use the Glasses Bridge** walkthrough.
+Backward compatible — existing 0.4.27 setups keep working unchanged. The WhatsApp bridge, scheduler, and Intentions generator are all opt-in. See [RELEASE_NOTES_0.4.28.md](RELEASE_NOTES_0.4.28.md) for the full breakdown and walkthroughs.
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the full changelog.
 
@@ -165,9 +162,9 @@ botport                   # Agent-to-agent routing hub
 
 First run starts onboarding automatically. For Ollama, no key needed — set `provider: ollama` in `config.yaml`.
 
-## 44 Built-in Tools
+## 46 Built-in Tools
 
-Shell, file I/O, web fetch/search, browser automation, PDF/DOCX/XLSX/PPTX extraction, image generation (DALL-E), OCR, vision, TTS, STT, email (SMTP/Mailgun/SendGrid), Google Workspace (Drive, Docs, Sheets, Slides, Gmail, Calendar), desktop automation, screen capture with voice commands, persistent cross-session memory (todos, contacts, scripts, APIs, playbooks), datastore (SQLite tables with protection rules), deep memory (Typesense), personality system, cron scheduling, BotPort fleet discovery, and Termux (Android).
+Shell, file I/O, web fetch/search, browser automation, PDF/DOCX/XLSX/PPTX extraction, image generation (DALL-E), OCR, vision, TTS, STT, email (SMTP/Mailgun/SendGrid), Google Workspace (Drive, Docs, Sheets, Slides, Gmail, Calendar), WhatsApp file delivery, intentions (proactive future actions), desktop automation, screen capture with voice commands, persistent cross-session memory (todos, contacts, scripts, APIs, playbooks), datastore (SQLite tables with protection rules), deep memory (Typesense), personality system, cron scheduling, BotPort fleet discovery, and Termux (Android).
 
 See [USAGE.md](USAGE.md#tools-reference) for the full reference.
 
