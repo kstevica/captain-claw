@@ -2024,9 +2024,13 @@ class AgentOrchestrationMixin:
             # i.e. the model is lying. Force a corrective retry instead of
             # letting the lie reach the user. (Truthful "Poslao sam… čekam"
             # AFTER a real delegate is allowed, since the tool is in turn use.)
+            # _turn_tool_call_counts is keyed by "<tool>|<args>" (see the
+            # duplicate-call blocker), so match on the tool-name prefix — NOT
+            # the bare name, or this never matches and the gate misfires after
+            # a real delegate (causing a redundant re-delegation + doubled reply).
             _delegated_this_turn = any(
-                t in getattr(self, "_turn_tool_call_counts", {})
-                for t in ("flight_deck", "consult_peer")
+                str(k).split("|", 1)[0] in ("flight_deck", "consult_peer")
+                for k in getattr(self, "_turn_tool_call_counts", {})
             )
             _false_claim = (
                 not response.tool_calls
