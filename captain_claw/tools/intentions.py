@@ -213,11 +213,20 @@ class IntentionsTool(Tool):
         if not decision_id:
             pend = await mgr.list_pending_decisions(limit=1)
             if not pend:
-                return ToolResult(success=False, error="No pending decision to resolve.")
+                # Nothing to resolve — likely already handled or cleared.
+                return ToolResult(
+                    success=True,
+                    content="There's nothing pending to resolve right now — it may already be cleared.",
+                )
             decision_id = pend[0]["id"]
         dec = await mgr.resolve_decision(decision_id, resolution, via="agent")
         if not dec:
-            return ToolResult(success=False, error=f"No pending decision '{decision_id}'.")
+            # Decision already resolved or the intention was deleted — treat as a
+            # benign no-op so the agent tells the user it's already handled.
+            return ToolResult(
+                success=True,
+                content="That one is no longer pending — it was already resolved or cleared.",
+            )
         res = await follow_through(
             dec["intention_id"], resolution,
             source_waid=_current_waid(kw),
@@ -250,7 +259,11 @@ class IntentionsTool(Tool):
         status = "cancelled" if action == "cancel" else "done"
         ok = await mgr.set_status(iid, status, decided_at=datetime.now(UTC).isoformat())
         if not ok:
-            return ToolResult(success=False, error=f"No intention with id {iid}.")
+            # Already gone (deleted or cleared) — benign no-op.
+            return ToolResult(
+                success=True,
+                content=f"Intention {iid} is already gone — nothing to {action}.",
+            )
         return ToolResult(success=True, content=f"Marked {iid} as {status}.")
 
     async def _snooze(self, mgr: Any, kw: dict[str, Any]) -> ToolResult:
