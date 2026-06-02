@@ -620,6 +620,25 @@ def _convert_messages_for_openai_style(messages: list[Message]) -> list[dict[str
 # Matches the attachment marker the chat pipeline injects for images.
 _ATTACHED_IMAGE_RE = re.compile(r"\[Attached image:\s*([^\]\n]+?)\s*\]")
 
+# Internal-context block injected into the prompt (todos, fleet info, …) that
+# small models sometimes echo verbatim into their reply. Strip it so it never
+# reaches the user.
+_INTERNAL_CTX_RE = re.compile(r"\[INTERNAL CONTEXT.*?\[END INTERNAL CONTEXT\]\s*", re.S | re.I)
+
+
+def _strip_internal_context(text: str) -> str:
+    """Remove any echoed internal-context block from a model reply."""
+    if not text or "[INTERNAL CONTEXT" not in text:
+        return text
+    cleaned = _INTERNAL_CTX_RE.sub("", text)
+    # A dangling, unterminated "[INTERNAL CONTEXT …" means the model echoed the
+    # injected block — cut from it (if at the very start, this yields "" and the
+    # caller's empty-content fallback surfaces the reasoning tail instead).
+    idx = cleaned.find("[INTERNAL CONTEXT")
+    if idx != -1:
+        cleaned = cleaned[:idx]
+    return cleaned.strip()
+
 
 def _encode_ollama_image(path: str) -> str | None:
     """Read, resize, and base64-encode an image for Ollama's ``images`` array.
@@ -1650,7 +1669,7 @@ class OllamaProvider(LLMProvider):
                     raw_content_len=len(str(raw_content)),
                     reasoning_len=len(str(_rc)) if _rc else 0,
                 )
-                content = _strip_reasoning_artifacts(str(raw_content))
+                content = _strip_internal_context(_strip_reasoning_artifacts(str(raw_content)))
                 if not content.strip() and _rc:
                     rc_str = str(_rc)
                     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", rc_str) if p.strip()]
@@ -2075,7 +2094,7 @@ class LiteLLMProvider(LLMProvider):
             else None
         )
         joined_content = "".join(content_parts)
-        final_content = _strip_reasoning_artifacts(joined_content)
+        final_content = _strip_internal_context(_strip_reasoning_artifacts(joined_content))
         joined_reasoning = "".join(reasoning_parts).strip()
         if not final_content.strip() and joined_reasoning and not tc_out:
             paragraphs = [p.strip() for p in re.split(r"\n\s*\n", joined_reasoning) if p.strip()]
