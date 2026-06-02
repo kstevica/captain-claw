@@ -15,8 +15,6 @@ from captain_claw.tools.registry import Tool, ToolResult
 
 log = structlog.get_logger(__name__)
 
-_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
-
 
 def _resolve_local_file(kwargs: dict[str, Any], path_arg: str):
     """Resolve a sender-local file path (saved/ workspace or absolute)."""
@@ -43,41 +41,6 @@ def _resolve_local_file(kwargs: dict[str, Any], path_arg: str):
                 if p.is_file():
                     return p
     return None
-
-
-async def _upload_to_peer(host: str, port: int, auth: str, file_path) -> tuple[list[str], list[str], str]:
-    """Upload a file to the TARGET agent's upload endpoint.
-
-    Images go to /api/image/upload (-> image_paths for the peer's vision),
-    everything else to /api/file/upload (-> file_paths). Returns
-    (image_paths, file_paths, error).
-    """
-    import httpx
-    from pathlib import Path
-
-    p = Path(file_path)
-    is_img = p.suffix.lower() in _IMAGE_EXTS
-    endpoint = "/api/image/upload" if is_img else "/api/file/upload"
-    try:
-        blob = p.read_bytes()
-    except Exception as e:
-        return [], [], f"could not read file: {e}"
-    params = {"token": auth} if auth else {}
-    url = f"http://{host}:{port}{endpoint}"
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(url, params=params, files={"file": (p.name, blob)})
-    except Exception as e:
-        return [], [], f"upload to peer failed: {e}"
-    if resp.status_code != 200:
-        return [], [], f"peer upload rejected ({resp.status_code}): {resp.text[:200]}"
-    try:
-        peer_path = str((resp.json() or {}).get("path") or "")
-    except Exception:
-        peer_path = ""
-    if not peer_path:
-        return [], [], "peer upload returned no path"
-    return ([peer_path], [], "") if is_img else ([], [peer_path], "")
 
 
 class FlightDeckTool(Tool):
@@ -238,17 +201,12 @@ class FlightDeckTool(Tool):
 
         log.info("Consulting peer via fleet", target=peer_display, host=host, port=port)
 
-        # Transfer an attached file to the peer first (upload to its workspace).
-        image_paths: list[str] = []
-        file_paths: list[str] = []
+        # Attach a file: Flight Deck uploads it to the target (it holds the
+        # target's auth token, which the sending agent doesn't have).
         attach = kwargs.get("_attach_file")
-        if attach is not None:
+        attach_path = str(attach) if attach is not None else ""
+        if attach_path:
             _emit("uploading", f"Sending file to {peer_display}...")
-            image_paths, file_paths, up_err = await _upload_to_peer(
-                host, port, target.get("auth", "") or "", attach
-            )
-            if up_err:
-                return ToolResult(success=False, error=f"File transfer failed: {up_err}")
 
         try:
             async with httpx.AsyncClient(timeout=600.0) as client:
@@ -262,8 +220,7 @@ class FlightDeckTool(Tool):
                         "message": message,
                         "source_name": source_name,
                         "timeout": 480.0,
-                        "image_paths": image_paths,
-                        "file_paths": file_paths,
+                        "attach_path": attach_path,
                     },
                 ) as resp:
                     if resp.status_code != 200:
@@ -434,17 +391,9 @@ class FlightDeckTool(Tool):
                  target_port=target.get("port"), source_port=source_port,
                  origin_platform=origin_platform)
 
-        # Transfer an attached file to the peer first (upload to its workspace).
-        image_paths: list[str] = []
-        file_paths: list[str] = []
+        # Attach a file: Flight Deck uploads it to the target on our behalf.
         attach = kwargs.get("_attach_file")
-        if attach is not None:
-            image_paths, file_paths, up_err = await _upload_to_peer(
-                target.get("host", "localhost"), target.get("port"),
-                target.get("auth", "") or "", attach,
-            )
-            if up_err:
-                return ToolResult(success=False, error=f"File transfer failed: {up_err}")
+        attach_path = str(attach) if attach is not None else ""
 
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -462,8 +411,7 @@ class FlightDeckTool(Tool):
                         "origin_platform": origin_platform,
                         "origin_user_id": origin_user_id,
                         "origin_chat_id": origin_chat_id,
-                        "image_paths": image_paths,
-                        "file_paths": file_paths,
+                        "attach_path": attach_path,
                     },
                 )
                 if resp.status_code != 200:

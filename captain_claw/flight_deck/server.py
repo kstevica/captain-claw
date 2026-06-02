@@ -2159,6 +2159,45 @@ async def _notify_fleet_change(new_agent_name: str, new_agent_port: int, event: 
     await asyncio.gather(*[_send_to(h, p, a) for h, p, a in targets], return_exceptions=True)
 
 
+_IMAGE_EXTS_TRANSFER = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+
+
+async def _transfer_file_to_agent(host: str, port: int, abs_path: str) -> tuple[list[str], list[str]]:
+    """Upload a sender-local file to the TARGET agent on the operator's behalf.
+
+    Flight Deck holds every agent's web-auth token (``_resolve_agent_auth``), so
+    it can authenticate the upload even though the sending agent can't. Reads the
+    file from disk (same-host fleet) and uploads to the target's
+    /api/image|file/upload. Returns (image_paths, file_paths) on the TARGET.
+    """
+    import httpx
+    from pathlib import Path
+
+    p = Path(abs_path)
+    if not abs_path or not p.is_file():
+        return [], []
+    is_img = p.suffix.lower() in _IMAGE_EXTS_TRANSFER
+    endpoint = "/api/image/upload" if is_img else "/api/file/upload"
+    auth = _resolve_agent_auth(port)
+    params = {"token": auth} if auth else {}
+    try:
+        blob = p.read_bytes()
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                f"http://{host}:{port}{endpoint}", params=params,
+                files={"file": (p.name, blob)},
+            )
+        if resp.status_code == 200:
+            tgt = str((resp.json() or {}).get("path") or "")
+            if tgt:
+                return ([tgt], []) if is_img else ([], [tgt])
+        else:
+            log.warning("agent file transfer rejected", status=resp.status_code, body=resp.text[:200])
+    except Exception as exc:
+        log.warning("agent file transfer failed: %s", exc)
+    return [], []
+
+
 class ConsultPeerRequest(BaseModel):
     host: str = "localhost"
     port: int
@@ -2166,9 +2205,12 @@ class ConsultPeerRequest(BaseModel):
     message: str
     source_name: str = "another agent"
     timeout: float = Field(default=480.0, le=600.0)
-    # Agent-to-agent file transfer: paths already uploaded to the TARGET agent
-    # (the sender uploads to the peer's /api/image|file/upload first), forwarded
-    # into the target's chat payload so it can see the image / attached file.
+    # Agent-to-agent file transfer. The sender passes a sender-local absolute
+    # path in ``attach_path``; Flight Deck uploads it to the target (with the
+    # target's resolved auth token) and forwards the resulting target-local
+    # path into the chat payload. image_paths/file_paths may also be passed
+    # directly when already uploaded.
+    attach_path: str = ""
     image_paths: list[str] = Field(default_factory=list)
     file_paths: list[str] = Field(default_factory=list)
 
@@ -2223,12 +2265,17 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
                     if msg.get("type") not in ("chat_message",) or not msg.get("replay"):
                         break
 
-                # Send the chat message (with any transferred attachments).
+                # Transfer any attached file to the target (FD resolves its auth).
+                _img, _fil = list(req.image_paths), list(req.file_paths)
+                if req.attach_path:
+                    _ti, _tf = await _transfer_file_to_agent(req.host, req.port, req.attach_path)
+                    _img += _ti
+                    _fil += _tf
                 _chat_payload: dict[str, Any] = {"type": "chat", "content": req.message}
-                if req.image_paths:
-                    _chat_payload["image_paths"] = req.image_paths
-                if req.file_paths:
-                    _chat_payload["file_paths"] = req.file_paths
+                if _img:
+                    _chat_payload["image_paths"] = _img
+                if _fil:
+                    _chat_payload["file_paths"] = _fil
                 await ws.send(json.dumps(_chat_payload))
 
                 # Stream events until we get the final assistant response
@@ -2291,7 +2338,8 @@ class DelegatePeerRequest(BaseModel):
     origin_platform: str = "web"       # "web" or "telegram"
     origin_user_id: str = ""           # telegram user id
     origin_chat_id: int = 0            # telegram chat id
-    # Agent-to-agent file transfer (already uploaded to the target agent).
+    # Agent-to-agent file transfer (FD uploads attach_path to the target).
+    attach_path: str = ""
     image_paths: list[str] = Field(default_factory=list)
     file_paths: list[str] = Field(default_factory=list)
 
@@ -2333,11 +2381,16 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
                         if msg.get("type") not in ("chat_message",) or not msg.get("replay"):
                             break
 
+                    _img, _fil = list(req.image_paths), list(req.file_paths)
+                    if req.attach_path:
+                        _ti, _tf = await _transfer_file_to_agent(req.target_host, req.target_port, req.attach_path)
+                        _img += _ti
+                        _fil += _tf
                     _payload: dict[str, Any] = {"type": "chat", "content": req.message}
-                    if req.image_paths:
-                        _payload["image_paths"] = req.image_paths
-                    if req.file_paths:
-                        _payload["file_paths"] = req.file_paths
+                    if _img:
+                        _payload["image_paths"] = _img
+                    if _fil:
+                        _payload["file_paths"] = _fil
                     await ws.send(json.dumps(_payload))
                     log.info("delegate_background: task sent to target", target=peer_display)
 
