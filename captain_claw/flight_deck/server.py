@@ -2428,7 +2428,12 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
         # Phase 2: deliver the result back to the source agent
         s_params = f"?token={source_auth}" if source_auth else ""
         source_url = f"ws://{req.source_host}:{req.source_port}/ws{s_params}"
-        callback_msg = f"[Delegated result from {peer_display}]\n\n{response_text}"
+        callback_msg = (
+            f"[Delegated result from {peer_display}] This is the ANSWER you were "
+            f"waiting for. Relay it to the user now, concisely, in their language. "
+            f"Do NOT delegate again, do NOT call any tool, and do NOT say you are "
+            f"still waiting — you already have the result below:\n\n{response_text}"
+        )
         log.info("delegate_background: delivering result to source",
                  source=req.source_name, source_port=req.source_port, result_len=len(response_text))
         try:

@@ -685,10 +685,11 @@ def _convert_messages_for_ollama(messages: list[Message]) -> list[dict[str, Any]
         if role in {"system", "user", "assistant"}:
             entry = {"role": role, "content": content}
             if i == last_img_idx:
-                images = [
-                    b64 for path in _ATTACHED_IMAGE_RE.findall(content)
-                    if (b64 := _encode_ollama_image(path))
-                ]
+                # Cap to the last few markers so a reflection/insight prompt that
+                # concatenates the whole history (many [Attached image:] markers)
+                # doesn't re-encode dozens of images and blow up tokens/latency.
+                paths = _ATTACHED_IMAGE_RE.findall(content)[-2:]
+                images = [b64 for p in paths if (b64 := _encode_ollama_image(p))]
                 if images:
                     entry["images"] = images
             result.append(entry)

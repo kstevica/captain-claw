@@ -202,6 +202,11 @@ class WebServer:
         self._busy_lock = asyncio.Lock()
         self._active_task: asyncio.Task | None = None
         self._telegram_queue: asyncio.Queue[TelegramMessage] = asyncio.Queue()
+        # Serialized queue for inbound messages from OTHER agents (delegate /
+        # consult results, peer notifications that should trigger a reply).
+        # A single consumer drains it one-at-a-time, only when the agent is
+        # free — so peer results never race the current turn or each other.
+        self._inbound_queue: asyncio.Queue[str] = asyncio.Queue()
         self._instr_loader = InstructionLoader()
         self._instructions_dir = self._instr_loader.base_dir
         self._instructions_personal_dir = self._instr_loader.personal_dir
@@ -1163,6 +1168,42 @@ class WebServer:
     async def _intentions_resolve(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_intentions import resolve_decision
         return await resolve_decision(self, request)
+
+    async def _inbound_queue_consumer(self) -> None:
+        """Drain inbound peer messages one-at-a-time, only when the agent is free.
+
+        Serializes delegate/consult results + triggered peer notifications so
+        they never interleave with the current turn or each other (which caused
+        duplicate "waiting" replies and re-planning). Each is delivered as a
+        normal chat turn so the agent relays it; the reply fans out to all
+        connected clients (incl. the WhatsApp/glasses bridge).
+        """
+        from captain_claw.web.chat_handler import handle_chat
+
+        while True:
+            content = await self._inbound_queue.get()
+            try:
+                # Wait for any in-flight turn to finish before starting this one.
+                for _ in range(1500):  # ~5 min ceiling
+                    if not self._busy:
+                        break
+                    await asyncio.sleep(0.2)
+                ws = next(
+                    (c for c in self.clients if not getattr(c, "_public_session_id", None)),
+                    None,
+                )
+                if ws is not None:
+                    await handle_chat(self, ws, content)
+                    # Let handle_chat latch _busy before we consider the next item.
+                    await asyncio.sleep(0.5)
+                elif self.agent and self.agent.session:
+                    # No client to stream through — record it so it's not lost.
+                    self.agent.session.add_message("user", content)
+                    log.info("Inbound peer message stored (no client ws)", content_len=len(content))
+            except Exception as exc:
+                log.warning("inbound_queue_consumer error", error=str(exc))
+            finally:
+                self._inbound_queue.task_done()
 
     async def _file_upload(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_file_upload import upload_file
@@ -2673,6 +2714,13 @@ async def _run_server(config: Config) -> None:
         print("  Cron scheduler started.")
     except Exception as exc:
         log.warning("cron_scheduler_failed_to_start", error=str(exc))
+
+    # Serialized consumer for inbound peer messages (delegate/consult results).
+    try:
+        asyncio.create_task(server._inbound_queue_consumer())
+        log.info("inbound_queue_consumer_started")
+    except Exception as exc:
+        log.warning("inbound_queue_consumer_failed_to_start", error=str(exc))
 
     await stop_event.wait()
 
