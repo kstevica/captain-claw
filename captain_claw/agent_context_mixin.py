@@ -86,6 +86,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "pocket_tts": "text-to-speech MP3",
     "send_mail": "send emails via SMTP",
     "whatsapp_send_file": "send a saved file to a WhatsApp chat (defaults to current chat)",
+    "intentions": "record future actions: user notes-to-self + your own proactive intentions",
     "clipboard": "read/write system clipboard",
     "gws": "Google Workspace: Drive, Docs, Calendar, Gmail",
     "datastore": "persistent relational tables",
@@ -1090,6 +1091,37 @@ class AgentContextMixin:
                 lines.append(f"    How to apply: {how}")
         return "\n".join(lines)
 
+    async def _refresh_intentions_context_cache(self) -> None:
+        """Pre-fetch open intentions for context injection."""
+        try:
+            from captain_claw.intentions import get_intentions_manager
+            self._intentions_context_cache = await get_intentions_manager().get_for_context(limit=12)
+        except Exception:
+            self._intentions_context_cache = []
+
+    def _build_intentions_context_note(self) -> str:
+        """Surface open intentions so the agent reasons about them proactively."""
+        items = getattr(self, "_intentions_context_cache", None)
+        if not items:
+            return ""
+        lines = [
+            "Active intentions (the user's notes-to-self and your own proactive "
+            "plans — act on / surface these when relevant):"
+        ]
+        for it in items:
+            origin = it.get("origin", "agent")
+            status = it.get("status", "")
+            title = (it.get("title") or "").strip()
+            line = f"- [{origin}/{status}] {title}"
+            repeat = (it.get("repeat") or "").strip()
+            if repeat:
+                line += f" [repeat: {repeat}]"
+            lines.append(line)
+            why = (it.get("why") or "").strip()
+            if why:
+                lines.append(f"    Why: {why}")
+        return "\n".join(lines)
+
     def _build_insights_block(self) -> str:
         """Build the {insights_block} for the system prompt."""
         cfg = get_config()
@@ -1990,6 +2022,7 @@ class AgentContextMixin:
         await self._refresh_apis_context_cache()
         await self._refresh_datastore_context_cache()
         await self._refresh_insights_context_cache()
+        await self._refresh_intentions_context_cache()
         await self._assess_cognitive_tempo()
         await self._refresh_nervous_system_cache()
         await self._refresh_briefing_context_cache()
@@ -2087,6 +2120,7 @@ class AgentContextMixin:
             InsightsTool,
             CronTool,
             WhatsAppSendFileTool,
+            IntentionsTool,
         )
 
         config = get_config()
@@ -2134,6 +2168,8 @@ class AgentContextMixin:
                 self.tools.register(GoogleMailTool(), metadata={"requires_google": True})
             elif tool_name == "whatsapp_send_file":
                 self.tools.register(WhatsAppSendFileTool())
+            elif tool_name == "intentions":
+                self.tools.register(IntentionsTool())
             elif tool_name == "gws":
                 self.tools.register(GwsTool())
             elif tool_name == "todo":
@@ -3369,6 +3405,14 @@ class AgentContextMixin:
                 "content": insights_note,
                 "tool_name": "insights_context",
                 "token_count": self._count_tokens(insights_note),
+            })
+        intentions_note = self._build_intentions_context_note()
+        if intentions_note:
+            candidate_messages.append({
+                "role": "assistant",
+                "content": intentions_note,
+                "tool_name": "intentions_context",
+                "token_count": self._count_tokens(intentions_note),
             })
         nervous_note = self._build_nervous_system_context_note()
         if nervous_note:
