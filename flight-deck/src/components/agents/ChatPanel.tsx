@@ -465,12 +465,16 @@ function ChatContent({
     // marker so the agent routes them to its vision tool instead of read.
     let content = text
     if (uploadedFiles.length > 0) {
+      const hasImage = uploadedFiles.some((a) => a.type.startsWith('image/'))
       const fileRefs = uploadedFiles.map((a) =>
         a.type.startsWith('image/')
           ? `[Attached image: ${a.uploadedPath}]`
           : `[Attached file: ${a.name} → ${a.uploadedPath}]`,
       ).join('\n')
-      content = content ? `${content}\n\n${fileRefs}` : fileRefs
+      const hint = hasImage
+        ? '\n(To view the image(s), call the image_vision tool with the path. Do NOT use read on an image.)'
+        : ''
+      content = content ? `${content}\n\n${fileRefs}${hint}` : `${fileRefs}${hint}`
     }
 
     onSend(content)

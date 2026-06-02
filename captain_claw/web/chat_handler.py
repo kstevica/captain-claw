@@ -226,14 +226,17 @@ async def handle_chat(
     # Build attachment prefix — supports single or multiple files.
     effective_content = content
     attachment_lines: list[str] = []
+    _has_image = False
 
     # Single image (backward compat)
     if image_path:
         attachment_lines.append(f"[Attached image: {image_path}]")
+        _has_image = True
     # Multiple images
     if image_paths:
         for p in image_paths:
             attachment_lines.append(f"[Attached image: {p}]")
+            _has_image = True
     # Single data file (backward compat)
     if file_path:
         attachment_lines.append(f"[Attached file: {file_path}]")
@@ -241,6 +244,14 @@ async def handle_chat(
     if file_paths:
         for p in file_paths:
             attachment_lines.append(f"[Attached file: {p}]")
+    # Tell the model how to actually view an image — it must call image_vision,
+    # not read (binary) and not give up based on earlier failed turns.
+    if _has_image:
+        attachment_lines.append(
+            "(To view the image(s) above, call the image_vision tool with the path. "
+            "Do NOT use read on an image, and do NOT say you can't open it without "
+            "calling image_vision first.)"
+        )
 
     if attachment_lines:
         prefix = "\n".join(attachment_lines) + "\n"

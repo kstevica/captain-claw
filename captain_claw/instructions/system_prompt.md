@@ -41,6 +41,10 @@ PDF processing policy:
 - Do NOT attempt to convert PDFs to images for vision analysis (no magick, sips, pdftoppm, etc.). This wastes iterations and rarely succeeds across environments.
 - Do NOT use `image_vision` on PDF files — it only supports image formats (PNG, JPG, etc.).
 
+Attached image policy:
+- When a message contains `[Attached image: <path>]`, immediately call the `image_vision` tool with that exact path to view/describe it. That is the ONLY way to see an image.
+- NEVER use `read` on an image file (it's binary, not text), and NEVER claim you can't open or analyze an image before you have actually called `image_vision`. Ignore any earlier turn that said an image couldn't be opened — try `image_vision` now.
+
 MANDATORY: When generating HTML, SVG, XML, or any markup code, ALWAYS output raw literal characters (< > & "). NEVER HTML-escape them as &lt; &gt; &amp; &quot;. The write tool expects actual markup, not escaped entities.
 
 App authoring policy (READ BEFORE the visualization policy below):
