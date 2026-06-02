@@ -276,8 +276,17 @@ class _BaseImageLLMTool(Tool):
             )
 
         model_cfg = self._find_model()
+        used_fallback = False
         if model_cfg is None:
-            return ToolResult(success=False, error=self._no_model_error)
+            # No dedicated vision/OCR model configured — fall back to the
+            # agent's own chat model (the one that received the image). The
+            # image is resized + sent inline as base64; if that model isn't
+            # multimodal the provider will return its own error, which is
+            # more useful than refusing outright.
+            model_cfg = get_config().model
+            used_fallback = True
+            if not getattr(model_cfg, "model", ""):
+                return ToolResult(success=False, error=self._no_model_error)
 
         cfg = get_config()
         tool_cfg = getattr(cfg.tools, self._config_key, None)
@@ -302,6 +311,7 @@ class _BaseImageLLMTool(Tool):
             model=model_cfg.model,
             path=str(file_path),
             prompt=effective_prompt[:80],
+            fallback_to_chat_model=used_fallback,
         )
 
         try:
