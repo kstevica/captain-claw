@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Cpu, Play, Square, RotateCcw, Trash2, ScrollText, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Pencil, Check, X, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser } from 'lucide-react'
+import { Cpu, Play, Square, RotateCcw, Trash2, ScrollText, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Target, Pencil, Check, X, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser } from 'lucide-react'
 import { useAgentMemoryTransfer } from '../../hooks/useAgentMemoryTransfer'
 import { ReflectionMergeModal } from './ReflectionMergeModal'
 import { PendingInsightsModal } from './PendingInsightsModal'
@@ -12,6 +12,7 @@ import { EmbeddedChat } from './EmbeddedChat'
 import { AgentGroupBadges } from '../common/AgentGroups'
 import { AgentConfigEditor } from './AgentConfigEditor'
 import { DatastoreBrowser } from './DatastoreBrowser'
+import { IntentionsPanel } from './IntentionsPanel'
 import { OpenDropdown } from '../common/OpenDropdown'
 import { CognitiveModeSelector } from '../common/CognitiveModeSelector'
 import { ModelSelector } from '../common/ModelSelector'
@@ -113,6 +114,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   }, [proc.slug])
   const [showConfig, setShowConfig] = useState(false)
   const [showDatastore, setShowDatastore] = useState(false)
+  const [showIntentions, setShowIntentions] = useState(false)
   const [showMergeReflection, setShowMergeReflection] = useState(false)
   const [showPendingInsights, setShowPendingInsights] = useState(false)
   const cognitiveMode = getCognitiveMode(proc.slug)
@@ -223,6 +225,10 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
     <DatastoreBrowser host="localhost" port={proc.web_port} auth={proc.web_auth} agentName={agentName} onClose={() => setShowDatastore(false)} />,
     document.body
   )
+  const intentionsModal = showIntentions && isRunning && createPortal(
+    <IntentionsPanel host="localhost" port={proc.web_port} auth={proc.web_auth} agentName={agentName} onClose={() => setShowIntentions(false)} />,
+    document.body
+  )
 
   const mergeReflectionModal = showMergeReflection && isRunning && createPortal(
     <ReflectionMergeModal
@@ -279,7 +285,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
         <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleViewMode} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Expand card">
           <Maximize2 className="h-3 w-3" />
         </button>
-      </div>{configModal}{datastoreModal}{mergeReflectionModal}{pendingInsightsModal}</>
+      </div>{configModal}{datastoreModal}{intentionsModal}{mergeReflectionModal}{pendingInsightsModal}</>
     )
   }
 
@@ -366,6 +372,11 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
                 <Database className="h-3.5 w-3.5" /> Data
               </button>
             )}
+            {isRunning && (
+              <button onClick={() => setShowIntentions(true)} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                <Target className="h-3.5 w-3.5" /> Intentions
+              </button>
+            )}
             <div className="flex-1" />
             <ProcessActionsDropdown {...actionProps} />
           </div>
@@ -394,7 +405,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
           className="hidden"
           onChange={memory.handleFileSelected}
         />
-      </div>{configModal}{datastoreModal}{mergeReflectionModal}{pendingInsightsModal}</>
+      </div>{configModal}{datastoreModal}{intentionsModal}{mergeReflectionModal}{pendingInsightsModal}</>
     )
   }
 
@@ -655,6 +666,11 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
               <Database className="h-3.5 w-3.5" /> Data
             </button>
           )}
+          {isRunning && (
+            <button onClick={() => setShowIntentions(true)} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+              <Target className="h-3.5 w-3.5" /> Intentions
+            </button>
+          )}
           <div className="flex-1" />
           <ProcessActionsDropdown {...actionProps} />
         </div>
@@ -691,6 +707,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
 
       {configModal}
       {datastoreModal}
+      {intentionsModal}
       {mergeReflectionModal}
       {pendingInsightsModal}
     </div>

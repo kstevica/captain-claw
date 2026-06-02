@@ -2643,6 +2643,73 @@ async def agent_files(host: str, port: int, token: str = "", since: str = "", re
     return registered
 
 
+# ── Intentions proxy (FD panel → agent /api/intentions*) ──────────────
+
+
+async def _proxy_agent_intentions(
+    method: str, host: str, port: int, token: str, path: str,
+    *, query: dict | None = None, body: dict | None = None,
+):
+    """Forward an intentions request to an agent, preserving its status code."""
+    import httpx
+    from fastapi.responses import JSONResponse
+
+    params = dict(query or {})
+    auth = token or _resolve_agent_auth(port)
+    if auth:
+        params["token"] = auth
+    url = f"http://{host}:{port}{path}"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.request(method, url, params=params, json=body)
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+    except Exception as exc:
+        raise HTTPException(502, f"Agent error: {exc}")
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = {"error": resp.text[:500]}
+    return JSONResponse(payload, status_code=resp.status_code)
+
+
+@app.get("/fd/agent-intentions/{host}/{port}")
+async def agent_intentions(
+    host: str, port: int, token: str = "", status: str = "", origin: str = "",
+    user: dict | None = _required_user_dep,
+):
+    q: dict = {}
+    if status:
+        q["status"] = status
+    if origin:
+        q["origin"] = origin
+    return await _proxy_agent_intentions("GET", host, port, token, "/api/intentions", query=q)
+
+
+@app.get("/fd/agent-intentions-decisions/{host}/{port}")
+async def agent_intention_decisions(
+    host: str, port: int, token: str = "", user: dict | None = _required_user_dep,
+):
+    return await _proxy_agent_intentions(
+        "GET", host, port, token, "/api/intentions/decisions"
+    )
+
+
+@app.post("/fd/agent-intentions-decision/{host}/{port}/{decision_id}/resolve")
+async def agent_resolve_intention_decision(
+    host: str, port: int, decision_id: str, request: Request,
+    token: str = "", user: dict | None = _required_user_dep,
+):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return await _proxy_agent_intentions(
+        "POST", host, port, token,
+        f"/api/intentions/decisions/{decision_id}/resolve", body=body,
+    )
+
+
 class TransferRequest(BaseModel):
     src_host: str
     src_port: int

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser } from 'lucide-react'
+import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Target, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser } from 'lucide-react'
 import { useAgentMemoryTransfer } from '../../hooks/useAgentMemoryTransfer'
 import { ReflectionMergeModal } from './ReflectionMergeModal'
 import { PendingInsightsModal } from './PendingInsightsModal'
@@ -12,6 +12,7 @@ import { EmbeddedChat } from './EmbeddedChat'
 import { AgentGroupBadges } from '../common/AgentGroups'
 import { AgentConfigEditor } from './AgentConfigEditor'
 import { DatastoreBrowser } from './DatastoreBrowser'
+import { IntentionsPanel } from './IntentionsPanel'
 import { OpenDropdown } from '../common/OpenDropdown'
 import { CognitiveModeSelector } from '../common/CognitiveModeSelector'
 import { ModelSelector } from '../common/ModelSelector'
@@ -124,6 +125,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   }, [container.id])
   const [showConfig, setShowConfig] = useState(false)
   const [showDatastore, setShowDatastore] = useState(false)
+  const [showIntentions, setShowIntentions] = useState(false)
   const [showMergeReflection, setShowMergeReflection] = useState(false)
   const [showPendingInsights, setShowPendingInsights] = useState(false)
   const cognitiveMode = getCognitiveMode(container.id)
@@ -237,6 +239,10 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
     <DatastoreBrowser host="localhost" port={container.web_port} auth={container.web_auth} agentName={agentName} onClose={() => setShowDatastore(false)} />,
     document.body
   )
+  const intentionsModal = showIntentions && isRunning && container.web_port && createPortal(
+    <IntentionsPanel host="localhost" port={container.web_port} auth={container.web_auth} agentName={agentName} onClose={() => setShowIntentions(false)} />,
+    document.body
+  )
 
   const mergeReflectionModal = showMergeReflection && isRunning && container.web_port && createPortal(
     <ReflectionMergeModal
@@ -293,7 +299,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
         <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleViewMode} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Expand card">
           <Maximize2 className="h-3 w-3" />
         </button>
-      </div>{configModal}{datastoreModal}{mergeReflectionModal}{pendingInsightsModal}</>
+      </div>{configModal}{datastoreModal}{intentionsModal}{mergeReflectionModal}{pendingInsightsModal}</>
     )
   }
 
@@ -410,6 +416,11 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
                 <Database className="h-3.5 w-3.5" /> Data
               </button>
             )}
+            {isRunning && container.web_port && (
+              <button onClick={() => setShowIntentions(true)} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                <Target className="h-3.5 w-3.5" /> Intentions
+              </button>
+            )}
             <div className="flex-1" />
             <ActionsDropdown {...actionProps} />
           </div>
@@ -469,7 +480,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
           className="hidden"
           onChange={memory.handleFileSelected}
         />
-      </div>{configModal}{datastoreModal}{mergeReflectionModal}{pendingInsightsModal}</>
+      </div>{configModal}{datastoreModal}{intentionsModal}{mergeReflectionModal}{pendingInsightsModal}</>
     )
   }
 
@@ -808,6 +819,11 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
               <Database className="h-3.5 w-3.5" /> Data
             </button>
           )}
+          {isRunning && container.web_port && (
+            <button onClick={() => setShowIntentions(true)} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+              <Target className="h-3.5 w-3.5" /> Intentions
+            </button>
+          )}
           <div className="flex-1" />
           <ActionsDropdown {...actionProps} />
         </div>
@@ -888,6 +904,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
 
       {configModal}
       {datastoreModal}
+      {intentionsModal}
       {mergeReflectionModal}
       {pendingInsightsModal}
     </div>
