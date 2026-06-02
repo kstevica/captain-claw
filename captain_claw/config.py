@@ -703,6 +703,25 @@ class ApisMemoryConfig(BaseModel):
     max_items_in_prompt: int = 5
 
 
+class IntentionsConfig(BaseModel):
+    """Proactive intentions generator (Phase 3).
+
+    Opt-in: when ``auto_generate`` is on, a cooldown-gated background pass
+    reviews recent activity and proposes agent intentions (announced if
+    low-risk, asked otherwise). Quiet hours and a per-day cap keep it from
+    being noisy. ``proactivity`` tunes how eager the proposals are.
+    """
+
+    auto_generate: bool = False  # opt-in — off by default
+    interval_hours: float = 6.0  # min hours between proposal passes
+    min_messages: int = 8  # need at least this many session messages
+    max_per_day: int = 4  # cap proposals/day so it never spams
+    quiet_hours_start: int = 22  # 22:00
+    quiet_hours_end: int = 8  # 08:00 (wraps midnight)
+    proactivity: str = "balanced"  # conservative | balanced | eager
+    push_to_whatsapp: bool = True  # push new proposals to the current WhatsApp chat
+
+
 class InsightsConfig(BaseModel):
     """Persistent insights memory — auto-extracted facts, contacts, decisions."""
 
@@ -1023,6 +1042,7 @@ class Config(BaseSettings):
     deep_memory: DeepMemoryConfig = Field(default_factory=DeepMemoryConfig)
     datastore: DatastoreConfig = Field(default_factory=DatastoreConfig)
     insights: InsightsConfig = Field(default_factory=InsightsConfig)
+    intentions: IntentionsConfig = Field(default_factory=IntentionsConfig)
     nervous_system: NervousSystemConfig = Field(default_factory=NervousSystemConfig)
     sister_session: SisterSessionConfig = Field(default_factory=SisterSessionConfig)
     cognitive_metrics: CognitiveMetricsConfig = Field(default_factory=CognitiveMetricsConfig)

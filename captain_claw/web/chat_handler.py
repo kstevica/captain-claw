@@ -449,6 +449,15 @@ async def _run_agent(
         except Exception:
             pass
 
+        # Proactive intentions generator (admin only; opt-in via config).
+        if not is_public:
+            try:
+                import asyncio as _asyncio4
+                from captain_claw.intentions_generator import maybe_auto_propose
+                _asyncio4.create_task(maybe_auto_propose(agent, trigger="periodic"))
+            except Exception:
+                pass
+
         # Record cognitive tempo metric (non-blocking).
         try:
             tempo = getattr(agent, "_cognitive_tempo", None)

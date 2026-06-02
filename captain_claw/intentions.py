@@ -153,9 +153,40 @@ class IntentionsManager:
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_dec_status ON intention_decisions(status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_dec_intention ON intention_decisions(intention_id)")
+
+        # Single-row state for the Phase 3 proposal generator (cooldown + budget).
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS generator_state (
+                id          INTEGER PRIMARY KEY CHECK (id = 1),
+                last_run_at TEXT,
+                day         TEXT,
+                count       INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        await db.execute(
+            "INSERT OR IGNORE INTO generator_state (id, last_run_at, day, count) VALUES (1, NULL, '', 0)"
+        )
         await db.commit()
         self._db = db
         return db
+
+    async def get_generator_state(self) -> dict[str, Any]:
+        db = await self._ensure_db()
+        async with db.execute(
+            "SELECT last_run_at, day, count FROM generator_state WHERE id = 1"
+        ) as cur:
+            r = await cur.fetchone()
+        if not r:
+            return {"last_run_at": None, "day": "", "count": 0}
+        return {"last_run_at": r["last_run_at"], "day": r["day"], "count": int(r["count"] or 0)}
+
+    async def set_generator_state(self, *, last_run_at: str, day: str, count: int) -> None:
+        db = await self._ensure_db()
+        await db.execute(
+            "UPDATE generator_state SET last_run_at = ?, day = ?, count = ? WHERE id = 1",
+            (last_run_at, day, count),
+        )
+        await db.commit()
 
     async def close(self) -> None:
         if self._db is not None:
@@ -495,6 +526,52 @@ async def _materialize_scheduler(it: dict[str, Any], source_waid: str) -> str:
     finally:
         await fd.close()
     return ""
+
+
+async def create_proposal(
+    *,
+    title: str,
+    why: str = "",
+    risk: str = "normal",
+    repeat: str | None = None,
+    action_prompt: str | None = None,
+    source_session: str = "",
+    waid: str = "",
+) -> dict[str, Any]:
+    """Create an agent intention + its decision (ask/announce). Shared by the
+    intentions tool and the Phase 3 generator so both emit identical decisions.
+
+    Returns ``{"intention", "decision", "question"}`` — ``question`` is the text
+    to surface to the user (empty for silent).
+    """
+    mgr = get_intentions_manager()
+    it = await mgr.create(
+        origin="agent",
+        title=title,
+        why=why,
+        risk=risk,
+        category="suggestion",
+        repeat=repeat,
+        action_type="run_prompt" if action_prompt else "nudge",
+        action_spec={"prompt": action_prompt} if action_prompt else None,
+        source_session=source_session,
+    )
+    hint = {"waid": waid} if waid else None
+    question = ""
+    decision = None
+    if it["approval_mode"] == "ask":
+        question = f"Should I {title}?"
+        decision = await mgr.create_decision(
+            intention_id=it["id"], kind="approval", prompt_text=question,
+            options=["yes", "no", "later"], target_hint=hint,
+        )
+    elif it["approval_mode"] == "announce":
+        question = f"I'll {title} unless you say stop."
+        decision = await mgr.create_decision(
+            intention_id=it["id"], kind="announce_undo", prompt_text=question,
+            options=["stop"], target_hint=hint,
+        )
+    return {"intention": it, "decision": decision, "question": question}
 
 
 async def _record_decline_insight(it: dict[str, Any], source_session: str = "") -> None:
