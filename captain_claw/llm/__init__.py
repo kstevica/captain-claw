@@ -244,6 +244,42 @@ def _safe_json_loads(raw: str) -> dict[str, Any]:
         return {"raw": raw}
 
 
+async def _acompletion_tolerant(kwargs: dict[str, Any], provider: Any = None) -> Any:
+    """Call ``acompletion``; if the model rejects ``tool_choice``, retry without it.
+
+    Thinking/reasoning models (e.g. DeepSeek thinking mode served via an
+    OpenAI-compatible endpoint) return HTTP 400 "does not support this
+    tool_choice". The orchestration layer forces ``tool_choice="required"`` on
+    stall retries — rather than crash the turn, we transparently drop the
+    constraint and let the model answer normally. We also flag the provider so
+    subsequent calls this session skip forcing tool_choice (one wasted call max).
+    """
+    from litellm import acompletion
+
+    try:
+        return await acompletion(**kwargs)
+    except Exception as e:
+        msg = str(e).lower()
+        if (
+            kwargs.get("tool_choice") is not None
+            and "tool_choice" in msg
+            and "support" in msg
+        ):
+            if provider is not None:
+                try:
+                    provider._tool_choice_unsupported = True
+                except Exception:
+                    pass
+            log.warning(
+                "Model rejected tool_choice; retrying without it",
+                model=kwargs.get("model"),
+            )
+            retry_kwargs = dict(kwargs)
+            retry_kwargs.pop("tool_choice", None)
+            return await acompletion(**retry_kwargs)
+        raise
+
+
 # Matches <think>...</think> blocks (and common variants like <thinking>,
 # <reasoning>) emitted by some models as raw text in the content field
 # instead of in a separate reasoning_content field. We strip these so the
@@ -1807,7 +1843,9 @@ class LiteLLMProvider(LLMProvider):
                 self._tool_choice_override = None
             except Exception:
                 pass
-            if kwargs.get("tools"):
+            # Skip when this model has already rejected tool_choice this
+            # session (thinking-mode models) — avoids repeating doomed calls.
+            if kwargs.get("tools") and not getattr(self, "_tool_choice_unsupported", False):
                 kwargs["tool_choice"] = override
 
         # Anthropic prompt caching: split system message on CACHE_SPLIT marker
@@ -2072,7 +2110,7 @@ class LiteLLMProvider(LLMProvider):
                         f"the request may be too large."
                     )
             else:
-                response = await acompletion(**kwargs)
+                response = await _acompletion_tolerant(kwargs, self)
 
             # Safety fallback: if any provider still returns a streaming
             # object despite stream=False, collect it.
@@ -2228,14 +2266,15 @@ class LiteLLMProvider(LLMProvider):
         self.last_reasoning_content = ""
 
         try:
-            stream = await acompletion(
-                **self._request_kwargs(
+            stream = await _acompletion_tolerant(
+                self._request_kwargs(
                     messages=messages,
                     tools=tools,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     stream=True,
-                )
+                ),
+                self,
             )
             async for chunk in stream:
                 delta_obj = _obj_get(_obj_get(chunk, "choices", [{}])[0], "delta", {})
@@ -2315,7 +2354,7 @@ class LiteLLMProvider(LLMProvider):
             # Request usage in the final stream chunk.
             kwargs["stream_options"] = {"include_usage": True}
 
-            stream = await acompletion(**kwargs)
+            stream = await _acompletion_tolerant(kwargs, self)
             collected = await self._collect_streaming_response(stream, on_chunk=on_chunk)
 
             # Parse the collected dict into an LLMResponse (same as complete()).
