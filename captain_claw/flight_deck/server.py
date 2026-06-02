@@ -2166,6 +2166,11 @@ class ConsultPeerRequest(BaseModel):
     message: str
     source_name: str = "another agent"
     timeout: float = Field(default=480.0, le=600.0)
+    # Agent-to-agent file transfer: paths already uploaded to the TARGET agent
+    # (the sender uploads to the peer's /api/image|file/upload first), forwarded
+    # into the target's chat payload so it can see the image / attached file.
+    image_paths: list[str] = Field(default_factory=list)
+    file_paths: list[str] = Field(default_factory=list)
 
 
 # Track active consultations to prevent duplicate requests to the same target
@@ -2218,8 +2223,13 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
                     if msg.get("type") not in ("chat_message",) or not msg.get("replay"):
                         break
 
-                # Send the chat message
-                await ws.send(json.dumps({"type": "chat", "content": req.message}))
+                # Send the chat message (with any transferred attachments).
+                _chat_payload: dict[str, Any] = {"type": "chat", "content": req.message}
+                if req.image_paths:
+                    _chat_payload["image_paths"] = req.image_paths
+                if req.file_paths:
+                    _chat_payload["file_paths"] = req.file_paths
+                await ws.send(json.dumps(_chat_payload))
 
                 # Stream events until we get the final assistant response
                 response_parts: list[str] = []
@@ -2281,6 +2291,9 @@ class DelegatePeerRequest(BaseModel):
     origin_platform: str = "web"       # "web" or "telegram"
     origin_user_id: str = ""           # telegram user id
     origin_chat_id: int = 0            # telegram chat id
+    # Agent-to-agent file transfer (already uploaded to the target agent).
+    image_paths: list[str] = Field(default_factory=list)
+    file_paths: list[str] = Field(default_factory=list)
 
 
 @app.post("/fd/delegate-peer")
@@ -2320,7 +2333,12 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
                         if msg.get("type") not in ("chat_message",) or not msg.get("replay"):
                             break
 
-                    await ws.send(json.dumps({"type": "chat", "content": req.message}))
+                    _payload: dict[str, Any] = {"type": "chat", "content": req.message}
+                    if req.image_paths:
+                        _payload["image_paths"] = req.image_paths
+                    if req.file_paths:
+                        _payload["file_paths"] = req.file_paths
+                    await ws.send(json.dumps(_payload))
                     log.info("delegate_background: task sent to target", target=peer_display)
 
                     # Wait for the final response

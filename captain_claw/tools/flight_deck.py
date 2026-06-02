@@ -15,6 +15,70 @@ from captain_claw.tools.registry import Tool, ToolResult
 
 log = structlog.get_logger(__name__)
 
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+
+
+def _resolve_local_file(kwargs: dict[str, Any], path_arg: str):
+    """Resolve a sender-local file path (saved/ workspace or absolute)."""
+    from pathlib import Path
+
+    if not path_arg:
+        return None
+    registry = kwargs.get("_file_registry")
+    if registry is not None:
+        try:
+            physical = registry.resolve(path_arg)
+        except Exception:
+            physical = None
+        if physical and Path(physical).is_file():
+            return Path(physical)
+    cand = Path(path_arg).expanduser()
+    if cand.is_absolute() and cand.is_file():
+        return cand
+    stripped = path_arg[len("saved/"):] if path_arg.startswith("saved/") else path_arg
+    for base in (kwargs.get("_saved_base_path"), kwargs.get("_runtime_base_path")):
+        if base:
+            for rel in (path_arg, stripped):
+                p = (Path(base) / rel).resolve()
+                if p.is_file():
+                    return p
+    return None
+
+
+async def _upload_to_peer(host: str, port: int, auth: str, file_path) -> tuple[list[str], list[str], str]:
+    """Upload a file to the TARGET agent's upload endpoint.
+
+    Images go to /api/image/upload (-> image_paths for the peer's vision),
+    everything else to /api/file/upload (-> file_paths). Returns
+    (image_paths, file_paths, error).
+    """
+    import httpx
+    from pathlib import Path
+
+    p = Path(file_path)
+    is_img = p.suffix.lower() in _IMAGE_EXTS
+    endpoint = "/api/image/upload" if is_img else "/api/file/upload"
+    try:
+        blob = p.read_bytes()
+    except Exception as e:
+        return [], [], f"could not read file: {e}"
+    params = {"token": auth} if auth else {}
+    url = f"http://{host}:{port}{endpoint}"
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(url, params=params, files={"file": (p.name, blob)})
+    except Exception as e:
+        return [], [], f"upload to peer failed: {e}"
+    if resp.status_code != 200:
+        return [], [], f"peer upload rejected ({resp.status_code}): {resp.text[:200]}"
+    try:
+        peer_path = str((resp.json() or {}).get("path") or "")
+    except Exception:
+        peer_path = ""
+    if not peer_path:
+        return [], [], "peer upload returned no path"
+    return ([peer_path], [], "") if is_img else ([], [peer_path], "")
+
 
 class FlightDeckTool(Tool):
     name = "flight_deck"
@@ -59,6 +123,17 @@ class FlightDeckTool(Tool):
                 "description": (
                     "The message/task to send to the peer agent "
                     "(required for 'consult' and 'delegate' actions)."
+                ),
+            },
+            "file": {
+                "type": "string",
+                "description": (
+                    "Optional path to a file to send ALONG WITH the message to the "
+                    "peer (for 'consult'/'delegate'). Use this to share an image, "
+                    "PDF, or document with another agent. Relative paths resolve "
+                    "from your saved/ workspace (e.g. 'showcase/<session>/report.pdf'); "
+                    "absolute paths also work. Images are delivered for the peer's "
+                    "vision; other files as attachments."
                 ),
             },
         },
@@ -163,6 +238,18 @@ class FlightDeckTool(Tool):
 
         log.info("Consulting peer via fleet", target=peer_display, host=host, port=port)
 
+        # Transfer an attached file to the peer first (upload to its workspace).
+        image_paths: list[str] = []
+        file_paths: list[str] = []
+        attach = kwargs.get("_attach_file")
+        if attach is not None:
+            _emit("uploading", f"Sending file to {peer_display}...")
+            image_paths, file_paths, up_err = await _upload_to_peer(
+                host, port, target.get("auth", "") or "", attach
+            )
+            if up_err:
+                return ToolResult(success=False, error=f"File transfer failed: {up_err}")
+
         try:
             async with httpx.AsyncClient(timeout=600.0) as client:
                 async with client.stream(
@@ -175,6 +262,8 @@ class FlightDeckTool(Tool):
                         "message": message,
                         "source_name": source_name,
                         "timeout": 480.0,
+                        "image_paths": image_paths,
+                        "file_paths": file_paths,
                     },
                 ) as resp:
                     if resp.status_code != 200:
@@ -345,6 +434,18 @@ class FlightDeckTool(Tool):
                  target_port=target.get("port"), source_port=source_port,
                  origin_platform=origin_platform)
 
+        # Transfer an attached file to the peer first (upload to its workspace).
+        image_paths: list[str] = []
+        file_paths: list[str] = []
+        attach = kwargs.get("_attach_file")
+        if attach is not None:
+            image_paths, file_paths, up_err = await _upload_to_peer(
+                target.get("host", "localhost"), target.get("port"),
+                target.get("auth", "") or "", attach,
+            )
+            if up_err:
+                return ToolResult(success=False, error=f"File transfer failed: {up_err}")
+
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
@@ -361,6 +462,8 @@ class FlightDeckTool(Tool):
                         "origin_platform": origin_platform,
                         "origin_user_id": origin_user_id,
                         "origin_chat_id": origin_chat_id,
+                        "image_paths": image_paths,
+                        "file_paths": file_paths,
                     },
                 )
                 if resp.status_code != 200:
@@ -468,6 +571,17 @@ class FlightDeckTool(Tool):
                 success=False,
                 error="Flight Deck URL not available. This tool requires Flight Deck.",
             )
+
+        # Resolve an optional file to transfer to the peer (consult/delegate).
+        file_arg = str(kwargs.get("file") or "").strip()
+        if file_arg and action in ("consult", "delegate"):
+            resolved = _resolve_local_file(kwargs, file_arg)
+            if resolved is None:
+                return ToolResult(
+                    success=False,
+                    error=f"Could not find file '{file_arg}' to send to the peer.",
+                )
+            kwargs["_attach_file"] = resolved
 
         if action == "list_agents":
             return await self._list_agents(fd_url, **kwargs)
