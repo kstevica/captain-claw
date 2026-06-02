@@ -248,9 +248,10 @@ async def handle_chat(
     # not read (binary) and not give up based on earlier failed turns.
     if _has_image:
         attachment_lines.append(
-            "(To view the image(s) above, call the image_vision tool with the path. "
-            "Do NOT use read on an image, and do NOT say you can't open it without "
-            "calling image_vision first.)"
+            "(To view the image(s) above you MUST call a tool: image_vision with the "
+            "path, or — if you can't see images — delegate it to a multimodal peer "
+            "via flight_deck with file=<path>. Never use read on an image. Never say "
+            "you sent/delegated/described it unless you actually called the tool this turn.)"
         )
 
     if attachment_lines:
