@@ -617,10 +617,55 @@ def _convert_messages_for_openai_style(messages: list[Message]) -> list[dict[str
     return result
 
 
+# Matches the attachment marker the chat pipeline injects for images.
+_ATTACHED_IMAGE_RE = re.compile(r"\[Attached image:\s*([^\]\n]+?)\s*\]")
+
+
+def _encode_ollama_image(path: str) -> str | None:
+    """Read, resize, and base64-encode an image for Ollama's ``images`` array.
+
+    Multimodal Ollama models (e.g. minimax-m3, llava, qwen-vl) accept images
+    inline per-message. Resized first (longest edge ~1568px) to bound tokens.
+    Returns the raw base64 string (no data: prefix), or None on failure.
+    """
+    import base64
+    from pathlib import Path
+
+    p = Path(path.strip())
+    if not p.is_file():
+        return None
+    try:
+        data = p.read_bytes()
+        try:
+            from captain_claw.tools.image_ocr import _maybe_resize_image
+            data, _mime = _maybe_resize_image(data, 1568, 85)
+        except Exception:
+            pass  # resize is best-effort; send original if it fails
+        return base64.b64encode(data).decode("ascii")
+    except Exception:
+        return None
+
+
 def _convert_messages_for_ollama(messages: list[Message]) -> list[dict[str, Any]]:
-    """Convert messages to Ollama API format."""
+    """Convert messages to Ollama API format.
+
+    Attached images are sent INLINE to multimodal models via Ollama's
+    per-message ``images`` array — but only on the most recent user message
+    that references one, so historical images aren't re-encoded every call.
+    """
+    def _content_of(m: Any) -> str:
+        return str(m.get("content", "")) if isinstance(m, dict) else str(getattr(m, "content", ""))
+
+    def _role_of(m: Any) -> str:
+        return str(m.get("role", "")) if isinstance(m, dict) else str(getattr(m, "role", ""))
+
+    last_img_idx = -1
+    for i, msg in enumerate(messages):
+        if _role_of(msg) == "user" and _ATTACHED_IMAGE_RE.search(_content_of(msg)):
+            last_img_idx = i
+
     result: list[dict[str, Any]] = []
-    for msg in messages:
+    for i, msg in enumerate(messages):
         if isinstance(msg, dict):
             role = str(msg.get("role", ""))
             content = str(msg.get("content", ""))
@@ -638,7 +683,15 @@ def _convert_messages_for_ollama(messages: list[Message]) -> list[dict[str, Any]
             continue
 
         if role in {"system", "user", "assistant"}:
-            result.append({"role": role, "content": content})
+            entry = {"role": role, "content": content}
+            if i == last_img_idx:
+                images = [
+                    b64 for path in _ATTACHED_IMAGE_RE.findall(content)
+                    if (b64 := _encode_ollama_image(path))
+                ]
+                if images:
+                    entry["images"] = images
+            result.append(entry)
     return result
 
 
