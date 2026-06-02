@@ -215,6 +215,24 @@ def _looks_like_stall(text: str) -> bool:
     return len(tail) < _STALL_FOLLOWTHROUGH_MIN_CHARS
 
 
+# Phrases that CLAIM a peer hand-off / send was performed. Used to catch the
+# model lying ("Poslao sam MiniMax-u", "I delegated it", "čekam odgovor")
+# without actually calling flight_deck/consult_peer this turn. EN + HR.
+_DELEGATION_CLAIM_RE = _re.compile(
+    r"(?i)("
+    r"poslao sam|poslala sam|šaljem|saljem|proslije|delegira|predao sam|"
+    r"\bi\s+(sent|delegated|forwarded|passed|asked)\b|sent it to|"
+    r"asked\s+\w+\s+(to|for)|čekam\s+(odgovor|opis)|cekam\s+(odgovor|opis)|"
+    r"waiting\s+for\s+(the\s+)?(peer|agent|minimax|response|reply)"
+    r")"
+)
+
+
+def _claims_delegation(text: str) -> bool:
+    """True if the reply claims a peer hand-off/send was done."""
+    return bool(text and _DELEGATION_CLAIM_RE.search(str(text)))
+
+
 class AgentOrchestrationMixin:
     """Core request orchestration: complete() and stream()."""
 
@@ -2001,22 +2019,45 @@ class AgentOrchestrationMixin:
             # The stall text is committed to the session so the model
             # can see (and avoid repeating) what it just emitted.
             _stall_resp_text = str(response.content or "")
+            # False-action-claim gate: the reply claims it delegated/sent to a
+            # peer, but no flight_deck/consult_peer tool was called THIS TURN —
+            # i.e. the model is lying. Force a corrective retry instead of
+            # letting the lie reach the user. (Truthful "Poslao sam… čekam"
+            # AFTER a real delegate is allowed, since the tool is in turn use.)
+            _delegated_this_turn = any(
+                t in getattr(self, "_turn_tool_call_counts", {})
+                for t in ("flight_deck", "consult_peer")
+            )
+            _false_claim = (
+                not response.tool_calls
+                and not _delegated_this_turn
+                and _claims_delegation(_stall_resp_text)
+            )
             if (
                 not response.tool_calls
-                and _looks_like_stall(_stall_resp_text)
+                and (_looks_like_stall(_stall_resp_text) or _false_claim)
                 and self._stall_retry_count < MAX_STALL_RETRIES
             ):
                 self._stall_retry_count += 1
                 _has_tools = bool(tool_defs)
-                _retry_instruction = (
-                    "You announced intent without acting. Do NOT narrate "
-                    "what you're about to do. "
-                    + (
-                        "Call the appropriate tool now to produce the deliverable."
-                        if _has_tools
-                        else "Produce the final answer now."
+                if _false_claim:
+                    _retry_instruction = (
+                        "You said you delegated/sent the task to a peer, but you "
+                        "did NOT call any tool this turn — that claim is false. To "
+                        "hand it off, CALL the flight_deck tool NOW (action='delegate' "
+                        "or 'consult', with agent_name and file/message). Otherwise do "
+                        "the task yourself. Never claim an action you didn't perform."
                     )
-                )
+                else:
+                    _retry_instruction = (
+                        "You announced intent without acting. Do NOT narrate "
+                        "what you're about to do. "
+                        + (
+                            "Call the appropriate tool now to produce the deliverable."
+                            if _has_tools
+                            else "Produce the final answer now."
+                        )
+                    )
                 log.warning(
                     "Stall detected, silent retry",
                     attempt=self._stall_retry_count,
