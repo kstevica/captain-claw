@@ -1152,6 +1152,18 @@ class WebServer:
         from captain_claw.web.rest_image_upload import upload_image
         return await upload_image(self, request)
 
+    async def _intentions_list(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_intentions import list_intentions
+        return await list_intentions(self, request)
+
+    async def _intentions_decisions(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_intentions import list_decisions
+        return await list_decisions(self, request)
+
+    async def _intentions_resolve(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_intentions import resolve_decision
+        return await resolve_decision(self, request)
+
     async def _file_upload(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_file_upload import upload_file
         return await upload_file(self, request)
@@ -2260,6 +2272,11 @@ class WebServer:
         app.router.add_post("/api/files/export", self._export_md)
         app.router.add_get("/api/media", self._serve_media)
         app.router.add_post("/api/image/upload", self._image_upload)
+        app.router.add_get("/api/intentions", self._intentions_list)
+        app.router.add_get("/api/intentions/decisions", self._intentions_decisions)
+        app.router.add_post(
+            "/api/intentions/decisions/{decision_id}/resolve", self._intentions_resolve
+        )
         app.router.add_post("/api/file/upload", self._file_upload)
         app.router.add_post("/api/audio/transcribe", self._audio_transcribe)
         app.router.add_post("/api/loops/start", self._start_loop)
