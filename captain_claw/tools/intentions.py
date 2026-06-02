@@ -17,14 +17,37 @@ from typing import Any
 
 from captain_claw.intentions import (
     CATEGORIES,
+    DECISION_RESOLUTIONS,
     OPEN_STATUSES,
     RISKS,
+    follow_through,
     get_intentions_manager,
 )
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 
 log = get_logger(__name__)
+
+# Map freeform verdict words → canonical resolutions so the agent can pass
+# whatever the user actually said.
+_VERDICT = {
+    "yes": "approved", "y": "approved", "approve": "approved", "approved": "approved",
+    "ok": "approved", "okay": "approved", "sure": "approved", "go": "approved",
+    "da": "approved", "može": "approved", "moze": "approved",
+    "no": "declined", "n": "declined", "decline": "declined", "declined": "declined",
+    "ne": "declined", "nope": "declined",
+    "later": "snoozed", "snooze": "snoozed", "snoozed": "snoozed", "kasnije": "snoozed",
+    "stop": "undone", "cancel": "undone", "undo": "undone", "undone": "undone",
+}
+
+
+def _current_waid(kw: dict[str, Any]) -> str:
+    """Pull the current WhatsApp chat's WAID from the session, if any."""
+    s = kw.get("_session")
+    md = getattr(s, "metadata", None) if s is not None else None
+    if isinstance(md, dict):
+        return str(md.get("whatsapp_waid") or "").strip()
+    return ""
 
 
 def _fmt(it: dict[str, Any]) -> str:
@@ -58,7 +81,7 @@ class IntentionsTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["create", "list", "update", "snooze", "cancel", "done"],
+                "enum": ["create", "list", "update", "snooze", "cancel", "done", "resolve"],
                 "description": "Operation to perform.",
             },
             "origin": {
@@ -82,6 +105,18 @@ class IntentionsTool(Tool):
             "repeat": {
                 "type": "string",
                 "description": "Optional recurrence, e.g. 'daily 09:00', 'weekly fri 17:00', 'every 15m'.",
+            },
+            "action_prompt": {
+                "type": "string",
+                "description": "For agent intentions: the prompt to run when this executes/recurs (e.g. 'Compile and send the weekly portfolio brief').",
+            },
+            "verdict": {
+                "type": "string",
+                "description": "For 'resolve': the user's answer — yes/no/later/stop (freeform ok, e.g. 'sure', 'ne', 'kasnije').",
+            },
+            "decision_id": {
+                "type": "string",
+                "description": "For 'resolve': which pending decision (omit to resolve the most recent).",
             },
             "intention_id": {
                 "type": "string",
@@ -114,6 +149,8 @@ class IntentionsTool(Tool):
                 return await self._snooze(mgr, kwargs)
             if action == "update":
                 return await self._update(mgr, kwargs)
+            if action == "resolve":
+                return await self._resolve(mgr, kwargs)
             return ToolResult(success=False, error=f"Unknown action: {action}")
         except Exception as exc:
             log.warning("intentions tool error: %s", exc)
@@ -124,6 +161,7 @@ class IntentionsTool(Tool):
         if not title:
             return ToolResult(success=False, error="'title' is required for create.")
         origin = str(kw.get("origin") or "agent").strip()
+        action_prompt = str(kw.get("action_prompt") or "").strip()
         it = await mgr.create(
             origin=origin,
             title=title,
@@ -132,17 +170,63 @@ class IntentionsTool(Tool):
             category=str(kw.get("category") or "other"),
             risk=str(kw.get("risk") or "normal"),
             repeat=(str(kw.get("repeat")).strip() or None) if kw.get("repeat") else None,
+            action_type="run_prompt" if action_prompt else "nudge",
+            action_spec={"prompt": action_prompt} if action_prompt else None,
             source_session=session_id,
         )
-        note = ""
-        if origin == "agent" and it["approval_mode"] == "ask":
-            note = " I'll ask the user before acting (pending the approval flow)."
-        elif origin == "agent" and it["approval_mode"] == "announce":
-            note = " I'll announce this before acting (pending the announce flow)."
-        return ToolResult(
-            success=True,
-            content=f"Recorded intention {_fmt(it)}.{note}",
+        # For agent intentions, emit a decision the user resolves (any channel).
+        if origin == "agent" and it["approval_mode"] in ("ask", "announce"):
+            waid = _current_waid(kw)
+            hint = {"waid": waid} if waid else None
+            if it["approval_mode"] == "ask":
+                q = f"Should I {title}?"
+                dec = await mgr.create_decision(
+                    intention_id=it["id"], kind="approval", prompt_text=q,
+                    options=["yes", "no", "later"], target_hint=hint,
+                )
+                return ToolResult(success=True, content=(
+                    f"Recorded {_fmt(it)}. Ask the user: \"{q}\" — then when they "
+                    f"reply, call intentions(action='resolve', decision_id='{dec['id']}', "
+                    f"verdict=<their answer>)."
+                ))
+            q = f"I'll {title} unless you say stop."
+            dec = await mgr.create_decision(
+                intention_id=it["id"], kind="announce_undo", prompt_text=q,
+                options=["stop"], target_hint=hint,
+            )
+            return ToolResult(success=True, content=(
+                f"Recorded {_fmt(it)}. Announce to the user: \"{q}\" — if they "
+                f"object, call intentions(action='resolve', decision_id='{dec['id']}', "
+                f"verdict='stop')."
+            ))
+        return ToolResult(success=True, content=f"Recorded intention {_fmt(it)}.")
+
+    async def _resolve(self, mgr: Any, kw: dict[str, Any]) -> ToolResult:
+        verdict = str(kw.get("verdict") or "").strip().lower()
+        resolution = _VERDICT.get(verdict) or (verdict if verdict in DECISION_RESOLUTIONS else "")
+        if not resolution:
+            return ToolResult(
+                success=False,
+                error="verdict must map to approved/declined/snoozed/undone (e.g. yes/no/later/stop).",
+            )
+        decision_id = str(kw.get("decision_id") or "").strip()
+        if not decision_id:
+            pend = await mgr.list_pending_decisions(limit=1)
+            if not pend:
+                return ToolResult(success=False, error="No pending decision to resolve.")
+            decision_id = pend[0]["id"]
+        dec = await mgr.resolve_decision(decision_id, resolution, via="agent")
+        if not dec:
+            return ToolResult(success=False, error=f"No pending decision '{decision_id}'.")
+        res = await follow_through(
+            dec["intention_id"], resolution,
+            source_waid=_current_waid(kw),
+            source_session=str(kw.get("_session_id") or ""),
         )
+        if not res.get("ok"):
+            return ToolResult(success=False, error=res.get("error", "follow-through failed"))
+        extra = f" (scheduler job {res['job_id']})" if res.get("job_id") else ""
+        return ToolResult(success=True, content=f"Resolved as {res['outcome']}{extra}.")
 
     async def _list(self, mgr: Any, kw: dict[str, Any]) -> ToolResult:
         limit = int(kw.get("limit") or 20)

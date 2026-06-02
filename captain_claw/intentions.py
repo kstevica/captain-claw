@@ -405,3 +405,114 @@ def get_intentions_manager() -> IntentionsManager:
     if _manager is None:
         _manager = IntentionsManager()
     return _manager
+
+
+# ── Resolution follow-through (Phase 2) ───────────────────────────────
+
+
+async def follow_through(
+    intention_id: str,
+    resolution: str,
+    *,
+    source_waid: str = "",
+    source_session: str = "",
+) -> dict[str, Any]:
+    """Apply a resolved decision to its intention.
+
+    approved → activate (and, if repeatable + we have a delivery target,
+    materialize a Flight Deck scheduler job). declined → mark declined and
+    write a negative-feedback insight so the agent stops re-proposing.
+    snoozed → defer. undone → cancel (announce-undo).
+    """
+    from datetime import timedelta
+
+    mgr = get_intentions_manager()
+    it = await mgr.get(intention_id)
+    if not it:
+        return {"ok": False, "error": "intention not found"}
+    now = _now_iso()
+
+    if resolution == "approved":
+        job_id = ""
+        if it.get("repeat") and source_waid:
+            job_id = await _materialize_scheduler(it, source_waid)
+        await mgr.set_status(
+            intention_id, "active", decided_at=now, materialized_job_id=job_id or None
+        )
+        return {
+            "ok": True,
+            "outcome": "scheduled" if job_id else "activated",
+            "job_id": job_id,
+            "intention": it,
+        }
+    if resolution == "declined":
+        await mgr.set_status(intention_id, "declined", decided_at=now)
+        await _record_decline_insight(it, source_session)
+        return {"ok": True, "outcome": "declined", "intention": it}
+    if resolution == "snoozed":
+        until = (datetime.now(UTC) + timedelta(days=1)).isoformat()
+        await mgr.set_status(intention_id, "snoozed", next_surface_at=until)
+        return {"ok": True, "outcome": "snoozed", "intention": it}
+    if resolution == "undone":
+        await mgr.set_status(intention_id, "cancelled", decided_at=now)
+        return {"ok": True, "outcome": "cancelled", "intention": it}
+    return {"ok": False, "error": f"unknown resolution: {resolution}"}
+
+
+async def _materialize_scheduler(it: dict[str, Any], source_waid: str) -> str:
+    """Create a Flight Deck scheduler job for an approved repeatable intention."""
+    import os
+
+    from captain_claw.fd_client import FDClient, flight_deck_base, flight_deck_slug
+
+    if not flight_deck_base():
+        return ""
+    action = it.get("action_spec")
+    prompt = ""
+    if isinstance(action, dict):
+        prompt = str(action.get("prompt") or "")
+    prompt = prompt or (it.get("body") or "").strip() or it.get("title") or "Run scheduled task."
+    payload = {
+        "name": (it.get("title") or "intention")[:60],
+        "schedule": it.get("repeat"),
+        "prompt": prompt,
+        "agent_slug": flight_deck_slug(),
+        "delivery_kind": "whatsapp",
+        "delivery_target": source_waid,
+    }
+    headers = {}
+    tok = (os.environ.get("FD_GLASSES_BRIDGE_TOKEN") or "").strip()
+    if tok:
+        headers["x-glasses-token"] = tok
+    fd = FDClient(timeout=15.0)
+    try:
+        resp = await fd.post("/scheduler/jobs", json=payload, headers=headers)
+        if resp.status_code in (200, 201):
+            return str((resp.json() or {}).get("id") or "")
+        log.warning("materialize scheduler rejected (%s): %s", resp.status_code, resp.text[:200])
+    except Exception as exc:
+        log.warning("materialize scheduler failed: %s", exc)
+    finally:
+        await fd.close()
+    return ""
+
+
+async def _record_decline_insight(it: dict[str, Any], source_session: str = "") -> None:
+    """Remember a decline as negative feedback so the agent won't re-propose."""
+    try:
+        from captain_claw.insights import get_insights_manager
+
+        await get_insights_manager().add(
+            content=(
+                f"User declined the proposal: {it.get('title', '')}. "
+                "Do not re-propose this unless they bring it up."
+            ),
+            category="feedback",
+            polarity="negative",
+            importance=4,
+            source_tool="intentions",
+            source_session=source_session or it.get("source_session", ""),
+            why=(it.get("why") or None),
+        )
+    except Exception as exc:
+        log.debug("decline insight skipped: %s", exc)

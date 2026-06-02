@@ -1092,34 +1092,53 @@ class AgentContextMixin:
         return "\n".join(lines)
 
     async def _refresh_intentions_context_cache(self) -> None:
-        """Pre-fetch open intentions for context injection."""
+        """Pre-fetch open intentions + pending decisions for context injection."""
         try:
             from captain_claw.intentions import get_intentions_manager
-            self._intentions_context_cache = await get_intentions_manager().get_for_context(limit=12)
+            mgr = get_intentions_manager()
+            self._intentions_context_cache = await mgr.get_for_context(limit=12)
+            self._intention_decisions_cache = await mgr.list_pending_decisions(limit=6)
         except Exception:
             self._intentions_context_cache = []
+            self._intention_decisions_cache = []
 
     def _build_intentions_context_note(self) -> str:
-        """Surface open intentions so the agent reasons about them proactively."""
-        items = getattr(self, "_intentions_context_cache", None)
-        if not items:
+        """Surface open intentions + pending decisions so the agent acts on them.
+
+        Pending decisions are how the channel-agnostic resolution works for
+        freeform replies: when the user answers (yes/no/later/stop) over any
+        channel, the agent maps it to the right decision and resolves it.
+        """
+        items = getattr(self, "_intentions_context_cache", None) or []
+        decisions = getattr(self, "_intention_decisions_cache", None) or []
+        if not items and not decisions:
             return ""
-        lines = [
-            "Active intentions (the user's notes-to-self and your own proactive "
-            "plans — act on / surface these when relevant):"
-        ]
-        for it in items:
-            origin = it.get("origin", "agent")
-            status = it.get("status", "")
-            title = (it.get("title") or "").strip()
-            line = f"- [{origin}/{status}] {title}"
-            repeat = (it.get("repeat") or "").strip()
-            if repeat:
-                line += f" [repeat: {repeat}]"
-            lines.append(line)
-            why = (it.get("why") or "").strip()
-            if why:
-                lines.append(f"    Why: {why}")
+        lines: list[str] = []
+        if items:
+            lines.append(
+                "Active intentions (the user's notes-to-self and your own proactive "
+                "plans — act on / surface these when relevant):"
+            )
+            for it in items:
+                origin = it.get("origin", "agent")
+                status = it.get("status", "")
+                title = (it.get("title") or "").strip()
+                line = f"- [{origin}/{status}] {title}"
+                repeat = (it.get("repeat") or "").strip()
+                if repeat:
+                    line += f" [repeat: {repeat}]"
+                lines.append(line)
+                why = (it.get("why") or "").strip()
+                if why:
+                    lines.append(f"    Why: {why}")
+        if decisions:
+            lines.append(
+                "Pending decisions awaiting the user's reply. When they answer "
+                "(yes/no/later/stop, in any wording), call "
+                "intentions(action='resolve', decision_id=<id>, verdict=<their answer>):"
+            )
+            for d in decisions:
+                lines.append(f"- [{d.get('id')}] {d.get('prompt_text', '')}")
         return "\n".join(lines)
 
     def _build_insights_block(self) -> str:
