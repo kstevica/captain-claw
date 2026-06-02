@@ -86,6 +86,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
+import time
 from typing import Any
 
 import httpx
@@ -181,6 +183,41 @@ _WIRED_CHANNELS: set[str] = set()
 # Channel → set of WAIDs currently bound to it. Consulted at delivery time
 # by the per-channel callback, so ``/c`` rebinds take effect immediately.
 _CHANNEL_WAIDS: dict[str, set[str]] = {}
+
+# Inbound image awaiting an instruction. When a photo arrives with no
+# caption we ask the user what to do and stash the bytes here; their next
+# message routes it (identify / describe / enroll). In-memory, TTL-gated.
+_PENDING_IMAGE: dict[str, dict[str, Any]] = {}
+_PENDING_IMAGE_TTL = 300.0  # seconds
+
+# Caption intent matchers for inbound images. Face recognition stays a
+# Flight Deck capability (face_index) — these just decide which FD path to
+# run; anything else is forwarded to the agent for vision.
+# Stems intentionally lack a trailing boundary so "identif" matches
+# "identify", "recogn" matches "recognise"/"recognize", etc.
+_IDENTIFY_RE = re.compile(
+    r"(?i)\b(who(?:'s| is| are)?|whose|identif|recogn|tko\s+(?:je|su)|prepoznaj)"
+)
+_ENROLL_LEAD_RE = re.compile(
+    r"(?i)^(?:please\s+)?(?:remember|save|enroll|zapamti|upamti)"
+    r"(?:\s+(?:this|that|this\s+person|the\s+face|ovu\s+osobu|ovo|to))?"
+    r"\s*(?:is|as|je|kao|[:\-])?\s*(?P<rest>.+)$"
+)
+_ENROLL_OVO_RE = re.compile(r"(?i)^(?:ovo|to)\s+je\s+(?P<rest>.+)$")
+
+
+def _parse_enroll(caption: str) -> tuple[str, str] | None:
+    """If *caption* is an enroll request, return (name, notes); else None."""
+    c = (caption or "").strip()
+    m = _ENROLL_LEAD_RE.match(c) or _ENROLL_OVO_RE.match(c)
+    if not m:
+        return None
+    rest = (m.group("rest") or "").strip(" :,-")
+    if not rest:
+        return None
+    name, _, notes = rest.partition(",")
+    return name.strip(), notes.strip()
+
 
 # Last-seen inbound message id per WAID. WhatsApp's typing-indicator API
 # requires the wamid of a *real* user message — there's no "show typing"
@@ -376,30 +413,32 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
     #    contacts, transcription for voice notes) and fall through to the
     #    shared agent send at the bottom.
     if mtype == "image":
-        media_id = str((message.get("image") or {}).get("id") or "")
+        img = message.get("image") or {}
+        media_id = str(img.get("id") or "")
         if not media_id:
             return
+        caption = str(img.get("caption") or "").strip()
         try:
             blob = await _download_media(media_id)
         except Exception as exc:
             await _send_whatsapp_text(waid, f"Couldn't fetch photo: {exc}")
             return
-        try:
-            result = await face_index.get_index().recognize(
-                image_blob=blob,
-                channel="",  # empty → don't log an encounter under any channel
+        if caption:
+            # Caption present → route immediately (identify / enroll / vision).
+            await _route_image(
+                waid, blob, caption, ch, agent_host, agent_port, agent_auth
             )
-        except RuntimeError:
+        else:
+            # Bare photo → ask what to do, stash bytes for the follow-up reply.
+            _PENDING_IMAGE[waid] = {"blob": blob, "ts": time.time()}
             await _send_whatsapp_text(
                 waid,
-                "Face recognition isn't available on this Flight Deck "
-                "(install with: pip install captain-claw[faces]).",
+                "📷 Got the photo. What should I do with it?\n"
+                "• \"who is this?\" — identify the people\n"
+                "• \"describe it\" / \"read this\" — analyse the image\n"
+                "• \"remember this is <name>\" — save the face",
             )
-            return
-        from captain_claw.flight_deck.meta_webhook_bridge import strip_markdown
-        plain = strip_markdown(result.card_markdown) or "Unknown face."
-        await _send_whatsapp_reply(waid, plain)
-        return  # photos never reach the agent
+        return
 
     if mtype == "location":
         # Build the FYI text and let the standard flow forward it to the agent.
@@ -445,6 +484,17 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
     # 4. Text only. If empty, nothing to do.
     if not text:
         return
+
+    # 4b. Pending-image follow-up: if we asked what to do with a bare photo,
+    #     this message is the instruction — route the stashed image with it.
+    pending = _PENDING_IMAGE.pop(waid, None)
+    if pending is not None:
+        if (time.time() - pending.get("ts", 0.0)) <= _PENDING_IMAGE_TTL:
+            await _route_image(
+                waid, pending["blob"], text, ch, agent_host, agent_port, agent_auth
+            )
+            return
+        # else: stale — fall through and treat as a normal message.
 
     # 5. Mirror the user's message onto the channel bus so the glasses HUD
     #    shows what arrived over WhatsApp (matches mobile + messenger). The
@@ -1088,9 +1138,128 @@ async def _download_media(media_id: str) -> bytes:
         return blob
 
 
-# Note: an earlier ``_forward_image_to_agent`` helper used to push the
-# photo bytes to the agent's ``/api/image/upload`` for LLM analysis. It
-# was removed when the WhatsApp photo path was scoped down to "face
-# recognition only" — the user wants no agent involvement for image
-# messages. If image-→-agent ever returns, the analogous helper in
-# ``messenger_bridge.py`` is the reference implementation.
+# ── Inbound image routing ─────────────────────────────────────────────
+# Photos are no longer "kidnapped" into face recognition. The caption (or,
+# for a bare photo, the user's follow-up reply) routes each image:
+#   • enroll intent  → face_index.enroll()      (Flight Deck)
+#   • identify intent → face_index.recognize()  (Flight Deck)
+#   • anything else  → forwarded to the agent for vision
+# Face recognition stays entirely on Flight Deck — never an agent tool.
+
+
+async def _upload_image_to_agent(
+    blob: bytes, host: str, port: int, auth: str, filename: str = "whatsapp.jpg"
+) -> str:
+    """POST image bytes to the agent's /api/image/upload; return saved path."""
+    params = {"token": auth} if auth else {}
+    files = {"file": (filename, blob, "image/jpeg")}
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"http://{host}:{port}/api/image/upload", params=params, files=files
+            )
+    except Exception as exc:
+        log.warning("Image upload to agent failed: %s", exc)
+        return ""
+    if resp.status_code != 200:
+        log.warning("Image upload rejected (%s): %s", resp.status_code, resp.text[:200])
+        return ""
+    try:
+        return str((resp.json() or {}).get("path") or "")
+    except Exception:
+        return ""
+
+
+async def _forward_image_to_agent(
+    waid: str, blob: bytes, prompt: str, ch: Any,
+    agent_host: str, agent_port: int, agent_auth: str,
+) -> None:
+    """Hand a photo to the agent for vision analysis (describe/read/etc.)."""
+    path = await _upload_image_to_agent(blob, agent_host, agent_port, agent_auth)
+    if not path:
+        await _send_whatsapp_text(
+            waid, "Couldn't hand the image to the agent — try again."
+        )
+        return
+    prompt = (prompt or "").strip() or "Look at this image and tell me what it shows."
+    # Mirror onto the channel bus so the glasses HUD shows the request.
+    await _broadcast(ch, {
+        "type": "user", "text": f"🖼 {prompt}", "ts": _now_iso(), "via": "whatsapp",
+    })
+    for _ in range(50):  # up to ~5s for the agent WS to be ready
+        if ch.agent_ws is not None:
+            break
+        await asyncio.sleep(0.1)
+    if ch.agent_ws is None:
+        await _send_whatsapp_text(waid, "Agent not ready, try again.")
+        return
+    async with ch.send_lock:
+        content = (_GLASSES_SYSTEM_CONTEXT + prompt) if not ch.context_sent else prompt
+        ch.context_sent = True
+        payload = {
+            "type": "chat",
+            "content": content,
+            "whatsapp_waid": waid,
+            "image_paths": [path],
+        }
+        try:
+            await ch.agent_ws.send(json.dumps(payload))
+        except Exception as exc:
+            ch.context_sent = False
+            await _send_whatsapp_text(waid, f"Send failed: {exc}")
+
+
+async def _route_image(
+    waid: str, blob: bytes, caption: str, ch: Any,
+    agent_host: str, agent_port: int, agent_auth: str,
+) -> None:
+    """Route an inbound image by caption intent. Face paths stay on FD."""
+    from captain_claw.flight_deck.meta_webhook_bridge import strip_markdown
+
+    # 1. Enroll: "remember this is Alice, colleague from X" / "ovo je Alice".
+    enroll = _parse_enroll(caption)
+    if enroll:
+        name, notes = enroll
+        try:
+            res = await face_index.get_index().enroll(
+                name=name, notes=notes, image_blobs=[blob]
+            )
+        except RuntimeError:
+            await _send_whatsapp_text(
+                waid,
+                "Face recognition isn't available on this Flight Deck "
+                "(install with: pip install captain-claw[faces]).",
+            )
+            return
+        except Exception as exc:
+            await _send_whatsapp_text(waid, f"Couldn't save that face: {exc}")
+            return
+        if res.embeddings_added:
+            await _send_whatsapp_reply(
+                waid, f"✅ Saved {res.name}'s face. I'll recognise them next time."
+            )
+        else:
+            await _send_whatsapp_text(
+                waid, "Couldn't find a clear face in that photo — try another shot."
+            )
+        return
+
+    # 2. Identify: "who is this", "tko je ovo", "recognise", ...
+    if _IDENTIFY_RE.search(caption or ""):
+        try:
+            result = await face_index.get_index().recognize(image_blob=blob, channel="")
+        except RuntimeError:
+            await _send_whatsapp_text(
+                waid,
+                "Face recognition isn't available on this Flight Deck "
+                "(install with: pip install captain-claw[faces]).",
+            )
+            return
+        plain = strip_markdown(result.card_markdown) or "Unknown face."
+        await _send_whatsapp_reply(waid, plain)
+        return
+
+    # 3. Anything else → the agent's vision pipeline, caption as the prompt.
+    await _forward_image_to_agent(
+        waid, blob, caption, ch, agent_host, agent_port, agent_auth
+    )
