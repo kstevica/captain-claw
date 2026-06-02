@@ -25,6 +25,9 @@ _ALLOWED_EXTENSIONS: set[str] = {
     ".pptx", ".ppt",
     ".md", ".txt",
     ".zip",
+    # Images: the chat composer uploads attachments here too; accept them so
+    # a manually-attached photo isn't rejected (the agent views it via vision).
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp",
 }
 
 

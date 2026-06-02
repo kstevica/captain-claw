@@ -461,10 +461,15 @@ function ChatContent({
     const hasContent = text || uploadedFiles.length > 0
     if (!hasContent || !session.connected) return
 
-    // Build message with file references
+    // Build message with file references. Images get the "[Attached image: …]"
+    // marker so the agent routes them to its vision tool instead of read.
     let content = text
     if (uploadedFiles.length > 0) {
-      const fileRefs = uploadedFiles.map((a) => `[Attached file: ${a.name} → ${a.uploadedPath}]`).join('\n')
+      const fileRefs = uploadedFiles.map((a) =>
+        a.type.startsWith('image/')
+          ? `[Attached image: ${a.uploadedPath}]`
+          : `[Attached file: ${a.name} → ${a.uploadedPath}]`,
+      ).join('\n')
       content = content ? `${content}\n\n${fileRefs}` : fileRefs
     }
 

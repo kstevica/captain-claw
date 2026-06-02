@@ -40,6 +40,9 @@ _ECO_CORE_TOOLS: frozenset[str] = frozenset({
     "web_fetch", "web_search",
     "google_mail", "google_drive", "google_calendar",
     "whatsapp_send_file", "intentions",
+    # Vision: always offer image_vision so an attached image can be analysed
+    # regardless of the caption's language (eco intent patterns are English).
+    "image_vision",
     # Fleet awareness: always let an agent see/consult/delegate to peers.
     # ``flight_deck`` self-discovers peers via /fd/fleet, so it works
     # whenever FD_URL is set and a peer is running. Without this, eco mode

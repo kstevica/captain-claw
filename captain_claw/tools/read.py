@@ -142,6 +142,19 @@ class ReadTool(Tool):
                     error=f"Not a file: {path}",
                 )
             
+            # Images / binaries aren't text — guide the agent to the right tool
+            # instead of choking on a size limit or a utf-8 decode error.
+            _img_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".heic"}
+            if file_path.suffix.lower() in _img_exts:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"'{file_path.name}' is an image, not a text file. Use the "
+                        "image_vision tool (action on this path) to see/describe it — "
+                        "do NOT use read. (Requires a vision-capable model configured.)"
+                    ),
+                )
+
             # Check if file is too large
             file_size = file_path.stat().st_size
             from captain_claw.config import get_config
@@ -151,9 +164,18 @@ class ReadTool(Tool):
                     success=False,
                     error=f"File too large: {file_size} bytes (max {max_size})",
                 )
-            
+
             # Read file
-            content = file_path.read_text(encoding="utf-8")
+            try:
+                content = file_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"'{file_path.name}' is a binary file and can't be read as text. "
+                        "If it's an image, use the image_vision tool instead."
+                    ),
+                )
 
             # Apply offset and limit
             all_lines = content.splitlines()
