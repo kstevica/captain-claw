@@ -87,6 +87,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "send_mail": "send emails via SMTP",
     "whatsapp_send_file": "send a saved file to a WhatsApp chat (defaults to current chat)",
     "intentions": "record future actions: user notes-to-self + your own proactive intentions",
+    "video_vision": "analyze/describe a video (samples frames + transcribes audio)",
     "clipboard": "read/write system clipboard",
     "gws": "Google Workspace: Drive, Docs, Calendar, Gmail",
     "datastore": "persistent relational tables",
@@ -2140,6 +2141,7 @@ class AgentContextMixin:
             CronTool,
             WhatsAppSendFileTool,
             IntentionsTool,
+            VideoVisionTool,
         )
 
         config = get_config()
@@ -2189,6 +2191,8 @@ class AgentContextMixin:
                 self.tools.register(WhatsAppSendFileTool())
             elif tool_name == "intentions":
                 self.tools.register(IntentionsTool())
+            elif tool_name == "video_vision":
+                self.tools.register(VideoVisionTool())
             elif tool_name == "gws":
                 self.tools.register(GwsTool())
             elif tool_name == "todo":

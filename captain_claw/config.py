@@ -434,6 +434,7 @@ class ToolsConfig(BaseModel):
         "image_gen",
         "image_ocr",
         "image_vision",
+        "video_vision",
         "send_mail",
         "whatsapp_send_file",
         "intentions",
@@ -486,7 +487,7 @@ class ToolsConfig(BaseModel):
         "read", "write", "edit", "personality", "botport", "playbooks",
         "browser", "datastore", "direct_api", "cron",
         "google_drive", "google_calendar", "google_mail",
-        "whatsapp_send_file", "intentions",
+        "whatsapp_send_file", "intentions", "video_vision",
     })
 
     @model_validator(mode="after")
