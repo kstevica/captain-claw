@@ -1214,6 +1214,41 @@ class WebServer:
         from captain_claw.web.rest_file_upload import upload_file
         return await upload_file(self, request)
 
+    async def _api_tool(self, request: web.Request) -> web.Response:
+        """Run a single tool deterministically (no agent turn) for the Flow engine.
+
+        Admin-locked: this executes arbitrary tools, so when an auth_token is
+        configured the caller (Flight Deck) must present it. Reuses the agent's
+        guarded execution path so base paths / file registry / policy apply.
+        """
+        from captain_claw.config import get_config as _gc
+        from captain_claw.web.public_auth import _is_admin
+        cfg = _gc()
+        if cfg.web.auth_token and not _is_admin(request, cfg.web):
+            return web.json_response({"success": False, "error": "unauthorized"}, status=403)
+        if not self.agent:
+            return web.json_response({"success": False, "error": "agent not initialized"}, status=503)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"success": False, "error": "invalid JSON body"}, status=400)
+        tool = str(data.get("tool") or "").strip()
+        args = data.get("args") or {}
+        if not tool or not isinstance(args, dict):
+            return web.json_response({"success": False, "error": "missing 'tool' or 'args'"}, status=400)
+        try:
+            result = await self.agent._execute_tool_with_guard(
+                tool, args, interaction_label="flow_step",
+            )
+            return web.json_response({
+                "success": bool(getattr(result, "success", False)),
+                "content": getattr(result, "content", "") or "",
+                "error": getattr(result, "error", "") or "",
+            })
+        except Exception as exc:
+            log.warning("api_tool failed", tool=tool, error=str(exc))
+            return web.json_response({"success": False, "error": str(exc)}, status=500)
+
     async def _audio_transcribe(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_audio_transcribe import transcribe_audio_handler
         return await transcribe_audio_handler(self, request)
@@ -2324,6 +2359,7 @@ class WebServer:
             "/api/intentions/decisions/{decision_id}/resolve", self._intentions_resolve
         )
         app.router.add_post("/api/file/upload", self._file_upload)
+        app.router.add_post("/api/tool", self._api_tool)  # Flow engine: deterministic single-tool RPC
         app.router.add_post("/api/audio/transcribe", self._audio_transcribe)
         app.router.add_post("/api/loops/start", self._start_loop)
         app.router.add_get("/api/loops/status", self._get_loop_status)

@@ -1,0 +1,135 @@
+"""Flow trigger router — classify an inbound message and match it to a Flow.
+
+Lives in Flight Deck. Hooked at the points FD forwards inbound to agents
+(WhatsApp bridge, glasses bus). Rules-first and cheap; an opt-in LLM classifier
+is a later phase. No match → the caller does its normal forward (no behaviour
+change when no flows are enabled).
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import re
+from typing import Any
+
+from captain_claw.logging import get_logger
+
+log = get_logger(__name__)
+
+# Module-level engine handle, set by the FD server on startup.
+_STORE: Any = None
+_RUNNER: Any = None
+
+
+def set_engine(store: Any, runner: Any) -> None:
+    global _STORE, _RUNNER
+    _STORE, _RUNNER = store, runner
+
+
+def engine_ready() -> bool:
+    return _STORE is not None and _RUNNER is not None
+
+
+def classify_payload(
+    *, channel: str, text: str = "", mime: str = "",
+    image_path: str = "", video_path: str = "", audio_path: str = "",
+    waid: str = "", origin_host: str = "localhost", origin_port: int = 0,
+    origin_name: str = "", extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Normalize an inbound message into a flat payload the router/runner use."""
+    p: dict[str, Any] = {
+        "channel": channel,
+        "text": text or "",
+        "mime": mime or "",
+        "has_image": bool(image_path),
+        "has_video": bool(video_path),
+        "has_audio": bool(audio_path),
+        "has_text": bool((text or "").strip()),
+        "image_path": image_path or "",
+        "video_path": video_path or "",
+        "audio_path": audio_path or "",
+        "waid": waid or "",
+        "whatsapp_waid": waid or "",
+        "origin_host": origin_host,
+        "origin_port": int(origin_port or 0),
+        "origin_name": origin_name or "",
+    }
+    if extra:
+        p.update(extra)
+    return p
+
+
+def _rule_ok(rule: str, payload: dict[str, Any]) -> bool:
+    rule = rule.strip()
+    if not rule:
+        return True
+    if ":" in rule:
+        key, val = (x.strip() for x in rule.split(":", 1))
+        if key == "channel":
+            return str(payload.get("channel", "")).lower() == val.lower()
+        if key == "from_waid":
+            return str(payload.get("waid", "")) == val
+        if key == "mime":
+            return fnmatch.fnmatch(str(payload.get("mime", "")), val)
+        if key == "regex":
+            try:
+                return bool(re.search(val, str(payload.get("text", "")), re.I))
+            except re.error:
+                return False
+        if key == "contains":
+            return val.lower() in str(payload.get("text", "")).lower()
+        return False
+    # boolean flags: has_image / has_video / has_audio / has_text
+    return bool(payload.get(rule, False))
+
+
+def _trigger_matches(trigger: dict[str, Any], payload: dict[str, Any]) -> bool:
+    if str(trigger.get("on", "message")) != "message":
+        return False
+    chan = str(trigger.get("channel", "any")).lower()
+    if chan not in ("any", "") and chan != str(payload.get("channel", "")).lower():
+        return False
+    match = trigger.get("match") or {}
+    kind = str(match.get("kind", "rule"))
+    if kind == "always":
+        return True
+    if kind == "rule":
+        rules = match.get("rules") or []
+        return all(_rule_ok(str(r), payload) for r in rules)
+    # 'classifier' is a later phase — treat as non-matching for now.
+    return False
+
+
+async def match_flow(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the highest-priority enabled flow whose trigger matches, else None."""
+    if not engine_ready():
+        return None
+    try:
+        flows = await _STORE.enabled_flows()  # already priority-desc
+    except Exception as exc:
+        log.warning("flow match: store error: %s", exc)
+        return None
+    for flow in flows:
+        try:
+            if _trigger_matches(flow.get("trigger") or {}, payload):
+                return flow
+        except Exception:
+            continue
+    return None
+
+
+async def try_match_and_run(payload: dict[str, Any]) -> bool:
+    """If a flow matches the payload, run it and return True; else False.
+
+    Safe to call from any inbound path — a no-op when no flow matches (so the
+    caller falls through to its normal agent-forward).
+    """
+    flow = await match_flow(payload)
+    if not flow:
+        return False
+    log.info("flow triggered", flow=flow.get("name"), channel=payload.get("channel"))
+    try:
+        await _RUNNER.run(flow, payload)
+    except Exception as exc:
+        log.warning("flow run error", flow=flow.get("name"), error=str(exc))
+    return True

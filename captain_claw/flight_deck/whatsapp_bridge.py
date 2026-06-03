@@ -519,6 +519,21 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
             return
         # else: stale — fall through and treat as a normal message.
 
+    # 4c. Flow engine: if an enabled text-triggered flow matches, run it and
+    #     stop here. No-op (falls through to the normal agent forward) when no
+    #     flow matches — so this is inert until the user enables a text flow.
+    try:
+        from captain_claw.flight_deck import flow_router
+        if flow_router.engine_ready():
+            _fp = flow_router.classify_payload(
+                channel="whatsapp", text=text, waid=waid,
+                origin_host=agent_host, origin_port=int(agent_port or 0),
+            )
+            if await flow_router.try_match_and_run(_fp):
+                return
+    except Exception as _exc:
+        log.warning("flow trigger check failed: %s", _exc)
+
     # 5. Mirror the user's message onto the channel bus so the glasses HUD
     #    shows what arrived over WhatsApp (matches mobile + messenger). The
     #    ``via`` tag lets the view badge the source. This does NOT echo back

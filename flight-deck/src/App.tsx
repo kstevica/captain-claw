@@ -26,6 +26,7 @@ import { ProjectsPage } from './pages/ProjectsPage'
 import { AppPage } from './pages/AppPage'
 import { AppCodePage } from './pages/AppCodePage'
 import { SchedulerPage } from './pages/SchedulerPage'
+import { FlowsPage } from './pages/FlowsPage'
 import { useUIStore } from './stores/uiStore'
 import { useAgentStore } from './stores/agentStore'
 import { useAuthStore, checkAuthStatus, refreshAccessToken } from './stores/authStore'
@@ -295,6 +296,7 @@ function AppContent() {
       {view === 'today' && <TodayPage />}
       {view === 'operations' && <OperationsPage />}
       {view === 'workflow' && <WorkflowPage />}
+      {view === 'flows' && <FlowsPage />}
       {view === 'skills' && <SkillsPage />}
       {view === 'games' && <GamesPage />}
       {view === 'spawner' && <SpawnerPage />}

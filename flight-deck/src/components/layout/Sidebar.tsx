@@ -21,6 +21,7 @@ import {
   FolderKanban,
   LayoutDashboard,
   AlarmClock,
+  Workflow,
 } from 'lucide-react'
 import { useEffect } from 'react'
 import { useAppRuntime } from '../../app-runtime/store'
@@ -45,6 +46,7 @@ const navItems: { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?:
   { id: 'projects', icon: FolderKanban, label: 'Projects' },
   { id: 'forge', icon: Wand2, label: 'Agent Forge' },
   { id: 'workflow', icon: GitBranch, label: 'Workflows' },
+  { id: 'flows', icon: Workflow, label: 'Flows' },
   { id: 'skills', icon: Sparkles, label: 'Skills' },
   { id: 'games', icon: Gamepad2, label: 'Games' },
   { id: 'gpu-cloud', icon: Cloud, label: 'GPU Cloud' },

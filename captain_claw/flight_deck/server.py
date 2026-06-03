@@ -568,6 +568,27 @@ async def lifespan(app: FastAPI):
         app.state.scheduler_stop = _sched_stop
         app.state.scheduler_task = asyncio.create_task(_sched_loop(_sched_stop))
         print("Flight Deck: scheduler started")
+    # ── Flow engine (process automations: trigger → steps on the agent pool) ──
+    try:
+        from captain_claw.flight_deck.flows_store import FlowStore
+        from captain_claw.flight_deck.flow_runner import FlowRunner
+        from captain_claw.flight_deck import flow_router
+        _flow_store = FlowStore(DATA_DIR / "flows.db")
+        _fd_port = os.environ.get("FD_PORT", "25080")
+        _flow_runner = FlowRunner(
+            _flow_store,
+            get_agents=_running_agents,
+            resolve_auth=_resolve_agent_auth,
+            fd_self_base=f"http://localhost:{_fd_port}",
+            fd_tools=_fd_internal_tools(),
+            whatsapp_send=_flow_whatsapp_send,
+        )
+        app.state.flow_store = _flow_store
+        app.state.flow_runner = _flow_runner
+        flow_router.set_engine(_flow_store, _flow_runner)
+        print("Flight Deck: flow engine ready")
+    except Exception as _exc:
+        print(f"Flight Deck: flow engine init failed: {_exc}")
     yield
     # Stop the scheduler loop first so it doesn't fire mid-shutdown.
     if hasattr(app.state, "scheduler_stop"):
@@ -2085,6 +2106,142 @@ def _resolve_agent_auth(port: int) -> str:
             return entry.get("web_auth", "")
 
     return ""
+
+
+# ── Flow engine helpers ────────────────────────────────────────────────
+
+def _running_agents() -> list[dict[str, Any]]:
+    """Lightweight pool snapshot for the FlowRunner's agent selector."""
+    out: list[dict[str, Any]] = []
+    for slug, entry in _load_process_registry().items():
+        out.append({
+            "name": entry.get("name", slug),
+            "host": "localhost",
+            "port": entry.get("web_port", 0),
+            "status": "running" if _process_is_alive(slug) else "stopped",
+            "description": entry.get("description", ""),
+        })
+    return out
+
+
+def _fd_internal_tools() -> dict[str, Any]:
+    """FD-side tools the FlowRunner can call directly (no agent), e.g. face_identify."""
+    async def _face_identify(args: dict[str, Any]) -> str:
+        image = str(args.get("image") or "")
+        try:
+            from captain_claw.flight_deck import face_index  # type: ignore
+            label = face_index.recognize(image)
+            if hasattr(label, "__await__"):
+                label = await label  # type: ignore
+            return json.dumps({"label": str(label or "none")})
+        except Exception:
+            return json.dumps({"label": "none", "note": "face index not wired"})
+    return {"face_identify": _face_identify}
+
+
+async def _flow_whatsapp_send(waid: str, text: str) -> None:
+    try:
+        from captain_claw.flight_deck.whatsapp_bridge import _send_whatsapp_text
+        await _send_whatsapp_text(waid, text, mirror=True)
+    except Exception as exc:
+        log.warning("flow whatsapp send failed: %s", exc)
+
+
+# ── Flow engine API (/fd/flows) ────────────────────────────────────────
+
+def _flow_store():
+    store = getattr(app.state, "flow_store", None)
+    if store is None:
+        raise HTTPException(503, "Flow engine not ready")
+    return store
+
+
+@app.get("/fd/flows")
+async def fd_flows_list(request: Request, user: dict | None = _optional_user_dep):
+    return {"flows": await _flow_store().list_flows()}
+
+
+@app.post("/fd/flows")
+async def fd_flows_create(request: Request, user: dict | None = _optional_user_dep):
+    spec = await request.json()
+    fid = await _flow_store().create_flow(spec)
+    return {"id": fid}
+
+
+@app.get("/fd/flows/runs/{run_id}")
+async def fd_flows_run_detail(run_id: str, request: Request, user: dict | None = _optional_user_dep):
+    detail = await _flow_store().get_run(run_id)
+    if not detail:
+        raise HTTPException(404, "run not found")
+    return detail
+
+
+@app.get("/fd/flows/{flow_id}")
+async def fd_flows_get(flow_id: str, request: Request, user: dict | None = _optional_user_dep):
+    flow = await _flow_store().get_flow(flow_id)
+    if not flow:
+        raise HTTPException(404, "flow not found")
+    return flow
+
+
+@app.put("/fd/flows/{flow_id}")
+async def fd_flows_update(flow_id: str, request: Request, user: dict | None = _optional_user_dep):
+    spec = await request.json()
+    ok = await _flow_store().update_flow(flow_id, spec)
+    if not ok:
+        raise HTTPException(404, "flow not found")
+    return {"ok": True}
+
+
+@app.delete("/fd/flows/{flow_id}")
+async def fd_flows_delete(flow_id: str, request: Request, user: dict | None = _optional_user_dep):
+    ok = await _flow_store().delete_flow(flow_id)
+    return {"ok": ok}
+
+
+@app.post("/fd/flows/{flow_id}/enable")
+async def fd_flows_enable(flow_id: str, request: Request, user: dict | None = _optional_user_dep):
+    body = await request.json()
+    ok = await _flow_store().set_enabled(flow_id, bool(body.get("enabled", True)))
+    if not ok:
+        raise HTTPException(404, "flow not found")
+    return {"ok": True}
+
+
+@app.post("/fd/flows/{flow_id}/run")
+async def fd_flows_run(flow_id: str, request: Request, user: dict | None = _optional_user_dep):
+    store = _flow_store()
+    flow = await store.get_flow(flow_id)
+    if not flow:
+        raise HTTPException(404, "flow not found")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    payload = body.get("payload") or {}
+    run_id = await store.start_run(flow_id, flow.get("name", ""), payload)
+    # Run in the background; the UI polls /fd/flows/runs/{run_id} for the log.
+    asyncio.create_task(app.state.flow_runner.run(flow, payload, run_id=run_id))
+    return {"run_id": run_id}
+
+
+@app.post("/fd/flows/{flow_id}/test")
+async def fd_flows_test(flow_id: str, request: Request, user: dict | None = _optional_user_dep):
+    store = _flow_store()
+    flow = await store.get_flow(flow_id)
+    if not flow:
+        raise HTTPException(404, "flow not found")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    result = await app.state.flow_runner.run(flow, body.get("payload") or {}, dry=True)
+    return {"steps": result.get("steps", []), "status": result.get("status")}
+
+
+@app.get("/fd/flows/{flow_id}/runs")
+async def fd_flows_runs(flow_id: str, request: Request, user: dict | None = _optional_user_dep):
+    return {"runs": await _flow_store().list_runs(flow_id)}
 
 
 async def _notify_fleet_change(new_agent_name: str, new_agent_port: int, event: str = "joined", owner_id: str = ""):
