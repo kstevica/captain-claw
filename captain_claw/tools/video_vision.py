@@ -31,7 +31,7 @@ _MAX_FRAMES = 20
 _DEFAULT_INTERVAL = 6.0      # default: one frame every 6 seconds…
 _FIRST_FRAME_OFFSET = 1.0    # …starting ~1 second in (skip the black/intro frame)
 _FRAME_CONCURRENCY = 4
-_PEER_FRAME_CONCURRENCY = 2  # peer turns are heavy — go gentler when delegating
+_PEER_FRAME_CONCURRENCY = 1  # a peer agent serves one request at a time → serialize
 _VISION_PEER_HINTS = ("vision", "image", "multimodal", "minimax", "llava", "qwen2.5vl", "vl")
 _VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
 _SONIOX_API_BASE = "https://api.soniox.com"
@@ -76,23 +76,33 @@ def _seek_args(ss: float, t: float | None) -> tuple[list[str], list[str]]:
     return pre, post
 
 
-async def _extract_frames(
-    ffmpeg: str, path: str, interval: float, count: int, out_dir: Path,
-    *, ss: float = 0.0, t: float | None = None,
-) -> list[Path]:
+async def _extract_frames_at(
+    ffmpeg: str, path: str, times: list[float], out_dir: Path,
+) -> list[tuple[float, Path]]:
+    """Extract exactly one frame at each absolute timestamp in *times*.
+
+    One precise ``-ss <t> -i`` seek per frame. This is deterministic — you get
+    exactly the scheduled in-range frames — unlike a single ``fps=1/N`` pass,
+    whose sampler can silently drop the final frame near the clip's end.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
-    pattern = str(out_dir / "frame_%03d.jpg")
-    pre, post = _seek_args(ss, t)
-    # One frame every `interval` seconds, capped at `count`, within the window.
-    # -ss before -i = fast seek; scale caps the long edge before vision resize.
-    rc, _, err = await _run([
-        ffmpeg, "-hide_banner", "-loglevel", "error", *pre, "-i", path, *post,
-        "-vf", f"fps=1/{interval:.4f},scale='min(1280,iw)':-2",
-        "-frames:v", str(count), "-y", pattern,
-    ], timeout=180.0)
-    if rc != 0:
-        log.warning("ffmpeg frame extraction failed: %s", err.decode(errors="replace")[:200])
-    return sorted(out_dir.glob("frame_*.jpg"))
+    sem = asyncio.Semaphore(_FRAME_CONCURRENCY)
+
+    async def _one(idx: int, ts: float) -> tuple[float, Path] | None:
+        outp = out_dir / f"frame_{idx:03d}.jpg"
+        pre, _ = _seek_args(ts, None)  # accurate enough; fast input seek
+        async with sem:
+            rc, _, err = await _run([
+                ffmpeg, "-hide_banner", "-loglevel", "error", *pre, "-i", path,
+                "-frames:v", "1", "-vf", "scale='min(1280,iw)':-2", "-y", str(outp),
+            ], timeout=60.0)
+        if rc == 0 and outp.is_file() and outp.stat().st_size > 0:
+            return (round(ts, 1), outp)
+        log.warning("ffmpeg frame extraction at %.1fs failed: %s", ts, err.decode(errors="replace")[:160])
+        return None
+
+    results = await asyncio.gather(*(_one(i, ts) for i, ts in enumerate(times)))
+    return [r for r in results if r is not None]
 
 
 async def _extract_audio(ffmpeg: str, path: str, *, ss: float = 0.0, t: float | None = None) -> tuple[bytes, str, str]:
@@ -304,6 +314,31 @@ async def _summarize_transcript(agent: Any, text: str, *, with_excerpts: bool) -
         return ""
 
 
+def _clean_frame_desc(text: str) -> str:
+    """Strip internal-context / memory leakage a peer may parrot into a frame desc."""
+    try:
+        from captain_claw.llm import _strip_internal_context
+        text = _strip_internal_context(text)
+    except Exception:
+        pass
+    # Drop a "Persistent insights from memory:" block (and its bullet list) if
+    # the peer echoed its memory context instead of describing the frame.
+    out_lines: list[str] = []
+    skipping = False
+    for line in text.splitlines():
+        low = line.strip().lower()
+        if low.startswith("persistent insights from memory"):
+            skipping = True
+            continue
+        if skipping:
+            # keep skipping bullet/insight lines; stop at a blank or normal line
+            if not line.strip() or line.lstrip().startswith(("-", "•", "*", "[")):
+                continue
+            skipping = False
+        out_lines.append(line)
+    return "\n".join(out_lines).strip()
+
+
 async def _describe_frame_via_peer(fdt: Any, fd_url: str, peer: str, frame: Path, prompt: str, kwargs: dict[str, Any]) -> str:
     """Ask a multimodal peer to describe one frame (Flight Deck uploads the image)."""
     call_kwargs = {k: v for k, v in kwargs.items() if k != "_attach_file"}
@@ -319,6 +354,7 @@ async def _describe_frame_via_peer(fdt: Any, fd_url: str, peer: str, frame: Path
     # _consult wraps the reply as "Response from <peer>:\n\n<text>".
     if text.startswith("Response from") and "\n\n" in text:
         text = text.split("\n\n", 1)[1].strip()
+    text = _clean_frame_desc(text)
     return text or "(frame not described: empty peer reply)"
 
 
@@ -417,9 +453,13 @@ class VideoVisionTool(Tool):
             n_frames = _MAX_FRAMES
             interval = usable / (_MAX_FRAMES - 1) if _MAX_FRAMES > 1 else interval
             widened = True
-        # Frames start at first_off into the segment; audio covers the whole segment.
-        frame_ss = (seg_start if is_segment else 0.0) + first_off
-        frame_t = (seg_dur - first_off) if is_segment else None
+        # Explicit absolute timestamps: first_off into the segment, then every
+        # `interval`s. Keep only those strictly inside the segment (small epsilon
+        # so a frame isn't requested past EOF). Extracted one-seek-each below.
+        frame_times = [seg_start + first_off + i * interval for i in range(n_frames)]
+        frame_times = [ts for ts in frame_times if ts < seg_end - 0.02] or [seg_start + first_off]
+        n_frames = len(frame_times)
+        # Audio covers the whole segment (frames start ~1s in, audio doesn't).
         audio_ss = seg_start if is_segment else 0.0
         audio_t = seg_dur if is_segment else None
 
@@ -430,15 +470,17 @@ class VideoVisionTool(Tool):
 
         log.info("video_vision: analyzing", path=str(file_path), duration=round(duration, 1),
                  segment=f"{round(seg_start,1)}-{round(seg_end,1)}s" if is_segment else "full",
-                 first_at=round(frame_ss, 1), interval=round(interval, 1), frames=n_frames, widened=widened)
+                 first_at=round(frame_times[0], 1), interval=round(interval, 1),
+                 frames=n_frames, widened=widened)
 
-        # Extract frames (from first_off) + audio (whole segment) concurrently.
-        frames, (audio, audio_name, audio_mime) = await asyncio.gather(
-            _extract_frames(ffmpeg, str(file_path), interval, n_frames, frame_dir, ss=frame_ss, t=frame_t),
+        # Extract frames (one seek each, exact timestamps) + audio (whole segment).
+        frame_pairs, (audio, audio_name, audio_mime) = await asyncio.gather(
+            _extract_frames_at(ffmpeg, str(file_path), frame_times, frame_dir),
             _extract_audio(ffmpeg, str(file_path), ss=audio_ss, t=audio_t),
         )
-        if not frames:
+        if not frame_pairs:
             return ToolResult(success=False, error="Frame extraction produced no frames (ffmpeg failed?).")
+        frames = [fp for _, fp in frame_pairs]
 
         agent_obj = kwargs.get("_agent")
         wa_id = _whatsapp_waid(kwargs)  # if set, mirror key updates to WhatsApp
@@ -496,9 +538,8 @@ class VideoVisionTool(Tool):
         # One WhatsApp heads-up (the live per-frame counter stays web/glasses-only).
         await _send_whatsapp(wa_id, f"🎞 Analyzing {total} frames now — this takes a couple of minutes…")
 
-        async def describe(idx: int, fp: Path) -> dict[str, Any]:
-            rel = first_off + idx * interval          # offset within the segment (first frame ~1s in)
-            abs_ts = round(seg_start + rel, 1)        # absolute time in the video
+        async def describe(abs_ts: float, fp: Path) -> dict[str, Any]:
+            rel = abs_ts - seg_start                  # offset within the segment
             # Transcript tokens are segment-relative (audio extracted from seg_start).
             audio = _transcript_window(tokens, rel, half) if tokens else ""
             fprompt = "Describe this single video frame concisely: people, objects, on-screen text, action."
@@ -515,9 +556,9 @@ class VideoVisionTool(Tool):
                     desc = f"(frame error: {exc})"
             prog["n"] += 1
             _emit_status(agent_obj, f"🎞️ Describing frames{frame_label}… ({prog['n']}/{total})")
-            return {"t": abs_ts, "desc": desc.strip(), "audio": audio}
+            return {"t": round(abs_ts, 1), "desc": desc.strip(), "audio": audio}
 
-        analyzed = await asyncio.gather(*(describe(i, fp) for i, fp in enumerate(frames)))
+        analyzed = await asyncio.gather(*(describe(ts, fp) for ts, fp in frame_pairs))
 
         # Build the per-frame breakdown.
         lines = []
