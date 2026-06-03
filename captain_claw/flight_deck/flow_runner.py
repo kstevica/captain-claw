@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable
 
 from captain_claw.logging import get_logger
@@ -192,7 +193,18 @@ class FlowRunner:
         steps = list(flow.get("steps") or [])
         guard = flow.get("guardrails") or {}
         max_steps = int(guard.get("max_steps", _DEFAULT_MAX_STEPS))
-        ctx: dict[str, Any] = {"trigger": payload, "steps": {}}
+        _now = datetime.now(UTC)
+        ctx: dict[str, Any] = {
+            "trigger": payload,
+            "steps": {},
+            "system": {
+                "now": _now.isoformat(),
+                "date": _now.strftime("%Y-%m-%d"),
+                "time": _now.strftime("%H:%M"),
+                "agent": str(payload.get("origin_name") or ""),
+                "channel": str(payload.get("channel") or ""),
+            },
+        }
         trace: list[dict[str, Any]] = []
 
         if dry:

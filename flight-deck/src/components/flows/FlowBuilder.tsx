@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft,
   Plus,
@@ -485,6 +485,42 @@ function CsvField({
   )
 }
 
+const _TRIGGER_VARS = [
+  'trigger.text', 'trigger.channel', 'trigger.waid', 'trigger.mime',
+  'trigger.image_path', 'trigger.video_path', 'trigger.audio_path', 'trigger.origin_name',
+]
+const _SYSTEM_VARS = ['system.now', 'system.date', 'system.time', 'system.agent', 'system.channel']
+
+/** Clickable chips that insert {{...}} variables into the focused field. */
+function VarChips({ priorIds, onInsert }: { priorIds: string[]; onInsert: (token: string) => void }) {
+  const groups: { label: string; vars: string[] }[] = [
+    { label: 'Trigger', vars: _TRIGGER_VARS },
+    ...(priorIds.length ? [{ label: 'Prior steps', vars: priorIds.map((id) => `steps.${id}.output`) }] : []),
+    { label: 'System', vars: _SYSTEM_VARS },
+  ]
+  return (
+    <div className="mt-1.5 space-y-1 rounded-lg border border-zinc-800/60 bg-zinc-900/30 p-1.5">
+      <div className="text-[9px] uppercase tracking-wider text-zinc-600">Insert variable (click into a field first)</div>
+      {groups.map((g) => (
+        <div key={g.label} className="flex flex-wrap items-center gap-1">
+          <span className="mr-1 w-16 shrink-0 text-[9px] uppercase tracking-wider text-zinc-600">{g.label}</span>
+          {g.vars.map((v) => (
+            <button
+              type="button"
+              key={v}
+              onMouseDown={(e) => { e.preventDefault(); onInsert(v) }}
+              className="rounded bg-zinc-800/70 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300 hover:bg-violet-500/20 hover:text-violet-200"
+              title={`Insert {{${v}}}`}
+            >
+              {`{{${v}}}`}
+            </button>
+          ))}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function StepCard({
   step,
   index,
@@ -508,6 +544,26 @@ function StepCard({
 }) {
   const meta = STEP_TYPE_META[step.type]
   const Icon = meta.icon
+
+  // Track the last-focused templatable field so a variable chip inserts at the
+  // cursor of whatever the user was editing in this step.
+  const lastField = useRef<{ el: HTMLTextAreaElement | HTMLInputElement; set: (v: string) => void } | null>(null)
+  const registerFocus = (el: HTMLTextAreaElement | HTMLInputElement, set: (v: string) => void) => {
+    lastField.current = { el, set }
+  }
+  const insertVar = (token: string) => {
+    const f = lastField.current
+    const ins = `{{${token}}}`
+    if (!f) return
+    const el = f.el
+    const cur = el.value || ''
+    const s = el.selectionStart ?? cur.length
+    const e = el.selectionEnd ?? cur.length
+    f.set(cur.slice(0, s) + ins + cur.slice(e))
+    requestAnimationFrame(() => {
+      try { el.focus(); const p = s + ins.length; el.setSelectionRange(p, p) } catch { /* ignore */ }
+    })
+  }
 
   // {{...}} hint built from prior step outputs
   const hint = priorIds.length
@@ -598,7 +654,8 @@ function StepCard({
               className={inputCls}
             />
           </div>
-          <ArgsEditor args={step.args || {}} onChange={(args) => onChange({ args })} hint={hint} />
+          <ArgsEditor args={step.args || {}} onChange={(args) => onChange({ args })} hint={hint} registerFocus={registerFocus} />
+          <VarChips priorIds={priorIds} onInsert={insertVar} />
         </>
       )}
 
@@ -609,11 +666,13 @@ function StepCard({
             <textarea
               value={step.prompt || ''}
               onChange={(e) => onChange({ prompt: e.target.value })}
+              onFocus={(e) => registerFocus(e.currentTarget, (v) => onChange({ prompt: v }))}
               rows={3}
               placeholder="Describe the video using ONLY this analysis:\n{{steps.analyze.output}}"
               className={`${inputCls} resize-y`}
             />
             <p className="mt-1 text-[10px] text-zinc-600">{hint}</p>
+            <VarChips priorIds={priorIds} onInsert={insertVar} />
           </div>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             <div>
@@ -659,9 +718,11 @@ function StepCard({
             <input
               value={step.when || ''}
               onChange={(e) => onChange({ when: e.target.value })}
+              onFocus={(e) => registerFocus(e.currentTarget, (v) => onChange({ when: v }))}
               placeholder="{{steps.who.label}} == none"
               className={`${inputCls} font-mono`}
             />
+            <VarChips priorIds={priorIds} onInsert={insertVar} />
           </div>
           <div>
             <label className={labelCls}>Goto step</label>
@@ -699,11 +760,13 @@ function StepCard({
             <textarea
               value={step.body || ''}
               onChange={(e) => onChange({ body: e.target.value })}
+              onFocus={(e) => registerFocus(e.currentTarget, (v) => onChange({ body: v }))}
               rows={2}
               placeholder="{{steps.whisper.output}}"
               className={`${inputCls} resize-y`}
             />
             <p className="mt-1 text-[10px] text-zinc-600">{hint}</p>
+            <VarChips priorIds={priorIds} onInsert={insertVar} />
           </div>
         </>
       )}
@@ -715,10 +778,12 @@ function ArgsEditor({
   args,
   onChange,
   hint,
+  registerFocus,
 }: {
   args: Record<string, string>
   onChange: (args: Record<string, string>) => void
   hint: string
+  registerFocus: (el: HTMLTextAreaElement | HTMLInputElement, set: (v: string) => void) => void
 }) {
   const entries = Object.entries(args)
 
@@ -755,6 +820,7 @@ function ArgsEditor({
             <input
               value={v}
               onChange={(e) => setVal(k, e.target.value)}
+              onFocus={(e) => registerFocus(e.currentTarget, (nv) => setVal(k, nv))}
               placeholder="{{trigger.video_path}}"
               className={`${inputCls} font-mono`}
             />
