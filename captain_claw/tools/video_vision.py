@@ -28,8 +28,8 @@ from captain_claw.tools.registry import Tool, ToolResult
 log = get_logger(__name__)
 
 _MAX_FRAMES = 20
-_MIN_INTERVAL = 2.0
-_MAX_INTERVAL = 10.0
+_DEFAULT_INTERVAL = 6.0      # default: one frame every 6 seconds…
+_FIRST_FRAME_OFFSET = 1.0    # …starting ~1 second in (skip the black/intro frame)
 _FRAME_CONCURRENCY = 4
 _PEER_FRAME_CONCURRENCY = 2  # peer turns are heavy — go gentler when delegating
 _VISION_PEER_HINTS = ("vision", "image", "multimodal", "minimax", "llava", "qwen2.5vl", "vl")
@@ -350,11 +350,15 @@ class VideoVisionTool(Tool):
                 "type": "string",
                 "description": "Optional end of the segment to analyze (same format as start). Omit to go to the end of the video.",
             },
+            "interval": {
+                "type": "number",
+                "description": "Optional seconds between sampled frames. Default 6 (first frame ~1s in, then every 6s), capped at 20 frames total.",
+            },
         },
         "required": ["path"],
     }
 
-    async def execute(self, path: str, prompt: str = "", start: Any = None, end: Any = None, **kwargs: Any) -> ToolResult:
+    async def execute(self, path: str, prompt: str = "", start: Any = None, end: Any = None, interval: Any = None, **kwargs: Any) -> ToolResult:
         path_str = str(path or "").strip()
         if not path_str:
             return ToolResult(success=False, error="Missing required argument: path")
@@ -362,7 +366,14 @@ class VideoVisionTool(Tool):
         ffmpeg = shutil.which("ffmpeg")
         ffprobe = shutil.which("ffprobe")
         if not ffmpeg or not ffprobe:
-            return ToolResult(success=False, error="video_vision requires system 'ffmpeg' and 'ffprobe' to be installed.")
+            return ToolResult(
+                success=False,
+                error=(
+                    "video_vision requires system 'ffmpeg' and 'ffprobe' (install with "
+                    "'apt install ffmpeg'). Do NOT substitute a custom script (cv2/etc.) — "
+                    "that skips audio transcription. Report this so ffmpeg can be installed."
+                ),
+            )
 
         # Resolve the video file.
         from captain_claw.tools.image_ocr import _require_existing_file
@@ -390,10 +401,27 @@ class VideoVisionTool(Tool):
         seg_dur = seg_end - seg_start
         is_segment = seg_start > 0.0 or seg_end < duration
 
-        interval = min(_MAX_INTERVAL, max(_MIN_INTERVAL, seg_dur / _MAX_FRAMES))
-        n_frames = max(1, min(_MAX_FRAMES, int(seg_dur // interval) + 1))
-        ss = seg_start if is_segment else 0.0
-        t = seg_dur if is_segment else None
+        # Default cadence: first frame ~1s in, then every 6s, capped at 20.
+        # If the segment is long enough that 6s would exceed the cap, widen the
+        # interval so 20 frames still span the whole segment (no silent tail-drop).
+        try:
+            interval = float(interval) if interval is not None else _DEFAULT_INTERVAL
+        except (TypeError, ValueError):
+            interval = _DEFAULT_INTERVAL
+        interval = max(0.5, interval)
+        first_off = _FIRST_FRAME_OFFSET if seg_dur > _FIRST_FRAME_OFFSET else 0.0
+        usable = max(0.0, seg_dur - first_off)
+        n_frames = max(1, int(usable // interval) + 1)
+        widened = False
+        if n_frames > _MAX_FRAMES:
+            n_frames = _MAX_FRAMES
+            interval = usable / (_MAX_FRAMES - 1) if _MAX_FRAMES > 1 else interval
+            widened = True
+        # Frames start at first_off into the segment; audio covers the whole segment.
+        frame_ss = (seg_start if is_segment else 0.0) + first_off
+        frame_t = (seg_dur - first_off) if is_segment else None
+        audio_ss = seg_start if is_segment else 0.0
+        audio_t = seg_dur if is_segment else None
 
         # Frame output dir under saved/.
         saved_base = kwargs.get("_saved_base_path")
@@ -402,12 +430,12 @@ class VideoVisionTool(Tool):
 
         log.info("video_vision: analyzing", path=str(file_path), duration=round(duration, 1),
                  segment=f"{round(seg_start,1)}-{round(seg_end,1)}s" if is_segment else "full",
-                 interval=round(interval, 1), frames=n_frames)
+                 first_at=round(frame_ss, 1), interval=round(interval, 1), frames=n_frames, widened=widened)
 
-        # Extract frames + audio (for the segment) concurrently.
+        # Extract frames (from first_off) + audio (whole segment) concurrently.
         frames, (audio, audio_name, audio_mime) = await asyncio.gather(
-            _extract_frames(ffmpeg, str(file_path), interval, n_frames, frame_dir, ss=ss, t=t),
-            _extract_audio(ffmpeg, str(file_path), ss=ss, t=t),
+            _extract_frames(ffmpeg, str(file_path), interval, n_frames, frame_dir, ss=frame_ss, t=frame_t),
+            _extract_audio(ffmpeg, str(file_path), ss=audio_ss, t=audio_t),
         )
         if not frames:
             return ToolResult(success=False, error="Frame extraction produced no frames (ffmpeg failed?).")
@@ -469,7 +497,7 @@ class VideoVisionTool(Tool):
         await _send_whatsapp(wa_id, f"🎞 Analyzing {total} frames now — this takes a couple of minutes…")
 
         async def describe(idx: int, fp: Path) -> dict[str, Any]:
-            rel = idx * interval                      # offset within the segment
+            rel = first_off + idx * interval          # offset within the segment (first frame ~1s in)
             abs_ts = round(seg_start + rel, 1)        # absolute time in the video
             # Transcript tokens are segment-relative (audio extracted from seg_start).
             audio = _transcript_window(tokens, rel, half) if tokens else ""
