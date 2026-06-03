@@ -59,6 +59,9 @@ def _fmt(it: dict[str, Any]) -> str:
     repeat = (it.get("repeat") or "").strip()
     if repeat:
         line += f" [repeat: {repeat}]"
+    tags = it.get("tags") or []
+    if tags:
+        line += f" #{' #'.join(tags)}"
     return line
 
 
@@ -73,16 +76,28 @@ class IntentionsTool(Tool):
         "to do for them later (e.g. 'send a Monday portfolio brief'); set "
         "risk='low' for read-only/no-send actions (will be announced) or "
         "risk='normal'/'high' for anything that sends or changes data (will ask "
-        "permission). Actions: create, list, update, snooze, cancel, done. "
-        "Always capture 'why' (the motivation) so it can be judged later."
+        "permission). Actions: create, list, search, update, snooze, cancel, done. "
+        "Always capture 'why' (the motivation), and add up to 5 short, lowercase "
+        "'tags' (themes/people/topics, e.g. ['health','reminder']) so the "
+        "intention can be found later via action='search'."
     )
     parameters = {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["create", "list", "update", "snooze", "cancel", "done", "resolve"],
+                "enum": ["create", "list", "search", "update", "snooze", "cancel", "done", "resolve"],
                 "description": "Operation to perform.",
+            },
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Up to 5 short lowercase tags. For 'create'/'update' to label the intention; for 'search' to find by tag.",
+            },
+            "match": {
+                "type": "string",
+                "enum": ["any", "all"],
+                "description": "For 'search': match intentions having ANY (default) or ALL of the given tags.",
             },
             "origin": {
                 "type": "string",
@@ -143,6 +158,8 @@ class IntentionsTool(Tool):
                 return await self._create(mgr, session_id, kwargs)
             if action == "list":
                 return await self._list(mgr, kwargs)
+            if action == "search":
+                return await self._search(mgr, kwargs)
             if action in ("cancel", "done"):
                 return await self._set_status(mgr, action, kwargs)
             if action == "snooze":
@@ -172,6 +189,7 @@ class IntentionsTool(Tool):
             repeat=(str(kw.get("repeat")).strip() or None) if kw.get("repeat") else None,
             action_type="run_prompt" if action_prompt else "nudge",
             action_spec={"prompt": action_prompt} if action_prompt else None,
+            tags=kw.get("tags"),
             source_session=session_id,
         )
         # For agent intentions, emit a decision the user resolves (any channel).
@@ -252,6 +270,28 @@ class IntentionsTool(Tool):
             content="Intentions:\n" + "\n".join(f"- {_fmt(i)}" for i in items),
         )
 
+    async def _search(self, mgr: Any, kw: dict[str, Any]) -> ToolResult:
+        tags = kw.get("tags")
+        if isinstance(tags, str):
+            tags = [t for t in tags.replace(",", " ").split() if t]
+        if not tags:
+            return ToolResult(success=False, error="Provide 'tags' (a list) to search by.")
+        match = str(kw.get("match") or "any").strip().lower()
+        limit = int(kw.get("limit") or 20)
+        status_filter = str(kw.get("status_filter") or "").strip()
+        statuses = [status_filter] if status_filter else None
+        items = await mgr.search_by_tags(tags, match=match, statuses=statuses, limit=limit)
+        if not items:
+            return ToolResult(
+                success=True,
+                content=f"No intentions match tags {tags} ({match}).",
+            )
+        return ToolResult(
+            success=True,
+            content=f"Intentions matching {tags} ({match}):\n"
+            + "\n".join(f"- {_fmt(i)}" for i in items),
+        )
+
     async def _set_status(self, mgr: Any, action: str, kw: dict[str, Any]) -> ToolResult:
         iid = str(kw.get("intention_id") or "").strip()
         if not iid:
@@ -283,7 +323,7 @@ class IntentionsTool(Tool):
             return ToolResult(success=False, error="'intention_id' is required.")
         fields = {
             k: kw[k]
-            for k in ("title", "body", "why", "category", "risk", "repeat")
+            for k in ("title", "body", "why", "category", "risk", "repeat", "tags")
             if k in kw and kw[k] is not None
         }
         if not fields:

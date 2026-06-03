@@ -68,6 +68,24 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+MAX_TAGS = 5
+
+
+def _normalize_tags(tags: Any) -> str:
+    """Normalize tags (list or comma string) → deduped, lowercased, ≤5, comma-joined."""
+    if not tags:
+        return ""
+    items = tags.split(",") if isinstance(tags, str) else list(tags)
+    out: list[str] = []
+    for t in items:
+        t = str(t).strip().lower().replace(",", " ")
+        if t and t not in out:
+            out.append(t)
+        if len(out) >= MAX_TAGS:
+            break
+    return ",".join(out)
+
+
 def _default_db_path() -> Path:
     """Place intentions.db alongside the session DB (respects per-agent HOME)."""
     try:
@@ -128,12 +146,18 @@ class IntentionsManager:
                 decided_at          TEXT,
                 next_surface_at     TEXT,
                 undo_until          TEXT,
-                expires_at          TEXT
+                expires_at          TEXT,
+                tags                TEXT
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_int_status ON intentions(status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_int_origin ON intentions(origin)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_int_next ON intentions(next_surface_at)")
+        # Migration: add tags column to intentions DBs created before tags existed.
+        try:
+            await db.execute("ALTER TABLE intentions ADD COLUMN tags TEXT")
+        except Exception:
+            pass  # column already exists
 
         await db.execute("""
             CREATE TABLE IF NOT EXISTS intention_decisions (
@@ -218,6 +242,7 @@ class IntentionsManager:
         source_session: str = "",
         next_surface_at: str | None = None,
         expires_at: str | None = None,
+        tags: Any = None,
     ) -> dict[str, Any]:
         origin = origin if origin in ORIGINS else "agent"
         risk = risk if risk in RISKS else "normal"
@@ -253,6 +278,7 @@ class IntentionsManager:
             "next_surface_at": next_surface_at,
             "undo_until": None,
             "expires_at": expires_at,
+            "tags": _normalize_tags(tags),
         }
         db = await self._ensure_db()
         cols = ", ".join(row.keys())
@@ -294,6 +320,38 @@ class IntentionsManager:
             rows = await cur.fetchall()
         return [_row_to_dict(dict(r)) for r in rows]
 
+    async def search_by_tags(
+        self,
+        tags: Any,
+        *,
+        match: str = "any",
+        statuses: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Find intentions by tag. match='any' (default) OR 'all'.
+
+        Tags are matched exactly against the stored comma list (delimiter-wrapped
+        LIKE), so 'cat' won't match 'category'.
+        """
+        norm = [t for t in _normalize_tags(tags).split(",") if t]
+        if not norm:
+            return []
+        # (',' || tags || ',') LIKE '%,<tag>,%'  → exact membership test.
+        per = "(',' || lower(COALESCE(tags,'')) || ',') LIKE '%,' || ? || ',%'"
+        joiner = " OR " if match != "all" else " AND "
+        where = "(" + joiner.join(per for _ in norm) + ")"
+        params: list[Any] = list(norm)
+        if statuses:
+            where += f" AND status IN ({', '.join('?' for _ in statuses)})"
+            params.extend(statuses)
+        params.append(int(limit))
+        db = await self._ensure_db()
+        async with db.execute(
+            f"SELECT * FROM intentions WHERE {where} ORDER BY created_at DESC LIMIT ?", params
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_dict(dict(r)) for r in rows]
+
     async def update(self, intention_id: str, **fields: Any) -> bool:
         if not fields:
             return False
@@ -301,13 +359,15 @@ class IntentionsManager:
             "title", "body", "why", "category", "risk", "approval_mode", "status",
             "trigger_type", "trigger_spec", "action_type", "action_spec", "repeat",
             "materialized_job_id", "audience", "provenance", "surfaced_at",
-            "decided_at", "next_surface_at", "undo_until", "expires_at",
+            "decided_at", "next_surface_at", "undo_until", "expires_at", "tags",
         }
         sets, params = [], []
         for k, v in fields.items():
             if k not in allowed:
                 continue
-            if k in _JSON_FIELDS and v is not None and not isinstance(v, str):
+            if k == "tags":
+                v = _normalize_tags(v)
+            elif k in _JSON_FIELDS and v is not None and not isinstance(v, str):
                 v = json.dumps(v)
             sets.append(f"{k} = ?")
             params.append(v)
@@ -419,7 +479,11 @@ def _parse_json_fields(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str
 
 
 def _row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
-    return _parse_json_fields(row, _JSON_FIELDS)
+    out = _parse_json_fields(row, _JSON_FIELDS)
+    # Tags are stored comma-joined; expose as a list.
+    raw_tags = out.get("tags")
+    out["tags"] = [t for t in str(raw_tags).split(",") if t] if raw_tags else []
+    return out
 
 
 def _decision_to_dict(row: dict[str, Any]) -> dict[str, Any]:
