@@ -227,6 +227,8 @@ async def handle_chat(
     effective_content = content
     attachment_lines: list[str] = []
     _has_image = False
+    _has_video = False
+    _VIDEO_EXTS = (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v")
 
     # Single image (backward compat)
     if image_path:
@@ -240,10 +242,12 @@ async def handle_chat(
     # Single data file (backward compat)
     if file_path:
         attachment_lines.append(f"[Attached file: {file_path}]")
+        _has_video = _has_video or str(file_path).lower().endswith(_VIDEO_EXTS)
     # Multiple data files
     if file_paths:
         for p in file_paths:
             attachment_lines.append(f"[Attached file: {p}]")
+            _has_video = _has_video or str(p).lower().endswith(_VIDEO_EXTS)
     # Tell the model how to actually view an image — it must call image_vision,
     # not read (binary) and not give up based on earlier failed turns.
     if _has_image:
@@ -252,6 +256,14 @@ async def handle_chat(
             "path, or — if you can't see images — delegate it to a multimodal peer "
             "via flight_deck with file=<path>. Never use read on an image. Never say "
             "you sent/delegated/described it unless you actually called the tool this turn.)"
+        )
+    # Tell the model how to analyze a video — it must call video_vision.
+    if _has_video:
+        attachment_lines.append(
+            "(To analyze the video(s) above you MUST call the video_vision tool with "
+            "the path. It samples frames + transcribes audio. Optionally pass start/end "
+            "to focus on a segment. Never use read on a video. Never say you analyzed/"
+            "described it unless you actually called the tool this turn.)"
         )
 
     if attachment_lines:

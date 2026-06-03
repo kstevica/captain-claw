@@ -31,6 +31,8 @@ _MAX_FRAMES = 20
 _MIN_INTERVAL = 2.0
 _MAX_INTERVAL = 10.0
 _FRAME_CONCURRENCY = 4
+_PEER_FRAME_CONCURRENCY = 2  # peer turns are heavy — go gentler when delegating
+_VISION_PEER_HINTS = ("vision", "image", "multimodal", "minimax", "llava", "qwen2.5vl", "vl")
 _VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
 _SONIOX_API_BASE = "https://api.soniox.com"
 _SONIOX_STT_MODEL = "stt-async-v4"
@@ -93,13 +95,27 @@ async def _extract_frames(
     return sorted(out_dir.glob("frame_*.jpg"))
 
 
-async def _extract_audio_wav(ffmpeg: str, path: str, *, ss: float = 0.0, t: float | None = None) -> bytes:
+async def _extract_audio(ffmpeg: str, path: str, *, ss: float = 0.0, t: float | None = None) -> tuple[bytes, str, str]:
+    """Extract speech audio as compressed Opus (16kHz mono).
+
+    Returns (bytes, filename, mime). Opus keeps long videos tiny for the Soniox
+    upload (~1-2 KB/s vs ~32 KB/s for WAV → ~115 MB/hour). Falls back to WAV if
+    the ffmpeg build lacks libopus.
+    """
     pre, post = _seek_args(ss, t)
+    rc, out, _ = await _run([
+        ffmpeg, "-hide_banner", "-loglevel", "error", *pre, "-i", path, *post,
+        "-vn", "-ar", "16000", "-ac", "1", "-c:a", "libopus", "-b:a", "16k",
+        "-f", "ogg", "pipe:1",
+    ], timeout=180.0)
+    if rc == 0 and out:
+        return out, "audio.ogg", "audio/ogg"
+    # Fallback: uncompressed WAV (still works, just larger upload).
     rc, out, _ = await _run([
         ffmpeg, "-hide_banner", "-loglevel", "error", *pre, "-i", path, *post,
         "-vn", "-ar", "16000", "-ac", "1", "-f", "wav", "pipe:1",
     ], timeout=180.0)
-    return out if rc == 0 else b""
+    return (out, "audio.wav", "audio/wav") if rc == 0 else (b"", "audio.wav", "audio/wav")
 
 
 def _parse_time(val: Any) -> float | None:
@@ -126,14 +142,16 @@ def _parse_time(val: Any) -> float | None:
 # ── Soniox transcription WITH timestamps ──────────────────────────────
 
 
-async def _transcribe_timestamped(wav_bytes: bytes) -> tuple[str, list[tuple[float, str]]]:
+async def _transcribe_timestamped(
+    audio_bytes: bytes, filename: str = "audio.ogg", mime: str = "audio/ogg",
+) -> tuple[str, list[tuple[float, str]]]:
     """Return (full_text, [(start_seconds, token_text), ...]) or ('', [])."""
     import os
 
     import httpx
 
     api_key = os.environ.get("SONIOX_API_KEY", "").strip()
-    if not api_key or not wav_bytes:
+    if not api_key or not audio_bytes:
         return "", []
     headers = {"Authorization": f"Bearer {api_key}"}
     file_id = transcription_id = ""
@@ -141,7 +159,7 @@ async def _transcribe_timestamped(wav_bytes: bytes) -> tuple[str, list[tuple[flo
         async with httpx.AsyncClient(timeout=180.0) as client:
             up = await client.post(
                 f"{_SONIOX_API_BASE}/v1/files", headers=headers,
-                files={"file": ("audio.wav", wav_bytes, "audio/wav")},
+                files={"file": (filename, audio_bytes, mime)},
             )
             up.raise_for_status()
             file_id = str((up.json() or {}).get("id") or "")
@@ -192,6 +210,116 @@ def _transcript_window(tokens: list[tuple[float, str]], center: float, half: flo
     """Join tokens whose start is within [center-half, center+half]."""
     parts = [t for (ts, t) in tokens if center - half <= ts <= center + half]
     return "".join(parts).strip()
+
+
+# ── vision-peer delegation (for agents without a local vision model) ───
+
+
+def _session_metadata(kwargs: dict[str, Any]) -> dict[str, Any]:
+    session = kwargs.get("_session")
+    meta = getattr(session, "metadata", {}) or {} if session is not None else {}
+    if not meta:
+        agent = kwargs.get("_agent")
+        sess = getattr(agent, "session", None) if agent is not None else None
+        meta = getattr(sess, "metadata", {}) or {} if sess is not None else {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _find_vision_peer(kwargs: dict[str, Any]) -> str | None:
+    """Pick a multimodal peer (by name/description) to describe frames for us."""
+    meta = _session_metadata(kwargs)
+    peers = meta.get("peer_agents") or []
+    my_name = str(meta.get("session_display_name") or "").lower()
+    for p in peers:
+        if not isinstance(p, dict):
+            continue
+        name = str(p.get("name") or "")
+        if not name or name.lower() == my_name:
+            continue
+        blob = f"{name} {p.get('description') or ''}".lower()
+        if any(h in blob for h in _VISION_PEER_HINTS):
+            return name
+    return None
+
+
+_TRANSCRIPT_FULL_LIMIT = 700  # chars; longer → show summary + excerpts instead of the full transcript
+
+
+def _emit_status(agent: Any, text: str) -> None:
+    """Transient status line (keeps the user company during the long run)."""
+    bc = getattr(agent, "ws_broadcast", None)
+    if callable(bc):
+        try:
+            bc({"type": "status", "status": text})
+        except Exception:
+            pass
+
+
+def _emit_message(agent: Any, content: str) -> None:
+    """Persistent interim message (renders as a centered system bubble, no completion side-effects)."""
+    bc = getattr(agent, "ws_broadcast", None)
+    if callable(bc):
+        try:
+            bc({"type": "chat_message", "role": "system", "content": content})
+        except Exception:
+            pass
+
+
+def _whatsapp_waid(kwargs: dict[str, Any]) -> str:
+    """The WhatsApp chat this turn arrived from, if any (set by chat_handler)."""
+    return str(_session_metadata(kwargs).get("whatsapp_waid") or "").strip()
+
+
+async def _send_whatsapp(wa_id: str, text: str) -> None:
+    """Best-effort interim WhatsApp message (mirrors the voice-note path's UX)."""
+    if not wa_id:
+        return
+    try:
+        from captain_claw.tools.whatsapp_send_file import send_whatsapp_text
+        ok, err = await send_whatsapp_text(wa_id, text)
+        if not ok:
+            log.warning("video_vision whatsapp interim send skipped: %s", err)
+    except Exception as exc:
+        log.warning("video_vision whatsapp interim send failed: %s", exc)
+
+
+async def _summarize_transcript(agent: Any, text: str, *, with_excerpts: bool) -> str:
+    """1-3 sentence summary of the transcript; for long ones, also a few key quotes."""
+    if agent is None or not getattr(agent, "provider", None) or not text.strip():
+        return ""
+    from captain_claw.llm import Message
+    sys = (
+        "Summarize this audio transcript in 1-3 sentences. Be concise and concrete; "
+        "do not invent anything. Keep the original language of the transcript."
+    )
+    if with_excerpts:
+        sys += " Then add 2-4 short, verbatim key excerpts as a bulleted list of quotes."
+    try:
+        resp = await agent.provider.complete(
+            [Message(role="system", content=sys), Message(role="user", content=text)],
+        )
+        return str(getattr(resp, "content", "") or "").strip()
+    except Exception as exc:
+        log.warning("video_vision transcript summary failed: %s", exc)
+        return ""
+
+
+async def _describe_frame_via_peer(fdt: Any, fd_url: str, peer: str, frame: Path, prompt: str, kwargs: dict[str, Any]) -> str:
+    """Ask a multimodal peer to describe one frame (Flight Deck uploads the image)."""
+    call_kwargs = {k: v for k, v in kwargs.items() if k != "_attach_file"}
+    call_kwargs["_attach_file"] = str(frame)
+    msg = prompt + " Reply with ONLY the description — no preamble, no questions."
+    try:
+        res = await fdt._consult(fd_url, peer, msg, **call_kwargs)
+    except Exception as exc:
+        return f"(frame not described: peer error: {exc})"
+    if not res.success:
+        return f"(frame not described: {res.error})"
+    text = str(res.content or "").strip()
+    # _consult wraps the reply as "Response from <peer>:\n\n<text>".
+    if text.startswith("Response from") and "\n\n" in text:
+        text = text.split("\n\n", 1)[1].strip()
+    return text or "(frame not described: empty peer reply)"
 
 
 class VideoVisionTool(Tool):
@@ -277,20 +405,68 @@ class VideoVisionTool(Tool):
                  interval=round(interval, 1), frames=n_frames)
 
         # Extract frames + audio (for the segment) concurrently.
-        frames, wav = await asyncio.gather(
+        frames, (audio, audio_name, audio_mime) = await asyncio.gather(
             _extract_frames(ffmpeg, str(file_path), interval, n_frames, frame_dir, ss=ss, t=t),
-            _extract_audio_wav(ffmpeg, str(file_path), ss=ss, t=t),
+            _extract_audio(ffmpeg, str(file_path), ss=ss, t=t),
         )
         if not frames:
             return ToolResult(success=False, error="Frame extraction produced no frames (ffmpeg failed?).")
 
-        full_text, tokens = await _transcribe_timestamped(wav)
+        agent_obj = kwargs.get("_agent")
+        wa_id = _whatsapp_waid(kwargs)  # if set, mirror key updates to WhatsApp
 
+        # ── Phase 1: audio → transcript → summary (fast; shown first) ──────
+        _emit_status(agent_obj, "🎙️ Transcribing audio…")
+        await _send_whatsapp(wa_id, "🎙 Transcribing the video's audio…")
+        full_text, tokens = await _transcribe_timestamped(audio, audio_name, audio_mime)
+        if full_text:
+            is_long = len(full_text) > _TRANSCRIPT_FULL_LIMIT
+            if not is_long:
+                _emit_message(agent_obj, f"🎙️ **Transcript**\n\n{full_text}")
+            _emit_status(agent_obj, "📝 Summarizing transcript…")
+            tsummary = await _summarize_transcript(agent_obj, full_text, with_excerpts=is_long)
+            if tsummary:
+                label = "📝 **Transcript summary**" if is_long else "📝 **Summary**"
+                _emit_message(agent_obj, f"{label}\n\n{tsummary}")
+            # WhatsApp: short → full transcript (like the voice-note path);
+            # long → the summary+excerpts so we don't flood the chat.
+            if is_long and tsummary:
+                await _send_whatsapp(wa_id, f"🎙 Transcription (summary):\n\n{tsummary}")
+            else:
+                await _send_whatsapp(wa_id, f"🎙 Transcription:\n\n\"{full_text}\"")
+        else:
+            _emit_message(agent_obj, "🎙️ No speech detected in the audio.")
+            await _send_whatsapp(wa_id, "🎙 No speech detected in the video's audio.")
+
+        # ── Phase 2: per-frame vision (the slow part) ──────────────────────
         # Describe each frame (with nearby transcript) — limited concurrency.
+        # If THIS agent has no vision model, image_vision would fall back to the
+        # text chat model and reject the image. In that case, delegate frame
+        # description to a multimodal peer (same path as the WhatsApp image flow).
         from captain_claw.tools.image_ocr import ImageVisionTool
         ivt = ImageVisionTool()
-        sem = asyncio.Semaphore(_FRAME_CONCURRENCY)
+        has_local_vision = ivt._find_model() is not None
+        vision_peer = None if has_local_vision else _find_vision_peer(kwargs)
+        delegating = vision_peer is not None
+        fdt = fd_url = None
+        if delegating:
+            from captain_claw.tools.flight_deck import FlightDeckTool
+            fdt = FlightDeckTool()
+            fd_url = fdt._get_fd_url(**kwargs)
+            if not fd_url:
+                delegating = False  # no Flight Deck URL → fall back to local (will report the error)
+
+        sem = asyncio.Semaphore(_PEER_FRAME_CONCURRENCY if delegating else _FRAME_CONCURRENCY)
         half = max(interval / 2.0, 1.5)
+        log.info("video_vision: frame vision path",
+                 mode=("peer:" + vision_peer if delegating else ("local" if has_local_vision else "local-fallback")))
+
+        total = len(frames)
+        frame_label = f" via {vision_peer}" if delegating else ""
+        prog = {"n": 0}
+        _emit_status(agent_obj, f"🎞️ Describing {total} frames{frame_label}… (0/{total})")
+        # One WhatsApp heads-up (the live per-frame counter stays web/glasses-only).
+        await _send_whatsapp(wa_id, f"🎞 Analyzing {total} frames now — this takes a couple of minutes…")
 
         async def describe(idx: int, fp: Path) -> dict[str, Any]:
             rel = idx * interval                      # offset within the segment
@@ -302,10 +478,15 @@ class VideoVisionTool(Tool):
                 fprompt += f" Audio spoken around this moment: \"{audio}\"."
             async with sem:
                 try:
-                    res = await ivt.execute(path=str(fp), prompt=fprompt, **kwargs)
-                    desc = res.content if res.success else f"(frame not described: {res.error})"
+                    if delegating:
+                        desc = await _describe_frame_via_peer(fdt, fd_url, vision_peer, fp, fprompt, kwargs)
+                    else:
+                        res = await ivt.execute(path=str(fp), prompt=fprompt, **kwargs)
+                        desc = res.content if res.success else f"(frame not described: {res.error})"
                 except Exception as exc:
                     desc = f"(frame error: {exc})"
+            prog["n"] += 1
+            _emit_status(agent_obj, f"🎞️ Describing frames{frame_label}… ({prog['n']}/{total})")
             return {"t": abs_ts, "desc": desc.strip(), "audio": audio}
 
         analyzed = await asyncio.gather(*(describe(i, fp) for i, fp in enumerate(frames)))
@@ -319,14 +500,17 @@ class VideoVisionTool(Tool):
             lines.append(seg)
         breakdown = "\n".join(lines)
 
+        _emit_status(agent_obj, "🧩 Synthesizing the final description…")
         # Step 5 — synthesize a coherent description via the agent's own model.
         scope = (f"segment {round(seg_start)}-{round(seg_end)}s of a {round(duration)}s video"
                  if is_segment else f"a {round(duration)}s video")
         summary = await self._synthesize(kwargs.get("_agent"), scope, full_text, breakdown, prompt)
 
         seg_label = f" of {round(seg_start)}-{round(seg_end)}s" if is_segment else ""
+        vision_note = (f" (frames described by peer '{vision_peer}')" if delegating
+                       else ("" if has_local_vision else " (no vision model/peer — frames not described)"))
         out = summary or "(synthesis unavailable)"
-        out += f"\n\n— Frame-by-frame{seg_label} ({len(frames)} frames @ ~{round(interval,1)}s) —\n{breakdown}"
+        out += f"\n\n— Frame-by-frame{seg_label} ({len(frames)} frames @ ~{round(interval,1)}s{vision_note}) —\n{breakdown}"
         if full_text:
             out += f"\n\n— Transcript —\n{full_text}"
         return ToolResult(success=True, content=out)

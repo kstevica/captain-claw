@@ -430,6 +430,11 @@ class WebServer:
             )
             agent.response_stream_callback = response_stream_cb
             agent.playbook_approval_callback = _public_playbook_approval
+            # Route tool-side broadcasts (interim status / system messages, peer
+            # activity) to THIS public session's WS — admin's _broadcast won't
+            # reach public users. `send` re-reads the active WS each call, so it
+            # survives reconnects.
+            agent.ws_broadcast = send
 
             # Bind to the public session (skip default session loading).
             agent.session = session
@@ -2170,7 +2175,7 @@ class WebServer:
     # ── App setup ────────────────────────────────────────────────────
 
     def create_app(self) -> web.Application:
-        app = web.Application(client_max_size=50 * 1024 * 1024)  # 50 MB for file uploads
+        app = web.Application(client_max_size=800 * 1024 * 1024)  # 800 MB for file/video uploads
         if self.config.web.public_run:
             # Public mode: lock down routes to the allowed section.
             # Admin bypass via auth_token is handled inside the middleware.

@@ -80,6 +80,47 @@ def _allowed_waids() -> set[str]:
     return {p.strip().lstrip("+") for p in raw.split(",") if p.strip()} if raw else set()
 
 
+async def send_whatsapp_text(to: str, body: str) -> tuple[bool, str]:
+    """Send a plain WhatsApp text message via the Meta Cloud API.
+
+    Reuses the same creds (``WHATSAPP_ACCESS_TOKEN`` / ``WHATSAPP_PHONE_NUMBER_ID``)
+    and recipient allowlist (``WHATSAPP_ALLOWED_WAIDS``) as file sending. This is
+    the agent-side counterpart to the bridge's ``_send_whatsapp_text`` — used for
+    interim progress updates (e.g. video_vision). Best-effort: returns
+    ``(ok, error)`` and never raises.
+    """
+    to = str(to or "").lstrip("+").strip()
+    body = str(body or "").strip()
+    if not to or not body:
+        return False, "missing recipient or body"
+    token = _env("WHATSAPP_ACCESS_TOKEN")
+    pid = _env("WHATSAPP_PHONE_NUMBER_ID")
+    if not token or not pid:
+        return False, "WhatsApp not configured (WHATSAPP_ACCESS_TOKEN / WHATSAPP_PHONE_NUMBER_ID)"
+    allowed = _allowed_waids()
+    if allowed and to not in allowed:
+        return False, f"recipient {to} not in WHATSAPP_ALLOWED_WAIDS"
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "text",
+        "text": {"body": body[:4096]},  # Meta caps text bodies at 4096 chars
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{_GRAPH_BASE}/{pid}/messages",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json=payload,
+            )
+    except Exception as exc:
+        return False, f"send request failed: {exc}"
+    if resp.status_code != 200:
+        return False, f"send rejected ({resp.status_code}): {resp.text[:300]}"
+    return True, ""
+
+
 class WhatsAppSendFileTool(Tool):
     """List and deliver a saved file to a WhatsApp chat as a document."""
 

@@ -28,6 +28,8 @@ _ALLOWED_EXTENSIONS: set[str] = {
     # Images: the chat composer uploads attachments here too; accept them so
     # a manually-attached photo isn't rejected (the agent views it via vision).
     ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp",
+    # Video: analyzed by the video_vision tool (frame sampling + transcription).
+    ".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v",
 }
 
 
