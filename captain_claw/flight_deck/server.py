@@ -2176,6 +2176,36 @@ async def fd_flows_run_detail(run_id: str, request: Request, user: dict | None =
     return detail
 
 
+@app.post("/fd/flows/evaluate")
+async def fd_flows_evaluate(request: Request, user: dict | None = _optional_user_dep):
+    """Agent-handled channels (web/glasses) call this before a turn: classify the
+    inbound, and if a Flow matches, run it and return its output to relay."""
+    from captain_claw.flight_deck import flow_router
+    if not flow_router.engine_ready():
+        return {"matched": False}
+    raw = await request.json()
+    payload = flow_router.classify_payload(
+        channel=str(raw.get("channel") or "web"),
+        text=str(raw.get("text") or ""),
+        mime=str(raw.get("mime") or ""),
+        image_path=str(raw.get("image_path") or ""),
+        video_path=str(raw.get("video_path") or ""),
+        audio_path=str(raw.get("audio_path") or ""),
+        waid=str(raw.get("waid") or ""),
+        origin_host=str(raw.get("origin_host") or "localhost"),
+        origin_port=int(raw.get("origin_port") or 0),
+        origin_name=str(raw.get("origin_name") or ""),
+    )
+    flow = await flow_router.match_flow(payload)
+    if not flow:
+        return {"matched": False}
+    result = await app.state.flow_runner.run(flow, payload)
+    return {
+        "matched": True, "flow": flow.get("name"),
+        "run_id": result.get("run_id"), "output": result.get("output") or "",
+    }
+
+
 @app.get("/fd/flows/{flow_id}")
 async def fd_flows_get(flow_id: str, request: Request, user: dict | None = _optional_user_dep):
     flow = await _flow_store().get_flow(flow_id)
@@ -2383,6 +2413,9 @@ class ConsultPeerRequest(BaseModel):
     attach_path: str = ""
     image_paths: list[str] = Field(default_factory=list)
     file_paths: list[str] = Field(default_factory=list)
+    # When set, the target must NOT evaluate Flow triggers for this message
+    # (loop guard: a Flow's agent-step consult shouldn't re-trigger a Flow).
+    no_flow: bool = False
 
 
 # Track active consultations to prevent duplicate requests to the same target
@@ -2447,6 +2480,8 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
                     _chat_payload["image_paths"] = _img
                 if _fil:
                     _chat_payload["file_paths"] = _fil
+                if req.no_flow:
+                    _chat_payload["no_flow"] = True
                 await ws.send(json.dumps(_chat_payload))
 
                 # Stream events until we get the final assistant response

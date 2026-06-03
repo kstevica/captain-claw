@@ -273,6 +273,7 @@ async def handle_ws_message(
                 file_paths=file_paths if len(file_paths) > 1 else None,
                 rewind_to=rewind_to,
                 whatsapp_waid=whatsapp_waid,
+                no_flow=bool(data.get("no_flow", False)),
             )
 
     elif msg_type == "command":

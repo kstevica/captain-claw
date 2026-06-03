@@ -149,7 +149,7 @@ class FlowRunner:
         body = {
             "host": agent["host"], "port": int(agent["port"]), "auth": "",
             "message": prompt, "source_name": "FlowEngine", "timeout": 480.0,
-            "attach_path": attach or "",
+            "attach_path": attach or "", "no_flow": True,  # loop guard
         }
         final, err = "", ""
         try:
@@ -201,6 +201,7 @@ class FlowRunner:
             run_id = await self.store.start_run(flow["id"], flow.get("name", ""), payload)
         status = "done"
         error = ""
+        final_text = ""
         by_id = {s.get("id"): i for i, s in enumerate(steps)}
         i = 0
         executed = 0
@@ -266,7 +267,7 @@ class FlowRunner:
 
         if not dry:
             await self.store.finish_run(run_id, status, error)
-        return {"run_id": run_id, "status": status, "error": error, "steps": trace}
+        return {"run_id": run_id, "status": status, "error": error, "steps": trace, "output": final_text}
 
 
 def _eval_when(cond: str) -> bool:

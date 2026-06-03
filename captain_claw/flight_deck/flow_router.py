@@ -79,8 +79,12 @@ def _rule_ok(rule: str, payload: dict[str, Any]) -> bool:
         if key == "contains":
             return val.lower() in str(payload.get("text", "")).lower()
         return False
-    # boolean flags: has_image / has_video / has_audio / has_text
-    return bool(payload.get(rule, False))
+    # Known boolean flags.
+    if rule in ("has_image", "has_video", "has_audio", "has_text", "has_document"):
+        return bool(payload.get(rule, False))
+    # Any other bare word → case-insensitive substring match on the text
+    # (intuitive: a rule of "he-man" fires when the message mentions he-man).
+    return rule.lower() in str(payload.get("text", "")).lower()
 
 
 def _trigger_matches(trigger: dict[str, Any], payload: dict[str, Any]) -> bool:

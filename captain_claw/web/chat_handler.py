@@ -145,6 +145,7 @@ async def handle_chat(
     file_paths: list[str] | None = None,
     rewind_to: str | None = None,
     whatsapp_waid: str | None = None,
+    no_flow: bool = False,
 ) -> None:
     """Process a chat message through the agent.
 
@@ -354,6 +355,8 @@ async def handle_chat(
         is_public=is_public,
         public_session_id=public_session_id,
         video_attachments=video_attachments,
+        no_flow=no_flow,
+        flow_text=content,
     ))
 
     if is_public:
@@ -403,6 +406,34 @@ async def _prefix_video_analysis(
     )
 
 
+async def _maybe_run_flow(agent: Any, text: str, *, is_public: bool) -> str | None:
+    """Ask Flight Deck whether a Flow matches this message; return its output text
+    (to relay), or None to take a normal agent turn. Best-effort; never raises."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    import os as _os
+    meta = getattr(getattr(agent, "session", None), "metadata", {}) or {}
+    # Prefer the loopback FD_URL (set at spawn) over the public metadata URL —
+    # the agent and FD share a host, so skip Caddy/TLS.
+    fd_url = str(_os.environ.get("FD_URL") or _os.environ.get("FD_INTERNAL_URL") or meta.get("fd_url") or "").rstrip("/")
+    if not fd_url:
+        return None
+    channel = "glasses" if is_public else "web"
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=600.0) as client:
+            r = await client.post(f"{fd_url}/fd/flows/evaluate", json={"channel": channel, "text": text})
+        if r.status_code != 200:
+            return None
+        data = r.json() or {}
+        if data.get("matched") and str(data.get("output") or "").strip():
+            return str(data["output"])
+    except Exception as exc:
+        log.debug("flow evaluate skipped: %s", exc)
+    return None
+
+
 async def _run_agent(
     server: WebServer,
     ws: web.WebSocketResponse,
@@ -413,6 +444,8 @@ async def _run_agent(
     is_public: bool = False,
     public_session_id: str | None = None,
     video_attachments: list[str] | None = None,
+    no_flow: bool = False,
+    flow_text: str = "",
 ) -> None:
     """Background coroutine that drives the agent and finalises the turn."""
     import json as _json
@@ -437,6 +470,19 @@ async def _run_agent(
 
         model_details = agent.get_runtime_model_details() if agent else {}
         model_label = f"{model_details.get('provider', '')}:{model_details.get('model', '')}" if model_details else ""
+
+        # Flow engine: agent-handled channels (web/glasses) ask Flight Deck
+        # whether a Flow trigger matches this message. If one does, FD runs it
+        # and we relay its output instead of taking a normal agent turn.
+        if not no_flow:
+            _flow_out = await _maybe_run_flow(agent, flow_text or content, is_public=is_public)
+            if _flow_out is not None:
+                send({
+                    "type": "chat_message", "role": "assistant",
+                    "content": _flow_out, "timestamp": datetime.now(UTC).isoformat(),
+                    "model": "flow",
+                })
+                return  # the `finally` resets busy + emits "ready"
 
         # Deterministic video preprocessing: when a video was attached, run
         # video_vision server-side (fixed-cadence frames + transcript + synthesis)
