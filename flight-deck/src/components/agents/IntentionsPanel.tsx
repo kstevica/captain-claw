@@ -13,6 +13,7 @@ interface Intention {
   approval_mode?: string
   status: string
   repeat?: string | null
+  tags?: string[]
   created_at?: string
 }
 
@@ -61,6 +62,12 @@ export function IntentionsPanel({ host, port, auth, agentName, onClose }: Intent
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
+  const [tagFilter, setTagFilter] = useState<string | null>(null)
+
+  const allTags = Array.from(new Set(intentions.flatMap((i) => i.tags || []))).sort()
+  const shownIntentions = tagFilter
+    ? intentions.filter((i) => (i.tags || []).includes(tagFilter))
+    : intentions
 
   const tokenQs = auth ? `?token=${encodeURIComponent(auth)}` : ''
 
@@ -198,13 +205,33 @@ export function IntentionsPanel({ host, port, auth, agentName, onClose }: Intent
               {/* Open intentions */}
               <section>
                 <h3 className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500 mb-2">
-                  Active intentions {intentions.length > 0 && <span className="text-zinc-400">({intentions.length})</span>}
+                  Active intentions {shownIntentions.length > 0 && <span className="text-zinc-400">({shownIntentions.length}{tagFilter ? ` of ${intentions.length}` : ''})</span>}
                 </h3>
-                {intentions.length === 0 ? (
-                  <p className="text-xs text-zinc-600">No active intentions.</p>
+                {/* Tag filter */}
+                {allTags.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5 mb-2">
+                    <button
+                      onClick={() => setTagFilter(null)}
+                      className={`rounded-full px-2 py-0.5 text-[10px] transition-colors ${tagFilter === null ? 'bg-amber-500/20 text-amber-300' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'}`}
+                    >
+                      all
+                    </button>
+                    {allTags.map((t) => (
+                      <button
+                        key={t}
+                        onClick={() => setTagFilter(tagFilter === t ? null : t)}
+                        className={`rounded-full px-2 py-0.5 text-[10px] transition-colors ${tagFilter === t ? 'bg-amber-500/20 text-amber-300' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'}`}
+                      >
+                        #{t}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {shownIntentions.length === 0 ? (
+                  <p className="text-xs text-zinc-600">{tagFilter ? `No intentions tagged #${tagFilter}.` : 'No active intentions.'}</p>
                 ) : (
                   <div className="divide-y divide-zinc-800/70 rounded-lg border border-zinc-800">
-                    {intentions.map((it) => (
+                    {shownIntentions.map((it) => (
                       <div key={it.id} className="flex items-start gap-2.5 px-3 py-2.5">
                         {originIcon(it.origin)}
                         <div className="min-w-0 flex-1">
@@ -216,6 +243,19 @@ export function IntentionsPanel({ host, port, auth, agentName, onClose }: Intent
                             )}
                           </div>
                           {it.why && <div className="text-[11px] text-zinc-500 mt-0.5">Why: {it.why}</div>}
+                          {(it.tags && it.tags.length > 0) && (
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              {it.tags.map((t) => (
+                                <button
+                                  key={t}
+                                  onClick={() => setTagFilter(t)}
+                                  className="rounded-full bg-zinc-800/80 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:text-amber-300"
+                                >
+                                  #{t}
+                                </button>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       </div>
                     ))}
