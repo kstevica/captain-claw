@@ -427,6 +427,19 @@ def _start_registered_process(slug: str, entry: dict) -> bool:
                     k, v = line.split("=", 1)
                     environment[k] = v
 
+    # Share secrets from Flight Deck's own env with the agent when the agent
+    # didn't set them (or set them blank). Lets one place hold the keys — e.g.
+    # SONIOX for video/audio transcription, WhatsApp Cloud API creds for the
+    # agent-side send path — instead of duplicating into every agent's .env.
+    for _shared in (
+        "SONIOX_API_KEY",
+        "WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_ALLOWED_WAIDS",
+    ):
+        if not str(environment.get(_shared, "")).strip():
+            _fd_val = str(os.environ.get(_shared, "")).strip()
+            if _fd_val:
+                environment[_shared] = _fd_val
+
     environment["HOME"] = str(agent_dir / "data" / "home-config-parent")
     # Slug + URL for port-fallback callbacks. Without FD_URL the agent can't
     # announce a drifted port back to Flight Deck and the registry goes stale

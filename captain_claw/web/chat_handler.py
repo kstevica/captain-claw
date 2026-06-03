@@ -394,9 +394,11 @@ async def _prefix_video_analysis(
     analysis = "\n\n".join(blocks)
     return (
         f"{analysis}\n\n---\n"
-        "The attached video(s) have ALREADY been analyzed above (frames + audio "
-        "transcript). Answer using that analysis — do NOT call video_vision again "
-        "or write any extraction script.\n\n"
+        "The attached video(s) have ALREADY been fully analyzed above (frames + "
+        "audio transcript). Reply to the user in plain text using ONLY that "
+        "analysis. Do NOT call video_vision again, do NOT write or run any script "
+        "(no cv2, no ffmpeg, no shell), and do NOT save anything to a file unless "
+        "the user explicitly asked you to.\n\n"
         f"{content}"
     )
 
@@ -425,6 +427,7 @@ async def _run_agent(
     if is_public:
         agent._public_busy = True  # type: ignore[attr-defined]
 
+    _video_policy_slug = None  # set when a video turn restricts script/shell tools
     try:
         if naming_task is not None:
             try:
@@ -441,6 +444,15 @@ async def _run_agent(
         # chooses tools or counts frames. Mirrors the audio-transcription path.
         if video_attachments:
             content = await _prefix_video_analysis(agent, content, video_attachments, send)
+            # The analysis is already done — block the script/shell tools for this
+            # turn so the agent can't burn time + tokens writing & running its own
+            # extraction or "save-to-file" scripts. Cleared in `finally` below.
+            try:
+                _video_policy_slug = agent._current_session_slug()
+                agent.tools.set_session_policy(_video_policy_slug, {"deny": ["scripts", "shell"]})
+            except Exception as exc:
+                log.warning("Could not set video-turn tool policy", error=str(exc))
+                _video_policy_slug = None
 
         # Route /orchestrate requests to the orchestrator (admin only).
         stripped = content.strip()
@@ -555,6 +567,11 @@ async def _run_agent(
         log.error("Chat error", error=str(e), public=is_public)
         send({"type": "error", "message": f"Error: {str(e)}"})
     finally:
+        if _video_policy_slug is not None:
+            try:
+                agent.tools.clear_session_policy(_video_policy_slug)
+            except Exception:
+                pass
         if is_public:
             agent._public_busy = False  # type: ignore[attr-defined]
         else:
