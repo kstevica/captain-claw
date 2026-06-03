@@ -423,6 +423,25 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
         except Exception as exc:
             await _send_whatsapp_text(waid, f"Couldn't fetch photo: {exc}")
             return
+        # Flow override: an enabled image Flow takes precedence over the built-in
+        # identify/describe/enroll automation. Match FIRST (cheap, no upload); only
+        # if a Flow matches do we upload the photo and run it. No match → the
+        # built-in below runs unchanged.
+        try:
+            from captain_claw.flight_deck import flow_router
+            if flow_router.engine_ready():
+                _fp = flow_router.classify_payload(
+                    channel="whatsapp", text=caption, waid=waid,
+                    origin_host=agent_host, origin_port=int(agent_port or 0),
+                    extra={"has_image": True},
+                )
+                _flow = await flow_router.match_flow(_fp)
+                if _flow is not None:
+                    _fp["image_path"] = await _upload_image_to_agent(blob, agent_host, agent_port, agent_auth)
+                    await flow_router.run_flow(_flow, _fp)
+                    return
+        except Exception as _exc:
+            log.warning("image flow override check failed: %s", _exc)
         if caption:
             # Caption present → route immediately (identify / enroll / vision).
             await _route_image(

@@ -122,6 +122,17 @@ async def match_flow(payload: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+async def run_flow(flow: dict[str, Any], payload: dict[str, Any]) -> None:
+    """Run a already-matched flow (used when the caller needs to enrich the
+    payload — e.g. upload an image and set image_path — between match and run)."""
+    if _RUNNER is None:
+        return
+    try:
+        await _RUNNER.run(flow, payload)
+    except Exception as exc:
+        log.warning("flow run error", flow=flow.get("name"), error=str(exc))
+
+
 async def try_match_and_run(payload: dict[str, Any]) -> bool:
     """If a flow matches the payload, run it and return True; else False.
 
