@@ -440,6 +440,29 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
             )
         return
 
+    if mtype == "video":
+        vid = message.get("video") or {}
+        media_id = str(vid.get("id") or "")
+        if not media_id:
+            return
+        caption = str(vid.get("caption") or "").strip()
+        mime = str(vid.get("mime_type") or "video/mp4")
+        await _send_whatsapp_text(
+            waid, "🎬 Got the video — analyzing it (frames + audio, ~a couple of minutes)…",
+            mirror=True,
+        )
+        if inbound_message_id:
+            asyncio.create_task(_mark_read_and_typing(inbound_message_id))
+        try:
+            blob = await _download_media(media_id)
+        except Exception as exc:
+            await _send_whatsapp_text(waid, f"Couldn't fetch the video: {exc}")
+            return
+        await _forward_video_to_agent(
+            waid, blob, caption, mime, ch, agent_host, agent_port, agent_auth
+        )
+        return
+
     if mtype == "location":
         # Build the FYI text and let the standard flow forward it to the agent.
         loc = message.get("location") or {}
@@ -1201,6 +1224,72 @@ async def _forward_image_to_agent(
             "content": content,
             "whatsapp_waid": waid,
             "image_paths": [path],
+        }
+        try:
+            await ch.agent_ws.send(json.dumps(payload))
+        except Exception as exc:
+            ch.context_sent = False
+            await _send_whatsapp_text(waid, f"Send failed: {exc}")
+
+
+_VIDEO_MIME_EXT = {
+    "video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm",
+    "video/x-matroska": ".mkv", "video/3gpp": ".3gp", "video/x-msvideo": ".avi",
+}
+
+
+async def _upload_video_to_agent(
+    blob: bytes, host: str, port: int, auth: str, filename: str = "whatsapp.mp4"
+) -> str:
+    """POST video bytes to the agent's /api/file/upload; return saved path."""
+    params = {"token": auth} if auth else {}
+    files = {"file": (filename, blob, "application/octet-stream")}
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                f"http://{host}:{port}/api/file/upload", params=params, files=files
+            )
+    except Exception as exc:
+        log.warning("Video upload to agent failed: %s", exc)
+        return ""
+    if resp.status_code != 200:
+        log.warning("Video upload rejected (%s): %s", resp.status_code, resp.text[:200])
+        return ""
+    try:
+        return str((resp.json() or {}).get("path") or "")
+    except Exception:
+        return ""
+
+
+async def _forward_video_to_agent(
+    waid: str, blob: bytes, prompt: str, mime: str, ch: Any,
+    agent_host: str, agent_port: int, agent_auth: str,
+) -> None:
+    """Hand a video to the agent; chat_handler auto-runs video_vision on it."""
+    ext = _VIDEO_MIME_EXT.get((mime or "").split(";")[0].strip(), ".mp4")
+    path = await _upload_video_to_agent(blob, agent_host, agent_port, agent_auth, f"whatsapp{ext}")
+    if not path:
+        await _send_whatsapp_text(waid, "Couldn't hand the video to the agent — try again.")
+        return
+    prompt = (prompt or "").strip() or "Describe this video."
+    await _broadcast(ch, {
+        "type": "user", "text": f"🎬 {prompt}", "ts": _now_iso(), "via": "whatsapp",
+    })
+    for _ in range(50):  # up to ~5s for the agent WS to be ready
+        if ch.agent_ws is not None:
+            break
+        await asyncio.sleep(0.1)
+    if ch.agent_ws is None:
+        await _send_whatsapp_text(waid, "Agent not ready, try again.")
+        return
+    async with ch.send_lock:
+        content = (_GLASSES_SYSTEM_CONTEXT + prompt) if not ch.context_sent else prompt
+        ch.context_sent = True
+        payload = {
+            "type": "chat",
+            "content": content,
+            "whatsapp_waid": waid,
+            "file_paths": [path],
         }
         try:
             await ch.agent_ws.send(json.dumps(payload))

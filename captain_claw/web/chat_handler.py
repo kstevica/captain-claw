@@ -229,6 +229,7 @@ async def handle_chat(
     _has_image = False
     _has_video = False
     _VIDEO_EXTS = (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v")
+    video_attachments: list[str] = []  # auto-analyzed server-side before the turn
 
     # Single image (backward compat)
     if image_path:
@@ -242,12 +243,16 @@ async def handle_chat(
     # Single data file (backward compat)
     if file_path:
         attachment_lines.append(f"[Attached file: {file_path}]")
-        _has_video = _has_video or str(file_path).lower().endswith(_VIDEO_EXTS)
+        if str(file_path).lower().endswith(_VIDEO_EXTS):
+            _has_video = True
+            video_attachments.append(str(file_path))
     # Multiple data files
     if file_paths:
         for p in file_paths:
             attachment_lines.append(f"[Attached file: {p}]")
-            _has_video = _has_video or str(p).lower().endswith(_VIDEO_EXTS)
+            if str(p).lower().endswith(_VIDEO_EXTS):
+                _has_video = True
+                video_attachments.append(str(p))
     # Tell the model how to actually view an image — it must call image_vision,
     # not read (binary) and not give up based on earlier failed turns.
     if _has_image:
@@ -257,13 +262,14 @@ async def handle_chat(
             "via flight_deck with file=<path>. Never use read on an image. Never say "
             "you sent/delegated/described it unless you actually called the tool this turn.)"
         )
-    # Tell the model how to analyze a video — it must call video_vision.
+    # Video is analyzed deterministically server-side (see _run_agent) and the
+    # analysis is injected into this turn — so we do NOT ask the model to call
+    # video_vision or (worse) write its own extraction script.
     if _has_video:
         attachment_lines.append(
-            "(To analyze the video(s) above you MUST call the video_vision tool with "
-            "the path. It samples frames + transcribes audio. Optionally pass start/end "
-            "to focus on a segment. Never use read on a video. Never say you analyzed/"
-            "described it unless you actually called the tool this turn.)"
+            "(The attached video(s) are being analyzed automatically — frames + audio "
+            "transcript — and the analysis is included in this message. Use it to answer; "
+            "do NOT call video_vision yourself and do NOT write any extraction script.)"
         )
 
     if attachment_lines:
@@ -347,6 +353,7 @@ async def handle_chat(
         server, ws, agent, effective_content, naming_task,
         is_public=is_public,
         public_session_id=public_session_id,
+        video_attachments=video_attachments,
     ))
 
     if is_public:
@@ -354,6 +361,44 @@ async def handle_chat(
         agent._public_task = task  # type: ignore[attr-defined]
     else:
         server._active_task = task
+
+
+async def _prefix_video_analysis(
+    agent: Any, content: str, video_paths: list[str], send: Any,
+) -> str:
+    """Run video_vision server-side for each attached video and prepend the
+    constructed analysis to the user message. Deterministic — the agent only
+    consumes the result, it never extracts frames itself."""
+    from pathlib import Path as _Path
+
+    blocks: list[str] = []
+    for vp in video_paths:
+        name = _Path(vp).name
+        try:
+            send({"type": "status", "status": f"\U0001F3AC Analyzing attached video {name}…"})
+            res = await agent._execute_tool_with_guard(
+                "video_vision", {"path": vp}, interaction_label="video_autorun",
+            )
+        except Exception as exc:
+            log.warning("Auto video analysis failed", path=vp, error=str(exc))
+            blocks.append(f"[Video {name}: automatic analysis failed: {exc}]")
+            continue
+        if res is not None and getattr(res, "success", False):
+            blocks.append(f"[Automatic analysis of attached video {name}]\n{res.content}")
+        else:
+            err = getattr(res, "error", "unknown error") if res is not None else "no result"
+            blocks.append(f"[Video {name}: automatic analysis failed: {err}]")
+
+    if not blocks:
+        return content
+    analysis = "\n\n".join(blocks)
+    return (
+        f"{analysis}\n\n---\n"
+        "The attached video(s) have ALREADY been analyzed above (frames + audio "
+        "transcript). Answer using that analysis — do NOT call video_vision again "
+        "or write any extraction script.\n\n"
+        f"{content}"
+    )
 
 
 async def _run_agent(
@@ -365,6 +410,7 @@ async def _run_agent(
     *,
     is_public: bool = False,
     public_session_id: str | None = None,
+    video_attachments: list[str] | None = None,
 ) -> None:
     """Background coroutine that drives the agent and finalises the turn."""
     import json as _json
@@ -388,6 +434,13 @@ async def _run_agent(
 
         model_details = agent.get_runtime_model_details() if agent else {}
         model_label = f"{model_details.get('provider', '')}:{model_details.get('model', '')}" if model_details else ""
+
+        # Deterministic video preprocessing: when a video was attached, run
+        # video_vision server-side (fixed-cadence frames + transcript + synthesis)
+        # and feed the constructed analysis into the agent's turn. The agent never
+        # chooses tools or counts frames. Mirrors the audio-transcription path.
+        if video_attachments:
+            content = await _prefix_video_analysis(agent, content, video_attachments, send)
 
         # Route /orchestrate requests to the orchestrator (admin only).
         stripped = content.strip()
