@@ -2230,6 +2230,7 @@ class ConsultPeerRequest(BaseModel):
 
 # Track active consultations to prevent duplicate requests to the same target
 _active_consults: dict[int, str] = {}  # target_port -> source_name
+_active_delegates: set[tuple[int, int]] = set()  # (source_port, target_port) in-flight
 
 
 @app.post("/fd/consult-peer")
@@ -2295,6 +2296,7 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
                 response_parts: list[str] = []
                 deadline = asyncio.get_event_loop().time() + req.timeout
                 recv_interval = 15.0  # heartbeat every 15s of silence
+                _busy_retries = 0     # peer is single-threaded; wait it out
                 while True:
                     remaining = deadline - asyncio.get_event_loop().time()
                     if remaining <= 0:
@@ -2322,7 +2324,20 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
                             response_parts.append(content)
                         break
                     elif msg_type == "error":
-                        yield json.dumps({"ok": False, "error": msg.get("message", "Agent error")}) + "\n"
+                        _err = str(msg.get("message", "Agent error"))
+                        # Transient "busy" → wait and re-send on the same socket.
+                        if _busy_retries < 8 and ("busy processing" in _err.lower() or "session is busy" in _err.lower()):
+                            _busy_retries += 1
+                            _wait = min(2 + _busy_retries * 2, 12)
+                            yield json.dumps({"event": "status", "data": {"status": f"Peer busy, retrying ({_busy_retries})…"}}) + "\n"
+                            await asyncio.sleep(_wait)
+                            try:
+                                await ws.send(json.dumps(_chat_payload))
+                            except Exception:
+                                yield json.dumps({"ok": False, "error": _err}) + "\n"
+                                return
+                            continue
+                        yield json.dumps({"ok": False, "error": _err}) + "\n"
                         return
 
             yield json.dumps({
@@ -2370,6 +2385,19 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
 
     peer_display = req.target_name or f"agent@{req.target_port}"
 
+    # Guard: if this source already has a delegation in flight to this target,
+    # don't pile on another (the model sometimes re-delegates the same task with
+    # a reworded message, which dodges arg-based dedup and storms the peer).
+    _deleg_key = (req.source_port, req.target_port)
+    if _deleg_key in _active_delegates:
+        return {
+            "ok": True,
+            "message": (
+                f"A task is already being processed by {peer_display} for you — "
+                f"waiting on that result. Do NOT delegate again; tell the user you're waiting."
+            ),
+        }
+
     async def _background():
         log.info("delegate_background: started", target=peer_display, source=req.source_name,
                  target_port=req.target_port, source_port=req.source_port)
@@ -2410,6 +2438,7 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
                     # Wait for the final response
                     deadline = asyncio.get_event_loop().time() + req.timeout
                     recv_interval = 30.0
+                    _busy_retries = 0  # peer is single-threaded; wait it out instead of erroring back
                     while True:
                         remaining = deadline - asyncio.get_event_loop().time()
                         if remaining <= 0:
@@ -2428,8 +2457,25 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
                                      target=peer_display, response_len=len(response_text))
                             break
                         elif msg_type == "error":
-                            response_text = f"[Error from {peer_display}] {msg.get('message', 'Unknown error')}"
-                            log.error("delegate_background: target returned error", target=peer_display, error=msg.get("message"))
+                            _err = str(msg.get("message", "Unknown error"))
+                            # "Agent is busy" is transient (peer serves one request
+                            # at a time). Wait and re-send on the SAME connection
+                            # instead of bouncing a fake "result" back to the caller,
+                            # which made the caller re-delegate in a loop.
+                            if _busy_retries < 8 and ("busy processing" in _err.lower() or "session is busy" in _err.lower()):
+                                _busy_retries += 1
+                                _wait = min(2 + _busy_retries * 2, 12)
+                                log.info("delegate_background: target busy, waiting then retrying",
+                                         target=peer_display, attempt=_busy_retries, wait=_wait)
+                                await asyncio.sleep(_wait)
+                                try:
+                                    await ws.send(json.dumps(_payload))
+                                except Exception:
+                                    response_text = f"[Error from {peer_display}] {_err}"
+                                    break
+                                continue
+                            response_text = f"[Error from {peer_display}] {_err}"
+                            log.error("delegate_background: target returned error", target=peer_display, error=_err)
                             break
         except Exception as exc:
             response_text = f"[Error] Could not reach {peer_display}: {exc}"
@@ -2483,11 +2529,17 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
             log.error("delegate_callback: failed to deliver result to source", source=req.source_name, error=str(exc))
 
     # Keep a strong reference so the task doesn't get garbage-collected
+    _active_delegates.add(_deleg_key)
     task = asyncio.create_task(_background())
     if not hasattr(app.state, "_delegate_tasks"):
         app.state._delegate_tasks = set()
     app.state._delegate_tasks.add(task)
-    task.add_done_callback(app.state._delegate_tasks.discard)
+
+    def _on_delegate_done(t: Any) -> None:
+        app.state._delegate_tasks.discard(t)
+        _active_delegates.discard(_deleg_key)
+
+    task.add_done_callback(_on_delegate_done)
 
     return {"ok": True, "message": f"Task delegated to {peer_display}. Results will be delivered to {req.source_name} when ready."}
 
