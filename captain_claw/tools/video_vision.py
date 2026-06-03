@@ -486,9 +486,20 @@ class VideoVisionTool(Tool):
         wa_id = _whatsapp_waid(kwargs)  # if set, mirror key updates to WhatsApp
 
         # ── Phase 1: audio → transcript → summary (fast; shown first) ──────
+        import os as _os
+        has_audio_track = bool(audio)
+        has_soniox = bool(_os.environ.get("SONIOX_API_KEY", "").strip())
         _emit_status(agent_obj, "🎙️ Transcribing audio…")
         await _send_whatsapp(wa_id, "🎙 Transcribing the video's audio…")
         full_text, tokens = await _transcribe_timestamped(audio, audio_name, audio_mime)
+        # Disambiguate the empty-transcript reasons so "no audio" isn't misleading.
+        if not full_text:
+            if not has_audio_track:
+                audio_note = "🎙 The video has no audio track."
+            elif not has_soniox:
+                audio_note = "🎙 Audio is present, but transcription isn't configured (no SONIOX_API_KEY)."
+            else:
+                audio_note = "🎙 No speech detected in the audio."
         if full_text:
             is_long = len(full_text) > _TRANSCRIPT_FULL_LIMIT
             if not is_long:
@@ -505,8 +516,8 @@ class VideoVisionTool(Tool):
             else:
                 await _send_whatsapp(wa_id, f"🎙 Transcription:\n\n\"{full_text}\"")
         else:
-            _emit_message(agent_obj, "🎙️ No speech detected in the audio.")
-            await _send_whatsapp(wa_id, "🎙 No speech detected in the video's audio.")
+            _emit_message(agent_obj, audio_note)
+            await _send_whatsapp(wa_id, audio_note)
 
         # ── Phase 2: per-frame vision (the slow part) ──────────────────────
         # Describe each frame (with nearby transcript) — limited concurrency.
