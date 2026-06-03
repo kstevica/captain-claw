@@ -420,10 +420,25 @@ async def _maybe_run_flow(agent: Any, text: str, *, is_public: bool) -> str | No
     if not fd_url:
         return None
     channel = "glasses" if is_public else "web"
+    # Tell FD which agent this turn arrived at, so a step's `on: origin` targets
+    # THIS agent (not a random pool member).
+    fid = meta.get("fleet_identity") or {}
+    origin_port = int(fid.get("port") or 0)
+    try:
+        if not origin_port:
+            from captain_claw.config import get_config as _gc
+            origin_port = int(getattr(_gc().web, "port", 0) or 0)
+    except Exception:
+        pass
+    body = {
+        "channel": channel, "text": text,
+        "origin_host": "localhost", "origin_port": origin_port,
+        "origin_name": str(fid.get("name") or ""),
+    }
     try:
         import httpx
         async with httpx.AsyncClient(timeout=600.0) as client:
-            r = await client.post(f"{fd_url}/fd/flows/evaluate", json={"channel": channel, "text": text})
+            r = await client.post(f"{fd_url}/fd/flows/evaluate", json=body)
         if r.status_code != 200:
             return None
         data = r.json() or {}

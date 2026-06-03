@@ -19,6 +19,7 @@ import {
 import { useFlowsStore } from '../../stores/flowsStore'
 import {
   emptyFlow,
+  listFleet,
   type FlowInput,
   type FlowStep,
   type StepType,
@@ -72,6 +73,11 @@ export function FlowBuilder() {
   const [testPayload, setTestPayload] = useState('{\n  "video_path": "/path/to/sample.mp4"\n}')
 
   useEffect(() => { setDraft(initial); clearTest() }, [initial, clearTest])
+
+  const [fleet, setFleet] = useState<string[]>([])
+  useEffect(() => {
+    listFleet().then((a) => setFleet(a.map((x) => x.name).filter(Boolean))).catch(() => {})
+  }, [])
 
   const patch = (p: Partial<FlowInput>) => setDraft((d) => ({ ...d, ...p }))
 
@@ -325,6 +331,7 @@ export function FlowBuilder() {
                 total={draft.steps.length}
                 priorIds={draft.steps.slice(0, i).map((s) => s.id)}
                 allIds={draft.steps.map((s) => s.id)}
+                fleet={fleet}
                 onChange={(p) => setStep(i, p)}
                 onRemove={() => removeStep(i)}
                 onMove={(dir) => moveStep(i, dir)}
@@ -484,6 +491,7 @@ function StepCard({
   total,
   priorIds,
   allIds,
+  fleet,
   onChange,
   onRemove,
   onMove,
@@ -493,6 +501,7 @@ function StepCard({
   total: number
   priorIds: string[]
   allIds: string[]
+  fleet: string[]
   onChange: (p: Partial<FlowStep>) => void
   onRemove: () => void
   onMove: (dir: -1 | 1) => void
@@ -549,13 +558,30 @@ function StepCard({
         </div>
         {(step.type === 'tool' || step.type === 'agent') && (
           <div>
-            <label className={labelCls}>On (agent selector)</label>
-            <input
-              value={step.on || ''}
+            <label className={labelCls}>Run on (agent)</label>
+            <select
+              value={step.on || 'origin'}
               onChange={(e) => onChange({ on: e.target.value })}
-              placeholder="origin · capability:vision · name:Agent"
               className={inputCls}
-            />
+            >
+              <option value="origin">origin (the triggering agent)</option>
+              <option value="any">any running agent</option>
+              <option value="capability:vision">capability: vision</option>
+              {step.type === 'tool' && <option value="fd">Flight Deck (internal tool)</option>}
+              {fleet.length > 0 && (
+                <optgroup label="Specific agent">
+                  {fleet.map((name) => (
+                    <option key={name} value={`name:${name}`}>{name}</option>
+                  ))}
+                </optgroup>
+              )}
+              {/* Preserve a custom value set outside the presets (e.g. from JSON). */}
+              {step.on &&
+                !['origin', 'any', 'capability:vision', 'fd'].includes(step.on) &&
+                !fleet.some((n) => `name:${n}` === step.on) && (
+                  <option value={step.on}>{step.on}</option>
+                )}
+            </select>
           </div>
         )}
       </div>

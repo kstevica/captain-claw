@@ -155,6 +155,17 @@ export async function listFlows(): Promise<Flow[]> {
   return r.flows || []
 }
 
+export interface FleetAgentLite { name: string; status?: string; description?: string }
+
+/** Running/known agents — used to populate the step "agent selector" dropdown. */
+export async function listFleet(): Promise<FleetAgentLite[]> {
+  try {
+    return (await fdFetch<FleetAgentLite[]>('/fleet')) || []
+  } catch {
+    return []
+  }
+}
+
 export async function getFlow(id: string): Promise<Flow> {
   return fdFetch<Flow>(`/flows/${encodeURIComponent(id)}`)
 }
