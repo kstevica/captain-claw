@@ -67,13 +67,24 @@ async def _ffprobe_duration(ffprobe: str, path: str) -> float:
         return 0.0
 
 
-async def _extract_frames(ffmpeg: str, path: str, interval: float, count: int, out_dir: Path) -> list[Path]:
+def _seek_args(ss: float, t: float | None) -> tuple[list[str], list[str]]:
+    """Return (pre_input_args, post_input_args) for an optional [ss, ss+t] window."""
+    pre = ["-ss", f"{ss:.3f}"] if ss and ss > 0 else []
+    post = ["-t", f"{t:.3f}"] if t and t > 0 else []
+    return pre, post
+
+
+async def _extract_frames(
+    ffmpeg: str, path: str, interval: float, count: int, out_dir: Path,
+    *, ss: float = 0.0, t: float | None = None,
+) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     pattern = str(out_dir / "frame_%03d.jpg")
-    # One frame every `interval` seconds, capped at `count`. -vf scale caps the
-    # long edge so frames are small before the vision step resizes them too.
+    pre, post = _seek_args(ss, t)
+    # One frame every `interval` seconds, capped at `count`, within the window.
+    # -ss before -i = fast seek; scale caps the long edge before vision resize.
     rc, _, err = await _run([
-        ffmpeg, "-hide_banner", "-loglevel", "error", "-i", path,
+        ffmpeg, "-hide_banner", "-loglevel", "error", *pre, "-i", path, *post,
         "-vf", f"fps=1/{interval:.4f},scale='min(1280,iw)':-2",
         "-frames:v", str(count), "-y", pattern,
     ], timeout=180.0)
@@ -82,12 +93,34 @@ async def _extract_frames(ffmpeg: str, path: str, interval: float, count: int, o
     return sorted(out_dir.glob("frame_*.jpg"))
 
 
-async def _extract_audio_wav(ffmpeg: str, path: str) -> bytes:
+async def _extract_audio_wav(ffmpeg: str, path: str, *, ss: float = 0.0, t: float | None = None) -> bytes:
+    pre, post = _seek_args(ss, t)
     rc, out, _ = await _run([
-        ffmpeg, "-hide_banner", "-loglevel", "error", "-i", path,
+        ffmpeg, "-hide_banner", "-loglevel", "error", *pre, "-i", path, *post,
         "-vn", "-ar", "16000", "-ac", "1", "-f", "wav", "pipe:1",
     ], timeout=180.0)
     return out if rc == 0 else b""
+
+
+def _parse_time(val: Any) -> float | None:
+    """Parse a time spec: seconds (number/'90') or 'MM:SS' / 'HH:MM:SS'. None if blank/invalid."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val) if val >= 0 else None
+    s = str(val).strip()
+    if not s:
+        return None
+    try:
+        if ":" in s:
+            parts = [float(p) for p in s.split(":")]
+            secs = 0.0
+            for p in parts:
+                secs = secs * 60 + p
+            return secs if secs >= 0 else None
+        return max(0.0, float(s))
+    except ValueError:
+        return None
 
 
 # ── Soniox transcription WITH timestamps ──────────────────────────────
@@ -181,11 +214,19 @@ class VideoVisionTool(Tool):
                 "type": "string",
                 "description": "Optional focus for the description (e.g. 'what is the person doing?').",
             },
+            "start": {
+                "type": "string",
+                "description": "Optional start of the segment to analyze: seconds ('90') or 'MM:SS'/'HH:MM:SS'. Omit for the whole video.",
+            },
+            "end": {
+                "type": "string",
+                "description": "Optional end of the segment to analyze (same format as start). Omit to go to the end of the video.",
+            },
         },
         "required": ["path"],
     }
 
-    async def execute(self, path: str, prompt: str = "", **kwargs: Any) -> ToolResult:
+    async def execute(self, path: str, prompt: str = "", start: Any = None, end: Any = None, **kwargs: Any) -> ToolResult:
         path_str = str(path or "").strip()
         if not path_str:
             return ToolResult(success=False, error="Missing required argument: path")
@@ -211,8 +252,20 @@ class VideoVisionTool(Tool):
         if duration <= 0:
             return ToolResult(success=False, error="Could not read the video's duration (corrupt or unsupported codec?).")
 
-        interval = min(_MAX_INTERVAL, max(_MIN_INTERVAL, duration / _MAX_FRAMES))
-        n_frames = max(1, min(_MAX_FRAMES, int(duration // interval) + 1))
+        # v2: optional [start, end] segment. Clamp to the video; default = whole.
+        seg_start = _parse_time(start) or 0.0
+        seg_start = max(0.0, min(seg_start, duration))
+        parsed_end = _parse_time(end)
+        seg_end = duration if parsed_end is None else max(0.0, min(parsed_end, duration))
+        if seg_end <= seg_start:
+            seg_end = duration  # invalid/zero window → fall back to the rest of the video
+        seg_dur = seg_end - seg_start
+        is_segment = seg_start > 0.0 or seg_end < duration
+
+        interval = min(_MAX_INTERVAL, max(_MIN_INTERVAL, seg_dur / _MAX_FRAMES))
+        n_frames = max(1, min(_MAX_FRAMES, int(seg_dur // interval) + 1))
+        ss = seg_start if is_segment else 0.0
+        t = seg_dur if is_segment else None
 
         # Frame output dir under saved/.
         saved_base = kwargs.get("_saved_base_path")
@@ -220,12 +273,13 @@ class VideoVisionTool(Tool):
         frame_dir = Path(base) / "video_frames" / uuid.uuid4().hex[:8]
 
         log.info("video_vision: analyzing", path=str(file_path), duration=round(duration, 1),
+                 segment=f"{round(seg_start,1)}-{round(seg_end,1)}s" if is_segment else "full",
                  interval=round(interval, 1), frames=n_frames)
 
-        # Extract frames + audio concurrently.
+        # Extract frames + audio (for the segment) concurrently.
         frames, wav = await asyncio.gather(
-            _extract_frames(ffmpeg, str(file_path), interval, n_frames, frame_dir),
-            _extract_audio_wav(ffmpeg, str(file_path)),
+            _extract_frames(ffmpeg, str(file_path), interval, n_frames, frame_dir, ss=ss, t=t),
+            _extract_audio_wav(ffmpeg, str(file_path), ss=ss, t=t),
         )
         if not frames:
             return ToolResult(success=False, error="Frame extraction produced no frames (ffmpeg failed?).")
@@ -239,8 +293,10 @@ class VideoVisionTool(Tool):
         half = max(interval / 2.0, 1.5)
 
         async def describe(idx: int, fp: Path) -> dict[str, Any]:
-            ts = round(idx * interval, 1)
-            audio = _transcript_window(tokens, ts, half) if tokens else ""
+            rel = idx * interval                      # offset within the segment
+            abs_ts = round(seg_start + rel, 1)        # absolute time in the video
+            # Transcript tokens are segment-relative (audio extracted from seg_start).
+            audio = _transcript_window(tokens, rel, half) if tokens else ""
             fprompt = "Describe this single video frame concisely: people, objects, on-screen text, action."
             if audio:
                 fprompt += f" Audio spoken around this moment: \"{audio}\"."
@@ -250,7 +306,7 @@ class VideoVisionTool(Tool):
                     desc = res.content if res.success else f"(frame not described: {res.error})"
                 except Exception as exc:
                     desc = f"(frame error: {exc})"
-            return {"t": ts, "desc": desc.strip(), "audio": audio}
+            return {"t": abs_ts, "desc": desc.strip(), "audio": audio}
 
         analyzed = await asyncio.gather(*(describe(i, fp) for i, fp in enumerate(frames)))
 
@@ -264,26 +320,29 @@ class VideoVisionTool(Tool):
         breakdown = "\n".join(lines)
 
         # Step 5 — synthesize a coherent description via the agent's own model.
-        summary = await self._synthesize(kwargs.get("_agent"), duration, full_text, breakdown, prompt)
+        scope = (f"segment {round(seg_start)}-{round(seg_end)}s of a {round(duration)}s video"
+                 if is_segment else f"a {round(duration)}s video")
+        summary = await self._synthesize(kwargs.get("_agent"), scope, full_text, breakdown, prompt)
 
+        seg_label = f" of {round(seg_start)}-{round(seg_end)}s" if is_segment else ""
         out = summary or "(synthesis unavailable)"
-        out += f"\n\n— Frame-by-frame ({len(frames)} frames @ ~{round(interval,1)}s) —\n{breakdown}"
+        out += f"\n\n— Frame-by-frame{seg_label} ({len(frames)} frames @ ~{round(interval,1)}s) —\n{breakdown}"
         if full_text:
             out += f"\n\n— Transcript —\n{full_text}"
         return ToolResult(success=True, content=out)
 
     @staticmethod
-    async def _synthesize(agent: Any, duration: float, transcript: str, breakdown: str, focus: str) -> str:
+    async def _synthesize(agent: Any, scope: str, transcript: str, breakdown: str, focus: str) -> str:
         if agent is None or not getattr(agent, "provider", None):
             return ""
         from captain_claw.llm import Message
         sys = (
-            "You are given a frame-by-frame visual analysis of a video plus its "
-            "audio transcript. Write a clear, coherent description of the video: "
-            "what it shows, what happens over time, and the key spoken content. "
-            "Be concise and concrete; do not invent details not present."
+            "You are given a frame-by-frame visual analysis of a video (or a "
+            "segment of it) plus its audio transcript. Write a clear, coherent "
+            "description: what it shows, what happens over time, and the key "
+            "spoken content. Be concise and concrete; do not invent details."
         )
-        user = f"Video duration: ~{round(duration)}s.\n\n"
+        user = f"This is {scope}.\n\n"
         if focus.strip():
             user += f"Focus on: {focus.strip()}\n\n"
         user += f"Frame-by-frame analysis:\n{breakdown}\n\n"
