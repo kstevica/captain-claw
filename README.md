@@ -15,6 +15,16 @@
 
 An open-source AI agent with multi-agent orchestration, autonomous cognitive systems, and a full management dashboard. Runs locally, supports every major LLM provider, and ships with 44 built-in tools.
 
+## What's New in 0.4.30
+
+**Intention Tags.** The assistant now labels each intention with up to 5 short tags, and you can search/filter intentions by tag.
+
+- **Tags on intentions** — normalized (lowercased, deduped, ≤5), stored with an automatic DB migration.
+- **Search by tag** — `intentions(action="search", tags=[…], match="any"|"all")`; exact matching (`vc` ≠ `vcfund`).
+- **Flight Deck panel** — tag chips per intention + a clickable tag-filter row.
+
+See [RELEASE_NOTES_0.4.30.md](RELEASE_NOTES_0.4.30.md). Backward compatible with 0.4.29.
+
 ## What's New in 0.4.29
 
 **Multi-Agent Vision & Reliable Hand-offs.** Captain Claw 0.4.29 makes the fleet collaborate around images and hardens agent-to-agent delivery.
