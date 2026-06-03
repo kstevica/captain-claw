@@ -2917,7 +2917,10 @@ async def agent_file_upload(host: str, port: int, token: str = "", file: UploadF
             files = {"file": (file.filename or "upload", content, file.content_type or "application/octet-stream")}
             resp = await client.post(url, files=files)
             if resp.status_code != 200:
-                raise HTTPException(resp.status_code, f"Agent upload failed: {resp.status_code}")
+                # Surface the agent's actual error (e.g. "Unsupported file type
+                # '.mov'") instead of a bare status code — invaluable for debugging.
+                detail = resp.text[:500] if resp.text else ""
+                raise HTTPException(resp.status_code, f"Agent upload failed ({resp.status_code}): {detail}")
             # Log usage
             if AUTH_ENABLED and user:
                 db = app.state.fd_db
