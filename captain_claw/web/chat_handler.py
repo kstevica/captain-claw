@@ -357,6 +357,11 @@ async def handle_chat(
         video_attachments=video_attachments,
         no_flow=no_flow,
         flow_text=content,
+        flow_attach={
+            "image_path": image_path or (image_paths[0] if image_paths else ""),
+            "video_path": video_attachments[0] if video_attachments else "",
+            "file_path": file_path or (file_paths[0] if file_paths else ""),
+        },
     ))
 
     if is_public:
@@ -406,11 +411,14 @@ async def _prefix_video_analysis(
     )
 
 
-async def _maybe_run_flow(agent: Any, text: str, *, is_public: bool) -> str | None:
+async def _maybe_run_flow(agent: Any, text: str, *, is_public: bool, attach: dict | None = None) -> str | None:
     """Ask Flight Deck whether a Flow matches this message; return its output text
     (to relay), or None to take a normal agent turn. Best-effort; never raises."""
+    attach = attach or {}
+    has_attach = any(attach.get(k) for k in ("image_path", "video_path", "audio_path", "file_path"))
+    # Need either text or an attachment to be worth evaluating.
     text = (text or "").strip()
-    if not text:
+    if not text and not has_attach:
         return None
     import os as _os
     meta = getattr(getattr(agent, "session", None), "metadata", {}) or {}
@@ -434,6 +442,9 @@ async def _maybe_run_flow(agent: Any, text: str, *, is_public: bool) -> str | No
         "channel": channel, "text": text,
         "origin_host": "localhost", "origin_port": origin_port,
         "origin_name": str(fid.get("name") or ""),
+        "image_path": str(attach.get("image_path") or ""),
+        "video_path": str(attach.get("video_path") or ""),
+        "audio_path": str(attach.get("audio_path") or ""),
     }
     try:
         import httpx
@@ -461,6 +472,7 @@ async def _run_agent(
     video_attachments: list[str] | None = None,
     no_flow: bool = False,
     flow_text: str = "",
+    flow_attach: dict | None = None,
 ) -> None:
     """Background coroutine that drives the agent and finalises the turn."""
     import json as _json
@@ -490,7 +502,7 @@ async def _run_agent(
         # whether a Flow trigger matches this message. If one does, FD runs it
         # and we relay its output instead of taking a normal agent turn.
         if not no_flow:
-            _flow_out = await _maybe_run_flow(agent, flow_text or content, is_public=is_public)
+            _flow_out = await _maybe_run_flow(agent, flow_text or content, is_public=is_public, attach=flow_attach)
             if _flow_out is not None:
                 send({
                     "type": "chat_message", "role": "assistant",

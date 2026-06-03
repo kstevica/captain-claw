@@ -70,6 +70,8 @@ export interface FlowStep {
   args?: Record<string, string>
   // agent step
   prompt?: string
+  /** optional file/image to send to the agent, e.g. {{trigger.image_path}} */
+  attach?: string
   guardrails?: { allow?: string[]; deny?: string[] }
   // branch step
   when?: string

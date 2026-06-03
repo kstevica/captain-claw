@@ -674,6 +674,19 @@ function StepCard({
             <p className="mt-1 text-[10px] text-zinc-600">{hint}</p>
             <VarChips priorIds={priorIds} onInsert={insertVar} />
           </div>
+          <div className="mb-2">
+            <label className={labelCls}>Attach to agent (file/image path — optional)</label>
+            <input
+              value={step.attach || ''}
+              onChange={(e) => onChange({ attach: e.target.value })}
+              onFocus={(e) => registerFocus(e.currentTarget, (v) => onChange({ attach: v }))}
+              placeholder="{{trigger.image_path}}"
+              className={`${inputCls} font-mono`}
+            />
+            <p className="mt-1 text-[10px] text-zinc-600">
+              Sends a file (e.g. the photo) to the agent so it can see it. Use {`{{trigger.image_path}}`} for an attached image.
+            </p>
+          </div>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             <div>
               <label className={labelCls}>Allowed tools (comma-sep)</label>
