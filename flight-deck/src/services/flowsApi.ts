@@ -58,7 +58,7 @@ export interface FlowTrigger {
   match: FlowMatch
 }
 
-export type StepType = 'tool' | 'agent' | 'vision' | 'branch' | 'emit'
+export type StepType = 'tool' | 'agent' | 'vision' | 'input' | 'branch' | 'emit'
 
 export interface FlowStep {
   id: string
@@ -79,6 +79,9 @@ export interface FlowStep {
   // emit step
   channel?: string
   body?: string
+  // input step — pause the run, ask the user, resume with their reply
+  /** seconds to wait for the user's reply before failing the run */
+  timeout?: number
 }
 
 export interface FlowGuardrails {

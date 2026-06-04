@@ -8,6 +8,7 @@ change when no flows are enabled).
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import re
 from typing import Any
@@ -19,6 +20,64 @@ log = get_logger(__name__)
 # Module-level engine handle, set by the FD server on startup.
 _STORE: Any = None
 _RUNNER: Any = None
+
+# Flows that pause on an `input` step park a Future here, keyed by the user
+# identity. The next inbound message from that user resolves it and the run
+# resumes. In-memory (a paused run is a live coroutine), so a FD restart drops
+# pending waits — acceptable for v1.
+_PENDING_INPUT: dict[str, asyncio.Future] = {}
+
+
+def input_key(*, waid: str = "", channel: str = "") -> str:
+    """Stable key for a paused-input wait. WAID identifies a WhatsApp user
+    across messages; otherwise fall back to the channel."""
+    waid = str(waid or "")
+    if waid:
+        return f"waid:{waid}"
+    return f"chan:{str(channel or '')}"
+
+
+async def wait_for_input(key: str, *, timeout: float = 3600.0) -> str:
+    """Park until someone delivers input for *key* (or timeout). Last waiter on
+    a key wins — a new wait cancels any stale one so a re-triggered flow doesn't
+    leak a dangling Future."""
+    loop = asyncio.get_event_loop()
+    fut: asyncio.Future = loop.create_future()
+    old = _PENDING_INPUT.get(key)
+    if old is not None and not old.done():
+        old.cancel()
+    _PENDING_INPUT[key] = fut
+    try:
+        return await asyncio.wait_for(fut, timeout=timeout)
+    finally:
+        if _PENDING_INPUT.get(key) is fut:
+            _PENDING_INPUT.pop(key, None)
+
+
+def has_pending_input(*, waid: str = "", channel: str = "") -> bool:
+    fut = _PENDING_INPUT.get(input_key(waid=waid, channel=channel))
+    return bool(fut is not None and not fut.done())
+
+
+def deliver_pending_input(*, waid: str = "", channel: str = "", text: str = "") -> bool:
+    """Resolve a paused flow's input wait with *text*. Returns True if a wait
+    was satisfied (caller should NOT also forward the message to the agent)."""
+    fut = _PENDING_INPUT.get(input_key(waid=waid, channel=channel))
+    if fut is not None and not fut.done():
+        fut.set_result(text)
+        return True
+    return False
+
+
+def _flow_has_input(flow: dict[str, Any]) -> bool:
+    return any(str(s.get("type")) == "input" for s in (flow.get("steps") or []))
+
+
+async def _bg_run(flow: dict[str, Any], payload: dict[str, Any]) -> None:
+    try:
+        await _RUNNER.run(flow, payload)
+    except Exception as exc:
+        log.warning("flow bg run error", flow=flow.get("name"), error=str(exc))
 
 
 def set_engine(store: Any, runner: Any) -> None:
@@ -127,6 +186,12 @@ async def run_flow(flow: dict[str, Any], payload: dict[str, Any]) -> None:
     payload — e.g. upload an image and set image_path — between match and run)."""
     if _RUNNER is None:
         return
+    # A flow that can pause for user input must not block the inbound handler
+    # (the user's reply arrives on a *later* message that needs this handler
+    # free to deliver it). Run those in the background.
+    if _flow_has_input(flow):
+        asyncio.create_task(_bg_run(flow, payload))
+        return
     try:
         await _RUNNER.run(flow, payload)
     except Exception as exc:
@@ -143,6 +208,9 @@ async def try_match_and_run(payload: dict[str, Any]) -> bool:
     if not flow:
         return False
     log.info("flow triggered", flow=flow.get("name"), channel=payload.get("channel"))
+    if _flow_has_input(flow):
+        asyncio.create_task(_bg_run(flow, payload))
+        return True
     try:
         await _RUNNER.run(flow, payload)
     except Exception as exc:

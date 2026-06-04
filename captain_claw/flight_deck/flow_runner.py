@@ -12,6 +12,7 @@ Dependencies are injected by the FD server to avoid import cycles.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -285,6 +286,46 @@ class FlowRunner:
         except Exception as exc:
             return f"(vision dispatch failed: {exc})", agent.get("name", "")
 
+    async def _run_input_step(
+        self, step: dict[str, Any], ctx: dict[str, Any],
+        payload: dict[str, Any], flow: dict[str, Any], *, dry: bool = False,
+    ) -> tuple[str, str]:
+        """Pause the run, prompt the user (naming the flow), and resume with
+        their reply as this step's output. Returns (user_text, "")."""
+        prompt = _render(str(step.get("prompt") or "Please reply with your input."), ctx)
+        flow_name = str(flow.get("name") or "Flow")
+
+        if dry:
+            return f"(dry-run: would pause and ask: {prompt})", ""
+
+        waid = str(payload.get("waid") or payload.get("whatsapp_waid") or "")
+        channel = str(payload.get("channel") or "")
+        # Announce that input is needed — the flow name is required so the user
+        # knows which automation is asking.
+        announce = f"⏳ *{flow_name}* needs your input:\n\n{prompt}"
+
+        delivered = False
+        if waid and self.whatsapp_send:
+            try:
+                await self.whatsapp_send(waid, announce)
+                delivered = True
+            except Exception as exc:
+                log.warning("input-step prompt delivery failed: %s", exc)
+        if not delivered:
+            # No reachable channel to ask on — fail clearly instead of hanging.
+            return "(input step: no channel available to prompt the user)", ""
+
+        from captain_claw.flight_deck import flow_router
+        timeout = float(step.get("timeout") or 3600.0)
+        key = flow_router.input_key(waid=waid, channel=channel)
+        try:
+            text = await flow_router.wait_for_input(key, timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(f"timed out waiting for input ({flow_name})") from exc
+        except asyncio.CancelledError as exc:
+            raise RuntimeError(f"input wait superseded ({flow_name})") from exc
+        return text, ""
+
     async def _emit(self, step: dict[str, Any], ctx: dict[str, Any], payload: dict[str, Any]) -> str:
         channel = str(step.get("channel") or "log")
         body = _render(str(step.get("body") or "{{steps}}"), ctx)
@@ -356,6 +397,8 @@ class FlowRunner:
                     out, agent = await self._run_agent_step(step, ctx, payload)
                 elif stype == "vision":
                     out, agent = await self._run_vision_step(step, ctx, payload)
+                elif stype == "input":
+                    out, agent = await self._run_input_step(step, ctx, payload, flow, dry=dry)
                 elif stype == "emit":
                     out, agent = await self._emit(step, ctx, payload), ""
                 else:

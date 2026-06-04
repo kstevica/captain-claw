@@ -11,6 +11,7 @@ import {
   Wrench,
   Bot,
   Eye,
+  MessageSquare,
   GitBranch,
   Send,
   X,
@@ -37,6 +38,7 @@ const STEP_TYPE_META: Record<StepType, { icon: typeof Wrench; label: string; col
   tool: { icon: Wrench, label: 'Tool', color: 'text-emerald-400' },
   agent: { icon: Bot, label: 'Agent', color: 'text-violet-400' },
   vision: { icon: Eye, label: 'Vision', color: 'text-pink-400' },
+  input: { icon: MessageSquare, label: 'Ask user', color: 'text-cyan-400' },
   branch: { icon: GitBranch, label: 'Branch', color: 'text-amber-400' },
   emit: { icon: Send, label: 'Emit', color: 'text-sky-400' },
 }
@@ -46,6 +48,7 @@ function newStep(type: StepType, idx: number): FlowStep {
   if (type === 'tool') { base.on = 'origin'; base.tool = ''; base.args = {} }
   if (type === 'agent') { base.on = 'origin'; base.prompt = ''; base.guardrails = { deny: [] } }
   if (type === 'vision') { base.on = 'capability:vision'; base.prompt = 'Describe this image in detail.'; base.attach = '{{trigger.image_path}}' }
+  if (type === 'input') { base.prompt = 'What would you like to do?'; base.timeout = 3600 }
   if (type === 'branch') { base.when = ''; base.goto = '' }
   if (type === 'emit') { base.channel = 'same'; base.body = '' }
   return base
@@ -754,6 +757,40 @@ function StepCard({
               vision agent and described directly. Use {`{{trigger.image_path}}`}.
             </p>
             <VarChips priorIds={priorIds} onInsert={insertVar} />
+          </div>
+        </>
+      )}
+
+      {step.type === 'input' && (
+        <>
+          <div className="mb-2">
+            <label className={labelCls}>Prompt to the user</label>
+            <textarea
+              value={step.prompt || ''}
+              onChange={(e) => onChange({ prompt: e.target.value })}
+              onFocus={(e) => registerFocus(e.currentTarget, (v) => onChange({ prompt: v }))}
+              rows={2}
+              placeholder="What would you like to do?"
+              className={`${inputCls} resize-y`}
+            />
+            <p className="mt-1 text-[10px] text-zinc-600">
+              Pauses the run and messages the user (the flow name is named automatically).
+              Their next reply becomes {`{{steps.${step.id}.output}}`}.
+            </p>
+            <VarChips priorIds={priorIds} onInsert={insertVar} />
+          </div>
+          <div className="mb-2">
+            <label className={labelCls}>Wait timeout (seconds)</label>
+            <input
+              type="number"
+              value={step.timeout ?? 3600}
+              onChange={(e) => onChange({ timeout: Number(e.target.value) || 0 })}
+              placeholder="3600"
+              className={`${inputCls} font-mono`}
+            />
+            <p className="mt-1 text-[10px] text-zinc-600">
+              If no reply arrives within this window the run fails. Default 1 hour.
+            </p>
           </div>
         </>
       )}

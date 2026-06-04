@@ -598,6 +598,17 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
         await _handle_face_command(waid, _face_cmd)
         return
 
+    # Resume a paused Flow: if a flow is waiting on an `input` step for this
+    # user, their reply feeds that step and the run continues — it must not be
+    # forwarded to the agent as a normal message.
+    if text:
+        try:
+            from captain_claw.flight_deck import flow_router
+            if flow_router.engine_ready() and flow_router.deliver_pending_input(waid=waid, text=text):
+                return
+        except Exception as _exc:
+            log.warning("flow input resume check failed: %s", _exc)
+
     channel = _WAID_CHANNEL.setdefault(waid, _channel_for_waid(waid))
     ch = await _get_or_create_channel(channel)
     _ensure_whatsapp_forwarding(ch.channel_id)
