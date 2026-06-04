@@ -17,11 +17,16 @@ import {
   X,
   CheckCircle2,
   XCircle,
+  Code2,
+  Sparkles,
 } from 'lucide-react'
 import { useFlowsStore } from '../../stores/flowsStore'
 import {
   emptyFlow,
   listFleet,
+  compileDsl,
+  decompileFlow,
+  compileWithAI,
   type FlowInput,
   type FlowStep,
   type StepType,
@@ -75,6 +80,7 @@ export function FlowBuilder() {
 
   const [draft, setDraft] = useState<FlowInput>(initial)
   const [saving, setSaving] = useState(false)
+  const [view, setView] = useState<'builder' | 'code'>('builder')
   const [showTest, setShowTest] = useState(false)
   const [testPayload, setTestPayload] = useState('{\n  "video_path": "/path/to/sample.mp4"\n}')
 
@@ -148,7 +154,21 @@ export function FlowBuilder() {
             <ArrowLeft className="h-3.5 w-3.5" /> Back to flows
           </button>
           <div className="flex items-center gap-2">
-            {editingId && (
+            <div className="flex rounded-lg border border-zinc-700/50 p-0.5 text-xs">
+              <button
+                onClick={() => setView('builder')}
+                className={`rounded-md px-2.5 py-1 transition-colors ${view === 'builder' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'}`}
+              >
+                Builder
+              </button>
+              <button
+                onClick={() => setView('code')}
+                className={`flex items-center gap-1 rounded-md px-2.5 py-1 transition-colors ${view === 'code' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'}`}
+              >
+                <Code2 className="h-3.5 w-3.5" /> Code
+              </button>
+            </div>
+            {editingId && view === 'builder' && (
               <button
                 onClick={() => setShowTest((v) => !v)}
                 className="flex items-center gap-1.5 rounded-lg border border-zinc-700/50 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 transition-colors"
@@ -183,6 +203,12 @@ export function FlowBuilder() {
           {editingId ? 'Edit flow' : 'New flow'}
         </h1>
 
+        {view === 'code' && (
+          <CodeView draft={draft} onApply={(flow) => setDraft((d) => ({ ...d, ...flow }))} />
+        )}
+
+        {view === 'builder' && (
+        <>
         {/* ── Basics ── */}
         <Section title="Basics">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -449,7 +475,123 @@ export function FlowBuilder() {
             )}
           </Section>
         )}
+        </>
+        )}
       </div>
+    </div>
+  )
+}
+
+// ── Code view (DSL editor + AI compile) ──
+
+function CodeView({ draft, onApply }: { draft: FlowInput; onApply: (flow: Partial<FlowInput>) => void }) {
+  const [dsl, setDsl] = useState('')
+  const [status, setStatus] = useState<{ kind: 'ok' | 'err' | 'info'; msg: string } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [ai, setAi] = useState('')
+
+  // Decompile the current draft into DSL when the view mounts.
+  useEffect(() => {
+    let live = true
+    decompileFlow(draft).then((r) => {
+      if (live && r.ok && r.dsl) setDsl(r.dsl)
+    }).catch(() => {})
+    return () => { live = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const applyDsl = async () => {
+    setBusy(true)
+    setStatus(null)
+    try {
+      const r = await compileDsl(dsl)
+      if (r.ok && r.flow) {
+        onApply(r.flow)
+        setStatus({ kind: 'ok', msg: 'Compiled & applied to the builder ✓' })
+      } else {
+        setStatus({ kind: 'err', msg: r.line ? `Line ${r.line}: ${r.error}` : (r.error || 'compile failed') })
+      }
+    } catch (e) {
+      setStatus({ kind: 'err', msg: String(e) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const runAi = async () => {
+    if (!ai.trim()) return
+    setBusy(true)
+    setStatus({ kind: 'info', msg: 'Asking the model to write the flow…' })
+    try {
+      const r = await compileWithAI(ai)
+      if (r.ok && r.flow) {
+        if (r.dsl) setDsl(r.dsl)
+        onApply(r.flow)
+        setStatus({ kind: 'ok', msg: 'Generated, validated & applied ✓' })
+      } else {
+        if (r.dsl) setDsl(r.dsl)
+        setStatus({ kind: 'err', msg: r.error || 'compile failed' })
+      }
+    } catch (e) {
+      setStatus({ kind: 'err', msg: String(e) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <Section title="Describe it (AI → flow)">
+        <textarea
+          value={ai}
+          onChange={(e) => setAi(e.target.value)}
+          rows={2}
+          placeholder="e.g. When someone sends a photo on WhatsApp, recognize the face; if known, greet them by name, otherwise ask who it is and remember it."
+          className={`${inputCls} resize-y`}
+        />
+        <button
+          onClick={runAi}
+          disabled={busy || !ai.trim()}
+          className="mt-2 flex items-center gap-1.5 rounded-lg bg-violet-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40 transition-colors"
+        >
+          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+          Compile with AI
+        </button>
+      </Section>
+
+      <Section title="Flow code (DSL)">
+        <textarea
+          value={dsl}
+          onChange={(e) => setDsl(e.target.value)}
+          rows={18}
+          spellCheck={false}
+          className={`${inputCls} resize-y font-mono text-[12px] leading-relaxed`}
+        />
+        <div className="mt-2 flex items-center gap-3">
+          <button
+            onClick={applyDsl}
+            disabled={busy}
+            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-40 transition-colors"
+          >
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+            Validate & apply
+          </button>
+          {status && (
+            <span
+              className={
+                status.kind === 'ok' ? 'text-xs text-emerald-400'
+                  : status.kind === 'err' ? 'text-xs text-rose-400'
+                    : 'text-xs text-zinc-400'
+              }
+            >
+              {status.msg}
+            </span>
+          )}
+        </div>
+        <p className="mt-2 text-[10px] text-zinc-600">
+          Edits here apply to the builder on “Validate &amp; apply”; switch to Builder and Save to persist.
+        </p>
+      </Section>
     </div>
   )
 }

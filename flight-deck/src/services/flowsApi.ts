@@ -217,6 +217,21 @@ export async function getFlowRun(runId: string): Promise<FlowRunDetail> {
   return fdFetch<FlowRunDetail>(`/flows/runs/${encodeURIComponent(runId)}`)
 }
 
+// ── DSL (code view) + AI compile ──
+export interface DslCompileResult { ok: boolean; flow?: FlowInput; error?: string; line?: number; dsl?: string }
+
+export async function compileDsl(dsl: string): Promise<DslCompileResult> {
+  return fdFetch<DslCompileResult>(`/flows/dsl/compile`, jsonInit('POST', { dsl }))
+}
+
+export async function decompileFlow(flow: FlowInput): Promise<{ ok: boolean; dsl?: string; error?: string }> {
+  return fdFetch(`/flows/dsl/decompile`, jsonInit('POST', { flow }))
+}
+
+export async function compileWithAI(text: string): Promise<DslCompileResult> {
+  return fdFetch<DslCompileResult>(`/flows/compile`, jsonInit('POST', { text }))
+}
+
 // ── Helpers ──
 
 /** Empty flow scaffold for the New Flow form. */

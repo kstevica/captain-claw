@@ -2265,6 +2265,93 @@ async def fd_flows_evaluate(request: Request, user: dict | None = _optional_user
     }
 
 
+# ── Flow DSL: text <-> flow, and agent-assisted NL -> flow ──────────────
+# Registered BEFORE /fd/flows/{flow_id} so 'dsl'/'compile' aren't read as ids.
+
+@app.post("/fd/flows/dsl/compile")
+async def fd_flows_dsl_compile(request: Request, user: dict | None = _optional_user_dep):
+    """Deterministic: DSL text → flow dict (with structured errors)."""
+    from captain_claw.flight_deck import flow_dsl
+    body = await request.json()
+    try:
+        flow = flow_dsl.compile_dsl(str(body.get("dsl") or ""))
+        return {"ok": True, "flow": flow}
+    except flow_dsl.DSLError as exc:
+        return {"ok": False, "error": exc.msg, "line": exc.line}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "line": 0}
+
+
+@app.post("/fd/flows/dsl/decompile")
+async def fd_flows_dsl_decompile(request: Request, user: dict | None = _optional_user_dep):
+    """Deterministic: flow dict → DSL text (for the code view / round-trip)."""
+    from captain_claw.flight_deck import flow_dsl
+    body = await request.json()
+    flow = body.get("flow") or {}
+    try:
+        return {"ok": True, "dsl": flow_dsl.decompile(flow)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@app.post("/fd/flows/compile")
+async def fd_flows_compile(request: Request, user: dict | None = _optional_user_dep):
+    """Agent-assisted: free text / loose code → canonical DSL (via a pooled
+    agent's model) → deterministic compile + validate. The model's output is
+    always run through the real parser, so invalid output is rejected."""
+    import re
+    from captain_claw.flight_deck import flow_dsl
+    body = await request.json()
+    text = str(body.get("text") or "").strip()
+    if not text:
+        return {"ok": False, "error": "no text to compile"}
+
+    # Pick any running agent to host the model call.
+    agents = _running_agents()
+    if not agents:
+        return {"ok": False, "error": "no running agent available to compile with"}
+    agent = agents[0]
+    host, port, token = agent["host"], int(agent["port"]), agent.get("auth", "")
+
+    system = (
+        "You translate a user's request into a Captain Claw Flow DSL program. "
+        "Output ONLY the DSL — no prose, no code fences. Grammar:\n"
+        + flow_dsl.__doc__.split("Grammar")[1]
+        + "\nValid step types: tool, agent, vision, input, emit, branch. "
+        "Selectors: origin, fd, any, capability:vision, name:<agent>. "
+        "Use {{trigger.text}}, {{trigger.image_path}}, {{trigger.fd_image_path}}, "
+        "{{steps.<id>.output}} for templating. Always include a trigger and at "
+        "least one step and an `output -> <channel>` line."
+    )
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            r = await client.post(
+                f"http://{host}:{port}/api/llm/complete",
+                params={"token": token} if token else {},
+                json={"messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": text},
+                ], "temperature": 0.1},
+            )
+        data = r.json() or {}
+        if not data.get("ok"):
+            return {"ok": False, "error": f"model error: {data.get('error') or r.status_code}"}
+        dsl = str(data.get("content") or "").strip()
+        # Strip accidental code fences.
+        dsl = re.sub(r"^```[a-zA-Z]*\n?|\n?```$", "", dsl).strip()
+    except Exception as exc:
+        return {"ok": False, "error": f"compile call failed: {exc}"}
+
+    try:
+        flow = flow_dsl.compile_dsl(dsl)
+    except flow_dsl.DSLError as exc:
+        return {"ok": False, "error": f"generated DSL invalid (line {exc.line}): {exc.msg}", "dsl": dsl}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "dsl": dsl}
+    return {"ok": True, "flow": flow, "dsl": dsl}
+
+
 @app.get("/fd/flows/{flow_id}")
 async def fd_flows_get(flow_id: str, request: Request, user: dict | None = _optional_user_dep):
     flow = await _flow_store().get_flow(flow_id)
