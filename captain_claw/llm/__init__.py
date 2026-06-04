@@ -1670,7 +1670,12 @@ class OllamaProvider(LLMProvider):
                     reasoning_len=len(str(_rc)) if _rc else 0,
                 )
                 content = _strip_internal_context(_strip_reasoning_artifacts(str(raw_content)))
-                if not content.strip() and _rc:
+                # Only surface the reasoning tail as content when the model has
+                # NO tool calls. With tool calls the reasoning is "I should call
+                # X" — leaking it as content pollutes the reply (and made vision
+                # agents narrate "I should call image_vision").
+                _has_tool_calls = bool(_obj_get(msg_obj, "tool_calls", []) or [])
+                if not content.strip() and _rc and not _has_tool_calls:
                     rc_str = str(_rc)
                     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", rc_str) if p.strip()]
                     fallback = paragraphs[-1] if paragraphs else rc_str.strip()
