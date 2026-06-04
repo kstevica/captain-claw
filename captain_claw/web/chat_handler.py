@@ -254,15 +254,25 @@ async def handle_chat(
             if str(p).lower().endswith(_VIDEO_EXTS):
                 _has_video = True
                 video_attachments.append(str(p))
-    # Tell the model how to actually view an image — it must call image_vision,
-    # not read (binary) and not give up based on earlier failed turns.
+    # Image guidance is capability-aware. Ollama-backed agents receive the image
+    # INLINE (see _convert_messages_for_ollama) — i.e. they can SEE it directly,
+    # so telling them to call image_vision makes them flail on a tool they may
+    # not even have. Other providers must use image_vision or delegate.
     if _has_image:
-        attachment_lines.append(
-            "(To view the image(s) above you MUST call a tool: image_vision with the "
-            "path, or — if you can't see images — delegate it to a multimodal peer "
-            "via flight_deck with file=<path>. Never use read on an image. Never say "
-            "you sent/delegated/described it unless you actually called the tool this turn.)"
-        )
+        _sees_inline = str(getattr(getattr(agent, "provider", None), "provider", "")).lower() == "ollama"
+        if _sees_inline:
+            attachment_lines.append(
+                "(The image(s) above are attached and you can SEE them directly — "
+                "describe/analyze from what you see. Do NOT call image_vision, do NOT "
+                "delegate, and do NOT use read; just look and answer.)"
+            )
+        else:
+            attachment_lines.append(
+                "(To view the image(s) above you MUST call a tool: image_vision with the "
+                "path, or — if you can't see images — delegate it to a multimodal peer "
+                "via flight_deck with file=<path>. Never use read on an image. Never say "
+                "you sent/delegated/described it unless you actually called the tool this turn.)"
+            )
     # Video is analyzed deterministically server-side (see _run_agent) and the
     # analysis is injected into this turn — so we do NOT ask the model to call
     # video_vision or (worse) write its own extraction script.
