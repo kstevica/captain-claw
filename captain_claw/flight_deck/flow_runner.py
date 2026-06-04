@@ -148,7 +148,8 @@ class FlowRunner:
             return f"(no agent for selector '{selector}')", ""
         import httpx
         body = {
-            "host": agent["host"], "port": int(agent["port"]), "auth": "",
+            "host": agent["host"], "port": int(agent["port"]),
+            "auth": str(agent.get("auth") or ""),  # token from the same entry as the port
             "message": prompt, "source_name": "FlowEngine", "timeout": 480.0,
             "attach_path": attach or "", "no_flow": True,  # loop guard
         }

@@ -2099,11 +2099,15 @@ def _resolve_agent_auth(port: int) -> str:
     except Exception:
         pass
 
-    # Check process registry
+    # Check process registry. Multiple (stale) entries can share a web_port, so
+    # prefer the one whose process is actually alive before falling back to any.
     registry = _load_process_registry()
-    for entry in registry.values():
-        if entry.get("web_port") == port:
+    matches = [(slug, e) for slug, e in registry.items() if e.get("web_port") == port]
+    for slug, entry in matches:
+        if _process_is_alive(slug):
             return entry.get("web_auth", "")
+    if matches:
+        return matches[0][1].get("web_auth", "")
 
     return ""
 
@@ -2120,6 +2124,10 @@ def _running_agents() -> list[dict[str, Any]]:
             "port": entry.get("web_port", 0),
             "status": "running" if _process_is_alive(slug) else "stopped",
             "description": entry.get("description", ""),
+            # Carry the auth from the SAME entry so the consult uses a token that
+            # matches THIS agent — port-keyed re-resolution can collide when stale
+            # entries share a port.
+            "auth": entry.get("web_auth", ""),
         })
     return out
 
