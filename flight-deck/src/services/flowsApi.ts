@@ -228,8 +228,8 @@ export async function decompileFlow(flow: FlowInput): Promise<{ ok: boolean; dsl
   return fdFetch(`/flows/dsl/decompile`, jsonInit('POST', { flow }))
 }
 
-export async function compileWithAI(text: string): Promise<DslCompileResult> {
-  return fdFetch<DslCompileResult>(`/flows/compile`, jsonInit('POST', { text }))
+export async function compileWithAI(text: string, agent?: string): Promise<DslCompileResult> {
+  return fdFetch<DslCompileResult>(`/flows/compile`, jsonInit('POST', { text, agent: agent || '' }))
 }
 
 // ── Helpers ──

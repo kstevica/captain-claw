@@ -205,7 +205,7 @@ export function FlowBuilder() {
         </h1>
 
         {view === 'code' && (
-          <CodeView draft={draft} onApply={(flow) => setDraft((d) => ({ ...d, ...flow }))} />
+          <CodeView draft={draft} fleet={fleet} onApply={(flow) => setDraft((d) => ({ ...d, ...flow }))} />
         )}
 
         {view === 'builder' && (
@@ -485,11 +485,12 @@ export function FlowBuilder() {
 
 // ── Code view (DSL editor + AI compile) ──
 
-function CodeView({ draft, onApply }: { draft: FlowInput; onApply: (flow: Partial<FlowInput>) => void }) {
+function CodeView({ draft, fleet, onApply }: { draft: FlowInput; fleet: string[]; onApply: (flow: Partial<FlowInput>) => void }) {
   const [dsl, setDsl] = useState('')
   const [status, setStatus] = useState<{ kind: 'ok' | 'err' | 'info'; msg: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const [ai, setAi] = useState('')
+  const [aiAgent, setAiAgent] = useState('')
 
   // Decompile the current draft into DSL when the view mounts.
   useEffect(() => {
@@ -524,7 +525,7 @@ function CodeView({ draft, onApply }: { draft: FlowInput; onApply: (flow: Partia
     setBusy(true)
     setStatus({ kind: 'info', msg: 'Asking the model to write the flow…' })
     try {
-      const r = await compileWithAI(ai)
+      const r = await compileWithAI(ai, aiAgent)
       if (r.ok && r.flow) {
         if (r.dsl) setDsl(r.dsl)
         onApply(r.flow)
@@ -546,18 +547,32 @@ function CodeView({ draft, onApply }: { draft: FlowInput; onApply: (flow: Partia
         <textarea
           value={ai}
           onChange={(e) => setAi(e.target.value)}
-          rows={2}
-          placeholder="e.g. When someone sends a photo on WhatsApp, recognize the face; if known, greet them by name, otherwise ask who it is and remember it."
-          className={`${inputCls} resize-y`}
+          rows={6}
+          placeholder={'Describe the flow in plain words, e.g.\n\nWhen someone sends a photo on WhatsApp, recognize the face. If it’s someone we know, greet them by name. Otherwise ask who it is and remember it.'}
+          className={`${inputCls} min-h-[120px] resize-y leading-relaxed`}
         />
-        <button
-          onClick={runAi}
-          disabled={busy || !ai.trim()}
-          className="mt-2 flex items-center gap-1.5 rounded-lg bg-violet-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40 transition-colors"
-        >
-          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-          Compile with AI
-        </button>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button
+            onClick={runAi}
+            disabled={busy || !ai.trim()}
+            className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40 transition-colors"
+          >
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+            Compile with AI
+          </button>
+          <span className="text-[10px] uppercase tracking-wide text-zinc-500">using</span>
+          <select
+            value={aiAgent}
+            onChange={(e) => setAiAgent(e.target.value)}
+            className={`${inputCls} w-auto`}
+            title="Which agent's model compiles the description"
+          >
+            <option value="">Auto (any running agent)</option>
+            {fleet.map((name) => (
+              <option key={name} value={name}>{name}</option>
+            ))}
+          </select>
+        </div>
       </Section>
 
       <Section title="Flow code (DSL)">

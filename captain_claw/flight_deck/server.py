@@ -2306,12 +2306,19 @@ async def fd_flows_compile(request: Request, user: dict | None = _optional_user_
     if not text:
         return {"ok": False, "error": "no text to compile"}
 
-    # Pick any running agent to host the model call.
-    agents = _running_agents()
-    if not agents:
+    # Pick a RUNNING agent with a live web port to host the model call. Try
+    # several (a registry "running" flag can lag a just-died web server).
+    running = [a for a in _running_agents()
+               if str(a.get("status")) == "running" and int(a.get("port") or 0) > 0]
+    if not running:
         return {"ok": False, "error": "no running agent available to compile with"}
-    agent = agents[0]
-    host, port, token = agent["host"], int(agent["port"]), agent.get("auth", "")
+    # The caller may pick which agent compiles; prefer it, fall back to others.
+    chosen = str(body.get("agent") or "").strip()
+    if chosen:
+        picked = [a for a in running if str(a.get("name")) == chosen]
+        agents = picked + [a for a in running if str(a.get("name")) != chosen]
+    else:
+        agents = running
 
     system = (
         "You translate a user's request into a Captain Claw Flow DSL program. "
@@ -2324,24 +2331,34 @@ async def fd_flows_compile(request: Request, user: dict | None = _optional_user_
         "least one step and an `output -> <channel>` line."
     )
     import httpx
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            r = await client.post(
-                f"http://{host}:{port}/api/llm/complete",
-                params={"token": token} if token else {},
-                json={"messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": text},
-                ], "temperature": 0.1},
-            )
-        data = r.json() or {}
-        if not data.get("ok"):
-            return {"ok": False, "error": f"model error: {data.get('error') or r.status_code}"}
-        dsl = str(data.get("content") or "").strip()
-        # Strip accidental code fences.
-        dsl = re.sub(r"^```[a-zA-Z]*\n?|\n?```$", "", dsl).strip()
-    except Exception as exc:
-        return {"ok": False, "error": f"compile call failed: {exc}"}
+    payload = {"messages": [
+        {"role": "system", "content": system},
+        {"role": "user", "content": text},
+    ], "temperature": 0.1}
+    dsl = ""
+    last_err = "no reachable agent"
+    for agent in agents:
+        host, port, token = agent["host"], int(agent["port"]), agent.get("auth", "")
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                r = await client.post(
+                    f"http://{host}:{port}/api/llm/complete",
+                    params={"token": token} if token else {},
+                    json=payload,
+                )
+            data = r.json() or {}
+            if not data.get("ok"):
+                last_err = f"model error on {agent.get('name')}: {data.get('error') or r.status_code}"
+                continue
+            dsl = str(data.get("content") or "").strip()
+            break
+        except Exception as exc:
+            last_err = f"{agent.get('name')}: {exc}"
+            continue
+    if not dsl:
+        return {"ok": False, "error": f"compile call failed ({last_err})"}
+    # Strip accidental code fences.
+    dsl = re.sub(r"^```[a-zA-Z]*\n?|\n?```$", "", dsl).strip()
 
     try:
         flow = flow_dsl.compile_dsl(dsl)
