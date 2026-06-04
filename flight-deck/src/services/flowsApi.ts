@@ -74,8 +74,12 @@ export interface FlowStep {
   attach?: string
   guardrails?: { allow?: string[]; deny?: string[] }
   // branch step
-  when?: string
-  goto?: string
+  when?: string          // legacy single-condition (still honored)
+  goto?: string          // legacy single-target
+  /** switch/case: first case whose condition is true jumps to its goto */
+  cases?: { when: string; goto: string }[]
+  /** goto when no case matches (the "else") */
+  default?: string
   // emit step
   channel?: string
   body?: string

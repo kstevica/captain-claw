@@ -404,15 +404,30 @@ class FlowRunner:
                 t0 = time.monotonic()
 
                 if stype == "branch":
-                    cond = _render(str(step.get("when") or ""), ctx)
-                    goto = step.get("goto")
-                    taken = bool(_eval_when(cond))
-                    out = f"branch {'taken→'+str(goto) if taken else 'not taken'}"
+                    # Multi-case switch: evaluate each case's condition in order;
+                    # first true wins. Falls back to the single when/goto for
+                    # legacy flows, and to `else`/`default` when nothing matches.
+                    cases = step.get("cases")
+                    if not cases:
+                        cases = [{"when": step.get("when"), "goto": step.get("goto")}]
+                    target = None
+                    label = "not taken"
+                    for c in cases:
+                        if _eval_expr(str(c.get("when") or ""), ctx):
+                            target = c.get("goto")
+                            label = f"taken→{target}"
+                            break
+                    if target is None:
+                        els = step.get("else") or step.get("default")
+                        if els:
+                            target = els
+                            label = f"else→{target}"
+                    out = f"branch {label}"
                     _record(trace, sid, stype, "done", "", out, t0)
                     if not dry:
                         await self.store.add_step_result(run_id, sid, executed, type=stype, status="done", output_text=out, ms=_ms(t0))
-                    if taken and goto in by_id:
-                        i = by_id[goto]
+                    if target and target in by_id:
+                        i = by_id[target]
                         continue
                     i += 1
                     continue
@@ -460,14 +475,141 @@ class FlowRunner:
         return {"run_id": run_id, "status": status, "error": error, "steps": trace, "output": final_text}
 
 
-def _eval_when(cond: str) -> bool:
-    """Tiny safe evaluator: supports 'A == B', 'A != B', or truthiness of A."""
-    cond = (cond or "").strip()
-    for op in ("==", "!="):
-        if op in cond:
-            lhs, rhs = (x.strip().strip('"\'') for x in cond.split(op, 1))
-            return (lhs == rhs) if op == "==" else (lhs != rhs)
-    return bool(cond) and cond.lower() not in ("none", "false", "0", "")
+# ── Branch condition evaluator ─────────────────────────────────────────
+#
+# A small, SAFE boolean expression evaluator (no eval()). Supports:
+#   • logicals:    and / or / not   (also && / || / !)
+#   • grouping:    ( ... )
+#   • comparisons: ==  !=  >  <  >=  <=  contains  matches (~)
+#   • operands:    {{path}} (resolved against ctx), "quoted", or bare words
+#   • truthiness:  a lone operand is true unless it's empty/false/0/none/no
+#
+# {{...}} tokens are resolved at eval time (not string-substituted first), so a
+# value containing spaces/quotes/operators can't corrupt the parse.
+
+_FALSY = {"", "false", "0", "none", "no", "null"}
+
+_TOKEN_RE = re.compile(
+    r"""\{\{.*?\}\}            # {{var}}
+      | "[^"]*" | '[^']*'      # quoted string
+      | >= | <= | == | !=      # 2-char comparisons
+      | && | \|\|              # logical and / or
+      | [()<>~!]               # parens & single-char ops
+      | [^\s()<>~!&|"'=]+       # bare operand / keyword
+    """,
+    re.X,
+)
+
+_CMP = {"==", "!=", ">", "<", ">=", "<=", "contains", "matches", "~"}
+
+
+def _val_to_str(v: Any) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    return str(v)
+
+
+def _resolve_operand(tok: str, ctx: dict[str, Any]) -> str:
+    if tok.startswith("{{") and tok.endswith("}}"):
+        return _val_to_str(_dig(ctx, tok[2:-2].strip()))
+    if len(tok) >= 2 and tok[0] in "\"'" and tok[-1] == tok[0]:
+        return tok[1:-1]
+    return tok
+
+
+def _apply_cmp(op: str, lhs: str, rhs: str) -> bool:
+    if op == "==":
+        return lhs == rhs
+    if op == "!=":
+        return lhs != rhs
+    if op == "contains":
+        return rhs.lower() in lhs.lower()
+    if op in ("matches", "~"):
+        try:
+            return bool(re.search(rhs, lhs, re.I))
+        except re.error:
+            return False
+    # Numeric comparisons, with lexicographic fallback.
+    try:
+        a: Any = float(lhs)
+        b: Any = float(rhs)
+    except ValueError:
+        a, b = lhs, rhs
+    if op == ">":
+        return a > b
+    if op == "<":
+        return a < b
+    if op == ">=":
+        return a >= b
+    if op == "<=":
+        return a <= b
+    return False
+
+
+def _eval_expr(expr: str, ctx: dict[str, Any]) -> bool:
+    """Evaluate a boolean branch condition against the run context. Safe: a
+    hand-written recursive-descent parser, never eval(). Returns False on any
+    parse/eval error so a malformed condition can't crash the run."""
+    toks = [m.group(0) for m in _TOKEN_RE.finditer(expr or "")]
+    if not toks:
+        return False
+    i = 0
+
+    def low() -> str | None:
+        return toks[i].lower() if i < len(toks) else None
+
+    def parse_or() -> bool:
+        nonlocal i
+        v = parse_and()
+        while low() in ("or", "||"):
+            i += 1
+            r = parse_and()
+            v = v or r
+        return v
+
+    def parse_and() -> bool:
+        nonlocal i
+        v = parse_not()
+        while low() in ("and", "&&"):
+            i += 1
+            r = parse_not()
+            v = v and r
+        return v
+
+    def parse_not() -> bool:
+        nonlocal i
+        if low() in ("not", "!"):
+            i += 1
+            return not parse_not()
+        return parse_atom()
+
+    def parse_atom() -> bool:
+        nonlocal i
+        if i >= len(toks):
+            return False
+        if toks[i] == "(":
+            i += 1
+            v = parse_or()
+            if i < len(toks) and toks[i] == ")":
+                i += 1
+            return v
+        lhs = _resolve_operand(toks[i], ctx)
+        i += 1
+        op = low()
+        if op in _CMP:
+            i += 1
+            rhs = _resolve_operand(toks[i], ctx) if i < len(toks) else ""
+            if i < len(toks):
+                i += 1
+            return _apply_cmp(op, lhs, rhs)
+        return lhs.strip().lower() not in _FALSY
+
+    try:
+        return bool(parse_or())
+    except Exception:
+        return False
 
 
 def _maybe_attach_fields(slot: dict[str, Any], out: Any) -> None:

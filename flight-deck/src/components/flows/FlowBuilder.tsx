@@ -49,7 +49,7 @@ function newStep(type: StepType, idx: number): FlowStep {
   if (type === 'agent') { base.on = 'origin'; base.prompt = ''; base.guardrails = { deny: [] } }
   if (type === 'vision') { base.on = 'capability:vision'; base.prompt = 'Describe this image in detail.'; base.attach = '{{trigger.image_path}}' }
   if (type === 'input') { base.prompt = 'What would you like to do?'; base.timeout = 3600 }
-  if (type === 'branch') { base.when = ''; base.goto = '' }
+  if (type === 'branch') { base.cases = [{ when: '', goto: '' }]; base.default = '' }
   if (type === 'emit') { base.channel = 'same'; base.body = '' }
   return base
 }
@@ -795,34 +795,89 @@ function StepCard({
         </>
       )}
 
-      {step.type === 'branch' && (
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          <div>
-            <label className={labelCls}>When (condition)</label>
-            <input
-              value={step.when || ''}
-              onChange={(e) => onChange({ when: e.target.value })}
-              onFocus={(e) => registerFocus(e.currentTarget, (v) => onChange({ when: v }))}
-              placeholder="{{steps.who.label}} == none"
-              className={`${inputCls} font-mono`}
-            />
+      {step.type === 'branch' && (() => {
+        // Normalize legacy single when/goto into the cases list.
+        const cases = (step.cases && step.cases.length)
+          ? step.cases
+          : [{ when: step.when || '', goto: step.goto || '' }]
+        const setCases = (next: { when: string; goto: string }[]) =>
+          onChange({ cases: next, when: undefined, goto: undefined })
+        const updateCase = (idx: number, p: Partial<{ when: string; goto: string }>) =>
+          setCases(cases.map((c, j) => (j === idx ? { ...c, ...p } : c)))
+        const gotoOptions = allIds.filter((id) => id !== step.id)
+        return (
+          <div className="space-y-2">
+            {cases.map((c, idx) => (
+              <div key={idx} className="rounded-md border border-zinc-800 p-2">
+                <div className="mb-1 flex items-center justify-between">
+                  <span className="text-[10px] uppercase tracking-wide text-zinc-500">
+                    {idx === 0 ? 'If' : 'Else if'}
+                  </span>
+                  {cases.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => setCases(cases.filter((_, j) => j !== idx))}
+                      className="text-zinc-600 hover:text-rose-400"
+                      title="Remove condition"
+                    >
+                      <X size={13} />
+                    </button>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <input
+                    value={c.when}
+                    onChange={(e) => updateCase(idx, { when: e.target.value })}
+                    onFocus={(e) => registerFocus(e.currentTarget, (v) => updateCase(idx, { when: v }))}
+                    placeholder={'{{steps.step_1.output}} == "Yes" and {{steps.s2.count}} > 2'}
+                    className={`${inputCls} font-mono`}
+                  />
+                  <select
+                    value={c.goto}
+                    onChange={(e) => updateCase(idx, { goto: e.target.value })}
+                    className={inputCls}
+                  >
+                    <option value="">— goto step —</option>
+                    {gotoOptions.map((id) => (
+                      <option key={id} value={id}>{id}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            ))}
+
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setCases([...cases, { when: '', goto: '' }])}
+                className="flex items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:border-amber-500 hover:text-amber-400"
+              >
+                <Plus size={12} /> Add condition
+              </button>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] uppercase tracking-wide text-zinc-500">Else → goto</span>
+                <select
+                  value={step.default || ''}
+                  onChange={(e) => onChange({ default: e.target.value })}
+                  className={`${inputCls} w-auto`}
+                >
+                  <option value="">— next step —</option>
+                  {gotoOptions.map((id) => (
+                    <option key={id} value={id}>{id}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
             <VarChips priorIds={priorIds} onInsert={insertVar} />
+            <p className="text-[10px] text-zinc-600">
+              Conditions support <span className="font-mono">and / or / not</span>, parentheses, and{' '}
+              <span className="font-mono">== != &gt; &lt; &gt;= &lt;= contains matches</span>. First matching
+              condition wins; otherwise the Else target (or the next step) runs.
+            </p>
           </div>
-          <div>
-            <label className={labelCls}>Goto step</label>
-            <select
-              value={step.goto || ''}
-              onChange={(e) => onChange({ goto: e.target.value })}
-              className={inputCls}
-            >
-              <option value="">— select step —</option>
-              {allIds.filter((id) => id !== step.id).map((id) => (
-                <option key={id} value={id}>{id}</option>
-              ))}
-            </select>
-          </div>
-        </div>
-      )}
+        )
+      })()}
 
       {step.type === 'emit' && (
         <>
