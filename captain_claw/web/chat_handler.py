@@ -260,18 +260,22 @@ async def handle_chat(
     # not even have. Other providers must use image_vision or delegate.
     if _has_image:
         _sees_inline = str(getattr(getattr(agent, "provider", None), "provider", "")).lower() == "ollama"
+        _this_msg_only = (
+            " Describe the image attached in THIS message only — do NOT reuse earlier "
+            "images or remembered/previous descriptions from the conversation."
+        )
         if _sees_inline:
             attachment_lines.append(
                 "(The image(s) above are attached and you can SEE them directly — "
                 "describe/analyze from what you see. Do NOT call image_vision, do NOT "
-                "delegate, and do NOT use read; just look and answer.)"
+                "delegate, and do NOT use read; just look and answer." + _this_msg_only + ")"
             )
         else:
             attachment_lines.append(
                 "(To view the image(s) above you MUST call a tool: image_vision with the "
                 "path, or — if you can't see images — delegate it to a multimodal peer "
                 "via flight_deck with file=<path>. Never use read on an image. Never say "
-                "you sent/delegated/described it unless you actually called the tool this turn.)"
+                "you sent/delegated/described it unless you actually called the tool this turn." + _this_msg_only + ")"
             )
     # Video is analyzed deterministically server-side (see _run_agent) and the
     # analysis is injected into this turn — so we do NOT ask the model to call
@@ -535,6 +539,16 @@ async def _run_agent(
         #     originating agent CANNOT auto-resend the task. This is the gate that
         #     stops the inter-agent resend flood: once a result (even an error)
         #     comes back, the relay turn can only relay it, never re-delegate.
+        # Image-describe turn: suppress memory/insights injection so the model
+        # describes the freshly-attached image instead of regurgitating a
+        # remembered description of an earlier one (rich-session contamination).
+        _img_turn = isinstance(content, str) and "[Attached image:" in content
+        if _img_turn:
+            try:
+                agent._suppress_memory_context = True  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
         _deny_tools: list[str] = []
         if video_attachments:
             _deny_tools += ["scripts", "shell"]
@@ -661,6 +675,10 @@ async def _run_agent(
         log.error("Chat error", error=str(e), public=is_public)
         send({"type": "error", "message": f"Error: {str(e)}"})
     finally:
+        try:
+            agent._suppress_memory_context = False  # type: ignore[attr-defined]
+        except Exception:
+            pass
         if _video_policy_slug is not None:
             try:
                 agent.tools.clear_session_policy(_video_policy_slug)

@@ -1064,6 +1064,8 @@ class AgentContextMixin:
 
     def _build_insights_context_note(self, query: str = "") -> str:
         """Build context note from relevant insights."""
+        if getattr(self, "_suppress_memory_context", False):
+            return ""  # e.g. image-describe turn: don't regurgitate remembered scenes
         cfg = get_config()
         if not cfg.insights.enabled or not cfg.insights.inject_in_context:
             return ""
@@ -1303,6 +1305,8 @@ class AgentContextMixin:
 
     def _build_nervous_system_context_note(self, query: str = "") -> str:
         """Build per-turn context note from relevant intuitions."""
+        if getattr(self, "_suppress_memory_context", False):
+            return ""
         cfg = get_config()
         if not cfg.nervous_system.enabled or not cfg.nervous_system.inject_in_context:
             return ""
@@ -1754,6 +1758,8 @@ class AgentContextMixin:
         *layer* controls snippet granularity: ``"l1"`` (one-liner), ``"l2"`` (summary),
         ``"l3"`` (full text). Defaults to ``"l2"`` for a good density/context balance.
         """
+        if getattr(self, "_suppress_memory_context", False):
+            return "", ""
         cleaned = str(query or "").strip()
         if not cleaned:
             return "", ""
@@ -1962,6 +1968,8 @@ class AgentContextMixin:
         Always searches when deep memory is available — relevance scoring
         in Typesense already filters out low-quality matches.
         """
+        if getattr(self, "_suppress_memory_context", False):
+            return "", ""
         cleaned = str(query or "").strip()
         if not cleaned:
             return "", ""
@@ -2942,6 +2950,8 @@ class AgentContextMixin:
         max_snippet_chars: int = 700,
     ) -> tuple[str, str]:
         """Build compact continuity note from historical tool outputs."""
+        if getattr(self, "_suppress_memory_context", False):
+            return "", ""
         if not skipped_tool_messages:
             return "", ""
 
