@@ -2322,51 +2322,88 @@ async def fd_flows_compile(request: Request, user: dict | None = _optional_user_
 
     system = (
         "You translate a user's request into a Captain Claw Flow DSL program. "
-        "Output ONLY the DSL — no prose, no code fences. Grammar:\n"
-        + flow_dsl.__doc__.split("Grammar")[1]
-        + "\nValid step types: tool, agent, vision, input, emit, branch. "
+        "Output ONLY the DSL — no prose, no code fences.\n"
+        "Grammar:" + flow_dsl.__doc__.split("Grammar", 1)[1] + "\n"
+        "STEP TYPE RULES (important):\n"
+        "• agent — open-ended work the model decides how to do: search the web, "
+        "research, look something up, summarize, answer. Use `agent on origin` "
+        "with a `prompt:`. THIS is what you use for 'search for X', 'find', "
+        "'research', 'look up'.\n"
+        "• tool — a SINGLE named, deterministic tool. ONLY use it when you know "
+        "the exact tool name; it needs `tool: <name>` and `arg <k>: <v>`. The "
+        "only `on fd` tool is `face_identify`. NEVER emit a `tool` step without "
+        "a `tool:` name — use an `agent` step instead.\n"
+        "• vision — describe/read an image (`on capability:vision`, `image:`).\n"
+        "• input — ask the user something and wait (`prompt:`). The reply is "
+        "{{steps.<id>.output}}.\n"
+        "• emit — send a message (`emit \"...\"`).\n"
+        "TRIGGER: default to `trigger any` unless the user explicitly names a "
+        "channel (whatsapp/web/glasses). Add `when <rules>` only if they gave a "
+        "condition (e.g. `when contains \"hungry\"`).\n"
         "Selectors: origin, fd, any, capability:vision, name:<agent>. "
-        "Use {{trigger.text}}, {{trigger.image_path}}, {{trigger.fd_image_path}}, "
-        "{{steps.<id>.output}} for templating. Always include a trigger and at "
-        "least one step and an `output -> <channel>` line."
+        "Template with {{trigger.text}}, {{trigger.image_path}}, "
+        "{{trigger.fd_image_path}}, {{steps.<id>.output}}. Always include a "
+        "trigger, at least one step, and an `output -> same` line."
     )
     import httpx
-    payload = {"messages": [
+
+    async def _complete(messages: list[dict[str, Any]]) -> tuple[str, str]:
+        """Return (dsl, error). Tries running agents until one responds."""
+        last = "no reachable agent"
+        for agent in agents:
+            host, port, token = agent["host"], int(agent["port"]), agent.get("auth", "")
+            try:
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    r = await client.post(
+                        f"http://{host}:{port}/api/llm/complete",
+                        params={"token": token} if token else {},
+                        json={"messages": messages, "temperature": 0.1},
+                    )
+                d = r.json() or {}
+                if not d.get("ok"):
+                    last = f"model error on {agent.get('name')}: {d.get('error') or r.status_code}"
+                    continue
+                content = str(d.get("content") or "").strip()
+                content = re.sub(r"^```[a-zA-Z]*\n?|\n?```$", "", content).strip()
+                return content, ""
+            except Exception as exc:
+                last = f"{agent.get('name')}: {exc}"
+        return "", last
+
+    messages: list[dict[str, Any]] = [
         {"role": "system", "content": system},
         {"role": "user", "content": text},
-    ], "temperature": 0.1}
-    dsl = ""
-    last_err = "no reachable agent"
-    for agent in agents:
-        host, port, token = agent["host"], int(agent["port"]), agent.get("auth", "")
-        try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                r = await client.post(
-                    f"http://{host}:{port}/api/llm/complete",
-                    params={"token": token} if token else {},
-                    json=payload,
-                )
-            data = r.json() or {}
-            if not data.get("ok"):
-                last_err = f"model error on {agent.get('name')}: {data.get('error') or r.status_code}"
-                continue
-            dsl = str(data.get("content") or "").strip()
-            break
-        except Exception as exc:
-            last_err = f"{agent.get('name')}: {exc}"
-            continue
+    ]
+    dsl, err = await _complete(messages)
     if not dsl:
-        return {"ok": False, "error": f"compile call failed ({last_err})"}
-    # Strip accidental code fences.
-    dsl = re.sub(r"^```[a-zA-Z]*\n?|\n?```$", "", dsl).strip()
+        return {"ok": False, "error": f"compile call failed ({err})"}
 
-    try:
-        flow = flow_dsl.compile_dsl(dsl)
-    except flow_dsl.DSLError as exc:
-        return {"ok": False, "error": f"generated DSL invalid (line {exc.line}): {exc.msg}", "dsl": dsl}
-    except Exception as exc:
-        return {"ok": False, "error": str(exc), "dsl": dsl}
-    return {"ok": True, "flow": flow, "dsl": dsl}
+    # Up to two attempts: if the generated DSL fails to compile, feed the error
+    # back to the model once and let it repair its own output.
+    for attempt in range(2):
+        try:
+            flow = flow_dsl.compile_dsl(dsl)
+            return {"ok": True, "flow": flow, "dsl": dsl}
+        except flow_dsl.DSLError as exc:
+            problem = f"line {exc.line}: {exc.msg}"
+        except Exception as exc:
+            problem = str(exc)
+        if attempt == 0:
+            messages += [
+                {"role": "assistant", "content": dsl},
+                {"role": "user", "content": (
+                    f"That DSL failed to compile ({problem}). Fix it and output "
+                    "ONLY the corrected DSL. Remember: open-ended work like "
+                    "searching is an `agent on origin` step with a prompt, never "
+                    "a bare `tool` step."
+                )},
+            ]
+            fixed, ferr = await _complete(messages)
+            if fixed:
+                dsl = fixed
+                continue
+        return {"ok": False, "error": f"generated DSL invalid ({problem})", "dsl": dsl}
+    return {"ok": False, "error": "generated DSL invalid", "dsl": dsl}
 
 
 @app.get("/fd/flows/{flow_id}")
