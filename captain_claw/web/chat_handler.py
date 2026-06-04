@@ -527,14 +527,25 @@ async def _run_agent(
         # chooses tools or counts frames. Mirrors the audio-transcription path.
         if video_attachments:
             content = await _prefix_video_analysis(agent, content, video_attachments, send)
-            # The analysis is already done — block the script/shell tools for this
-            # turn so the agent can't burn time + tokens writing & running its own
-            # extraction or "save-to-file" scripts. Cleared in `finally` below.
+
+        # Deterministic per-turn tool denials (guardrails that do NOT rely on the
+        # model obeying instructions). Cleared in `finally` below.
+        #   • video turn → no scripts/shell (the analysis is already injected)
+        #   • relaying a delegated result → no flight_deck/consult_peer, so the
+        #     originating agent CANNOT auto-resend the task. This is the gate that
+        #     stops the inter-agent resend flood: once a result (even an error)
+        #     comes back, the relay turn can only relay it, never re-delegate.
+        _deny_tools: list[str] = []
+        if video_attachments:
+            _deny_tools += ["scripts", "shell"]
+        if isinstance(content, str) and "[Delegated result from" in content:
+            _deny_tools += ["flight_deck", "consult_peer"]
+        if _deny_tools:
             try:
                 _video_policy_slug = agent._current_session_slug()
-                agent.tools.set_session_policy(_video_policy_slug, {"deny": ["scripts", "shell"]})
+                agent.tools.set_session_policy(_video_policy_slug, {"deny": sorted(set(_deny_tools))})
             except Exception as exc:
-                log.warning("Could not set video-turn tool policy", error=str(exc))
+                log.warning("Could not set per-turn tool policy", error=str(exc))
                 _video_policy_slug = None
 
         # Route /orchestrate requests to the orchestrator (admin only).
