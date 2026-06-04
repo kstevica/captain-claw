@@ -2429,15 +2429,9 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
     import websockets
     import json
 
-    # Prevent duplicate consultations to the same agent
-    existing = _active_consults.get(req.port)
-    if existing:
-        async def _busy_stream():
-            yield json.dumps({
-                "ok": False,
-                "error": f"Agent on port {req.port} is already being consulted by '{existing}'. Wait for that consultation to finish, or use 'delegate' for fire-and-forget tasks.",
-            }) + "\n"
-        return StreamingResponse(_busy_stream(), media_type="application/x-ndjson")
+    # NB: a peer serves one consult at a time. Rather than reject when it's
+    # busy (which made flows/agents fail or loop), we QUEUE: _event_stream waits
+    # for the in-flight consult to finish, then acquires the lock.
 
     # Event types we forward as peer activity so the caller can show progress
     _FORWARD_TYPES = {"status", "thinking", "monitor", "tool_stream"}
@@ -2451,6 +2445,19 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
     agent_url = f"ws://{req.host}:{req.port}/ws{params}"
 
     async def _event_stream():
+        # Queue behind any in-flight consult to this agent (it serves one at a
+        # time). Bounded by the request timeout. The check-then-set has no await
+        # between, so only one waiter acquires per loop tick (no race).
+        _waited = 0.0
+        _cap = min(float(req.timeout), 180.0)
+        while _active_consults.get(req.port) and _waited < _cap:
+            if _waited == 0.0:
+                yield json.dumps({"event": "status", "data": {"status": f"Agent on port {req.port} busy — queuing…"}}) + "\n"
+            await asyncio.sleep(1.0)
+            _waited += 1.0
+        if _active_consults.get(req.port):
+            yield json.dumps({"ok": False, "error": f"Agent on port {req.port} still busy after {int(_waited)}s — try again."}) + "\n"
+            return
         _active_consults[req.port] = req.source_name
         try:
             async with websockets.connect(agent_url, max_size=4 * 1024 * 1024) as ws:
