@@ -83,9 +83,21 @@ class FlowRunner:
         if sel == "origin" or not sel:
             host = payload.get("origin_host") or "localhost"
             port = payload.get("origin_port")
+            name = str(payload.get("origin_name") or "").strip()
+            # Resolve to the LIVE registry entry so we get the current port AND
+            # the matching auth token. Prefer name (the origin may have drifted
+            # ports since the message arrived), then port.
+            if name:
+                for a in agents:
+                    if str(a.get("name", "")).lower() == name.lower():
+                        return a
             if port:
-                return {"name": payload.get("origin_name", "origin"), "host": host, "port": int(port)}
-            # fall back to any running agent
+                for a in agents:
+                    if int(a.get("port") or 0) == int(port):
+                        return a
+                # Fallback: hand-built target with a resolved token.
+                return {"name": name or "origin", "host": host, "port": int(port),
+                        "auth": self.resolve_auth(int(port)) if self.resolve_auth else ""}
             return agents[0] if agents else None
         if sel.startswith("name:"):
             want = sel.split(":", 1)[1].strip().lower()
