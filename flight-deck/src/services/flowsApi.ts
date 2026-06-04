@@ -86,6 +86,8 @@ export interface FlowStep {
   // input step — pause the run, ask the user, resume with their reply
   /** seconds to wait for the user's reply before failing the run */
   timeout?: number
+  /** end the flow after this step runs (e.g. inside a branch path) */
+  stop?: boolean
 }
 
 export interface FlowGuardrails {

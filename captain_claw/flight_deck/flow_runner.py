@@ -28,6 +28,9 @@ _TEMPLATE_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_.\[\]]+)\s*\}\}")
 _VISION_HINTS = ("vision", "image", "multimodal", "minimax", "llava", "vl")
 _DEFAULT_MAX_STEPS = 20
 
+# Sentinel goto target that ends the flow (used by branch `goto`/`else`).
+_STOP_TARGET = "__stop__"
+
 
 def _dig(ctx: dict[str, Any], path: str) -> Any:
     """Resolve a dotted path like 'steps.analyze.output' against ctx."""
@@ -426,6 +429,8 @@ class FlowRunner:
                     _record(trace, sid, stype, "done", "", out, t0)
                     if not dry:
                         await self.store.add_step_result(run_id, sid, executed, type=stype, status="done", output_text=out, ms=_ms(t0))
+                    if target and str(target) == _STOP_TARGET:
+                        break  # branch ends the flow
                     if target and target in by_id:
                         i = by_id[target]
                         continue
@@ -454,12 +459,16 @@ class FlowRunner:
                         run_id, sid, executed, type=stype, status="done",
                         agent=agent, output_text=str(out), ms=_ms(t0),
                     )
+                # Track the last EXECUTED step's output (correct under goto/stop,
+                # unlike steps[-1] which is just the last step in the list).
+                final_text = str(out)
                 i += 1
+                if step.get("stop"):
+                    break  # "Stop after this step" flag → end the flow here
 
-            # Deliver final output.
+            # Deliver final output (the last executed step's output).
             output = flow.get("output") or {}
             out_channel = str(output.get("channel") or "log")
-            final_text = ctx["steps"].get(steps[-1]["id"], {}).get("output", "") if steps else ""
             if not dry and out_channel in ("whatsapp", "same", "glasses", "web") and final_text:
                 try:
                     await self._deliver(payload, str(final_text))

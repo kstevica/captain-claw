@@ -838,6 +838,7 @@ function StepCard({
                     className={inputCls}
                   >
                     <option value="">— goto step —</option>
+                    <option value="__stop__">⏹ Stop flow</option>
                     {gotoOptions.map((id) => (
                       <option key={id} value={id}>{id}</option>
                     ))}
@@ -862,6 +863,7 @@ function StepCard({
                   className={`${inputCls} w-auto`}
                 >
                   <option value="">— next step —</option>
+                  <option value="__stop__">⏹ Stop flow</option>
                   {gotoOptions.map((id) => (
                     <option key={id} value={id}>{id}</option>
                   ))}
@@ -908,6 +910,18 @@ function StepCard({
             <VarChips priorIds={priorIds} onInsert={insertVar} />
           </div>
         </>
+      )}
+
+      {step.type !== 'branch' && (
+        <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-zinc-400">
+          <input
+            type="checkbox"
+            checked={!!step.stop}
+            onChange={(e) => onChange({ stop: e.target.checked })}
+            className="accent-rose-500"
+          />
+          <span>⏹ Stop the flow after this step</span>
+        </label>
       )}
     </div>
   )
