@@ -618,6 +618,7 @@ function CodeView({ draft, fleet, onApply }: { draft: FlowInput; fleet: string[]
         </div>
         <p className="mt-2 text-[10px] text-zinc-600">
           Edits here apply to the builder on “Validate &amp; apply”; switch to Builder and Save to persist.
+          {' '}Full language reference: <span className="font-mono">FLOWS.md</span> in the repo.
         </p>
       </Section>
     </div>

@@ -28,6 +28,8 @@ An open-source AI agent with multi-agent orchestration, autonomous cognitive sys
 
 Adds two agent endpoints (`/api/tool`, `/api/vision`, admin-locked). See [RELEASE_NOTES_0.4.32.md](RELEASE_NOTES_0.4.32.md). Backward compatible with 0.4.31.
 
+📖 **Full Flow language reference:** [FLOWS.md](FLOWS.md) — triggers, step types, the `{{…}}` templating, branch conditions, the code DSL, and the AI compiler, with a cookbook and troubleshooting.
+
 ## What's New in 0.4.31
 
 **Video Understanding.** The fleet can now watch and describe videos. Attach a clip (Flight Deck/glasses) or send one over WhatsApp and Captain Claw samples frames, transcribes the audio, describes each frame, and synthesizes one coherent description.
