@@ -174,6 +174,19 @@ class FlowRunner:
 
         prompt = _render(str(step.get("prompt") or ""), render_ctx)
 
+        # FD-only mitigation (works even if the target runs older code): when a
+        # file/image is attached, prepend a hard instruction to ignore memory and
+        # describe ONLY the attachment. The deterministic version (suppressing the
+        # target's memory injection) needs the target on current code.
+        if attach:
+            prompt = (
+                "A file/image is attached to THIS message. Answer using ONLY what you "
+                "actually see in the attachment. IGNORE everything else in your context "
+                "— do NOT use 'Persistent insights from memory', remembered facts, fleet "
+                "ports, or earlier descriptions. Describe only the attached content.\n\n"
+                + prompt
+            )
+
         # Deterministic tool denials for the target. Start with the step's own
         # deny list; when a file/image is attached, also block shell/scripts/read
         # so the model uses the ATTACHED content instead of operating on the path.
