@@ -19,7 +19,10 @@ import {
   XCircle,
   Code2,
   Sparkles,
+  BookOpen,
 } from 'lucide-react'
+import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useFlowsStore } from '../../stores/flowsStore'
 import {
   emptyFlow,
@@ -27,6 +30,7 @@ import {
   compileDsl,
   decompileFlow,
   compileWithAI,
+  getFlowDocs,
   type FlowInput,
   type FlowStep,
   type StepType,
@@ -514,6 +518,19 @@ function CodeView({ draft, fleet, onApply }: { draft: FlowInput; fleet: string[]
   const [busy, setBusy] = useState(false)
   const [ai, setAi] = useState('')
   const [aiAgent, setAiAgent] = useState('')
+  const [docs, setDocs] = useState<string | null>(null)
+  const [docsOpen, setDocsOpen] = useState(false)
+
+  const openDocs = async () => {
+    setDocsOpen(true)
+    if (docs === null) {
+      try {
+        setDocs(await getFlowDocs())
+      } catch {
+        setDocs('# Flow docs unavailable\n\nCould not load FLOWS.md from the server.')
+      }
+    }
+  }
 
   // Decompile the current draft into DSL when the view mounts.
   useEffect(() => {
@@ -566,6 +583,45 @@ function CodeView({ draft, fleet, onApply }: { draft: FlowInput; fleet: string[]
 
   return (
     <div className="space-y-4">
+      <div className="flex justify-end">
+        <button
+          onClick={openDocs}
+          className="flex items-center gap-1.5 rounded-lg border border-zinc-700/50 px-3 py-1.5 text-xs text-zinc-300 hover:border-violet-500/40 hover:text-violet-300 transition-colors"
+        >
+          <BookOpen className="h-3.5 w-3.5" /> Flow language docs
+        </button>
+      </div>
+
+      {docsOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => setDocsOpen(false)}
+        >
+          <div
+            className="flex max-h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-2.5">
+              <h3 className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
+                <BookOpen className="h-4 w-4 text-violet-400" /> Flow language reference
+              </h3>
+              <button onClick={() => setDocsOpen(false)} className="text-zinc-500 hover:text-zinc-200">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="fd-markdown overflow-y-auto px-5 py-4 text-sm leading-relaxed text-zinc-300">
+              {docs === null ? (
+                <div className="flex items-center gap-2 text-zinc-500">
+                  <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+                </div>
+              ) : (
+                <Markdown remarkPlugins={[remarkGfm]}>{docs}</Markdown>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       <Section title="Describe it (AI → flow)">
         <textarea
           value={ai}

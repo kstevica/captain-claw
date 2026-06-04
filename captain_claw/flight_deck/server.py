@@ -2268,6 +2268,25 @@ async def fd_flows_evaluate(request: Request, user: dict | None = _optional_user
 # ── Flow DSL: text <-> flow, and agent-assisted NL -> flow ──────────────
 # Registered BEFORE /fd/flows/{flow_id} so 'dsl'/'compile' aren't read as ids.
 
+@app.get("/fd/flows/docs")
+async def fd_flows_docs(request: Request, user: dict | None = _optional_user_dep):
+    """Serve the Flow language reference (FLOWS.md) for the in-app docs viewer."""
+    from pathlib import Path as _Path
+    here = _Path(__file__).resolve()
+    candidates = [
+        here.parent.parent.parent / "FLOWS.md",   # repo root (../../ from this file)
+        here.parent.parent / "FLOWS.md",
+        _Path.cwd() / "FLOWS.md",
+    ]
+    for p in candidates:
+        try:
+            if p.is_file():
+                return {"ok": True, "markdown": p.read_text(encoding="utf-8")}
+        except Exception:
+            continue
+    return {"ok": False, "markdown": "# Flow docs\n\nFLOWS.md was not found on the server."}
+
+
 @app.post("/fd/flows/dsl/compile")
 async def fd_flows_dsl_compile(request: Request, user: dict | None = _optional_user_dep):
     """Deterministic: DSL text → flow dict (with structured errors)."""

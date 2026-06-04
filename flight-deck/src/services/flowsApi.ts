@@ -234,6 +234,11 @@ export async function compileWithAI(text: string, agent?: string): Promise<DslCo
   return fdFetch<DslCompileResult>(`/flows/compile`, jsonInit('POST', { text, agent: agent || '' }))
 }
 
+export async function getFlowDocs(): Promise<string> {
+  const r = await fdFetch<{ ok: boolean; markdown?: string }>(`/flows/docs`)
+  return r.markdown || '# Flow docs unavailable'
+}
+
 // ── Helpers ──
 
 /** Empty flow scaffold for the New Flow form. */
