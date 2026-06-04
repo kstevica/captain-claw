@@ -2424,6 +2424,10 @@ class ConsultPeerRequest(BaseModel):
     # When set, the target must NOT evaluate Flow triggers for this message
     # (loop guard: a Flow's agent-step consult shouldn't re-trigger a Flow).
     no_flow: bool = False
+    # Tools the target must NOT use for this consult (deterministic guardrail —
+    # e.g. an image-describe step denies shell/scripts/read so the model uses
+    # the attached image instead of operating on the path).
+    deny_tools: list[str] = Field(default_factory=list)
 
 
 # Track active consultations to prevent duplicate requests to the same target
@@ -2497,6 +2501,8 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
                     _chat_payload["file_paths"] = _fil
                 if req.no_flow:
                     _chat_payload["no_flow"] = True
+                if req.deny_tools:
+                    _chat_payload["deny_tools"] = list(req.deny_tools)
                 await ws.send(json.dumps(_chat_payload))
 
                 # Stream events until we get the final assistant response

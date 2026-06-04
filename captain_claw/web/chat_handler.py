@@ -146,6 +146,7 @@ async def handle_chat(
     rewind_to: str | None = None,
     whatsapp_waid: str | None = None,
     no_flow: bool = False,
+    deny_tools: list[str] | None = None,
 ) -> None:
     """Process a chat message through the agent.
 
@@ -370,6 +371,7 @@ async def handle_chat(
         public_session_id=public_session_id,
         video_attachments=video_attachments,
         no_flow=no_flow,
+        deny_tools=deny_tools,
         flow_text=content,
         flow_attach={
             "image_path": image_path or (image_paths[0] if image_paths else ""),
@@ -485,6 +487,7 @@ async def _run_agent(
     public_session_id: str | None = None,
     video_attachments: list[str] | None = None,
     no_flow: bool = False,
+    deny_tools: list[str] | None = None,
     flow_text: str = "",
     flow_attach: dict | None = None,
 ) -> None:
@@ -549,7 +552,7 @@ async def _run_agent(
             except Exception:
                 pass
 
-        _deny_tools: list[str] = []
+        _deny_tools: list[str] = list(deny_tools or [])  # caller-requested (e.g. consult)
         if video_attachments:
             _deny_tools += ["scripts", "shell"]
         if isinstance(content, str) and "[Delegated result from" in content:

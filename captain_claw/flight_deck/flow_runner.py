@@ -146,12 +146,22 @@ class FlowRunner:
         agent = self._select_agent(selector, payload)
         if not agent:
             return f"(no agent for selector '{selector}')", ""
+        # Deterministic tool denials for the target. Start with the step's own
+        # deny list; when a file/image is attached, also block shell/scripts/read
+        # so the model uses the ATTACHED content instead of operating on the path
+        # (e.g. running `ls`/`read` on the image path).
+        _deny = list(deny)
+        if attach:
+            for t in ("shell", "scripts", "read"):
+                if t not in _deny:
+                    _deny.append(t)
         import httpx
         body = {
             "host": agent["host"], "port": int(agent["port"]),
             "auth": str(agent.get("auth") or ""),  # token from the same entry as the port
             "message": prompt, "source_name": "FlowEngine", "timeout": 480.0,
             "attach_path": attach or "", "no_flow": True,  # loop guard
+            "deny_tools": _deny,
         }
         final, err = "", ""
         try:
