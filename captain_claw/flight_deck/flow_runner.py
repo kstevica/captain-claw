@@ -286,6 +286,38 @@ class FlowRunner:
         except Exception as exc:
             return f"(vision dispatch failed: {exc})", agent.get("name", "")
 
+    async def _deliver(self, payload: dict[str, Any], text: str, *, role: str = "assistant") -> bool:
+        """Send a message to the user on the originating channel.
+
+        WhatsApp → whatsapp_send. Agent-handled channels (web/glasses) → push
+        into the origin agent's chat UI via /api/chat/push (the flow runs in FD,
+        so it can't rely on the agent relaying inside a blocking turn)."""
+        text = str(text or "")
+        if not text:
+            return False
+        waid = str(payload.get("waid") or payload.get("whatsapp_waid") or "")
+        if waid and self.whatsapp_send:
+            try:
+                await self.whatsapp_send(waid, text)
+                return True
+            except Exception as exc:
+                log.warning("flow deliver (whatsapp) failed: %s", exc)
+                return False
+        agent = self._select_agent("origin", payload)
+        if not agent:
+            return False
+        import httpx
+        url = f"http://{agent['host']}:{agent['port']}/api/chat/push"
+        token = agent.get("auth") or (self.resolve_auth(int(agent["port"])) if self.resolve_auth else "")
+        params = {"token": token} if token else {}
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(url, params=params, json={"text": text, "role": role})
+            return resp.status_code == 200
+        except Exception as exc:
+            log.warning("flow deliver (agent push) failed: %s", exc)
+            return False
+
     async def _run_input_step(
         self, step: dict[str, Any], ctx: dict[str, Any],
         payload: dict[str, Any], flow: dict[str, Any], *, dry: bool = False,
@@ -300,24 +332,18 @@ class FlowRunner:
 
         waid = str(payload.get("waid") or payload.get("whatsapp_waid") or "")
         channel = str(payload.get("channel") or "")
+        origin_port = int(payload.get("origin_port") or 0)
         # Announce that input is needed — the flow name is required so the user
         # knows which automation is asking.
         announce = f"⏳ *{flow_name}* needs your input:\n\n{prompt}"
 
-        delivered = False
-        if waid and self.whatsapp_send:
-            try:
-                await self.whatsapp_send(waid, announce)
-                delivered = True
-            except Exception as exc:
-                log.warning("input-step prompt delivery failed: %s", exc)
-        if not delivered:
+        if not await self._deliver(payload, announce):
             # No reachable channel to ask on — fail clearly instead of hanging.
             return "(input step: no channel available to prompt the user)", ""
 
         from captain_claw.flight_deck import flow_router
         timeout = float(step.get("timeout") or 3600.0)
-        key = flow_router.input_key(waid=waid, channel=channel)
+        key = flow_router.input_key(waid=waid, channel=channel, origin_port=origin_port)
         try:
             text = await flow_router.wait_for_input(key, timeout=timeout)
         except asyncio.TimeoutError as exc:
@@ -329,11 +355,11 @@ class FlowRunner:
     async def _emit(self, step: dict[str, Any], ctx: dict[str, Any], payload: dict[str, Any]) -> str:
         channel = str(step.get("channel") or "log")
         body = _render(str(step.get("body") or "{{steps}}"), ctx)
-        if channel in ("whatsapp", "same") and self.whatsapp_send:
-            waid = str(payload.get("waid") or payload.get("whatsapp_waid") or "")
-            if waid:
-                await self.whatsapp_send(waid, body)
-                return f"(emitted to whatsapp {waid})"
+        # 'same'/'whatsapp'/'glasses'/'web' all deliver on the originating
+        # channel (whatsapp_send or agent chat-push); 'log' just records.
+        if channel in ("whatsapp", "same", "glasses", "web"):
+            if await self._deliver(payload, body):
+                return f"(emitted to {channel})"
         return body  # 'log' / fallthrough — captured in the run record
 
     # ── main loop ──────────────────────────────────────────────────────
@@ -419,13 +445,11 @@ class FlowRunner:
             output = flow.get("output") or {}
             out_channel = str(output.get("channel") or "log")
             final_text = ctx["steps"].get(steps[-1]["id"], {}).get("output", "") if steps else ""
-            if not dry and out_channel in ("whatsapp", "same", "glasses") and self.whatsapp_send:
-                waid = str(payload.get("waid") or payload.get("whatsapp_waid") or "")
-                if waid and final_text:
-                    try:
-                        await self.whatsapp_send(waid, str(final_text))
-                    except Exception as exc:
-                        log.warning("flow output delivery failed: %s", exc)
+            if not dry and out_channel in ("whatsapp", "same", "glasses", "web") and final_text:
+                try:
+                    await self._deliver(payload, str(final_text))
+                except Exception as exc:
+                    log.warning("flow output delivery failed: %s", exc)
         except Exception as exc:
             status = "error"
             error = str(exc)

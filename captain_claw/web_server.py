@@ -1288,6 +1288,41 @@ class WebServer:
             log.warning("api_vision failed", error=str(exc))
             return web.json_response({"success": False, "error": str(exc)}, status=500)
 
+    async def _api_chat_push(self, request: web.Request) -> web.Response:
+        """Inject a message into this agent's chat UI (the director/web chat).
+
+        The Flow engine uses this to deliver flow output and input-step prompts
+        on the web/glasses channels asynchronously — the flow runs in Flight
+        Deck (so the origin agent isn't busy), then pushes its messages here
+        instead of relying on the agent to relay them inside a blocking turn.
+        Admin-locked like /api/tool.
+        """
+        from captain_claw.config import get_config as _gc
+        from captain_claw.web.public_auth import _is_admin
+        cfg = _gc()
+        if cfg.web.auth_token and not _is_admin(request, cfg.web):
+            return web.json_response({"success": False, "error": "unauthorized"}, status=403)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"success": False, "error": "invalid JSON body"}, status=400)
+        text = str(data.get("text") or "").strip()
+        if not text:
+            return web.json_response({"success": False, "error": "missing 'text'"}, status=400)
+        try:
+            from datetime import datetime, timezone
+            self._broadcast({
+                "type": "chat_message",
+                "role": str(data.get("role") or "assistant"),
+                "content": text,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "model": str(data.get("model") or "flow"),
+            })
+            return web.json_response({"success": True})
+        except Exception as exc:
+            log.warning("api_chat_push failed", error=str(exc))
+            return web.json_response({"success": False, "error": str(exc)}, status=500)
+
     async def _audio_transcribe(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_audio_transcribe import transcribe_audio_handler
         return await transcribe_audio_handler(self, request)
@@ -2400,6 +2435,7 @@ class WebServer:
         app.router.add_post("/api/file/upload", self._file_upload)
         app.router.add_post("/api/tool", self._api_tool)  # Flow engine: deterministic single-tool RPC
         app.router.add_post("/api/vision", self._api_vision)  # Flow engine: lean image-describe (raw model call)
+        app.router.add_post("/api/chat/push", self._api_chat_push)  # Flow engine: async delivery into this agent's chat UI
         app.router.add_post("/api/audio/transcribe", self._audio_transcribe)
         app.router.add_post("/api/loops/start", self._start_loop)
         app.router.add_get("/api/loops/status", self._get_loop_status)

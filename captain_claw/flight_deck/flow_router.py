@@ -28,13 +28,14 @@ _RUNNER: Any = None
 _PENDING_INPUT: dict[str, asyncio.Future] = {}
 
 
-def input_key(*, waid: str = "", channel: str = "") -> str:
+def input_key(*, waid: str = "", channel: str = "", origin_port: int = 0) -> str:
     """Stable key for a paused-input wait. WAID identifies a WhatsApp user
-    across messages; otherwise fall back to the channel."""
+    across messages; for agent-handled channels (web/glasses) the same user
+    talks to one agent, so key by channel + that agent's port."""
     waid = str(waid or "")
     if waid:
         return f"waid:{waid}"
-    return f"chan:{str(channel or '')}"
+    return f"chan:{str(channel or '')}:{int(origin_port or 0)}"
 
 
 async def wait_for_input(key: str, *, timeout: float = 3600.0) -> str:
@@ -54,15 +55,15 @@ async def wait_for_input(key: str, *, timeout: float = 3600.0) -> str:
             _PENDING_INPUT.pop(key, None)
 
 
-def has_pending_input(*, waid: str = "", channel: str = "") -> bool:
-    fut = _PENDING_INPUT.get(input_key(waid=waid, channel=channel))
+def has_pending_input(*, waid: str = "", channel: str = "", origin_port: int = 0) -> bool:
+    fut = _PENDING_INPUT.get(input_key(waid=waid, channel=channel, origin_port=origin_port))
     return bool(fut is not None and not fut.done())
 
 
-def deliver_pending_input(*, waid: str = "", channel: str = "", text: str = "") -> bool:
+def deliver_pending_input(*, waid: str = "", channel: str = "", origin_port: int = 0, text: str = "") -> bool:
     """Resolve a paused flow's input wait with *text*. Returns True if a wait
     was satisfied (caller should NOT also forward the message to the agent)."""
-    fut = _PENDING_INPUT.get(input_key(waid=waid, channel=channel))
+    fut = _PENDING_INPUT.get(input_key(waid=waid, channel=channel, origin_port=origin_port))
     if fut is not None and not fut.done():
         fut.set_result(text)
         return True
@@ -71,6 +72,20 @@ def deliver_pending_input(*, waid: str = "", channel: str = "", text: str = "") 
 
 def _flow_has_input(flow: dict[str, Any]) -> bool:
     return any(str(s.get("type")) == "input" for s in (flow.get("steps") or []))
+
+
+def _flow_needs_async(flow: dict[str, Any]) -> bool:
+    """A flow must run detached from the caller's turn when it can pause for
+    input, or when it consults the ORIGIN agent — on agent-handled channels the
+    origin agent is the one waiting on this evaluate call, so a synchronous
+    consult would deadlock it. Such flows run in the background and deliver via
+    the channel (WhatsApp send / agent chat-push) instead of an inline return."""
+    for s in (flow.get("steps") or []):
+        if str(s.get("type")) == "input":
+            return True
+        if str(s.get("on") or "").strip() == "origin" and str(s.get("type")) in ("agent", "tool", "vision"):
+            return True
+    return False
 
 
 async def _bg_run(flow: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -189,7 +204,7 @@ async def run_flow(flow: dict[str, Any], payload: dict[str, Any]) -> None:
     # A flow that can pause for user input must not block the inbound handler
     # (the user's reply arrives on a *later* message that needs this handler
     # free to deliver it). Run those in the background.
-    if _flow_has_input(flow):
+    if _flow_needs_async(flow):
         asyncio.create_task(_bg_run(flow, payload))
         return
     try:
@@ -208,7 +223,7 @@ async def try_match_and_run(payload: dict[str, Any]) -> bool:
     if not flow:
         return False
     log.info("flow triggered", flow=flow.get("name"), channel=payload.get("channel"))
-    if _flow_has_input(flow):
+    if _flow_needs_async(flow):
         asyncio.create_task(_bg_run(flow, payload))
         return True
     try:

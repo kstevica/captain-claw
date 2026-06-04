@@ -2236,9 +2236,28 @@ async def fd_flows_evaluate(request: Request, user: dict | None = _optional_user
         origin_port=int(raw.get("origin_port") or 0),
         origin_name=str(raw.get("origin_name") or ""),
     )
+    # 1. Resume a paused flow first: if one is waiting on an `input` step for
+    #    this channel+agent, this message is the reply — feed it and stop (the
+    #    flow continues in the background and delivers via the channel).
+    if flow_router.deliver_pending_input(
+        waid=payload.get("waid", ""), channel=payload.get("channel", ""),
+        origin_port=int(payload.get("origin_port") or 0), text=payload.get("text", ""),
+    ):
+        return {"matched": True, "deferred": True}
+
     flow = await flow_router.match_flow(payload)
     if not flow:
         return {"matched": False}
+
+    # 2. Flows that can pause for input or consult the ORIGIN agent must run
+    #    detached: the origin agent is the one blocked on THIS evaluate call, so
+    #    a synchronous origin-consult would deadlock it. Background it and let it
+    #    deliver via the channel (agent chat-push); the agent ends its turn now.
+    if flow_router._flow_needs_async(flow):
+        asyncio.create_task(flow_router._bg_run(flow, payload))
+        return {"matched": True, "flow": flow.get("name"), "deferred": True}
+
+    # 3. Simple flow → run inline and relay its output (unchanged behaviour).
     result = await app.state.flow_runner.run(flow, payload)
     return {
         "matched": True, "flow": flow.get("name"),

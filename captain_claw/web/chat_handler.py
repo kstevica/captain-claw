@@ -429,9 +429,14 @@ async def _prefix_video_analysis(
     )
 
 
-async def _maybe_run_flow(agent: Any, text: str, *, is_public: bool, attach: dict | None = None) -> str | None:
-    """Ask Flight Deck whether a Flow matches this message; return its output text
-    (to relay), or None to take a normal agent turn. Best-effort; never raises."""
+async def _maybe_run_flow(agent: Any, text: str, *, is_public: bool, attach: dict | None = None) -> dict | None:
+    """Ask Flight Deck whether a Flow matches this message.
+
+    Returns None to take a normal agent turn, or a dict:
+      {"output": text}  → relay this text, end the turn (inline simple flow)
+      {"deferred": True} → flow took over (runs in FD bg, delivers via channel);
+                           end the turn silently. Also covers resuming a paused
+                           input step. Best-effort; never raises."""
     attach = attach or {}
     has_attach = any(attach.get(k) for k in ("image_path", "video_path", "audio_path", "file_path"))
     # Need either text or an attachment to be worth evaluating.
@@ -471,8 +476,15 @@ async def _maybe_run_flow(agent: Any, text: str, *, is_public: bool, attach: dic
         if r.status_code != 200:
             return None
         data = r.json() or {}
-        if data.get("matched") and str(data.get("output") or "").strip():
-            return str(data["output"])
+        if not data.get("matched"):
+            return None
+        # Deferred: the flow runs in FD's background and delivers via the channel
+        # (agent chat-push). The agent must end its turn WITHOUT a normal reply.
+        if data.get("deferred"):
+            return {"deferred": True}
+        out = str(data.get("output") or "").strip()
+        if out:
+            return {"output": out}
     except Exception as exc:
         log.debug("flow evaluate skipped: %s", exc)
     return None
@@ -525,13 +537,16 @@ async def _run_agent(
         # whether a Flow trigger matches this message. If one does, FD runs it
         # and we relay its output instead of taking a normal agent turn.
         if not no_flow:
-            _flow_out = await _maybe_run_flow(agent, flow_text or content, is_public=is_public, attach=flow_attach)
-            if _flow_out is not None:
-                send({
-                    "type": "chat_message", "role": "assistant",
-                    "content": _flow_out, "timestamp": datetime.now(UTC).isoformat(),
-                    "model": "flow",
-                })
+            _flow = await _maybe_run_flow(agent, flow_text or content, is_public=is_public, attach=flow_attach)
+            if _flow is not None:
+                # Inline output → relay it. Deferred → the flow delivers its own
+                # messages asynchronously via /api/chat/push; end the turn quietly.
+                if _flow.get("output"):
+                    send({
+                        "type": "chat_message", "role": "assistant",
+                        "content": _flow["output"], "timestamp": datetime.now(UTC).isoformat(),
+                        "model": "flow",
+                    })
                 return  # the `finally` resets busy + emits "ready"
 
         # Deterministic video preprocessing: when a video was attached, run
