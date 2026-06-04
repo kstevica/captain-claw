@@ -234,6 +234,44 @@ class FlowRunner:
             err = str(exc)
         return (final or f"(no result: {err})"), agent.get("name", "")
 
+    async def _run_vision_step(self, step: dict[str, Any], ctx: dict[str, Any], payload: dict[str, Any]) -> tuple[str, str]:
+        """Lean image describe: upload the image to a vision agent and call its
+        /api/vision (raw model call) — NO agent loop, memory, tools, or history."""
+        image_src = _render(str(step.get("attach") or step.get("image") or "{{trigger.image_path}}"), ctx)
+        prompt = _render(str(step.get("prompt") or "Describe this image in detail."), ctx)
+        selector = str(step.get("on") or "capability:vision")
+        agent = self._select_agent(selector, payload)
+        if not agent:
+            return f"(no vision agent for selector '{selector}')", ""
+        if not image_src:
+            return "(no image to describe)", agent.get("name", "")
+        if not self.transfer_file:
+            return "(file transfer unavailable)", agent.get("name", "")
+        # Upload to the target and verify it landed; use the TARGET-local path.
+        try:
+            imgs, files = await self.transfer_file(agent["host"], int(agent["port"]), image_src)
+        except Exception as exc:
+            return f"(failed to send image to {agent.get('name','')}: {exc})", agent.get("name", "")
+        target = imgs[0] if imgs else (files[0] if files else "")
+        if not target:
+            return f"(image NOT received by {agent.get('name','')}: {image_src})", agent.get("name", "")
+        import httpx
+        url = f"http://{agent['host']}:{int(agent['port'])}/api/vision"
+        token = str(agent.get("auth") or "")
+        try:
+            async with httpx.AsyncClient(timeout=600.0) as client:
+                resp = await client.post(
+                    url, params=({"token": token} if token else {}),
+                    json={"image": target, "prompt": prompt},
+                )
+            if resp.status_code != 200:
+                return f"(vision failed: HTTP {resp.status_code} {resp.text[:200]})", agent.get("name", "")
+            data = resp.json() or {}
+            out = data.get("content") if data.get("success") else f"(vision error: {data.get('error')})"
+            return str(out or "(empty vision result)"), agent.get("name", "")
+        except Exception as exc:
+            return f"(vision dispatch failed: {exc})", agent.get("name", "")
+
     async def _emit(self, step: dict[str, Any], ctx: dict[str, Any], payload: dict[str, Any]) -> str:
         channel = str(step.get("channel") or "log")
         body = _render(str(step.get("body") or "{{steps}}"), ctx)
@@ -303,6 +341,8 @@ class FlowRunner:
                     out, agent = await self._run_tool(step, ctx, payload)
                 elif stype == "agent":
                     out, agent = await self._run_agent_step(step, ctx, payload)
+                elif stype == "vision":
+                    out, agent = await self._run_vision_step(step, ctx, payload)
                 elif stype == "emit":
                     out, agent = await self._emit(step, ctx, payload), ""
                 else:

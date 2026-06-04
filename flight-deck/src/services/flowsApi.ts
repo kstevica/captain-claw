@@ -58,7 +58,7 @@ export interface FlowTrigger {
   match: FlowMatch
 }
 
-export type StepType = 'tool' | 'agent' | 'branch' | 'emit'
+export type StepType = 'tool' | 'agent' | 'vision' | 'branch' | 'emit'
 
 export interface FlowStep {
   id: string

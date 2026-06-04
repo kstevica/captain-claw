@@ -1249,6 +1249,45 @@ class WebServer:
             log.warning("api_tool failed", tool=tool, error=str(exc))
             return web.json_response({"success": False, "error": str(exc)}, status=500)
 
+    async def _api_vision(self, request: web.Request) -> web.Response:
+        """Lean vision primitive: describe/answer about an image with a RAW model
+        call — no agent loop, no memory/insights, no tools, no session history.
+
+        The Flow engine uses this for image steps so the description never inherits
+        the agent's baggage (the cause of ls-the-path / memory-regurgitation bugs).
+        Admin-locked like /api/tool.
+        """
+        from captain_claw.config import get_config as _gc
+        from captain_claw.web.public_auth import _is_admin
+        cfg = _gc()
+        if cfg.web.auth_token and not _is_admin(request, cfg.web):
+            return web.json_response({"success": False, "error": "unauthorized"}, status=403)
+        if not self.agent or not getattr(self.agent, "provider", None):
+            return web.json_response({"success": False, "error": "no model available"}, status=503)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"success": False, "error": "invalid JSON body"}, status=400)
+        image = str(data.get("image") or data.get("path") or "").strip()
+        prompt = str(data.get("prompt") or "Describe this image in detail.").strip()
+        if not image:
+            return web.json_response({"success": False, "error": "missing 'image' path"}, status=400)
+        try:
+            from captain_claw.llm import Message
+            msgs = [
+                Message(role="system", content=(
+                    "You are a vision assistant. Describe or answer based ONLY on the "
+                    "attached image. Use no other context, memory, or tools."
+                )),
+                Message(role="user", content=f"{prompt}\n[Attached image: {image}]"),
+            ]
+            resp = await self.agent.provider.complete(msgs)
+            content = str(getattr(resp, "content", "") or "").strip()
+            return web.json_response({"success": True, "content": content})
+        except Exception as exc:
+            log.warning("api_vision failed", error=str(exc))
+            return web.json_response({"success": False, "error": str(exc)}, status=500)
+
     async def _audio_transcribe(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_audio_transcribe import transcribe_audio_handler
         return await transcribe_audio_handler(self, request)
@@ -2360,6 +2399,7 @@ class WebServer:
         )
         app.router.add_post("/api/file/upload", self._file_upload)
         app.router.add_post("/api/tool", self._api_tool)  # Flow engine: deterministic single-tool RPC
+        app.router.add_post("/api/vision", self._api_vision)  # Flow engine: lean image-describe (raw model call)
         app.router.add_post("/api/audio/transcribe", self._audio_transcribe)
         app.router.add_post("/api/loops/start", self._start_loop)
         app.router.add_get("/api/loops/status", self._get_loop_status)

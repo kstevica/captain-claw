@@ -10,6 +10,7 @@ import {
   Loader2,
   Wrench,
   Bot,
+  Eye,
   GitBranch,
   Send,
   X,
@@ -35,6 +36,7 @@ const RULE_PRESETS = ['has_image', 'has_video', 'has_audio', 'has_document', 'ha
 const STEP_TYPE_META: Record<StepType, { icon: typeof Wrench; label: string; color: string }> = {
   tool: { icon: Wrench, label: 'Tool', color: 'text-emerald-400' },
   agent: { icon: Bot, label: 'Agent', color: 'text-violet-400' },
+  vision: { icon: Eye, label: 'Vision', color: 'text-pink-400' },
   branch: { icon: GitBranch, label: 'Branch', color: 'text-amber-400' },
   emit: { icon: Send, label: 'Emit', color: 'text-sky-400' },
 }
@@ -43,6 +45,7 @@ function newStep(type: StepType, idx: number): FlowStep {
   const base: FlowStep = { id: `step_${idx}`, type }
   if (type === 'tool') { base.on = 'origin'; base.tool = ''; base.args = {} }
   if (type === 'agent') { base.on = 'origin'; base.prompt = ''; base.guardrails = { deny: [] } }
+  if (type === 'vision') { base.on = 'capability:vision'; base.prompt = 'Describe this image in detail.'; base.attach = '{{trigger.image_path}}' }
   if (type === 'branch') { base.when = ''; base.goto = '' }
   if (type === 'emit') { base.channel = 'same'; base.body = '' }
   return base
@@ -612,7 +615,7 @@ function StepCard({
             className={`${inputCls} font-mono`}
           />
         </div>
-        {(step.type === 'tool' || step.type === 'agent') && (
+        {(step.type === 'tool' || step.type === 'agent' || step.type === 'vision') && (
           <div>
             <label className={labelCls}>Run on (agent)</label>
             <select
@@ -720,6 +723,37 @@ function StepCard({
                 className={inputCls}
               />
             </div>
+          </div>
+        </>
+      )}
+
+      {step.type === 'vision' && (
+        <>
+          <div className="mb-2">
+            <label className={labelCls}>Prompt</label>
+            <textarea
+              value={step.prompt || ''}
+              onChange={(e) => onChange({ prompt: e.target.value })}
+              onFocus={(e) => registerFocus(e.currentTarget, (v) => onChange({ prompt: v }))}
+              rows={2}
+              placeholder="Describe this image in detail."
+              className={`${inputCls} resize-y`}
+            />
+          </div>
+          <div className="mb-2">
+            <label className={labelCls}>Image to look at</label>
+            <input
+              value={step.attach || ''}
+              onChange={(e) => onChange({ attach: e.target.value })}
+              onFocus={(e) => registerFocus(e.currentTarget, (v) => onChange({ attach: v }))}
+              placeholder="{{trigger.image_path}}"
+              className={`${inputCls} font-mono`}
+            />
+            <p className="mt-1 text-[10px] text-zinc-600">
+              Raw model look — no tools, memory, or history. The image is uploaded to the
+              vision agent and described directly. Use {`{{trigger.image_path}}`}.
+            </p>
+            <VarChips priorIds={priorIds} onInsert={insertVar} />
           </div>
         </>
       )}
