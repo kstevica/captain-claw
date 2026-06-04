@@ -190,6 +190,31 @@ _CHANNEL_WAIDS: dict[str, set[str]] = {}
 _PENDING_IMAGE: dict[str, dict[str, Any]] = {}
 _PENDING_IMAGE_TTL = 300.0  # seconds
 
+# Per-WAID face mode, set via /face commands. Built for the glasses use case:
+# photos arrive over WhatsApp with no caption, so we can't read intent from
+# text — instead the user flips a sticky mode once.
+#   recognize=True  → every bare photo is checked for faces (Option A):
+#                     a face → show its card; no face → fall through to the
+#                     normal flow/agent so the scene still gets described.
+#   enroll_name set → every bare photo adds a reference sample for that person
+#                     (enrollment needs a name, which the toggle carries). The
+#                     window auto-expires so we never keep enrolling by accident.
+# In-memory, per-process — matches _PENDING_IMAGE. Recognition is sticky until
+# turned off; enrollment expires after _FACE_ENROLL_TTL of inactivity.
+_FACE_MODE: dict[str, dict[str, Any]] = {}
+_FACE_ENROLL_TTL = 300.0  # seconds an open "enroll <name>" window survives idle
+
+
+def _face_mode(waid: str) -> dict[str, Any]:
+    """Return the (live) face-mode dict for a WAID, expiring stale enrollment."""
+    m = _FACE_MODE.get(waid)
+    if not m:
+        return {"recognize": False, "enroll_name": None}
+    if m.get("enroll_name") and (time.time() - m.get("enroll_ts", 0.0)) > _FACE_ENROLL_TTL:
+        m["enroll_name"] = None
+        m.pop("enroll_pid", None)
+    return m
+
 # Caption intent matchers for inbound images. Face recognition stays a
 # Flight Deck capability (face_index) — these just decide which FD path to
 # run; anything else is forwarded to the agent for vision.
@@ -217,6 +242,137 @@ def _parse_enroll(caption: str) -> tuple[str, str] | None:
         return None
     name, _, notes = rest.partition(",")
     return name.strip(), notes.strip()
+
+
+def _face_status_text(waid: str) -> str:
+    """Render the current face-mode for a WAID."""
+    m = _face_mode(waid)
+    rec = "ON" if m.get("recognize") else "OFF"
+    if m.get("enroll_name"):
+        n = m.get("enroll_count", 0)
+        enr = f"{m['enroll_name']} ({n} saved)"
+    else:
+        enr = "OFF"
+    return (
+        "🙂 *Face mode*\n"
+        f"• Recognition: {rec}\n"
+        f"• Enrollment: {enr}\n\n"
+        "Commands:\n"
+        "• /face on — recognize faces in photos\n"
+        "• /face off — stop\n"
+        "• /face enroll <name> — save the next photos as that person\n"
+        "• /face enroll off — finish enrolling"
+    )
+
+
+async def _handle_face_command(waid: str, text: str) -> bool:
+    """Handle the ``/face …`` command family. Returns True if it consumed *text*.
+
+    Toggles are deliberate text actions (issued from the paired phone), so they
+    live as slash commands alongside /c and /mute rather than as a Flow trigger.
+    """
+    if not text.lower().startswith("/face"):
+        return False
+    arg = text[len("/face"):].strip()
+    low = arg.lower()
+
+    if not arg:
+        await _send_whatsapp_text(waid, _face_status_text(waid))
+        return True
+
+    # Enrollment sub-commands.
+    if low.startswith("enroll"):
+        rest = arg[len("enroll"):].strip(" :,-")
+        if rest.lower() in ("off", "stop", "done", ""):
+            m = _FACE_MODE.setdefault(waid, {"recognize": False, "enroll_name": None})
+            was = m.get("enroll_name")
+            n = m.get("enroll_count", 0)
+            m["enroll_name"] = None
+            m.pop("enroll_pid", None)
+            m.pop("enroll_count", None)
+            if was:
+                await _send_whatsapp_text(waid, f"✅ Finished enrolling {was} ({n} sample(s) saved).")
+            else:
+                await _send_whatsapp_text(waid, "Enrollment was not active.")
+            return True
+        name, _, notes = rest.partition(",")
+        name = name.strip()
+        if not name:
+            await _send_whatsapp_text(waid, "Usage: /face enroll <name>[, notes]")
+            return True
+        m = _FACE_MODE.setdefault(waid, {"recognize": False, "enroll_name": None})
+        m["enroll_name"] = name
+        m["enroll_notes"] = notes.strip()
+        m["enroll_ts"] = time.time()
+        m["enroll_count"] = 0
+        m.pop("enroll_pid", None)
+        await _send_whatsapp_text(
+            waid,
+            f"📸 Enrolling *{name}*. Send a few photos (different angles), "
+            "then /face enroll off when done.",
+        )
+        return True
+
+    # Recognition on/off.
+    if low in ("on", "recognize on", "recognition on", "rec on"):
+        m = _FACE_MODE.setdefault(waid, {"recognize": False, "enroll_name": None})
+        m["recognize"] = True
+        await _send_whatsapp_text(waid, "🙂 Recognition ON. Photos with a face will be identified.")
+        return True
+    if low in ("off", "recognize off", "recognition off", "rec off"):
+        m = _FACE_MODE.setdefault(waid, {"recognize": False, "enroll_name": None})
+        m["recognize"] = False
+        await _send_whatsapp_text(waid, "Recognition OFF.")
+        return True
+
+    await _send_whatsapp_text(waid, _face_status_text(waid))
+    return True
+
+
+async def _enroll_face_sample(waid: str, blob: bytes, mode: dict[str, Any]) -> None:
+    """Add one inbound photo as a reference sample for the in-progress person."""
+    name = mode.get("enroll_name") or ""
+    notes = mode.get("enroll_notes", "")
+    try:
+        res = await face_index.get_index().enroll(
+            name=name, notes=notes, image_blobs=[blob],
+            person_id=mode.get("enroll_pid"),
+        )
+    except Exception as exc:
+        log.warning("face enroll failed: %s", exc)
+        await _send_whatsapp_text(waid, f"Enrollment failed: {exc}")
+        return
+    # Reuse the same person for subsequent samples; refresh the idle window.
+    mode["enroll_pid"] = res.person_id
+    mode["enroll_ts"] = time.time()
+    if res.embeddings_added:
+        mode["enroll_count"] = mode.get("enroll_count", 0) + res.embeddings_added
+        await _send_whatsapp_text(
+            waid,
+            f"✅ Saved sample {mode['enroll_count']} for {name}. "
+            "Send more angles, or /face enroll off when done.",
+        )
+    else:
+        await _send_whatsapp_text(
+            waid, "No face detected in that photo — try a clearer, front-facing shot."
+        )
+
+
+async def _recognize_and_reply(waid: str, blob: bytes) -> bool:
+    """Identify faces in a photo. Returns True if it was handled (a face was
+    found and a card sent), False if there was no face (caller should fall
+    through to the normal flow/agent path — Option A)."""
+    try:
+        res = await face_index.get_index().recognize(image_blob=blob, channel="glasses")
+    except Exception as exc:
+        # Missing 'faces' extra or a decode error — degrade to normal handling
+        # rather than spamming an error on every ambient photo.
+        log.warning("face recognize failed, falling through: %s", exc)
+        return False
+    if not res.faces:
+        return False
+    await _send_whatsapp_text(waid, res.card_markdown)
+    return True
 
 
 # Last-seen inbound message id per WAID. WhatsApp's typing-indicator API
@@ -389,6 +545,9 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
         _MUTED_UNTIL.pop(waid, None)
         await _send_whatsapp_text(waid, "🔔 Proactive pushes resumed.")
         return
+    if text.lower().startswith("/face"):
+        await _handle_face_command(waid, text)
+        return
 
     channel = _WAID_CHANNEL.setdefault(waid, _channel_for_waid(waid))
     ch = await _get_or_create_channel(channel)
@@ -423,6 +582,25 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
         except Exception as exc:
             await _send_whatsapp_text(waid, f"Couldn't fetch photo: {exc}")
             return
+        # Face mode (glasses): captionless photos are driven by the sticky
+        # /face mode before anything else. A caption means explicit intent, so
+        # we skip modes and let the normal caption routing below handle it.
+        if not caption:
+            mode = _face_mode(waid)
+            if mode.get("enroll_name"):
+                await _enroll_face_sample(waid, blob, mode)
+                return
+            if mode.get("recognize"):
+                # Option A (ambient glasses): a face → identify & reply; no face
+                # → describe the scene directly via the agent's vision path, so
+                # every photo gets a useful answer with zero extra setup.
+                if await _recognize_and_reply(waid, blob):
+                    return
+                await _forward_image_to_agent(
+                    waid, blob, "Describe what's in front of me.",
+                    ch, agent_host, agent_port, agent_auth,
+                )
+                return
         # Flow override: an enabled image Flow takes precedence over the built-in
         # identify/describe/enroll automation. Match FIRST (cheap, no upload); only
         # if a Flow matches do we upload the photo and run it. No match → the
@@ -438,6 +616,9 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
                 _flow = await flow_router.match_flow(_fp)
                 if _flow is not None:
                     _fp["image_path"] = await _upload_image_to_agent(blob, agent_host, agent_port, agent_auth)
+                    # FD-local copy for on:fd tools (e.g. face_identify) that run
+                    # in-process and can't read the agent-host path above.
+                    _fp["fd_image_path"] = _save_fd_local_image(blob)
                     await flow_router.run_flow(_flow, _fp)
                     return
         except Exception as _exc:
@@ -1205,6 +1386,29 @@ async def _download_media(media_id: str) -> bytes:
 #   • identify intent → face_index.recognize()  (Flight Deck)
 #   • anything else  → forwarded to the agent for vision
 # Face recognition stays entirely on Flight Deck — never an agent tool.
+
+
+def _save_fd_local_image(blob: bytes, suffix: str = ".jpg") -> str:
+    """Write inbound image bytes to an FD-local file and return its path.
+
+    Flows that call an FD-internal tool (``on: fd``, e.g. ``face_identify``)
+    run in-process inside Flight Deck — they need a path the FD process can
+    read, not the agent-host path that ``_upload_image_to_agent`` returns.
+    Exposed to Flows as ``{{trigger.fd_image_path}}``. Best-effort: returns
+    "" on failure so the caller can degrade gracefully.
+    """
+    try:
+        import secrets
+        from pathlib import Path
+
+        media_dir = Path("~/.captain-claw/flow_media").expanduser()
+        media_dir.mkdir(parents=True, exist_ok=True)
+        path = media_dir / f"wa-{int(time.time())}-{secrets.token_hex(4)}{suffix}"
+        path.write_bytes(blob)
+        return str(path)
+    except Exception as exc:
+        log.warning("FD-local image save failed: %s", exc)
+        return ""
 
 
 async def _upload_image_to_agent(

@@ -490,7 +490,7 @@ function CsvField({
 
 const _TRIGGER_VARS = [
   'trigger.text', 'trigger.channel', 'trigger.waid', 'trigger.mime',
-  'trigger.image_path', 'trigger.video_path', 'trigger.audio_path', 'trigger.origin_name',
+  'trigger.image_path', 'trigger.fd_image_path', 'trigger.video_path', 'trigger.audio_path', 'trigger.origin_name',
 ]
 const _SYSTEM_VARS = ['system.now', 'system.date', 'system.time', 'system.agent', 'system.channel']
 

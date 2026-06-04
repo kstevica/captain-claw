@@ -2136,15 +2136,46 @@ def _running_agents() -> list[dict[str, Any]]:
 def _fd_internal_tools() -> dict[str, Any]:
     """FD-side tools the FlowRunner can call directly (no agent), e.g. face_identify."""
     async def _face_identify(args: dict[str, Any]) -> str:
-        image = str(args.get("image") or "")
+        """Recognize faces in an image, in-process in Flight Deck.
+
+        ``args.image`` is a filesystem path the FD process can read — use the
+        ``{{trigger.fd_image_path}}`` Flow variable (FD-local copy of the
+        inbound photo), NOT ``{{trigger.image_path}}`` (which points at the
+        agent host). Returns JSON the rest of the Flow can branch on:
+          {name, person_id, confident, confidence, count, card}
+        On any failure returns {error: "..."} with confident=false so a
+        ``branch`` step still has a defined shape to test.
+        """
+        image = str(args.get("image") or "").strip()
+        if not image:
+            return json.dumps({"confident": False, "name": None, "error": "no image path provided"})
         try:
+            from pathlib import Path as _Path
+
+            p = _Path(image).expanduser()
+            if not p.is_file():
+                return json.dumps({
+                    "confident": False, "name": None,
+                    "error": f"image not readable by Flight Deck: {image} "
+                             "(use {{trigger.fd_image_path}}, not {{trigger.image_path}})",
+                })
+            blob = p.read_bytes()
+
             from captain_claw.flight_deck import face_index  # type: ignore
-            label = face_index.recognize(image)
-            if hasattr(label, "__await__"):
-                label = await label  # type: ignore
-            return json.dumps({"label": str(label or "none")})
-        except Exception:
-            return json.dumps({"label": "none", "note": "face index not wired"})
+            result = await face_index.get_index().recognize(image_blob=blob, channel="flow")
+            return json.dumps({
+                "confident": bool(result.name is not None),
+                "name": result.name,
+                "person_id": result.person_id,
+                "confidence": round(float(result.confidence), 4),
+                "count": len(result.faces),
+                "card": result.card_markdown,
+            })
+        except RuntimeError as exc:
+            # Missing 'faces' extra (insightface/sqlite-vec) surfaces here.
+            return json.dumps({"confident": False, "name": None, "error": str(exc)})
+        except Exception as exc:
+            return json.dumps({"confident": False, "name": None, "error": f"face_identify failed: {exc}"})
     return {"face_identify": _face_identify}
 
 
