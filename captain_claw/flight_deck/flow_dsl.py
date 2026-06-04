@@ -68,7 +68,7 @@ class DSLError(Exception):
 
 
 def _unquote(s: str) -> str:
-    s = s.strip()
+    s = s.strip().replace('\\"', '"')  # tolerate over-escaped quotes from models
     if len(s) >= 2 and s[0] in "\"'" and s[-1] == s[0]:
         return s[1:-1]
     return s
@@ -123,15 +123,53 @@ def _parse_trigger(rest: str, lineno: int) -> dict[str, Any]:
         return trigger
     if head != "when":
         raise DSLError(lineno, f"expected 'when' or 'always' after channel, got '{head}'")
-    rules = _parse_rules(cond.strip(), lineno)
+    rules, mode = _parse_rules(cond.strip(), lineno)
     trigger["match"]["rules"] = rules
+    trigger["match"]["mode"] = mode  # 'all' (and) or 'any' (or)
     return trigger
 
 
-def _parse_rules(text: str, lineno: int) -> list[str]:
-    """Split a rule list on ` and ` / commas and normalize each rule to the
-    router's stored form (has_image, contains:x, from_waid:x, …)."""
-    chunks = [c.strip() for c in re.split(r"\s+and\s+|,", text) if c.strip()]
+def _split_rules(text: str) -> tuple[list[str], set[str]]:
+    """Split a rule list on top-level ` and ` / ` or ` / commas, ignoring those
+    words inside quotes. Returns (chunks, operators-used)."""
+    chunks: list[str] = []
+    ops: set[str] = set()
+    buf = ""
+    quote = ""
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if quote:
+            buf += c
+            if c == quote:
+                quote = ""
+            i += 1
+            continue
+        if c in "\"'":
+            quote = c
+            buf += c
+            i += 1
+            continue
+        if c == ",":
+            chunks.append(buf); ops.add("and"); buf = ""; i += 1; continue
+        if text[i:i + 5].lower() == " and ":
+            chunks.append(buf); ops.add("and"); buf = ""; i += 5; continue
+        if text[i:i + 4].lower() == " or ":
+            chunks.append(buf); ops.add("or"); buf = ""; i += 4; continue
+        buf += c
+        i += 1
+    if buf.strip():
+        chunks.append(buf)
+    return [c.strip() for c in chunks if c.strip()], ops
+
+
+def _parse_rules(text: str, lineno: int) -> tuple[list[str], str]:
+    """Normalize a rule list to the router's stored form and a match mode.
+    `and`/commas → mode 'all'; `or` → mode 'any'. Mixing the two is rejected."""
+    chunks, ops = _split_rules(text)
+    if "and" in ops and "or" in ops:
+        raise DSLError(lineno, "don't mix 'and' and 'or' in trigger rules — use one (group with separate flows if needed)")
+    mode = "any" if "or" in ops else "all"
     rules: list[str] = []
     for c in chunks:
         low = c.lower()
@@ -151,7 +189,7 @@ def _parse_rules(text: str, lineno: int) -> list[str]:
         else:
             # Bare quoted/word → substring contains (matches router semantics).
             rules.append(f"contains:{_unquote(c)}")
-    return rules
+    return rules, mode
 
 
 def _rule_to_dsl(rule: str) -> str:
@@ -449,7 +487,8 @@ def _trigger_to_dsl(trig: dict[str, Any]) -> str:
     rules = match.get("rules") or []
     if not rules:
         return f"trigger {ch}"
-    return f"trigger {ch} when " + " and ".join(_rule_to_dsl(str(r)) for r in rules)
+    joiner = " or " if str(match.get("mode") or "all").lower() == "any" else " and "
+    return f"trigger {ch} when " + joiner.join(_rule_to_dsl(str(r)) for r in rules)
 
 
 def _step_to_dsl(s: dict[str, Any]) -> list[str]:

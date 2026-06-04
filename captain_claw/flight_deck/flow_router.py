@@ -173,7 +173,11 @@ def _trigger_matches(trigger: dict[str, Any], payload: dict[str, Any]) -> bool:
         return True
     if kind == "rule":
         rules = match.get("rules") or []
-        return all(_rule_ok(str(r), payload) for r in rules)
+        if not rules:
+            return True
+        mode = str(match.get("mode") or "all").lower()
+        results = [_rule_ok(str(r), payload) for r in rules]
+        return any(results) if mode == "any" else all(results)
     # 'classifier' is a later phase — treat as non-matching for now.
     return False
 

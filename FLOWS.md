@@ -112,6 +112,8 @@ trigger <channel> always
 | `mime "image/*"` | the attachment MIME matches the glob |
 | `regex "^hi"` | the text matches the regular expression (case-insensitive) |
 
+**Combining rules:** join with **`and`** (every rule must match) or **`or`** (any one matches). Pick one — don’t mix `and` and `or` in a single trigger (split into two flows if you need that). Commas mean `and`.
+
 `trigger <channel> always` fires on **every** message on that channel (use sparingly). A trigger with **no** `when` matches any message on the channel.
 
 Examples:
@@ -119,9 +121,12 @@ Examples:
 ```text
 trigger whatsapp when has image
 trigger any when contains "hungry"
-trigger web when regex "^/order\b" and has text
+trigger any when contains "hungry" or contains "gladan" or contains "gladni"   # ANY word
+trigger web when regex "^/order\b" and has text                                # ALL conditions
 trigger whatsapp when has image and from_waid "385991234567"
 ```
+
+In the **Builder**, the same choice is the **Match: ALL (and) / ANY (or)** toggle above the rules.
 
 > If two enabled flows could match the same message, the one with the higher `priority` wins. No match → the message is handled normally (a regular agent turn).
 

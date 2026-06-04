@@ -303,6 +303,29 @@ export function FlowBuilder() {
 
           {draft.trigger.match.kind === 'rule' && (
             <div className="mt-3">
+              <div className="mb-2 flex items-center gap-2">
+                <label className={`${labelCls} mb-0`}>Match</label>
+                <div className="flex rounded-md border border-zinc-700/50 p-0.5 text-[11px]">
+                  {(['all', 'any'] as const).map((m) => (
+                    <button
+                      key={m}
+                      onClick={() => setMatch({ mode: m })}
+                      className={`rounded px-2 py-0.5 transition-colors ${
+                        (draft.trigger.match.mode || 'all') === m
+                          ? 'bg-zinc-700 text-zinc-100'
+                          : 'text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      {m === 'all' ? 'ALL (and)' : 'ANY (or)'}
+                    </button>
+                  ))}
+                </div>
+                <span className="text-[10px] text-zinc-600">
+                  {(draft.trigger.match.mode || 'all') === 'all'
+                    ? 'every rule must match'
+                    : 'any one rule matches'}
+                </span>
+              </div>
               <label className={labelCls}>Rules</label>
               <div className="flex flex-wrap gap-1.5">
                 {RULE_PRESETS.map((r) => {

@@ -50,6 +50,8 @@ export interface FlowMatch {
   kind: MatchKind
   rules: string[]
   labels: string[]
+  /** how rules combine: 'all' (AND, default) or 'any' (OR) */
+  mode?: 'all' | 'any'
 }
 
 export interface FlowTrigger {
