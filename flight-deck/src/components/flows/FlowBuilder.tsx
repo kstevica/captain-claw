@@ -35,6 +35,7 @@ import {
   type MatchKind,
   type FlowTestStep,
 } from '../../services/flowsApi'
+import { EXAMPLE_FLOW_DSL } from './exampleFlow'
 
 // ── Rule presets for the match builder ──
 const RULE_PRESETS = ['has_image', 'has_video', 'has_audio', 'has_document', 'has_text']
@@ -560,6 +561,18 @@ function CodeView({ draft, onApply }: { draft: FlowInput; onApply: (flow: Partia
       </Section>
 
       <Section title="Flow code (DSL)">
+        <div className="mb-2 flex items-center justify-end">
+          <button
+            onClick={() => {
+              setDsl(EXAMPLE_FLOW_DSL)
+              setStatus({ kind: 'info', msg: 'Loaded annotated example — read the comments, then Validate & apply.' })
+            }}
+            className="flex items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-300 hover:border-violet-500/40 hover:text-violet-300"
+            title="Load a heavily-commented example flow to explore"
+          >
+            <Sparkles className="h-3 w-3" /> Load example
+          </button>
+        </div>
         <textarea
           value={dsl}
           onChange={(e) => setDsl(e.target.value)}
