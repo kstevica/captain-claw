@@ -2584,6 +2584,14 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
 
     peer_display = req.target_name or f"agent@{req.target_port}"
 
+    # Guard: an agent must not delegate to itself (e.g. a vision agent that
+    # tried image_vision, failed, then "delegated" the image to its own name).
+    if req.source_port and req.target_port and int(req.source_port) == int(req.target_port):
+        return {
+            "ok": False,
+            "message": f"{peer_display} is the requesting agent itself — handle the task directly, do not delegate to yourself.",
+        }
+
     # Guard: if this source already has a delegation in flight to this target,
     # don't pile on another (the model sometimes re-delegates the same task with
     # a reworded message, which dodges arg-based dedup and storms the peer).

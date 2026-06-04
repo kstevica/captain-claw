@@ -161,6 +161,22 @@ class FlightDeckTool(Tool):
             content=f"Fleet agents ({len(agents)}):\n" + "\n".join(lines),
         )
 
+    @staticmethod
+    def _is_self_target(target: dict, **kwargs: Any) -> bool:
+        """True if the resolved target is THIS agent (prevents self-delegation)."""
+        session = kwargs.get("_session")
+        metadata = getattr(session, "metadata", {}) or {} if session else {}
+        fid = metadata.get("fleet_identity") or {}
+        own_port = fid.get("port")
+        own_name = str(metadata.get("session_display_name") or fid.get("name") or "").strip().lower()
+        tport, tname = target.get("port"), str(target.get("name") or "").strip().lower()
+        try:
+            if own_port and tport and int(own_port) == int(tport):
+                return True
+        except (TypeError, ValueError):
+            pass
+        return bool(own_name and tname and own_name == tname)
+
     async def _consult(self, fd_url: str, agent_name: str, message: str, **kwargs: Any) -> ToolResult:
         """Consult a peer agent via /fd/fleet lookup + /fd/consult-peer."""
         try:
@@ -171,6 +187,11 @@ class FlightDeckTool(Tool):
         target, agents, error = await self._resolve_target(fd_url, agent_name, **kwargs)
         if error:
             return ToolResult(success=False, error=error)
+        if self._is_self_target(target, **kwargs):
+            return ToolResult(success=False, error=(
+                f"'{target.get('name', agent_name)}' is YOU. Do NOT consult/delegate "
+                f"to yourself — handle the task directly (e.g. describe the image you can see)."
+            ))
 
         host = target.get("host", "localhost")
         port = target.get("port", 0)
@@ -331,6 +352,11 @@ class FlightDeckTool(Tool):
         target, agents, error = await self._resolve_target(fd_url, agent_name, **kwargs)
         if error:
             return ToolResult(success=False, error=error)
+        if self._is_self_target(target, **kwargs):
+            return ToolResult(success=False, error=(
+                f"'{target.get('name', agent_name)}' is YOU. Do NOT delegate to yourself — "
+                f"handle the task directly (e.g. describe the image you can see)."
+            ))
 
         agent = kwargs.get("_agent")
         session = kwargs.get("_session")
