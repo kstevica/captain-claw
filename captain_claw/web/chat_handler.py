@@ -147,6 +147,7 @@ async def handle_chat(
     whatsapp_waid: str | None = None,
     no_flow: bool = False,
     deny_tools: list[str] | None = None,
+    no_broadcast: bool = False,
 ) -> None:
     """Process a chat message through the agent.
 
@@ -372,6 +373,7 @@ async def handle_chat(
         video_attachments=video_attachments,
         no_flow=no_flow,
         deny_tools=deny_tools,
+        no_broadcast=no_broadcast,
         flow_text=content,
         flow_attach={
             "image_path": image_path or (image_paths[0] if image_paths else ""),
@@ -488,6 +490,7 @@ async def _run_agent(
     video_attachments: list[str] | None = None,
     no_flow: bool = False,
     deny_tools: list[str] | None = None,
+    no_broadcast: bool = False,
     flow_text: str = "",
     flow_attach: dict | None = None,
 ) -> None:
@@ -499,7 +502,10 @@ async def _run_agent(
         fire_and_forget_send(ws, _json.dumps(msg, default=str))
 
     # Choose the right send function.
-    send = _send_to_ws if is_public else (lambda msg: server._broadcast(msg))
+    # no_broadcast (flow consult): reply ONLY to the requesting socket, never
+    # broadcast to the agent's channels/UI — prevents double-delivery when the
+    # step runs on a channel-connected agent (e.g. the WhatsApp origin agent).
+    send = _send_to_ws if (is_public or no_broadcast) else (lambda msg: server._broadcast(msg))
 
     if is_public:
         agent._public_busy = True  # type: ignore[attr-defined]

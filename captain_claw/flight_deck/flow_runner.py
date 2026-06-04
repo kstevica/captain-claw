@@ -217,7 +217,8 @@ class FlowRunner:
             "host": agent["host"], "port": int(agent["port"]),
             "auth": str(agent.get("auth") or ""),  # token from the same entry as the port
             "message": prompt, "source_name": "FlowEngine", "timeout": 480.0,
-            "no_flow": True,  # loop guard
+            "no_flow": True,         # loop guard
+            "no_broadcast": True,    # FlowRunner is the sole deliverer (no channel leak)
             "deny_tools": _deny,
             "image_paths": target_images,   # already on the TARGET (verified)
             "file_paths": target_files,

@@ -902,6 +902,9 @@ async def _send_whatsapp_text(waid: str, text: str, *, mirror: bool = False) -> 
     text = text.strip()
     if not text:
         return
+    # WhatsApp bold is *single* asterisks; Markdown **double** shows literal '**'.
+    # Convert paired **bold** → *bold* so flow/agent output renders cleanly.
+    text = re.sub(r"\*\*([^*\n]+)\*\*", r"*\1*", text)
 
     if mirror:
         channel = _WAID_CHANNEL.get(waid)

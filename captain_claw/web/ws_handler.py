@@ -275,6 +275,7 @@ async def handle_ws_message(
                 whatsapp_waid=whatsapp_waid,
                 no_flow=bool(data.get("no_flow", False)),
                 deny_tools=[str(t) for t in (data.get("deny_tools") or [])],
+                no_broadcast=bool(data.get("no_broadcast", False)),
             )
 
     elif msg_type == "command":

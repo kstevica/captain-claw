@@ -2429,6 +2429,10 @@ class ConsultPeerRequest(BaseModel):
     # e.g. an image-describe step denies shell/scripts/read so the model uses
     # the attached image instead of operating on the path).
     deny_tools: list[str] = Field(default_factory=list)
+    # When set, the target replies ONLY to this consult (does NOT broadcast its
+    # reply to its own channels/UI). Prevents double-delivery when a flow step
+    # runs on a channel-connected agent (e.g. the WhatsApp origin agent).
+    no_broadcast: bool = False
 
 
 # Track active consultations to prevent duplicate requests to the same target
@@ -2504,6 +2508,8 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
                     _chat_payload["no_flow"] = True
                 if req.deny_tools:
                     _chat_payload["deny_tools"] = list(req.deny_tools)
+                if req.no_broadcast:
+                    _chat_payload["no_broadcast"] = True
                 await ws.send(json.dumps(_chat_payload))
 
                 # Stream events until we get the final assistant response
