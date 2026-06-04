@@ -582,6 +582,7 @@ async def lifespan(app: FastAPI):
             fd_self_base=f"http://localhost:{_fd_port}",
             fd_tools=_fd_internal_tools(),
             whatsapp_send=_flow_whatsapp_send,
+            transfer_file=_transfer_file_to_agent,
         )
         app.state.flow_store = _flow_store
         app.state.flow_runner = _flow_runner

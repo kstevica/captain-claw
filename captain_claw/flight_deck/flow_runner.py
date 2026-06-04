@@ -63,6 +63,7 @@ class FlowRunner:
         fd_self_base: str,
         fd_tools: dict[str, Callable[[dict[str, Any]], Awaitable[str]]] | None = None,
         whatsapp_send: Callable[[str, str], Awaitable[Any]] | None = None,
+        transfer_file: Callable[[str, int, str], Awaitable[tuple[list[str], list[str]]]] | None = None,
     ) -> None:
         self.store = store
         self.get_agents = get_agents
@@ -70,6 +71,9 @@ class FlowRunner:
         self.fd_self_base = fd_self_base.rstrip("/")
         self.fd_tools = fd_tools or {}        # FD-internal tools (e.g. face_identify)
         self.whatsapp_send = whatsapp_send
+        # Uploads a file to a target agent, returning (image_paths, file_paths)
+        # ON THE TARGET. Lets the runner verify delivery + use the target's path.
+        self.transfer_file = transfer_file
 
     # ── agent pool selection ───────────────────────────────────────────
 
@@ -133,35 +137,65 @@ class FlowRunner:
             return f"(tool {tool} dispatch failed: {exc})", agent.get("name", "")
 
     async def _run_agent_step(self, step: dict[str, Any], ctx: dict[str, Any], payload: dict[str, Any]) -> tuple[str, str]:
-        prompt = _render(str(step.get("prompt") or ""), ctx)
         guard = step.get("guardrails") or {}
         deny = guard.get("deny") or []
-        if deny:
-            prompt = (
-                f"Constraints: do NOT use these tools this turn: {', '.join(deny)}. "
-                f"Do not write or run scripts. Answer directly.\n\n{prompt}"
-            )
         attach = _render(str(step.get("attach") or ""), ctx)
         selector = str(step.get("on") or "capability:vision")
         agent = self._select_agent(selector, payload)
         if not agent:
             return f"(no agent for selector '{selector}')", ""
+
+        # When a file/image is attached, UPLOAD it to the target FIRST and use
+        # the TARGET-local path. `attach`/{{trigger.image_path}} is the ORIGIN
+        # agent's path (where the message arrived) — the target can't read that
+        # path, so we transfer the bytes and reference the copy on the target.
+        # Verify it actually landed, then render the prompt with the TARGET path.
+        target_images: list[str] = []
+        target_files: list[str] = []
+        render_ctx = ctx
+        if attach:
+            if not self.transfer_file:
+                return "(cannot attach: file transfer unavailable)", agent.get("name", "")
+            try:
+                target_images, target_files = await self.transfer_file(
+                    agent["host"], int(agent["port"]), attach,
+                )
+            except Exception as exc:
+                return f"(failed to send the attachment to {agent.get('name','')}: {exc})", agent.get("name", "")
+            if not target_images and not target_files:
+                return (f"(attachment was NOT received by {agent.get('name','')} — "
+                        f"upload failed or source file missing: {attach})"), agent.get("name", "")
+            # Make {{trigger.image_path}} / {{attached_image_path}} resolve to the
+            # TARGET copy for THIS step's prompt (origin path is meaningless there).
+            _tpath = target_images[0] if target_images else target_files[0]
+            render_ctx = dict(ctx)
+            render_ctx["trigger"] = {**(ctx.get("trigger") or {}), "image_path": _tpath}
+            render_ctx["attached_image_path"] = _tpath
+
+        prompt = _render(str(step.get("prompt") or ""), render_ctx)
+
         # Deterministic tool denials for the target. Start with the step's own
         # deny list; when a file/image is attached, also block shell/scripts/read
-        # so the model uses the ATTACHED content instead of operating on the path
-        # (e.g. running `ls`/`read` on the image path).
+        # so the model uses the ATTACHED content instead of operating on the path.
         _deny = list(deny)
         if attach:
             for t in ("shell", "scripts", "read"):
                 if t not in _deny:
                     _deny.append(t)
+        if deny:
+            prompt = (
+                f"Constraints: do NOT use these tools this turn: {', '.join(deny)}. "
+                f"Do not write or run scripts. Answer directly.\n\n{prompt}"
+            )
         import httpx
         body = {
             "host": agent["host"], "port": int(agent["port"]),
             "auth": str(agent.get("auth") or ""),  # token from the same entry as the port
             "message": prompt, "source_name": "FlowEngine", "timeout": 480.0,
-            "attach_path": attach or "", "no_flow": True,  # loop guard
+            "no_flow": True,  # loop guard
             "deny_tools": _deny,
+            "image_paths": target_images,   # already on the TARGET (verified)
+            "file_paths": target_files,
         }
         final, err = "", ""
         try:
