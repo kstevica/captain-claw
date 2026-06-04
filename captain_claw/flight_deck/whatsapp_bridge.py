@@ -257,23 +257,71 @@ def _face_status_text(waid: str) -> str:
         "🙂 *Face mode*\n"
         f"• Recognition: {rec}\n"
         f"• Enrollment: {enr}\n\n"
-        "Commands:\n"
-        "• /face on — recognize faces in photos\n"
-        "• /face off — stop\n"
-        "• /face enroll <name> — save the next photos as that person\n"
-        "• /face enroll off — finish enrolling"
+        "Commands (the / is optional):\n"
+        "• face on — recognize faces in photos\n"
+        "• face off — stop\n"
+        "• face enroll <name> — save the next photos as that person\n"
+        "• face enroll off — finish enrolling"
     )
 
 
-async def _handle_face_command(waid: str, text: str) -> bool:
-    """Handle the ``/face …`` command family. Returns True if it consumed *text*.
+def _match_face_command(text: str) -> str | None:
+    """Map a message to a normalized face-command argument, or None.
 
-    Toggles are deliberate text actions (issued from the paired phone), so they
-    live as slash commands alongside /c and /mute rather than as a Flow trigger.
+    Accepts three surfaces:
+      • slash:   "/face …"                       (lenient — unknown → status)
+      • bare:    "face on" / "face enroll Ana"   (needs the "face " lead)
+      • natural: "recognition on" / "enroll Ana" (whitelisted whole-message)
+
+    Bare/natural forms only match when the WHOLE message is a recognized
+    command, so ordinary chat ("face on the wall", a lone "on") still passes
+    through to the agent. Returns the argument string the handler expects
+    ("" = status, "on"/"off", "enroll <name>", "enroll off").
     """
-    if not text.lower().startswith("/face"):
-        return False
-    arg = text[len("/face"):].strip()
+    raw = (text or "").strip()
+    low = raw.lower()
+
+    # Slash form — explicit intent, stays lenient.
+    if low.startswith("/face"):
+        return raw[len("/face"):].strip()
+
+    # Optional leading "face " for the bare form.
+    had_face = False
+    body, bl = raw, low
+    if bl == "face":
+        return ""  # status
+    if bl.startswith("face "):
+        had_face = True
+        body = raw[len("face "):].strip()
+        bl = body.lower()
+
+    # Recognition on/off — explicit keyword, or bare on/off only after "face ".
+    if bl in ("recognition on", "recognize on") or (had_face and bl == "on"):
+        return "on"
+    if bl in ("recognition off", "recognize off") or (had_face and bl == "off"):
+        return "off"
+
+    # Enrollment (works with or without the leading "face").
+    if bl in ("enroll off", "enrollment off", "enroll stop", "enroll done", "enrollment stop"):
+        return "enroll off"
+    for verb in ("enrollment on ", "enrollment ", "enroll "):
+        if bl.startswith(verb):
+            name = body[len(verb):].strip()
+            return f"enroll {name}" if name else "enroll"
+    if had_face and bl == "enroll":
+        return "enroll"
+
+    return None
+
+
+async def _handle_face_command(waid: str, arg: str) -> bool:
+    """Handle a normalized face command (see :func:`_match_face_command`).
+
+    ``arg`` is the already-stripped argument: "" (status), "on"/"off", or
+    "enroll …". Toggles are deliberate text actions issued from the paired
+    phone — they gate the glasses image path rather than reaching the agent.
+    """
+    arg = (arg or "").strip()
     low = arg.lower()
 
     if not arg:
@@ -545,8 +593,9 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
         _MUTED_UNTIL.pop(waid, None)
         await _send_whatsapp_text(waid, "🔔 Proactive pushes resumed.")
         return
-    if text.lower().startswith("/face"):
-        await _handle_face_command(waid, text)
+    _face_cmd = _match_face_command(text)
+    if _face_cmd is not None:
+        await _handle_face_command(waid, _face_cmd)
         return
 
     channel = _WAID_CHANNEL.setdefault(waid, _channel_for_waid(waid))
