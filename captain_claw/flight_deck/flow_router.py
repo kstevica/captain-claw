@@ -70,6 +70,74 @@ def deliver_pending_input(*, waid: str = "", channel: str = "", origin_port: int
     return False
 
 
+def cancel_pending_input(*, waid: str = "", channel: str = "", origin_port: int = 0) -> bool:
+    """Cancel a paused flow's input wait (used when stopping a flow that's
+    blocked waiting for the user). Returns True if a wait was cancelled."""
+    fut = _PENDING_INPUT.get(input_key(waid=waid, channel=channel, origin_port=origin_port))
+    if fut is not None and not fut.done():
+        fut.cancel()
+        return True
+    return False
+
+
+# Text control commands: '/flow stop|pause|resume' — slash optional, anchored
+# so ordinary chat ("the flow stopped") doesn't trigger it. `halt`=stop,
+# `continue`=resume. A trailing phrase after `stop` is sent before stopping.
+_FLOW_CMD_RE = re.compile(r"^\s*/?flow\s+(stop|halt|pause|resume|continue)\b\s*(.*)$", re.I)
+
+
+def _owner_key_for(payload: dict[str, Any]) -> str:
+    return input_key(
+        waid=str(payload.get("waid") or payload.get("whatsapp_waid") or ""),
+        channel=str(payload.get("channel") or ""),
+        origin_port=int(payload.get("origin_port") or 0),
+    )
+
+
+async def maybe_handle_flow_command(payload: dict[str, Any]) -> bool:
+    """Intercept a '/flow stop|pause|resume' message and control the caller's
+    running flow. Returns True if it was a flow command (and was handled), so
+    the caller must NOT forward it on as input or a new trigger."""
+    text = str(payload.get("text") or "")
+    m = _FLOW_CMD_RE.match(text)
+    if not m:
+        return False
+    import captain_claw.flight_deck.flow_runner as fr
+
+    action = m.group(1).lower()
+    rest = (m.group(2) or "").strip()
+    owner = _owner_key_for(payload)
+    run_ids = fr.runs_for_owner(owner)
+    reply = ""
+
+    if action in ("stop", "halt"):
+        n = sum(1 for rid in run_ids if fr.request_stop(rid, rest))
+        if n:
+            # A flow paused on an `input` step is blocked off the control loop —
+            # cancel its wait so the stop takes effect immediately.
+            cancel_pending_input(
+                waid=str(payload.get("waid") or payload.get("whatsapp_waid") or ""),
+                channel=str(payload.get("channel") or ""),
+                origin_port=int(payload.get("origin_port") or 0),
+            )
+            reply = "" if rest else "⏹️ Stopped the running flow."
+        else:
+            reply = "No running flow to stop."
+    elif action == "pause":
+        n = sum(1 for rid in run_ids if fr.request_pause(rid))
+        reply = "⏸️ Paused — send */flow resume* to continue." if n else "No running flow to pause."
+    else:  # resume / continue
+        n = sum(1 for rid in run_ids if fr.request_resume(rid))
+        reply = "▶️ Resumed the flow." if n else "No paused flow to resume."
+
+    if reply and _RUNNER is not None:
+        try:
+            await _RUNNER._deliver(payload, reply)
+        except Exception as exc:
+            log.warning("flow command reply failed: %s", exc)
+    return True
+
+
 def _flow_has_input(flow: dict[str, Any]) -> bool:
     return any(str(s.get("type")) == "input" for s in (flow.get("steps") or []))
 

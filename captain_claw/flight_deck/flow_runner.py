@@ -40,16 +40,31 @@ class _RunControl:
     ``stopped`` ends the run at the next boundary (optionally after delivering
     ``stop_message`` on the originating channel)."""
 
-    __slots__ = ("resume", "stopped", "stop_message")
+    __slots__ = ("resume", "stopped", "stop_message", "owner")
 
-    def __init__(self) -> None:
+    def __init__(self, owner: str = "") -> None:
         self.resume = asyncio.Event()
         self.resume.set()  # set = running, cleared = paused
         self.stopped = False
         self.stop_message = ""
+        self.owner = owner  # caller identity, for '/flow stop|pause|resume'
 
 
 _RUN_CONTROL: dict[str, _RunControl] = {}
+
+
+def _owner_key(payload: dict[str, Any]) -> str:
+    """Caller identity for run control — mirrors flow_router.input_key so a
+    user's '/flow stop' reaches the flow they triggered."""
+    waid = str(payload.get("waid") or payload.get("whatsapp_waid") or "")
+    if waid:
+        return f"waid:{waid}"
+    return f"chan:{str(payload.get('channel') or '')}:{int(payload.get('origin_port') or 0)}"
+
+
+def runs_for_owner(owner: str) -> list[str]:
+    """Active (not-yet-stopped) run ids controllable by *owner*."""
+    return [rid for rid, c in _RUN_CONTROL.items() if c.owner == owner and not c.stopped]
 
 
 def request_pause(run_id: str) -> bool:
@@ -448,7 +463,7 @@ class FlowRunner:
         # Register a control handle so the run can be paused/resumed/stopped.
         ctrl: _RunControl | None = None
         if not dry and run_id:
-            ctrl = _RunControl()
+            ctrl = _RunControl(owner=_owner_key(payload))
             _RUN_CONTROL[run_id] = ctrl
         status = "done"
         error = ""
@@ -561,9 +576,20 @@ class FlowRunner:
                 except Exception as exc:
                     log.warning("flow output delivery failed: %s", exc)
         except Exception as exc:
-            status = "error"
-            error = str(exc)
-            log.warning("flow run failed", flow=flow.get("name"), error=error)
+            # A stop requested while the run was blocked off the control loop
+            # (e.g. waiting on an `input` step) surfaces here as the cancelled
+            # wait — treat it as a clean stop, not a failure.
+            if ctrl is not None and ctrl.stopped:
+                status = "stopped"
+                if ctrl.stop_message:
+                    try:
+                        await self._deliver(payload, ctrl.stop_message)
+                    except Exception as dexc:
+                        log.warning("flow stop message delivery failed: %s", dexc)
+            else:
+                status = "error"
+                error = str(exc)
+                log.warning("flow run failed", flow=flow.get("name"), error=error)
 
         if not dry:
             await self.store.finish_run(run_id, status, error)

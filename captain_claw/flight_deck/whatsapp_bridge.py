@@ -598,6 +598,19 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
         await _handle_face_command(waid, _face_cmd)
         return
 
+    # Flow control command ('/flow stop|pause|resume', slash optional) — control
+    # this user's running flow. Must come before the input-resume hook so the
+    # command isn't swallowed as a paused flow's input answer.
+    if text:
+        try:
+            from captain_claw.flight_deck import flow_router
+            if flow_router.engine_ready() and await flow_router.maybe_handle_flow_command(
+                {"waid": waid, "text": text}
+            ):
+                return
+        except Exception as _exc:
+            log.warning("flow command check failed: %s", _exc)
+
     # Resume a paused Flow: if a flow is waiting on an `input` step for this
     # user, their reply feeds that step and the run continues — it must not be
     # forwarded to the agent as a normal message.

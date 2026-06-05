@@ -352,6 +352,20 @@ step route:
 
 When a flow stops (or finishes), its **last executed step’s output** is delivered to the [output](#output) channel.
 
+**3. Stop, pause or resume a *running* flow by message** — from any channel the
+flow runs on, send a control command (the leading `/` is optional):
+
+| Command | Effect |
+|---|---|
+| `/flow stop` | End the running flow now. Add a trailing phrase to send it first: `/flow stop ok, cancelled` |
+| `/flow pause` | Pause at the next step boundary |
+| `/flow resume` | Continue a paused flow (`/flow continue` also works) |
+
+These reach the flow **you** triggered (matched by your WhatsApp number, or by
+your web/glasses session). `stop` works even while the flow is paused waiting on
+an `input` step. The same controls are available as **Pause / Resume / Stop**
+buttons in the Flight Deck run log.
+
 ---
 
 ## Output

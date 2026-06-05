@@ -2236,6 +2236,11 @@ async def fd_flows_evaluate(request: Request, user: dict | None = _optional_user
         origin_port=int(raw.get("origin_port") or 0),
         origin_name=str(raw.get("origin_name") or ""),
     )
+    # 0. Flow control command ('/flow stop|pause|resume', slash optional) —
+    #    intercept before treating the message as input or a new trigger.
+    if await flow_router.maybe_handle_flow_command(payload):
+        return {"matched": True, "deferred": True}
+
     # 1. Resume a paused flow first: if one is waiting on an `input` step for
     #    this channel+agent, this message is the reply — feed it and stop (the
     #    flow continues in the background and delivers via the channel).
