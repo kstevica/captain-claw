@@ -1174,6 +1174,10 @@ class WebServer:
         from captain_claw.web.rest_intentions import resolve_decision
         return await resolve_decision(self, request)
 
+    async def _intentions_set_status(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_intentions import set_intention_status
+        return await set_intention_status(self, request)
+
     async def _inbound_queue_consumer(self) -> None:
         """Drain inbound peer messages one-at-a-time, only when the agent is free.
 
@@ -2431,6 +2435,9 @@ class WebServer:
         app.router.add_get("/api/intentions/decisions", self._intentions_decisions)
         app.router.add_post(
             "/api/intentions/decisions/{decision_id}/resolve", self._intentions_resolve
+        )
+        app.router.add_post(
+            "/api/intentions/{intention_id}/status", self._intentions_set_status
         )
         app.router.add_post("/api/file/upload", self._file_upload)
         app.router.add_post("/api/tool", self._api_tool)  # Flow engine: deterministic single-tool RPC

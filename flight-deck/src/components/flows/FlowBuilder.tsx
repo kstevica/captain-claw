@@ -209,7 +209,13 @@ export function FlowBuilder() {
         </h1>
 
         {view === 'code' && (
-          <CodeView draft={draft} fleet={fleet} onApply={(flow) => setDraft((d) => ({ ...d, ...flow }))} />
+          <CodeView
+            draft={draft}
+            fleet={fleet}
+            editingId={editingId}
+            onApply={(flow) => setDraft((d) => ({ ...d, ...flow }))}
+            onSave={async (flow) => { await saveFlow(flow, editingId) }}
+          />
         )}
 
         {view === 'builder' && (
@@ -512,7 +518,13 @@ export function FlowBuilder() {
 
 // ── Code view (DSL editor + AI compile) ──
 
-function CodeView({ draft, fleet, onApply }: { draft: FlowInput; fleet: string[]; onApply: (flow: Partial<FlowInput>) => void }) {
+function CodeView({ draft, fleet, editingId, onApply, onSave }: {
+  draft: FlowInput
+  fleet: string[]
+  editingId: string | null
+  onApply: (flow: Partial<FlowInput>) => void
+  onSave: (flow: FlowInput) => Promise<void>
+}) {
   const [dsl, setDsl] = useState('')
   const [status, setStatus] = useState<{ kind: 'ok' | 'err' | 'info'; msg: string } | null>(null)
   const [busy, setBusy] = useState(false)
@@ -560,12 +572,35 @@ function CodeView({ draft, fleet, onApply }: { draft: FlowInput; fleet: string[]
     }
   }
 
+  // Compile the edited code and persist it straight to the flow being edited.
+  const saveToFlow = async () => {
+    setBusy(true)
+    setStatus(null)
+    try {
+      const r = await compileDsl(dsl)
+      if (r.ok && r.flow) {
+        onApply(r.flow)
+        await onSave(r.flow as FlowInput)
+        setStatus({ kind: 'ok', msg: 'Saved to the flow ✓' })
+      } else {
+        setStatus({ kind: 'err', msg: r.line ? `Line ${r.line}: ${r.error}` : (r.error || 'compile failed') })
+      }
+    } catch (e) {
+      setStatus({ kind: 'err', msg: String(e) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const runAi = async () => {
     if (!ai.trim()) return
     setBusy(true)
-    setStatus({ kind: 'info', msg: 'Asking the model to write the flow…' })
+    const editing = dsl.trim().length > 0
+    setStatus({ kind: 'info', msg: editing ? 'Asking the model to edit the flow…' : 'Asking the model to write the flow…' })
     try {
-      const r = await compileWithAI(ai, aiAgent)
+      // Pass the current code so a request like "add a step…" edits it in place
+      // rather than regenerating from scratch.
+      const r = await compileWithAI(ai, aiAgent, editing ? dsl : '')
       if (r.ok && r.flow) {
         if (r.dsl) setDsl(r.dsl)
         onApply(r.flow)
@@ -622,12 +657,14 @@ function CodeView({ draft, fleet, onApply }: { draft: FlowInput; fleet: string[]
         </div>
       )}
 
-      <Section title="Describe it (AI → flow)">
+      <Section title={dsl.trim() ? 'Describe a change (AI edits the code below)' : 'Describe it (AI → flow)'}>
         <textarea
           value={ai}
           onChange={(e) => setAi(e.target.value)}
           rows={6}
-          placeholder={'Describe the flow in plain words, e.g.\n\nWhen someone sends a photo on WhatsApp, recognize the face. If it’s someone we know, greet them by name. Otherwise ask who it is and remember it.'}
+          placeholder={dsl.trim()
+            ? 'Describe a change to the flow below, e.g.\n\nAdd a step to ask whether they want ćevapi or McDonald’s, then search for whichever they pick.'
+            : 'Describe the flow in plain words, e.g.\n\nWhen someone sends a photo on WhatsApp, recognize the face. If it’s someone we know, greet them by name. Otherwise ask who it is and remember it.'}
           className={`${inputCls} min-h-[120px] resize-y leading-relaxed`}
         />
         <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -637,7 +674,7 @@ function CodeView({ draft, fleet, onApply }: { draft: FlowInput; fleet: string[]
             className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40 transition-colors"
           >
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-            Compile with AI
+            {dsl.trim() ? 'Apply change with AI' : 'Compile with AI'}
           </button>
           <span className="text-[10px] uppercase tracking-wide text-zinc-500">using</span>
           <select
@@ -683,6 +720,17 @@ function CodeView({ draft, fleet, onApply }: { draft: FlowInput; fleet: string[]
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
             Validate & apply
           </button>
+          {editingId && (
+            <button
+              onClick={saveToFlow}
+              disabled={busy}
+              className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40 transition-colors"
+              title="Compile this code and save it directly to the flow you're editing"
+            >
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+              Save to this flow
+            </button>
+          )}
           {status && (
             <span
               className={
@@ -696,7 +744,9 @@ function CodeView({ draft, fleet, onApply }: { draft: FlowInput; fleet: string[]
           )}
         </div>
         <p className="mt-2 text-[10px] text-zinc-600">
-          Edits here apply to the builder on “Validate &amp; apply”; switch to Builder and Save to persist.
+          “Validate &amp; apply” updates the builder draft; {editingId
+            ? '“Save to this flow” compiles and writes it straight back to the flow you’re editing.'
+            : 'switch to Builder and Save to persist a new flow.'}
           {' '}Full language reference: <span className="font-mono">FLOWS.md</span> in the repo.
         </p>
       </Section>

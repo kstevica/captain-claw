@@ -216,6 +216,14 @@ class FlowStore:
         )
         await db.commit()
 
+    async def set_run_status(self, run_id: str, status: str) -> None:
+        """Update a live run's status (e.g. 'paused'/'running') without ending it."""
+        db = await self._ensure_db()
+        await db.execute(
+            "UPDATE flow_runs SET status=? WHERE id=?", (status, run_id)
+        )
+        await db.commit()
+
     async def finish_run(self, run_id: str, status: str, error: str = "") -> None:
         db = await self._ensure_db()
         await db.execute(

@@ -9,6 +9,7 @@ endpoints and channels are thin clients.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from aiohttp import web
@@ -33,6 +34,17 @@ _VERDICT_ALIASES = {
     "stop": "undone", "cancel": "undone",
 }
 
+# Statuses the Flight Deck panel can set directly on an intention (manual
+# transitions — distinct from the decision/approval queue above). Friendly
+# aliases map the button labels to canonical statuses.
+_STATUS_ALIASES = {
+    "resolve": "done", "resolved": "done", "complete": "done", "completed": "done",
+    "cancel": "cancelled", "canceled": "cancelled",
+    "activate": "active", "reopen": "active", "open": "active",
+    "snooze": "snoozed", "decline": "declined", "dismiss": "declined",
+}
+_MANUAL_STATUSES = frozenset({"done", "cancelled", "active", "snoozed", "declined"})
+
 
 async def list_intentions(server: "WebServer", request: web.Request) -> web.Response:
     """GET /api/intentions — open intentions (optionally ?status= / ?origin=)."""
@@ -49,6 +61,46 @@ async def list_intentions(server: "WebServer", request: web.Request) -> web.Resp
         from captain_claw.intentions import OPEN_STATUSES
         items = await mgr.list(origin=origin, statuses=list(OPEN_STATUSES), limit=limit)
     return web.json_response({"intentions": items})
+
+
+async def set_intention_status(server: "WebServer", request: web.Request) -> web.Response:
+    """POST /api/intentions/{intention_id}/status — body {status, days?}.
+
+    Directly transition an intention (done/cancelled/active/snoozed/declined)
+    from the Flight Deck panel, without going through the approval queue.
+    """
+    intention_id = request.match_info.get("intention_id", "").strip()
+    if not intention_id:
+        return web.json_response({"error": "intention_id required"}, status=400)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    raw = str(body.get("status") or "").strip().lower()
+    status = _STATUS_ALIASES.get(raw, raw)
+    if status not in _MANUAL_STATUSES:
+        return web.json_response(
+            {"error": f"status must be one of {sorted(_MANUAL_STATUSES)} (or done/cancel/snooze/activate)"},
+            status=400,
+        )
+    mgr = get_intentions_manager()
+    cur = await mgr.get(intention_id)
+    if not cur:
+        return web.json_response({"error": "no such intention"}, status=404)
+    extra: dict = {}
+    now = datetime.now(UTC)
+    if status == "snoozed":
+        try:
+            days = int(body.get("days") or 1)
+        except (TypeError, ValueError):
+            days = 1
+        extra["next_surface_at"] = (now + timedelta(days=max(1, days))).isoformat()
+    elif status in ("done", "cancelled", "declined"):
+        extra["decided_at"] = now.isoformat()
+    ok = await mgr.set_status(intention_id, status, **extra)
+    if not ok:
+        return web.json_response({"error": "update failed"}, status=500)
+    return web.json_response({"ok": True, "id": intention_id, "status": status})
 
 
 async def list_decisions(server: "WebServer", request: web.Request) -> web.Response:

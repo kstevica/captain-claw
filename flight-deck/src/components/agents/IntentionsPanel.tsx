@@ -107,6 +107,23 @@ export function IntentionsPanel({ host, port, auth, agentName, onClose }: Intent
     }
   }
 
+  const setStatus = async (intentionId: string, status: string) => {
+    setBusy(intentionId)
+    setError('')
+    try {
+      await fdFetch(`/agent-intention/${host}/${port}/${intentionId}/status${tokenQs}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status }),
+      })
+      await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const originIcon = (o: string) => (o === 'user'
     ? <User className="h-3.5 w-3.5 text-sky-400/80 shrink-0" />
     : <Bot className="h-3.5 w-3.5 text-violet-400/80 shrink-0" />)
@@ -256,6 +273,32 @@ export function IntentionsPanel({ host, port, auth, agentName, onClose }: Intent
                               ))}
                             </div>
                           )}
+                          {/* Status actions */}
+                          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                            <button
+                              disabled={busy === it.id || it.status === 'done'}
+                              onClick={() => setStatus(it.id, 'done')}
+                              className="flex items-center gap-1 rounded-md bg-emerald-500/15 px-2 py-0.5 text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/25 disabled:opacity-40"
+                            >
+                              <Check className="h-3 w-3" /> Done
+                            </button>
+                            <button
+                              disabled={busy === it.id || it.status === 'snoozed'}
+                              onClick={() => setStatus(it.id, 'snoozed')}
+                              className="flex items-center gap-1 rounded-md bg-zinc-700/50 px-2 py-0.5 text-[11px] font-medium text-zinc-300 hover:bg-zinc-700 disabled:opacity-40"
+                              title="Snooze for a day"
+                            >
+                              <Clock className="h-3 w-3" /> Snooze
+                            </button>
+                            <button
+                              disabled={busy === it.id}
+                              onClick={() => setStatus(it.id, 'cancelled')}
+                              className="flex items-center gap-1 rounded-md bg-zinc-700/50 px-2 py-0.5 text-[11px] font-medium text-zinc-300 hover:bg-rose-500/20 hover:text-rose-300 disabled:opacity-40"
+                            >
+                              <Ban className="h-3 w-3" /> Cancel
+                            </button>
+                            {busy === it.id && <Loader2 className="h-3 w-3 animate-spin text-zinc-500" />}
+                          </div>
                         </div>
                       </div>
                     ))}

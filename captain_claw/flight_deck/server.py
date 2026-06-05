@@ -2324,6 +2324,9 @@ async def fd_flows_compile(request: Request, user: dict | None = _optional_user_
     text = str(body.get("text") or "").strip()
     if not text:
         return {"ok": False, "error": "no text to compile"}
+    # When the editor already holds a flow, the request is an EDIT: the model
+    # gets the current DSL as context and must return the FULL updated program.
+    current = str(body.get("current") or "").strip()
 
     # Pick a RUNNING agent with a live web port to host the model call. Try
     # several (a registry "running" flag can lag a just-died web server).
@@ -2367,6 +2370,15 @@ async def fd_flows_compile(request: Request, user: dict | None = _optional_user_
         "{{trigger.fd_image_path}}, {{steps.<id>.output}}. Always include a "
         "trigger, at least one step, and an `output -> same` line."
     )
+    if current:
+        system += (
+            "\n\nEDIT MODE: The user already has a flow (given below) and wants "
+            "to MODIFY it. Apply their requested change to that existing program "
+            "and output the COMPLETE updated DSL — keep every other step, the "
+            "trigger, and the output line unchanged unless the request says "
+            "otherwise. Preserve existing step ids; give any new step a fresh, "
+            "descriptive snake_case id. Do not drop or reorder unrelated steps."
+        )
     import httpx
 
     async def _complete(messages: list[dict[str, Any]]) -> tuple[str, str]:
@@ -2392,9 +2404,18 @@ async def fd_flows_compile(request: Request, user: dict | None = _optional_user_
                 last = f"{agent.get('name')}: {exc}"
         return "", last
 
+    if current:
+        user_msg = (
+            "Here is the current flow DSL:\n\n"
+            f"{current}\n\n"
+            f"Requested change: {text}\n\n"
+            "Output ONLY the complete updated DSL."
+        )
+    else:
+        user_msg = text
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system},
-        {"role": "user", "content": text},
+        {"role": "user", "content": user_msg},
     ]
     dsl, err = await _complete(messages)
     if not dsl:
@@ -2475,6 +2496,42 @@ async def fd_flows_run(flow_id: str, request: Request, user: dict | None = _opti
     # Run in the background; the UI polls /fd/flows/runs/{run_id} for the log.
     asyncio.create_task(app.state.flow_runner.run(flow, payload, run_id=run_id))
     return {"run_id": run_id}
+
+
+@app.post("/fd/flows/runs/{run_id}/pause")
+async def fd_flows_run_pause(run_id: str, request: Request, user: dict | None = _optional_user_dep):
+    from captain_claw.flight_deck import flow_runner
+    ok = flow_runner.request_pause(run_id)
+    if ok:
+        try:
+            await _flow_store().set_run_status(run_id, "paused")
+        except Exception:
+            pass
+    return {"ok": ok, "status": "paused" if ok else "not_running"}
+
+
+@app.post("/fd/flows/runs/{run_id}/resume")
+async def fd_flows_run_resume(run_id: str, request: Request, user: dict | None = _optional_user_dep):
+    from captain_claw.flight_deck import flow_runner
+    ok = flow_runner.request_resume(run_id)
+    if ok:
+        try:
+            await _flow_store().set_run_status(run_id, "running")
+        except Exception:
+            pass
+    return {"ok": ok, "status": "running" if ok else "not_running"}
+
+
+@app.post("/fd/flows/runs/{run_id}/stop")
+async def fd_flows_run_stop(run_id: str, request: Request, user: dict | None = _optional_user_dep):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    message = str(body.get("message") or "")
+    from captain_claw.flight_deck import flow_runner
+    ok = flow_runner.request_stop(run_id, message)
+    return {"ok": ok, "status": "stopping" if ok else "not_running"}
 
 
 @app.post("/fd/flows/{flow_id}/test")
@@ -3289,6 +3346,21 @@ async def agent_resolve_intention_decision(
     return await _proxy_agent_intentions(
         "POST", host, port, token,
         f"/api/intentions/decisions/{decision_id}/resolve", body=body,
+    )
+
+
+@app.post("/fd/agent-intention/{host}/{port}/{intention_id}/status")
+async def agent_set_intention_status(
+    host: str, port: int, intention_id: str, request: Request,
+    token: str = "", user: dict | None = _required_user_dep,
+):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return await _proxy_agent_intentions(
+        "POST", host, port, token,
+        f"/api/intentions/{intention_id}/status", body=body,
     )
 
 

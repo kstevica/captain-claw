@@ -44,6 +44,9 @@ interface FlowsStore {
   clearTest: () => void
   refreshRun: (runId: string) => Promise<void>
   fetchRunsFor: (id: string) => Promise<void>
+  pauseRun: (runId: string) => Promise<void>
+  resumeRun: (runId: string) => Promise<void>
+  stopRun: (runId: string, message?: string) => Promise<void>
 }
 
 export const useFlowsStore = create<FlowsStore>((set, get) => ({
@@ -160,6 +163,36 @@ export const useFlowsStore = create<FlowsStore>((set, get) => ({
     try {
       const runs = await api.listFlowRuns(id)
       set({ runs })
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : String(e) })
+    }
+  },
+
+  pauseRun: async (runId) => {
+    set({ error: null })
+    try {
+      await api.pauseRun(runId)
+      await get().refreshRun(runId)
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : String(e) })
+    }
+  },
+
+  resumeRun: async (runId) => {
+    set({ error: null })
+    try {
+      await api.resumeRun(runId)
+      await get().refreshRun(runId)
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : String(e) })
+    }
+  },
+
+  stopRun: async (runId, message) => {
+    set({ error: null })
+    try {
+      await api.stopRun(runId, message)
+      await get().refreshRun(runId)
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) })
     }

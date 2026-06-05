@@ -32,6 +32,61 @@ _DEFAULT_MAX_STEPS = 20
 _STOP_TARGET = "__stop__"
 
 
+class _RunControl:
+    """In-memory control handle for a live run — pause / resume / stop.
+
+    A run registers one of these while executing; the loop checks it at each
+    step boundary. ``resume`` is set while running and cleared to pause;
+    ``stopped`` ends the run at the next boundary (optionally after delivering
+    ``stop_message`` on the originating channel)."""
+
+    __slots__ = ("resume", "stopped", "stop_message")
+
+    def __init__(self) -> None:
+        self.resume = asyncio.Event()
+        self.resume.set()  # set = running, cleared = paused
+        self.stopped = False
+        self.stop_message = ""
+
+
+_RUN_CONTROL: dict[str, _RunControl] = {}
+
+
+def request_pause(run_id: str) -> bool:
+    """Pause a live run at its next step boundary. False if not controllable."""
+    c = _RUN_CONTROL.get(run_id)
+    if not c or c.stopped:
+        return False
+    c.resume.clear()
+    return True
+
+
+def request_resume(run_id: str) -> bool:
+    """Resume a paused run. False if the run is not controllable."""
+    c = _RUN_CONTROL.get(run_id)
+    if not c:
+        return False
+    c.resume.set()
+    return True
+
+
+def request_stop(run_id: str, message: str = "") -> bool:
+    """Stop a live run at its next boundary, optionally sending *message* first.
+    False if the run is not controllable."""
+    c = _RUN_CONTROL.get(run_id)
+    if not c:
+        return False
+    c.stopped = True
+    c.stop_message = str(message or "")
+    c.resume.set()  # unblock a paused run so it can observe the stop
+    return True
+
+
+def run_is_controllable(run_id: str) -> bool:
+    """True while a run is registered and can accept pause/resume/stop."""
+    return run_id in _RUN_CONTROL
+
+
 def _dig(ctx: dict[str, Any], path: str) -> Any:
     """Resolve a dotted path like 'steps.analyze.output' against ctx."""
     cur: Any = ctx
@@ -390,14 +445,44 @@ class FlowRunner:
             run_id = ""
         elif not run_id:
             run_id = await self.store.start_run(flow["id"], flow.get("name", ""), payload)
+        # Register a control handle so the run can be paused/resumed/stopped.
+        ctrl: _RunControl | None = None
+        if not dry and run_id:
+            ctrl = _RunControl()
+            _RUN_CONTROL[run_id] = ctrl
         status = "done"
         error = ""
         final_text = ""
+        paused_marked = False
         by_id = {s.get("id"): i for i, s in enumerate(steps)}
         i = 0
         executed = 0
         try:
             while i < len(steps):
+                # ── pause / stop control (checked at each step boundary) ──
+                if ctrl is not None:
+                    if not ctrl.stopped and not ctrl.resume.is_set():
+                        if not paused_marked:
+                            paused_marked = True
+                            try:
+                                await self.store.set_run_status(run_id, "paused")
+                            except Exception:
+                                pass
+                        await ctrl.resume.wait()
+                        if not ctrl.stopped:
+                            paused_marked = False
+                            try:
+                                await self.store.set_run_status(run_id, "running")
+                            except Exception:
+                                pass
+                    if ctrl.stopped:
+                        status = "stopped"
+                        if ctrl.stop_message:
+                            try:
+                                await self._deliver(payload, ctrl.stop_message)
+                            except Exception as exc:
+                                log.warning("flow stop message delivery failed: %s", exc)
+                        break
                 if executed >= max_steps:
                     raise RuntimeError(f"max_steps ({max_steps}) exceeded")
                 step = steps[i]
@@ -466,10 +551,11 @@ class FlowRunner:
                 if step.get("stop"):
                     break  # "Stop after this step" flag → end the flow here
 
-            # Deliver final output (the last executed step's output).
+            # Deliver final output (the last executed step's output) — only on a
+            # clean finish, not when the run was stopped mid-flight.
             output = flow.get("output") or {}
             out_channel = str(output.get("channel") or "log")
-            if not dry and out_channel in ("whatsapp", "same", "glasses", "web") and final_text:
+            if status == "done" and not dry and out_channel in ("whatsapp", "same", "glasses", "web") and final_text:
                 try:
                     await self._deliver(payload, str(final_text))
                 except Exception as exc:
@@ -481,6 +567,7 @@ class FlowRunner:
 
         if not dry:
             await self.store.finish_run(run_id, status, error)
+            _RUN_CONTROL.pop(run_id, None)
         return {"run_id": run_id, "status": status, "error": error, "steps": trace, "output": final_text}
 
 

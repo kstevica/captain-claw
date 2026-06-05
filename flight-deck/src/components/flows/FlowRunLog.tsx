@@ -8,6 +8,9 @@ import {
   Clock,
   CircleDot,
   Bot,
+  Pause,
+  Play,
+  OctagonX,
 } from 'lucide-react'
 import { useFlowsStore } from '../../stores/flowsStore'
 import type { FlowRunStep } from '../../services/flowsApi'
@@ -17,6 +20,8 @@ function StatusIcon({ status }: { status: string }) {
   if (s === 'done' || s === 'ok' || s === 'success') return <CheckCircle2 className="h-4 w-4 text-emerald-400" />
   if (s === 'error' || s === 'failed') return <XCircle className="h-4 w-4 text-red-400" />
   if (s === 'running') return <Loader2 className="h-4 w-4 animate-spin text-violet-400" />
+  if (s === 'paused') return <Pause className="h-4 w-4 text-amber-400" />
+  if (s === 'stopped') return <OctagonX className="h-4 w-4 text-rose-400" />
   if (s === 'parked' || s === 'waiting') return <Clock className="h-4 w-4 text-amber-400" />
   return <CircleDot className="h-4 w-4 text-zinc-500" />
 }
@@ -29,19 +34,34 @@ function fmtTime(t?: string): string {
 }
 
 export function FlowRunLog() {
-  const { activeRunId, runDetail, error, openList, refreshRun } = useFlowsStore()
+  const { activeRunId, runDetail, error, openList, refreshRun, pauseRun, resumeRun, stopRun } =
+    useFlowsStore()
 
-  // Poll while running
+  // Poll while a run is live (running or paused)
   useEffect(() => {
     if (!activeRunId) return
-    const isRunning = (runDetail?.run.status || '').toLowerCase() === 'running'
-    if (!isRunning) return
+    const s = (runDetail?.run.status || '').toLowerCase()
+    if (s !== 'running' && s !== 'paused') return
     const t = setInterval(() => refreshRun(activeRunId), 2000)
     return () => clearInterval(t)
   }, [activeRunId, runDetail?.run.status, refreshRun])
 
   const run = runDetail?.run
   const steps: FlowRunStep[] = runDetail?.steps || []
+  const runStatus = (run?.status || '').toLowerCase()
+  const isRunning = runStatus === 'running'
+  const isPaused = runStatus === 'paused'
+  const isLive = isRunning || isPaused
+
+  const onStop = () => {
+    if (!activeRunId) return
+    const m = window.prompt(
+      'Send a message before stopping? Leave blank for none, or Cancel to abort.',
+      '',
+    )
+    if (m === null) return // user cancelled
+    stopRun(activeRunId, m)
+  }
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -55,12 +75,38 @@ export function FlowRunLog() {
             <ArrowLeft className="h-3.5 w-3.5" /> Back to flows
           </button>
           {activeRunId && (
-            <button
-              onClick={() => refreshRun(activeRunId)}
-              className="flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-colors"
-            >
-              <RefreshCw className="h-3.5 w-3.5" /> Refresh
-            </button>
+            <div className="flex items-center gap-2">
+              {isLive && isRunning && (
+                <button
+                  onClick={() => pauseRun(activeRunId)}
+                  className="flex items-center gap-1.5 rounded-lg bg-amber-500/15 px-2.5 py-1 text-xs font-medium text-amber-300 hover:bg-amber-500/25 transition-colors"
+                >
+                  <Pause className="h-3.5 w-3.5" /> Pause
+                </button>
+              )}
+              {isLive && isPaused && (
+                <button
+                  onClick={() => resumeRun(activeRunId)}
+                  className="flex items-center gap-1.5 rounded-lg bg-emerald-500/15 px-2.5 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-500/25 transition-colors"
+                >
+                  <Play className="h-3.5 w-3.5" /> Resume
+                </button>
+              )}
+              {isLive && (
+                <button
+                  onClick={onStop}
+                  className="flex items-center gap-1.5 rounded-lg bg-rose-500/15 px-2.5 py-1 text-xs font-medium text-rose-300 hover:bg-rose-500/25 transition-colors"
+                >
+                  <OctagonX className="h-3.5 w-3.5" /> Stop
+                </button>
+              )}
+              <button
+                onClick={() => refreshRun(activeRunId)}
+                className="flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-colors"
+              >
+                <RefreshCw className="h-3.5 w-3.5" /> Refresh
+              </button>
+            </div>
           )}
         </div>
 

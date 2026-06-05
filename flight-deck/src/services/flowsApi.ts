@@ -219,6 +219,21 @@ export async function getFlowRun(runId: string): Promise<FlowRunDetail> {
   return fdFetch<FlowRunDetail>(`/flows/runs/${encodeURIComponent(runId)}`)
 }
 
+// ── Live run control (pause / resume / stop) ──
+export interface RunControlResult { ok: boolean; status: string }
+
+export async function pauseRun(runId: string): Promise<RunControlResult> {
+  return fdFetch<RunControlResult>(`/flows/runs/${encodeURIComponent(runId)}/pause`, jsonInit('POST'))
+}
+
+export async function resumeRun(runId: string): Promise<RunControlResult> {
+  return fdFetch<RunControlResult>(`/flows/runs/${encodeURIComponent(runId)}/resume`, jsonInit('POST'))
+}
+
+export async function stopRun(runId: string, message?: string): Promise<RunControlResult> {
+  return fdFetch<RunControlResult>(`/flows/runs/${encodeURIComponent(runId)}/stop`, jsonInit('POST', { message: message || '' }))
+}
+
 // ── DSL (code view) + AI compile ──
 export interface DslCompileResult { ok: boolean; flow?: FlowInput; error?: string; line?: number; dsl?: string }
 
@@ -230,8 +245,15 @@ export async function decompileFlow(flow: FlowInput): Promise<{ ok: boolean; dsl
   return fdFetch(`/flows/dsl/decompile`, jsonInit('POST', { flow }))
 }
 
-export async function compileWithAI(text: string, agent?: string): Promise<DslCompileResult> {
-  return fdFetch<DslCompileResult>(`/flows/compile`, jsonInit('POST', { text, agent: agent || '' }))
+export async function compileWithAI(
+  text: string,
+  agent?: string,
+  current?: string,
+): Promise<DslCompileResult> {
+  return fdFetch<DslCompileResult>(
+    `/flows/compile`,
+    jsonInit('POST', { text, agent: agent || '', current: current || '' }),
+  )
 }
 
 export async function getFlowDocs(): Promise<string> {
