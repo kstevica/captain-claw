@@ -27,6 +27,18 @@ _RUNNER: Any = None
 # pending waits — acceptable for v1.
 _PENDING_INPUT: dict[str, asyncio.Future] = {}
 
+# The announce text of an active input step, keyed the same way — so a
+# '/flow resume' can re-show the question the flow is waiting on.
+_PENDING_INPUT_PROMPT: dict[str, str] = {}
+
+
+def set_input_prompt(key: str, text: str) -> None:
+    _PENDING_INPUT_PROMPT[key] = text
+
+
+def clear_input_prompt(key: str) -> None:
+    _PENDING_INPUT_PROMPT.pop(key, None)
+
 
 def input_key(*, waid: str = "", channel: str = "", origin_port: int = 0) -> str:
     """Stable key for a paused-input wait. WAID identifies a WhatsApp user
@@ -62,12 +74,24 @@ def has_pending_input(*, waid: str = "", channel: str = "", origin_port: int = 0
 
 def deliver_pending_input(*, waid: str = "", channel: str = "", origin_port: int = 0, text: str = "") -> bool:
     """Resolve a paused flow's input wait with *text*. Returns True if a wait
-    was satisfied (caller should NOT also forward the message to the agent)."""
-    fut = _PENDING_INPUT.get(input_key(waid=waid, channel=channel, origin_port=origin_port))
-    if fut is not None and not fut.done():
-        fut.set_result(text)
-        return True
-    return False
+    was satisfied (caller should NOT also forward the message to the agent).
+
+    If the owner's flow is *paused* (via '/flow pause'), the wait is left
+    intact and this returns False, so the message goes to the agent as a normal
+    turn instead of being swallowed as the flow's answer. The flow stays on the
+    input step and consumes the next reply only after it is resumed."""
+    key = input_key(waid=waid, channel=channel, origin_port=origin_port)
+    fut = _PENDING_INPUT.get(key)
+    if fut is None or fut.done():
+        return False
+    try:
+        import captain_claw.flight_deck.flow_runner as fr
+        if fr.owner_is_paused(key):
+            return False
+    except Exception:
+        pass
+    fut.set_result(text)
+    return True
 
 
 def cancel_pending_input(*, waid: str = "", channel: str = "", origin_port: int = 0) -> bool:
@@ -83,7 +107,7 @@ def cancel_pending_input(*, waid: str = "", channel: str = "", origin_port: int 
 # Text control commands: '/flow stop|pause|resume' — slash optional, anchored
 # so ordinary chat ("the flow stopped") doesn't trigger it. `halt`=stop,
 # `continue`=resume. A trailing phrase after `stop` is sent before stopping.
-_FLOW_CMD_RE = re.compile(r"^\s*/?flow\s+(stop|halt|pause|resume|continue)\b\s*(.*)$", re.I)
+_FLOW_CMD_RE = re.compile(r"^\s*/?flow\s+(stop|halt|pause|resume|continue|status|state)\b\s*(.*)$", re.I)
 
 
 def _owner_key_for(payload: dict[str, Any]) -> str:
@@ -108,9 +132,30 @@ async def maybe_handle_flow_command(payload: dict[str, Any]) -> bool:
     rest = (m.group(2) or "").strip()
     owner = _owner_key_for(payload)
     run_ids = fr.runs_for_owner(owner)
+    waiting = has_pending_input(
+        waid=str(payload.get("waid") or payload.get("whatsapp_waid") or ""),
+        channel=str(payload.get("channel") or ""),
+        origin_port=int(payload.get("origin_port") or 0),
+    )
     reply = ""
 
-    if action in ("stop", "halt"):
+    if action in ("status", "state"):
+        states = fr.owner_run_states(owner)
+        if not states:
+            reply = "💤 No flow is running."
+        else:
+            lines = []
+            for s in states:
+                nm = s.get("name") or "Flow"
+                if s.get("paused"):
+                    detail = "⏸️ paused" + (" — waiting for your input on resume" if waiting else "")
+                elif waiting:
+                    detail = "⏳ waiting for your input"
+                else:
+                    detail = "▶️ running"
+                lines.append(f"• *{nm}* — {detail}")
+            reply = "📊 *Flow status*\n" + "\n".join(lines)
+    elif action in ("stop", "halt"):
         n = sum(1 for rid in run_ids if fr.request_stop(rid, rest))
         if n:
             # A flow paused on an `input` step is blocked off the control loop —
@@ -128,7 +173,13 @@ async def maybe_handle_flow_command(payload: dict[str, Any]) -> bool:
         reply = "⏸️ Paused — send */flow resume* to continue." if n else "No running flow to pause."
     else:  # resume / continue
         n = sum(1 for rid in run_ids if fr.request_resume(rid))
-        reply = "▶️ Resumed the flow." if n else "No paused flow to resume."
+        if not n:
+            reply = "No paused flow to resume."
+        else:
+            # If the flow paused on an input step, re-show the question so the
+            # user knows their next reply continues the flow from that step.
+            prompt = _PENDING_INPUT_PROMPT.get(owner)
+            reply = f"▶️ Resumed.\n\n{prompt}" if prompt else "▶️ Resumed the flow."
 
     if reply and _RUNNER is not None:
         try:

@@ -357,6 +357,7 @@ flow runs on, send a control command (the leading `/` is optional):
 
 | Command | Effect |
 |---|---|
+| `/flow status` | Report whether a flow is running, paused, or waiting for your input |
 | `/flow stop` | End the running flow now. Add a trailing phrase to send it first: `/flow stop ok, cancelled` |
 | `/flow pause` | Pause at the next step boundary |
 | `/flow resume` | Continue a paused flow (`/flow continue` also works) |
@@ -365,6 +366,11 @@ These reach the flow **you** triggered (matched by your WhatsApp number, or by
 your web/glasses session). `stop` works even while the flow is paused waiting on
 an `input` step. The same controls are available as **Pause / Resume / Stop**
 buttons in the Flight Deck run log.
+
+**Pause + input:** if you pause a flow while it’s waiting for your input, your
+next messages go to the agent as normal chat — they are **not** swallowed as the
+flow’s answer. The flow stays on that step; `/flow resume` re-shows the question,
+and your next reply continues it from there.
 
 ---
 

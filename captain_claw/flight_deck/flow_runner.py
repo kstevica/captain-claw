@@ -40,14 +40,15 @@ class _RunControl:
     ``stopped`` ends the run at the next boundary (optionally after delivering
     ``stop_message`` on the originating channel)."""
 
-    __slots__ = ("resume", "stopped", "stop_message", "owner")
+    __slots__ = ("resume", "stopped", "stop_message", "owner", "name")
 
-    def __init__(self, owner: str = "") -> None:
+    def __init__(self, owner: str = "", name: str = "") -> None:
         self.resume = asyncio.Event()
         self.resume.set()  # set = running, cleared = paused
         self.stopped = False
         self.stop_message = ""
         self.owner = owner  # caller identity, for '/flow stop|pause|resume'
+        self.name = name    # flow name, for '/flow status'
 
 
 _RUN_CONTROL: dict[str, _RunControl] = {}
@@ -65,6 +66,24 @@ def _owner_key(payload: dict[str, Any]) -> str:
 def runs_for_owner(owner: str) -> list[str]:
     """Active (not-yet-stopped) run ids controllable by *owner*."""
     return [rid for rid, c in _RUN_CONTROL.items() if c.owner == owner and not c.stopped]
+
+
+def owner_is_paused(owner: str) -> bool:
+    """True if *owner* has a live run that is currently paused."""
+    return any(
+        c.owner == owner and not c.stopped and not c.resume.is_set()
+        for c in _RUN_CONTROL.values()
+    )
+
+
+def owner_run_states(owner: str) -> list[dict[str, Any]]:
+    """Snapshot of *owner*'s live runs for '/flow status'."""
+    out: list[dict[str, Any]] = []
+    for c in _RUN_CONTROL.values():
+        if c.owner != owner or c.stopped:
+            continue
+        out.append({"name": c.name, "paused": not c.resume.is_set()})
+    return out
 
 
 def request_pause(run_id: str) -> bool:
@@ -417,12 +436,16 @@ class FlowRunner:
         from captain_claw.flight_deck import flow_router
         timeout = float(step.get("timeout") or 3600.0)
         key = flow_router.input_key(waid=waid, channel=channel, origin_port=origin_port)
+        # Remember the prompt so '/flow resume' can re-show the question.
+        flow_router.set_input_prompt(key, announce)
         try:
             text = await flow_router.wait_for_input(key, timeout=timeout)
         except asyncio.TimeoutError as exc:
             raise RuntimeError(f"timed out waiting for input ({flow_name})") from exc
         except asyncio.CancelledError as exc:
             raise RuntimeError(f"input wait superseded ({flow_name})") from exc
+        finally:
+            flow_router.clear_input_prompt(key)
         return text, ""
 
     async def _emit(self, step: dict[str, Any], ctx: dict[str, Any], payload: dict[str, Any]) -> str:
@@ -463,7 +486,7 @@ class FlowRunner:
         # Register a control handle so the run can be paused/resumed/stopped.
         ctrl: _RunControl | None = None
         if not dry and run_id:
-            ctrl = _RunControl(owner=_owner_key(payload))
+            ctrl = _RunControl(owner=_owner_key(payload), name=str(flow.get("name") or ""))
             _RUN_CONTROL[run_id] = ctrl
         status = "done"
         error = ""
