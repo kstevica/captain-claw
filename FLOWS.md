@@ -29,6 +29,9 @@ There is also an **AI compiler**: describe what you want in plain English and a 
    - [return — exit with a value](#return-step)
    - [spawn / join — run flows in parallel](#spawn-step--join-step)
    - [error / `on error` — handle failure](#error-step--on-error)
+   - [set — compute & accumulate](#set-step--compute--accumulate)
+   - [foreach — iterate over a list](#foreach-step--iterate-a-flow-over-a-list)
+   - [while / retry / sleep / wait until](#while-step--loop)
 5. [Agent selectors (`on`)](#agent-selectors-on)
 6. [Templating — `{{ … }}`](#templating)
 7. [Branch conditions](#branch-conditions)
@@ -38,7 +41,8 @@ There is also an **AI compiler**: describe what you want in plain English and a 
 11. [Channels](#channels)
 12. [The AI compiler](#the-ai-compiler)
 13. [Synthesized flows (the scratch space)](#synthesized-flows-the-scratch-space)
-14. [Cookbook](#cookbook)
+14. [Scheduling — run a flow on a timer](#scheduling-run-a-flow-on-a-timer)
+15. [Cookbook](#cookbook)
 15. [Worked examples](#worked-examples) — simple · moderate · complex · synthesis
 16. [Common errors](#common-errors)
 17. [Grammar cheat-sheet](#grammar-cheat-sheet)
@@ -346,6 +350,106 @@ step failed:
 Without `on error`, a failed call just sets its `{{calls|joins.<id>.status}}` — you
 can branch on that instead (the inline form).
 
+### set step — compute & accumulate
+
+Store a computed value into `{{vars.<name>}}`. The expression supports `+ - * /`
+(`+` also concatenates strings and lists), `{{path}}` operands, list literals
+`[a, b]`, and functions `split`, `join`, `len`, `upper`, `lower`, `trim`, `first`,
+`last`, `append`, `int`, `str`, `contains`.
+
+```text
+step init:
+  set total = 0
+
+step lines:
+  set rows = split({{steps.report.output}})   # text → list (by newline)
+
+step bump:
+  set total = {{vars.total}} + 1
+```
+
+Arbitrary data-crunching still belongs in a `tool`/`agent` step — `set` is just
+enough to orchestrate (counters, list building, simple transforms).
+
+### foreach step — iterate a flow over a list
+
+Run a flow once per item of a list, binding the loop variable each time. `gosub`
+mode is sequential; `spawn` mode is a **parallel map**. The collected results are
+this step's output (a list).
+
+```text
+step lookups:
+  foreach city in {{steps.cities.output}}
+  gosub "Place Lookup"
+  with place: {{city}}
+# → {{steps.lookups.output}} is the list of each call's return value
+```
+
+```text
+step weather:
+  foreach city in {{vars.cities}}
+  spawn "Weather Brief"      # all at once
+  with place: {{city}}
+  timeout: 60
+```
+
+The `in` value can be a list (from `set`/another `foreach`), a JSON array, or any
+text (split on newlines).
+
+### while step — loop
+
+`while <condition> -> <target>`: while the condition holds, jump to the target
+(whose path loops back here); otherwise fall through. Pair with `set` for a
+counter. Bounded by the shared step budget.
+
+```text
+step loop:
+  while {{vars.n}} < 5 -> work
+# (falls through here when n reaches 5)
+```
+
+### retry (modifier)
+
+On a `gosub` / `spawn` / `join` step, `retry: N` re-runs it up to N times on
+failure before `on error` fires.
+
+```text
+step fetch:
+  gosub "Flaky Lookup"
+  retry: 3
+  on error -> give_up
+```
+
+### sleep step — pause
+
+`sleep <duration>` parks the run for a while (durations: `30s`, `5m`, `2h`, `1d`,
+or a bare number of seconds). `/flow stop` still interrupts it.
+
+```text
+step wait_a_bit:
+  sleep 10m
+```
+
+### wait step — pause until a condition
+
+`wait until <condition>` parks the flow until an **inbound message** satisfies the
+condition; non-matching messages fall through to the agent (the flow stays paused).
+The matching message's text becomes the step's output. Great for approvals.
+
+```text
+step approval:
+  emit "Reply 'approved' to ship it."
+
+step gate:
+  wait until contains "approved"
+
+step ship:
+  gosub "Deploy"
+```
+
+Shorthand `contains "x"` / `matches "x"` tests `{{trigger.text}}`; or write a full
+condition like `wait until {{trigger.text}} == "yes"`. `/flow stop` ends the wait.
+
 ---
 
 ## Agent selectors (`on`)
@@ -576,6 +680,21 @@ A synthesized flow proves itself by *running well*:
 Endpoints: `POST /fd/flows/synthesize` (goal → validated scratch flow, optional
 run), `GET /fd/flows/scratch` (list, self-maintains), `POST /fd/flows/scratch/maintain`
 (janitor), `POST /fd/flows/{id}/promote`.
+
+---
+
+## Scheduling — run a flow on a timer
+
+Flows are reactive by default (a message starts them). To make one **proactive**,
+schedule it: in **Flight Deck → Scheduler**, create a job, switch the action to
+**Flow**, pick the flow, and set a schedule (`daily 08:00`, `every 2h`, `weekly mon
+09:00`, …) plus a delivery target (WhatsApp / channel). At fire time the flow runs
+and its output is delivered.
+
+- **Scheduled flows should be self-contained** — no `input` / `wait` steps (there's
+  no user to ask at fire time); the flow runs to completion and its output is sent.
+- A `Morning Briefing`-style flow (parallel `spawn`/`join`, then a merged `emit`)
+  is the canonical fit — fire it at 8am instead of waiting for "brief me".
 
 ---
 

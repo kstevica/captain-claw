@@ -295,6 +295,14 @@ class SchedulerStore:
                     ON scheduler_jobs(enabled, next_run_at);
                 """
             )
+            # A job runs either a `prompt` (text → agent) or a `flow_id`
+            # (run a Flow). Migrate existing DBs in place.
+            try:
+                self._conn_or_open().execute(
+                    "ALTER TABLE scheduler_jobs ADD COLUMN flow_id TEXT NOT NULL DEFAULT ''"
+                )
+            except Exception:
+                pass  # column already exists
             self._conn_or_open().commit()
 
     def create(self, **fields: Any) -> dict[str, Any]:
@@ -307,8 +315,9 @@ class SchedulerStore:
         if not target:
             raise ValueError("delivery_target required")
         prompt = str(fields.get("prompt", "")).strip()
-        if not prompt:
-            raise ValueError("prompt required")
+        flow_id = str(fields.get("flow_id", "")).strip()
+        if not prompt and not flow_id:
+            raise ValueError("prompt or flow_id required")
 
         jid = _new_job_id()
         now_iso = _utcnow_iso()
@@ -321,6 +330,7 @@ class SchedulerStore:
             "agent_slug": str(fields.get("agent_slug", "")).strip(),
             "agent_auth": str(fields.get("agent_auth", "")).strip(),
             "prompt": prompt,
+            "flow_id": flow_id,
             "delivery_kind": kind,
             "delivery_target": target.lstrip("+") if kind == "whatsapp" else target,
             "enabled": enabled,
@@ -337,12 +347,12 @@ class SchedulerStore:
             conn.execute(
                 """
                 INSERT INTO scheduler_jobs
-                  (id, name, schedule, agent_slug, agent_auth, prompt,
+                  (id, name, schedule, agent_slug, agent_auth, prompt, flow_id,
                    delivery_kind, delivery_target, enabled, ignore_quiet_hours,
                    created_at, updated_at, next_run_at, last_run_at,
                    last_status, last_result)
                 VALUES
-                  (:id, :name, :schedule, :agent_slug, :agent_auth, :prompt,
+                  (:id, :name, :schedule, :agent_slug, :agent_auth, :prompt, :flow_id,
                    :delivery_kind, :delivery_target, :enabled, :ignore_quiet_hours,
                    :created_at, :updated_at, :next_run_at, :last_run_at,
                    :last_status, :last_result)
@@ -383,7 +393,7 @@ class SchedulerStore:
         if not existing:
             return None
         allowed = {
-            "name", "schedule", "agent_slug", "agent_auth", "prompt",
+            "name", "schedule", "agent_slug", "agent_auth", "prompt", "flow_id",
             "delivery_kind", "delivery_target", "enabled", "ignore_quiet_hours",
         }
         updates: dict[str, Any] = {}
@@ -589,6 +599,41 @@ async def _deliver(kind: str, target: str, text: str) -> tuple[bool, str]:
     return (False, f"error:unknown delivery_kind {kind}")
 
 
+async def _execute_flow_job(job: dict[str, Any], flow_id: str) -> tuple[str, str]:
+    """Run a scheduled Flow and deliver its output. Scheduled flows should be
+    self-contained (no `input` — there's no user to ask at fire time)."""
+    try:
+        from captain_claw.flight_deck.server import app
+        store = getattr(app.state, "flow_store", None)
+        runner = getattr(app.state, "flow_runner", None)
+    except Exception:
+        store = runner = None
+    if store is None or runner is None:
+        return ("error:flow-engine", "flow engine not available")
+    flow = await store.get_flow(flow_id)
+    if not flow:
+        return ("error:flow-missing", f"flow '{flow_id}' not found")
+    # Neutral payload: the scheduler delivers the flow's output itself, so the
+    # flow's own auto-delivery (output -> same with no channel) is a no-op.
+    payload = {"channel": "scheduler", "scheduled": True, "scheduler_job": job.get("id", "")}
+    try:
+        result = await runner.run(flow, payload)
+    except Exception as exc:
+        return ("error:flow-run", str(exc))
+    status = str(result.get("status") or "")
+    output = str(result.get("output") or "")
+    if status != "done":
+        return (f"error:flow-{status or 'failed'}", output or status)
+    if not output.strip():
+        return ("ok:no-output", "")
+    delivered, note = await _deliver(
+        str(job.get("delivery_kind") or ""),
+        str(job.get("delivery_target") or ""),
+        output,
+    )
+    return (note, output)
+
+
 async def execute_job(job: dict[str, Any], *, force: bool = False) -> tuple[str, str]:
     """Run one job end-to-end. Returns ``(status, result_text)``.
 
@@ -596,6 +641,11 @@ async def execute_job(job: dict[str, Any], *, force: bool = False) -> tuple[str,
     """
     if not force and not job.get("ignore_quiet_hours") and _in_quiet_hours():
         return ("skipped:quiet", "")
+
+    # A job runs either a Flow or a text prompt.
+    flow_id = str(job.get("flow_id") or "").strip()
+    if flow_id:
+        return await _execute_flow_job(job, flow_id)
 
     slug = str(job.get("agent_slug") or "")
     host, port, auth = resolve_agent_by_slug(slug, str(job.get("agent_auth") or ""))

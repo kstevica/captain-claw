@@ -24,6 +24,7 @@ interface Job {
   agent_slug: string
   agent_auth: string
   prompt: string
+  flow_id?: string
   delivery_kind: 'whatsapp' | 'channel'
   delivery_target: string
   enabled: number
@@ -102,6 +103,7 @@ const EMPTY_FORM = {
   agent_slug: '',
   agent_auth: '',
   prompt: '',
+  flow_id: '',
   delivery_kind: 'whatsapp' as 'whatsapp' | 'channel',
   delivery_target: '',
   ignore_quiet_hours: false,
@@ -113,10 +115,12 @@ type FormState = typeof EMPTY_FORM
 export function SchedulerPage() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [agents, setAgents] = useState<AgentOption[]>([])
+  const [flowList, setFlowList] = useState<{ id: string; name: string }[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState<FormState>(EMPTY_FORM)
+  const action: 'prompt' | 'flow' = form.flow_id ? 'flow' : 'prompt'
   const [editingId, setEditingId] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -147,6 +151,12 @@ export function SchedulerPage() {
   }, [])
 
   useEffect(() => { load(); loadAgents() }, [load, loadAgents])
+  useEffect(() => {
+    import('../services/flowsApi')
+      .then((m) => m.listFlows())
+      .then((fs) => setFlowList(fs.map((f) => ({ id: f.id, name: f.name }))))
+      .catch(() => setFlowList([]))
+  }, [])
 
   const resetForm = () => {
     setForm(EMPTY_FORM)
@@ -161,6 +171,7 @@ export function SchedulerPage() {
       agent_slug: job.agent_slug,
       agent_auth: job.agent_auth,
       prompt: job.prompt,
+      flow_id: job.flow_id || '',
       delivery_kind: job.delivery_kind,
       delivery_target: job.delivery_target,
       ignore_quiet_hours: job.ignore_quiet_hours === 1,
@@ -171,8 +182,8 @@ export function SchedulerPage() {
   }
 
   const submit = async () => {
-    if (!form.schedule.trim() || !form.prompt.trim() || !form.delivery_target.trim()) {
-      setError('schedule, prompt and delivery target are required')
+    if (!form.schedule.trim() || (!form.prompt.trim() && !form.flow_id) || !form.delivery_target.trim()) {
+      setError('schedule, a prompt or flow, and a delivery target are required')
       return
     }
     setSaving(true)
@@ -351,11 +362,31 @@ export function SchedulerPage() {
                   className={inputCls} />
               </Field>
             </div>
-            <Field label="Prompt" className="mt-3">
-              <textarea value={form.prompt} onChange={(e) => setForm({ ...form, prompt: e.target.value })}
-                rows={3} placeholder="Compile my morning briefing: today's calendar, flagged emails, and one follow-up I owe."
-                className={inputCls + ' resize-y'} />
-            </Field>
+            <div className="mt-3 flex items-center gap-1 rounded-lg border border-zinc-700 p-0.5 text-xs w-fit">
+              <button
+                onClick={() => setForm({ ...form, flow_id: '' })}
+                className={`rounded-md px-2.5 py-1 ${action === 'prompt' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'}`}
+              >Prompt</button>
+              <button
+                onClick={() => setForm({ ...form, prompt: '', flow_id: form.flow_id || (flowList[0]?.id || '') })}
+                className={`rounded-md px-2.5 py-1 ${action === 'flow' ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'}`}
+              >Flow</button>
+            </div>
+            {action === 'flow' ? (
+              <Field label="Run flow" className="mt-2">
+                <select value={form.flow_id} onChange={(e) => setForm({ ...form, flow_id: e.target.value })} className={inputCls}>
+                  <option value="">(pick a flow)</option>
+                  {flowList.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+                </select>
+                <p className="mt-1 text-[11px] text-zinc-600">Runs the flow on schedule and delivers its output. Use self-contained flows (no “ask user” steps).</p>
+              </Field>
+            ) : (
+              <Field label="Prompt" className="mt-2">
+                <textarea value={form.prompt} onChange={(e) => setForm({ ...form, prompt: e.target.value })}
+                  rows={3} placeholder="Compile my morning briefing: today's calendar, flagged emails, and one follow-up I owe."
+                  className={inputCls + ' resize-y'} />
+              </Field>
+            )}
             <label className="mt-3 flex items-center gap-2 text-sm text-zinc-400">
               <input type="checkbox" checked={form.ignore_quiet_hours}
                 onChange={(e) => setForm({ ...form, ignore_quiet_hours: e.target.checked })}

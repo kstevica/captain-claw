@@ -60,7 +60,7 @@ export interface FlowTrigger {
   match: FlowMatch
 }
 
-export type StepType = 'tool' | 'agent' | 'vision' | 'input' | 'branch' | 'emit' | 'gosub' | 'return' | 'spawn' | 'join' | 'error'
+export type StepType = 'tool' | 'agent' | 'vision' | 'input' | 'branch' | 'emit' | 'gosub' | 'return' | 'spawn' | 'join' | 'error' | 'set' | 'foreach' | 'while' | 'sleep' | 'wait'
 
 export interface FlowStep {
   id: string
@@ -83,6 +83,24 @@ export interface FlowStep {
   message?: string
   /** on a gosub/join/spawn step: jump to this step id if the call fails */
   on_error?: string
+  /** retry a failed call step up to N times before on_error fires */
+  retry?: number
+  // set step — compute a value into {{vars.<var>}}
+  /** variable name (set / foreach loop var) */
+  var?: string
+  /** value expression for `set` (e.g. {{vars.n}} + 1) */
+  expr?: string
+  // foreach step — iterate a flow over a list
+  /** list expression to iterate (e.g. {{steps.x.output}}) */
+  in?: string
+  /** foreach mode: 'gosub' (sequential) or 'spawn' (parallel) */
+  mode?: 'gosub' | 'spawn'
+  // sleep step
+  /** duration like 30s / 5m / 2h / 1d (or seconds) */
+  duration?: string
+  // wait step
+  /** condition to wait for, e.g. contains "approved" */
+  until?: string
   // agent step
   prompt?: string
   /** optional file/image to send to the agent, e.g. {{trigger.image_path}} */

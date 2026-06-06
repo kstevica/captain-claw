@@ -25,6 +25,11 @@ import {
   Zap,
   GitMerge,
   AlertTriangle,
+  Variable,
+  Repeat,
+  RotateCw,
+  Moon,
+  Hourglass,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -61,6 +66,11 @@ const STEP_TYPE_META: Record<StepType, { icon: typeof Wrench; label: string; col
   spawn: { icon: Zap, label: 'Spawn', color: 'text-yellow-400' },
   join: { icon: GitMerge, label: 'Join', color: 'text-teal-400' },
   error: { icon: AlertTriangle, label: 'On error', color: 'text-orange-400' },
+  set: { icon: Variable, label: 'Set', color: 'text-lime-400' },
+  foreach: { icon: Repeat, label: 'For each', color: 'text-fuchsia-400' },
+  while: { icon: RotateCw, label: 'While', color: 'text-amber-400' },
+  sleep: { icon: Moon, label: 'Sleep', color: 'text-slate-400' },
+  wait: { icon: Hourglass, label: 'Wait until', color: 'text-cyan-400' },
 }
 
 function newStep(type: StepType, idx: number): FlowStep {
@@ -76,6 +86,11 @@ function newStep(type: StepType, idx: number): FlowStep {
   if (type === 'spawn') { base.flow = ''; base.args = {} }
   if (type === 'join') { base.join = ''; base.timeout = 300 }
   if (type === 'error') { base.message = '' }
+  if (type === 'set') { base.var = ''; base.expr = '' }
+  if (type === 'foreach') { base.var = 'item'; base.in = ''; base.mode = 'gosub'; base.flow = ''; base.args = {} }
+  if (type === 'while') { base.when = ''; base.goto = '' }
+  if (type === 'sleep') { base.duration = '5m' }
+  if (type === 'wait') { base.until = 'contains "approved"' }
   return base
 }
 
@@ -1326,7 +1341,96 @@ function StepCard({
         </div>
       )}
 
-      {step.type !== 'branch' && step.type !== 'return' && (
+      {step.type === 'set' && (
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_2fr]">
+          <div>
+            <label className={labelCls}>Variable</label>
+            <input value={step.var || ''} onChange={(e) => onChange({ var: e.target.value })} placeholder="total" className={`${inputCls} font-mono`} />
+          </div>
+          <div>
+            <label className={labelCls}>= Expression</label>
+            <input value={step.expr || ''} onChange={(e) => onChange({ expr: e.target.value })} placeholder="{{vars.total}} + 1" className={`${inputCls} font-mono`} />
+            <p className="mt-1 text-[10px] text-zinc-600">
+              Stored in <span className="font-mono">{`{{vars.${step.var || 'name'}}}`}</span>. + - * /, lists <span className="font-mono">[a, b]</span>, and split/join/len/upper/first/append.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {step.type === 'foreach' && (
+        <>
+          <div className="mb-2 grid grid-cols-1 gap-2 sm:grid-cols-[1fr_2fr]">
+            <div>
+              <label className={labelCls}>Loop var</label>
+              <input value={step.var || 'item'} onChange={(e) => onChange({ var: e.target.value })} placeholder="item" className={`${inputCls} font-mono`} />
+            </div>
+            <div>
+              <label className={labelCls}>In list</label>
+              <input value={step.in || ''} onChange={(e) => onChange({ in: e.target.value })} placeholder="{{steps.cities.output}}" className={`${inputCls} font-mono`} />
+            </div>
+          </div>
+          <div className="mb-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <div>
+              <label className={labelCls}>Run flow</label>
+              <input value={step.flow || ''} onChange={(e) => onChange({ flow: e.target.value })} placeholder="Place Lookup" className={inputCls} />
+            </div>
+            <div>
+              <label className={labelCls}>Mode</label>
+              <select value={step.mode || 'gosub'} onChange={(e) => onChange({ mode: e.target.value as 'gosub' | 'spawn' })} className={inputCls}>
+                <option value="gosub">sequential (gosub)</option>
+                <option value="spawn">parallel (spawn)</option>
+              </select>
+            </div>
+          </div>
+          <label className={labelCls}>Args (use {`{{${step.var || 'item'}}}`} for the current item) → {`{{steps.${step.id}.output}}`} is the list of results</label>
+          <ArgsEditor args={step.args || {}} onChange={(args) => onChange({ args })} hint={hint} registerFocus={registerFocus} />
+        </>
+      )}
+
+      {step.type === 'while' && (
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-[2fr_1fr]">
+          <div>
+            <label className={labelCls}>While condition</label>
+            <input value={step.when || ''} onChange={(e) => onChange({ when: e.target.value })} placeholder="{{vars.n}} < 5" className={`${inputCls} font-mono`} />
+          </div>
+          <div>
+            <label className={labelCls}>→ loop to step</label>
+            <select value={step.goto || ''} onChange={(e) => onChange({ goto: e.target.value })} className={inputCls}>
+              <option value="">(pick a step)</option>
+              {allIds.filter((id) => id !== step.id).map((id) => <option key={id} value={id}>{id}</option>)}
+            </select>
+            <p className="mt-1 text-[10px] text-zinc-600">That step’s path should loop back here.</p>
+          </div>
+        </div>
+      )}
+
+      {step.type === 'sleep' && (
+        <div>
+          <label className={labelCls}>Sleep for</label>
+          <input value={step.duration || ''} onChange={(e) => onChange({ duration: e.target.value })} placeholder="5m" className={`${inputCls} font-mono w-32`} />
+          <p className="mt-1 text-[10px] text-zinc-600">e.g. <span className="font-mono">30s · 5m · 2h · 1d</span>. The flow pauses (stop still works).</p>
+        </div>
+      )}
+
+      {step.type === 'wait' && (
+        <div>
+          <label className={labelCls}>Wait until a message matches</label>
+          <input value={step.until || ''} onChange={(e) => onChange({ until: e.target.value })} placeholder='contains "approved"' className={`${inputCls} font-mono`} />
+          <p className="mt-1 text-[10px] text-zinc-600">
+            The flow parks until an inbound message satisfies this (others go to the agent). The matching text is <span className="font-mono">{`{{steps.${step.id}.output}}`}</span>.
+          </p>
+        </div>
+      )}
+
+      {(step.type === 'gosub' || step.type === 'spawn' || step.type === 'join') && (
+        <div className="mt-2 w-40">
+          <label className={labelCls}>Retry on failure</label>
+          <input type="number" min={0} value={step.retry ?? 0} onChange={(e) => onChange({ retry: Number(e.target.value) || undefined })} className={inputCls} />
+        </div>
+      )}
+
+      {step.type !== 'branch' && step.type !== 'return' && step.type !== 'while'
+        && step.type !== 'set' && step.type !== 'foreach' && step.type !== 'sleep' && step.type !== 'wait' && (
         <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-zinc-400">
           <input
             type="checkbox"
