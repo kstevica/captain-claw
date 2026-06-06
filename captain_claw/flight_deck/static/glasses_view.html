@@ -1642,18 +1642,26 @@
       return;
     }
     // One record per page; every field is its own card on that page.
+    // The glasses navigate by FOCUS — the NeuralBand down-gesture moves focus to
+    // the next focusable element and scrolls it into view. Plain <div>s aren't
+    // focusable, so make the page, the id header, and each field card
+    // tabindex=0 so the down-gesture can walk down a record (same as the files
+    // content viewer). Without this the record couldn't be scrolled.
     dsRowsEl.innerHTML = '';
     rows.forEach((row, ri) => {
       const page = document.createElement('div');
       page.className = 'record-page';
+      page.tabIndex = 0;
       const idEl = document.createElement('div');
       idEl.className = 'rec-id';
+      idEl.tabIndex = 0;
       idEl.textContent = (row._id !== undefined) ? ('#' + row._id) : ('Record ' + (ri + 1));
       page.appendChild(idEl);
       cols.forEach(col => {
         if (col === '_id') return;
         const card = document.createElement('div');
         card.className = 'card';
+        card.tabIndex = 0;
         const k = document.createElement('div');
         k.className = 'field-k';
         k.textContent = col;
