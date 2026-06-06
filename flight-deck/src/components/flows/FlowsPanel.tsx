@@ -56,8 +56,12 @@ export function FlowsPanel() {
   const [query, setQuery] = useState('')
   const [running, setRunning] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+  const [tab, setTab] = useState<'persistent' | 'synthesized'>('persistent')
+  const [scratch, setScratch] = useState<Flow[]>([])
 
+  const refreshScratch = () => { api.listScratchFlows().then(setScratch).catch(() => setScratch([])) }
   useEffect(() => { fetchFlows() }, [fetchFlows])
+  useEffect(() => { refreshScratch() }, [])
 
   const shown = flows.filter((f) => {
     if (!query.trim()) return true
@@ -112,6 +116,31 @@ export function FlowsPanel() {
           </div>
         </div>
 
+        {/* Tabs */}
+        <div className="mb-4 flex items-center gap-1 rounded-xl border border-zinc-800 p-1 text-sm">
+          <button
+            onClick={() => setTab('persistent')}
+            className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 transition-colors ${tab === 'persistent' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'}`}
+          >
+            <Workflow className="h-3.5 w-3.5" /> Persistent
+            <span className="text-zinc-600">{flows.length}</span>
+          </button>
+          <button
+            onClick={() => { setTab('synthesized'); refreshScratch() }}
+            className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 transition-colors ${tab === 'synthesized' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'}`}
+          >
+            <Sparkles className="h-3.5 w-3.5 text-violet-400" /> Synthesized
+            <span className="text-zinc-600">{scratch.length}</span>
+          </button>
+        </div>
+
+        {tab === 'synthesized' ? (
+          <ScratchList
+            flows={scratch}
+            onChanged={() => { refreshScratch(); fetchFlows() }}
+          />
+        ) : (
+        <>
         {/* Search */}
         <div className="mb-4 flex items-center gap-2 rounded-xl border border-zinc-700/50 bg-zinc-900/50 px-3 py-2">
           <Search className="h-4 w-4 text-zinc-600" />
@@ -238,29 +267,21 @@ export function FlowsPanel() {
             ))}
           </div>
         )}
-
-        <ScratchFlows onChanged={fetchFlows} />
+        </>
+        )}
       </div>
     </div>
   )
 }
 
-function ScratchFlows({ onChanged }: { onChanged: () => void }) {
+function ScratchList({ flows, onChanged }: { flows: Flow[]; onChanged: () => void }) {
   const editScratch = useFlowsStore((s) => s.editScratch)
-  const [flows, setFlows] = useState<Flow[]>([])
-  const [open, setOpen] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
-
-  const refresh = () => { api.listScratchFlows().then(setFlows).catch(() => setFlows([])) }
-  useEffect(() => { refresh() }, [])
-
-  if (flows.length === 0) return null
 
   const promote = async (f: Flow) => {
     setBusy(f.id)
     try {
       await api.promoteFlow(f.id)
-      refresh()
       onChanged()
     } finally {
       setBusy(null)
@@ -270,23 +291,27 @@ function ScratchFlows({ onChanged }: { onChanged: () => void }) {
     setBusy(f.id)
     try {
       await api.deleteFlow(f.id)
-      refresh()
+      onChanged()
     } finally {
       setBusy(null)
     }
   }
 
+  if (flows.length === 0) {
+    return (
+      <div className="rounded-2xl border border-dashed border-zinc-800 px-8 py-16 text-center">
+        <Sparkles className="mx-auto h-10 w-10 text-zinc-700" />
+        <p className="mt-3 text-sm text-zinc-500">No synthesized flows yet</p>
+        <p className="mt-1 text-xs text-zinc-600">
+          Ask an agent to “synthesize a flow that …”. Flows it authors land here — review, edit, then promote the good ones.
+        </p>
+      </div>
+    )
+  }
+
   return (
-    <div className="mt-8">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-500 hover:text-zinc-300"
-      >
-        <Sparkles className="h-3.5 w-3.5 text-violet-400" />
-        Synthesized (scratch) <span className="text-zinc-600">· {flows.length}</span>
-      </button>
-      {open && (
-        <div className="divide-y divide-zinc-800/60 rounded-xl border border-dashed border-zinc-800">
+    <div>
+      <div className="divide-y divide-zinc-800/60 rounded-xl border border-zinc-800">
           {flows.map((f) => (
             <div key={f.id} className="flex items-center gap-3 px-3.5 py-2.5">
               <div className="min-w-0 flex-1">
@@ -332,8 +357,7 @@ function ScratchFlows({ onChanged }: { onChanged: () => void }) {
               </button>
             </div>
           ))}
-        </div>
-      )}
+      </div>
     </div>
   )
 }
