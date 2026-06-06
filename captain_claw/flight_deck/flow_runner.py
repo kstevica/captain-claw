@@ -29,6 +29,7 @@ _VISION_HINTS = ("vision", "image", "multimodal", "minimax", "llava", "vl")
 _DEFAULT_MAX_STEPS = 20            # per-frame local sanity cap
 _DEFAULT_MAX_TOTAL_STEPS = 100     # shared budget across the whole call tree
 _DEFAULT_MAX_DEPTH = 8             # gosub recursion depth cap
+_DEFAULT_JOIN_TIMEOUT = 300.0      # seconds to wait on a spawned future
 
 # Sentinel goto target that ends the flow (used by branch `goto`/`else`).
 _STOP_TARGET = "__stop__"
@@ -538,6 +539,64 @@ class FlowRunner:
         st = str(result.get("status") or "done")
         return str(result.get("value", "")), f"flow:{name}", ("done" if st in ("done", "returned") else st)
 
+    async def _run_spawn(
+        self, step: dict[str, Any], ctx: dict[str, Any], payload: dict[str, Any],
+    ) -> tuple[str, str, str]:
+        """Launch another flow as an INDEPENDENT background root run and stash its
+        task as a future. Returns immediately; the parent continues. Returns
+        (note, label, status) — status 'error' only if the flow can't be found."""
+        name = _render(str(step.get("flow") or ""), ctx).strip()
+        if not name:
+            return "(spawn: no flow name)", "spawn", "error"
+        target = await self._resolve_flow_by_name(name)
+        if not target:
+            return f"(spawn: no flow named '{name}')", "spawn", "error"
+        args = _render(step.get("args") or {}, ctx)
+        if not isinstance(args, dict):
+            args = {}
+        child_payload = dict(payload)
+        child_payload["args"] = args
+        for k, v in args.items():
+            child_payload[k] = v
+        # New, independent root run (its own run_id + control handle): not killed
+        # by the parent's `flow stop`, reachable by `flow stop all`, joinable.
+        task = asyncio.create_task(self.run(target, child_payload))
+        ctx.setdefault("_spawns", {})[str(step.get("id"))] = task
+        return f"(spawned '{name}')", f"flow:{name}", "done"
+
+    async def _run_join(
+        self, step: dict[str, Any], ctx: dict[str, Any], root: "_Root",
+    ) -> tuple[str, str, str]:
+        """Wait for a spawned future and collect its result. Returns
+        (output, label, status) where status is done/error/stopped/timeout.
+        Honors a stop on THIS run by aborting the wait (the spawned run, being
+        independent, keeps going unless separately stopped)."""
+        jid = _render(str(step.get("join") or ""), ctx).strip()
+        task = (ctx.get("_spawns") or {}).get(jid)
+        if task is None:
+            return f"(join: no spawn '{jid}' in this flow)", f"join:{jid}", "error"
+        _to = step.get("timeout")
+        timeout = float(_to) if _to is not None else _DEFAULT_JOIN_TIMEOUT
+        poll = min(0.2, timeout) if timeout > 0 else 0.05
+        ctrl = root.control
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        while True:
+            if ctrl is not None and ctrl.stopped:
+                raise _FlowStopped()  # unwind THIS run; spawned task survives
+            try:
+                # shield: a join timeout/stop must not cancel the spawned run.
+                result = await asyncio.wait_for(asyncio.shield(task), timeout=poll)
+                st = str((result or {}).get("status") or "done")
+                out = str((result or {}).get("output") or "")
+                return out, f"join:{jid}", ("done" if st in ("done", "returned") else st)
+            except asyncio.TimeoutError:
+                if loop.time() >= deadline:
+                    return f"(join '{jid}' timed out after {timeout:g}s)", f"join:{jid}", "timeout"
+                continue
+            except Exception as exc:
+                return f"(join '{jid}' failed: {exc})", f"join:{jid}", "error"
+
     # ── frame loop (one flow's steps) ──────────────────────────────────
 
     async def _run_frame(
@@ -653,9 +712,25 @@ class FlowRunner:
                         await self.store.add_step_result(run_id, sid, executed, type="return", status="done", output_text=str(frame_value), ms=_ms(t0), depth=depth, frame=flow_name)
                     break
 
+                call_status: str | None = None  # set by call steps (gosub/join/spawn)
+                self_delivered = False
                 if stype == "gosub":
-                    out, agent, child_status = await self._run_gosub(step, ctx, payload, root, depth)
-                    ctx["calls"][sid] = {"output": out, "status": child_status}
+                    out, agent, call_status = await self._run_gosub(step, ctx, payload, root, depth)
+                    ctx["calls"][sid] = {"output": out, "status": call_status}
+                elif stype == "spawn":
+                    out, agent, call_status = await self._run_spawn(step, ctx, payload)
+                    ctx.setdefault("spawns", {})[sid] = {"status": call_status}
+                elif stype == "join":
+                    out, agent, call_status = await self._run_join(step, ctx, root)
+                    jid = _render(str(step.get("join") or ""), ctx).strip()
+                    ctx.setdefault("joins", {})[jid] = {"output": out, "status": call_status}
+                elif stype == "error":
+                    # Handler step: report the error on the user channel (the
+                    # message may reference {{error.message}}) and continue.
+                    msg = _render(str(step.get("message") or ""), ctx)
+                    if msg:
+                        self_delivered = await self._deliver(payload, msg)
+                    out, agent = (msg or "(error handler)"), ""
                 elif stype == "tool":
                     out, agent = await self._run_tool(step, ctx, payload)
                 elif stype == "agent":
@@ -672,18 +747,34 @@ class FlowRunner:
                 # An emit to a user channel already delivered — so the root must
                 # not re-deliver this as the flow's final output (would leak the
                 # "(emitted to …)" sentinel as a second message).
-                self_delivered = stype == "emit" and str(step.get("channel") or "log") in ("whatsapp", "same", "glasses", "web")
+                if stype == "emit":
+                    self_delivered = str(step.get("channel") or "log") in ("whatsapp", "same", "glasses", "web")
 
                 ctx["steps"][sid] = {"output": out}
                 _maybe_attach_fields(ctx["steps"][sid], out)
-                _record(root.trace, sid, stype, "done", agent, out, t0, depth)
+                rec_status = call_status if call_status in ("error", "stopped", "timeout") else "done"
+                _record(root.trace, sid, stype, rec_status, agent, out, t0, depth)
                 if not dry:
                     await self.store.add_step_result(
-                        run_id, sid, executed, type=stype, status="done",
+                        run_id, sid, executed, type=stype, status=rec_status,
                         agent=agent, output_text=str(out), ms=_ms(t0),
                         depth=depth, frame=flow_name,
                     )
                 frame_value = str(out)
+
+                # Error routing: a failed call exposes {{error.*}} and, if it has
+                # `on error -> <target>`, jumps there (else falls through — the
+                # author can still branch on {{calls|joins.<id>.status}}).
+                if call_status in ("error", "stopped", "timeout"):
+                    ctx["error"] = {"message": str(out), "status": call_status, "step": sid}
+                    tgt = step.get("on_error")
+                    if tgt:
+                        if str(tgt) == _STOP_TARGET:
+                            break
+                        if tgt in by_id:
+                            i = by_id[tgt]
+                            continue
+
                 i += 1
                 # `return` directive (supersedes the bare `stop` flag): exit with
                 # an optional value.

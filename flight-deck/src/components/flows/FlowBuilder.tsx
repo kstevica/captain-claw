@@ -22,6 +22,9 @@ import {
   BookOpen,
   Workflow,
   CornerUpLeft,
+  Zap,
+  GitMerge,
+  AlertTriangle,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -55,6 +58,9 @@ const STEP_TYPE_META: Record<StepType, { icon: typeof Wrench; label: string; col
   emit: { icon: Send, label: 'Emit', color: 'text-sky-400' },
   gosub: { icon: Workflow, label: 'Call flow', color: 'text-indigo-400' },
   return: { icon: CornerUpLeft, label: 'Return', color: 'text-rose-400' },
+  spawn: { icon: Zap, label: 'Spawn', color: 'text-yellow-400' },
+  join: { icon: GitMerge, label: 'Join', color: 'text-teal-400' },
+  error: { icon: AlertTriangle, label: 'On error', color: 'text-orange-400' },
 }
 
 function newStep(type: StepType, idx: number): FlowStep {
@@ -67,6 +73,9 @@ function newStep(type: StepType, idx: number): FlowStep {
   if (type === 'emit') { base.channel = 'same'; base.body = '' }
   if (type === 'gosub') { base.flow = ''; base.args = {} }
   if (type === 'return') { base.value = '' }
+  if (type === 'spawn') { base.flow = ''; base.args = {} }
+  if (type === 'join') { base.join = ''; base.timeout = 300 }
+  if (type === 'error') { base.message = '' }
   return base
 }
 
@@ -1220,10 +1229,10 @@ function StepCard({
         </>
       )}
 
-      {step.type === 'gosub' && (
+      {(step.type === 'gosub' || step.type === 'spawn') && (
         <>
           <div className="mb-2">
-            <label className={labelCls}>Call flow (by name)</label>
+            <label className={labelCls}>{step.type === 'spawn' ? 'Background flow (by name)' : 'Call flow (by name)'}</label>
             <input
               value={step.flow || ''}
               onChange={(e) => onChange({ flow: e.target.value })}
@@ -1231,15 +1240,71 @@ function StepCard({
               className={inputCls}
             />
             <p className="mt-1 text-[10px] text-zinc-600">
-              Runs that flow as a subroutine and waits. Its result is{' '}
-              <span className="font-mono">{`{{calls.${step.id}.output}}`}</span> (status:{' '}
-              <span className="font-mono">{`{{calls.${step.id}.status}}`}</span>).
+              {step.type === 'spawn' ? (
+                <>Starts that flow in the background and continues. Collect it later with a{' '}
+                  <span className="font-mono">join {step.id}</span> step.</>
+              ) : (
+                <>Runs that flow as a subroutine and waits. Result:{' '}
+                  <span className="font-mono">{`{{calls.${step.id}.output}}`}</span> (status:{' '}
+                  <span className="font-mono">{`{{calls.${step.id}.status}}`}</span>).</>
+              )}
             </p>
           </div>
           <label className={labelCls}>Arguments (passed as {`{{args.<name>}}`})</label>
           <ArgsEditor args={step.args || {}} onChange={(args) => onChange({ args })} hint={hint} registerFocus={registerFocus} />
           <VarChips priorIds={priorIds} onInsert={insertVar} />
+          <OnErrorField step={step} allIds={allIds} onChange={onChange} />
         </>
+      )}
+
+      {step.type === 'join' && (
+        <>
+          <div className="mb-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <div>
+              <label className={labelCls}>Wait for spawn (step id)</label>
+              <input
+                value={step.join || ''}
+                onChange={(e) => onChange({ join: e.target.value })}
+                placeholder="w1"
+                className={`${inputCls} font-mono`}
+              />
+            </div>
+            <div>
+              <label className={labelCls}>Timeout (seconds)</label>
+              <input
+                type="number"
+                value={step.timeout ?? 300}
+                onChange={(e) => onChange({ timeout: Number(e.target.value) })}
+                className={inputCls}
+              />
+            </div>
+          </div>
+          <p className="mb-2 text-[10px] text-zinc-600">
+            Result: <span className="font-mono">{`{{joins.${step.join || '<id>'}.output}}`}</span> (status:{' '}
+            <span className="font-mono">{`{{joins.${step.join || '<id>'}.status}}`}</span> — done/error/timeout).
+          </p>
+          <OnErrorField step={step} allIds={allIds} onChange={onChange} />
+        </>
+      )}
+
+      {step.type === 'error' && (
+        <div>
+          <label className={labelCls}>Error message (sent to the user — optional)</label>
+          <textarea
+            value={step.message || ''}
+            onChange={(e) => onChange({ message: e.target.value })}
+            onFocus={(e) => registerFocus(e.currentTarget, (v) => onChange({ message: v }))}
+            rows={2}
+            placeholder="Something went wrong: {{error.message}}"
+            className={`${inputCls} resize-y`}
+          />
+          <p className="mt-1 text-[10px] text-zinc-600">
+            A handler step — reach it from a failing call’s “on error”. The error is{' '}
+            <span className="font-mono">{`{{error.message}}`}</span> /{' '}
+            <span className="font-mono">{`{{error.status}}`}</span>. Add a{' '}
+            <span className="font-mono">return</span> after it to stop the flow.
+          </p>
+        </div>
       )}
 
       {step.type === 'return' && (
@@ -1272,6 +1337,36 @@ function StepCard({
           <span>⏹ Stop the flow after this step</span>
         </label>
       )}
+    </div>
+  )
+}
+
+function OnErrorField({
+  step,
+  allIds,
+  onChange,
+}: {
+  step: FlowStep
+  allIds: string[]
+  onChange: (patch: Partial<FlowStep>) => void
+}) {
+  return (
+    <div className="mt-2">
+      <label className={labelCls}>On error → jump to step (optional)</label>
+      <select
+        value={step.on_error || ''}
+        onChange={(e) => onChange({ on_error: e.target.value || undefined })}
+        className={inputCls}
+      >
+        <option value="">(none — continue / branch on status)</option>
+        {allIds.filter((id) => id !== step.id).map((id) => (
+          <option key={id} value={id}>{id}</option>
+        ))}
+        <option value="__stop__">stop the flow</option>
+      </select>
+      <p className="mt-1 text-[10px] text-zinc-600">
+        If this call fails (error/timeout), jump to that step. {`{{error.message}}`} is set.
+      </p>
     </div>
   )
 }

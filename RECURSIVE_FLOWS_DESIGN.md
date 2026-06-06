@@ -378,11 +378,11 @@ placement, and cross-space resolution checks.
 
 ## 13. Phasing
 
-1. **Composition core** — `gosub` (sync), args, `return` (+ branch-exit), `output ->
-   return`, frame stack, root budget/depth guards, stack-aware `flow status` + stop
-   bubbling. No synthesis yet. (Pure value: human-authored flows can compose.)
-2. **Async** — `spawn`, futures, `join`, stop-propagates-into-joins, the `error`/handler
-   step.
+1. **Composition core** ✅ *shipped* — `gosub` (sync), args, `return` (+ branch-exit),
+   `output -> return`, frame stack, root budget/depth guards, stack-aware `flow status`
+   + stop bubbling.
+2. **Async** ✅ *shipped* — `spawn`, futures, `join` (timeout + stop-aborts-join), the
+   `error`/handler step + `on error -> <step>` routing, branchable call/join status.
 3. **Addressability** — handles stamped on messages, `flow stop <handle|name>`,
    `flow stop all`, multi-stack status.
 4. **Synthesis** — the tool (gated), retrieve-before-generate, scratch space, compiler

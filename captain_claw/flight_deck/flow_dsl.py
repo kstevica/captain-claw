@@ -48,7 +48,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-VALID_TYPES = {"tool", "agent", "vision", "input", "emit", "branch", "gosub", "return"}
+VALID_TYPES = {"tool", "agent", "vision", "input", "emit", "branch", "gosub", "return",
+               "spawn", "join", "error"}
 TRIGGER_CHANNELS = {"any", "whatsapp", "web", "glasses"}
 OUTPUT_CHANNELS = {"same", "whatsapp", "web", "glasses", "log", "return"}
 _HAS_FLAGS = {"image", "video", "audio", "text", "document"}
@@ -323,15 +324,24 @@ def _parse_step(sid: str, inline: str, body: list[tuple[int, str]], header_line:
     if stype == "branch":
         step["cases"] = []
 
-    # gosub: the tail is the target flow name. return: the tail is the value.
-    if stype == "gosub":
+    # gosub/spawn: the tail is the target flow name. return: the tail is the
+    # value. join: the tail is the spawn step id. error: the tail is a message.
+    if stype in ("gosub", "spawn"):
         step["args"] = {}
         if remainder:
             step["flow"] = _unquote(remainder)
         return _consume_fields(step, lines[1:])
+    if stype == "join":
+        if remainder:
+            step["join"] = _unquote(remainder)
+        return _consume_fields(step, lines[1:])
     if stype == "return":
         if remainder:
             step["value"] = remainder.strip()
+        return _consume_fields(step, lines[1:])
+    if stype == "error":
+        if remainder:
+            step["message"] = _unquote(remainder)
         return _consume_fields(step, lines[1:])
 
     # Type line tail is either `on <selector>` or an inline `key: value`.
@@ -368,6 +378,13 @@ def _consume_fields(step: dict[str, Any], lines: list[tuple[int, str]]) -> dict[
             continue
         if step["type"] == "branch" and (low.startswith("if ") or low.startswith("elif ") or low.startswith("else")):
             _apply_branch_line(step, lineno, ln)
+            continue
+        # `on error -> <step>` — jump to a handler if this call step fails.
+        if low.startswith("on error"):
+            m = re.match(r"on\s+error\s*->\s*(\S+)", ln, re.I)
+            if not m:
+                raise DSLError(lineno, "use 'on error -> <step>'")
+            step["on_error"] = _norm_target(m.group(1))
             continue
         if low.startswith("on "):
             step["on"] = ln[3:].strip()
@@ -461,8 +478,10 @@ def validate_flow(flow: dict[str, Any]) -> list[str]:
             errs.append(f"step '{sid}': tool step needs a 'tool' name")
         if t in ("agent", "vision", "input") and not str(s.get("prompt") or "").strip():
             errs.append(f"step '{sid}': {t} step needs a prompt")
-        if t == "gosub" and not str(s.get("flow") or "").strip():
-            errs.append(f"step '{sid}': gosub step needs a flow name")
+        if t in ("gosub", "spawn") and not str(s.get("flow") or "").strip():
+            errs.append(f"step '{sid}': {t} step needs a flow name")
+        if t == "join" and not str(s.get("join") or "").strip():
+            errs.append(f"step '{sid}': join step needs a spawn step id")
     idset = set(ids)
     if len(idset) != len(ids):
         errs.append("duplicate step ids")
@@ -477,6 +496,17 @@ def validate_flow(flow: dict[str, Any]) -> list[str]:
                 continue
             if tgt not in idset:
                 errs.append(f"step '{s.get('id')}': branch goto '{tgt}' is not a step id")
+    # `on error -> <target>` targets must resolve; `join` must name a real spawn.
+    spawn_ids = {s.get("id") for s in steps if s.get("type") == "spawn"}
+    for s in steps:
+        oe = s.get("on_error")
+        if oe and oe != "__stop__" and oe not in idset:
+            errs.append(f"step '{s.get('id')}': on error '{oe}' is not a step id")
+        if s.get("type") == "join":
+            jid = str(s.get("join") or "").strip()
+            # Allow templated joins; only flag a plain id that names no spawn.
+            if jid and "{{" not in jid and jid not in spawn_ids:
+                errs.append(f"step '{s.get('id')}': join '{jid}' is not a spawn step id")
     out_ch = (flow.get("output") or {}).get("channel", "same")
     if out_ch not in OUTPUT_CHANNELS:
         errs.append(f"output channel '{out_ch}' is invalid")
@@ -523,10 +553,31 @@ def _step_to_dsl(s: dict[str, Any]) -> list[str]:
     sid = s.get("id", "step")
     t = s.get("type", "tool")
     out = [f"step {sid}:"]
-    if t == "gosub":
-        out.append(f"  gosub {_quote(s.get('flow', ''))}")
+    if t in ("gosub", "spawn"):
+        out.append(f"  {t} {_quote(s.get('flow', ''))}")
         for k, v in (s.get("args") or {}).items():
             out.append(f"  with {k}: {_quote(v)}")
+        if s.get("on_error"):
+            out.append(f"  on error -> {'stop' if s['on_error'] == '__stop__' else s['on_error']}")
+        if s.get("return") is not None:
+            out.append(f"  return {s['return']}".rstrip())
+        elif s.get("stop"):
+            out.append("  stop")
+        return out
+    if t == "join":
+        out.append(f"  join {s.get('join', '')}")
+        if s.get("timeout"):
+            out.append(f"  timeout: {int(s['timeout'])}")
+        if s.get("on_error"):
+            out.append(f"  on error -> {'stop' if s['on_error'] == '__stop__' else s['on_error']}")
+        if s.get("return") is not None:
+            out.append(f"  return {s['return']}".rstrip())
+        elif s.get("stop"):
+            out.append("  stop")
+        return out
+    if t == "error":
+        msg = s.get("message")
+        out.append(f"  error {_quote(msg)}" if msg else "  error")
         if s.get("return") is not None:
             out.append(f"  return {s['return']}".rstrip())
         elif s.get("stop"):
@@ -585,6 +636,8 @@ def _step_to_dsl(s: dict[str, Any]) -> list[str]:
     deny = (s.get("guardrails") or {}).get("deny") or []
     if deny:
         out.append(f"  deny: {', '.join(deny)}")
+    if s.get("on_error"):
+        out.append(f"  on error -> {'stop' if s['on_error'] == '__stop__' else s['on_error']}")
     if s.get("return") is not None:
         out.append(f"  return {s['return']}".rstrip())
     elif s.get("stop"):

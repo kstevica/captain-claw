@@ -60,7 +60,7 @@ export interface FlowTrigger {
   match: FlowMatch
 }
 
-export type StepType = 'tool' | 'agent' | 'vision' | 'input' | 'branch' | 'emit' | 'gosub' | 'return'
+export type StepType = 'tool' | 'agent' | 'vision' | 'input' | 'branch' | 'emit' | 'gosub' | 'return' | 'spawn' | 'join' | 'error'
 
 export interface FlowStep {
   id: string
@@ -70,12 +70,19 @@ export interface FlowStep {
   // tool step
   tool?: string
   args?: Record<string, string>
-  // gosub step — call another flow as a subroutine
-  /** name of the flow to call; result is {{calls.<id>.output}} */
+  // gosub / spawn step — call (or background-launch) another flow
+  /** name of the flow to call; result is {{calls.<id>.output}} (gosub) */
   flow?: string
+  // join step — wait for a spawned flow; result is {{joins.<id>.output}}
+  /** the spawn step id to wait for */
+  join?: string
   // return step — end the flow, handing a value to the caller
   /** value/template to return (e.g. {{steps.x.output}}) */
   value?: string
+  // error step — handler message (may reference {{error.message}})
+  message?: string
+  /** on a gosub/join/spawn step: jump to this step id if the call fails */
+  on_error?: string
   // agent step
   prompt?: string
   /** optional file/image to send to the agent, e.g. {{trigger.image_path}} */

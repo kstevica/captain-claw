@@ -282,6 +282,62 @@ step oops:
 - A flow meant to be `gosub`’d should end with `output -> return` (its value goes
   to the caller, not to a user channel).
 
+### spawn step + join step
+
+**Run flows in the background and collect them later** — for parallelism. `spawn`
+launches a flow as an independent background run and continues immediately; `join`
+waits for it.
+
+```text
+step w1:
+  spawn "Geocode"
+  with place: {{trigger.text}}
+
+step w2:
+  spawn "Weather"
+  with place: {{trigger.text}}
+
+step got_geo:
+  join w1
+  timeout: 30
+
+step got_weather:
+  join w2
+
+step done:
+  return "{{joins.w1.output}} — {{joins.w2.output}}"
+```
+
+- `join <spawn_step_id>` exposes `{{joins.<id>.output}}` and `{{joins.<id>.status}}`
+  (`done` / `error` / `timeout`). Default timeout is 300s; set `timeout: <seconds>`.
+- A spawned flow is **independent**: it isn’t killed by your `/flow stop` (use
+  `/flow stop all`), and it has its own entry in `/flow status`.
+- Stopping *this* flow aborts a pending `join` (the spawned flow keeps running).
+
+### error step + `on error`
+
+**Handle failures.** Any `gosub` / `join` / `spawn` step can carry
+`on error -> <step>` — if that call fails (error/timeout), the flow jumps to the
+named step instead of continuing. An `error` step is a tidy handler that reports
+the problem; the failure is available as `{{error.message}}` and `{{error.status}}`.
+
+```text
+step geo:
+  gosub "Geocode"
+  with place: {{steps.where.output}}
+  on error -> failed
+
+step done:
+  return {{calls.geo.output}}
+
+step failed:
+  error "Couldn't locate you: {{error.message}}"
+  return
+```
+
+Without `on error`, a failed call just sets its `{{calls|joins.<id>.status}}` — you
+can branch on that instead (the inline form).
+
 ---
 
 ## Agent selectors (`on`)
