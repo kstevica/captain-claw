@@ -43,7 +43,7 @@ There is also an **AI compiler**: describe what you want in plain English and a 
 13. [Synthesized flows (the scratch space)](#synthesized-flows-the-scratch-space)
 14. [Scheduling — run a flow on a timer](#scheduling-run-a-flow-on-a-timer)
 15. [Cookbook](#cookbook)
-15. [Worked examples](#worked-examples) — simple · moderate · complex · synthesis
+15. [Worked examples](#worked-examples) — simple → composition → parallel → data/loops/time → synthesis · scheduling
 16. [Common errors](#common-errors)
 17. [Grammar cheat-sheet](#grammar-cheat-sheet)
 
@@ -1006,6 +1006,177 @@ times — watch it pick up ✓ counts and earn a **⭐ ready** badge — then **
 **Promote** it into your permanent flows (it lands call-only; switch its trigger on
 to make `standup` live). Re-describe the same goal and it **reuses** the existing
 one instead of making a twin.
+
+### 5) Data — `set` + `foreach` (sequential) → "City Compare"
+
+*Split user text into a list, look each item up with a sub-flow, combine. The
+helper labels its own result so the joined output reads cleanly.*
+
+**Helper — save first:**
+
+```text
+flow "City Fact"
+trigger any when contains "city-fact-internal"
+
+step f:
+  agent on origin
+  prompt: "Output ONLY one short sentence about {{args.city}} (its food, vibe, or a landmark). No preamble, no questions, no alternatives, nothing else."
+
+step done:
+  return *{{args.city}}*: {{steps.f.output}}
+
+output -> return
+```
+
+**The flow you trigger:**
+
+```text
+flow "City Compare"
+description "Split a list, look up each city, combine"
+trigger any when contains "compare cities"
+
+step ask:
+  input
+  prompt: "List a few cities, comma-separated (e.g. Zagreb, Split, Rijeka)."
+
+step cities:
+  set cities = split({{steps.ask.output}}, ",")
+
+step facts:
+  foreach city in {{vars.cities}}
+  gosub "City Fact"
+  with city: {{city}}
+
+step out:
+  emit "{{steps.facts.output}}"
+
+output -> same
+```
+
+Tip: `foreach` joins results bare — put any labels/structure in the sub-flow's
+`return` (the loop var `{{args.city}}` is available there).
+
+### 6) Parallel map — `foreach` **spawn** → "Topic Digest"
+
+*Same shape, but the workers run all at once. `/flow status` shows them as their
+own handles while it runs.*
+
+```text
+flow "Topic Headlines"
+trigger any when contains "topic-headlines-internal"
+step h:
+  agent on origin
+  prompt: "Give 2 short bullet headlines about {{args.topic}}. No preamble."
+step done:
+  return *{{args.topic}}*:\n{{steps.h.output}}
+output -> return
+```
+
+```text
+flow "Topic Digest"
+description "Fan out one worker per topic, in parallel"
+trigger any when contains "digest"
+
+step ask:
+  input
+  prompt: "Which topics? (comma-separated)"
+
+step topics:
+  set topics = split({{steps.ask.output}}, ",")
+
+step heads:
+  foreach topic in {{vars.topics}}
+  spawn "Topic Headlines"
+  with topic: {{topic}}
+  timeout: 60
+
+step out:
+  emit "{{steps.heads.output}}"
+
+output -> same
+```
+
+### 7) Control — `while` + `set` + `sleep` → "Countdown"
+
+*A real loop with a counter and a pause (`/flow stop` interrupts the sleep).*
+
+```text
+flow "Countdown"
+description "Loop with a counter and a sleep"
+trigger any when contains "countdown"
+
+step init:
+  set n = 3
+
+step loop:
+  while {{vars.n}} > 0 -> tick
+
+step done:
+  emit "Liftoff!"
+  return
+
+step tick:
+  emit "{{vars.n}}..."
+
+step dec:
+  set n = {{vars.n}} - 1
+
+step nap:
+  sleep 2s
+
+step back:
+  while true -> loop
+
+output -> same
+```
+
+### 8) Approval — `wait until` → "Deploy"
+
+*The flow parks until a message matches the condition; other messages go to the
+agent meanwhile.*
+
+```text
+flow "Deploy"
+description "Wait for approval before acting"
+trigger any when contains "deploy please"
+
+step confirm:
+  emit "Ready to deploy. Reply 'approved' to proceed (anything else keeps waiting)."
+
+step gate:
+  wait until contains "approved"
+
+step go:
+  agent on origin
+  prompt: "Pretend to run a deployment; report 3 short steps as if done."
+
+step out:
+  emit "Deployed.\n{{steps.go.output}}"
+
+output -> same
+```
+
+### 9) Scheduling — a self-contained flow on a timer → "Daily Digest"
+
+*No `input`/`wait` (nothing to ask at fire time). In **Scheduler**, set the action
+to **Flow**, pick it, and schedule it.*
+
+```text
+flow "Daily Digest"
+description "Self-contained — schedule it to fire each morning"
+trigger any when contains "daily-digest-internal"
+
+step heads:
+  foreach topic in ["AI", "markets", "Croatia"]
+  spawn "Topic Headlines"
+  with topic: {{topic}}
+  timeout: 60
+
+step out:
+  emit "Daily digest:\n{{steps.heads.output}}"
+
+output -> same
+```
 
 ---
 

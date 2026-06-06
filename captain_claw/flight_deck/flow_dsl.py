@@ -36,11 +36,20 @@ Grammar (indentation-light, line-oriented):
 
     output -> same
 
-Step header line: a bare type keyword (`tool`/`agent`/`vision`/`input`/`emit`/
-`branch`), optionally `on <selector>`, optionally a trailing inline `key: value`.
-`emit "..."` is shorthand for an emit step with that body. A bare `stop` line
-sets the step's stop flag. Branch bodies use `if/elif/else <cond> -> <target>`
-where target is a step id or `stop`.
+Step header line: a bare type keyword, optionally `on <selector>`, optionally a
+trailing inline `key: value`. Step keywords:
+  tool, agent, vision, input, emit, branch        — basics
+  gosub "Flow" [with k: v]                         — call a flow, wait, use result
+  spawn "Flow" [with k: v]  /  join <step> [timeout: n]  — parallel (future + join)
+  return [<expr>]                                  — exit, hand a value to the caller
+  error "<msg>"  /  <call> on error -> <step>      — handle failure (also `retry: N`)
+  set <name> = <expr>                              — compute into {{vars.<name>}}
+  foreach <var> in <list> + gosub/spawn "Flow"     — iterate a flow over a list
+  while <cond> -> <target>                         — loop
+  sleep <30s|5m|2h|1d>  /  wait until <cond>        — pause / pause-until-message
+`emit "..."` is shorthand for an emit step. A bare `stop` line sets the stop flag;
+`return [<expr>]` is the value-carrying exit. Branch bodies use
+`if/elif/else <cond> -> <target>` where target is a step id or `stop`.
 """
 
 from __future__ import annotations
