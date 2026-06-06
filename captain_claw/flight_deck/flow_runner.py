@@ -223,18 +223,260 @@ def _dig(ctx: dict[str, Any], path: str) -> Any:
     return cur
 
 
+def _disp(v: Any) -> str:
+    """Render a value for display/templating. Lists become newline-joined text
+    (readable, and re-splittable by `foreach`); dicts stay JSON."""
+    if isinstance(v, list):
+        return "\n".join(_disp(x) for x in v)
+    if isinstance(v, dict):
+        return json.dumps(v, default=str)
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if v is None:
+        return ""
+    return str(v)
+
+
 def _render(value: Any, ctx: dict[str, Any]) -> Any:
     """Substitute {{path}} in strings; recurse into dicts/lists."""
     if isinstance(value, str):
         def _sub(m: re.Match) -> str:
             got = _dig(ctx, m.group(1))
-            return got if isinstance(got, str) else json.dumps(got, default=str)
+            return got if isinstance(got, str) else _disp(got)
         return _TEMPLATE_RE.sub(_sub, value)
     if isinstance(value, dict):
         return {k: _render(v, ctx) for k, v in value.items()}
     if isinstance(value, list):
         return [_render(v, ctx) for v in value]
     return value
+
+
+# ── value-expression evaluator (for the `set` step) ────────────────────
+#
+# A small, SAFE evaluator (no eval()) over scalars and lists. Supports:
+#   • literals: 42, 3.14, "str", 'str', [a, b, c]
+#   • operators: + - * /  (+ is also string-concat / list-concat)
+#   • {{path}} operands (resolved against ctx)
+#   • functions: split, join, len, upper, lower, trim, first, last, append,
+#                int, str, contains
+# Used by `set <name> = <expr>` to compute counters, build strings, split text
+# into lists, accumulate results, etc. Arbitrary computation still belongs in a
+# tool/agent step — this is just enough to orchestrate.
+
+_VAL_TOKEN_RE = re.compile(
+    r"""\{\{.*?\}\}                         # {{template}}
+      | "(?:[^"\\]|\\.)*" | '(?:[^'\\]|\\.)*'  # quoted string
+      | \d+\.\d+ | \d+                      # number
+      | [A-Za-z_][A-Za-z0-9_]*              # name (function)
+      | [+\-*/(),\[\]]                       # operators / punctuation
+    """,
+    re.X,
+)
+
+_VAL_ESC = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"', "'": "'"}
+
+
+def _val_unescape(s: str) -> str:
+    out, i, n = [], 0, len(s)
+    while i < n:
+        if s[i] == "\\" and i + 1 < n and s[i + 1] in _VAL_ESC:
+            out.append(_VAL_ESC[s[i + 1]]); i += 2; continue
+        out.append(s[i]); i += 1
+    return "".join(out)
+
+
+def _to_num(x: Any) -> Any:
+    if isinstance(x, bool):
+        return int(x)
+    if isinstance(x, (int, float)):
+        return x
+    s = str(x).strip()
+    try:
+        return int(s)
+    except ValueError:
+        try:
+            return float(s)
+        except ValueError:
+            return 0
+
+
+def _is_num(x: Any) -> bool:
+    if isinstance(x, bool):
+        return False
+    if isinstance(x, (int, float)):
+        return True
+    s = str(x).strip()
+    if not s:
+        return False
+    try:
+        int(s); return True
+    except ValueError:
+        try:
+            float(s); return True
+        except ValueError:
+            return False
+
+
+_DUR_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$", re.I)
+_DUR_UNIT = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+
+
+def _parse_duration(v: Any) -> float:
+    """'30s' / '5m' / '2h' / '1d' / a bare number (seconds) → seconds."""
+    if isinstance(v, (int, float)):
+        return float(v)
+    m = _DUR_RE.match(str(v or ""))
+    if not m:
+        return 0.0
+    return float(m.group(1)) * _DUR_UNIT[(m.group(2) or "s").lower()]
+
+
+def _as_list(v: Any) -> list[Any]:
+    """Coerce a value to a list: a real list stays; a JSON array string parses;
+    any other string splits on newlines (empties dropped)."""
+    if isinstance(v, list):
+        return v
+    if v is None:
+        return []
+    s = str(v).strip()
+    if not s:
+        return []
+    if s[0] == "[":
+        try:
+            j = json.loads(s)
+            if isinstance(j, list):
+                return j
+        except (ValueError, TypeError):
+            pass
+    return [p.strip() for p in s.split("\n") if p.strip()]
+
+
+def _apply_arith(op: str, a: Any, b: Any) -> Any:
+    if op == "+":
+        if isinstance(a, list) or isinstance(b, list):
+            la = a if isinstance(a, list) else [a]
+            lb = b if isinstance(b, list) else [b]
+            return list(la) + list(lb)
+        a_empty = isinstance(a, str) and not a.strip()
+        b_empty = isinstance(b, str) and not b.strip()
+        if (_is_num(a) or a_empty) and (_is_num(b) or b_empty) and not (a_empty and b_empty):
+            return _to_num(a) + _to_num(b)
+        return _disp(a) + _disp(b)
+    x, y = _to_num(a), _to_num(b)
+    if op == "-":
+        return x - y
+    if op == "*":
+        return x * y
+    if op == "/":
+        return (x / y) if y else 0
+    return ""
+
+
+def _apply_func(name: str, args: list[Any]) -> Any:
+    name = name.lower()
+    a0 = args[0] if args else ""
+    if name == "split":
+        sep = _disp(args[1]) if len(args) > 1 else "\n"
+        return [p.strip() for p in _disp(a0).split(sep) if p.strip()]
+    if name == "join":
+        sep = _disp(args[1]) if len(args) > 1 else "\n"
+        return sep.join(_disp(x) for x in _as_list(a0))
+    if name == "len":
+        return len(a0) if isinstance(a0, (list, str)) else len(_disp(a0))
+    if name == "upper":
+        return _disp(a0).upper()
+    if name == "lower":
+        return _disp(a0).lower()
+    if name == "trim":
+        return _disp(a0).strip()
+    if name == "first":
+        lst = _as_list(a0)
+        return lst[0] if lst else ""
+    if name == "last":
+        lst = _as_list(a0)
+        return lst[-1] if lst else ""
+    if name == "append":
+        return _as_list(a0) + [args[1] if len(args) > 1 else ""]
+    if name == "int":
+        return _to_num(a0)
+    if name == "str":
+        return _disp(a0)
+    if name == "contains":
+        hay = a0 if isinstance(a0, list) else _disp(a0)
+        needle = args[1] if len(args) > 1 else ""
+        return (needle in hay) if isinstance(hay, list) else (_disp(needle) in hay)
+    return ""
+
+
+def _eval_value(expr: str, ctx: dict[str, Any]) -> Any:
+    """Evaluate a value expression. Returns a scalar or list (never raises —
+    a parse problem yields the best-effort partial value or '')."""
+    toks = _VAL_TOKEN_RE.findall(expr or "")
+    pos = [0]
+
+    def peek() -> Any:
+        return toks[pos[0]] if pos[0] < len(toks) else None
+
+    def nxt() -> Any:
+        t = peek(); pos[0] += 1; return t
+
+    def parse_expr() -> Any:
+        v = parse_term()
+        while peek() in ("+", "-"):
+            v = _apply_arith(nxt(), v, parse_term())
+        return v
+
+    def parse_term() -> Any:
+        v = parse_factor()
+        while peek() in ("*", "/"):
+            v = _apply_arith(nxt(), v, parse_factor())
+        return v
+
+    def parse_args() -> list[Any]:
+        args: list[Any] = []
+        if peek() not in (")", None):
+            args.append(parse_expr())
+            while peek() == ",":
+                nxt(); args.append(parse_expr())
+        return args
+
+    def parse_factor() -> Any:
+        t = nxt()
+        if t is None:
+            return ""
+        if t == "(":
+            v = parse_expr()
+            if peek() == ")":
+                nxt()
+            return v
+        if t == "[":
+            items: list[Any] = []
+            if peek() not in ("]", None):
+                items.append(parse_expr())
+                while peek() == ",":
+                    nxt(); items.append(parse_expr())
+            if peek() == "]":
+                nxt()
+            return items
+        if t.startswith("{{"):
+            return _dig(ctx, t[2:-2].strip())
+        if t[0] in "\"'":
+            return _val_unescape(t[1:-1])
+        if t[0].isdigit():
+            return float(t) if "." in t else int(t)
+        # identifier → function call if followed by '(', else a bare word string
+        if peek() == "(":
+            nxt()
+            args = parse_args()
+            if peek() == ")":
+                nxt()
+            return _apply_func(t, args)
+        return t
+
+    try:
+        return parse_expr()
+    except Exception:
+        return ""
 
 
 class FlowRunner:
@@ -673,6 +915,97 @@ class FlowRunner:
             except Exception as exc:
                 return f"(join '{jid}' failed: {exc})", f"join:{jid}", "error"
 
+    async def _run_foreach(
+        self, step: dict[str, Any], ctx: dict[str, Any], payload: dict[str, Any],
+        root: "_Root", depth: int, caller_origin: str,
+    ) -> tuple[Any, str, str]:
+        """Run a flow once per item of a list. mode 'gosub' = sequential, 'spawn'
+        = parallel map. Returns (list-of-results, label, status). The loop
+        variable (`var`, default `item`) is bound for each iteration."""
+        var = str(step.get("var") or "item")
+        items = _as_list(_eval_value(str(step.get("in") or ""), ctx))
+        fname = str(step.get("flow") or "")
+        mode = str(step.get("mode") or "gosub")
+        if not fname:
+            return [], "foreach", "error"
+        results: list[Any] = []
+        if mode == "spawn":
+            tasks: list[Any] = []
+            for it in items:
+                ctx[var] = it
+                args = _render(step.get("args") or {}, ctx)
+                if not isinstance(args, dict):
+                    args = {}
+                target = await self._resolve_flow_by_name(_render(fname, ctx))
+                if not target or self._guard_cross_space(caller_origin, target, fname, "foreach"):
+                    tasks.append(None)
+                    continue
+                cp = dict(payload)
+                cp["args"] = args
+                for k, v in args.items():
+                    cp[k] = v
+                tasks.append(asyncio.create_task(self.run(target, cp)))
+            timeout = float(step.get("timeout") or _DEFAULT_JOIN_TIMEOUT)
+            for tk in tasks:
+                if tk is None:
+                    results.append("")
+                    continue
+                try:
+                    r = await asyncio.wait_for(asyncio.shield(tk), timeout=timeout)
+                    results.append(str((r or {}).get("output") or ""))
+                except Exception:
+                    results.append("")
+        else:
+            for it in items:
+                ctx[var] = it
+                sub = {"flow": fname, "args": step.get("args") or {}}
+                o, _a, _st = await self._run_gosub(sub, ctx, payload, root, depth, caller_origin)
+                results.append(o)
+        ctx.pop(var, None)
+        return results, "foreach", "done"
+
+    async def _interruptible_sleep(self, secs: float, ctrl: "_RunControl | None") -> None:
+        """Sleep, but wake immediately if the run is stopped."""
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + max(0.0, secs)
+        while True:
+            if ctrl is not None and ctrl.stopped:
+                raise _FlowStopped()
+            rem = deadline - loop.time()
+            if rem <= 0:
+                return
+            await asyncio.sleep(min(0.5, rem))
+
+    async def _run_wait_step(
+        self, step: dict[str, Any], ctx: dict[str, Any],
+        payload: dict[str, Any], flow: dict[str, Any], *, dry: bool = False,
+    ) -> tuple[str, str]:
+        """Park until an inbound message satisfies the `until` condition. The
+        matching message's text becomes this step's output; non-matching messages
+        fall through to the agent (the flow stays paused)."""
+        cond = str(step.get("until") or "").strip()
+        if not cond:
+            return "(wait: no condition)", ""
+        if dry:
+            return f"(dry-run: would wait until {cond})", ""
+        # shorthand: "contains X" / "matches X" → test against {{trigger.text}}
+        low = cond.lower()
+        if (low.startswith("contains ") or low.startswith("matches ")) and "{{" not in cond:
+            cond = "{{trigger.text}} " + cond
+        waid = str(payload.get("waid") or payload.get("whatsapp_waid") or "")
+        channel = str(payload.get("channel") or "")
+        origin_port = int(payload.get("origin_port") or 0)
+        from captain_claw.flight_deck import flow_router
+        timeout = float(step.get("timeout") or 86400.0)
+        key = flow_router.input_key(waid=waid, channel=channel, origin_port=origin_port)
+        try:
+            text = await flow_router.wait_for_match(key, cond, timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("timed out waiting for condition") from exc
+        except asyncio.CancelledError as exc:
+            raise RuntimeError("wait superseded") from exc
+        return text, ""
+
     # ── frame loop (one flow's steps) ──────────────────────────────────
 
     async def _run_frame(
@@ -693,6 +1026,7 @@ class FlowRunner:
             "args": payload.get("args") or {},
             "steps": {},
             "calls": {},
+            "vars": {},
             "system": {
                 "now": _now.isoformat(),
                 "date": _now.strftime("%Y-%m-%d"),
@@ -716,6 +1050,7 @@ class FlowRunner:
         frame_value = ""
         frame_status = "done"
         self_delivered = False  # did the last executed step already message the user?
+        retry_used: dict[str, int] = {}  # per-step retry counters
         try:
             while i < len(steps):
                 # ── pause / stop control (checked at each step boundary) ──
@@ -778,6 +1113,23 @@ class FlowRunner:
                     i += 1
                     continue
 
+                if stype == "while":
+                    # Loop: while the condition holds, jump to the target (whose
+                    # path loops back here); otherwise fall through.
+                    taken = _eval_expr(str(step.get("when") or ""), ctx)
+                    tgt = step.get("goto")
+                    out = f"while {('→' + str(tgt)) if taken else 'exit'}"
+                    _record(root.trace, sid, stype, "done", "", out, t0, depth)
+                    if not dry:
+                        await self.store.add_step_result(run_id, sid, executed, type=stype, status="done", output_text=out, ms=_ms(t0), depth=depth, frame=flow_name)
+                    if taken and tgt and str(tgt) == _STOP_TARGET:
+                        break
+                    if taken and tgt and tgt in by_id:
+                        i = by_id[tgt]
+                        continue
+                    i += 1
+                    continue
+
                 if stype == "return":
                     # Explicit exit. `return <expr>` returns the expr; bare `return`
                     # hands back the last step's output (frame_value so far).
@@ -809,6 +1161,29 @@ class FlowRunner:
                     if msg:
                         self_delivered = await self._deliver(payload, msg)
                     out, agent = (msg or "(error handler)"), ""
+                elif stype == "set":
+                    name = str(step.get("var") or "")
+                    val = _eval_value(str(step.get("expr") or ""), ctx)
+                    if name:
+                        ctx.setdefault("vars", {})[name] = val
+                    out, agent = val, ""
+                elif stype == "foreach":
+                    out, agent, call_status = await self._run_foreach(step, ctx, payload, root, depth, frame_origin)
+                elif stype == "sleep":
+                    secs = _parse_duration(step.get("duration"))
+                    if not dry:
+                        try:
+                            await self.store.set_run_status(run_id, "sleeping")
+                        except Exception:
+                            pass
+                        await self._interruptible_sleep(secs, ctrl)
+                        try:
+                            await self.store.set_run_status(run_id, "running")
+                        except Exception:
+                            pass
+                    out, agent = f"(slept {secs:g}s)", ""
+                elif stype == "wait":
+                    out, agent = await self._run_wait_step(step, ctx, payload, flow, dry=dry)
                 elif stype == "tool":
                     out, agent = await self._run_tool(step, ctx, payload)
                 elif stype == "agent":
@@ -831,20 +1206,27 @@ class FlowRunner:
                 ctx["steps"][sid] = {"output": out}
                 _maybe_attach_fields(ctx["steps"][sid], out)
                 rec_status = call_status if call_status in ("error", "stopped", "timeout") else "done"
-                _record(root.trace, sid, stype, rec_status, agent, out, t0, depth)
+                _disp_out = _disp(out)
+                _record(root.trace, sid, stype, rec_status, agent, _disp_out, t0, depth)
                 if not dry:
                     await self.store.add_step_result(
                         run_id, sid, executed, type=stype, status=rec_status,
-                        agent=agent, output_text=str(out), ms=_ms(t0),
+                        agent=agent, output_text=_disp_out, ms=_ms(t0),
                         depth=depth, frame=flow_name,
                     )
-                frame_value = str(out)
+                frame_value = _disp_out
 
-                # Error routing: a failed call exposes {{error.*}} and, if it has
-                # `on error -> <target>`, jumps there (else falls through — the
-                # author can still branch on {{calls|joins.<id>.status}}).
+                # Error routing: a failed call exposes {{error.*}}.
                 if call_status in ("error", "stopped", "timeout"):
-                    ctx["error"] = {"message": str(out), "status": call_status, "step": sid}
+                    # `retry: N` — re-run the failing step up to N times before
+                    # giving up (not for a stop, which is intentional).
+                    rmax = int(step.get("retry") or 0)
+                    if rmax and call_status != "stopped" and retry_used.get(sid, 0) < rmax:
+                        retry_used[sid] = retry_used.get(sid, 0) + 1
+                        continue  # re-execute the same step
+                    ctx["error"] = {"message": _disp_out, "status": call_status, "step": sid}
+                    # `on error -> <target>` jumps to a handler; else fall through
+                    # (the author can still branch on {{calls|joins.<id>.status}}).
                     tgt = step.get("on_error")
                     if tgt:
                         if str(tgt) == _STOP_TARGET:
@@ -852,6 +1234,8 @@ class FlowRunner:
                         if tgt in by_id:
                             i = by_id[tgt]
                             continue
+                elif call_status == "done":
+                    retry_used.pop(sid, None)  # reset the retry budget on success
 
                 i += 1
                 # `return` directive (supersedes the bare `stop` flag): exit with

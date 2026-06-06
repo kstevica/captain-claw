@@ -49,7 +49,7 @@ import re
 from typing import Any
 
 VALID_TYPES = {"tool", "agent", "vision", "input", "emit", "branch", "gosub", "return",
-               "spawn", "join", "error"}
+               "spawn", "join", "error", "set", "foreach", "while", "sleep", "wait"}
 TRIGGER_CHANNELS = {"any", "whatsapp", "web", "glasses"}
 OUTPUT_CHANNELS = {"same", "whatsapp", "web", "glasses", "log", "return"}
 _HAS_FLAGS = {"image", "video", "audio", "text", "document"}
@@ -364,6 +364,43 @@ def _parse_step(sid: str, inline: str, body: list[tuple[int, str]], header_line:
         if remainder:
             step["message"] = _unquote(remainder)
         return _consume_fields(step, lines[1:])
+    # set <name> = <expr>  /  foreach <var> in <list>  /  while <cond> -> <t>
+    # sleep <duration>  /  wait until <condition>
+    if stype == "set":
+        if "=" not in remainder:
+            raise DSLError(first_lineno, "set must be 'set <name> = <expr>'")
+        nm, _, ex = remainder.partition("=")
+        if not nm.strip():
+            raise DSLError(first_lineno, "set needs a variable name before '='")
+        step["var"] = nm.strip()
+        step["expr"] = ex.strip()
+        return _consume_fields(step, lines[1:])
+    if stype == "foreach":
+        m2 = re.match(r"([A-Za-z_]\w*)\s+in\s+(.+)$", remainder)
+        if not m2:
+            raise DSLError(first_lineno, "foreach must be 'foreach <var> in <list-expr>'")
+        step["var"] = m2.group(1)
+        step["in"] = m2.group(2).strip()
+        step["args"] = {}
+        return _consume_fields(step, lines[1:])
+    if stype == "while":
+        m2 = re.search(r"->\s*(\S+)\s*$", remainder)
+        if not m2:
+            raise DSLError(first_lineno, "while must be 'while <condition> -> <target>'")
+        step["goto"] = _norm_target(m2.group(1))
+        step["when"] = remainder[: m2.start()].strip()
+        if not step["when"]:
+            raise DSLError(first_lineno, "while needs a condition before '->'")
+        return _consume_fields(step, lines[1:])
+    if stype == "sleep":
+        step["duration"] = remainder.strip()
+        return _consume_fields(step, lines[1:])
+    if stype == "wait":
+        cond = remainder.strip()
+        if cond.lower().startswith("until "):
+            cond = cond[6:].strip()
+        step["until"] = cond
+        return _consume_fields(step, lines[1:])
 
     # Type line tail is either `on <selector>` or an inline `key: value`.
     if remainder:
@@ -386,6 +423,12 @@ def _consume_fields(step: dict[str, Any], lines: list[tuple[int, str]]) -> dict[
         # value up to the caller (supersedes the bare `stop` flag).
         if low == "return" or low.startswith("return "):
             step["return"] = ln[len("return"):].strip()
+            continue
+        # Inside a `foreach`, a `gosub "Flow"` / `spawn "Flow"` line sets the
+        # body flow + iteration mode (sequential vs parallel).
+        if step["type"] == "foreach" and (low.startswith("gosub ") or low.startswith("spawn ")):
+            step["mode"] = "spawn" if low.startswith("spawn ") else "gosub"
+            step["flow"] = _unquote(ln.split(None, 1)[1])
             continue
         # `with <name>: <value>` — an argument passed to a gosub'd flow.
         if low.startswith("with "):
@@ -438,6 +481,11 @@ def _apply_field(step: dict[str, Any], lineno: int, ln: str) -> None:
             step["timeout"] = int(val)
         except ValueError:
             raise DSLError(lineno, "timeout must be an integer (seconds)")
+    elif key == "retry":
+        try:
+            step["retry"] = int(val)
+        except ValueError:
+            raise DSLError(lineno, "retry must be an integer (number of attempts)")
     elif key == "deny":
         step.setdefault("guardrails", {})["deny"] = [x.strip() for x in val.split(",") if x.strip()]
     elif key == "arg":
@@ -503,11 +551,26 @@ def validate_flow(flow: dict[str, Any]) -> list[str]:
             errs.append(f"step '{sid}': {t} step needs a flow name")
         if t == "join" and not str(s.get("join") or "").strip():
             errs.append(f"step '{sid}': join step needs a spawn step id")
+        if t == "set" and not str(s.get("var") or "").strip():
+            errs.append(f"step '{sid}': set step needs 'set <name> = <expr>'")
+        if t == "foreach" and not str(s.get("flow") or "").strip():
+            errs.append(f"step '{sid}': foreach needs a 'gosub \"Flow\"' (or 'spawn \"Flow\"') body line")
+        if t == "while" and not str(s.get("goto") or "").strip():
+            errs.append(f"step '{sid}': while needs 'while <condition> -> <target>'")
+        if t == "sleep" and not str(s.get("duration") or "").strip():
+            errs.append(f"step '{sid}': sleep needs a duration (e.g. 30s, 5m, 2h)")
+        if t == "wait" and not str(s.get("until") or "").strip():
+            errs.append(f"step '{sid}': wait needs 'wait until <condition>'")
     idset = set(ids)
     if len(idset) != len(ids):
         errs.append("duplicate step ids")
-    # Branch targets must exist (or be the stop sentinel / empty=fall through).
+    # Branch / while targets must exist (or be the stop sentinel).
     for s in steps:
+        if s.get("type") == "while":
+            tgt = s.get("goto")
+            if tgt and tgt != "__stop__" and tgt not in idset:
+                errs.append(f"step '{s.get('id')}': while target '{tgt}' is not a step id")
+            continue
         if s.get("type") != "branch":
             continue
         targets = [c.get("goto") for c in (s.get("cases") or [])]
@@ -587,10 +650,33 @@ def _step_to_dsl(s: dict[str, Any]) -> list[str]:
     sid = s.get("id", "step")
     t = s.get("type", "tool")
     out = [f"step {sid}:"]
+    if t == "set":
+        out.append(f"  set {s.get('var', '')} = {s.get('expr', '')}".rstrip())
+        return out
+    if t == "foreach":
+        out.append(f"  foreach {s.get('var', 'item')} in {s.get('in', '')}")
+        out.append(f"  {s.get('mode', 'gosub')} {_quote(s.get('flow', ''))}")
+        for k, v in (s.get("args") or {}).items():
+            out.append(f"  with {k}: {_quote(v)}")
+        if s.get("timeout"):
+            out.append(f"  timeout: {int(s['timeout'])}")
+        return out
+    if t == "while":
+        tgt = "stop" if s.get("goto") == "__stop__" else s.get("goto", "")
+        out.append(f"  while {s.get('when', '')} -> {tgt}")
+        return out
+    if t == "sleep":
+        out.append(f"  sleep {s.get('duration', '')}".rstrip())
+        return out
+    if t == "wait":
+        out.append(f"  wait until {s.get('until', '')}".rstrip())
+        return out
     if t in ("gosub", "spawn"):
         out.append(f"  {t} {_quote(s.get('flow', ''))}")
         for k, v in (s.get("args") or {}).items():
             out.append(f"  with {k}: {_quote(v)}")
+        if s.get("retry"):
+            out.append(f"  retry: {int(s['retry'])}")
         if s.get("on_error"):
             out.append(f"  on error -> {'stop' if s['on_error'] == '__stop__' else s['on_error']}")
         if s.get("return") is not None:
@@ -602,6 +688,8 @@ def _step_to_dsl(s: dict[str, Any]) -> list[str]:
         out.append(f"  join {s.get('join', '')}")
         if s.get("timeout"):
             out.append(f"  timeout: {int(s['timeout'])}")
+        if s.get("retry"):
+            out.append(f"  retry: {int(s['retry'])}")
         if s.get("on_error"):
             out.append(f"  on error -> {'stop' if s['on_error'] == '__stop__' else s['on_error']}")
         if s.get("return") is not None:
@@ -670,6 +758,8 @@ def _step_to_dsl(s: dict[str, Any]) -> list[str]:
     deny = (s.get("guardrails") or {}).get("deny") or []
     if deny:
         out.append(f"  deny: {', '.join(deny)}")
+    if s.get("retry"):
+        out.append(f"  retry: {int(s['retry'])}")
     if s.get("on_error"):
         out.append(f"  on error -> {'stop' if s['on_error'] == '__stop__' else s['on_error']}")
     if s.get("return") is not None:

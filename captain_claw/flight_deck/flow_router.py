@@ -40,6 +40,27 @@ def clear_input_prompt(key: str) -> None:
     _PENDING_INPUT_PROMPT.pop(key, None)
 
 
+# A `wait until <condition>` parks here with a predicate; only a message that
+# satisfies the condition resolves it (others fall through to the agent).
+_PENDING_COND: dict[str, str] = {}
+
+
+async def wait_for_match(key: str, condition: str, *, timeout: float = 86400.0) -> str:
+    """Like wait_for_input, but only an inbound message satisfying *condition*
+    (a branch expression evaluated against {{trigger.text}}) resolves it."""
+    _PENDING_COND[key] = condition
+    return await wait_for_input(key, timeout=timeout)
+
+
+def _match_condition(condition: str, text: str) -> bool:
+    try:
+        import captain_claw.flight_deck.flow_runner as fr
+        ctx = {"trigger": {"text": text}, "vars": {}, "steps": {}, "system": {}}
+        return bool(fr._eval_expr(condition, ctx))
+    except Exception:
+        return False
+
+
 def input_key(*, waid: str = "", channel: str = "", origin_port: int = 0) -> str:
     """Stable key for a paused-input wait. WAID identifies a WhatsApp user
     across messages; for agent-handled channels (web/glasses) the same user
@@ -65,6 +86,7 @@ async def wait_for_input(key: str, *, timeout: float = 3600.0) -> str:
     finally:
         if _PENDING_INPUT.get(key) is fut:
             _PENDING_INPUT.pop(key, None)
+        _PENDING_COND.pop(key, None)
 
 
 def has_pending_input(*, waid: str = "", channel: str = "", origin_port: int = 0) -> bool:
@@ -90,6 +112,10 @@ def deliver_pending_input(*, waid: str = "", channel: str = "", origin_port: int
             return False
     except Exception:
         pass
+    # A `wait until` parks with a condition — only a matching message resolves it.
+    cond = _PENDING_COND.get(key)
+    if cond and not _match_condition(cond, text):
+        return False
     fut.set_result(text)
     return True
 
