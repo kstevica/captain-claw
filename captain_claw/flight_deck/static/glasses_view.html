@@ -1655,6 +1655,7 @@
       const idEl = document.createElement('div');
       idEl.className = 'rec-id';
       idEl.tabIndex = 0;
+      idEl.setAttribute('role', 'button');   // role=button + tabindex = the focus-walk recipe
       idEl.textContent = (row._id !== undefined) ? ('#' + row._id) : ('Record ' + (ri + 1));
       page.appendChild(idEl);
       cols.forEach(col => {
@@ -1662,6 +1663,7 @@
         const card = document.createElement('div');
         card.className = 'card';
         card.tabIndex = 0;
+        card.setAttribute('role', 'button');   // focusable on the glasses (like menu items)
         const k = document.createElement('div');
         k.className = 'field-k';
         k.textContent = col;
@@ -1794,6 +1796,7 @@
     const topCard = document.createElement('div');
     topCard.className = 'card';
     topCard.tabIndex = 0;
+    topCard.setAttribute('role', 'button');
     const topK = document.createElement('div');
     topK.className = 'field-k';
     topK.textContent = 'FILE';
@@ -1808,6 +1811,7 @@
     const contentCard = document.createElement('div');
     contentCard.className = 'card';
     contentCard.tabIndex = 0;
+    contentCard.setAttribute('role', 'button');
     if (ext === '.html' || ext === '.htm') {
       // Sandboxed iframe so the document renders with its own markup/styles
       // in isolation and can't reach into (or restyle) the HUD. allow-scripts
@@ -1827,7 +1831,7 @@
       // Make each top-level block (heading, paragraph, list, table, …) a focus
       // stop so the NeuralBand down-gesture walks through long prose smoothly —
       // the same way it steps through a datastore record's many small cards.
-      for (const child of div.children) child.tabIndex = 0;
+      for (const child of div.children) { child.tabIndex = 0; child.setAttribute('role', 'button'); }
       contentCard.appendChild(div);
     }
     page.appendChild(contentCard);
@@ -1837,6 +1841,7 @@
     const bottomCard = document.createElement('div');
     bottomCard.className = 'card';
     bottomCard.tabIndex = 0;
+    bottomCard.setAttribute('role', 'button');
     const botV = document.createElement('div');
     botV.className = 'field-v empty';
     botV.style.textAlign = 'center';
