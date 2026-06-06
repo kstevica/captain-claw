@@ -1484,6 +1484,19 @@
     });
   }
 
+  // Move the device's focus INTO a freshly-shown surface so the NeuralBand
+  // down-gesture walks/scrolls through it right away. Without this, after a
+  // view/pane transition the focus falls back to <body> and the user has to
+  // walk the whole header again to re-enter the content (which is why the file
+  // list and record fields felt unreachable while the first table list worked).
+  function focusFirst(container) {
+    if (!container) return;
+    requestAnimationFrame(() => {
+      const t = container.querySelector('[role="button"], [tabindex]') || container;
+      try { t.focus(); } catch (_) {}
+    });
+  }
+
   // ── Datastore: table menu (step 1) → one record per screen (step 2) ──
   const dsTablesEl = document.getElementById('ds-tables');
   const dsRowsEl = document.getElementById('ds-rows');
@@ -1499,6 +1512,7 @@
   function showDsSelect() {
     dsPaneContent.classList.remove('show');
     dsPaneSelect.classList.add('show');
+    focusFirst(dsTablesEl);
   }
   function showDsContent(table, count) {
     dsTitleEl.innerHTML = '';
@@ -1619,6 +1633,7 @@
       onActivate(item, () => { showDsContent(tb.name, tb.row_count); loadRows(tb.name); });
       dsTablesEl.appendChild(item);
     });
+    focusFirst(dsTablesEl);
   }
 
   async function loadRows(table) {
@@ -1687,6 +1702,7 @@
     dsRowsEl.scrollLeft = 0;
     buildPosBar((data && data.total) || rows.length);
     updatePos(0);
+    focusFirst(dsRowsEl);   // focus the record's first field so the down-gesture can scroll it
   }
 
   // ── Files: file menu (step 1) → scrollable content (step 2) ────────
@@ -1702,6 +1718,7 @@
   function showFilesSelect() {
     filesPaneContent.classList.remove('show');
     filesPaneSelect.classList.add('show');
+    focusFirst(filesListEl);
   }
   function showFilesContent(title) {
     filesTitleEl.textContent = title || '';
@@ -1762,6 +1779,7 @@
       onActivate(item, () => { showFilesContent(name); openFile(f); });
       filesListEl.appendChild(item);
     });
+    focusFirst(filesListEl);
   }
 
   async function openFile(f) {
@@ -1851,6 +1869,7 @@
 
     filesContentEl.appendChild(page);
     page.scrollTop = 0;
+    focusFirst(filesContentEl);   // focus the file's first block so the down-gesture scrolls it
   }
 })();
 </script>
