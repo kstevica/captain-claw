@@ -60,7 +60,7 @@ export interface FlowTrigger {
   match: FlowMatch
 }
 
-export type StepType = 'tool' | 'agent' | 'vision' | 'input' | 'branch' | 'emit'
+export type StepType = 'tool' | 'agent' | 'vision' | 'input' | 'branch' | 'emit' | 'gosub' | 'return'
 
 export interface FlowStep {
   id: string
@@ -70,6 +70,12 @@ export interface FlowStep {
   // tool step
   tool?: string
   args?: Record<string, string>
+  // gosub step — call another flow as a subroutine
+  /** name of the flow to call; result is {{calls.<id>.output}} */
+  flow?: string
+  // return step — end the flow, handing a value to the caller
+  /** value/template to return (e.g. {{steps.x.output}}) */
+  value?: string
   // agent step
   prompt?: string
   /** optional file/image to send to the agent, e.g. {{trigger.image_path}} */
@@ -145,6 +151,10 @@ export interface FlowRunStep {
   agent?: string
   output_text?: string
   ms?: number
+  /** call-stack depth (0 = top-level; >0 = inside a gosub'd flow) */
+  depth?: number
+  /** the flow name this step ran in (for nested run logs) */
+  frame?: string
 }
 
 export interface FlowRunDetail {

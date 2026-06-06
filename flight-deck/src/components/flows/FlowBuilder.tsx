@@ -20,6 +20,8 @@ import {
   Code2,
   Sparkles,
   BookOpen,
+  Workflow,
+  CornerUpLeft,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -51,6 +53,8 @@ const STEP_TYPE_META: Record<StepType, { icon: typeof Wrench; label: string; col
   input: { icon: MessageSquare, label: 'Ask user', color: 'text-cyan-400' },
   branch: { icon: GitBranch, label: 'Branch', color: 'text-amber-400' },
   emit: { icon: Send, label: 'Emit', color: 'text-sky-400' },
+  gosub: { icon: Workflow, label: 'Call flow', color: 'text-indigo-400' },
+  return: { icon: CornerUpLeft, label: 'Return', color: 'text-rose-400' },
 }
 
 function newStep(type: StepType, idx: number): FlowStep {
@@ -61,6 +65,8 @@ function newStep(type: StepType, idx: number): FlowStep {
   if (type === 'input') { base.prompt = 'What would you like to do?'; base.timeout = 3600 }
   if (type === 'branch') { base.cases = [{ when: '', goto: '' }]; base.default = '' }
   if (type === 'emit') { base.channel = 'same'; base.body = '' }
+  if (type === 'gosub') { base.flow = ''; base.args = {} }
+  if (type === 'return') { base.value = '' }
   return base
 }
 
@@ -459,6 +465,8 @@ export function FlowBuilder() {
                 <option value="whatsapp">whatsapp</option>
                 <option value="glasses">glasses</option>
                 <option value="web">web</option>
+                <option value="return">return (to caller — for sub-flows)</option>
+                <option value="log">log (nowhere — internal)</option>
                 <option value="none">none</option>
               </select>
             </div>
@@ -1212,7 +1220,48 @@ function StepCard({
         </>
       )}
 
-      {step.type !== 'branch' && (
+      {step.type === 'gosub' && (
+        <>
+          <div className="mb-2">
+            <label className={labelCls}>Call flow (by name)</label>
+            <input
+              value={step.flow || ''}
+              onChange={(e) => onChange({ flow: e.target.value })}
+              placeholder="Geocode"
+              className={inputCls}
+            />
+            <p className="mt-1 text-[10px] text-zinc-600">
+              Runs that flow as a subroutine and waits. Its result is{' '}
+              <span className="font-mono">{`{{calls.${step.id}.output}}`}</span> (status:{' '}
+              <span className="font-mono">{`{{calls.${step.id}.status}}`}</span>).
+            </p>
+          </div>
+          <label className={labelCls}>Arguments (passed as {`{{args.<name>}}`})</label>
+          <ArgsEditor args={step.args || {}} onChange={(args) => onChange({ args })} hint={hint} registerFocus={registerFocus} />
+          <VarChips priorIds={priorIds} onInsert={insertVar} />
+        </>
+      )}
+
+      {step.type === 'return' && (
+        <div>
+          <label className={labelCls}>Return value (optional)</label>
+          <textarea
+            value={step.value || ''}
+            onChange={(e) => onChange({ value: e.target.value })}
+            onFocus={(e) => registerFocus(e.currentTarget, (v) => onChange({ value: v }))}
+            rows={2}
+            placeholder="{{steps.search.output}}"
+            className={`${inputCls} resize-y font-mono`}
+          />
+          <p className="mt-1 text-[10px] text-zinc-600">
+            Ends the flow now and hands this value back to the caller (or to the output channel
+            for a top-level flow). Leave blank to return the last step’s output. {hint}
+          </p>
+          <VarChips priorIds={priorIds} onInsert={insertVar} />
+        </div>
+      )}
+
+      {step.type !== 'branch' && step.type !== 'return' && (
         <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-zinc-400">
           <input
             type="checkbox"

@@ -48,9 +48,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-VALID_TYPES = {"tool", "agent", "vision", "input", "emit", "branch"}
+VALID_TYPES = {"tool", "agent", "vision", "input", "emit", "branch", "gosub", "return"}
 TRIGGER_CHANNELS = {"any", "whatsapp", "web", "glasses"}
-OUTPUT_CHANNELS = {"same", "whatsapp", "web", "glasses", "log"}
+OUTPUT_CHANNELS = {"same", "whatsapp", "web", "glasses", "log", "return"}
 _HAS_FLAGS = {"image", "video", "audio", "text", "document"}
 _DEFAULT_ON = {"tool": "origin", "agent": "origin", "vision": "capability:vision"}
 
@@ -323,6 +323,17 @@ def _parse_step(sid: str, inline: str, body: list[tuple[int, str]], header_line:
     if stype == "branch":
         step["cases"] = []
 
+    # gosub: the tail is the target flow name. return: the tail is the value.
+    if stype == "gosub":
+        step["args"] = {}
+        if remainder:
+            step["flow"] = _unquote(remainder)
+        return _consume_fields(step, lines[1:])
+    if stype == "return":
+        if remainder:
+            step["value"] = remainder.strip()
+        return _consume_fields(step, lines[1:])
+
     # Type line tail is either `on <selector>` or an inline `key: value`.
     if remainder:
         if remainder.lower().startswith("on "):
@@ -339,6 +350,21 @@ def _consume_fields(step: dict[str, Any], lines: list[tuple[int, str]]) -> dict[
         low = ln.lower()
         if low == "stop":
             step["stop"] = True
+            continue
+        # `return` / `return <expr>` directive — end the flow here, handing the
+        # value up to the caller (supersedes the bare `stop` flag).
+        if low == "return" or low.startswith("return "):
+            step["return"] = ln[len("return"):].strip()
+            continue
+        # `with <name>: <value>` — an argument passed to a gosub'd flow.
+        if low.startswith("with "):
+            rest = ln[len("with "):].strip()
+            if ":" not in rest:
+                raise DSLError(lineno, "with must be 'with <name>: <value>'")
+            k, _, v = rest.partition(":")
+            if not k.strip():
+                raise DSLError(lineno, "with needs an argument name before ':'")
+            step.setdefault("args", {})[k.strip()] = _unquote(v.strip())
             continue
         if step["type"] == "branch" and (low.startswith("if ") or low.startswith("elif ") or low.startswith("else")):
             _apply_branch_line(step, lineno, ln)
@@ -408,7 +434,7 @@ def _apply_branch_line(step: dict[str, Any], lineno: int, ln: str) -> None:
 
 
 def _norm_target(t: str) -> str:
-    return "__stop__" if t.lower() in ("stop", "__stop__", "end") else t
+    return "__stop__" if t.lower() in ("stop", "return", "__stop__", "end") else t
 
 
 # ── validate ───────────────────────────────────────────────────────────
@@ -435,6 +461,8 @@ def validate_flow(flow: dict[str, Any]) -> list[str]:
             errs.append(f"step '{sid}': tool step needs a 'tool' name")
         if t in ("agent", "vision", "input") and not str(s.get("prompt") or "").strip():
             errs.append(f"step '{sid}': {t} step needs a prompt")
+        if t == "gosub" and not str(s.get("flow") or "").strip():
+            errs.append(f"step '{sid}': gosub step needs a flow name")
     idset = set(ids)
     if len(idset) != len(ids):
         errs.append("duplicate step ids")
@@ -495,6 +523,19 @@ def _step_to_dsl(s: dict[str, Any]) -> list[str]:
     sid = s.get("id", "step")
     t = s.get("type", "tool")
     out = [f"step {sid}:"]
+    if t == "gosub":
+        out.append(f"  gosub {_quote(s.get('flow', ''))}")
+        for k, v in (s.get("args") or {}).items():
+            out.append(f"  with {k}: {_quote(v)}")
+        if s.get("return") is not None:
+            out.append(f"  return {s['return']}".rstrip())
+        elif s.get("stop"):
+            out.append("  stop")
+        return out
+    if t == "return":
+        val = s.get("value")
+        out.append(f"  return {val}".rstrip() if val else "  return")
+        return out
     if t == "branch":
         out.append("  branch")
         cases = s.get("cases") or ([{"when": s.get("when"), "goto": s.get("goto")}]
@@ -511,7 +552,9 @@ def _step_to_dsl(s: dict[str, Any]) -> list[str]:
     # emit shorthand: `emit "<body>"` when going to the default channel.
     if t == "emit" and s.get("channel", "same") == "same":
         out.append(f"  emit {_quote(s.get('body', ''))}")
-        if s.get("stop"):
+        if s.get("return") is not None:
+            out.append(f"  return {s['return']}".rstrip())
+        elif s.get("stop"):
             out.append("  stop")
         return out
 
@@ -542,6 +585,8 @@ def _step_to_dsl(s: dict[str, Any]) -> list[str]:
     deny = (s.get("guardrails") or {}).get("deny") or []
     if deny:
         out.append(f"  deny: {', '.join(deny)}")
-    if s.get("stop"):
+    if s.get("return") is not None:
+        out.append(f"  return {s['return']}".rstrip())
+    elif s.get("stop"):
         out.append("  stop")
     return out

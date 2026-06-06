@@ -239,6 +239,49 @@ step route:
 - If nothing matches and there’s no `else`, execution falls through to the next step.
 - See [branch conditions](#branch-conditions) for the full condition language.
 
+### gosub step
+
+**Calls another flow as a subroutine** and waits for it to finish — flows compose
+like functions. The called flow’s return value is `{{calls.<step_id>.output}}`
+and its outcome is `{{calls.<step_id>.status}}` (`done` / `error`).
+
+```text
+step geo:
+  gosub "Geocode"
+  with place: {{steps.where.output}}
+  with units: metric
+```
+
+- The target is matched **by flow name** (case-insensitive).
+- `with <name>: <value>` lines pass **arguments**; inside the called flow they’re
+  available as `{{args.<name>}}` (and as `{{trigger.<name>}}`).
+- The call **blocks** until the child returns; the child runs as a nested frame
+  of the same run (you’ll see it indented in the run log, and in `/flow status`).
+- A child that pauses for `input` pauses the whole chain — your reply continues it.
+- Guards: a recursion **depth cap** and a **shared step budget** across the whole
+  call tree stop runaways.
+
+### return step
+
+**Ends the flow now and hands a value back** to the caller (or to the output
+channel for a top-level flow). Works as its own step *or* as a trailing line on
+any step, including inside a branch path.
+
+```text
+step done:
+  return {{calls.geo.output}}
+```
+
+```text
+step oops:
+  emit "Couldn't do it."
+  return            # exit here — supersedes the bare `stop` flag
+```
+
+- `return <expr>` returns that value; bare `return` returns the last step’s output.
+- A flow meant to be `gosub`’d should end with `output -> return` (its value goes
+  to the caller, not to a user channel).
+
 ---
 
 ## Agent selectors (`on`)
@@ -380,9 +423,9 @@ and your next reply continues it from there.
 output -> <channel>
 ```
 
-`<channel>` is `same` (reply on the originating channel — the default), `whatsapp`, `web`, `glasses`, or `log` (record only, no message sent).
+`<channel>` is `same` (reply on the originating channel — the default), `whatsapp`, `web`, `glasses`, `log` (record only, no message sent), or `return` (hand the value back to the caller — for a flow meant to be [`gosub`’d](#gosub-step)).
 
-The output line delivers the **last executed step’s** output. `emit` steps deliver their own messages along the way; the final output is delivered in addition.
+The output line delivers the **last executed step’s** output — unless that step was already an `emit` to a user channel (then it isn’t re-sent). For a `gosub`’d sub-flow the value goes to the **caller**, not to a user channel, unless the child explicitly `emit`s.
 
 ---
 

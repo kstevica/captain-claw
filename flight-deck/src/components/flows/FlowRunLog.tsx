@@ -154,7 +154,11 @@ export function FlowRunLog() {
               </p>
             ) : (
               steps.map((step, i) => (
-                <div key={`${step.step_id}-${step.seq}-${i}`} className="flex gap-3">
+                <div
+                  key={`${step.step_id}-${step.seq}-${i}`}
+                  className="flex gap-3"
+                  style={{ marginLeft: `${Math.min(step.depth || 0, 6) * 20}px` }}
+                >
                   {/* Timeline rail */}
                   <div className="flex flex-col items-center">
                     <div className="mt-1.5"><StatusIcon status={step.status} /></div>
@@ -165,6 +169,11 @@ export function FlowRunLog() {
                   <div className="mb-3 min-w-0 flex-1 rounded-xl border border-zinc-800 bg-zinc-900/40 px-3.5 py-2.5">
                     <div className="flex items-center gap-2">
                       <span className="font-mono text-xs text-zinc-200">{step.step_id}</span>
+                      {(step.depth || 0) > 0 && step.frame && (
+                        <span className="rounded bg-indigo-500/15 px-1.5 py-0.5 text-[10px] text-indigo-300" title="Running inside a called flow">
+                          ↳ {step.frame}
+                        </span>
+                      )}
                       <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-zinc-400">
                         {step.status}
                       </span>

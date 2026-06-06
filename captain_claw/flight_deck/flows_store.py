@@ -94,6 +94,13 @@ class FlowStore:
             )
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_steps_run ON flow_run_steps(run_id)")
+        # Recursive flows: depth + frame (flow name) per step, for nested run logs.
+        # ADD COLUMN on an existing DB is a no-op-if-present (wrapped in try).
+        for col, ddl in (("depth", "INTEGER DEFAULT 0"), ("frame", "TEXT")):
+            try:
+                await db.execute(f"ALTER TABLE flow_run_steps ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass  # column already exists
         await db.commit()
         self._db = db
         return db
@@ -168,6 +175,17 @@ class FlowStore:
             row = await cur.fetchone()
         return _row_to_flow(row) if row else None
 
+    async def get_flow_by_name(self, name: str) -> dict[str, Any] | None:
+        """Case-insensitive name lookup for `gosub` resolution. Highest priority
+        wins on a tie. Permanent space only (Phase 1)."""
+        db = await self._ensure_db()
+        async with db.execute(
+            "SELECT * FROM flows WHERE lower(name)=lower(?) ORDER BY priority DESC LIMIT 1",
+            (name.strip(),),
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_flow(row) if row else None
+
     async def list_flows(self) -> list[dict[str, Any]]:
         db = await self._ensure_db()
         async with db.execute("SELECT * FROM flows ORDER BY priority DESC, name") as cur:
@@ -207,12 +225,13 @@ class FlowStore:
     async def add_step_result(
         self, run_id: str, step_id: str, seq: int, *, type: str, status: str,
         agent: str = "", input_text: str = "", output_text: str = "", ms: int = 0,
+        depth: int = 0, frame: str = "",
     ) -> None:
         db = await self._ensure_db()
         await db.execute(
-            """INSERT INTO flow_run_steps (run_id, step_id, seq, type, status, agent, input_text, output_text, ms, started_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (run_id, step_id, seq, type, status, agent, input_text[:4000], output_text[:8000], ms, _now()),
+            """INSERT INTO flow_run_steps (run_id, step_id, seq, type, status, agent, input_text, output_text, ms, started_at, depth, frame)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (run_id, step_id, seq, type, status, agent, input_text[:4000], output_text[:8000], ms, _now(), int(depth), frame),
         )
         await db.commit()
 

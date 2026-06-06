@@ -26,10 +26,35 @@ log = get_logger(__name__)
 
 _TEMPLATE_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_.\[\]]+)\s*\}\}")
 _VISION_HINTS = ("vision", "image", "multimodal", "minimax", "llava", "vl")
-_DEFAULT_MAX_STEPS = 20
+_DEFAULT_MAX_STEPS = 20            # per-frame local sanity cap
+_DEFAULT_MAX_TOTAL_STEPS = 100     # shared budget across the whole call tree
+_DEFAULT_MAX_DEPTH = 8             # gosub recursion depth cap
 
 # Sentinel goto target that ends the flow (used by branch `goto`/`else`).
 _STOP_TARGET = "__stop__"
+
+
+class _FlowStopped(Exception):
+    """Raised at a step boundary to unwind the whole frame stack on stop."""
+
+
+class _Root:
+    """State shared across every frame of one logical run (the call tree).
+
+    Frames push/pop on `control.frames` for status/control; the budget and trace
+    are shared so recursion can't multiply per-flow limits and the run log sees
+    one ordered, depth-tagged timeline."""
+
+    __slots__ = ("run_id", "control", "trace", "budget", "depth_cap", "dry")
+
+    def __init__(self, run_id: str, control: "_RunControl | None", dry: bool,
+                 budget: dict[str, int], depth_cap: int) -> None:
+        self.run_id = run_id
+        self.control = control
+        self.trace: list[dict[str, Any]] = []
+        self.budget = budget          # mutable {"steps_left": int}
+        self.depth_cap = depth_cap
+        self.dry = dry
 
 
 class _RunControl:
@@ -40,7 +65,7 @@ class _RunControl:
     ``stopped`` ends the run at the next boundary (optionally after delivering
     ``stop_message`` on the originating channel)."""
 
-    __slots__ = ("resume", "stopped", "stop_message", "owner", "name")
+    __slots__ = ("resume", "stopped", "stop_message", "owner", "name", "frames")
 
     def __init__(self, owner: str = "", name: str = "") -> None:
         self.resume = asyncio.Event()
@@ -49,6 +74,7 @@ class _RunControl:
         self.stop_message = ""
         self.owner = owner  # caller identity, for '/flow stop|pause|resume'
         self.name = name    # flow name, for '/flow status'
+        self.frames: list[dict[str, Any]] = []  # live call stack (gosub frames)
 
 
 _RUN_CONTROL: dict[str, _RunControl] = {}
@@ -77,12 +103,19 @@ def owner_is_paused(owner: str) -> bool:
 
 
 def owner_run_states(owner: str) -> list[dict[str, Any]]:
-    """Snapshot of *owner*'s live runs for '/flow status'."""
+    """Snapshot of *owner*'s live runs for '/flow status' (with call-stack crumb)."""
     out: list[dict[str, Any]] = []
     for c in _RUN_CONTROL.values():
         if c.owner != owner or c.stopped:
             continue
-        out.append({"name": c.name, "paused": not c.resume.is_set()})
+        crumb = " › ".join(str(f.get("flow") or "?") for f in c.frames)
+        active = str(c.frames[-1].get("step") or "") if c.frames else ""
+        out.append({
+            "name": c.name,
+            "paused": not c.resume.is_set(),
+            "crumb": crumb,
+            "step": active,
+        })
     return out
 
 
@@ -458,17 +491,72 @@ class FlowRunner:
                 return f"(emitted to {channel})"
         return body  # 'log' / fallthrough — captured in the run record
 
-    # ── main loop ──────────────────────────────────────────────────────
+    # ── flow resolution (for gosub) ────────────────────────────────────
 
-    async def run(self, flow: dict[str, Any], payload: dict[str, Any] | None = None, *, dry: bool = False, run_id: str | None = None) -> dict[str, Any]:
-        payload = payload or {}
+    async def _resolve_flow_by_name(self, name: str) -> dict[str, Any] | None:
+        """Resolve a flow by name for `gosub` (Phase 1: permanent space only)."""
+        name_l = name.strip().lower()
+        if not name_l:
+            return None
+        try:
+            getter = getattr(self.store, "get_flow_by_name", None)
+            if getter:
+                return await getter(name)
+            for f in await self.store.list_flows():
+                if str(f.get("name", "")).lower() == name_l:
+                    return f
+        except Exception as exc:
+            log.warning("gosub resolve failed: %s", exc)
+        return None
+
+    async def _run_gosub(
+        self, step: dict[str, Any], ctx: dict[str, Any],
+        payload: dict[str, Any], root: "_Root", depth: int,
+    ) -> tuple[str, str, str]:
+        """Synchronously call another flow. Returns (return_value, label, status)."""
+        name = _render(str(step.get("flow") or ""), ctx).strip()
+        if not name:
+            return "(gosub: no flow name)", "gosub", "error"
+        # Depth cap is a hard runaway guard — it raises (fails the run) rather than
+        # returning a catchable status, so infinite recursion can't be swallowed.
+        if depth + 1 > root.depth_cap:
+            raise RuntimeError(f"max flow recursion depth ({root.depth_cap}) exceeded")
+        target = await self._resolve_flow_by_name(name)
+        if not target:
+            return f"(gosub: no flow named '{name}')", "gosub", "error"
+        args = _render(step.get("args") or {}, ctx)
+        if not isinstance(args, dict):
+            args = {}
+        # The child carries the parent's identity (so delivery + input keying still
+        # resolve) plus the call args. Args merge into the trigger so a reused flow
+        # that reads {{trigger.<k>}} works, and {{args.<k>}} is always available.
+        child_payload = dict(payload)
+        child_payload["args"] = args
+        for k, v in args.items():
+            child_payload[k] = v
+        result = await self._run_frame(target, child_payload, root=root, depth=depth + 1)
+        st = str(result.get("status") or "done")
+        return str(result.get("value", "")), f"flow:{name}", ("done" if st in ("done", "returned") else st)
+
+    # ── frame loop (one flow's steps) ──────────────────────────────────
+
+    async def _run_frame(
+        self, flow: dict[str, Any], payload: dict[str, Any], *,
+        root: "_Root", depth: int,
+    ) -> dict[str, Any]:
+        """Execute one flow's steps and return {value, status}. `gosub` recurses
+        here at depth+1; the parent captures the return value. Frame-local ctx
+        (steps/calls) is fresh; budget/trace/control are shared via `root`."""
         steps = list(flow.get("steps") or [])
         guard = flow.get("guardrails") or {}
         max_steps = int(guard.get("max_steps", _DEFAULT_MAX_STEPS))
+        flow_name = str(flow.get("name") or "Flow")
         _now = datetime.now(UTC)
         ctx: dict[str, Any] = {
             "trigger": payload,
+            "args": payload.get("args") or {},
             "steps": {},
+            "calls": {},
             "system": {
                 "now": _now.isoformat(),
                 "date": _now.strftime("%Y-%m-%d"),
@@ -477,24 +565,20 @@ class FlowRunner:
                 "channel": str(payload.get("channel") or ""),
             },
         }
-        trace: list[dict[str, Any]] = []
-
-        if dry:
-            run_id = ""
-        elif not run_id:
-            run_id = await self.store.start_run(flow["id"], flow.get("name", ""), payload)
-        # Register a control handle so the run can be paused/resumed/stopped.
-        ctrl: _RunControl | None = None
-        if not dry and run_id:
-            ctrl = _RunControl(owner=_owner_key(payload), name=str(flow.get("name") or ""))
-            _RUN_CONTROL[run_id] = ctrl
-        status = "done"
-        error = ""
-        final_text = ""
+        ctrl = root.control
+        run_id = root.run_id
+        dry = root.dry
+        frame: dict[str, Any] | None = None
+        if ctrl is not None:
+            frame = {"depth": depth, "flow": flow_name, "step": ""}
+            ctrl.frames.append(frame)
         paused_marked = False
         by_id = {s.get("id"): i for i, s in enumerate(steps)}
         i = 0
         executed = 0
+        frame_value = ""
+        frame_status = "done"
+        self_delivered = False  # did the last executed step already message the user?
         try:
             while i < len(steps):
                 # ── pause / stop control (checked at each step boundary) ──
@@ -514,25 +598,22 @@ class FlowRunner:
                             except Exception:
                                 pass
                     if ctrl.stopped:
-                        status = "stopped"
-                        if ctrl.stop_message:
-                            try:
-                                await self._deliver(payload, ctrl.stop_message)
-                            except Exception as exc:
-                                log.warning("flow stop message delivery failed: %s", exc)
-                        break
+                        raise _FlowStopped()  # unwind the whole stack to run()
+                # ── budgets ──
+                if root.budget["steps_left"] <= 0:
+                    raise RuntimeError("flow step budget exhausted")
                 if executed >= max_steps:
                     raise RuntimeError(f"max_steps ({max_steps}) exceeded")
                 step = steps[i]
                 sid = str(step.get("id") or f"step{i}")
                 stype = str(step.get("type") or "tool")
                 executed += 1
+                root.budget["steps_left"] -= 1
+                if frame is not None:
+                    frame["step"] = sid
                 t0 = time.monotonic()
 
                 if stype == "branch":
-                    # Multi-case switch: evaluate each case's condition in order;
-                    # first true wins. Falls back to the single when/goto for
-                    # legacy flows, and to `else`/`default` when nothing matches.
                     cases = step.get("cases")
                     if not cases:
                         cases = [{"when": step.get("when"), "goto": step.get("goto")}]
@@ -549,18 +630,33 @@ class FlowRunner:
                             target = els
                             label = f"else→{target}"
                     out = f"branch {label}"
-                    _record(trace, sid, stype, "done", "", out, t0)
+                    _record(root.trace, sid, stype, "done", "", out, t0, depth)
                     if not dry:
-                        await self.store.add_step_result(run_id, sid, executed, type=stype, status="done", output_text=out, ms=_ms(t0))
+                        await self.store.add_step_result(run_id, sid, executed, type=stype, status="done", output_text=out, ms=_ms(t0), depth=depth, frame=flow_name)
                     if target and str(target) == _STOP_TARGET:
-                        break  # branch ends the flow
+                        break  # branch ends the flow (no value)
                     if target and target in by_id:
                         i = by_id[target]
                         continue
                     i += 1
                     continue
 
-                if stype == "tool":
+                if stype == "return":
+                    # Explicit exit. `return <expr>` returns the expr; bare `return`
+                    # hands back the last step's output (frame_value so far).
+                    val = step.get("value")
+                    if val:
+                        frame_value = _render(str(val), ctx)
+                        self_delivered = False  # a returned value isn't auto-delivered
+                    _record(root.trace, sid, "return", "done", "", frame_value, t0, depth)
+                    if not dry:
+                        await self.store.add_step_result(run_id, sid, executed, type="return", status="done", output_text=str(frame_value), ms=_ms(t0), depth=depth, frame=flow_name)
+                    break
+
+                if stype == "gosub":
+                    out, agent, child_status = await self._run_gosub(step, ctx, payload, root, depth)
+                    ctx["calls"][sid] = {"output": out, "status": child_status}
+                elif stype == "tool":
                     out, agent = await self._run_tool(step, ctx, payload)
                 elif stype == "agent":
                     out, agent = await self._run_agent_step(step, ctx, payload)
@@ -573,35 +669,86 @@ class FlowRunner:
                 else:
                     out, agent = f"(unknown step type '{stype}')", ""
 
+                # An emit to a user channel already delivered — so the root must
+                # not re-deliver this as the flow's final output (would leak the
+                # "(emitted to …)" sentinel as a second message).
+                self_delivered = stype == "emit" and str(step.get("channel") or "log") in ("whatsapp", "same", "glasses", "web")
+
                 ctx["steps"][sid] = {"output": out}
-                # Convenience: expose a trailing 'label' if the tool returned JSON.
                 _maybe_attach_fields(ctx["steps"][sid], out)
-                _record(trace, sid, stype, "done", agent, out, t0)
+                _record(root.trace, sid, stype, "done", agent, out, t0, depth)
                 if not dry:
                     await self.store.add_step_result(
                         run_id, sid, executed, type=stype, status="done",
                         agent=agent, output_text=str(out), ms=_ms(t0),
+                        depth=depth, frame=flow_name,
                     )
-                # Track the last EXECUTED step's output (correct under goto/stop,
-                # unlike steps[-1] which is just the last step in the list).
-                final_text = str(out)
+                frame_value = str(out)
                 i += 1
+                # `return` directive (supersedes the bare `stop` flag): exit with
+                # an optional value.
+                if "return" in step:
+                    rexpr = step.get("return")
+                    if rexpr:
+                        frame_value = _render(str(rexpr), ctx)
+                        self_delivered = False  # returned value differs from what was emitted
+                    break
                 if step.get("stop"):
-                    break  # "Stop after this step" flag → end the flow here
+                    break  # "Stop after this step" → end the frame here
+        finally:
+            if ctrl is not None and frame is not None:
+                try:
+                    ctrl.frames.remove(frame)
+                except ValueError:
+                    pass
+        return {"value": frame_value, "status": frame_status, "self_delivered": self_delivered}
 
-            # Deliver final output (the last executed step's output) — only on a
-            # clean finish, not when the run was stopped mid-flight.
+    # ── run (root concerns: control, budget, delivery, persistence) ─────
+
+    async def run(self, flow: dict[str, Any], payload: dict[str, Any] | None = None, *, dry: bool = False, run_id: str | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        if dry:
+            run_id = ""
+        elif not run_id:
+            run_id = await self.store.start_run(flow["id"], flow.get("name", ""), payload)
+        # Register a control handle so the run can be paused/resumed/stopped.
+        ctrl: _RunControl | None = None
+        if not dry and run_id:
+            ctrl = _RunControl(owner=_owner_key(payload), name=str(flow.get("name") or ""))
+            _RUN_CONTROL[run_id] = ctrl
+        guard = flow.get("guardrails") or {}
+        budget = {"steps_left": int(guard.get("max_total_steps", _DEFAULT_MAX_TOTAL_STEPS))}
+        depth_cap = int(guard.get("max_depth", _DEFAULT_MAX_DEPTH))
+        root = _Root(run_id=run_id, control=ctrl, dry=dry, budget=budget, depth_cap=depth_cap)
+
+        status = "done"
+        error = ""
+        final_text = ""
+        try:
+            result = await self._run_frame(flow, payload, root=root, depth=0)
+            final_text = str(result.get("value") or "")
+            # Deliver the root flow's output to the user channel (children never
+            # do this — their value returns to the caller; only an explicit `emit`
+            # in a child reaches the user). Skip if the last step was itself an
+            # emit to a user channel — it already delivered.
             output = flow.get("output") or {}
             out_channel = str(output.get("channel") or "log")
-            if status == "done" and not dry and out_channel in ("whatsapp", "same", "glasses", "web") and final_text:
+            if not result.get("self_delivered") and not dry and out_channel in ("whatsapp", "same", "glasses", "web") and final_text:
                 try:
                     await self._deliver(payload, str(final_text))
                 except Exception as exc:
                     log.warning("flow output delivery failed: %s", exc)
+        except _FlowStopped:
+            status = "stopped"
+            if ctrl is not None and ctrl.stop_message:
+                try:
+                    await self._deliver(payload, ctrl.stop_message)
+                except Exception as exc:
+                    log.warning("flow stop message delivery failed: %s", exc)
         except Exception as exc:
-            # A stop requested while the run was blocked off the control loop
-            # (e.g. waiting on an `input` step) surfaces here as the cancelled
-            # wait — treat it as a clean stop, not a failure.
+            # A stop requested while a frame was blocked off the control loop
+            # (e.g. waiting on `input`) surfaces here as the cancelled wait —
+            # treat it as a clean stop, not a failure.
             if ctrl is not None and ctrl.stopped:
                 status = "stopped"
                 if ctrl.stop_message:
@@ -617,7 +764,7 @@ class FlowRunner:
         if not dry:
             await self.store.finish_run(run_id, status, error)
             _RUN_CONTROL.pop(run_id, None)
-        return {"run_id": run_id, "status": status, "error": error, "steps": trace, "output": final_text}
+        return {"run_id": run_id, "status": status, "error": error, "steps": root.trace, "output": final_text}
 
 
 # ── Branch condition evaluator ─────────────────────────────────────────
@@ -776,6 +923,6 @@ def _ms(t0: float) -> int:
     return int((time.monotonic() - t0) * 1000)
 
 
-def _record(trace: list, sid: str, stype: str, status: str, agent: str, out: Any, t0: float) -> None:
+def _record(trace: list, sid: str, stype: str, status: str, agent: str, out: Any, t0: float, depth: int = 0) -> None:
     trace.append({"step_id": sid, "type": stype, "status": status, "agent": agent,
-                  "output": str(out)[:4000], "ms": _ms(t0)})
+                  "output": str(out)[:4000], "ms": _ms(t0), "depth": depth})

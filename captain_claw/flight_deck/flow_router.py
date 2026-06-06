@@ -153,7 +153,10 @@ async def maybe_handle_flow_command(payload: dict[str, Any]) -> bool:
                     detail = "⏳ waiting for your input"
                 else:
                     detail = "▶️ running"
-                lines.append(f"• *{nm}* — {detail}")
+                # Show the call-stack breadcrumb when the run is nested (gosub).
+                crumb = str(s.get("crumb") or "")
+                tail = f"  ({crumb})" if crumb and "›" in crumb else ""
+                lines.append(f"• *{nm}* — {detail}{tail}")
             reply = "📊 *Flow status*\n" + "\n".join(lines)
     elif action in ("stop", "halt"):
         n = sum(1 for rid in run_ids if fr.request_stop(rid, rest))
