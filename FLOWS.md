@@ -456,15 +456,24 @@ flow runs on, send a control command (the leading `/` is optional):
 
 | Command | Effect |
 |---|---|
-| `/flow status` | Report whether a flow is running, paused, or waiting for your input |
-| `/flow stop` | End the running flow now. Add a trailing phrase to send it first: `/flow stop ok, cancelled` |
-| `/flow pause` | Pause at the next step boundary |
-| `/flow resume` | Continue a paused flow (`/flow continue` also works) |
+| `/flow status` | List your running flows — each with a **handle** `[hs]`, state, and call-stack breadcrumb |
+| `/flow stop` | Stop the most-recent flow. Add a phrase to send it first: `/flow stop ok, cancelled` |
+| `/flow stop <handle>` | Stop a specific flow by its handle, e.g. `/flow stop hs` |
+| `/flow stop <name>` | Stop by flow-name fragment, e.g. `/flow stop weather` |
+| `/flow stop all` | Stop **every** running flow |
+| `/flow pause [handle\|name\|all]` | Pause (most-recent by default) |
+| `/flow resume [handle\|name\|all]` | Continue a paused flow (`/flow continue` also works) |
 
-These reach the flow **you** triggered (matched by your WhatsApp number, or by
-your web/glasses session). `stop` works even while the flow is paused waiting on
-an `input` step. The same controls are available as **Pause / Resume / Stop**
-buttons in the Flight Deck run log.
+**Handles.** When several flows run at once, each gets a short stable tag like
+`[hs]` (shown on its input prompts and in `/flow status`) so you can address it:
+`/flow pause hs`, `/flow stop weather`. A bare command targets your most-recent
+flow; `all` targets every one.
+
+These reach the flows **you** triggered (matched by your WhatsApp number, or by
+your web/glasses session). `stop` works even while a flow is paused waiting on an
+`input` step. `spawn`’d background flows are independent — a plain `/flow stop`
+won’t touch them; use `/flow stop all` (or their handle). The same per-run
+controls are also **Pause / Resume / Stop** buttons in the Flight Deck run log.
 
 **Pause + input:** if you pause a flow while it’s waiting for your input, your
 next messages go to the agent as normal chat — they are **not** swallowed as the

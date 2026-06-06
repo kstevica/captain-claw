@@ -66,16 +66,60 @@ class _RunControl:
     ``stopped`` ends the run at the next boundary (optionally after delivering
     ``stop_message`` on the originating channel)."""
 
-    __slots__ = ("resume", "stopped", "stop_message", "owner", "name", "frames")
+    __slots__ = ("resume", "stopped", "stop_message", "owner", "name", "frames", "handle")
 
-    def __init__(self, owner: str = "", name: str = "") -> None:
+    def __init__(self, owner: str = "", name: str = "", handle: str = "") -> None:
         self.resume = asyncio.Event()
         self.resume.set()  # set = running, cleared = paused
         self.stopped = False
         self.stop_message = ""
         self.owner = owner  # caller identity, for '/flow stop|pause|resume'
         self.name = name    # flow name, for '/flow status'
+        self.handle = handle  # short stable tag, for '/flow stop <handle>'
         self.frames: list[dict[str, Any]] = []  # live call stack (gosub frames)
+
+
+def _slug(name: str) -> str:
+    """A short base handle from a flow name: initials for multi-word, first two
+    chars for a single word."""
+    words = re.findall(r"[A-Za-z0-9]+", name or "")
+    if len(words) >= 2:
+        return "".join(w[0] for w in words[:3]).lower()
+    if words:
+        return words[0][:2].lower()
+    return "fl"
+
+
+def _assign_handle(name: str) -> str:
+    """A handle unique among currently-live runs (base slug, then base2, base3…)."""
+    taken = {c.handle for c in _RUN_CONTROL.values() if c.handle}
+    base = _slug(name)
+    h, n = base, 2
+    while h in taken:
+        h = f"{base}{n}"
+        n += 1
+    return h
+
+
+def resolve_runs(owner: str, target: str) -> list[str]:
+    """Resolve a '/flow <cmd> [target]' selector to run ids for *owner*.
+
+    target: '' → the most-recently-started run; 'all' → every live run; a handle
+    (exact) or a flow-name fragment (substring) → matching runs. Returns [] when a
+    non-empty target matches nothing (caller may then treat it as a stop message)."""
+    active = [(rid, c) for rid, c in _RUN_CONTROL.items() if c.owner == owner and not c.stopped]
+    if not active:
+        return []
+    t = (target or "").strip().lower()
+    if not t:
+        return [active[-1][0]]  # most-recent
+    if t == "all":
+        return [rid for rid, _ in active]
+    by_handle = [rid for rid, c in active if (c.handle or "").lower() == t]
+    if by_handle:
+        return by_handle
+    by_name = [rid for rid, c in active if t in (c.name or "").lower()]
+    return by_name
 
 
 _RUN_CONTROL: dict[str, _RunControl] = {}
@@ -113,6 +157,7 @@ def owner_run_states(owner: str) -> list[dict[str, Any]]:
         active = str(c.frames[-1].get("step") or "") if c.frames else ""
         out.append({
             "name": c.name,
+            "handle": c.handle,
             "paused": not c.resume.is_set(),
             "crumb": crumb,
             "step": active,
@@ -459,9 +504,11 @@ class FlowRunner:
         waid = str(payload.get("waid") or payload.get("whatsapp_waid") or "")
         channel = str(payload.get("channel") or "")
         origin_port = int(payload.get("origin_port") or 0)
-        # Announce that input is needed — the flow name is required so the user
-        # knows which automation is asking.
-        announce = f"⏳ *{flow_name}* needs your input:\n\n{prompt}"
+        # Announce that input is needed — the flow name + handle let the user know
+        # which automation is asking (and how to address it: '/flow pause <handle>').
+        handle = str((ctx.get("system") or {}).get("handle") or "")
+        tag = f" `[{handle}]`" if handle else ""
+        announce = f"⏳ *{flow_name}*{tag} needs your input:\n\n{prompt}"
 
         if not await self._deliver(payload, announce):
             # No reachable channel to ask on — fail clearly instead of hanging.
@@ -622,6 +669,7 @@ class FlowRunner:
                 "time": _now.strftime("%H:%M"),
                 "agent": str(payload.get("origin_name") or ""),
                 "channel": str(payload.get("channel") or ""),
+                "handle": (root.control.handle if root.control else ""),
             },
         }
         ctrl = root.control
@@ -805,7 +853,8 @@ class FlowRunner:
         # Register a control handle so the run can be paused/resumed/stopped.
         ctrl: _RunControl | None = None
         if not dry and run_id:
-            ctrl = _RunControl(owner=_owner_key(payload), name=str(flow.get("name") or ""))
+            _name = str(flow.get("name") or "")
+            ctrl = _RunControl(owner=_owner_key(payload), name=_name, handle=_assign_handle(_name))
             _RUN_CONTROL[run_id] = ctrl
         guard = flow.get("guardrails") or {}
         budget = {"steps_left": int(guard.get("max_total_steps", _DEFAULT_MAX_TOTAL_STEPS))}

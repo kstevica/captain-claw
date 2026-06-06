@@ -131,13 +131,16 @@ async def maybe_handle_flow_command(payload: dict[str, Any]) -> bool:
     action = m.group(1).lower()
     rest = (m.group(2) or "").strip()
     owner = _owner_key_for(payload)
-    run_ids = fr.runs_for_owner(owner)
     waiting = has_pending_input(
         waid=str(payload.get("waid") or payload.get("whatsapp_waid") or ""),
         channel=str(payload.get("channel") or ""),
         origin_port=int(payload.get("origin_port") or 0),
     )
     reply = ""
+
+    def _label(rid: str) -> str:
+        c = fr._RUN_CONTROL.get(rid)
+        return f"*{c.name or 'Flow'}* `[{c.handle}]`" if c else "the flow"
 
     if action in ("status", "state"):
         states = fr.owner_run_states(owner)
@@ -147,20 +150,33 @@ async def maybe_handle_flow_command(payload: dict[str, Any]) -> bool:
             lines = []
             for s in states:
                 nm = s.get("name") or "Flow"
+                h = s.get("handle") or ""
                 if s.get("paused"):
                     detail = "⏸️ paused" + (" — waiting for your input on resume" if waiting else "")
                 elif waiting:
                     detail = "⏳ waiting for your input"
                 else:
                     detail = "▶️ running"
-                # Show the call-stack breadcrumb when the run is nested (gosub).
                 crumb = str(s.get("crumb") or "")
                 tail = f"  ({crumb})" if crumb and "›" in crumb else ""
-                lines.append(f"• *{nm}* — {detail}{tail}")
+                tag = f" `[{h}]`" if h else ""
+                lines.append(f"• *{nm}*{tag} — {detail}{tail}")
             reply = "📊 *Flow status*\n" + "\n".join(lines)
+            if len(states) > 1:
+                reply += "\n\n_Target one with e.g. `/flow stop <handle>`, or `/flow stop all`._"
     elif action in ("stop", "halt"):
-        n = sum(1 for rid in run_ids if fr.request_stop(rid, rest))
-        if n:
+        targeted = fr.resolve_runs(owner, rest)
+        # A non-empty target that matched nothing is treated as a stop message
+        # applied to the most-recent run (e.g. `/flow stop ok, cancelled`).
+        msg = ""
+        if rest and not targeted and rest.lower() != "all":
+            targeted = fr.resolve_runs(owner, "")
+            msg = rest
+        if not targeted:
+            reply = "No running flow to stop." if not rest else f"No flow matching “{rest}”."
+        else:
+            for rid in targeted:
+                fr.request_stop(rid, msg)
             # A flow paused on an `input` step is blocked off the control loop —
             # cancel its wait so the stop takes effect immediately.
             cancel_pending_input(
@@ -168,21 +184,32 @@ async def maybe_handle_flow_command(payload: dict[str, Any]) -> bool:
                 channel=str(payload.get("channel") or ""),
                 origin_port=int(payload.get("origin_port") or 0),
             )
-            reply = "" if rest else "⏹️ Stopped the running flow."
-        else:
-            reply = "No running flow to stop."
+            if msg:
+                reply = ""  # the stopped run delivers the custom message itself
+            elif len(targeted) == 1:
+                reply = f"⏹️ Stopped {_label(targeted[0])}."
+            else:
+                reply = f"⏹️ Stopped {len(targeted)} running flows."
     elif action == "pause":
-        n = sum(1 for rid in run_ids if fr.request_pause(rid))
-        reply = "⏸️ Paused — send */flow resume* to continue." if n else "No running flow to pause."
-    else:  # resume / continue
-        n = sum(1 for rid in run_ids if fr.request_resume(rid))
+        targeted = fr.resolve_runs(owner, rest)
+        n = sum(1 for rid in targeted if fr.request_pause(rid))
         if not n:
-            reply = "No paused flow to resume."
+            reply = "No running flow to pause." if not rest else f"No flow matching “{rest}”."
+        elif len(targeted) == 1:
+            reply = f"⏸️ Paused {_label(targeted[0])} — send */flow resume* to continue."
         else:
-            # If the flow paused on an input step, re-show the question so the
-            # user knows their next reply continues the flow from that step.
+            reply = f"⏸️ Paused {n} flows — send */flow resume all* to continue."
+    else:  # resume / continue
+        targeted = fr.resolve_runs(owner, rest)
+        n = sum(1 for rid in targeted if fr.request_resume(rid))
+        if not n:
+            reply = "No paused flow to resume." if not rest else f"No flow matching “{rest}”."
+        elif len(targeted) == 1:
+            # If the flow paused on an input step, re-show the question.
             prompt = _PENDING_INPUT_PROMPT.get(owner)
-            reply = f"▶️ Resumed.\n\n{prompt}" if prompt else "▶️ Resumed the flow."
+            reply = f"▶️ Resumed {_label(targeted[0])}.\n\n{prompt}" if prompt else f"▶️ Resumed {_label(targeted[0])}."
+        else:
+            reply = f"▶️ Resumed {n} flows."
 
     if reply and _RUNNER is not None:
         try:

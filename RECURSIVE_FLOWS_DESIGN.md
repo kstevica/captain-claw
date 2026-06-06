@@ -383,8 +383,9 @@ placement, and cross-space resolution checks.
    + stop bubbling.
 2. **Async** ✅ *shipped* — `spawn`, futures, `join` (timeout + stop-aborts-join), the
    `error`/handler step + `on error -> <step>` routing, branchable call/join status.
-3. **Addressability** — handles stamped on messages, `flow stop <handle|name>`,
-   `flow stop all`, multi-stack status.
+3. **Addressability** ✅ *shipped* — per-run handles (stamped on input prompts +
+   `flow status`), `flow stop/pause/resume <handle|name|all>`, bare = most-recent,
+   multi-stack status.
 4. **Synthesis** — the tool (gated), retrieve-before-generate, scratch space, compiler
    hardening, transitive palette guard, world-acting approval.
 5. **Lifecycle** — dedup/hash, use-scoring, tiered TTL/GC, quarantine, promotion review,
