@@ -35,6 +35,34 @@ def _iso_after(seconds: int) -> str:
     return (datetime.now(UTC) + timedelta(seconds=max(0, int(seconds)))).isoformat()
 
 
+# ── scratch-flow lifecycle (Phase 5) ───────────────────────────────────
+_PROMOTE_MIN_SUCCESS = 3       # successful runs before a flow is a promotion candidate
+_QUARANTINE_MIN_FAIL = 3       # failures before a flow is quarantined
+_TTL_EPHEMERAL = 3 * 86400     # active flows: GC if idle this long
+_TTL_CANDIDATE = 30 * 86400    # proven flows survive longer
+_TTL_QUARANTINE = 1 * 86400    # known-bad flows: short grace, then GC
+_SCRATCH_CAP = 200             # hard LRU cap on the scratch space
+
+
+def _classify(success: int, fail: int) -> str:
+    """Lifecycle state from run outcomes. Promotion is driven by *successful*,
+    non-reversed runs (failures push toward quarantine, never promotion)."""
+    if fail >= _QUARANTINE_MIN_FAIL and fail > success:
+        return "quarantined"
+    if success >= _PROMOTE_MIN_SUCCESS and success >= fail:
+        return "candidate"
+    return "active"
+
+
+def _promotion_score(success: int, fail: int) -> int:
+    """Rank candidates: successes minus weighted failures."""
+    return int(success) - 2 * int(fail)
+
+
+def _ttl_for(state: str) -> int:
+    return {"candidate": _TTL_CANDIDATE, "quarantined": _TTL_QUARANTINE}.get(state, _TTL_EPHEMERAL)
+
+
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
@@ -117,6 +145,9 @@ class FlowStore:
             ("use_count", "INTEGER NOT NULL DEFAULT 0"),
             ("last_used_at", "TEXT"),
             ("expires_at", "TEXT"),                      # TTL for GC (Phase 5)
+            ("success_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("fail_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("state", "TEXT NOT NULL DEFAULT 'active'"),  # active|candidate|quarantined|proposed
         ):
             try:
                 await db.execute(f"ALTER TABLE flows ADD COLUMN {col} {ddl}")
@@ -291,21 +322,110 @@ class FlowStore:
         await db.commit()
         return fid
 
-    async def bump_use(self, flow_id: str, *, ttl_seconds: int = 7 * 86400) -> None:
-        """Record a use of a scratch flow (count++, refresh last_used_at + TTL)."""
+    async def bump_use(self, flow_id: str) -> None:
+        """Record a selection/reuse of a scratch flow (use_count++, refresh TTL)."""
         db = await self._ensure_db()
+        async with db.execute(
+            "SELECT success_count, fail_count FROM flows WHERE id=?", (flow_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return
+        state = _classify(int(row["success_count"] or 0), int(row["fail_count"] or 0))
         await db.execute(
             "UPDATE flows SET use_count=use_count+1, last_used_at=?, expires_at=? WHERE id=?",
-            (_now(), _iso_after(ttl_seconds), flow_id),
+            (_now(), _iso_after(_ttl_for(state)), flow_id),
         )
         await db.commit()
 
-    async def promote_flow(self, flow_id: str, *, name: str | None = None) -> bool:
-        """Move a scratch flow into the permanent space (Phase 5 wires the review
-        UI; this is the underlying transition)."""
+    async def record_outcome(self, flow_id: str, ok: bool) -> None:
+        """Record a scratch flow's run outcome: bump success/fail + use, reclassify
+        its lifecycle state, refresh the TTL. No-op for non-scratch flows."""
         db = await self._ensure_db()
-        sets = ["space='user'", "origin='user'", "expires_at=NULL", "updated_at=?"]
-        params: list[Any] = [_now()]
+        async with db.execute(
+            "SELECT success_count, fail_count, state FROM flows WHERE id=? AND space='scratch'",
+            (flow_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return  # not a scratch flow — outcomes only tracked there
+        s = int(row["success_count"] or 0) + (1 if ok else 0)
+        f = int(row["fail_count"] or 0) + (0 if ok else 1)
+        state = _classify(s, f)
+        # Don't downgrade a flow already proposed for promotion (unless it's now bad).
+        if (row["state"] or "active") == "proposed" and state != "quarantined":
+            state = "proposed"
+        await db.execute(
+            """UPDATE flows SET success_count=?, fail_count=?, use_count=use_count+1,
+                 state=?, last_used_at=?, expires_at=? WHERE id=?""",
+            (s, f, state, _now(), _iso_after(_ttl_for(state)), flow_id),
+        )
+        await db.commit()
+
+    async def gc_scratch(self) -> int:
+        """Delete expired scratch flows (TTL passed) — except those proposed for
+        promotion — then enforce a hard LRU cap. Returns the number removed."""
+        db = await self._ensure_db()
+        now = _now()
+        cur = await db.execute(
+            "DELETE FROM flows WHERE space='scratch' AND state!='proposed' "
+            "AND expires_at IS NOT NULL AND expires_at < ?",
+            (now,),
+        )
+        removed = cur.rowcount or 0
+        # LRU cap: keep the most-recently-used; never evict candidates/proposed.
+        async with db.execute("SELECT COUNT(*) AS n FROM flows WHERE space='scratch'") as c:
+            total = int((await c.fetchone())["n"])
+        if total > _SCRATCH_CAP:
+            over = total - _SCRATCH_CAP
+            async with db.execute(
+                "SELECT id FROM flows WHERE space='scratch' AND state NOT IN ('candidate','proposed') "
+                "ORDER BY last_used_at ASC LIMIT ?",
+                (over,),
+            ) as c:
+                victims = [r["id"] for r in await c.fetchall()]
+            for vid in victims:
+                await db.execute("DELETE FROM flows WHERE id=?", (vid,))
+            removed += len(victims)
+        await db.commit()
+        return removed
+
+    async def maintain_scratch(self) -> dict[str, int]:
+        """Janitor: reclassify every scratch flow from its counters, then GC.
+        Returns a summary {active, candidate, quarantined, proposed, removed}."""
+        db = await self._ensure_db()
+        async with db.execute(
+            "SELECT id, success_count, fail_count, state FROM flows WHERE space='scratch'"
+        ) as cur:
+            rows = await cur.fetchall()
+        for r in rows:
+            cur_state = r["state"] or "active"
+            if cur_state == "proposed":
+                continue  # pinned until a human decides
+            new_state = _classify(int(r["success_count"] or 0), int(r["fail_count"] or 0))
+            if new_state != cur_state:
+                await db.execute(
+                    "UPDATE flows SET state=?, expires_at=? WHERE id=?",
+                    (new_state, _iso_after(_ttl_for(new_state)), r["id"]),
+                )
+        await db.commit()
+        removed = await self.gc_scratch()
+        tally: dict[str, int] = {"active": 0, "candidate": 0, "quarantined": 0, "proposed": 0, "removed": removed}
+        async with db.execute(
+            "SELECT state, COUNT(*) AS n FROM flows WHERE space='scratch' GROUP BY state"
+        ) as cur:
+            for r in await cur.fetchall():
+                tally[str(r["state"] or "active")] = int(r["n"])
+        return tally
+
+    async def promote_flow(self, flow_id: str, *, name: str | None = None, enable: bool = False) -> bool:
+        """Move a scratch flow into the permanent space. Defaults to **call-only**
+        (enabled=0) so a synthesized `trigger any` can't suddenly fire on every
+        message — the user enables it to make it user-facing."""
+        db = await self._ensure_db()
+        sets = ["space='user'", "origin='user'", "state='active'", "expires_at=NULL",
+                "enabled=?", "updated_at=?"]
+        params: list[Any] = [1 if enable else 0, _now()]
         if name:
             sets.insert(0, "name=?")
             params.insert(0, name)
@@ -315,6 +435,15 @@ class FlowStore:
         )
         await db.commit()
         return cur.rowcount > 0
+
+    async def mark_proposed(self, flow_id: str) -> None:
+        """Pin a candidate as proposed-for-promotion (survives GC until decided)."""
+        db = await self._ensure_db()
+        await db.execute(
+            "UPDATE flows SET state='proposed', expires_at=NULL WHERE id=? AND space='scratch'",
+            (flow_id,),
+        )
+        await db.commit()
 
     # ── runs ───────────────────────────────────────────────────────────
 
@@ -397,6 +526,10 @@ def _row_to_flow(row: Any) -> dict[str, Any]:
         "use_count": int(d.get("use_count") or 0),
         "last_used_at": d.get("last_used_at"),
         "expires_at": d.get("expires_at"),
+        "success_count": int(d.get("success_count") or 0),
+        "fail_count": int(d.get("fail_count") or 0),
+        "state": d.get("state") or "active",
+        "score": _promotion_score(int(d.get("success_count") or 0), int(d.get("fail_count") or 0)),
     }
     for col in _JSON_COLS:
         raw = d.get(f"{col}_json")

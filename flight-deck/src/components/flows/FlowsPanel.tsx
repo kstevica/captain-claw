@@ -291,10 +291,16 @@ function ScratchFlows({ onChanged }: { onChanged: () => void }) {
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <span className="truncate text-sm text-zinc-200">{f.name}</span>
-                  <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[10px] text-violet-300">agent</span>
-                  {typeof f.use_count === 'number' && f.use_count > 0 && (
-                    <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">used {f.use_count}×</span>
+                  {f.state === 'candidate' && (
+                    <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] text-emerald-300" title="Proven — ready to promote">⭐ ready</span>
                   )}
+                  {f.state === 'quarantined' && (
+                    <span className="rounded bg-red-500/15 px-1.5 py-0.5 text-[10px] text-red-300" title="Failed repeatedly — will be discarded">⚠️ failing</span>
+                  )}
+                  <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[10px] text-violet-300">agent</span>
+                  {(f.success_count || f.fail_count) ? (
+                    <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">{f.success_count ?? 0}✓ {f.fail_count ?? 0}✗</span>
+                  ) : null}
                 </div>
                 <div className="text-[11px] text-zinc-600">
                   {f.author ? `by ${f.author}` : 'synthesized'}{f.description ? ` — ${f.description}` : ''}
@@ -303,8 +309,8 @@ function ScratchFlows({ onChanged }: { onChanged: () => void }) {
               <button
                 onClick={() => promote(f)}
                 disabled={busy === f.id}
-                className="rounded-lg bg-emerald-500/15 px-2.5 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-500/25 disabled:opacity-40"
-                title="Promote into your permanent flows"
+                className={`rounded-lg px-2.5 py-1 text-xs font-medium disabled:opacity-40 ${f.state === 'candidate' ? 'bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30' : 'bg-emerald-500/10 text-emerald-300/80 hover:bg-emerald-500/20'}`}
+                title="Promote into your permanent flows (call-only; enable it there to make it user-facing)"
               >
                 Promote
               </button>

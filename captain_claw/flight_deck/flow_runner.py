@@ -934,6 +934,15 @@ class FlowRunner:
         if not dry:
             await self.store.finish_run(run_id, status, error)
             _RUN_CONTROL.pop(run_id, None)
+            # Lifecycle: record the outcome on a synthesized (scratch) flow so it
+            # earns its way to promotion (or to quarantine). No-op otherwise.
+            if str(flow.get("space") or "user") == "scratch" and flow.get("id"):
+                rec = getattr(self.store, "record_outcome", None)
+                if rec:
+                    try:
+                        await rec(flow["id"], status == "done")
+                    except Exception as exc:
+                        log.warning("scratch outcome record failed: %s", exc)
         return {"run_id": run_id, "status": status, "error": error, "steps": root.trace, "output": final_text}
 
 

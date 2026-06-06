@@ -142,6 +142,10 @@ export interface Flow {
   use_count?: number
   last_used_at?: string | null
   expires_at?: string | null
+  success_count?: number
+  fail_count?: number
+  state?: 'active' | 'candidate' | 'quarantined' | 'proposed'
+  score?: number
 }
 
 /** Payload sent to create/update — no server-managed fields. */

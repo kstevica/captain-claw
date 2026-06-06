@@ -391,9 +391,12 @@ placement, and cross-space resolution checks.
    cross-space name resolution (permanent wins, no shadowing), the world-acting trust
    guard (transitive via per-frame origin), `/fd/flows/synthesize` + `/scratch` +
    `/promote`, and a scratch list + Promote UI.
-5. **Lifecycle** — use-scoring (non-reversal), tiered TTL/GC, quarantine, promotion
-   review, reactive + proactive (janitor) triggers. *(columns + bump_use + promote
-   already in place; scoring/GC/janitor remain.)*
+5. **Lifecycle** ✅ *shipped* — per-run outcome recording (success/fail), state
+   classification (active → candidate at 3 successes; quarantined at 3 failures),
+   tiered TTL + LRU-capped GC, negative memory (quarantined signature won't
+   re-synthesize), self-maintaining scratch list + a `/scratch/maintain` janitor,
+   and safe promotion (call-only by default). *Non-reversal is approximated by
+   run success; a true "user didn't correct it" signal remains future work.*
 
 Each phase is independently shippable and useful.
 

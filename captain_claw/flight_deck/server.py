@@ -2503,24 +2503,29 @@ async def fd_flows_synthesize(request: Request, user: dict | None = _optional_us
     flow["origin"] = "agent"
 
     # 2. Dedup: a structurally-identical scratch flow already exists → reuse it.
+    #    A quarantined one is negative memory — don't re-create the same bad flow.
     h = flow_dsl.canonical_hash(flow)
     existing = await store.find_scratch_by_hash(h)
+    if existing and existing.get("state") == "quarantined":
+        return {"ok": False, "quarantined": True,
+                "error": "This flow pattern failed repeatedly before (quarantined) — refine the goal."}
     if existing:
-        await store.bump_use(existing["id"])
         fid, name, reused = existing["id"], existing["name"], True
     else:
         fid = await store.create_scratch_flow(flow, author=author, dsl_hash=h)
         name, reused = flow.get("name") or "Synthesized flow", False
 
+    run = bool(body.get("run"))
+    # A selection without a run counts as a use; a run records its own outcome.
+    if reused and not run:
+        await store.bump_use(fid)
+
     out: dict = {"ok": True, "flow_id": fid, "name": name, "reused": reused, "dsl": dsl}
 
-    # 3. Optionally run it now.
-    if body.get("run"):
+    # 3. Optionally run it now (this records the outcome → drives promotion/quarantine).
+    if run:
         target = await store.get_flow(fid)
-        payload = body.get("payload") or {}
-        if not reused:
-            await store.bump_use(fid)
-        result = await app.state.flow_runner.run(target, payload)
+        result = await app.state.flow_runner.run(target, body.get("payload") or {})
         out["run_id"] = result.get("run_id")
         out["status"] = result.get("status")
         out["output"] = result.get("output") or ""
@@ -2529,8 +2534,21 @@ async def fd_flows_synthesize(request: Request, user: dict | None = _optional_us
 
 @app.get("/fd/flows/scratch")
 async def fd_flows_scratch(request: Request, user: dict | None = _optional_user_dep):
-    """List the scratch space (synthesized flows) with provenance + use stats."""
-    return {"flows": await _flow_store().list_scratch_flows()}
+    """List the scratch space (synthesized flows) with provenance + lifecycle.
+    Self-maintains: reclassifies states and GCs expired flows on view."""
+    store = _flow_store()
+    try:
+        await store.maintain_scratch()
+    except Exception as exc:
+        log.warning("scratch maintain failed: %s", exc)
+    return {"flows": await store.list_scratch_flows()}
+
+
+@app.post("/fd/flows/scratch/maintain")
+async def fd_flows_scratch_maintain(request: Request, user: dict | None = _optional_user_dep):
+    """Janitor: reclassify every scratch flow (candidate/quarantined) and GC the
+    expired ones. Returns a summary. Safe to call on a schedule."""
+    return {"ok": True, **(await _flow_store().maintain_scratch())}
 
 
 @app.post("/fd/flows/{flow_id}/promote")

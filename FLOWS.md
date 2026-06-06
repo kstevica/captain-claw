@@ -548,8 +548,26 @@ one entry (canonical hash), and each use is counted.
 - **When agents synthesize.** Only for work that’s repeatable, durable, auditable,
   or worth handing off — not for a one-off answer.
 
+### Lifecycle — earning promotion (or being discarded)
+
+A synthesized flow proves itself by *running well*:
+
+- Each run records an outcome. **3 successful runs** (more successes than
+  failures) marks it a **⭐ candidate** — “ready to promote” in the panel. **3
+  failures** (mostly failing) **quarantines** it (⚠️), and a flow with that exact
+  signature won’t be re-synthesized (negative memory).
+- **TTL by state:** idle *active* flows expire in days; *candidates* survive much
+  longer; *quarantined* ones get a short grace then go. A hard cap bounds the
+  scratch space (least-recently-used evicted first, never candidates).
+- **Promotion is safe by default:** a promoted flow lands **call-only** (its
+  trigger disabled) so a synthesized `trigger any` can’t suddenly fire on every
+  message — toggle it on in the Flows panel to make it user-facing.
+- **Self-maintaining:** the scratch list reclassifies + GCs on view; or call the
+  janitor on a schedule.
+
 Endpoints: `POST /fd/flows/synthesize` (goal → validated scratch flow, optional
-run), `GET /fd/flows/scratch` (list), `POST /fd/flows/{id}/promote`.
+run), `GET /fd/flows/scratch` (list, self-maintains), `POST /fd/flows/scratch/maintain`
+(janitor), `POST /fd/flows/{id}/promote`.
 
 ---
 
