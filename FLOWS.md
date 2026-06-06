@@ -39,8 +39,9 @@ There is also an **AI compiler**: describe what you want in plain English and a 
 12. [The AI compiler](#the-ai-compiler)
 13. [Synthesized flows (the scratch space)](#synthesized-flows-the-scratch-space)
 14. [Cookbook](#cookbook)
-15. [Common errors](#common-errors)
-16. [Grammar cheat-sheet](#grammar-cheat-sheet)
+15. [Worked examples](#worked-examples) — simple · moderate · complex · synthesis
+16. [Common errors](#common-errors)
+17. [Grammar cheat-sheet](#grammar-cheat-sheet)
 
 ---
 
@@ -679,6 +680,213 @@ step general:
 
 output -> same
 ```
+
+---
+
+## Worked examples
+
+Four end-to-end builds, from a single step to a self-authoring agent. Paste each
+into **Flows → New Flow → Code → Validate & apply → Save**. Helper flows below use
+a never-match trigger (`…-internal`) so they only run when called — you can also
+just toggle them **off** in the list.
+
+### 1) Simple — "Gift Idea"
+
+*Trigger → ask one question → think → reply. Try `/flow status`, `/flow pause`,
+`/flow resume` while it waits.*
+
+```text
+flow "Gift Idea"
+description "Ask who it's for, then suggest gift ideas"
+trigger any when contains "gift idea" or contains "present idea"
+
+step who:
+  input
+  prompt: "Who is the gift for, and what's the occasion + budget?"
+
+step ideas:
+  agent on origin
+  prompt: "Suggest 5 thoughtful, specific gift ideas for: {{steps.who.output}}. Keep it short, with rough prices."
+
+step reply:
+  emit "{{steps.ideas.output}}"
+
+output -> same
+```
+
+### 2) Moderate — "Trip Planner" (+ a reusable sub-flow)
+
+*`gosub` with args + `return`, a branch on the call's result, a re-ask loop, and an
+`on error` handler. `/flow status` shows the breadcrumb `Trip Planner › Place
+Lookup`.*
+
+**Helper — save first:**
+
+```text
+flow "Place Lookup"
+description "Look up basics about a place — call-only"
+trigger any when contains "place-lookup-internal"
+
+step info:
+  agent on origin
+  prompt: "Give a 3-line snapshot of {{args.place}}: best time to visit, one must-see, typical daily budget. If it is NOT a real place, reply exactly: UNKNOWN"
+
+step done:
+  return {{steps.info.output}}
+
+output -> return
+```
+
+**The flow you trigger:**
+
+```text
+flow "Trip Planner"
+description "Plan a short trip; re-ask if the place isn't found"
+trigger any when contains "plan a trip" or contains "trip to"
+
+step where:
+  input
+  prompt: "Where do you want to go, and for how many days?"
+
+step lookup:
+  gosub "Place Lookup"
+  with place: {{steps.where.output}}
+  on error -> oops
+
+step check:
+  branch
+  if {{calls.lookup.output}} contains "UNKNOWN" -> retry
+  else -> tips
+
+step retry:
+  emit "I couldn't find that place — give me a real city or country (and days)."
+
+step loop:
+  branch
+  else -> where
+
+step tips:
+  agent on origin
+  prompt: "Using this snapshot:\n{{calls.lookup.output}}\n\nWrite a short {{steps.where.output}} plan: 3 day-by-day bullets and one packing tip."
+
+step reply:
+  emit "{{steps.tips.output}}"
+  return
+
+step oops:
+  error "Trip planning hit a snag: {{error.message}}"
+  return
+
+output -> same
+```
+
+Send `plan a trip` → *"Lisbon, 3 days"*. Answer with gibberish and it **loops back
+and re-asks** — branches can jump backward.
+
+### 3) Complex — "Morning Briefing" (parallel `spawn`/`join`)
+
+*One input fans out to three background workers that run **in parallel**, then joins
+and merges them — with a partial-failure handler. While it runs, `/flow status`
+shows the three workers as their own handles; `/flow stop all` stops everything.*
+
+**Three helpers — save each:**
+
+```text
+flow "Weather Brief"
+trigger any when contains "weather-brief-internal"
+step w:
+  agent on origin
+  prompt: "In 2 lines, give today's weather for {{args.place}} (assume typical seasonal weather if unsure)."
+step done:
+  return {{steps.w.output}}
+output -> return
+```
+
+```text
+flow "News Brief"
+trigger any when contains "news-brief-internal"
+step n:
+  agent on origin
+  prompt: "Give 3 short bullet headlines about {{args.topic}}."
+step done:
+  return {{steps.n.output}}
+output -> return
+```
+
+```text
+flow "Focus Tip"
+trigger any when contains "focus-tip-internal"
+step t:
+  agent on origin
+  prompt: "One concrete productivity tip for someone whose focus today is: {{args.focus}}. One sentence."
+step done:
+  return {{steps.t.output}}
+output -> return
+```
+
+**The flow you trigger:**
+
+```text
+flow "Morning Briefing"
+description "Parallel briefing: weather + news + a focus tip"
+trigger any when contains "morning briefing" or contains "brief me"
+
+step ask:
+  input
+  prompt: "Your city, a news topic, and your main focus today? (e.g. 'Zagreb, AI, finish the report')"
+
+step w:
+  spawn "Weather Brief"
+  with place: {{steps.ask.output}}
+
+step n:
+  spawn "News Brief"
+  with topic: {{steps.ask.output}}
+
+step t:
+  spawn "Focus Tip"
+  with focus: {{steps.ask.output}}
+
+step jw:
+  join w
+  timeout: 60
+  on error -> partial
+
+step jn:
+  join n
+  timeout: 60
+
+step jt:
+  join t
+  timeout: 60
+
+step merge:
+  emit "Weather:\n{{joins.w.output}}\n\nNews:\n{{joins.n.output}}\n\nFocus:\n{{joins.t.output}}"
+  return
+
+step partial:
+  emit "Briefing partly failed ({{error.message}}) - here is what I got:\n{{joins.w.output}}"
+  return
+
+output -> same
+```
+
+Send `brief me` → *"Zagreb, AI, finish the report"*. The three workers run together,
+then you get a merged briefing.
+
+### 4) Synthesis — let the system write the flow
+
+No DSL at all. Open **Flows → Synthesized → describe a goal → Synthesize** (or ask
+an agent in chat with the `synthesize_flow` tool):
+
+> *"When I say 'standup', ask what I did yesterday and what's blocking me, then
+> write a tight one-line status."*
+
+It compiles to a validated, call-only flow in the **scratch space**. Run it a few
+times — watch it pick up ✓ counts and earn a **⭐ ready** badge — then **Edit** or
+**Promote** it into your permanent flows (it lands call-only; switch its trigger on
+to make `standup` live). Re-describe the same goal and it **reuses** the existing
+one instead of making a twin.
 
 ---
 
