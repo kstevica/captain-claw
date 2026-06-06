@@ -68,15 +68,36 @@ class DSLError(Exception):
 # ── small helpers ──────────────────────────────────────────────────────
 
 
+_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"', "'": "'"}
+
+
+def _unescape(s: str) -> str:
+    """Decode the standard string escapes inside a quoted value, so `\\n` in the
+    DSL becomes a real newline in the flow (and `\\t`, `\\\\`, `\\"`)."""
+    out: list[str] = []
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if c == "\\" and i + 1 < n and s[i + 1] in _ESCAPES:
+            out.append(_ESCAPES[s[i + 1]])
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _unquote(s: str) -> str:
-    s = s.strip().replace('\\"', '"')  # tolerate over-escaped quotes from models
+    s = s.strip()
     if len(s) >= 2 and s[0] in "\"'" and s[-1] == s[0]:
-        return s[1:-1]
-    return s
+        return _unescape(s[1:-1])
+    return s.replace('\\"', '"')  # tolerate a stray escaped quote on a bare word
 
 
 def _quote(s: str) -> str:
-    return '"' + str(s).replace('"', '\\"') + '"'
+    s = (str(s).replace("\\", "\\\\").replace('"', '\\"')
+         .replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r"))
+    return '"' + s + '"'
 
 
 def _strip_comment(line: str) -> str:

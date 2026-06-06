@@ -34,6 +34,7 @@ interface FlowsStore {
   openList: () => void
   openNew: () => void
   openEdit: (id: string) => void
+  editScratch: (flow: Flow) => void
   openRunLog: (runId: string) => Promise<void>
 
   saveFlow: (input: FlowInput, id: string | null) => Promise<void>
@@ -77,6 +78,16 @@ export const useFlowsStore = create<FlowsStore>((set, get) => ({
   openList: () => set({ view: 'list', editingId: null, testSteps: null }),
   openNew: () => set({ view: 'builder', editingId: null, testSteps: null }),
   openEdit: (id) => set({ view: 'builder', editingId: id, testSteps: null }),
+
+  // Edit a scratch (synthesized) flow: it isn't in the permanent `flows` list, so
+  // inject it so the builder can load it. Saving updates it in place (stays scratch).
+  editScratch: (flow) =>
+    set({
+      flows: [...get().flows.filter((f) => f.id !== flow.id), flow],
+      view: 'builder',
+      editingId: flow.id,
+      testSteps: null,
+    }),
 
   openRunLog: async (runId) => {
     set({ view: 'runlog', activeRunId: runId, runDetail: null, error: null })

@@ -246,6 +246,7 @@ export function FlowsPanel() {
 }
 
 function ScratchFlows({ onChanged }: { onChanged: () => void }) {
+  const editScratch = useFlowsStore((s) => s.editScratch)
   const [flows, setFlows] = useState<Flow[]>([])
   const [open, setOpen] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
@@ -306,6 +307,13 @@ function ScratchFlows({ onChanged }: { onChanged: () => void }) {
                   {f.author ? `by ${f.author}` : 'synthesized'}{f.description ? ` — ${f.description}` : ''}
                 </div>
               </div>
+              <button
+                onClick={() => editScratch(f)}
+                className="rounded-lg p-2 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                title="Open in the builder / code view"
+              >
+                <Edit3 className="h-3.5 w-3.5" />
+              </button>
               <button
                 onClick={() => promote(f)}
                 disabled={busy === f.id}
