@@ -2318,20 +2318,18 @@ async def fd_flows_dsl_decompile(request: Request, user: dict | None = _optional
         return {"ok": False, "error": str(exc)}
 
 
-@app.post("/fd/flows/compile")
-async def fd_flows_compile(request: Request, user: dict | None = _optional_user_dep):
+async def _ai_compile_flow(text: str, agent: str = "", current: str = "") -> dict:
     """Agent-assisted: free text / loose code → canonical DSL (via a pooled
     agent's model) → deterministic compile + validate. The model's output is
-    always run through the real parser, so invalid output is rejected."""
+    always run through the real parser, so invalid output is rejected. Shared by
+    /fd/flows/compile and /fd/flows/synthesize."""
     import re
     from captain_claw.flight_deck import flow_dsl
-    body = await request.json()
-    text = str(body.get("text") or "").strip()
+    text = str(text or "").strip()
     if not text:
         return {"ok": False, "error": "no text to compile"}
-    # When the editor already holds a flow, the request is an EDIT: the model
-    # gets the current DSL as context and must return the FULL updated program.
-    current = str(body.get("current") or "").strip()
+    current = str(current or "").strip()
+    body = {"agent": agent}
 
     # Pick a RUNNING agent with a live web port to host the model call. Try
     # several (a registry "running" flag can lag a just-died web server).
@@ -2470,6 +2468,82 @@ async def fd_flows_compile(request: Request, user: dict | None = _optional_user_
                 continue
         return {"ok": False, "error": f"generated DSL invalid ({problem})", "dsl": dsl}
     return {"ok": False, "error": "generated DSL invalid", "dsl": dsl}
+
+
+@app.post("/fd/flows/compile")
+async def fd_flows_compile(request: Request, user: dict | None = _optional_user_dep):
+    """Agent-assisted NL/loose-code → validated flow (for the Code view)."""
+    body = await request.json()
+    return await _ai_compile_flow(
+        str(body.get("text") or ""), str(body.get("agent") or ""), str(body.get("current") or ""),
+    )
+
+
+@app.post("/fd/flows/synthesize")
+async def fd_flows_synthesize(request: Request, user: dict | None = _optional_user_dep):
+    """Agent synthesis: a natural-language goal → a validated, **call-only**
+    flow stored in the SCRATCH space (origin=agent). Dedups by canonical hash
+    (retrieve-before-generate), optionally runs it, and returns its handle/name.
+
+    Body: {goal, agent?, author?, run?(bool), payload?(dict)}."""
+    from captain_claw.flight_deck import flow_dsl
+    body = await request.json()
+    goal = str(body.get("goal") or body.get("text") or "").strip()
+    if not goal:
+        return {"ok": False, "error": "no goal to synthesize"}
+    author = str(body.get("author") or body.get("agent") or "").strip()
+    store = _flow_store()
+
+    # 1. Compile the goal to a validated flow via a pooled model.
+    res = await _ai_compile_flow(goal, str(body.get("agent") or ""))
+    if not res.get("ok"):
+        return {"ok": False, "error": res.get("error") or "synthesis failed", "dsl": res.get("dsl")}
+    flow = res["flow"]
+    dsl = res.get("dsl") or flow_dsl.decompile(flow)
+    flow["origin"] = "agent"
+
+    # 2. Dedup: a structurally-identical scratch flow already exists → reuse it.
+    h = flow_dsl.canonical_hash(flow)
+    existing = await store.find_scratch_by_hash(h)
+    if existing:
+        await store.bump_use(existing["id"])
+        fid, name, reused = existing["id"], existing["name"], True
+    else:
+        fid = await store.create_scratch_flow(flow, author=author, dsl_hash=h)
+        name, reused = flow.get("name") or "Synthesized flow", False
+
+    out: dict = {"ok": True, "flow_id": fid, "name": name, "reused": reused, "dsl": dsl}
+
+    # 3. Optionally run it now.
+    if body.get("run"):
+        target = await store.get_flow(fid)
+        payload = body.get("payload") or {}
+        if not reused:
+            await store.bump_use(fid)
+        result = await app.state.flow_runner.run(target, payload)
+        out["run_id"] = result.get("run_id")
+        out["status"] = result.get("status")
+        out["output"] = result.get("output") or ""
+    return out
+
+
+@app.get("/fd/flows/scratch")
+async def fd_flows_scratch(request: Request, user: dict | None = _optional_user_dep):
+    """List the scratch space (synthesized flows) with provenance + use stats."""
+    return {"flows": await _flow_store().list_scratch_flows()}
+
+
+@app.post("/fd/flows/{flow_id}/promote")
+async def fd_flows_promote(flow_id: str, request: Request, user: dict | None = _optional_user_dep):
+    """Promote a scratch flow into the permanent space (optionally rename)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    ok = await _flow_store().promote_flow(flow_id, name=str(body.get("name") or "") or None)
+    if not ok:
+        raise HTTPException(404, "scratch flow not found")
+    return {"ok": True}
 
 
 @app.get("/fd/flows/{flow_id}")

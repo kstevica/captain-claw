@@ -79,6 +79,18 @@ class _RunControl:
         self.frames: list[dict[str, Any]] = []  # live call stack (gosub frames)
 
 
+_WORLD_ACTING_STEPS = {"emit", "tool", "input"}
+
+
+def _is_world_acting(flow: dict[str, Any]) -> bool:
+    """A flow that touches the outside world — messages the user, runs a tool, or
+    asks for input. Synthesized (agent-authored) flows may not call a *permanent*
+    world-acting flow without human approval (no borrowing of vetted authority)."""
+    if str((flow.get("output") or {}).get("channel") or "") in ("whatsapp", "same", "glasses", "web"):
+        return True
+    return any(str(s.get("type")) in _WORLD_ACTING_STEPS for s in (flow.get("steps") or []))
+
+
 def _slug(name: str) -> str:
     """A short base handle from a flow name: initials for multi-word, first two
     chars for a single word."""
@@ -559,7 +571,7 @@ class FlowRunner:
 
     async def _run_gosub(
         self, step: dict[str, Any], ctx: dict[str, Any],
-        payload: dict[str, Any], root: "_Root", depth: int,
+        payload: dict[str, Any], root: "_Root", depth: int, caller_origin: str = "user",
     ) -> tuple[str, str, str]:
         """Synchronously call another flow. Returns (return_value, label, status)."""
         name = _render(str(step.get("flow") or ""), ctx).strip()
@@ -572,6 +584,9 @@ class FlowRunner:
         target = await self._resolve_flow_by_name(name)
         if not target:
             return f"(gosub: no flow named '{name}')", "gosub", "error"
+        blocked = self._guard_cross_space(caller_origin, target, name, "gosub")
+        if blocked:
+            return blocked, "gosub", "error"
         args = _render(step.get("args") or {}, ctx)
         if not isinstance(args, dict):
             args = {}
@@ -586,8 +601,19 @@ class FlowRunner:
         st = str(result.get("status") or "done")
         return str(result.get("value", "")), f"flow:{name}", ("done" if st in ("done", "returned") else st)
 
+    def _guard_cross_space(self, caller_origin: str, target: dict[str, Any], name: str, verb: str) -> str:
+        """Return a block message if a synthesized (agent) flow tries to call a
+        permanent world-acting flow, else ''."""
+        if (caller_origin == "agent"
+                and str(target.get("space") or "user") == "user"
+                and _is_world_acting(target)):
+            return (f"({verb} blocked: a synthesized flow may not call the world-acting "
+                    f"flow '{name}' without approval — promote it first)")
+        return ""
+
     async def _run_spawn(
         self, step: dict[str, Any], ctx: dict[str, Any], payload: dict[str, Any],
+        caller_origin: str = "user",
     ) -> tuple[str, str, str]:
         """Launch another flow as an INDEPENDENT background root run and stash its
         task as a future. Returns immediately; the parent continues. Returns
@@ -598,6 +624,9 @@ class FlowRunner:
         target = await self._resolve_flow_by_name(name)
         if not target:
             return f"(spawn: no flow named '{name}')", "spawn", "error"
+        blocked = self._guard_cross_space(caller_origin, target, name, "spawn")
+        if blocked:
+            return blocked, "spawn", "error"
         args = _render(step.get("args") or {}, ctx)
         if not isinstance(args, dict):
             args = {}
@@ -657,6 +686,7 @@ class FlowRunner:
         guard = flow.get("guardrails") or {}
         max_steps = int(guard.get("max_steps", _DEFAULT_MAX_STEPS))
         flow_name = str(flow.get("name") or "Flow")
+        frame_origin = str(flow.get("origin") or "user")  # 'agent' = synthesized
         _now = datetime.now(UTC)
         ctx: dict[str, Any] = {
             "trigger": payload,
@@ -763,10 +793,10 @@ class FlowRunner:
                 call_status: str | None = None  # set by call steps (gosub/join/spawn)
                 self_delivered = False
                 if stype == "gosub":
-                    out, agent, call_status = await self._run_gosub(step, ctx, payload, root, depth)
+                    out, agent, call_status = await self._run_gosub(step, ctx, payload, root, depth, frame_origin)
                     ctx["calls"][sid] = {"output": out, "status": call_status}
                 elif stype == "spawn":
-                    out, agent, call_status = await self._run_spawn(step, ctx, payload)
+                    out, agent, call_status = await self._run_spawn(step, ctx, payload, frame_origin)
                     ctx.setdefault("spawns", {})[sid] = {"status": call_status}
                 elif stype == "join":
                     out, agent, call_status = await self._run_join(step, ctx, root)

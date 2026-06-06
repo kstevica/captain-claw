@@ -2279,6 +2279,10 @@ class AgentContextMixin:
         # if FD_URL isn't available, so registration cost is negligible.
         from captain_claw.tools.app_runner import AppRunnerTool
         self.tools.register(AppRunnerTool())
+        # Flow synthesis — always registered; turns a repeatable goal into a
+        # reusable Flow in the agent's scratch space (clear error if FD missing).
+        from captain_claw.tools.synthesize_flow import SynthesizeFlowTool
+        self.tools.register(SynthesizeFlowTool())
         sft = SummarizeFilesTool()
         uid = getattr(self, "_active_personality_id", None) or getattr(self, "_user_id", None)
         if uid:

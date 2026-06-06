@@ -135,6 +135,13 @@ export interface Flow {
   guardrails: FlowGuardrails
   updated_at?: string
   last_run?: FlowLastRun | null
+  // Synthesis / scratch metadata
+  space?: 'user' | 'scratch'
+  origin?: 'user' | 'agent'
+  author?: string
+  use_count?: number
+  last_used_at?: string | null
+  expires_at?: string | null
 }
 
 /** Payload sent to create/update — no server-managed fields. */
@@ -271,6 +278,16 @@ export async function compileWithAI(
     `/flows/compile`,
     jsonInit('POST', { text, agent: agent || '', current: current || '' }),
   )
+}
+
+// ── Scratch space (agent-synthesized flows) ──
+export async function listScratchFlows(): Promise<Flow[]> {
+  const r = await fdFetch<{ flows: Flow[] }>('/flows/scratch')
+  return r.flows || []
+}
+
+export async function promoteFlow(id: string, name?: string): Promise<{ ok: boolean }> {
+  return fdFetch<{ ok: boolean }>(`/flows/${encodeURIComponent(id)}/promote`, jsonInit('POST', { name: name || '' }))
 }
 
 export async function getFlowDocs(): Promise<string> {

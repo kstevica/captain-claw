@@ -386,10 +386,14 @@ placement, and cross-space resolution checks.
 3. **Addressability** ✅ *shipped* — per-run handles (stamped on input prompts +
    `flow status`), `flow stop/pause/resume <handle|name|all>`, bare = most-recent,
    multi-stack status.
-4. **Synthesis** — the tool (gated), retrieve-before-generate, scratch space, compiler
-   hardening, transitive palette guard, world-acting approval.
-5. **Lifecycle** — dedup/hash, use-scoring, tiered TTL/GC, quarantine, promotion review,
-   reactive + proactive (janitor) triggers.
+4. **Synthesis** ✅ *shipped* — the `synthesize_flow` tool (gated, always-on), scratch
+   space (`space`/`origin`/dedup-hash/use-count/TTL columns), canonical-hash dedup,
+   cross-space name resolution (permanent wins, no shadowing), the world-acting trust
+   guard (transitive via per-frame origin), `/fd/flows/synthesize` + `/scratch` +
+   `/promote`, and a scratch list + Promote UI.
+5. **Lifecycle** — use-scoring (non-reversal), tiered TTL/GC, quarantine, promotion
+   review, reactive + proactive (janitor) triggers. *(columns + bump_use + promote
+   already in place; scoring/GC/janitor remain.)*
 
 Each phase is independently shippable and useful.
 

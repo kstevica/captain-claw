@@ -526,6 +526,33 @@ The AI is a convenience front-end; the deterministic parser is the source of tru
 
 ---
 
+## Synthesized flows (the scratch space)
+
+Agents can **author their own flows on the fly** with the `synthesize_flow` tool:
+they describe a repeatable goal, Flight Deck compiles it through the same
+validator, and stores it in a separate **scratch space** (`origin: agent`,
+call-only — no message trigger). Re-synthesizing the same behaviour **dedups** to
+one entry (canonical hash), and each use is counted.
+
+- **Two spaces.** Your hand-built flows are *permanent*; agent-synthesized ones
+  live in *scratch*, listed under **“Synthesized (scratch)”** in the Flows panel —
+  separate from your real list. **Promote** one to move it into your permanent
+  flows; discard the rest (they also expire on a TTL).
+- **Reuse them.** A scratch flow is callable — `gosub "Its Name"` (the permanent
+  space wins on a name clash, so a synthesized flow can never silently shadow a
+  vetted one).
+- **Trust guard.** A synthesized flow **may not** `gosub`/`spawn` a *permanent
+  world-acting* flow (one that messages the user, runs a tool, or asks for input)
+  — that call is blocked until the synthesized flow is **promoted**. Synthesized
+  flows can freely call read-only flows and each other.
+- **When agents synthesize.** Only for work that’s repeatable, durable, auditable,
+  or worth handing off — not for a one-off answer.
+
+Endpoints: `POST /fd/flows/synthesize` (goal → validated scratch flow, optional
+run), `GET /fd/flows/scratch` (list), `POST /fd/flows/{id}/promote`.
+
+---
+
 ## Cookbook
 
 ### Recognize a face, greet or ask

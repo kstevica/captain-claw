@@ -13,9 +13,11 @@ import {
   Clock,
   CircleDot,
   Search,
+  Sparkles,
 } from 'lucide-react'
 import { useFlowsStore } from '../../stores/flowsStore'
 import { triggerSummary, type Flow } from '../../services/flowsApi'
+import * as api from '../../services/flowsApi'
 
 function LastRunBadge({ flow }: { flow: Flow }) {
   const lr = flow.last_run
@@ -236,7 +238,88 @@ export function FlowsPanel() {
             ))}
           </div>
         )}
+
+        <ScratchFlows onChanged={fetchFlows} />
       </div>
+    </div>
+  )
+}
+
+function ScratchFlows({ onChanged }: { onChanged: () => void }) {
+  const [flows, setFlows] = useState<Flow[]>([])
+  const [open, setOpen] = useState(true)
+  const [busy, setBusy] = useState<string | null>(null)
+
+  const refresh = () => { api.listScratchFlows().then(setFlows).catch(() => setFlows([])) }
+  useEffect(() => { refresh() }, [])
+
+  if (flows.length === 0) return null
+
+  const promote = async (f: Flow) => {
+    setBusy(f.id)
+    try {
+      await api.promoteFlow(f.id)
+      refresh()
+      onChanged()
+    } finally {
+      setBusy(null)
+    }
+  }
+  const remove = async (f: Flow) => {
+    setBusy(f.id)
+    try {
+      await api.deleteFlow(f.id)
+      refresh()
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div className="mt-8">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-zinc-500 hover:text-zinc-300"
+      >
+        <Sparkles className="h-3.5 w-3.5 text-violet-400" />
+        Synthesized (scratch) <span className="text-zinc-600">· {flows.length}</span>
+      </button>
+      {open && (
+        <div className="divide-y divide-zinc-800/60 rounded-xl border border-dashed border-zinc-800">
+          {flows.map((f) => (
+            <div key={f.id} className="flex items-center gap-3 px-3.5 py-2.5">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="truncate text-sm text-zinc-200">{f.name}</span>
+                  <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[10px] text-violet-300">agent</span>
+                  {typeof f.use_count === 'number' && f.use_count > 0 && (
+                    <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">used {f.use_count}×</span>
+                  )}
+                </div>
+                <div className="text-[11px] text-zinc-600">
+                  {f.author ? `by ${f.author}` : 'synthesized'}{f.description ? ` — ${f.description}` : ''}
+                </div>
+              </div>
+              <button
+                onClick={() => promote(f)}
+                disabled={busy === f.id}
+                className="rounded-lg bg-emerald-500/15 px-2.5 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-500/25 disabled:opacity-40"
+                title="Promote into your permanent flows"
+              >
+                Promote
+              </button>
+              <button
+                onClick={() => remove(f)}
+                disabled={busy === f.id}
+                className="rounded-lg p-2 text-zinc-400 hover:bg-red-500/10 hover:text-red-400 disabled:opacity-40"
+                title="Discard"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

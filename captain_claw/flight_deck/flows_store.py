@@ -30,6 +30,11 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _iso_after(seconds: int) -> str:
+    from datetime import timedelta
+    return (datetime.now(UTC) + timedelta(seconds=max(0, int(seconds)))).isoformat()
+
+
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
@@ -101,6 +106,23 @@ class FlowStore:
                 await db.execute(f"ALTER TABLE flow_run_steps ADD COLUMN {col} {ddl}")
             except Exception:
                 pass  # column already exists
+        # Synthesis (Phase 4): the scratch space — agent-authored throwaway flows
+        # live alongside permanent ones, tagged by space/origin with dedup +
+        # use-tracking + TTL columns. Migrate existing DBs in place.
+        for col, ddl in (
+            ("space", "TEXT NOT NULL DEFAULT 'user'"),   # 'user' | 'scratch'
+            ("origin", "TEXT NOT NULL DEFAULT 'user'"),  # 'user' | 'agent'
+            ("dsl_hash", "TEXT"),                        # canonical signature (dedup)
+            ("author", "TEXT"),                          # which agent authored it
+            ("use_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_used_at", "TEXT"),
+            ("expires_at", "TEXT"),                      # TTL for GC (Phase 5)
+        ):
+            try:
+                await db.execute(f"ALTER TABLE flows ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_flows_space ON flows(space)")
         await db.commit()
         self._db = db
         return db
@@ -176,11 +198,15 @@ class FlowStore:
         return _row_to_flow(row) if row else None
 
     async def get_flow_by_name(self, name: str) -> dict[str, Any] | None:
-        """Case-insensitive name lookup for `gosub` resolution. Highest priority
-        wins on a tie. Permanent space only (Phase 1)."""
+        """Case-insensitive name lookup for `gosub`/`spawn` resolution. The
+        **permanent** space wins over **scratch** (no silent shadowing); highest
+        priority wins within a space."""
         db = await self._ensure_db()
+        # Permanent first (space='user'), then scratch — ordered so the first row
+        # is the winner.
         async with db.execute(
-            "SELECT * FROM flows WHERE lower(name)=lower(?) ORDER BY priority DESC LIMIT 1",
+            """SELECT * FROM flows WHERE lower(name)=lower(?)
+               ORDER BY (space='user') DESC, priority DESC LIMIT 1""",
             (name.strip(),),
         ) as cur:
             row = await cur.fetchone()
@@ -188,7 +214,11 @@ class FlowStore:
 
     async def list_flows(self) -> list[dict[str, Any]]:
         db = await self._ensure_db()
-        async with db.execute("SELECT * FROM flows ORDER BY priority DESC, name") as cur:
+        # The user-facing list shows the PERMANENT space only; scratch flows are
+        # listed separately (list_scratch_flows).
+        async with db.execute(
+            "SELECT * FROM flows WHERE space='user' ORDER BY priority DESC, name"
+        ) as cur:
             rows = await cur.fetchall()
         flows = [_row_to_flow(r) for r in rows]
         # Attach the most recent run summary for the list view.
@@ -203,11 +233,88 @@ class FlowStore:
 
     async def enabled_flows(self) -> list[dict[str, Any]]:
         db = await self._ensure_db()
+        # Triggers only fire permanent flows; scratch flows are call-only.
         async with db.execute(
-            "SELECT * FROM flows WHERE enabled=1 ORDER BY priority DESC, name"
+            "SELECT * FROM flows WHERE enabled=1 AND space='user' ORDER BY priority DESC, name"
         ) as cur:
             rows = await cur.fetchall()
         return [_row_to_flow(r) for r in rows]
+
+    # ── scratch space (synthesized flows) ──────────────────────────────
+
+    async def list_scratch_flows(self) -> list[dict[str, Any]]:
+        db = await self._ensure_db()
+        async with db.execute(
+            "SELECT * FROM flows WHERE space='scratch' ORDER BY last_used_at DESC, created_at DESC"
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_flow(r) for r in rows]
+
+    async def find_scratch_by_hash(self, dsl_hash: str) -> dict[str, Any] | None:
+        if not dsl_hash:
+            return None
+        db = await self._ensure_db()
+        async with db.execute(
+            "SELECT * FROM flows WHERE space='scratch' AND dsl_hash=? LIMIT 1", (dsl_hash,)
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_flow(row) if row else None
+
+    async def create_scratch_flow(
+        self, spec: dict[str, Any], *, author: str = "", dsl_hash: str = "",
+        ttl_seconds: int = 7 * 86400,
+    ) -> str:
+        """Store an agent-synthesized flow in the scratch space (origin=agent,
+        call-only). Returns the new flow id."""
+        db = await self._ensure_db()
+        fid = _new_id("scratch")
+        now = _now()
+        expires = _iso_after(ttl_seconds)
+        await db.execute(
+            """INSERT INTO flows (id, name, description, enabled, priority,
+                 trigger_json, steps_json, guardrails_json, output_json, created_at, updated_at,
+                 space, origin, dsl_hash, author, use_count, last_used_at, expires_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scratch', 'agent', ?, ?, 0, ?, ?)""",
+            (
+                fid,
+                str(spec.get("name") or "Synthesized flow"),
+                str(spec.get("description") or ""),
+                1,
+                int(spec.get("priority", 50)),
+                json.dumps(spec.get("trigger") or {}),
+                json.dumps(spec.get("steps") or []),
+                json.dumps(spec.get("guardrails") or {}),
+                json.dumps(spec.get("output") or {}),
+                now, now, dsl_hash, author, now, expires,
+            ),
+        )
+        await db.commit()
+        return fid
+
+    async def bump_use(self, flow_id: str, *, ttl_seconds: int = 7 * 86400) -> None:
+        """Record a use of a scratch flow (count++, refresh last_used_at + TTL)."""
+        db = await self._ensure_db()
+        await db.execute(
+            "UPDATE flows SET use_count=use_count+1, last_used_at=?, expires_at=? WHERE id=?",
+            (_now(), _iso_after(ttl_seconds), flow_id),
+        )
+        await db.commit()
+
+    async def promote_flow(self, flow_id: str, *, name: str | None = None) -> bool:
+        """Move a scratch flow into the permanent space (Phase 5 wires the review
+        UI; this is the underlying transition)."""
+        db = await self._ensure_db()
+        sets = ["space='user'", "origin='user'", "expires_at=NULL", "updated_at=?"]
+        params: list[Any] = [_now()]
+        if name:
+            sets.insert(0, "name=?")
+            params.insert(0, name)
+        params.append(flow_id)
+        cur = await db.execute(
+            f"UPDATE flows SET {', '.join(sets)} WHERE id=? AND space='scratch'", params
+        )
+        await db.commit()
+        return cur.rowcount > 0
 
     # ── runs ───────────────────────────────────────────────────────────
 
@@ -283,6 +390,13 @@ def _row_to_flow(row: Any) -> dict[str, Any]:
         "priority": int(d.get("priority", 50)),
         "created_at": d.get("created_at"),
         "updated_at": d.get("updated_at"),
+        # Synthesis / scratch metadata (defaults keep permanent flows unchanged).
+        "space": d.get("space") or "user",
+        "origin": d.get("origin") or "user",
+        "author": d.get("author") or "",
+        "use_count": int(d.get("use_count") or 0),
+        "last_used_at": d.get("last_used_at"),
+        "expires_at": d.get("expires_at"),
     }
     for col in _JSON_COLS:
         raw = d.get(f"{col}_json")

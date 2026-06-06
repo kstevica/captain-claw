@@ -516,6 +516,19 @@ def validate_flow(flow: dict[str, Any]) -> list[str]:
 # ── decompile: flow dict → DSL text ────────────────────────────────────
 
 
+def canonical_hash(flow: dict[str, Any]) -> str:
+    """A stable signature of a flow's BEHAVIOUR (trigger + steps + output),
+    ignoring cosmetic name/description — so re-synthesizing the same flow with
+    different wording dedups to one scratch entry."""
+    import hashlib
+    import json
+    try:
+        body = decompile({**flow, "name": "", "description": ""})
+    except Exception:
+        body = json.dumps({k: flow.get(k) for k in ("trigger", "steps", "output")}, sort_keys=True, default=str)
+    return hashlib.sha1(body.encode("utf-8")).hexdigest()
+
+
 def decompile(flow: dict[str, Any]) -> str:
     lines: list[str] = []
     name = flow.get("name") or ""
