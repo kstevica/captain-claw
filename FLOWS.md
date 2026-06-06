@@ -2,6 +2,8 @@
 
 **Flows** are declarative automations that run inside Flight Deck and dispatch work to your agent pool. A flow is a **trigger** (what starts it) plus an ordered list of **steps** (what it does) plus an **output** (where the result goes). Flight Deck owns the deterministic plumbing — triggering, routing, sequencing, branching, pausing for input, guardrails — while agents do the judgment work as steps.
 
+Flows **compose** like functions: one flow can [`gosub`](#gosub-step) another, run work in parallel with [`spawn` / `join`](#spawn-step--join-step), [`return`](#return-step) values, and [handle errors](#error-step--on-error). You can control a *running* flow from any channel ([`/flow stop|pause|resume|status`](#stopping-a-flow)), and agents can even [**synthesize** their own flows](#synthesized-flows-the-scratch-space).
+
 You can build a flow two ways, and they are the *same* flow:
 
 - **Builder** — a form-based UI (click to add steps).
@@ -23,17 +25,22 @@ There is also an **AI compiler**: describe what you want in plain English and a 
    - [input](#input-step)
    - [emit](#emit-step)
    - [branch](#branch-step)
+   - [gosub — call another flow](#gosub-step)
+   - [return — exit with a value](#return-step)
+   - [spawn / join — run flows in parallel](#spawn-step--join-step)
+   - [error / `on error` — handle failure](#error-step--on-error)
 5. [Agent selectors (`on`)](#agent-selectors-on)
 6. [Templating — `{{ … }}`](#templating)
 7. [Branch conditions](#branch-conditions)
-8. [Stopping a flow](#stopping-a-flow)
+8. [Stopping & controlling a flow](#stopping-a-flow) — incl. `/flow stop|pause|resume|status` + handles
 9. [Output](#output)
 10. [Execution & delivery model](#execution--delivery-model)
 11. [Channels](#channels)
 12. [The AI compiler](#the-ai-compiler)
-13. [Cookbook](#cookbook)
-14. [Common errors](#common-errors)
-15. [Grammar cheat-sheet](#grammar-cheat-sheet)
+13. [Synthesized flows (the scratch space)](#synthesized-flows-the-scratch-space)
+14. [Cookbook](#cookbook)
+15. [Common errors](#common-errors)
+16. [Grammar cheat-sheet](#grammar-cheat-sheet)
 
 ---
 
