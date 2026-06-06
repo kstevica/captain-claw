@@ -309,6 +309,10 @@
     transition: background .12s, color .12s, border-color .12s;
   }
   .mode-btn:hover { background: var(--hud-soft); color: var(--ink); }
+  .mode-btn:focus {
+    outline: 2px solid var(--hud); outline-offset: 2px;
+    background: var(--hud-soft); color: var(--ink);
+  }
   .mode-btn.active {
     color: var(--bg); background: var(--hud);
     border-color: var(--hud);
@@ -558,9 +562,12 @@
     </span>
     <span class="pill conn off" id="conn">…</span>
     <span class="modebar" role="tablist" aria-label="view">
-      <button class="mode-btn active" id="mode-chat" type="button" title="chat" aria-label="chat">💬</button>
-      <button class="mode-btn" id="mode-ds" type="button" title="datastore" aria-label="datastore">🗄</button>
-      <button class="mode-btn" id="mode-files" type="button" title="files" aria-label="files">📄</button>
+      <!-- <div role=button tabindex=0>, NOT <button>: the Meta Ray-Ban Display
+           focus-walk only lands on tabindexed <div>s and skips <button>s, so
+           buttons here were unreachable by the NeuralBand down gesture. -->
+      <div class="mode-btn active" id="mode-chat" role="button" tabindex="0" title="chat" aria-label="chat">💬</div>
+      <div class="mode-btn" id="mode-ds" role="button" tabindex="0" title="datastore" aria-label="datastore">🗄</div>
+      <div class="mode-btn" id="mode-files" role="button" tabindex="0" title="files" aria-label="files">📄</div>
     </span>
   </div>
   <div class="hud-right">
@@ -1442,9 +1449,12 @@
     if (next === 'ds' && !dsLoaded) loadTables();
     if (next === 'files' && !filesLoaded) loadFiles();
   }
-  btnChat.addEventListener('click', () => setMode('chat'));
-  btnDs.addEventListener('click', () => setMode('ds'));
-  btnFiles.addEventListener('click', () => setMode('files'));
+  // onActivate = click + Enter/Space, so the glasses select gesture works on
+  // these <div role=button>s (a <div>, unlike <button>, doesn't activate on
+  // Enter/Space by itself). onActivate is hoisted (function declaration below).
+  onActivate(btnChat, () => setMode('chat'));
+  onActivate(btnDs, () => setMode('ds'));
+  onActivate(btnFiles, () => setMode('files'));
 
   function note(el, text, isErr) {
     el.innerHTML = '';
