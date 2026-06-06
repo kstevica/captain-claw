@@ -294,6 +294,23 @@ export async function promoteFlow(id: string, name?: string): Promise<{ ok: bool
   return fdFetch<{ ok: boolean }>(`/flows/${encodeURIComponent(id)}/promote`, jsonInit('POST', { name: name || '' }))
 }
 
+export interface SynthesizeResult {
+  ok: boolean
+  flow_id?: string
+  name?: string
+  reused?: boolean
+  dsl?: string
+  run_id?: string
+  status?: string
+  output?: string
+  error?: string
+  quarantined?: boolean
+}
+
+export async function synthesizeFlow(goal: string, agent?: string, run?: boolean): Promise<SynthesizeResult> {
+  return fdFetch<SynthesizeResult>('/flows/synthesize', jsonInit('POST', { goal, agent: agent || '', run: !!run }))
+}
+
 export async function getFlowDocs(): Promise<string> {
   const r = await fdFetch<{ ok: boolean; markdown?: string }>(`/flows/docs`)
   return r.markdown || '# Flow docs unavailable'

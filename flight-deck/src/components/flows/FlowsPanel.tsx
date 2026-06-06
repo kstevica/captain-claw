@@ -135,10 +135,13 @@ export function FlowsPanel() {
         </div>
 
         {tab === 'synthesized' ? (
-          <ScratchList
-            flows={scratch}
-            onChanged={() => { refreshScratch(); fetchFlows() }}
-          />
+          <div className="space-y-4">
+            <SynthesizeComposer onChanged={() => { refreshScratch(); fetchFlows() }} />
+            <ScratchList
+              flows={scratch}
+              onChanged={() => { refreshScratch(); fetchFlows() }}
+            />
+          </div>
         ) : (
         <>
         {/* Search */}
@@ -270,6 +273,85 @@ export function FlowsPanel() {
         </>
         )}
       </div>
+    </div>
+  )
+}
+
+function SynthesizeComposer({ onChanged }: { onChanged: () => void }) {
+  const [goal, setGoal] = useState('')
+  const [agent, setAgent] = useState('')
+  const [run, setRun] = useState(false)
+  const [fleet, setFleet] = useState<string[]>([])
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<{ kind: 'ok' | 'err' | 'info'; text: string } | null>(null)
+
+  useEffect(() => {
+    api.listFleet().then((a) => setFleet(a.map((x) => x.name).filter(Boolean))).catch(() => {})
+  }, [])
+
+  const go = async () => {
+    if (!goal.trim()) return
+    setBusy(true)
+    setMsg({ kind: 'info', text: 'Asking the model to build it…' })
+    try {
+      const r = await api.synthesizeFlow(goal, agent, run)
+      if (r.ok) {
+        const ran = run ? ` — ran (${r.status})` : ''
+        setMsg({ kind: 'ok', text: `${r.reused ? 'Reused' : 'Created'} “${r.name}”${ran}.` })
+        setGoal('')
+        onChanged()
+      } else {
+        setMsg({ kind: 'err', text: r.error || 'synthesis failed' })
+      }
+    } catch (e) {
+      setMsg({ kind: 'err', text: String(e) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-900/30 p-4">
+      <label className="mb-1.5 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+        <Sparkles className="h-3 w-3 text-violet-400" /> Synthesize a flow
+      </label>
+      <textarea
+        value={goal}
+        onChange={(e) => setGoal(e.target.value)}
+        rows={3}
+        placeholder="Describe a repeatable goal, e.g. “When I say standup, ask what I did yesterday, then write a one-line status.”"
+        className="w-full resize-y rounded-lg border border-zinc-700/50 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none focus:ring-1 focus:ring-violet-500/20"
+      />
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <button
+          onClick={go}
+          disabled={busy || !goal.trim()}
+          className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40 transition-colors"
+        >
+          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />} Synthesize
+        </button>
+        <span className="text-[10px] uppercase tracking-wide text-zinc-500">using</span>
+        <select
+          value={agent}
+          onChange={(e) => setAgent(e.target.value)}
+          className="rounded-lg border border-zinc-700/50 bg-zinc-950 px-2 py-1 text-xs text-zinc-200"
+          title="Which agent's model writes the flow"
+        >
+          <option value="">Auto</option>
+          {fleet.map((n) => <option key={n} value={n}>{n}</option>)}
+        </select>
+        <label className="flex cursor-pointer items-center gap-1.5 text-xs text-zinc-400">
+          <input type="checkbox" checked={run} onChange={(e) => setRun(e.target.checked)} className="accent-violet-500" /> run now
+        </label>
+        {msg && (
+          <span className={msg.kind === 'ok' ? 'text-xs text-emerald-400' : msg.kind === 'err' ? 'text-xs text-rose-400' : 'text-xs text-zinc-400'}>
+            {msg.text}
+          </span>
+        )}
+      </div>
+      <p className="mt-2 text-[10px] text-zinc-600">
+        Creates a call-only flow in the scratch space (validated by the real parser). Run it a few times — it earns a ⭐ before you promote it.
+      </p>
     </div>
   )
 }
