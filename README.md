@@ -321,6 +321,8 @@ Full reference: [USAGE.md](USAGE.md#configuration-reference) (23 config sections
 
 - **[USAGE.md](USAGE.md)** — Complete reference for all commands, tools, config, and features
 - **[README_DETAILED.md](README_DETAILED.md)** — Extended README with feature-by-feature breakdown
+- **[FLOWS.md](FLOWS.md)** — The Flow language reference (triggers, every step type, templating, the value language, scheduling, a cookbook, and worked examples)
+- **[.claude/skills/flow-builder/SKILL.md](.claude/skills/flow-builder/SKILL.md)** — A portable **flow-builder skill** for AI coding assistants (Claude Code, Codex, …): point your agent at it to author/edit/debug flows in the DSL correctly
 
 ## License
 
