@@ -341,6 +341,19 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
         elif cmd == "/watch":
             result = await _handle_watch_command(server, args.strip())
 
+        elif cmd in ("/flow", "/flows"):
+            # Flow control (/flow status|stop|pause|resume) — hand to the flow
+            # engine via the evaluate hook; it replies asynchronously (chat-push).
+            from captain_claw.web.chat_handler import _maybe_run_flow
+            flow = await _maybe_run_flow(server.agent, raw.strip(), is_public=False)
+            if flow is None:
+                result = ("No matching flow command. Try `/flow status`, `/flow pause`, "
+                          "`/flow resume`, or `/flow stop`.")
+            elif flow.get("output"):
+                result = flow["output"]
+            else:
+                return  # deferred — the flow engine delivers its own reply
+
         else:
             result = f"Unknown command: `{cmd}`. Type `/help` for available commands."
 

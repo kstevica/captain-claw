@@ -107,6 +107,7 @@ COMMANDS: list[dict[str, str]] = [
     {"command": "/compact", "description": "Manually compact session memory", "category": "General"},
     {"command": "/nuke", "description": "Delete all workspace files, memory, and datastore", "category": "General"},
     {"command": "/exit", "description": "Exit Captain Claw", "category": "General"},
+    {"command": "/flow status|pause|resume|stop", "description": "Control a running flow (add a handle or 'all' to target)", "category": "General"},
     {"command": "/new [name]", "description": "Create a new session", "category": "Sessions"},
     {"command": "/session", "description": "Show active session info", "category": "Sessions"},
     {"command": "/sessions", "description": "List recent sessions", "category": "Sessions"},
