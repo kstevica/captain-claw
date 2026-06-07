@@ -25,6 +25,8 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [Orchestrator Commands](#orchestrator-commands)
   - [Admin Commands](#admin-commands)
 - [Tools Reference](#tools-reference)
+- [Presentation Control (Decks)](#presentation-control-decks)
+- [File Editor (Flight Deck)](#file-editor-flight-deck)
 - [Configuration Reference](#configuration-reference)
   - [Config Load Precedence](#config-load-precedence)
   - [model](#model)
@@ -1195,6 +1197,65 @@ Record and manage **intentions** — future actions under consideration. `origin
 | `intention_id` | string | for update/snooze/cancel/done | Target intention id |
 
 Decisions can also be resolved from the **Intentions** panel on each agent card in Flight Deck (Approve / Decline / Later / Stop).
+
+---
+
+## Presentation Control (Decks)
+
+Drive an agent-built **HTML slide deck** live — from the Flight Deck big screen,
+the glasses view, a phone, or WhatsApp. All surfaces subscribe to one in-memory
+**channel** (default `deck`), so any control moves every surface in lock-step.
+No PDF/PPT export.
+
+**Cast a deck:** in the Flight Deck **file list**, tap the **⧉ deck-view** button
+on an HTML file. The green panel holds a live **channel** field (the open URL
+updates as you type). Selecting a file never auto-loads a deck — casting is
+always an explicit tap. The deck's own on-page nav (arrows/dots) is hidden in
+deck view.
+
+**Phone remote:** open `/deck/remote?c=<channel>` — large prev/next, first/last,
+and a **go-to-slide** number box (clamped to the live slide count). Arrow / Page
+keys also work.
+
+**Glasses:** the present bar shows `⧉ ◀ ▶`; the arrows advance the big screen
+**and** the glasses' own view together.
+
+**WhatsApp** (allowlisted chat): send any of —
+
+| Message | Action |
+|---|---|
+| `next slide` (`/next`) | advance one |
+| `previous slide` (`/prev`) | back one |
+| `first slide` / `last slide` | jump to ends |
+| `go to slide N` | jump to slide *N* (1-based) |
+
+`go to slide N` also accepts `goto N`, `slide N`, `jump to slide N`, `slide #N`,
+and tolerates a trailing `.`/`!`. Each command replies with the current
+position, e.g. `→ Slide 3 / 20`. Point the remote at a different deck with
+`/slide on <channel>`.
+
+> Built for a hands-free live talk: control the deck from Meta Ray-Ban glasses
+> over WhatsApp while the deck renders on the projector.
+
+---
+
+## File Editor (Flight Deck)
+
+Agent text files are editable in place, not preview-only. In the file list, the
+**✎ Edit** button (next to Download) opens a code editor:
+
+- **Syntax highlighting** — markdown, HTML, CSS, JS/TS, JSON, Python, Bash,
+  YAML, and the **Flow DSL** (same editor powers the Flow builder's code view).
+- **Line numbers** with a scroll-synced gutter.
+- **Find** — `⌘/Ctrl+F`: case-insensitive, match count, `Enter` /
+  `Shift+Enter` to step through matches, `Esc` to close.
+- **Cursor memory** — reopening a file returns the caret to the **start of the
+  row** you left off on.
+- **Save** — `⌘/Ctrl+S` (or the Save button); editable groups are markdown,
+  code, data, text, and html.
+
+Row actions in the file list (pin · view · ⧉ deck · ✎ edit · download) sit on
+their own line under the file path.
 
 ---
 
