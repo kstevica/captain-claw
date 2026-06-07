@@ -173,11 +173,20 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+# Transient deck commands must NOT be kept in ``recent`` for backfill: replaying
+# a stale ``deck_open`` to a freshly-loaded deck page would navigate it to an
+# old file (and ``control`` would re-step it), causing the deck to reload back
+# and forth between recently-opened decks before settling. These are live, fire-
+# once signals — only durable chat-like messages belong in the replay buffer.
+_NO_BACKFILL_TYPES = {"deck_open", "control", "deck_state"}
+
+
 async def _broadcast(ch: _ChannelState, payload: dict) -> None:
     """Send a JSON payload to every subscriber on this channel. Drops dead
     sockets; never raises."""
     msg = json.dumps(payload, default=str)
-    ch.recent.append(payload)
+    if payload.get("type") not in _NO_BACKFILL_TYPES:
+        ch.recent.append(payload)
     stale: list[WebSocket] = []
     for ws in list(ch.subscribers):
         try:
