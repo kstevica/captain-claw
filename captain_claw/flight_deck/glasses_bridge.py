@@ -866,19 +866,21 @@ async def deck_state(request: Request) -> JSONResponse:
 
 
 async def step_deck_and_wait(
-    channel: str, action: str, timeout: float = 1.2,
+    channel: str, action: str, timeout: float = 1.2, index: int | None = None,
 ) -> tuple[int, int] | None:
     """Broadcast a slide-control action, then wait for the deck to report its
     new position via /deck/state. Returns ``(index0, total)`` (index 0-based),
     or ``None`` when no deck has ever reported on this channel.
 
-    If the action doesn't change the slide (e.g. ``next`` on the last slide),
-    no new report arrives — we time out and return the last known position, so
-    the caller still gets the current slide number."""
+    ``index`` (0-based) is only used by the ``goto`` action.
+
+    If the action doesn't change the slide (e.g. ``next`` on the last slide,
+    or ``goto`` the current slide), no new report arrives — we time out and
+    return the last known position, so the caller still gets the slide number."""
     ch = await _get_or_create_channel(channel)
     async with ch.deck_state_cond:
         start_seq = ch.deck_state_seq
-    await broadcast_deck_control(channel, action)
+    await broadcast_deck_control(channel, action, index)
     try:
         async with ch.deck_state_cond:
             await asyncio.wait_for(

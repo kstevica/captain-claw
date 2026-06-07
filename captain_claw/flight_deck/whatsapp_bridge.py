@@ -171,7 +171,11 @@ _SLIDE_PREV = {"/prev", "/slide prev", "/slide previous", "previous slide", "pre
 _SLIDE_FIRST = {"/slide first", "first slide"}
 _SLIDE_LAST = {"/slide last", "last slide"}
 
-_SLIDE_ARROW = {"next": "▶", "prev": "◀", "first": "⏮", "last": "⏭"}
+# "go to slide 5", "goto 5", "slide 5", "/slide 5". Captures the 1-based number;
+# a leading keyword is required so a bare number isn't treated as a slide jump.
+_SLIDE_GOTO_RE = re.compile(r"^(?:/?go\s*to|/?goto|/?slide)\s+(?:slide\s+)?(\d{1,3})$", re.I)
+
+_SLIDE_ARROW = {"next": "▶", "prev": "◀", "first": "⏮", "last": "⏭", "goto": "→"}
 
 
 def _slide_reply(action: str, pos: tuple[int, int] | None) -> str:
@@ -644,10 +648,18 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
         await _send_whatsapp_text(
             waid,
             f"🎬 Slide remote on '{_deck_channel_for_waid(waid)}'.\n"
-            "Send: next slide · previous slide · first slide · last slide\n"
+            "Send: next slide · previous slide · first slide · last slide · go to slide N\n"
             "Point at another deck: /slide on <channel>",
         )
         return
+    _goto_m = _SLIDE_GOTO_RE.match(low.strip())
+    if _goto_m:
+        _n = int(_goto_m.group(1))
+        if _n >= 1:
+            # Slide numbers are 1-based for the user; the engine is 0-based.
+            pos = await step_deck_and_wait(_deck_channel_for_waid(waid), "goto", index=_n - 1)
+            await _send_whatsapp_text(waid, _slide_reply("goto", pos))
+            return
     _slide_action = (
         "next" if low in _SLIDE_NEXT else
         "prev" if low in _SLIDE_PREV else
