@@ -27,6 +27,7 @@ import {
   Play,
   Trash2,
   CircleDot,
+  Workflow,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -40,6 +41,7 @@ import { usePinnedStore } from '../../stores/pinnedStore'
 import { useClipboardStore } from '../../stores/clipboardStore'
 import { useTraceStore, selectSpanCount } from '../../stores/traceStore'
 import { SendContextModal } from './SendContextModal'
+import { FlowSelectorModal } from './FlowSelectorModal'
 import { PlanCard } from './PlanCard'
 import TraceTimeline from '../observability/TraceTimeline'
 import { uploadFileToAgent, formatSize } from '../../services/fileTransfer'
@@ -79,6 +81,7 @@ export function ChatPanel() {
   const containers = useContainerStore((s) => s.containers)
   const processes = useProcessStore((s) => s.processes)
   const [showSendContext, setShowSendContext] = useState(false)
+  const [showFlows, setShowFlows] = useState(false)
   const [showTracePanel, setShowTracePanel] = useState(false)
   const [planLevelMenuOpen, setPlanLevelMenuOpen] = useState(false)
   const planLevelMenuRef = useRef<HTMLDivElement>(null)
@@ -142,6 +145,13 @@ export function ChatPanel() {
             </button>
           ))}
         </div>
+        <button
+          onClick={() => setShowFlows(true)}
+          title="Flows — enable/disable and start a flow"
+          className="mr-1 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+        >
+          <Workflow className="h-4 w-4" />
+        </button>
         <button
           onClick={() => setShowSendContext(true)}
           title="Send context to another agent"
@@ -309,6 +319,14 @@ export function ChatPanel() {
           messages={session.messages}
           targets={targets}
           onClose={() => setShowSendContext(false)}
+        />
+      )}
+
+      {/* Flow selector modal */}
+      {showFlows && (
+        <FlowSelectorModal
+          containerId={session.containerId}
+          onClose={() => setShowFlows(false)}
         />
       )}
     </div>

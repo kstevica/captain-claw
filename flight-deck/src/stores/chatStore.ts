@@ -483,6 +483,8 @@ interface ChatStore {
   disconnectChat: (containerId: string) => void
   sendMessage: (containerId: string, content: string) => void
   sendBtw: (containerId: string, content: string) => void
+  /** Append a local system note to the chat (no agent turn) — e.g. "started flow X". */
+  addLocalNote: (containerId: string, content: string) => void
   cancelTask: (containerId: string) => void
   setModel: (containerId: string, selector: string) => void
   setPersonality: (containerId: string, personalityId: string) => void
@@ -1318,6 +1320,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   sendBtw: (containerId, content) => {
     const session = get().sessions.get(containerId)
     if (session) session.ws.sendBtw(content)
+  },
+
+  addLocalNote: (containerId, content) => {
+    if (!get().sessions.get(containerId)) return
+    addMessage(containerId, {
+      id: nextId(),
+      role: 'system',
+      content,
+      timestamp: new Date().toISOString(),
+    })
   },
 
   cancelTask: (containerId) => {
