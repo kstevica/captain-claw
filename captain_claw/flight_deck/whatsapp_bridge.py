@@ -171,9 +171,14 @@ _SLIDE_PREV = {"/prev", "/slide prev", "/slide previous", "previous slide", "pre
 _SLIDE_FIRST = {"/slide first", "first slide"}
 _SLIDE_LAST = {"/slide last", "last slide"}
 
-# "go to slide 5", "goto 5", "slide 5", "/slide 5". Captures the 1-based number;
-# a leading keyword is required so a bare number isn't treated as a slide jump.
-_SLIDE_GOTO_RE = re.compile(r"^(?:/?go\s*to|/?goto|/?slide)\s+(?:slide\s+)?(\d{1,3})$", re.I)
+# "go to slide 5", "go to 5", "goto 5", "slide 5", "/slide 5", "jump to slide 5",
+# "go to slide number 5", "slide #5" — trailing "."/"!"/"?" tolerated (voice
+# transcription). Captures the 1-based number; a leading keyword is required so
+# a bare number isn't treated as a slide jump.
+_SLIDE_GOTO_RE = re.compile(
+    r"^/?(?:go\s*to|goto|jump\s*to|slide)\s+(?:slide\s+)?(?:number\s+|no\.?\s*|#\s*)?(\d{1,3})\s*[.!?]*$",
+    re.I,
+)
 
 _SLIDE_ARROW = {"next": "▶", "prev": "◀", "first": "⏮", "last": "⏭", "goto": "→"}
 
