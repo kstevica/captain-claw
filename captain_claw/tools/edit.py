@@ -127,9 +127,15 @@ class EditTool(Tool):
         try:
             batch_mode = bool(edits)
             if not batch_mode:
-                # Single-edit mode needs an action.
+                # Single-edit mode needs an action. If it's omitted but
+                # old_string + new_string are present, infer the common case
+                # (replace_string) so a natural "edit old→new" call just works
+                # instead of erroring and sending the model into a retry loop.
                 if action is None:
-                    return ToolResult(success=False, error="Provide 'action' (or an 'edits' array for multiple changes).")
+                    if old_string is not None and new_string is not None:
+                        action = "replace_string"
+                    else:
+                        return ToolResult(success=False, error="Provide 'action' (or an 'edits' array for multiple changes).")
                 # Validate action
                 if action not in _ACTIONS:
                     return ToolResult(success=False, error=f"Unknown action: {action}. Valid: {', '.join(_ACTIONS)}")
