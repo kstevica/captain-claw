@@ -327,6 +327,40 @@ class AgentReasoningMixin:
         re.IGNORECASE,
     )
 
+    # Trivial single-value edits: "change X to Y", "replace A with B",
+    # "set X to Y", "on slide 2, change $2.2M to $4.5M". One substitution =
+    # one or two tool calls; the contract → critic → completion-gate pipeline
+    # adds ~10s of LLM round-trips for nothing. A verb followed (within a short
+    # window) by a to/with/from/into connector — searched anywhere so a leading
+    # locator like "on slide 2," still matches.
+    _TRIVIAL_EDIT_RE = re.compile(
+        r"\b(?:change|replace|rename|swap|set|update)\b[^\n]{0,40}\b(?:to|with|from|into)\b",
+        re.IGNORECASE,
+    )
+    # Words that signal a multi-part request — never treat such a turn as
+    # trivial even if it contains an edit verb. (A comma alone is fine: "on
+    # slide 2, change X to Y" is still a single edit.)
+    _COMPOUND_RE = re.compile(
+        r"\b(?:and|then|also|plus|while|each|every|both)\b", re.IGNORECASE
+    )
+
+    @staticmethod
+    def _is_simple_request(user_input: str) -> bool:
+        """Single-action turns that don't justify the contract pipeline:
+        read-only lookups (list/show/search…) and trivial inline edits
+        (change X to Y). Must be short and free of compound conjunctions."""
+        text = (user_input or "").strip()
+        if not text or len(text) >= 120:
+            return False
+        if AgentReasoningMixin._SIMPLE_TASK_RE.search(text):
+            return True
+        if (
+            AgentReasoningMixin._TRIVIAL_EDIT_RE.search(text)
+            and not AgentReasoningMixin._COMPOUND_RE.search(text)
+        ):
+            return True
+        return False
+
     @staticmethod
     def _should_use_contract_pipeline(
         user_input: str,
@@ -335,24 +369,22 @@ class AgentReasoningMixin:
     ) -> bool:
         """Use explicit user-selected mode only (no automatic switching).
 
-        Simple single-action requests (list, search, read, etc.) bypass the
-        contract pipeline entirely — the overhead of generating a contract,
-        running a critic, and retrying validation is not justified for tasks
-        that translate to one or two tool calls.
+        Simple single-action requests (list, search, read, trivial edits)
+        bypass the contract pipeline entirely — the overhead of generating a
+        contract, running a critic, and retrying validation is not justified
+        for tasks that translate to one or two tool calls.
         """
         mode = str(pipeline_mode or "").strip().lower()
         if mode == "contracts":
             # Explicit contracts mode — but still skip for trivially simple tasks.
-            text = (user_input or "").strip()
-            if len(text) < 120 and AgentReasoningMixin._SIMPLE_TASK_RE.search(text):
+            if AgentReasoningMixin._is_simple_request(user_input):
                 return False
             return True
         if mode == "loop":
             return bool(planning_enabled)
 
         # Default / fallback — skip for simple tasks.
-        text = (user_input or "").strip()
-        if len(text) < 120 and AgentReasoningMixin._SIMPLE_TASK_RE.search(text):
+        if AgentReasoningMixin._is_simple_request(user_input):
             return False
         return bool(planning_enabled)
 
