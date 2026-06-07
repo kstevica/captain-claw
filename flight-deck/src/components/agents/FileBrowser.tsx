@@ -389,7 +389,6 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
             <SortHeader label="Date" field="date" current={sortField} dir={sortDir} onClick={handleSort} className="w-28 text-right" />
             <SortHeader label="Type" field="type" current={sortField} dir={sortDir} onClick={handleSort} className="w-16 text-right" />
             <SortHeader label="Size" field="size" current={sortField} dir={sortDir} onClick={handleSort} className="w-16 text-right" />
-            <div className="w-20" /> {/* actions column */}
           </div>
         )}
 
@@ -444,7 +443,7 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
                   {(!collapsedGroups.has(group) || group === 'all') && groupFiles.map((f) => (
                     <div
                       key={f.physical}
-                      className={`flex items-center gap-2 border-b border-zinc-800/20 px-5 py-2 hover:bg-zinc-900/50 transition-colors ${
+                      className={`flex items-start gap-2 border-b border-zinc-800/20 px-5 py-2 hover:bg-zinc-900/50 transition-colors ${
                         selected.has(f.physical) ? 'bg-violet-500/5' : ''
                       }`}
                     >
@@ -452,12 +451,83 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
                         type="checkbox"
                         checked={selected.has(f.physical)}
                         onChange={() => toggleSelect(f.physical)}
-                        className="rounded border-zinc-600 mr-1"
+                        className="rounded border-zinc-600 mr-1 mt-0.5 shrink-0"
                       />
-                      <FileIcon file={f} />
+                      <span className="mt-0.5 shrink-0"><FileIcon file={f} /></span>
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-sm text-zinc-200">{f.filename}</div>
                         <div className="truncate text-[11px] text-zinc-600 font-mono">{f.logical || f.physical}</div>
+                        {/* Actions — third row, under the path */}
+                        <div className="-ml-1 mt-1.5 flex flex-wrap items-center gap-0.5">
+                          <button
+                            onClick={() => {
+                              if (!isFilePinned(agent.id, f.physical)) {
+                                pinFile({
+                                  agentId: agent.id,
+                                  agentName: agent.name,
+                                  host: agent.host,
+                                  port: agent.port,
+                                  auth: agent.auth,
+                                  filename: f.filename,
+                                  extension: f.extension,
+                                  physical: f.physical,
+                                  logical: f.logical,
+                                  size: f.size,
+                                  mime_type: f.mime_type,
+                                })
+                              }
+                            }}
+                            className={`rounded p-1 transition-colors ${
+                              isFilePinned(agent.id, f.physical)
+                                ? 'text-amber-400'
+                                : 'text-zinc-600 hover:bg-zinc-800 hover:text-amber-400'
+                            }`}
+                            title={isFilePinned(agent.id, f.physical) ? 'Pinned' : 'Pin file'}
+                          >
+                            <Pin className="h-3.5 w-3.5" />
+                          </button>
+                          {isViewable(f) && (
+                            <button
+                              onClick={() => handleView(f)}
+                              className="rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300"
+                              title="View"
+                            >
+                              <Eye className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                          {isDeckable(f) && (
+                            <button
+                              onClick={() => handleDeckView(f)}
+                              className="rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-emerald-400"
+                              title="Deck view (present + remote control)"
+                            >
+                              <MonitorPlay className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                          {isEditable(f) && (
+                            <button
+                              onClick={() => handleEdit(f)}
+                              className="rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-amber-400"
+                              title="Edit file"
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                          <button
+                            onClick={() => {
+                              const a = document.createElement('a')
+                              a.href = getDownloadUrl(agent.host, agent.port, f.physical, agent.auth)
+                              a.download = f.filename
+                              document.body.appendChild(a)
+                              a.click()
+                              document.body.removeChild(a)
+                            }}
+                            className="rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300"
+                            title="Download"
+                          >
+                            <Download className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       </div>
                       {/* Transfer status */}
                       {transferStatus[f.physical] === 'sending' && <Loader2 className="h-3 w-3 animate-spin text-violet-400" />}
@@ -471,77 +541,6 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
                       </span>
                       {/* Size */}
                       <span className="w-16 text-right text-[11px] text-zinc-600 shrink-0">{formatSize(f.size)}</span>
-                      {/* Actions */}
-                      <div className="w-20 flex items-center justify-end gap-0.5 shrink-0">
-                        <button
-                          onClick={() => {
-                            if (!isFilePinned(agent.id, f.physical)) {
-                              pinFile({
-                                agentId: agent.id,
-                                agentName: agent.name,
-                                host: agent.host,
-                                port: agent.port,
-                                auth: agent.auth,
-                                filename: f.filename,
-                                extension: f.extension,
-                                physical: f.physical,
-                                logical: f.logical,
-                                size: f.size,
-                                mime_type: f.mime_type,
-                              })
-                            }
-                          }}
-                          className={`rounded p-1 transition-colors ${
-                            isFilePinned(agent.id, f.physical)
-                              ? 'text-amber-400'
-                              : 'text-zinc-600 hover:bg-zinc-800 hover:text-amber-400'
-                          }`}
-                          title={isFilePinned(agent.id, f.physical) ? 'Pinned' : 'Pin file'}
-                        >
-                          <Pin className="h-3 w-3" />
-                        </button>
-                        {isViewable(f) && (
-                          <button
-                            onClick={() => handleView(f)}
-                            className="rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300"
-                            title="View"
-                          >
-                            <Eye className="h-3 w-3" />
-                          </button>
-                        )}
-                        {isDeckable(f) && (
-                          <button
-                            onClick={() => handleDeckView(f)}
-                            className="rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-emerald-400"
-                            title="Deck view (present + remote control)"
-                          >
-                            <MonitorPlay className="h-3 w-3" />
-                          </button>
-                        )}
-                        {isEditable(f) && (
-                          <button
-                            onClick={() => handleEdit(f)}
-                            className="rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-amber-400"
-                            title="Edit file"
-                          >
-                            <Pencil className="h-3 w-3" />
-                          </button>
-                        )}
-                        <button
-                          onClick={() => {
-                            const a = document.createElement('a')
-                            a.href = getDownloadUrl(agent.host, agent.port, f.physical, agent.auth)
-                            a.download = f.filename
-                            document.body.appendChild(a)
-                            a.click()
-                            document.body.removeChild(a)
-                          }}
-                          className="rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300"
-                          title="Download"
-                        >
-                          <Download className="h-3 w-3" />
-                        </button>
-                      </div>
                     </div>
                   ))}
                 </div>
