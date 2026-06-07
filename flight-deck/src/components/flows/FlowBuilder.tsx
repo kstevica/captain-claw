@@ -32,6 +32,7 @@ import {
   Hourglass,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
+import { CodeEditor } from '../agents/CodeEditor'
 import remarkGfm from 'remark-gfm'
 import { useFlowsStore } from '../../stores/flowsStore'
 import {
@@ -736,13 +737,17 @@ function CodeView({ draft, fleet, editingId, onApply, onSave }: {
             <Sparkles className="h-3 w-3" /> Load example
           </button>
         </div>
-        <textarea
-          value={dsl}
-          onChange={(e) => setDsl(e.target.value)}
-          rows={18}
-          spellCheck={false}
-          className={`${inputCls} resize-y font-mono text-[12px] leading-relaxed`}
-        />
+        <div
+          className="resize-y overflow-hidden rounded-lg border border-zinc-700/60"
+          style={{ height: 380, minHeight: 200 }}
+        >
+          <CodeEditor
+            value={dsl}
+            onChange={setDsl}
+            language="flow"
+            storageKey={`flow:${editingId || 'new'}`}
+          />
+        </div>
         <div className="mt-2 flex items-center gap-3">
           <button
             onClick={applyDsl}

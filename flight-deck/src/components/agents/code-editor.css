@@ -2,7 +2,26 @@
    Prism-highlighted <pre>. Both MUST share identical text metrics so the
    highlight stays aligned with the typed characters (no-wrap + synced scroll). */
 
-.cc-code-editor { position: relative; height: 100%; overflow: hidden; background: #0a0a0f; }
+.cc-code-editor { position: relative; height: 100%; overflow: hidden; background: #0a0a0f; display: flex; }
+
+/* Line-number gutter — scrolls vertically in sync with the textarea. */
+.cc-code-editor .cc-gutter {
+  flex: 0 0 auto;
+  overflow: hidden;
+  background: #0a0a0f;
+  border-right: 1px solid #1c1c2a;
+  user-select: none;
+}
+.cc-code-editor .cc-gutter-inner {
+  padding: 12px 8px 12px 12px;
+  font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  text-align: right;
+  color: #4b4b66;
+}
+.cc-code-editor .cc-gutter-line { height: 20px; line-height: 20px; }   /* == code line-height */
+
+.cc-code-wrap { position: relative; flex: 1 1 auto; min-width: 0; }
 
 .cc-code-editor pre,
 .cc-code-editor textarea {
@@ -72,6 +91,9 @@
 .cc-code-editor .token.function { color: #93c5fd; }
 .cc-code-editor .token.variable { color: #e4e4ec; }
 .cc-code-editor .token.deleted { color: #fca5a5; }
+/* Flow DSL: top-level directives + {{ }} interpolation */
+.cc-code-editor .token.directive { color: #f0abfc; font-weight: 600; }
+.cc-code-editor .token.template { color: #fcd34d; }
 
 /* ── Find bar ─────────────────────────────────────────────────────── */
 .cc-find {

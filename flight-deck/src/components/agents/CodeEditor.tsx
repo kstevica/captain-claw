@@ -7,6 +7,7 @@ import 'prismjs/components/prism-bash'
 import 'prismjs/components/prism-yaml'
 import 'prismjs/components/prism-markdown'
 import 'prismjs/components/prism-typescript'
+import './prism-flow'   // registers Prism.languages.flow
 import { X, ChevronUp, ChevronDown } from 'lucide-react'
 import './code-editor.css'
 
@@ -29,17 +30,26 @@ function escapeHtml(s: string): string {
 interface CodeEditorProps {
   value: string
   onChange: (value: string) => void
-  extension: string
-  /** Stable key (the file's physical path) for remembering the cursor */
+  extension?: string
+  /** Explicit Prism grammar id (e.g. 'flow'); overrides extension detection */
+  language?: string
+  /** Stable key (the file's physical path / flow id) for remembering the cursor */
   storageKey: string
 }
 
-export function CodeEditor({ value, onChange, extension, storageKey }: CodeEditorProps) {
+export function CodeEditor({ value, onChange, extension, language, storageKey }: CodeEditorProps) {
   const taRef = useRef<HTMLTextAreaElement>(null)
   const preRef = useRef<HTMLPreElement>(null)
+  const gutterRef = useRef<HTMLDivElement>(null)
   const cursorKey = `fdEditCursor:${storageKey}`
 
-  const lang = LANG_BY_EXT[(extension || '').toLowerCase()] || ''
+  const lang = language || LANG_BY_EXT[(extension || '').toLowerCase()] || ''
+
+  const lineCount = useMemo(() => {
+    let n = 1
+    for (let i = 0; i < value.length; i++) if (value.charCodeAt(i) === 10) n++
+    return n
+  }, [value])
 
   const highlighted = useMemo(() => {
     const grammar = lang ? Prism.languages[lang] : undefined
@@ -51,8 +61,9 @@ export function CodeEditor({ value, onChange, extension, storageKey }: CodeEdito
   }, [value, lang])
 
   const syncScroll = useCallback(() => {
-    const ta = taRef.current, pre = preRef.current
+    const ta = taRef.current, pre = preRef.current, gut = gutterRef.current
     if (ta && pre) { pre.scrollTop = ta.scrollTop; pre.scrollLeft = ta.scrollLeft }
+    if (ta && gut) { gut.scrollTop = ta.scrollTop }
   }, [])
 
   // Keep the highlight layer aligned after every value change re-render.
@@ -63,7 +74,9 @@ export function CodeEditor({ value, onChange, extension, storageKey }: CodeEdito
     const ta = taRef.current
     if (!ta) return
     const raw = sessionStorage.getItem(cursorKey)
-    const pos = raw ? Math.min(parseInt(raw, 10) || 0, value.length) : 0
+    const saved = raw ? Math.min(parseInt(raw, 10) || 0, value.length) : 0
+    // Restore to the BEGINNING of the saved row (column 0), not the exact column.
+    const pos = value.lastIndexOf('\n', saved - 1) + 1
     requestAnimationFrame(() => {
       try {
         ta.focus()
@@ -194,24 +207,33 @@ export function CodeEditor({ value, onChange, extension, storageKey }: CodeEdito
           </button>
         </div>
       )}
-      <pre ref={preRef} aria-hidden="true">
-        <code className={lang ? `language-${lang}` : undefined} dangerouslySetInnerHTML={{ __html: highlighted }} />
-      </pre>
-      <textarea
-        ref={taRef}
-        value={value}
-        spellCheck={false}
-        autoCapitalize="off"
-        autoCorrect="off"
-        wrap="off"
-        onChange={(e) => onChange(e.target.value)}
-        onScroll={syncScroll}
-        onKeyDown={onEditorKeyDown}
-        onKeyUp={persistCursor}
-        onClick={persistCursor}
-        onSelect={persistCursor}
-        placeholder="Empty file"
-      />
+      <div className="cc-gutter" ref={gutterRef} aria-hidden="true">
+        <div className="cc-gutter-inner">
+          {Array.from({ length: lineCount }, (_, i) => (
+            <div className="cc-gutter-line" key={i}>{i + 1}</div>
+          ))}
+        </div>
+      </div>
+      <div className="cc-code-wrap">
+        <pre ref={preRef} aria-hidden="true">
+          <code className={lang ? `language-${lang}` : undefined} dangerouslySetInnerHTML={{ __html: highlighted }} />
+        </pre>
+        <textarea
+          ref={taRef}
+          value={value}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          wrap="off"
+          onChange={(e) => onChange(e.target.value)}
+          onScroll={syncScroll}
+          onKeyDown={onEditorKeyDown}
+          onKeyUp={persistCursor}
+          onClick={persistCursor}
+          onSelect={persistCursor}
+          placeholder="Empty file"
+        />
+      </div>
     </div>
   )
 }
