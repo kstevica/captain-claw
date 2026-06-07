@@ -21,12 +21,9 @@ export function FlowSelectorModal({ containerId, onClose }: FlowSelectorModalPro
   const loading = useFlowsStore((s) => s.loading)
   const fetchFlows = useFlowsStore((s) => s.fetchFlows)
   const toggleEnabled = useFlowsStore((s) => s.toggleEnabled)
-  const runNow = useFlowsStore((s) => s.runNow)
-  const addLocalNote = useChatStore((s) => s.addLocalNote)
+  const sendMessage = useChatStore((s) => s.sendMessage)
 
   const [q, setQ] = useState('')
-  const [starting, setStarting] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => { fetchFlows() }, [fetchFlows])
 
@@ -41,17 +38,13 @@ export function FlowSelectorModal({ containerId, onClose }: FlowSelectorModalPro
     )
   }, [flows, q])
 
-  const start = async (id: string, name: string) => {
-    setStarting(id)
-    setError(null)
-    try {
-      await runNow(id)
-      addLocalNote(containerId, `▶ Started flow “${name}”. Output is delivered to its channel (web flows appear here).`)
-      onClose()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-      setStarting(null)
-    }
+  const start = (name: string) => {
+    // Route the start THROUGH the chat ("/flow run <name>") so Flight Deck
+    // binds the run to THIS web channel — /flow status|stop and the input
+    // step's resume then all target it, and the flow delivers its intro/output
+    // right here. (Works for disabled flows too — that only gates the trigger.)
+    sendMessage(containerId, `/flow run ${name}`)
+    onClose()
   }
 
   return (
@@ -143,14 +136,13 @@ export function FlowSelectorModal({ containerId, onClose }: FlowSelectorModalPro
                     />
                   </button>
 
-                  {/* Start it now */}
+                  {/* Start it now (runs in this chat) */}
                   <button
-                    onClick={() => start(f.id, f.name || 'flow')}
-                    disabled={starting === f.id}
-                    title="Start this flow now"
-                    className="flex items-center gap-1 rounded-md bg-violet-600/20 px-2.5 py-1.5 text-xs font-medium text-violet-300 hover:bg-violet-600/30 disabled:opacity-40"
+                    onClick={() => start(f.name || 'flow')}
+                    title="Start this flow now — runs in this chat"
+                    className="flex items-center gap-1 rounded-md bg-violet-600/20 px-2.5 py-1.5 text-xs font-medium text-violet-300 hover:bg-violet-600/30"
                   >
-                    {starting === f.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
+                    <Play className="h-3 w-3" />
                     Start
                   </button>
                 </div>
@@ -159,12 +151,9 @@ export function FlowSelectorModal({ containerId, onClose }: FlowSelectorModalPro
           ))}
         </div>
 
-        {error && (
-          <div className="border-t border-red-500/20 bg-red-500/10 px-5 py-2 text-xs text-red-300">{error}</div>
-        )}
         <div className="border-t border-zinc-800 px-5 py-2.5 text-[11px] leading-relaxed text-zinc-600">
-          Toggle to enable/disable a flow's trigger. <span className="text-zinc-500">Start</span> runs it now — output goes
-          to the flow's channel (web flows land here in chat).
+          Toggle to enable/disable a flow's trigger. <span className="text-zinc-500">Start</span> runs it in this chat —
+          control it with <code className="text-zinc-500">/flow status</code> · <code className="text-zinc-500">/flow stop</code>.
         </div>
       </div>
     </div>

@@ -2241,6 +2241,29 @@ async def fd_flows_evaluate(request: Request, user: dict | None = _optional_user
     if await flow_router.maybe_handle_flow_command(payload):
         return {"matched": True, "deferred": True}
 
+    # 0b. Explicit start: '/flow run|start <name|id>' — launch a specific flow
+    #     BOUND to this channel/origin (same path as a trigger match) so that
+    #     /flow status|stop and input-resume all target it. Works for disabled
+    #     flows too (enable/disable only gates automatic trigger firing).
+    import re as _re
+    _run_m = _re.match(r"^\s*/?flow\s+(?:run|start|launch)\s+(.+)$", str(payload.get("text") or ""), _re.I)
+    if _run_m:
+        _target = _run_m.group(1).strip()
+        _store = flow_router._STORE
+        _flow = None
+        if _store is not None:
+            _flow = await _store.get_flow(_target) or await _store.get_flow_by_name(_target)
+        if _flow is None:
+            return {"matched": True, "output": f"No flow named “{_target}”."}
+        if flow_router._flow_needs_async(_flow):
+            asyncio.create_task(flow_router._bg_run(_flow, payload))
+            return {"matched": True, "flow": _flow.get("name"), "deferred": True}
+        _result = await app.state.flow_runner.run(_flow, payload)
+        return {
+            "matched": True, "flow": _flow.get("name"),
+            "run_id": _result.get("run_id"), "output": _result.get("output") or "",
+        }
+
     # 1. Resume a paused flow first: if one is waiting on an `input` step for
     #    this channel+agent, this message is the reply — feed it and stop (the
     #    flow continues in the background and delivers via the channel).
