@@ -178,7 +178,7 @@ def _now_iso() -> str:
 # old file (and ``control`` would re-step it), causing the deck to reload back
 # and forth between recently-opened decks before settling. These are live, fire-
 # once signals — only durable chat-like messages belong in the replay buffer.
-_NO_BACKFILL_TYPES = {"deck_open", "control", "deck_state"}
+_NO_BACKFILL_TYPES = {"deck_open", "control", "deck_state", "narration"}
 
 
 async def _broadcast(ch: _ChannelState, payload: dict) -> None:
@@ -265,6 +265,14 @@ async def _agent_pump(ch: _ChannelState, host: str, port: int) -> None:
                         })
                     # We don't echo "user" chat_messages back — mobile already
                     # injected its own "user" event for instant local display.
+                elif mtype == "narration":
+                    # Live between-step progress blurbs — forward so the glasses
+                    # HUD and WhatsApp/Messenger see them during a long task.
+                    await _broadcast(ch, {
+                        "type": "narration",
+                        "text": str(data.get("text", "")),
+                        "ts": data.get("timestamp") or _now_iso(),
+                    })
                 elif mtype == "status":
                     await _broadcast(ch, {
                         "type": "status",

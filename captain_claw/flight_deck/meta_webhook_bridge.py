@@ -146,7 +146,13 @@ def register_channel_callback(
         # echoes (the user already typed it on their own screen) and
         # ``status`` heartbeats (noise on a chat thread).
         mtype = payload.get("type")
-        if mtype not in ("agent", "error"):
+        if mtype == "narration":
+            # Live progress blurbs during a long task. On by default; can be
+            # chatty on a message thread, so allow opt-out via env.
+            import os
+            if os.environ.get("STREAM_NARRATION", "on").strip().lower() in ("off", "0", "false", "no"):
+                return
+        elif mtype not in ("agent", "error"):
             return
         text = str(payload.get("text") or "").strip()
         if not text:

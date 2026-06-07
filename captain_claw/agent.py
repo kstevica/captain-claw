@@ -59,6 +59,7 @@ class Agent(
         approval_callback: Callable[[str], bool] | None = None,
         thinking_callback: Callable[[str, str, str], None] | None = None,
         tool_stream_callback: Callable[[str], None] | None = None,
+        narration_callback: Callable[[str, int], None] | None = None,
     ):
         """Initialize the agent.
 
@@ -76,6 +77,7 @@ class Agent(
         self.playbook_approval_callback: Callable[[str], Any] | None = None
         self.thinking_callback = thinking_callback
         self._tool_stream_callback = tool_stream_callback
+        self.narration_callback = narration_callback
         self.response_stream_callback: Callable[[str], None] | None = None
         self.tools = get_tool_registry()
         self.tools.set_approval_callback(self.approval_callback)
@@ -183,6 +185,23 @@ class Agent(
                 self.thinking_callback(text, tool, phase)
             except Exception:
                 pass
+
+    def _emit_narration(self, text: str, iteration: int = 0) -> bool:
+        """Forward an intermediate narration blurb — the short text the model
+        emits alongside its tool calls (e.g. "Now let me apply the edits…") — to
+        the UI and channel bridges as a LIVE progress event, so the user sees
+        what's happening during a long task instead of only at the end.
+
+        Returns True when a callback is wired, so the caller can skip folding
+        the same text into the final combined answer (avoids showing it twice)."""
+        cb = getattr(self, "narration_callback", None)
+        if not cb:
+            return False
+        try:
+            cb(text, iteration)
+        except Exception:
+            pass
+        return True
 
     def _emit_tool_output(self, tool_name: str, arguments: dict[str, Any], output: str) -> None:
         """Forward raw tool output to UI callback when configured."""

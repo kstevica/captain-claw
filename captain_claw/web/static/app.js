@@ -139,6 +139,11 @@
             case 'thinking':
                 updateThinkingIndicator(data.text, data.tool, data.phase);
                 break;
+            case 'narration':
+                // Live between-step narration — render in the chat flow as it
+                // happens so the user follows a long task in real time.
+                addChatMessage('assistant', data.text, false, data.timestamp);
+                break;
             case 'tool_output_inline':
                 updateThinkingWithOutput(data.tool, data.summary, data.output);
                 break;

@@ -946,6 +946,10 @@ class AgentOrchestrationMixin:
         # Accumulate intermediate text the LLM produces alongside
         # tool calls so the final answer includes the full narrative.
         _intermediate_texts: list[str] = []
+        # Whether intermediate narration was streamed live (web/whatsapp). When
+        # it was, the final answer is just the last response — the blurbs were
+        # already shown during the run, so we don't repeat them combined.
+        _narration_streamed = False
         _tools_executed_count = 0
 
         for iteration in range(hard_turn_iterations):
@@ -1360,6 +1364,8 @@ class AgentOrchestrationMixin:
                 _tc_text = str(response.content or "").strip()
                 if _tc_text:
                     _intermediate_texts.append(_tc_text)
+                    if self._emit_narration(_tc_text, iteration):
+                        _narration_streamed = True
                 _tools_executed_count += len(response.tool_calls)
                 self._add_session_message(
                     role="assistant",
@@ -1703,6 +1709,8 @@ class AgentOrchestrationMixin:
                 _emb_text = str(response.content or "").strip()
                 if _emb_text:
                     _intermediate_texts.append(_emb_text)
+                    if self._emit_narration(_emb_text, iteration):
+                        _narration_streamed = True
                 _tools_executed_count += len(embedded_calls)
                 self._add_session_message(
                     role="assistant",
@@ -1910,6 +1918,8 @@ class AgentOrchestrationMixin:
                 _inline_text = str(response.content or "").strip()
                 if _inline_text:
                     _intermediate_texts.append(_inline_text)
+                    if self._emit_narration(_inline_text, iteration):
+                        _narration_streamed = True
                 log.info("Executing inline command", command=command)
                 self._emit_thinking(f"Running: {command[:60]}", tool="shell", phase="tool")
                 try:
@@ -2113,7 +2123,7 @@ class AgentOrchestrationMixin:
             # user sees a complete account of what was done rather than
             # just the last LLM output (which may be a generic guide).
             _final_output = response.content
-            if _tools_executed_count > 0 and _intermediate_texts:
+            if _tools_executed_count > 0 and _intermediate_texts and not _narration_streamed:
                 # Build combined output: intermediate narrative + final
                 _combined_parts = list(_intermediate_texts)
                 _final_text_str = str(response.content or "").strip()

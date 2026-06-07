@@ -261,6 +261,7 @@ class WebServer:
             approval_callback=self._approval_callback,
             thinking_callback=self._thinking_callback,
             tool_stream_callback=self._tool_stream_callback,
+            narration_callback=self._narration_callback,
         )
         self.agent.response_stream_callback = self._response_stream_callback
         self.agent.playbook_approval_callback = self._playbook_approval_callback
@@ -477,6 +478,18 @@ class WebServer:
     def _tool_stream_callback(self, chunk: str) -> None:
         """Broadcast a live tool output chunk to the thinking console."""
         self._broadcast({"type": "tool_stream", "chunk": chunk})
+
+    def _narration_callback(self, text: str, iteration: int = 0) -> None:
+        """Broadcast the agent's between-step narration live, so it shows up in
+        the chat (and on bridged channels — WhatsApp/glasses) during the run
+        instead of only landing in the final answer."""
+        from datetime import datetime, timezone
+        self._broadcast({
+            "type": "narration",
+            "text": text,
+            "iteration": iteration,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
 
     def _response_stream_callback(self, text: str) -> None:
         """Broadcast LLM response content to the stream panel."""
