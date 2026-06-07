@@ -1895,11 +1895,10 @@
     const content = (data && data.content) || '';
     const ext = (f.extension || '').toLowerCase();
     const isHtml = (ext === '.html' || ext === '.htm');
-    // Present remote only makes sense for an HTML deck — show Prev/Next then.
+    // Present remote only makes sense for an HTML deck — show the controls then
+    // (⧉ loads THIS file onto the Flight Deck big screen; ◀/▶ step it). We do
+    // NOT auto-open on selection — the user picks the deck here, then taps ⧉.
     if (filesPresentEl) filesPresentEl.hidden = !isHtml;
-    // Mirror onto Flight Deck: opening a deck on the glasses opens it on the
-    // big screen too, so the whole thing is driven from here.
-    if (isHtml) deckOpen(f.physical);
     filesFrame = null;   // drop any prior frame so stale height messages no-op
     // One file = one .record-page inside the pager, exactly like a datastore
     // record. The .record-page is the proven-on-glasses vertical scroller.
