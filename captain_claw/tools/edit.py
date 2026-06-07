@@ -49,7 +49,11 @@ class EditTool(Tool):
         "delete_string — remove exact text; "
         "insert_at_line — insert at line number; "
         "delete_lines / replace_lines — line-range operations; "
-        "undo — restore most recent backup."
+        "undo — restore most recent backup. "
+        "MULTIPLE CHANGES: pass an 'edits' array to apply many edits to the same "
+        "file in ONE call (read once, write once) instead of calling edit repeatedly — "
+        "much faster and cheaper. Each item is {action?, old_string?, new_string?, "
+        "start_line?, end_line?}; action defaults to replace_string."
     )
     timeout_seconds = 15.0
     parameters = {
@@ -91,8 +95,20 @@ class EditTool(Tool):
                 "type": "integer",
                 "description": "Ending line number, inclusive (1-indexed). Used by: delete_lines, replace_lines.",
             },
+            "edits": {
+                "type": "array",
+                "description": (
+                    "Apply MANY edits to this file in a single call (preferred over "
+                    "repeated edit calls). Each item: {action?, old_string?, new_string?, "
+                    "start_line?, end_line?}. action defaults to 'replace_string'. Edits "
+                    "are applied in order; one that fails to match does NOT block the "
+                    "others — the result lists per-edit success/failure so you can re-issue "
+                    "only the misses. When 'edits' is given, the top-level action is ignored."
+                ),
+                "items": {"type": "object"},
+            },
         },
-        "required": ["path", "action"],
+        "required": ["path"],
     }
 
     # ── Public API ──────────────────────────────────────────────────
@@ -100,22 +116,31 @@ class EditTool(Tool):
     async def execute(
         self,
         path: str,
-        action: str,
+        action: str | None = None,
         old_string: str | None = None,
         new_string: str | None = None,
         start_line: int | None = None,
         end_line: int | None = None,
+        edits: list[dict[str, Any]] | None = None,
         **kwargs: Any,
     ) -> ToolResult:
         try:
-            # Validate action
-            if action not in _ACTIONS:
-                return ToolResult(success=False, error=f"Unknown action: {action}. Valid: {', '.join(_ACTIONS)}")
-
-            # Validate action-specific required params
-            missing = [p for p in _ACTION_REQUIRED[action] if locals().get(p) is None]
-            if missing:
-                return ToolResult(success=False, error=f"Action '{action}' requires: {', '.join(missing)}")
+            batch_mode = bool(edits)
+            if not batch_mode:
+                # Single-edit mode needs an action.
+                if action is None:
+                    return ToolResult(success=False, error="Provide 'action' (or an 'edits' array for multiple changes).")
+                # Validate action
+                if action not in _ACTIONS:
+                    return ToolResult(success=False, error=f"Unknown action: {action}. Valid: {', '.join(_ACTIONS)}")
+                # Validate action-specific required params
+                _provided = {
+                    "old_string": old_string, "new_string": new_string,
+                    "start_line": start_line, "end_line": end_line,
+                }
+                missing = [p for p in _ACTION_REQUIRED[action] if _provided.get(p) is None]
+                if missing:
+                    return ToolResult(success=False, error=f"Action '{action}' requires: {', '.join(missing)}")
 
             # Resolve file path (same logic as ReadTool)
             file_path = self._resolve_path(path, kwargs)
@@ -161,6 +186,10 @@ class EditTool(Tool):
 
             # Create backup
             backup_path = self._create_backup(file_path, kwargs)
+
+            # Batch mode: apply every edit in one read/write cycle.
+            if batch_mode:
+                return self._apply_batch(file_path, content, line_ending, edits, backup_path)
 
             # Dispatch to action handler
             result = self._dispatch(action, content, line_ending, old_string, new_string, start_line, end_line)
@@ -338,6 +367,77 @@ class EditTool(Tool):
                 pass
             raise
 
+    # ── Batch application ───────────────────────────────────────────
+
+    def _apply_batch(
+        self,
+        file_path: Path,
+        content: str,
+        line_ending: str,
+        edits: list[dict[str, Any]],
+        backup_path: str | None,
+    ) -> ToolResult:
+        """Apply many edits to one file in a single read/write cycle.
+
+        Edits are applied in order against the evolving content. A failed match
+        leaves the content unchanged and does NOT block later edits — the
+        summary reports each edit's outcome so the model can re-issue only the
+        ones that missed, instead of re-reading or rewriting the whole file."""
+        cur = content
+        outcomes: list[tuple[int, bool, str]] = []
+        any_ok = False
+
+        for i, spec in enumerate(edits, 1):
+            if not isinstance(spec, dict):
+                outcomes.append((i, False, "edit must be an object"))
+                continue
+            act = spec.get("action") or "replace_string"
+            if act not in _ACTIONS or act == "undo":
+                outcomes.append((i, False, f"invalid action '{act}'"))
+                continue
+            missing = [p for p in _ACTION_REQUIRED.get(act, []) if spec.get(p) is None]
+            if missing:
+                outcomes.append((i, False, f"requires: {', '.join(missing)}"))
+                continue
+
+            os_ = spec.get("old_string")
+            ns_ = spec.get("new_string")
+            if os_ is not None:
+                os_ = self._normalize_line_endings(os_, line_ending)
+            if ns_ is not None:
+                ns_ = self._normalize_line_endings(ns_, line_ending)
+
+            res = self._dispatch(
+                act, cur, line_ending, os_, ns_, spec.get("start_line"), spec.get("end_line"),
+            )
+            if res.error:
+                outcomes.append((i, False, res.error))
+            else:
+                cur = res.content
+                any_ok = True
+                first_line = res.summary.splitlines()[0] if res.summary else "ok"
+                outcomes.append((i, True, first_line))
+
+        if any_ok:
+            self._atomic_write(file_path, cur)
+
+        ok_n = sum(1 for _, ok, _ in outcomes if ok)
+        fail_n = len(outcomes) - ok_n
+        lines = [f"Batch edit: {ok_n} applied, {fail_n} failed (of {len(outcomes)})."]
+        for i, ok, msg in outcomes:
+            lines.append(f"  [{i}] {'OK  ' if ok else 'FAIL'} {msg}")
+        if backup_path:
+            lines.append(f"Backup: {backup_path}")
+        lines.append(f"File: {file_path}")
+        summary = "\n".join(lines)
+
+        # Success when at least one edit applied; failures are surfaced in the
+        # content so the model can fix and re-issue just those. Total failure
+        # (nothing applied) returns an error so the agent retries.
+        if any_ok:
+            return ToolResult(success=True, content=summary)
+        return ToolResult(success=False, error=summary)
+
     # ── Action dispatch ─────────────────────────────────────────────
 
     def _dispatch(
@@ -378,7 +478,11 @@ class EditTool(Tool):
 
         count = content.count(old_string)
         if count == 0:
-            return _EditResult(error="String not found in file. Make sure old_string matches the file content exactly (including whitespace and indentation).")
+            return _EditResult(error=(
+                "String not found in file. Make sure old_string matches the file content "
+                "exactly (including whitespace and indentation)."
+                + self._not_found_hint(content, old_string)
+            ))
         if count > 1:
             # Find line numbers of each occurrence for helpful error
             lines = content.splitlines(keepends=True)
@@ -560,6 +664,35 @@ class EditTool(Tool):
         )
 
     # ── Helpers ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _not_found_hint(content: str, old_string: str) -> str:
+        """When an exact match fails, point the model at the closest file line so
+        it can fix old_string in one shot (usual cause: whitespace / HTML
+        entities / a guessed string) rather than retrying blindly or rewriting
+        the whole file."""
+        import difflib
+
+        first = ""
+        for ln in (old_string or "").splitlines():
+            if ln.strip():
+                first = ln.strip()
+                break
+        if not first:
+            return ""
+        best_ratio = 0.0
+        best_no = 0
+        best_text = ""
+        for i, line in enumerate(content.splitlines(), 1):
+            ratio = difflib.SequenceMatcher(None, first, line.strip()).ratio()
+            if ratio > best_ratio:
+                best_ratio, best_no, best_text = ratio, i, line
+        if best_no and best_ratio >= 0.6:
+            snippet = best_text.strip()
+            if len(snippet) > 160:
+                snippet = snippet[:160] + "…"
+            return f" Closest match is line {best_no}: {snippet!r} — copy it verbatim."
+        return ""
 
     @staticmethod
     def _context_around(content: str, target_line: int, span: int = 3, line_ending: str | None = None) -> str:
