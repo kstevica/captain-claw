@@ -3,8 +3,11 @@ import {
   X, FileText, Send, Loader2, Check, AlertCircle, FolderOpen, RefreshCw,
   Download, Eye, Search, ChevronDown, ChevronRight, Image, FileCode,
   FileSpreadsheet, Film, Music, Archive, Filter, Pin, MonitorPlay,
-  Copy, ExternalLink,
+  Copy, ExternalLink, Pencil,
 } from 'lucide-react'
+
+// File groups whose text content can be edited in place (mirrors FileViewer).
+const EDITABLE_GROUPS = new Set(['markdown', 'code', 'data', 'text', 'html'])
 import type { AgentFile, AgentEndpoint } from '../../services/fileTransfer'
 import {
   listAgentFiles, transferFile, formatSize, getDownloadUrl, getViewUrl,
@@ -79,6 +82,7 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [showFilters, setShowFilters] = useState(false)
   const [viewingFile, setViewingFile] = useState<AgentFile | null>(null)
+  const [viewerStartEdit, setViewerStartEdit] = useState(false)
   // Deck-view: the file to present + the (live-editable) channel. The URL is
   // derived from these so it updates as the channel is typed. Surfaced as a
   // clickable link (popup blockers stop an automatic window.open).
@@ -245,6 +249,9 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
     setDeckLink({ file: f, channel: sessionStorage.getItem('deckChannel') || 'deck' })
   }
   const isDeckable = (f: AgentFile) => getFileTypeGroup(f) === 'html'
+  const isEditable = (f: AgentFile) => EDITABLE_GROUPS.has(getFileTypeGroup(f))
+  // Open the viewer straight into edit mode for this file.
+  const handleEdit = (f: AgentFile) => { setViewerStartEdit(true); setViewingFile(f) }
   // Build the deck URL from the chosen channel — host/port/auth bind the
   // channel to this agent so the right files are served.
   const buildDeckUrl = (f: AgentFile, channel: string) => {
@@ -511,6 +518,15 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
                             <MonitorPlay className="h-3 w-3" />
                           </button>
                         )}
+                        {isEditable(f) && (
+                          <button
+                            onClick={() => handleEdit(f)}
+                            className="rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-amber-400"
+                            title="Edit file"
+                          >
+                            <Pencil className="h-3 w-3" />
+                          </button>
+                        )}
                         <button
                           onClick={() => {
                             const a = document.createElement('a')
@@ -667,7 +683,8 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
           host={agent.host}
           port={agent.port}
           auth={agent.auth}
-          onClose={() => setViewingFile(null)}
+          startInEdit={viewerStartEdit}
+          onClose={() => { setViewingFile(null); setViewerStartEdit(false) }}
           hasPrev={viewingViewableIndex > 0}
           hasNext={viewingViewableIndex < viewableFiles.length - 1}
           onPrev={() => {

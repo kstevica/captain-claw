@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   X, Download, Loader2, AlertCircle, Maximize2, Minimize2,
   ChevronLeft, ChevronRight, Copy, Check, Pencil, Save,
@@ -17,6 +17,8 @@ interface FileViewerProps {
   port: number
   auth: string
   onClose: () => void
+  /** Open straight into edit mode (e.g. the file-list Edit button) */
+  startInEdit?: boolean
   /** Navigate to adjacent files */
   onPrev?: () => void
   onNext?: () => void
@@ -24,7 +26,7 @@ interface FileViewerProps {
   hasNext?: boolean
 }
 
-export function FileViewer({ file, host, port, auth, onClose, onPrev, onNext, hasPrev, hasNext }: FileViewerProps) {
+export function FileViewer({ file, host, port, auth, startInEdit, onClose, onPrev, onNext, hasPrev, hasNext }: FileViewerProps) {
   const [content, setContent] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -40,6 +42,9 @@ export function FileViewer({ file, host, port, auth, onClose, onPrev, onNext, ha
   const group = getFileTypeGroup(file)
   const editable = content !== null && EDITABLE_GROUPS.has(group)
   const dirty = editing && draft !== content
+  // Consume startInEdit once (on the file it was opened for) — file nav inside
+  // the viewer shouldn't re-trigger edit mode.
+  const autoEditRef = useRef(!!startInEdit)
   const viewUrl = getViewUrl(host, port, file.physical, auth)
   const downloadUrl = getDownloadUrl(host, port, file.physical, auth)
 
@@ -63,6 +68,12 @@ export function FileViewer({ file, host, port, auth, onClose, onPrev, onNext, ha
         if (!resp.ok) throw new Error(`Failed to load: ${resp.status}`)
         const text = await resp.text()
         setContent(text)
+        // Opened via the Edit button → drop straight into edit mode (once).
+        if (autoEditRef.current && EDITABLE_GROUPS.has(group)) {
+          autoEditRef.current = false
+          setDraft(text)
+          setEditing(true)
+        }
       })
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false))
