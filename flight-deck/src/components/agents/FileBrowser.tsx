@@ -79,9 +79,10 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [showFilters, setShowFilters] = useState(false)
   const [viewingFile, setViewingFile] = useState<AgentFile | null>(null)
-  // Deck-view link to open manually (popup blockers stop window.open after the
-  // channel prompt, so we surface a clickable link instead).
-  const [deckLink, setDeckLink] = useState<{ url: string; channel: string; name: string } | null>(null)
+  // Deck-view: the file to present + the (live-editable) channel. The URL is
+  // derived from these so it updates as the channel is typed. Surfaced as a
+  // clickable link (popup blockers stop an automatic window.open).
+  const [deckLink, setDeckLink] = useState<{ file: AgentFile; channel: string } | null>(null)
   const [deckCopied, setDeckCopied] = useState(false)
 
   const { pin: pinFile, isPinned: isFilePinned } = usePinnedFilesStore()
@@ -237,28 +238,25 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
   // run at once — open the glasses / remote / WhatsApp on the SAME channel to
   // control this one. Remembered per-tab so repeated opens default to the last.
   const handleDeckView = (f: AgentFile) => {
-    // Ask for the channel, then surface a clickable link instead of calling
-    // window.open — prompt() consumes the click's user-activation, so popup
-    // blockers stop an automatic open. A link the user clicks is never blocked.
-    const last = sessionStorage.getItem('deckChannel') || 'deck'
-    const channel = window.prompt(
-      'Deck channel — open the glasses / remote / WhatsApp on this same name to control it:',
-      last,
-    )
-    if (!channel) return   // cancelled
-    const c = channel.trim() || 'deck'
-    sessionStorage.setItem('deckChannel', c)
+    // Open the green panel with a live channel field; the URL below updates as
+    // it's typed. No prompt / auto window.open (popup blockers stop those) —
+    // the user clicks the link, which is never blocked.
+    setDeckCopied(false)
+    setDeckLink({ file: f, channel: sessionStorage.getItem('deckChannel') || 'deck' })
+  }
+  const isDeckable = (f: AgentFile) => getFileTypeGroup(f) === 'html'
+  // Build the deck URL from the chosen channel — host/port/auth bind the
+  // channel to this agent so the right files are served.
+  const buildDeckUrl = (f: AgentFile, channel: string) => {
     const q = new URLSearchParams({
-      c,
+      c: channel.trim() || 'deck',
       path: f.physical,
       host: agent.host,
       port: String(agent.port),
       auth: agent.auth || '',
     })
-    setDeckCopied(false)
-    setDeckLink({ url: `${window.location.origin}/deck/view?${q.toString()}`, channel: c, name: f.filename })
+    return `${window.location.origin}/deck/view?${q.toString()}`
   }
-  const isDeckable = (f: AgentFile) => getFileTypeGroup(f) === 'html'
 
   // Navigation for the viewer: prev/next viewable file in processedFiles
   const viewableFiles = processedFiles.filter((f) => isViewable(f))
@@ -536,50 +534,67 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
           )}
         </div>
 
-        {/* Deck-view link — click to open the deck in a new tab (popup-safe) */}
-        {deckLink && (
-          <div className="border-t border-emerald-500/20 bg-emerald-500/10 px-5 py-3">
-            <div className="flex items-center gap-2 mb-2">
-              <MonitorPlay className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
-              <span className="text-xs font-medium text-emerald-300">
-                Deck ready on channel <span className="font-mono">"{deckLink.channel}"</span> — open it on the big screen:
-              </span>
-              <button
-                onClick={() => setDeckLink(null)}
-                className="ml-auto rounded p-0.5 text-zinc-500 hover:text-zinc-300"
-                title="Dismiss"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
+        {/* Deck-view panel — live channel field, URL updates as you type */}
+        {deckLink && (() => {
+          const ch = deckLink.channel.trim() || 'deck'
+          const url = buildDeckUrl(deckLink.file, deckLink.channel)
+          return (
+            <div className="border-t border-emerald-500/20 bg-emerald-500/10 px-5 py-3">
+              <div className="flex items-center gap-2 mb-2">
+                <MonitorPlay className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+                <span className="text-xs font-medium text-emerald-300 shrink-0">Present on channel</span>
+                <input
+                  type="text"
+                  value={deckLink.channel}
+                  autoFocus
+                  spellCheck={false}
+                  placeholder="deck"
+                  onChange={(e) => {
+                    const v = e.target.value
+                    sessionStorage.setItem('deckChannel', v.trim() || 'deck')
+                    setDeckCopied(false)
+                    setDeckLink((d) => (d ? { ...d, channel: v } : d))
+                  }}
+                  className="w-40 rounded border border-emerald-500/40 bg-zinc-900 px-2 py-1 text-xs font-mono text-emerald-200 focus:border-emerald-400 focus:outline-none"
+                />
+                <span className="text-[11px] text-zinc-500 truncate">— {deckLink.file.filename}</span>
+                <button
+                  onClick={() => setDeckLink(null)}
+                  className="ml-auto rounded p-0.5 text-zinc-500 hover:text-zinc-300 shrink-0"
+                  title="Dismiss"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div className="flex items-center gap-2">
+                <a
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 shrink-0"
+                >
+                  <ExternalLink className="h-3 w-3" />
+                  Open deck
+                </a>
+                <code className="flex-1 min-w-0 truncate rounded bg-zinc-900 px-2 py-1.5 text-[11px] font-mono text-zinc-400" title={url}>
+                  {url}
+                </code>
+                <button
+                  onClick={() => { navigator.clipboard?.writeText(url).then(() => { setDeckCopied(true); setTimeout(() => setDeckCopied(false), 2000) }).catch(() => {}) }}
+                  className="flex items-center gap-1 rounded-md bg-zinc-800 px-2.5 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-700 shrink-0"
+                  title="Copy URL"
+                >
+                  {deckCopied ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                  {deckCopied ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+              <p className="mt-2 text-[11px] text-zinc-500">
+                Then control it from the glasses (<span className="font-mono">/glasses/view?c={ch}</span>),
+                the remote (<span className="font-mono">/deck/remote?c={ch}</span>), or WhatsApp.
+              </p>
             </div>
-            <div className="flex items-center gap-2">
-              <a
-                href={deckLink.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 shrink-0"
-              >
-                <ExternalLink className="h-3 w-3" />
-                Open deck
-              </a>
-              <code className="flex-1 min-w-0 truncate rounded bg-zinc-900 px-2 py-1.5 text-[11px] font-mono text-zinc-400" title={deckLink.url}>
-                {deckLink.url}
-              </code>
-              <button
-                onClick={() => { navigator.clipboard?.writeText(deckLink.url).then(() => { setDeckCopied(true); setTimeout(() => setDeckCopied(false), 2000) }).catch(() => {}) }}
-                className="flex items-center gap-1 rounded-md bg-zinc-800 px-2.5 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-700 shrink-0"
-                title="Copy URL"
-              >
-                {deckCopied ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
-                {deckCopied ? 'Copied' : 'Copy'}
-              </button>
-            </div>
-            <p className="mt-2 text-[11px] text-zinc-500">
-              Then control it from the glasses (<span className="font-mono">/glasses/view?c={deckLink.channel}</span>),
-              the remote (<span className="font-mono">/deck/remote?c={deckLink.channel}</span>), or WhatsApp.
-            </p>
-          </div>
-        )}
+          )
+        })()}
 
         {/* Result message */}
         {resultMessage && (
