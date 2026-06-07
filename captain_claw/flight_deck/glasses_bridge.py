@@ -111,6 +111,13 @@ class _ChannelState:
     # agent replies back out to a Messenger PSID. Failures are isolated:
     # one raising callback never stops the WS broadcast.
     callback_subscribers: list[Callable[[dict], Awaitable[None]]] = field(default_factory=list)
+    # Last slide position reported by a deck on this channel (via /deck/state).
+    # Lets WhatsApp's /slide reply with the current slide number after stepping.
+    # ``deck_state_seq`` bumps on every report so a waiter can detect a change.
+    deck_index: int | None = None
+    deck_total: int | None = None
+    deck_state_seq: int = 0
+    deck_state_cond: asyncio.Condition = field(default_factory=asyncio.Condition)
 
 
 _channels: dict[str, _ChannelState] = {}
@@ -830,10 +837,42 @@ async def deck_state(request: Request) -> JSONResponse:
     except Exception:
         index, total = 0, 0
     ch = await _get_or_create_channel(channel)
+    async with ch.deck_state_cond:
+        ch.deck_index = index
+        ch.deck_total = total
+        ch.deck_state_seq += 1
+        ch.deck_state_cond.notify_all()
     await _broadcast(ch, {
         "type": "deck_state", "index": index, "total": total, "ts": _now_iso(),
     })
     return JSONResponse({"ok": True}, headers=_NO_CACHE)
+
+
+async def step_deck_and_wait(
+    channel: str, action: str, timeout: float = 1.2,
+) -> tuple[int, int] | None:
+    """Broadcast a slide-control action, then wait for the deck to report its
+    new position via /deck/state. Returns ``(index0, total)`` (index 0-based),
+    or ``None`` when no deck has ever reported on this channel.
+
+    If the action doesn't change the slide (e.g. ``next`` on the last slide),
+    no new report arrives — we time out and return the last known position, so
+    the caller still gets the current slide number."""
+    ch = await _get_or_create_channel(channel)
+    async with ch.deck_state_cond:
+        start_seq = ch.deck_state_seq
+    await broadcast_deck_control(channel, action)
+    try:
+        async with ch.deck_state_cond:
+            await asyncio.wait_for(
+                ch.deck_state_cond.wait_for(lambda: ch.deck_state_seq > start_seq),
+                timeout=timeout,
+            )
+    except (asyncio.TimeoutError, Exception):
+        pass
+    if ch.deck_total is None:
+        return None
+    return (ch.deck_index or 0, ch.deck_total or 0)
 
 
 @router.get("/deck/view", response_class=HTMLResponse)

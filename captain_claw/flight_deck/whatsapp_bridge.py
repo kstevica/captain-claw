@@ -103,6 +103,7 @@ from captain_claw.flight_deck.glasses_bridge import (
     _ensure_agent_binding,
     _get_or_create_channel,
     broadcast_deck_control,
+    step_deck_and_wait,
 )
 from captain_claw.flight_deck.meta_webhook_bridge import (
     now_iso as _now_iso,
@@ -169,6 +170,17 @@ _SLIDE_NEXT = {"/next", "/slide next", "next slide"}
 _SLIDE_PREV = {"/prev", "/slide prev", "/slide previous", "previous slide", "prev slide"}
 _SLIDE_FIRST = {"/slide first", "first slide"}
 _SLIDE_LAST = {"/slide last", "last slide"}
+
+_SLIDE_ARROW = {"next": "▶", "prev": "◀", "first": "⏮", "last": "⏭"}
+
+
+def _slide_reply(action: str, pos: tuple[int, int] | None) -> str:
+    """Format the WhatsApp confirmation after a slide step. ``pos`` is the
+    ``(index0, total)`` the deck reported, or None if no deck answered."""
+    arrow = _SLIDE_ARROW.get(action, "▶")
+    if pos and pos[1]:
+        return f"{arrow} Slide {pos[0] + 1} / {pos[1]}"
+    return f"{arrow} (no deck connected on this channel)"
 
 
 def _default_agent() -> tuple[str, int, str]:
@@ -636,17 +648,15 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
             "Point at another deck: /slide on <channel>",
         )
         return
-    if low in _SLIDE_NEXT:
-        await broadcast_deck_control(_deck_channel_for_waid(waid), "next")
-        return
-    if low in _SLIDE_PREV:
-        await broadcast_deck_control(_deck_channel_for_waid(waid), "prev")
-        return
-    if low in _SLIDE_FIRST:
-        await broadcast_deck_control(_deck_channel_for_waid(waid), "first")
-        return
-    if low in _SLIDE_LAST:
-        await broadcast_deck_control(_deck_channel_for_waid(waid), "last")
+    _slide_action = (
+        "next" if low in _SLIDE_NEXT else
+        "prev" if low in _SLIDE_PREV else
+        "first" if low in _SLIDE_FIRST else
+        "last" if low in _SLIDE_LAST else None
+    )
+    if _slide_action is not None:
+        pos = await step_deck_and_wait(_deck_channel_for_waid(waid), _slide_action)
+        await _send_whatsapp_text(waid, _slide_reply(_slide_action, pos))
         return
 
     _face_cmd = _match_face_command(text)
