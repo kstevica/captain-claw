@@ -1,0 +1,122 @@
+/* Syntax-highlighted code editor: a transparent <textarea> layered over a
+   Prism-highlighted <pre>. Both MUST share identical text metrics so the
+   highlight stays aligned with the typed characters (no-wrap + synced scroll). */
+
+.cc-code-editor { position: relative; height: 100%; overflow: hidden; background: #0a0a0f; }
+
+.cc-code-editor pre,
+.cc-code-editor textarea {
+  margin: 0;
+  border: 0;
+  padding: 12px 16px;
+  font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  tab-size: 2;
+  -moz-tab-size: 2;
+  white-space: pre;          /* no wrap → visual line == logical line */
+  word-wrap: normal;
+  overflow-wrap: normal;
+  letter-spacing: 0;
+}
+
+.cc-code-editor pre {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;          /* scroll is driven from the textarea */
+  pointer-events: none;
+  color: #e4e4ec;
+}
+.cc-code-editor pre code { font: inherit; background: none; }
+
+.cc-code-editor textarea {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  resize: none;
+  background: transparent;
+  color: transparent;        /* text is shown by the <pre> underneath */
+  -webkit-text-fill-color: transparent;
+  caret-color: #ffffff;
+  outline: none;
+}
+/* Semi-transparent so the highlighted code shows through the selection. */
+.cc-code-editor textarea::selection { background: rgba(108, 92, 231, 0.45); }
+
+/* ── Prism token theme (dark) ─────────────────────────────────────── */
+.cc-code-editor .token.comment,
+.cc-code-editor .token.prolog,
+.cc-code-editor .token.doctype,
+.cc-code-editor .token.cdata { color: #6b7280; font-style: italic; }
+.cc-code-editor .token.punctuation { color: #8b8b9e; }
+.cc-code-editor .token.tag,
+.cc-code-editor .token.keyword,
+.cc-code-editor .token.selector,
+.cc-code-editor .token.atrule,
+.cc-code-editor .token.important { color: #c4b5fd; }
+.cc-code-editor .token.attr-name,
+.cc-code-editor .token.property,
+.cc-code-editor .token.class-name { color: #7dd3fc; }
+.cc-code-editor .token.boolean,
+.cc-code-editor .token.number,
+.cc-code-editor .token.constant,
+.cc-code-editor .token.symbol { color: #fca5a5; }
+.cc-code-editor .token.string,
+.cc-code-editor .token.char,
+.cc-code-editor .token.attr-value,
+.cc-code-editor .token.regex,
+.cc-code-editor .token.inserted { color: #86efac; }
+.cc-code-editor .token.operator,
+.cc-code-editor .token.entity,
+.cc-code-editor .token.url { color: #fcd34d; }
+.cc-code-editor .token.function { color: #93c5fd; }
+.cc-code-editor .token.variable { color: #e4e4ec; }
+.cc-code-editor .token.deleted { color: #fca5a5; }
+
+/* ── Find bar ─────────────────────────────────────────────────────── */
+.cc-find {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border-radius: 8px;
+  background: #14141f;
+  border: 1px solid #2a2a3e;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+.cc-find input {
+  width: 150px;
+  background: #0a0a0f;
+  border: 1px solid #2a2a3e;
+  border-radius: 6px;
+  color: #e4e4ec;
+  font-size: 12px;
+  padding: 5px 8px;
+  outline: none;
+}
+.cc-find input:focus { border-color: #6c5ce7; }
+.cc-find .cc-count {
+  font-size: 11px;
+  color: #8888a0;
+  font-variant-numeric: tabular-nums;
+  min-width: 44px;
+  text-align: center;
+}
+.cc-find button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  border: 0;
+  background: transparent;
+  color: #8888a0;
+  cursor: pointer;
+}
+.cc-find button:hover { background: #1c1c2e; color: #e4e4ec; }
+.cc-find button:disabled { opacity: 0.3; cursor: default; }

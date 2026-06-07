@@ -7,6 +7,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { AgentFile } from '../../services/fileTransfer'
 import { getViewUrl, getDownloadUrl, formatSize, getFileTypeGroup, saveFileContent } from '../../services/fileTransfer'
+import { CodeEditor } from './CodeEditor'
 
 // File groups whose text content can be edited in place.
 const EDITABLE_GROUPS = new Set(['markdown', 'code', 'data', 'text', 'html'])
@@ -249,14 +250,14 @@ export function FileViewer({ file, host, port, auth, startInEdit, onClose, onPre
                   <AlertCircle className="h-3.5 w-3.5 shrink-0" /> {saveError}
                 </div>
               )}
-              <textarea
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                spellCheck={false}
-                autoFocus
-                className="flex-1 w-full resize-none bg-zinc-950 px-4 py-3 font-mono text-xs leading-relaxed text-zinc-200 focus:outline-none"
-                placeholder="Empty file"
-              />
+              <div className="flex-1 min-h-0">
+                <CodeEditor
+                  value={draft}
+                  onChange={setDraft}
+                  extension={file.extension}
+                  storageKey={file.physical}
+                />
+              </div>
             </div>
           ) : (<>
           {loading && (
