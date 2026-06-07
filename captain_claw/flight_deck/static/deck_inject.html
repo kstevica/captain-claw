@@ -1,0 +1,213 @@
+<!-- ───────────────────────────────────────────────────────────────────
+  Captain Claw — slide-deck engine + remote-control receiver.
+
+  Spliced into an agent's HTML deck by /deck/view before </body>. Because
+  /deck/view is served by the SAME origin as the channel bus, the WebSocket
+  below connects to /glasses/ws directly — no cross-origin / iframe limits.
+
+  The agent only has to mark each slide. Recognised, in priority order:
+    1. elements with class "slide"
+    2. <section> children of <main> or <body>
+    3. any <section> in the document
+  Everything else (one-at-a-time display, transitions, keyboard, click
+  zones, remote sync, position badge) is handled here so the agent's deck
+  stays trivial.
+
+  Control sources, all converging on the same engine:
+    • Local keyboard  → ←/→, PgUp/PgDn, Space, Home/End, F (fullscreen)
+    • Click zones     → right 25% = next, left 25% = prev
+    • Remote (bus)    → /deck/control pushes {type:"control", action:…}
+                        from /deck/remote (phone/glasses) or WhatsApp /slide
+  A live link to the bus is shown by the dot top-left (green = connected).
+──────────────────────────────────────────────────────────────────── -->
+<style id="__deck_style">
+  html, body { margin: 0; height: 100%; }
+  body.__deck-on { overflow: hidden; background: #000; }
+  body.__deck-on .__deck-slide {
+    position: fixed; inset: 0;
+    opacity: 0; visibility: hidden; pointer-events: none;
+    overflow: auto;
+    transition: opacity .35s ease;
+  }
+  body.__deck-on .__deck-slide.__deck-current {
+    opacity: 1; visibility: visible; pointer-events: auto;
+  }
+  #__deck_badge {
+    position: fixed; bottom: 14px; right: 16px; z-index: 2147483647;
+    font: 600 13px/1 ui-sans-serif, system-ui, -apple-system, sans-serif;
+    color: #fff; background: rgba(0,0,0,.55); padding: 6px 11px;
+    border-radius: 999px; letter-spacing: .04em; pointer-events: none;
+    backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+  }
+  #__deck_dot {
+    position: fixed; top: 12px; left: 12px; z-index: 2147483647;
+    width: 9px; height: 9px; border-radius: 50%;
+    background: #e74c3c; transition: background .3s; pointer-events: none;
+  }
+  #__deck_dot.__on { background: #2ecc71; }
+</style>
+<div id="__deck_dot" title="remote link"></div>
+<div id="__deck_badge">1 / 1</div>
+<script>
+(function () {
+  "use strict";
+
+  var channel = window.__DECK_CHANNEL__ || "";
+  var slides = [];
+  var idx = 0;
+
+  function findSlides() {
+    var s = [].slice.call(document.querySelectorAll(".slide"));
+    if (s.length) return s;
+    // Only treat <section>s as slides when they are TOP-LEVEL (direct children
+    // of <body> or <main>) — the deck-template shape. Nested <section>s inside
+    // a wrapper (reports, articles) are document structure, NOT slides, and
+    // must render normally. This is what keeps "Deck view" on a normal page
+    // from chopping it into broken slides.
+    var scope = document.querySelector("main") || document.body;
+    return [].slice.call(scope.children).filter(function (el) {
+      return el.tagName === "SECTION";
+    });
+  }
+
+  function clamp(i) { return Math.max(0, Math.min(slides.length - 1, i)); }
+
+  function render() {
+    for (var i = 0; i < slides.length; i++) {
+      slides[i].classList.toggle("__deck-current", i === idx);
+    }
+    var badge = document.getElementById("__deck_badge");
+    if (badge) badge.textContent = (idx + 1) + " / " + slides.length;
+    if (slides[idx]) slides[idx].scrollTop = 0;
+    reportState();
+  }
+
+  function goto(i) { idx = clamp(i); render(); }
+  function next() { if (idx < slides.length - 1) { idx++; render(); } }
+  function prev() { if (idx > 0) { idx--; render(); } }
+
+  // Exposed so a custom deck can drive the engine and so it's debuggable.
+  window.__deck = {
+    next: next, prev: prev, goto: goto, first: function () { goto(0); },
+    last: function () { goto(slides.length - 1); },
+    get index() { return idx; }, get total() { return slides.length; }
+  };
+
+  function init() {
+    slides = findSlides();
+    if (!slides.length) {
+      // Not a recognisable deck — don't hijack the document. Remote calls
+      // become no-ops; badge/dot hide so we leave no trace.
+      hide("__deck_badge"); hide("__deck_dot");
+      return;
+    }
+    slides.forEach(function (el) { el.classList.add("__deck-slide"); });
+    hideNonSlideChrome();
+    document.body.classList.add("__deck-on");
+    goto(0);
+  }
+  function hide(id) { var e = document.getElementById(id); if (e) e.style.display = "none"; }
+
+  // Hide the deck's OWN built-in chrome (its bottom nav bar, dot pager, footer)
+  // so the big screen shows slides only — navigation is handled by this engine
+  // plus the remotes. Anything that is a slide, an ancestor/container of a
+  // slide, or our own badge/dot is kept; every other stray element is hidden.
+  function hideNonSlideChrome() {
+    walk(document.body);
+    function walk(parent) {
+      var kids = [].slice.call(parent.children);
+      for (var i = 0; i < kids.length; i++) {
+        var el = kids[i];
+        if (el.classList && el.classList.contains("__deck-slide")) continue;
+        if (el.id && el.id.indexOf("__deck") === 0) continue;
+        var tag = el.tagName;
+        if (tag === "SCRIPT" || tag === "STYLE" || tag === "LINK") continue;
+        if (el.querySelector && el.querySelector(".__deck-slide")) { walk(el); continue; }
+        el.style.display = "none";
+      }
+    }
+  }
+
+  // ── Local controls — always on, work with zero network ───────────────
+  document.addEventListener("keydown", function (e) {
+    switch (e.key) {
+      case "ArrowRight": case "PageDown": case " ": next(); e.preventDefault(); break;
+      case "ArrowLeft": case "PageUp": prev(); e.preventDefault(); break;
+      case "Home": goto(0); e.preventDefault(); break;
+      case "End": goto(slides.length - 1); e.preventDefault(); break;
+      case "f": case "F":
+        if (document.fullscreenElement) { document.exitFullscreen(); }
+        else if (document.documentElement.requestFullscreen) { document.documentElement.requestFullscreen(); }
+        break;
+    }
+  });
+  document.addEventListener("click", function (e) {
+    if (e.target.closest && e.target.closest("a,button,input,textarea,select,[data-no-advance]")) return;
+    var w = window.innerWidth;
+    if (e.clientX > w * 0.75) next();
+    else if (e.clientX < w * 0.25) prev();
+  });
+
+  // ── Remote over the channel bus ──────────────────────────────────────
+  var ws = null, retry = 0;
+  function setDot(on) {
+    var d = document.getElementById("__deck_dot");
+    if (d) d.classList.toggle("__on", !!on);
+  }
+  function connect() {
+    if (!channel) { setDot(false); return; }
+    var proto = location.protocol === "https:" ? "wss" : "ws";
+    try {
+      ws = new WebSocket(proto + "://" + location.host +
+        "/glasses/ws?c=" + encodeURIComponent(channel) + "&role=deck");
+    } catch (_) { schedule(); return; }
+    ws.onopen = function () { retry = 0; setDot(true); reportState(); };
+    ws.onclose = function () { setDot(false); schedule(); };
+    ws.onerror = function () { try { ws.close(); } catch (_) {} };
+    ws.onmessage = function (ev) {
+      var m; try { m = JSON.parse(ev.data); } catch (_) { return; }
+      // A new deck was picked elsewhere (e.g. on the glasses) — follow it by
+      // navigating this big-screen surface to that file. Ignore our own file.
+      if (m.type === "deck_open") {
+        var p = m.path || "";
+        if (p && p !== (window.__DECK_PATH__ || "")) {
+          location.href = "/deck/view?c=" + encodeURIComponent(channel) +
+            "&path=" + encodeURIComponent(p);
+        }
+        return;
+      }
+      if (m.type !== "control") return;
+      if (m.action === "next") next();
+      else if (m.action === "prev") prev();
+      else if (m.action === "first") goto(0);
+      else if (m.action === "last") goto(slides.length - 1);
+      else if (m.action === "goto" && typeof m.index === "number") goto(m.index);
+    };
+  }
+  function schedule() {
+    retry = Math.min(retry + 1, 10);
+    setTimeout(connect, 400 * retry);
+  }
+
+  // Report position so the remote can show "3 / 10". Debounced; best-effort.
+  var stateT = null;
+  function reportState() {
+    if (!channel) return;
+    clearTimeout(stateT);
+    stateT = setTimeout(function () {
+      try {
+        fetch("/deck/state", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ channel: channel, index: idx, total: slides.length })
+        });
+      } catch (_) {}
+    }, 120);
+  }
+
+  function boot() { init(); connect(); }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot);
+  } else { boot(); }
+})();
+</script>

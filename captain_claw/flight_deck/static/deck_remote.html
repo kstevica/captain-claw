@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>Deck Remote</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      background: #07090d; color: #e8eef5;
+      font: 15px/1.4 ui-sans-serif, system-ui, -apple-system, sans-serif;
+      display: flex; flex-direction: column;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+      overscroll-behavior: none; user-select: none;
+    }
+    header {
+      display: flex; align-items: center; gap: 10px;
+      padding: 14px 16px 8px;
+    }
+    #dot { width: 10px; height: 10px; border-radius: 50%; background: #e74c3c; transition: background .3s; }
+    #dot.on { background: #2ecc71; }
+    header .ch { color: #6b7886; font-size: 12px; letter-spacing: .03em; }
+    #pos {
+      margin-left: auto; font-weight: 700; font-size: 18px;
+      font-variant-numeric: tabular-nums; color: #5fe3ff;
+    }
+    main { flex: 1; display: flex; flex-direction: column; gap: 12px; padding: 8px 16px 16px; }
+    .nav { flex: 1; display: flex; gap: 12px; }
+    button.big {
+      flex: 1; border: 1px solid #1d2530; border-radius: 18px;
+      background: #11161e; color: #e8eef5;
+      font-size: 22px; font-weight: 700; letter-spacing: .02em;
+      display: flex; align-items: center; justify-content: center; gap: 10px;
+      cursor: pointer; transition: background .12s, transform .06s;
+      touch-action: manipulation;
+    }
+    button.big:active { background: #1b2430; transform: scale(.98); }
+    button.big.prev { background: #0e141c; }
+    button.big.next { background: #12303a; border-color: #1c4a5a; }
+    button.big svg { width: 34px; height: 34px; stroke: currentColor; fill: none; stroke-width: 2.5; }
+    .row { display: flex; gap: 10px; }
+    button.sm {
+      flex: 1; border: 1px solid #1d2530; border-radius: 12px;
+      background: #0e141c; color: #9fb0c0; font-size: 13px; font-weight: 600;
+      padding: 11px 0; cursor: pointer; touch-action: manipulation;
+    }
+    button.sm:active { background: #161e29; }
+    #flash {
+      position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+      background: rgba(20,28,38,.95); border: 1px solid #233040; color: #cfe;
+      padding: 8px 14px; border-radius: 999px; font-size: 13px;
+      opacity: 0; transition: opacity .25s; pointer-events: none;
+    }
+    #flash.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <header>
+    <span id="dot" title="bus link"></span>
+    <span class="ch" id="chan">—</span>
+    <span id="pos">– / –</span>
+  </header>
+  <main>
+    <div class="nav">
+      <button class="big prev" id="prev" aria-label="Previous slide">
+        <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>
+      </button>
+      <button class="big next" id="next" aria-label="Next slide">
+        <svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
+      </button>
+    </div>
+    <div class="row">
+      <button class="sm" id="first">⏮ First</button>
+      <button class="sm" id="last">Last ⏭</button>
+    </div>
+  </main>
+  <div id="flash"></div>
+
+  <script>
+    (function () {
+      "use strict";
+      var qs = new URLSearchParams(location.search);
+      var channel = qs.get("c") || "";
+      document.getElementById("chan").textContent = channel ? ("#" + channel) : "no channel (?c=…)";
+
+      var flashT = null;
+      function flash(msg) {
+        var f = document.getElementById("flash");
+        f.textContent = msg; f.classList.add("show");
+        clearTimeout(flashT); flashT = setTimeout(function () { f.classList.remove("show"); }, 900);
+      }
+
+      function send(action) {
+        if (!channel) { flash("set ?c=channel"); return; }
+        flash(action);
+        fetch("/deck/control", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ channel: channel, action: action })
+        }).catch(function () { flash("send failed"); });
+      }
+
+      document.getElementById("next").addEventListener("click", function () { send("next"); });
+      document.getElementById("prev").addEventListener("click", function () { send("prev"); });
+      document.getElementById("first").addEventListener("click", function () { send("first"); });
+      document.getElementById("last").addEventListener("click", function () { send("last"); });
+
+      // Hardware/volume keys land as keydown on some setups; mirror locally.
+      document.addEventListener("keydown", function (e) {
+        if (e.key === "ArrowRight" || e.key === "PageDown") { send("next"); }
+        else if (e.key === "ArrowLeft" || e.key === "PageUp") { send("prev"); }
+      });
+
+      // Subscribe to the bus for live position ("3 / 10") + link status.
+      var dot = document.getElementById("dot");
+      var pos = document.getElementById("pos");
+      var ws = null, retry = 0;
+      function connect() {
+        if (!channel) return;
+        var proto = location.protocol === "https:" ? "wss" : "ws";
+        try {
+          ws = new WebSocket(proto + "://" + location.host +
+            "/glasses/ws?c=" + encodeURIComponent(channel) + "&role=remote");
+        } catch (_) { schedule(); return; }
+        ws.onopen = function () { retry = 0; dot.classList.add("on"); };
+        ws.onclose = function () { dot.classList.remove("on"); schedule(); };
+        ws.onerror = function () { try { ws.close(); } catch (_) {} };
+        ws.onmessage = function (ev) {
+          var m; try { m = JSON.parse(ev.data); } catch (_) { return; }
+          if (m.type === "deck_state" && typeof m.total === "number") {
+            pos.textContent = (m.total ? (m.index + 1) : 0) + " / " + m.total;
+          }
+        };
+      }
+      function schedule() { retry = Math.min(retry + 1, 10); setTimeout(connect, 400 * retry); }
+      connect();
+    })();
+  </script>
+</body>
+</html>

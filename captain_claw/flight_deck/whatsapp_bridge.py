@@ -102,6 +102,7 @@ from captain_claw.flight_deck.glasses_bridge import (
     _check_token,
     _ensure_agent_binding,
     _get_or_create_channel,
+    broadcast_deck_control,
 )
 from captain_claw.flight_deck.meta_webhook_bridge import (
     now_iso as _now_iso,
@@ -146,6 +147,28 @@ def _channel_for_waid(waid: str) -> str:
     if env_default:
         return env_default
     return f"whatsapp:{waid}"
+
+
+# WAID → slide-deck channel for the `/slide` remote. Lets one phone drive a
+# deck shown on Flight Deck (served by /deck/view on the same channel). Falls
+# back to env DECK_DEFAULT_CHANNEL, then the user's own chat channel.
+_WAID_DECK_CHANNEL: dict[str, str] = {}
+
+
+def _deck_channel_for_waid(waid: str) -> str:
+    return (
+        _WAID_DECK_CHANNEL.get(waid)
+        or _env("DECK_DEFAULT_CHANNEL")
+        or _channel_for_waid(waid)
+    )
+
+
+# Exact phrases that drive the deck remote. Kept explicit (no bare "next") so
+# normal agent chat is never hijacked; slash forms are always unambiguous.
+_SLIDE_NEXT = {"/next", "/slide next", "next slide"}
+_SLIDE_PREV = {"/prev", "/slide prev", "/slide previous", "previous slide", "prev slide"}
+_SLIDE_FIRST = {"/slide first", "first slide"}
+_SLIDE_LAST = {"/slide last", "last slide"}
 
 
 def _default_agent() -> tuple[str, int, str]:
@@ -593,6 +616,39 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
         _MUTED_UNTIL.pop(waid, None)
         await _send_whatsapp_text(waid, "🔔 Proactive pushes resumed.")
         return
+
+    # Slide-deck remote — drives a deck shown on Flight Deck (/deck/view) over
+    # the channel bus, no agent turn. Bind the target with "/slide on <channel>".
+    low = text.lower()
+    if low.startswith("/slide on "):
+        chan = text[len("/slide on "):].strip()
+        if chan:
+            _WAID_DECK_CHANNEL[waid] = chan
+            await _send_whatsapp_text(waid, f"🎬 Slide remote → channel '{chan}'.")
+        else:
+            await _send_whatsapp_text(waid, "Usage: /slide on <channel>")
+        return
+    if low == "/slide":
+        await _send_whatsapp_text(
+            waid,
+            f"🎬 Slide remote on '{_deck_channel_for_waid(waid)}'.\n"
+            "Send: next slide · previous slide · first slide · last slide\n"
+            "Point at another deck: /slide on <channel>",
+        )
+        return
+    if low in _SLIDE_NEXT:
+        await broadcast_deck_control(_deck_channel_for_waid(waid), "next")
+        return
+    if low in _SLIDE_PREV:
+        await broadcast_deck_control(_deck_channel_for_waid(waid), "prev")
+        return
+    if low in _SLIDE_FIRST:
+        await broadcast_deck_control(_deck_channel_for_waid(waid), "first")
+        return
+    if low in _SLIDE_LAST:
+        await broadcast_deck_control(_deck_channel_for_waid(waid), "last")
+        return
+
     _face_cmd = _match_face_command(text)
     if _face_cmd is not None:
         await _handle_face_command(waid, _face_cmd)

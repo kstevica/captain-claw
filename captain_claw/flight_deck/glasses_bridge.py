@@ -725,6 +725,195 @@ async def channel_push(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True}, headers=_NO_CACHE)
 
 
+# ── Slide-deck presentation control ───────────────────────────────────
+#
+# A self-contained way to present agent-built HTML decks on Flight Deck and
+# drive them from a phone / glasses / WhatsApp:
+#
+#   /deck/view?c=<channel>&path=<file>   serve an agent .html file as a full
+#                                        page at THIS origin, with the slide
+#                                        engine + bus receiver injected
+#   /deck/remote?c=<channel>             phone/glasses remote (Prev/Next)
+#   POST /deck/control {channel,action}  push next|prev|first|last|goto
+#   POST /deck/state   {channel,index,total}  deck → bus position echo
+#
+# Because the deck page is served from the same origin as the channel bus,
+# its injected JS opens /glasses/ws directly — no cross-origin / iframe
+# limit (FileViewer's sandboxed srcDoc iframe can't reach the bus; this can).
+# Control events ride the existing bus as ``type:"control"`` / ``"deck_state"``,
+# neither of which is in the WhatsApp/Messenger forward allow-list, so they
+# never echo into a chat thread.
+
+_DECK_ACTIONS = {"next", "prev", "first", "last", "goto"}
+
+
+async def broadcast_deck_control(
+    channel: str, action: str, index: int | None = None,
+) -> None:
+    """Push one slide-control event onto a channel. Every deck subscribed
+    as ``role=deck`` advances on it. Safe to call from any bridge in-process
+    (WhatsApp ``/slide`` uses this) — it only touches the in-memory bus."""
+    ch = await _get_or_create_channel(channel)
+    payload: dict = {"type": "control", "action": action, "ts": _now_iso()}
+    if index is not None:
+        payload["index"] = int(index)
+    await _broadcast(ch, payload)
+
+
+@router.post("/deck/control")
+async def deck_control(request: Request) -> JSONResponse:
+    """External controller (remote page / WhatsApp / scheduler) → deck.
+
+    Body: ``{channel, action, index?}`` where action ∈ next|prev|first|last|goto.
+    """
+    _check_token(request)
+    body = await request.json()
+    channel = str(body.get("channel", "")).strip()
+    action = str(body.get("action", "")).strip().lower()
+    if not channel or action not in _DECK_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="channel and action (next|prev|first|last|goto) required",
+        )
+    raw_index = body.get("index")
+    index = int(raw_index) if isinstance(raw_index, (int, float)) else None
+    await broadcast_deck_control(channel, action, index)
+    return JSONResponse({"ok": True}, headers=_NO_CACHE)
+
+
+async def broadcast_deck_open(channel: str, path: str) -> None:
+    """Tell every deck surface on a channel to switch to file ``path``. The
+    big-screen ``/deck/view`` (or its waiting page) navigates itself there."""
+    ch = await _get_or_create_channel(channel)
+    await _broadcast(ch, {"type": "deck_open", "path": path, "ts": _now_iso()})
+
+
+@router.post("/deck/open")
+async def deck_open(request: Request) -> JSONResponse:
+    """Open a deck on the big screen from elsewhere (glasses / React file list).
+
+    Body: ``{channel, path, host?, port?, auth?}``. When host/port are given
+    the channel is bound to that agent first, so ``/deck/view`` fetches the
+    file from the right agent (needed when several agents are running)."""
+    _check_token(request)
+    body = await request.json()
+    channel = str(body.get("channel", "")).strip()
+    path = str(body.get("path", "")).strip()
+    if not channel or not path:
+        raise HTTPException(status_code=400, detail="channel and path required")
+    host = str(body.get("host", "")).strip()
+    try:
+        port = int(body.get("port", 0) or 0)
+    except Exception:
+        port = 0
+    if port:
+        ch = await _get_or_create_channel(channel)
+        await _ensure_agent_binding(
+            ch, host or "localhost", port, str(body.get("auth", "")).strip() or None,
+        )
+    await broadcast_deck_open(channel, path)
+    return JSONResponse({"ok": True}, headers=_NO_CACHE)
+
+
+@router.post("/deck/state")
+async def deck_state(request: Request) -> JSONResponse:
+    """Deck → bus position echo so remotes can show ``3 / 10``.
+
+    Broadcast as ``type:"deck_state"`` (not forwarded to chat bridges)."""
+    body = await request.json()
+    channel = str(body.get("channel", "")).strip()
+    if not channel:
+        raise HTTPException(status_code=400, detail="channel required")
+    try:
+        index = int(body.get("index", 0))
+        total = int(body.get("total", 0))
+    except Exception:
+        index, total = 0, 0
+    ch = await _get_or_create_channel(channel)
+    await _broadcast(ch, {
+        "type": "deck_state", "index": index, "total": total, "ts": _now_iso(),
+    })
+    return JSONResponse({"ok": True}, headers=_NO_CACHE)
+
+
+@router.get("/deck/view", response_class=HTMLResponse)
+async def deck_view(
+    request: Request, c: str = "", path: str = "",
+    host: str = "", port: int = 0, auth: str = "",
+) -> HTMLResponse:
+    """Serve a bound agent's HTML deck as a full page at the FD origin, with
+    the slide engine + remote receiver injected before ``</body>``.
+
+    Present this on the big screen; drive it from ``/deck/remote?c=<channel>``,
+    the glasses file list, or WhatsApp ``/slide``. Arrow keys work locally as a
+    zero-dependency fallback even if the bus is down.
+
+    With **no ``path``** it serves a waiting page that follows the first
+    ``deck_open`` on the channel — so you can open ``/deck/view?c=<channel>``
+    once on the big screen and then drive everything from the glasses.
+
+    Optional ``host``/``port``/``auth`` bind the channel to a specific agent
+    before fetching the file (the React file list passes these so the right
+    agent is used when several are running)."""
+    _check_token(request)
+    if not c:
+        raise HTTPException(status_code=400, detail="missing channel ?c=")
+    ch = await _get_or_create_channel(c)
+    if port:
+        await _ensure_agent_binding(ch, host or "localhost", int(port), auth or None)
+
+    # No deck chosen yet → waiting surface that navigates on deck_open.
+    if not path:
+        wait = (_STATIC_DIR / "deck_wait.html").read_text(encoding="utf-8")
+        wait = wait.replace(
+            "<script>",
+            "<script>window.__DECK_CHANNEL__=" + json.dumps(c) + ";</script>\n<script>",
+            1,
+        )
+        return HTMLResponse(content=wait, headers=_NO_CACHE)
+
+    resp = await _agent_get(ch, "/api/files/content", {"path": path})
+    raw = resp.body if isinstance(resp.body, (bytes, bytearray)) else bytes(resp.body or b"")
+    body_text = raw.decode("utf-8", "ignore")
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=body_text[:500] or "could not load deck file from agent",
+        )
+    # /api/files/content returns JSON {"content": "<raw file text>"} (the same
+    # shape the glasses view consumes) — NOT the file bytes. Pull the real HTML
+    # out; non-ASCII like š/ć arrive \u-escaped in the JSON and json.loads
+    # restores them. Fall back to the raw body if an agent ever serves it
+    # unwrapped.
+    try:
+        payload = json.loads(body_text)
+        html = payload.get("content", "") if isinstance(payload, dict) else body_text
+    except Exception:
+        html = body_text
+    inject = (_STATIC_DIR / "deck_inject.html").read_text(encoding="utf-8")
+    inject = (
+        "<script>window.__DECK_CHANNEL__=" + json.dumps(c) +
+        ";window.__DECK_PATH__=" + json.dumps(path) + ";</script>\n" + inject
+    )
+    # Splice before the final </body>; append if the deck omits one.
+    marker_pos = html.lower().rfind("</body>")
+    if marker_pos != -1:
+        html = html[:marker_pos] + inject + html[marker_pos:]
+    else:
+        html = html + inject
+    return HTMLResponse(content=html, headers=_NO_CACHE)
+
+
+@router.get("/deck/remote", response_class=HTMLResponse)
+async def deck_remote_page(request: Request, c: str = "") -> HTMLResponse:
+    """Phone/glasses remote: big Prev/Next, live ``N / M`` position, link dot.
+    Channel comes from ``?c=`` (read client-side)."""
+    if not c:
+        raise HTTPException(status_code=400, detail="missing channel ?c=")
+    html = (_STATIC_DIR / "deck_remote.html").read_text(encoding="utf-8")
+    return HTMLResponse(content=html, headers=_NO_CACHE)
+
+
 # ── Agent content proxy (datastore + files) ───────────────────────────
 #
 # The glasses view can show more than the live chat: the bound agent's

@@ -2,7 +2,8 @@ import { useState, useEffect, useMemo } from 'react'
 import {
   X, FileText, Send, Loader2, Check, AlertCircle, FolderOpen, RefreshCw,
   Download, Eye, Search, ChevronDown, ChevronRight, Image, FileCode,
-  FileSpreadsheet, Film, Music, Archive, Filter, Pin,
+  FileSpreadsheet, Film, Music, Archive, Filter, Pin, MonitorPlay,
+  Copy, ExternalLink,
 } from 'lucide-react'
 import type { AgentFile, AgentEndpoint } from '../../services/fileTransfer'
 import {
@@ -78,6 +79,10 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
   const [showFilters, setShowFilters] = useState(false)
   const [viewingFile, setViewingFile] = useState<AgentFile | null>(null)
+  // Deck-view link to open manually (popup blockers stop window.open after the
+  // channel prompt, so we surface a clickable link instead).
+  const [deckLink, setDeckLink] = useState<{ url: string; channel: string; name: string } | null>(null)
+  const [deckCopied, setDeckCopied] = useState(false)
 
   const { pin: pinFile, isPinned: isFilePinned } = usePinnedFilesStore()
   const otherAgents = allAgents.filter((a) => a.id !== agent.id)
@@ -222,6 +227,38 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
       setViewingFile(f)
     }
   }
+
+  // Open an HTML file as a controllable slide deck: a full-screen page served
+  // by the FD server with the slide engine injected, driveable from the glasses
+  // file list, /deck/remote, or WhatsApp. host/port/auth bind the channel to
+  // this agent so the right files are served.
+  //
+  // Prompt for the channel (prefilled "deck") so several independent decks can
+  // run at once — open the glasses / remote / WhatsApp on the SAME channel to
+  // control this one. Remembered per-tab so repeated opens default to the last.
+  const handleDeckView = (f: AgentFile) => {
+    // Ask for the channel, then surface a clickable link instead of calling
+    // window.open — prompt() consumes the click's user-activation, so popup
+    // blockers stop an automatic open. A link the user clicks is never blocked.
+    const last = sessionStorage.getItem('deckChannel') || 'deck'
+    const channel = window.prompt(
+      'Deck channel — open the glasses / remote / WhatsApp on this same name to control it:',
+      last,
+    )
+    if (!channel) return   // cancelled
+    const c = channel.trim() || 'deck'
+    sessionStorage.setItem('deckChannel', c)
+    const q = new URLSearchParams({
+      c,
+      path: f.physical,
+      host: agent.host,
+      port: String(agent.port),
+      auth: agent.auth || '',
+    })
+    setDeckCopied(false)
+    setDeckLink({ url: `${window.location.origin}/deck/view?${q.toString()}`, channel: c, name: f.filename })
+  }
+  const isDeckable = (f: AgentFile) => getFileTypeGroup(f) === 'html'
 
   // Navigation for the viewer: prev/next viewable file in processedFiles
   const viewableFiles = processedFiles.filter((f) => isViewable(f))
@@ -467,6 +504,15 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
                             <Eye className="h-3 w-3" />
                           </button>
                         )}
+                        {isDeckable(f) && (
+                          <button
+                            onClick={() => handleDeckView(f)}
+                            className="rounded p-1 text-zinc-600 hover:bg-zinc-800 hover:text-emerald-400"
+                            title="Deck view (present + remote control)"
+                          >
+                            <MonitorPlay className="h-3 w-3" />
+                          </button>
+                        )}
                         <button
                           onClick={() => {
                             const a = document.createElement('a')
@@ -489,6 +535,51 @@ export function FileBrowser({ agent, allAgents, onClose }: FileBrowserProps) {
             </div>
           )}
         </div>
+
+        {/* Deck-view link — click to open the deck in a new tab (popup-safe) */}
+        {deckLink && (
+          <div className="border-t border-emerald-500/20 bg-emerald-500/10 px-5 py-3">
+            <div className="flex items-center gap-2 mb-2">
+              <MonitorPlay className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+              <span className="text-xs font-medium text-emerald-300">
+                Deck ready on channel <span className="font-mono">"{deckLink.channel}"</span> — open it on the big screen:
+              </span>
+              <button
+                onClick={() => setDeckLink(null)}
+                className="ml-auto rounded p-0.5 text-zinc-500 hover:text-zinc-300"
+                title="Dismiss"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <a
+                href={deckLink.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 shrink-0"
+              >
+                <ExternalLink className="h-3 w-3" />
+                Open deck
+              </a>
+              <code className="flex-1 min-w-0 truncate rounded bg-zinc-900 px-2 py-1.5 text-[11px] font-mono text-zinc-400" title={deckLink.url}>
+                {deckLink.url}
+              </code>
+              <button
+                onClick={() => { navigator.clipboard?.writeText(deckLink.url).then(() => { setDeckCopied(true); setTimeout(() => setDeckCopied(false), 2000) }).catch(() => {}) }}
+                className="flex items-center gap-1 rounded-md bg-zinc-800 px-2.5 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-700 shrink-0"
+                title="Copy URL"
+              >
+                {deckCopied ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                {deckCopied ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+            <p className="mt-2 text-[11px] text-zinc-500">
+              Then control it from the glasses (<span className="font-mono">/glasses/view?c={deckLink.channel}</span>),
+              the remote (<span className="font-mono">/deck/remote?c={deckLink.channel}</span>), or WhatsApp.
+            </p>
+          </div>
+        )}
 
         {/* Result message */}
         {resultMessage && (

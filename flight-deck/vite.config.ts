@@ -43,6 +43,7 @@ export default defineConfig({
       // Scheduler + glasses bridge endpoints live on the FD server too.
       '/scheduler': { target: 'http://localhost:25080', changeOrigin: true },
       '/glasses': { target: 'http://localhost:25080', changeOrigin: true },
+      '/deck': { target: 'http://localhost:25080', changeOrigin: true },
     },
   },
 })

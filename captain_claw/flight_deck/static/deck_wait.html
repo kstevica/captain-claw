@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Deck — waiting</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #07090d; color: #e8eef5;
+      font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; }
+    .wrap { height: 100%; display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 18px; text-align: center; padding: 6vmin; }
+    .ring { width: 54px; height: 54px; border-radius: 50%;
+      border: 3px solid rgba(95,227,255,.18); border-top-color: #5fe3ff;
+      animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    h1 { font-size: clamp(22px, 4vmin, 40px); margin: 0; font-weight: 700; letter-spacing: -.01em; }
+    p { color: #8493a3; font-size: clamp(14px, 2.2vmin, 20px); margin: 0; max-width: 30ch; }
+    .chan { color: #5fe3ff; font-weight: 700; }
+    .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+      background: #e74c3c; vertical-align: middle; transition: background .3s; }
+    .dot.on { background: #2ecc71; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="ring"></div>
+    <h1>Ready to present</h1>
+    <p>Pick a deck on your glasses — it opens here automatically.</p>
+    <p style="font-size:13px;"><span class="dot" id="dot"></span>
+      &nbsp;channel <span class="chan" id="chan">—</span></p>
+  </div>
+  <script>
+    (function () {
+      "use strict";
+      var channel = window.__DECK_CHANNEL__ || "";
+      document.getElementById("chan").textContent = channel || "(none)";
+      var dot = document.getElementById("dot");
+      var ws = null, retry = 0;
+      function connect() {
+        if (!channel) return;
+        var proto = location.protocol === "https:" ? "wss" : "ws";
+        try {
+          ws = new WebSocket(proto + "://" + location.host +
+            "/glasses/ws?c=" + encodeURIComponent(channel) + "&role=deck");
+        } catch (_) { schedule(); return; }
+        ws.onopen = function () { retry = 0; dot.classList.add("on"); };
+        ws.onclose = function () { dot.classList.remove("on"); schedule(); };
+        ws.onerror = function () { try { ws.close(); } catch (_) {} };
+        ws.onmessage = function (ev) {
+          var m; try { m = JSON.parse(ev.data); } catch (_) { return; }
+          if (m.type === "deck_open" && m.path) {
+            location.href = "/deck/view?c=" + encodeURIComponent(channel) +
+              "&path=" + encodeURIComponent(m.path);
+          }
+        };
+      }
+      function schedule() { retry = Math.min(retry + 1, 10); setTimeout(connect, 400 * retry); }
+      connect();
+    })();
+  </script>
+</body>
+</html>

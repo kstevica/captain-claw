@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agents — Captain Claw</title>
+  <!--
+    SAMPLE DECK / TEMPLATE.
+
+    Convention: each slide is <section class="slide">…</section>. That's the
+    only requirement. Navigation, transitions, keyboard, click-zones, the
+    position badge and the phone/glasses/WhatsApp remote are all added by the
+    server when this file is opened through:
+
+        /deck/view?c=<channel>&path=<this file's path>
+
+    Open that URL on the big screen; drive it from /deck/remote?c=<channel>
+    or WhatsApp ("next slide" / "previous slide"). Arrow keys also work.
+
+    The styles below are purely cosmetic — restyle freely. Keep the
+    `.slide` class on each section and the engine does the rest.
+  -->
+  <style>
+    :root {
+      --bg: #07090d; --fg: #eaf2fb; --accent: #5fe3ff; --muted: #7d8b9c;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    .slide {
+      display: flex; flex-direction: column; justify-content: center;
+      padding: 8vmin 12vmin;
+      background:
+        radial-gradient(60vmax 60vmax at 80% -10%, rgba(95,227,255,.10), transparent 60%),
+        radial-gradient(50vmax 50vmax at -10% 110%, rgba(95,255,159,.08), transparent 60%),
+        var(--bg);
+    }
+    .slide h1 { font-size: clamp(34px, 7vmin, 84px); line-height: 1.04; margin: 0 0 .35em; letter-spacing: -.02em; }
+    .slide h2 { font-size: clamp(26px, 5vmin, 56px); margin: 0 0 .5em; letter-spacing: -.01em; }
+    .slide p  { font-size: clamp(17px, 2.6vmin, 28px); line-height: 1.5; color: #cdd9e6; max-width: 24ch; }
+    .slide .kicker { color: var(--accent); font-weight: 700; letter-spacing: .18em; text-transform: uppercase;
+      font-size: clamp(12px, 1.8vmin, 16px); margin-bottom: 1.4em; }
+    .slide ul { font-size: clamp(18px, 3vmin, 32px); line-height: 1.7; padding-left: 1.2em; max-width: 26ch; }
+    .slide ul li::marker { color: var(--accent); }
+    .slide .big { font-size: clamp(40px, 10vmin, 130px); font-weight: 800; letter-spacing: -.03em;
+      background: linear-gradient(120deg, var(--accent), #5fff9f); -webkit-background-clip: text;
+      background-clip: text; color: transparent; }
+    .slide .foot { position: absolute; bottom: 6vmin; left: 12vmin; color: var(--muted);
+      font-size: clamp(12px, 1.6vmin, 15px); letter-spacing: .04em; }
+  </style>
+</head>
+<body>
+
+  <section class="slide">
+    <div class="kicker">Captain Claw · Live</div>
+    <h1>Agents that<br>do the work.</h1>
+    <p>This deck is an agent-built HTML file, driven from my phone.</p>
+    <div class="foot">→ / Space to advance · F for fullscreen</div>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">The shift</div>
+    <h2>From apps you operate<br>to agents you delegate to.</h2>
+    <ul>
+      <li>You state the outcome</li>
+      <li>The agent picks the steps</li>
+      <li>Surfaces render the result</li>
+    </ul>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Proof, not slides</div>
+    <h2>Even this presentation<br>is the product.</h2>
+    <p>One HTML file. No PDF, no PPT. Advanced over the same channel bus that
+       runs the glasses and WhatsApp.</p>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Control plane</div>
+    <h2>Three remotes,<br>one engine.</h2>
+    <ul>
+      <li>Glasses / phone buttons</li>
+      <li>WhatsApp: "next slide"</li>
+      <li>Arrow keys — always</li>
+    </ul>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Why it matters</div>
+    <span class="big">10×</span>
+    <p>Less surface to build. The agent assembles what each moment needs.</p>
+  </section>
+
+  <section class="slide">
+    <div class="kicker">Thank you</div>
+    <h1>Let's build<br>agent-native.</h1>
+    <p>Questions → just ask the agent. Out loud.</p>
+  </section>
+
+</body>
+</html>
