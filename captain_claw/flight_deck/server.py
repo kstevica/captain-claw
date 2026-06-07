@@ -3647,6 +3647,32 @@ async def agent_file_upload(host: str, port: int, token: str = "", file: UploadF
         raise HTTPException(502, "Cannot connect to agent")
 
 
+@app.post("/fd/agent-file-save/{host}/{port}")
+async def agent_file_save(host: str, port: int, token: str = "", request: Request = None, user: dict | None = _required_user_dep):
+    """Proxy a text-file save to a CC agent (POST /api/files/content).
+
+    Body: ``{"path": "<physical>", "content": "<text>"}``. The agent applies
+    the same path-sandbox + token auth as its read endpoints."""
+    import httpx
+
+    auth = token or _resolve_agent_auth(port)
+    params = f"?token={auth}" if auth else ""
+    url = f"http://{host}:{port}/api/files/content{params}"
+    body = await request.json()
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(url, json=body)
+            if resp.status_code != 200:
+                detail = resp.text[:500] if resp.text else ""
+                raise HTTPException(resp.status_code, f"Agent save failed ({resp.status_code}): {detail}")
+            if AUTH_ENABLED and user:
+                db = app.state.fd_db
+                await db.log_usage(user["id"], "file_save", json.dumps({"path": body.get("path", ""), "agent_port": port}))
+            return resp.json()
+    except httpx.ConnectError:
+        raise HTTPException(502, "Cannot connect to agent")
+
+
 @app.get("/fd/agent-usage/{host}/{port}")
 async def agent_usage(host: str, port: int, token: str = "", period: str = "today", request: Request = None, user: dict | None = _required_user_dep):
     """Proxy /api/usage from a CC agent."""

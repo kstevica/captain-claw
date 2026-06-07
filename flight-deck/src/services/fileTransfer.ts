@@ -140,6 +140,30 @@ export async function uploadFileToAgent(
   return resp.json()
 }
 
+/** Save (overwrite) an existing text file on an agent */
+export async function saveFileContent(
+  host: string,
+  port: number,
+  auth: string,
+  path: string,
+  content: string,
+): Promise<{ ok: boolean; path: string; filename: string; size: number; modified: number }> {
+  const params = new URLSearchParams()
+  if (auth) params.set('token', auth)
+  const qs = params.toString() ? `?${params}` : ''
+  const resp = await fdFileFetch(`${BASE}/agent-file-save/${encodeURIComponent(host)}/${port}${qs}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path, content }),
+  })
+  if (!resp.ok) {
+    let detail = ''
+    try { detail = (await resp.json())?.detail || '' } catch { /* ignore */ }
+    throw new Error(detail || `Save failed: ${resp.status}`)
+  }
+  return resp.json()
+}
+
 /** Extract folder category from logical path (e.g. "downloads/file.txt" -> "downloads") */
 export function getFileCategory(file: AgentFile): string {
   const logical = file.logical || file.physical

@@ -398,6 +398,64 @@ async def get_file_content(server: WebServer, request: web.Request) -> web.Respo
     })
 
 
+async def save_file_content(server: WebServer, request: web.Request) -> web.Response:
+    """POST /api/files/content — overwrite an existing text file.
+
+    Body: ``{"path": "<physical_path>", "content": "<text>"}``. Same sandbox
+    as the GET: the path must be in the file registry or under workspace
+    saved/ output/ workflows/, and public users are limited to their own
+    session. Editing only — the file must already exist on disk (we never
+    create new paths here)."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+    physical = str(body.get("path", "")).strip()
+    if not physical:
+        return web.json_response({"error": "Missing 'path' parameter"}, status=400)
+    content = body.get("content")
+    if not isinstance(content, str):
+        return web.json_response({"error": "'content' must be a string"}, status=400)
+
+    # Public users can only write files from their own session.
+    from captain_claw.web.public_auth import get_request_session_id
+    is_public, pub_session_id = get_request_session_id(request)
+    if is_public:
+        if not pub_session_id or not _path_belongs_to_session(physical, pub_session_id):
+            return web.json_response({"error": "Access denied"}, status=403)
+
+    # Security: same gate as reads — registry OR workspace saved/output dirs.
+    if not _is_allowed_path(physical):
+        known_physicals = {f["physical"] for f in await _collect_files(server)}
+        if physical not in known_physicals:
+            return web.json_response({"error": "File not in registry"}, status=403)
+
+    if len(content.encode("utf-8")) > _MAX_TEXT_PREVIEW_BYTES:
+        return web.json_response(
+            {"error": "Content too large to save (>2 MB)"}, status=413,
+        )
+
+    p = Path(physical)
+    if not p.is_file():
+        # Editing only — refuse to create arbitrary new files via this route.
+        return web.json_response({"error": "File not found on disk"}, status=404)
+
+    try:
+        p.write_text(content, encoding="utf-8")
+        stat = p.stat()
+    except Exception as exc:
+        return web.json_response({"error": f"Write error: {exc}"}, status=500)
+
+    return web.json_response({
+        "ok": True,
+        "path": physical,
+        "filename": p.name,
+        "size": stat.st_size,
+        "modified": stat.st_mtime,
+    })
+
+
 async def download_file(server: WebServer, request: web.Request) -> web.Response:
     """GET /api/files/download?path=<physical_path> — download any registered file."""
     physical = request.query.get("path", "").strip()

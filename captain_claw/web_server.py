@@ -1139,6 +1139,10 @@ class WebServer:
         from captain_claw.web.rest_files import get_file_content
         return await get_file_content(self, request)
 
+    async def _save_file_content(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_files import save_file_content
+        return await save_file_content(self, request)
+
     async def _download_file(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_files import download_file
         return await download_file(self, request)
@@ -2426,6 +2430,7 @@ class WebServer:
         app.router.add_get("/api/files", self._list_files)
         app.router.add_get("/api/files/session/{session_id}", self._list_session_files)
         app.router.add_get("/api/files/content", self._get_file_content)
+        app.router.add_post("/api/files/content", self._save_file_content)
         app.router.add_get("/api/files/download", self._download_file)
         app.router.add_get("/api/files/view", self._view_file)
         app.router.add_post("/api/files/delete", self._delete_files)

@@ -1,12 +1,15 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
   X, Download, Loader2, AlertCircle, Maximize2, Minimize2,
-  ChevronLeft, ChevronRight, Copy, Check,
+  ChevronLeft, ChevronRight, Copy, Check, Pencil, Save,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { AgentFile } from '../../services/fileTransfer'
-import { getViewUrl, getDownloadUrl, formatSize, getFileTypeGroup } from '../../services/fileTransfer'
+import { getViewUrl, getDownloadUrl, formatSize, getFileTypeGroup, saveFileContent } from '../../services/fileTransfer'
+
+// File groups whose text content can be edited in place.
+const EDITABLE_GROUPS = new Set(['markdown', 'code', 'data', 'text', 'html'])
 
 interface FileViewerProps {
   file: AgentFile
@@ -27,8 +30,16 @@ export function FileViewer({ file, host, port, auth, onClose, onPrev, onNext, ha
   const [error, setError] = useState('')
   const [maximized, setMaximized] = useState(false)
   const [copied, setCopied] = useState(false)
+  // Edit mode
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const [savedTick, setSavedTick] = useState(false)
 
   const group = getFileTypeGroup(file)
+  const editable = content !== null && EDITABLE_GROUPS.has(group)
+  const dirty = editing && draft !== content
   const viewUrl = getViewUrl(host, port, file.physical, auth)
   const downloadUrl = getDownloadUrl(host, port, file.physical, auth)
 
@@ -38,6 +49,8 @@ export function FileViewer({ file, host, port, auth, onClose, onPrev, onNext, ha
     setError('')
     setContent(null)
     setCopied(false)
+    setEditing(false)
+    setSaveError('')
 
     if (group === 'image') {
       // Images don't need text fetch
@@ -55,12 +68,38 @@ export function FileViewer({ file, host, port, auth, onClose, onPrev, onNext, ha
       .finally(() => setLoading(false))
   }, [file.physical, viewUrl, group])
 
-  // Keyboard navigation
+  const startEdit = () => { setDraft(content ?? ''); setSaveError(''); setEditing(true) }
+  const cancelEdit = () => { setEditing(false); setSaveError('') }
+
+  const handleSave = useCallback(async () => {
+    if (saving) return
+    setSaving(true)
+    setSaveError('')
+    try {
+      await saveFileContent(host, port, auth, file.physical, draft)
+      setContent(draft)        // preview now reflects the saved content
+      setEditing(false)
+      setSavedTick(true)
+      setTimeout(() => setSavedTick(false), 2000)
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSaving(false)
+    }
+  }, [saving, host, port, auth, file.physical, draft])
+
+  // Keyboard: while editing, Esc cancels and ⌘/Ctrl+S saves (arrows type, not
+  // navigate). Otherwise Esc closes and arrows move between files.
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    if (editing) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') { e.preventDefault(); handleSave() }
+      else if (e.key === 'Escape') { e.preventDefault(); cancelEdit() }
+      return
+    }
     if (e.key === 'Escape') onClose()
     if (e.key === 'ArrowLeft' && onPrev && hasPrev) onPrev()
     if (e.key === 'ArrowRight' && onNext && hasNext) onNext()
-  }, [onClose, onPrev, onNext, hasPrev, hasNext])
+  }, [editing, handleSave, onClose, onPrev, onNext, hasPrev, hasNext])
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown)
@@ -99,7 +138,7 @@ export function FileViewer({ file, host, port, auth, onClose, onPrev, onNext, ha
               <>
                 <button
                   onClick={onPrev}
-                  disabled={!hasPrev}
+                  disabled={!hasPrev || editing}
                   className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-25 disabled:hover:bg-transparent"
                   title="Previous file (Left arrow)"
                 >
@@ -107,7 +146,7 @@ export function FileViewer({ file, host, port, auth, onClose, onPrev, onNext, ha
                 </button>
                 <button
                   onClick={onNext}
-                  disabled={!hasNext}
+                  disabled={!hasNext || editing}
                   className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-25 disabled:hover:bg-transparent"
                   title="Next file (Right arrow)"
                 >
@@ -116,6 +155,40 @@ export function FileViewer({ file, host, port, auth, onClose, onPrev, onNext, ha
                 <div className="w-px h-4 bg-zinc-800 mx-1" />
               </>
             )}
+            {/* Edit / Save / Cancel */}
+            {editing ? (
+              <>
+                <button
+                  onClick={handleSave}
+                  disabled={saving || !dirty}
+                  className="flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-600/20 disabled:opacity-40 disabled:hover:bg-transparent"
+                  title="Save (⌘/Ctrl+S)"
+                >
+                  {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                  {dirty ? 'Save' : 'Saved'}
+                </button>
+                <button
+                  onClick={cancelEdit}
+                  className="rounded px-2 py-1 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                  title="Cancel (Esc)"
+                >
+                  Cancel
+                </button>
+                <div className="w-px h-4 bg-zinc-800 mx-1" />
+              </>
+            ) : editable ? (
+              <>
+                <button
+                  onClick={startEdit}
+                  className="flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                  title="Edit file"
+                >
+                  {savedTick ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Pencil className="h-3.5 w-3.5" />}
+                  {savedTick ? 'Saved' : 'Edit'}
+                </button>
+                <div className="w-px h-4 bg-zinc-800 mx-1" />
+              </>
+            ) : null}
             {/* Copy (text content only) */}
             {content !== null && (
               <button
@@ -158,6 +231,23 @@ export function FileViewer({ file, host, port, auth, onClose, onPrev, onNext, ha
 
         {/* Content */}
         <div className="flex-1 overflow-auto">
+          {editing ? (
+            <div className="flex flex-col" style={{ height: maximized ? 'calc(95vh - 52px)' : 'calc(85vh - 52px)' }}>
+              {saveError && (
+                <div className="flex items-center gap-2 px-4 py-2 text-xs text-red-300 bg-red-500/10 border-b border-red-500/20 shrink-0">
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0" /> {saveError}
+                </div>
+              )}
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                spellCheck={false}
+                autoFocus
+                className="flex-1 w-full resize-none bg-zinc-950 px-4 py-3 font-mono text-xs leading-relaxed text-zinc-200 focus:outline-none"
+                placeholder="Empty file"
+              />
+            </div>
+          ) : (<>
           {loading && (
             <div className="flex items-center justify-center py-20">
               <Loader2 className="h-6 w-6 animate-spin text-zinc-500" />
@@ -219,6 +309,7 @@ export function FileViewer({ file, host, port, auth, onClose, onPrev, onNext, ha
               </pre>
             </div>
           )}
+          </>)}
         </div>
       </div>
     </div>
