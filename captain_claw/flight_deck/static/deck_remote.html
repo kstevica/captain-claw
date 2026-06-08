@@ -89,6 +89,10 @@
       <input type="number" id="gotoNum" inputmode="numeric" min="1" placeholder="slide #" aria-label="Go to slide number" />
       <button class="sm go" id="goto">Go →</button>
     </div>
+    <div class="row" title="Scroll the current slide / page (for tall slides or non-deck pages)">
+      <button class="sm" id="scrollUp" aria-label="Scroll up">▲ Up</button>
+      <button class="sm" id="scrollDown" aria-label="Scroll down">▼ Down</button>
+    </div>
   </main>
   <div id="flash"></div>
 
@@ -137,6 +141,20 @@
       document.getElementById("gotoNum").addEventListener("keydown", function (e) {
         if (e.key === "Enter") { e.preventDefault(); gotoSlide(); }
       });
+
+      // Vertical scroll (tall slides / non-deck pages). amount = signed fraction
+      // of the viewport; the deck engine scrolls the current slide or the page.
+      function sendScroll(amount) {
+        if (!channel) { flash("set ?c=channel"); return; }
+        flash(amount < 0 ? "scroll ↑" : "scroll ↓");
+        fetch("/deck/control", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ channel: channel, action: "scroll", amount: amount })
+        }).catch(function () { flash("send failed"); });
+      }
+      document.getElementById("scrollUp").addEventListener("click", function () { sendScroll(-0.85); });
+      document.getElementById("scrollDown").addEventListener("click", function () { sendScroll(0.85); });
 
       // Hardware/volume keys land as keydown on some setups; mirror locally.
       document.addEventListener("keydown", function (e) {

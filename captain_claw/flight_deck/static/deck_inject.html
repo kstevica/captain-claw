@@ -94,11 +94,21 @@
       if ((slides[k].textContent || "").toLowerCase().indexOf(needle) !== -1) { goto(k); return; }
     }
   }
+  // Vertical scroll by a fraction of the viewport (+ = down). Scrolls the
+  // current slide when this IS a deck (slides have overflow:auto), or the whole
+  // page when it's NOT a deck — so the remote/glasses can scroll long reports.
+  function doScroll(amt) {
+    var f = (typeof amt === "number" && isFinite(amt)) ? amt : 0.85;
+    var dy = f * window.innerHeight;
+    var el = (slides.length && slides[idx]) ? slides[idx] : null;
+    if (el && el.scrollHeight > el.clientHeight + 2) el.scrollBy({ top: dy, behavior: "smooth" });
+    else window.scrollBy({ top: dy, behavior: "smooth" });
+  }
 
   // Exposed so a custom deck can drive the engine and so it's debuggable.
   window.__deck = {
-    next: next, prev: prev, goto: goto, gotoText: gotoText, first: function () { goto(0); },
-    last: function () { goto(slides.length - 1); },
+    next: next, prev: prev, goto: goto, gotoText: gotoText, scroll: doScroll,
+    first: function () { goto(0); }, last: function () { goto(slides.length - 1); },
     get index() { return idx; }, get total() { return slides.length; }
   };
 
@@ -192,6 +202,7 @@
       else if (m.action === "last") goto(slides.length - 1);
       else if (m.action === "goto" && typeof m.index === "number") goto(m.index);
       else if (m.action === "goto_text" && m.query) gotoText(m.query);
+      else if (m.action === "scroll") doScroll(typeof m.amount === "number" ? m.amount : 0.85);
     };
   }
   function schedule() {

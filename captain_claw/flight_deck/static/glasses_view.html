@@ -1393,6 +1393,12 @@
     ws.onerror = () => {};
     ws.onmessage = (ev) => {
       let m; try { m = JSON.parse(ev.data); } catch { return; }
+      // FD deck view is the master: relay its reported position to the content
+      // view so the glasses' own deck iframe mirrors the current slide.
+      if (m && m.type === 'deck_state') {
+        try { window.dispatchEvent(new CustomEvent('__deckstate', { detail: m })); } catch (_) {}
+        return;
+      }
       push(m);
     };
   }
@@ -1819,6 +1825,19 @@
   onActivate(document.getElementById('deck-next'), () => deckStep('next'));
   onActivate(document.getElementById('deck-cast'), () => { if (filesActive) deckOpen(filesActive); });
 
+  // FD deck view is the master — when it reports a new position (deck_state,
+  // relayed from the chat socket above), mirror it in the glasses' own deck
+  // iframe so the two never drift.
+  window.addEventListener('__deckstate', (e) => {
+    const m = (e && e.detail) || {};
+    if (typeof m.index !== 'number') return;
+    try {
+      if (filesFrame && filesFrame.contentWindow) {
+        filesFrame.contentWindow.postMessage({ __deck: 'goto', index: m.index }, '*');
+      }
+    } catch (_) {}
+  });
+
   function showFilesSelect() {
     filesPaneContent.classList.remove('show');
     filesPaneSelect.classList.add('show');
@@ -1859,8 +1878,10 @@
     if (!filesContentEl.contains(document.activeElement)) return;
     const page = filesContentEl.querySelector('.record-page');
     if (!page) return;
-    page.scrollTo({
-      top: e.key === 'ArrowLeft' ? 0 : page.scrollHeight,
+    // Incremental chunk scroll (long non-deck pages AND tall slides), rather
+    // than jumping straight to top/bottom.
+    page.scrollBy({
+      top: (e.key === 'ArrowLeft' ? -1 : 1) * page.clientHeight * 0.8,
       behavior: 'smooth',
     });
     e.preventDefault();
