@@ -70,7 +70,7 @@ _CONTENT_FETCH_TOOLS: frozenset[str] = frozenset({
 # ``requires_google`` gate in the registry — so when Google OAuth is
 # disconnected they're filtered out upstream and never kept regardless.
 _ECO_CORE_TOOLS: frozenset[str] = frozenset({
-    "shell", "read", "write", "edit", "glob",
+    "shell", "read", "write", "edit", "glob", "grep",
     "web_fetch", "web_search",
     "google_mail", "google_drive", "google_calendar",
     "whatsapp_send_file", "intentions",
@@ -90,7 +90,7 @@ _ECO_CORE_TOOLS: frozenset[str] = frozenset({
 # many specialized tools.  Anything outside this set is hidden from
 # the LLM (definitions stripped) when nano mode is active.
 _NANO_TOOLS: frozenset[str] = frozenset({
-    "shell", "read", "write", "edit", "glob",
+    "shell", "read", "write", "edit", "glob", "grep",
     "web_fetch", "web_search",
     "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract",
     "datastore", "insights", "personality", "clipboard",

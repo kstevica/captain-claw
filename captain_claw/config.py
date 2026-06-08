@@ -424,6 +424,7 @@ class ToolsConfig(BaseModel):
         "read",
         "write",
         "glob",
+        "grep",
         "web_fetch",
         "web_search",
         "pdf_extract",

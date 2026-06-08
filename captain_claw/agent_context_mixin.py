@@ -2117,6 +2117,7 @@ class AgentContextMixin:
             DocxExtractTool,
             EditTool,
             GlobTool,
+            GrepTool,
             GoogleCalendarTool,
             GoogleDriveTool,
             GoogleMailTool,
@@ -2166,6 +2167,8 @@ class AgentContextMixin:
                 self.tools.register(EditTool())
             elif tool_name == "glob":
                 self.tools.register(GlobTool())
+            elif tool_name == "grep":
+                self.tools.register(GrepTool())
             elif tool_name == "web_fetch":
                 self.tools.register(WebFetchTool())
                 self.tools.register(WebGetTool())
