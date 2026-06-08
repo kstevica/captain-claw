@@ -20,6 +20,40 @@ from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
 
+
+# Phrases signalling the model emitted its REASONING / decision *about*
+# answering instead of the answer itself — a "preamble" it should continue
+# past. Real answers rarely open by narrating "the user is asking…" or stack
+# multiple of these decision statements, so detection stays high-precision.
+_PREAMBLE_META_STARTS = (
+    "the user is asking", "the user wants", "the user is requesting",
+    "the user asked", "the user's question", "the user would like",
+    "the user is looking", "the user needs",
+)
+_PREAMBLE_DECISION_MARKERS = (
+    "i can answer this", "i can answer that", "i'll answer", "i will answer",
+    "let me answer", "i can provide this from", "from my existing knowledge",
+    "without needing to do additional", "without additional research",
+    "no need to search", "don't need to search", "do not need to search",
+    "this is a straightforward knowledge question", "this is a simple question",
+    "i can help with this directly", "i can answer from my", "answer this directly",
+)
+
+
+def _looks_like_planning_preamble(text: str) -> bool:
+    """True if a short text-only response is the model's reasoning/decision
+    *about* answering rather than the answer itself (e.g. "The user is asking…
+    I can answer this from my knowledge without searching."). Conservative:
+    only a meta opener, or ≥2 decision markers in a short message."""
+    t = (text or "").strip()
+    if not t or len(t) > 700:
+        return False
+    low = t.lower()
+    if low.startswith(_PREAMBLE_META_STARTS):
+        return True
+    n = sum(1 for m in _PREAMBLE_DECISION_MARKERS if m in low)
+    return n >= 2 and len(t) < 400
+
 # Tools that bring in new external / document content and may warrant
 # deferred scale re-extraction.  Lightweight tools like datastore, glob,
 # shell, todo do NOT qualify — they return structured local data that
@@ -951,6 +985,9 @@ class AgentOrchestrationMixin:
         # already shown during the run, so we don't repeat them combined.
         _narration_streamed = False
         _tools_executed_count = 0
+        # Nudge at most once per turn when a reasoning-preamble is about to be
+        # shipped as the answer (see the no-tool finalize path below).
+        _preamble_nudged = False
 
         for iteration in range(hard_turn_iterations):
             # ── External cancellation check ───────────────────────
@@ -2118,6 +2155,31 @@ class AgentOrchestrationMixin:
                     continue
 
             # ── No tool calls — final response ────────────────────
+            # Guard: a text-only response that is just the model's reasoning /
+            # decision *about* answering (not the answer) shouldn't be shipped
+            # as the final answer — that's what leaves the user nudging "ok,
+            # answer". Nudge once to produce the real answer instead. Scoped to
+            # no-tool turns so it can't disrupt a genuine end-of-work summary.
+            if (
+                _tools_executed_count == 0
+                and not _preamble_nudged
+                and _looks_like_planning_preamble(response.content)
+            ):
+                _preamble_nudged = True
+                log.warning(
+                    "Reasoning-preamble detected as final response; nudging to answer",
+                    preview=str(response.content or "")[:160],
+                )
+                self._add_session_message(role="assistant", content=str(response.content or ""))
+                self._add_session_message(
+                    role="user",
+                    content=(
+                        "That was your reasoning, not the answer. Give the user the complete "
+                        "answer now, directly — don't describe what you're going to do."
+                    ),
+                )
+                continue
+
             # When tools were executed in previous iterations, combine
             # the intermediate narrative with the final response so the
             # user sees a complete account of what was done rather than
