@@ -838,6 +838,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       updateSession(containerId, patch)
     })
 
+    ws.on('narration', (data) => {
+      // Live between-step narration — show it in the flow as a subtle blurb
+      // while a long task runs (same as WhatsApp/glasses).
+      const text = String(data.text || '').trim()
+      if (!text) return
+      addMessage(containerId, {
+        id: nextId(),
+        role: 'system',
+        content: text,
+        timestamp: (data.timestamp as string) || new Date().toISOString(),
+        narration: true,
+      })
+    })
+
     ws.on('monitor', (data) => {
       const toolName = data.tool_name as string || ''
       const output = data.output as string || ''

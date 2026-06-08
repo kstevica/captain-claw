@@ -17,6 +17,8 @@ export interface ChatMessage {
   approval_category?: string
   approval_resolved?: boolean
   peer_name?: string
+  /** Live between-step narration blurb (rendered as a subtle system line). */
+  narration?: boolean
 }
 
 type EventHandler = (data: Record<string, unknown>) => void

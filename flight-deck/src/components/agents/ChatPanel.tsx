@@ -1200,6 +1200,15 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
   }
 
   if (message.role === 'system') {
+    // Live between-step narration blurb — subtle, in the flow.
+    if (message.narration) {
+      return (
+        <div className="mb-1.5 flex items-start gap-1.5 pl-1 pr-6 text-xs italic text-zinc-500">
+          <CircleDot className="mt-0.5 h-3 w-3 shrink-0 text-zinc-600" />
+          <span className="whitespace-pre-wrap">{message.content}</span>
+        </div>
+      )
+    }
     // Approval request with approve/deny buttons
     if (message.approval_request_id && !message.approval_resolved) {
       const respondToApproval = useChatStore.getState().respondToApproval
