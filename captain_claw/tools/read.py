@@ -14,7 +14,13 @@ class ReadTool(Tool):
     """Read file contents."""
 
     name = "read"
-    description = "Read the contents of a file."
+    description = (
+        "Read a text file. Returns the content with a `[path N chars] [lines a-b]` "
+        "header. To read just part of a large file, pass offset (1-indexed start line) "
+        "and limit (number of lines) — ALWAYS prefer this over shell `sed`/`head`/"
+        "`tail`, which bypass the size/binary guards and duplicate-read detection. "
+        "Omit offset and limit to read the whole file."
+    )
     timeout_seconds = 10.0  # local file read — 10 s is ample
     parameters = {
         "type": "object",
@@ -23,13 +29,19 @@ class ReadTool(Tool):
                 "type": "string",
                 "description": "Path to the file to read",
             },
-            "limit": {
-                "type": "number",
-                "description": "Maximum number of lines to read",
-            },
             "offset": {
                 "type": "number",
-                "description": "Line number to start reading from (1-indexed)",
+                "description": (
+                    "1-indexed line to start reading from. Combine with limit to read a "
+                    "line range instead of using shell sed/head/tail."
+                ),
+            },
+            "limit": {
+                "type": "number",
+                "description": (
+                    "Number of lines to read from offset (a slice). Example: offset=630, "
+                    "limit=41 reads lines 630–670."
+                ),
             },
         },
         "required": ["path"],
