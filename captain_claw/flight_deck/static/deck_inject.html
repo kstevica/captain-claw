@@ -85,10 +85,19 @@
   function goto(i) { idx = clamp(i); render(); }
   function next() { if (idx < slides.length - 1) { idx++; render(); } }
   function prev() { if (idx > 0) { idx--; render(); } }
+  // Jump to the first slide whose visible text contains the phrase (case-
+  // insensitive). Used by WhatsApp "go to slide with <phrase>". No match → no-op.
+  function gotoText(q) {
+    var needle = String(q || "").toLowerCase().trim();
+    if (!needle) return;
+    for (var k = 0; k < slides.length; k++) {
+      if ((slides[k].textContent || "").toLowerCase().indexOf(needle) !== -1) { goto(k); return; }
+    }
+  }
 
   // Exposed so a custom deck can drive the engine and so it's debuggable.
   window.__deck = {
-    next: next, prev: prev, goto: goto, first: function () { goto(0); },
+    next: next, prev: prev, goto: goto, gotoText: gotoText, first: function () { goto(0); },
     last: function () { goto(slides.length - 1); },
     get index() { return idx; }, get total() { return slides.length; }
   };
@@ -182,6 +191,7 @@
       else if (m.action === "first") goto(0);
       else if (m.action === "last") goto(slides.length - 1);
       else if (m.action === "goto" && typeof m.index === "number") goto(m.index);
+      else if (m.action === "goto_text" && m.query) gotoText(m.query);
     };
   }
   function schedule() {

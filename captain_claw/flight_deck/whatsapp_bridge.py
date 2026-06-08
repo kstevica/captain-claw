@@ -172,13 +172,32 @@ _SLIDE_FIRST = {"/slide first", "first slide"}
 _SLIDE_LAST = {"/slide last", "last slide"}
 
 # "go to slide 5", "go to 5", "goto 5", "slide 5", "/slide 5", "jump to slide 5",
-# "go to slide number 5", "slide #5" — trailing "."/"!"/"?" tolerated (voice
-# transcription). Captures the 1-based number; a leading keyword is required so
-# a bare number isn't treated as a slide jump.
+# "go to slide number 5", "slide #5", AND spelled-out "go to slide five" / "slide
+# one" — voice transcription (Soniox) often writes numbers as words. Trailing
+# "."/"!"/"?" tolerated. The captured token is a digit or a word; a leading
+# keyword is required so a bare number/word isn't treated as a slide jump.
 _SLIDE_GOTO_RE = re.compile(
-    r"^/?(?:go\s*to|goto|jump\s*to|slide)\s+(?:slide\s+)?(?:number\s+|no\.?\s*|#\s*)?(\d{1,3})\s*[.!?]*$",
+    r"^/?(?:go\s*to|goto|jump\s*to|slide)\s+(?:slide\s+)?(?:number\s+|no\.?\s*|#\s*)?(\d{1,3}|[a-z]+)\s*[.!?]*$",
     re.I,
 )
+
+# "go to slide with Stevica Kuharski", "go to the slide about pricing",
+# "jump to slide titled Roadmap", "find slide containing demo" — jump to the
+# slide whose text contains the phrase (handled by the deck engine).
+_SLIDE_PHRASE_RE = re.compile(
+    r"^/?(?:go\s*to|goto|jump\s*to|find|show)\s+(?:me\s+)?(?:the\s+)?slide\s+"
+    r"(?:with|about|titled?|showing|containing|mentioning|on|that\s+(?:says|mentions|has|shows|contains))\s+"
+    r"(.+?)\s*[.!?]*$",
+    re.I,
+)
+
+# Spelled-out numbers Soniox emits for small slide counts.
+_WORD_NUM = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+}
 
 _SLIDE_ARROW = {"next": "▶", "prev": "◀", "first": "⏮", "last": "⏭", "goto": "→"}
 
@@ -657,10 +676,20 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
             "Point at another deck: /slide on <channel>",
         )
         return
+    # "go to slide with <phrase>" → jump to the slide containing that text.
+    _phrase_m = _SLIDE_PHRASE_RE.match(text.strip())
+    if _phrase_m:
+        _q = _phrase_m.group(1).strip()
+        if _q:
+            pos = await step_deck_and_wait(_deck_channel_for_waid(waid), "goto_text", query=_q)
+            await _send_whatsapp_text(waid, _slide_reply("goto", pos))
+            return
+    # "go to slide N" / "go to slide five" — digit or spelled-out number.
     _goto_m = _SLIDE_GOTO_RE.match(low.strip())
     if _goto_m:
-        _n = int(_goto_m.group(1))
-        if _n >= 1:
+        _tok = _goto_m.group(1).lower()
+        _n = int(_tok) if _tok.isdigit() else _WORD_NUM.get(_tok)
+        if _n is not None and _n >= 1:
             # Slide numbers are 1-based for the user; the engine is 0-based.
             pos = await step_deck_and_wait(_deck_channel_for_waid(waid), "goto", index=_n - 1)
             await _send_whatsapp_text(waid, _slide_reply("goto", pos))

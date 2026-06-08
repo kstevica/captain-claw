@@ -1462,7 +1462,10 @@
   // After each step it fires a resize so HTML_CLAMP re-measures the new slide
   // and the outer record-page resizes to it.
   const DECK_EMBED =
-    '<style>.__de-slide:not(.__de-cur){display:none!important}<\/style>' +
+    // Hide non-current slides; and on the glasses show each slide from its TOP
+    // (override the deck's vertical centering) so tall slides aren't cut off.
+    '<style>.__de-slide:not(.__de-cur){display:none!important}' +
+    '.__de-slide.__de-cur{align-items:flex-start!important;justify-content:flex-start!important}<\/style>' +
     '<script>(function(){' +
     'function find(){var s=[].slice.call(document.querySelectorAll(".slide"));if(s.length)return s;' +
     'var sc=document.querySelector("main")||document.body;' +
@@ -1475,13 +1478,17 @@
     'if(e.querySelector&&e.querySelector(".__de-slide")){chrome(e);return;}' +
     'e.style.display="none";});}chrome(document.body);' +
     'function show(){for(var k=0;k<sl.length;k++)sl[k].classList.toggle("__de-cur",k===i);' +
+    'try{window.scrollTo(0,0);if(sl[i])sl[i].scrollTop=0;parent.postMessage({__deckTop:1},"*");}catch(_){}' +
     'try{window.dispatchEvent(new Event("resize"));}catch(_){}}' +
     'function go(n){i=Math.max(0,Math.min(sl.length-1,n));show();}' +
+    'function goText(q){q=(""+q).toLowerCase();for(var k=0;k<sl.length;k++){' +
+    'if((sl[k].textContent||"").toLowerCase().indexOf(q)!==-1){go(k);return;}}}' +
     'show();' +
     'window.addEventListener("message",function(e){var d=e&&e.data;if(!d||!d.__deck)return;' +
     'if(d.__deck==="next")go(i+1);else if(d.__deck==="prev")go(i-1);' +
     'else if(d.__deck==="first")go(0);else if(d.__deck==="last")go(sl.length-1);' +
-    'else if(d.__deck==="goto")go(d.index|0);});' +
+    'else if(d.__deck==="goto")go(d.index|0);' +
+    'else if(d.__deck==="goto_text"&&d.query)goText(d.query);});' +
     'document.addEventListener("keydown",function(e){' +
     'if(e.key==="ArrowRight")go(i+1);else if(e.key==="ArrowLeft")go(i-1);});' +
     '})();<\/script>';
@@ -1829,9 +1836,17 @@
   // so the document flows into the scrollable view (the outer .record-page
   // scrolls) instead of scrolling inside a fixed-height frame.
   window.addEventListener('message', (e) => {
-    const h = e && e.data && e.data.__glassesFrameHeight;
-    if (typeof h === 'number' && h > 0 && filesFrame) {
-      filesFrame.style.height = h + 'px';
+    const d = e && e.data;
+    if (!d) return;
+    if (typeof d.__glassesFrameHeight === 'number' && d.__glassesFrameHeight > 0 && filesFrame) {
+      filesFrame.style.height = d.__glassesFrameHeight + 'px';
+    }
+    // A slide changed in the embedded deck — scroll the outer view back to the
+    // top so the new slide shows from its top (not wherever we last scrolled).
+    if (d.__deckTop) {
+      const page = filesContentEl.querySelector('.record-page');
+      if (page) page.scrollTo({ top: 0 });
+      filesContentEl.scrollTop = 0;
     }
   });
 

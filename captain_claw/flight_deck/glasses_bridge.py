@@ -768,19 +768,28 @@ async def channel_push(request: Request) -> JSONResponse:
 # neither of which is in the WhatsApp/Messenger forward allow-list, so they
 # never echo into a chat thread.
 
-_DECK_ACTIONS = {"next", "prev", "first", "last", "goto"}
+_DECK_ACTIONS = {"next", "prev", "first", "last", "goto", "goto_text", "scroll"}
 
 
 async def broadcast_deck_control(
     channel: str, action: str, index: int | None = None,
+    query: str | None = None, amount: float | None = None,
 ) -> None:
     """Push one slide-control event onto a channel. Every deck subscribed
     as ``role=deck`` advances on it. Safe to call from any bridge in-process
-    (WhatsApp ``/slide`` uses this) — it only touches the in-memory bus."""
+    (WhatsApp ``/slide`` uses this) — it only touches the in-memory bus.
+
+    ``index`` is for ``goto``; ``query`` is for ``goto_text`` (jump to the
+    slide whose text contains the phrase); ``amount`` is for ``scroll`` (a
+    signed fraction of the viewport, + = down)."""
     ch = await _get_or_create_channel(channel)
     payload: dict = {"type": "control", "action": action, "ts": _now_iso()}
     if index is not None:
         payload["index"] = int(index)
+    if query:
+        payload["query"] = str(query)
+    if amount is not None:
+        payload["amount"] = float(amount)
     await _broadcast(ch, payload)
 
 
@@ -801,7 +810,10 @@ async def deck_control(request: Request) -> JSONResponse:
         )
     raw_index = body.get("index")
     index = int(raw_index) if isinstance(raw_index, (int, float)) else None
-    await broadcast_deck_control(channel, action, index)
+    raw_amount = body.get("amount")
+    amount = float(raw_amount) if isinstance(raw_amount, (int, float)) else None
+    query = str(body.get("query") or "").strip() or None
+    await broadcast_deck_control(channel, action, index, query=query, amount=amount)
     return JSONResponse({"ok": True}, headers=_NO_CACHE)
 
 
@@ -867,20 +879,23 @@ async def deck_state(request: Request) -> JSONResponse:
 
 async def step_deck_and_wait(
     channel: str, action: str, timeout: float = 1.2, index: int | None = None,
+    query: str | None = None,
 ) -> tuple[int, int] | None:
     """Broadcast a slide-control action, then wait for the deck to report its
     new position via /deck/state. Returns ``(index0, total)`` (index 0-based),
     or ``None`` when no deck has ever reported on this channel.
 
-    ``index`` (0-based) is only used by the ``goto`` action.
+    ``index`` (0-based) is for ``goto``; ``query`` is for ``goto_text`` (jump
+    to the slide whose text contains the phrase).
 
     If the action doesn't change the slide (e.g. ``next`` on the last slide,
-    or ``goto`` the current slide), no new report arrives — we time out and
-    return the last known position, so the caller still gets the slide number."""
+    ``goto`` the current slide, or ``goto_text`` with no match), no new report
+    arrives — we time out and return the last known position, so the caller
+    still gets the slide number."""
     ch = await _get_or_create_channel(channel)
     async with ch.deck_state_cond:
         start_seq = ch.deck_state_seq
-    await broadcast_deck_control(channel, action, index)
+    await broadcast_deck_control(channel, action, index, query=query)
     try:
         async with ch.deck_state_cond:
             await asyncio.wait_for(
