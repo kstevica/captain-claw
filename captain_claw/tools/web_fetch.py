@@ -115,7 +115,7 @@ _LOAD_MORE_SELECTORS = [
 ]
 
 
-async def _deep_fetch(url: str, max_scrolls: int = 20, scroll_pause: float = 1.0) -> str:
+async def _deep_fetch(url: str, max_scrolls: int = 20, scroll_pause: float = 1.0, max_seconds: float = 22.0) -> str:
     """Use Playwright to fetch a page with full JS rendering, auto-scroll, and load-more clicking.
 
     Returns the final page HTML after all content has been loaded.
@@ -133,12 +133,22 @@ async def _deep_fetch(url: str, max_scrolls: int = 20, scroll_pause: float = 1.0
             user_agent="Captain Claw/0.1.0 (Web Fetch Tool)",
             viewport={"width": 1280, "height": 800},
         )
-        await page.goto(url, wait_until="networkidle", timeout=30000)
+        # domcontentloaded fires when the HTML is parsed — reliable. networkidle
+        # never settles on ad/tracker-heavy pages (a big chunk of the real web),
+        # so it just burns the time budget and times out with nothing. Cap total
+        # work with a deadline and return whatever has rendered on timeout.
+        deadline = asyncio.get_running_loop().time() + max_seconds
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=min(20000, int(max_seconds * 1000)))
+        except Exception as exc:
+            log.debug("deep_fetch: goto did not fully settle for %s (%s); using partial content", url, exc)
 
         prev_height = 0
         stable_rounds = 0
 
         for _ in range(max_scrolls):
+            if asyncio.get_running_loop().time() >= deadline:
+                break
             # Try clicking a "load more" button first.
             clicked = False
             for selector in _LOAD_MORE_SELECTORS:

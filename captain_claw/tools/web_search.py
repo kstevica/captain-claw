@@ -12,6 +12,17 @@ from captain_claw.tools.registry import Tool, ToolResult
 
 log = get_logger(__name__)
 
+# Brave Search rejects the whole request (HTTP 422) if `country` isn't one of
+# its supported codes — e.g. "HR" (Croatia) is NOT supported, which silently
+# breaks every regional query. Validate against this set and drop anything else
+# (search globally) instead of forwarding an invalid value.
+_BRAVE_COUNTRIES = frozenset({
+    "ALL", "AR", "AU", "AT", "BE", "BR", "CA", "CL", "DK", "FI", "FR", "DE",
+    "GR", "HK", "IN", "ID", "IT", "JP", "KR", "MY", "MX", "NL", "NZ", "NO",
+    "CN", "PL", "PT", "PH", "RU", "SA", "ZA", "ES", "SE", "CH", "TW", "TR",
+    "GB", "US",
+})
+
 
 class WebSearchTool(Tool):
     """Search the web using Brave Search API or Tavily."""
@@ -35,7 +46,12 @@ class WebSearchTool(Tool):
             },
             "country": {
                 "type": "string",
-                "description": "Country code for regional ranking (example: US, HR)",
+                "description": (
+                    "Optional 2-letter country for regional ranking. Brave supports a "
+                    "limited set (US, GB, DE, FR, IT, ES, etc.); unsupported codes (e.g. HR) "
+                    "are ignored. For local results, prefer search_lang (e.g. 'hr') and "
+                    "query terms instead."
+                ),
             },
             "search_lang": {
                 "type": "string",
@@ -128,7 +144,13 @@ class WebSearchTool(Tool):
             "safesearch": safe_value,
         }
         if country.strip():
-            params["country"] = country.strip()
+            _cc = country.strip().upper()
+            if _cc in _BRAVE_COUNTRIES:
+                params["country"] = _cc
+            else:
+                # Unsupported by Brave (e.g. HR) — drop it and search globally
+                # rather than 422 the whole request.
+                log.debug("web_search: dropping unsupported Brave country %r", country.strip())
         if search_lang.strip():
             params["search_lang"] = search_lang.strip()
         if freshness.strip():
