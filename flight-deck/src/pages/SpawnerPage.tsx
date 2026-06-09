@@ -100,6 +100,18 @@ const ALL_TOOLS = [
   'botport',
 ]
 
+// Local Flight Deck URL — this page is served by FD, so its origin gives the
+// current port (25080 in the desktop app, or whatever FD is bound to). Spawned
+// agents use FD_URL to call back into Flight Deck (port-drift announce, fleet
+// notify, MCP, etc.). Prefilled on the form so it's visible and editable.
+function localFdUrl(): string {
+  try {
+    return `http://localhost:${window.location.port || '25080'}`
+  } catch {
+    return 'http://localhost:25080'
+  }
+}
+
 const defaultConfig: AgentConfig = {
   name: '',
   description: '',
@@ -135,7 +147,7 @@ const defaultConfig: AgentConfig = {
   networkMode: 'host',
   restartPolicy: 'unless-stopped',
   extraVolumes: [],
-  envVars: [],
+  envVars: [{ key: 'FD_URL', value: localFdUrl() }],
 }
 
 function loadPresets(): SavedPreset[] {

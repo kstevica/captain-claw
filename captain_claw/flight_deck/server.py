@@ -408,6 +408,21 @@ def _stop_all_processes():
     _processes.clear()
 
 
+def _resolve_cc_web_bin() -> str:
+    """Resolve the ``captain-claw-web`` executable.
+
+    In a PyInstaller standalone build the binary lives next to this process's
+    executable (``sys._MEIPASS``'s parent) and is NOT on PATH, so a bare
+    ``"captain-claw-web"`` lookup fails with FileNotFoundError. Resolve the
+    bundled path when frozen; fall back to PATH for pip/dev installs.
+    """
+    if getattr(sys, "_MEIPASS", None):
+        bundled = Path(sys._MEIPASS).parent / "captain-claw-web"
+        if bundled.exists():
+            return str(bundled)
+    return "captain-claw-web"
+
+
 def _start_registered_process(slug: str, entry: dict) -> bool:
     """Start a single process agent from its registry entry. Returns True on success."""
     agent_dir = DATA_DIR / slug
@@ -453,7 +468,7 @@ def _start_registered_process(slug: str, entry: dict) -> bool:
     try:
         log_fh = open(log_file, "a")
         proc = subprocess.Popen(
-            ["captain-claw-web", "--port", str(web_port)],
+            [_resolve_cc_web_bin(), "--port", str(web_port)],
             cwd=str(agent_dir),
             env=environment,
             stdout=log_fh,
@@ -463,7 +478,8 @@ def _start_registered_process(slug: str, entry: dict) -> bool:
         _processes[slug] = proc
         entry["pid"] = proc.pid
         return True
-    except Exception:
+    except Exception as exc:
+        log.error("Failed to start process agent", slug=slug, error=str(exc))
         return False
 
 
@@ -4549,12 +4565,7 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     log_fh = open(log_file, "a")
 
     # Resolve captain-claw-web binary: bundled (PyInstaller) or PATH
-    cc_web_bin = "captain-claw-web"
-    if getattr(sys, "_MEIPASS", None):
-        # In standalone build, the binary is next to this executable
-        bundled = Path(sys._MEIPASS).parent / "captain-claw-web"
-        if bundled.exists():
-            cc_web_bin = str(bundled)
+    cc_web_bin = _resolve_cc_web_bin()
 
     # IMPORTANT: write the registry entry BEFORE we Popen the child. The
     # child can bind, drift to a fallback port, and POST to /announce-port
