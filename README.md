@@ -260,13 +260,17 @@ captain-claw-web                         # http://127.0.0.1:23080
 ```
 
 ```bash
-captain-claw-web          # Web UI (default)
+flight-deck               # Flight Deck multi-agent dashboard  (alias of captain-claw-fd)
+captain-claw-fd           # Flight Deck multi-agent dashboard
+captain-claw-agent        # Agent web server                   (alias of captain-claw-web)
+captain-claw-web          # Agent web server
 captain-claw              # Interactive terminal
 captain-claw --tui        # Terminal UI
-captain-claw-fd           # Flight Deck multi-agent dashboard
 captain-claw-mcp          # MCP server for Claude Desktop
 botport                   # Agent-to-agent routing hub
 ```
+
+`flight-deck` and `captain-claw-agent` are friendly aliases added in 0.5.3 — `flight-deck` launches the dashboard, `captain-claw-agent` runs a single agent's web server. (Editable installs: run `pip install -e .` once so the new entry points are generated.)
 
 First run starts onboarding automatically. For Ollama, no key needed — set `provider: ollama` in `config.yaml`.
 

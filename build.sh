@@ -98,7 +98,7 @@ fi
 
 # Check executables
 OK=true
-for name in captain-claw captain-claw-web captain-claw-orchestrate captain-claw-fd; do
+for name in captain-claw captain-claw-web captain-claw-agent captain-claw-orchestrate captain-claw-fd flight-deck; do
     if [[ -f "$DIST_DIR/$name" ]] || [[ -f "$DIST_DIR/$name.exe" ]]; then
         echo "  ✓ $name"
     else
@@ -172,7 +172,9 @@ fi
 echo ""
 echo "Build complete! Binaries are in dist/captain-claw/"
 echo ""
-echo "  dist/captain-claw/captain-claw            # CLI + Web UI"
-echo "  dist/captain-claw/captain-claw-web         # Web UI only"
+echo "  dist/captain-claw/captain-claw            # Terminal agent (CLI)"
+echo "  dist/captain-claw/captain-claw-web         # Agent web server"
+echo "  dist/captain-claw/captain-claw-agent       # Agent web server (alias)"
 echo "  dist/captain-claw/captain-claw-orchestrate  # Headless orchestrator"
 echo "  dist/captain-claw/captain-claw-fd           # Flight Deck server"
+echo "  dist/captain-claw/flight-deck               # Flight Deck server (alias)"

@@ -174,9 +174,18 @@ pip install -e ".[dev]"
 | `captain-claw --tui` | Start with terminal UI |
 | `captain-claw --port <PORT>` | Override web server port |
 | `captain-claw --onboarding` | Re-run first-time setup wizard |
-| `captain-claw-web` | Web UI only (standalone entry point) |
+| `captain-claw-web` | Agent web server (standalone entry point) |
+| `captain-claw-agent` | Agent web server — **alias of `captain-claw-web`** (added in 0.5.3) |
+| `captain-claw-fd` | Flight Deck multi-agent dashboard |
+| `flight-deck` | Flight Deck — **alias of `captain-claw-fd`** (added in 0.5.3) |
 | `captain-claw-orchestrate` | Headless orchestrator for cron jobs and scripting |
 | `botport` | BotPort agent-to-agent routing hub |
+
+> **Note:** `captain-claw` is unchanged (the interactive terminal agent). The
+> `flight-deck` and `captain-claw-agent` aliases are friendlier names for the
+> dashboard and the agent web server. On an **editable/pip install**, reinstall
+> once (`pip install -e .` / `uv pip install -e .`) so pip generates the new
+> entry-point launchers; the standalone build ships them as binaries.
 
 If the configured port is busy, Captain Claw automatically tries the next available port (up to 10 attempts).
 
@@ -3910,11 +3919,16 @@ Flight Deck is a management dashboard for running multiple Captain Claw agents. 
 ### Starting
 
 ```bash
+flight-deck                        # default: http://0.0.0.0:25080  (alias of captain-claw-fd)
 captain-claw-fd                    # default: http://0.0.0.0:25080
-captain-claw-fd --port 8080        # custom port
-captain-claw-fd --dev              # API-only mode (use with Vite dev server)
+flight-deck --port 8080            # custom port
+flight-deck --dev                  # API-only mode (use with Vite dev server)
 python -m captain_claw.flight_deck # alternative
 ```
+
+`flight-deck` (added in 0.5.3) is a friendly alias for `captain-claw-fd` — same
+flags, same server. On an editable install, run `pip install -e .` once so the
+launcher is generated.
 
 Flight Deck serves both the React frontend and the FastAPI backend from a single process. No separate build step is needed for production — the built frontend is bundled with the Python package.
 

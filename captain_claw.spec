@@ -1,10 +1,13 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec for Captain Claw.
 
-Builds three executables:
-  - captain-claw       (CLI + Web UI, default entry point)
-  - captain-claw-web   (Web UI only)
+Builds these executables:
+  - captain-claw         (terminal agent, default entry point)
+  - captain-claw-web     (agent web server)
+  - captain-claw-agent   (alias of captain-claw-web)
   - captain-claw-orchestrate (headless orchestrator)
+  - captain-claw-fd      (Flight Deck)
+  - flight-deck          (alias of captain-claw-fd)
 
 Usage:
   pyinstaller captain_claw.spec
@@ -278,6 +281,20 @@ exe_web = EXE(
     console=True,
 )
 
+# Alias of captain-claw-web — same entry point, friendlier name.
+exe_agent = EXE(
+    pyz_web,
+    a_web.scripts,
+    [],
+    exclude_binaries=True,
+    name="captain-claw-agent",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=True,
+)
+
 exe_orchestrate = EXE(
     pyz_orchestrate,
     a_orchestrate.scripts,
@@ -304,12 +321,31 @@ exe_fd = EXE(
     console=True,
 )
 
+# Alias of captain-claw-fd — same entry point, friendlier name.
+exe_flight_deck = EXE(
+    pyz_fd,
+    a_fd.scripts,
+    [],
+    exclude_binaries=True,
+    name="flight-deck",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=True,
+)
+
 # ── COLLECT into one dist folder ────────────────────────────────
+# exe_agent / exe_flight_deck reuse the captain-claw-web / captain-claw-fd
+# Analysis, so they're added as bare executables — their binaries/datas are
+# already collected from exe_web / exe_fd above.
 coll = COLLECT(
     exe_main, a_main.binaries, a_main.datas,
     exe_web, a_web.binaries, a_web.datas,
+    exe_agent,
     exe_orchestrate, a_orchestrate.binaries, a_orchestrate.datas,
     exe_fd, a_fd.binaries, a_fd.datas,
+    exe_flight_deck,
     strip=False,
     upx=True,
     upx_exclude=[],
