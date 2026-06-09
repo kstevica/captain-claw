@@ -4286,6 +4286,45 @@ Before spawning, Flight Deck checks if the requested port is in use. If it is, a
 
 Spawned agents are managed under `fd-data/<agent-slug>/` with isolated config, workspace, sessions, and skills directories.
 
+### Quick Free Agent (OpenRouter) — NEW in 0.5.3
+
+The Spawn Agent page has a green **Quick Free Agent** button (above the
+Docker/Process toggle). It spins up a process agent that runs entirely on
+**free OpenRouter models**, for the price of a single free API key:
+
+1. **Get a free key** — the modal links to [openrouter.ai](https://openrouter.ai)
+   and `openrouter.ai/settings/keys`. Sign-up and free models cost $0 (subject to
+   OpenRouter's free-tier rate limits).
+2. **Fetch free models** — pulls the *currently-free* models from OpenRouter's
+   public catalog (no key required just to list). The list is **filtered to
+   tool-capable models** — agents rely on tools, so models without function
+   calling are hidden.
+3. **Pick a default** — every fetched free model is written into the agent's
+   `model.allowed` list, so all of them are available to switch between at
+   runtime; the one you pick becomes the default.
+
+Free agents are tagged with a **"Freebie"** badge on their card. The underlying
+endpoints:
+
+- `GET /fd/openrouter/free-models` — public free, tool-capable model list.
+- `POST /fd/spawn-free` — spawns the process agent (provider `openrouter`,
+  base URL `https://openrouter.ai/api/v1`, key in `.env`, free models as the
+  allowed list) and marks it `freebie` in the registry.
+- `POST /fd/agent-refresh-free-models/{kind}/{id}` — re-fetches the current free
+  roster and rewrites `model.allowed` (and the default if it dropped off) across
+  **all three** config files. The agent **must be stopped** (config is read at
+  startup). Exposed as **Refresh free models** in the card's Actions menu,
+  enabled only when the agent is stopped.
+
+### Switching the active model live — NEW in 0.5.3
+
+Agent cards show an **Active model** dropdown listing the agent's *allowed*
+models (advertised over the chat channel on connect). Selecting one switches the
+running agent's model **live — no restart** — and takes effect on the next
+message. This is the same per-session selection as the `/session model <id>`
+chat command, surfaced as a control on the card. The list is populated once the
+agent is running and connected.
+
 ### Fleet Discovery & Agent Communication
 
 Agents can discover and communicate with each other through two mechanisms:

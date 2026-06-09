@@ -1,11 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Target, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser } from 'lucide-react'
+import { Box, Play, Square, RotateCcw, Trash2, ScrollText, ChevronDown, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Target, Pencil, Check, X, RefreshCw, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser, Gift } from 'lucide-react'
 import { useAgentMemoryTransfer } from '../../hooks/useAgentMemoryTransfer'
 import { ReflectionMergeModal } from './ReflectionMergeModal'
 import { PendingInsightsModal } from './PendingInsightsModal'
 import type { ContainerInfo } from '../../services/docker'
-import { getContainerLogs } from '../../services/docker'
+import { getContainerLogs, refreshFreeModels } from '../../services/docker'
 import { useContainerStore } from '../../stores/containerStore'
 import { useChatStore } from '../../stores/chatStore'
 import { EmbeddedChat } from './EmbeddedChat'
@@ -224,6 +224,11 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
     onImportStageMemory: () => memory.promptImport(true),
     onMergeReflection: () => setShowMergeReflection(true),
     onReviewPending: () => setShowPendingInsights(true),
+    freebie: container.freebie ?? false,
+    onRefreshFreeModels: () => doAction('refresh-free', async () => {
+      const r = await refreshFreeModels('docker', container.id)
+      alert(r.message || `Refreshed ${r.count} free models. Start the agent to use them.`)
+    }),
     memoryState: memory.state,
     memoryBusy: memory.busy,
     canMemory: Boolean(container.web_port),
@@ -547,6 +552,11 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
             </div>
           </div>
           <div className="flex items-center gap-1.5">
+            {container.freebie && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-400" title="Free OpenRouter agent">
+                <Gift className="h-3 w-3" /> Freebie
+              </span>
+            )}
             <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${badgeCls}`}>
               {isRunning && (
                 <span className="relative flex h-1.5 w-1.5">
@@ -910,7 +920,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   )
 }
 
-function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart, onRebuild, onClone, onRemove, onConfig, onExportMemory, onExportFullMemory, onImportMemory, onImportStageMemory, onMergeReflection, onReviewPending, memoryState, memoryBusy, canMemory, iconOnly }: {
+function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart, onRebuild, onClone, onRemove, onConfig, onExportMemory, onExportFullMemory, onImportMemory, onImportStageMemory, onMergeReflection, onReviewPending, freebie, onRefreshFreeModels, memoryState, memoryBusy, canMemory, iconOnly }: {
   isRunning: boolean
   actionLoading: string | null
   onStart: () => void
@@ -926,6 +936,8 @@ function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart,
   onImportStageMemory: () => void
   onMergeReflection: () => void
   onReviewPending: () => void
+  freebie: boolean
+  onRefreshFreeModels: () => void
   memoryState: 'idle' | 'exporting' | 'importing'
   memoryBusy: boolean
   canMemory: boolean
@@ -962,6 +974,7 @@ function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart,
     { icon: Play,      label: 'Start',   onClick: onStart,   loading: actionLoading === 'start',   accent: true, show: !isRunning },
     { icon: Square,    label: 'Stop',    onClick: onStop,    loading: actionLoading === 'stop',    show: isRunning },
     { icon: RotateCcw, label: 'Restart', onClick: onRestart, loading: actionLoading === 'restart', show: isRunning },
+    { icon: Gift,      label: isRunning ? 'Refresh free models (stop first)' : 'Refresh free models', onClick: onRefreshFreeModels, loading: actionLoading === 'refresh-free', show: freebie, disabled: isRunning },
     { icon: Settings,  label: 'Config',  onClick: onConfig },
     { icon: Download,  label: memoryState === 'exporting' ? 'Exporting…' : 'Export Memory', onClick: onExportMemory, loading: memoryState === 'exporting', show: isRunning && canMemory, disabled: memoryBusy },
     { icon: Download,  label: 'Export Memory + Semantic', onClick: onExportFullMemory, show: isRunning && canMemory, disabled: memoryBusy },

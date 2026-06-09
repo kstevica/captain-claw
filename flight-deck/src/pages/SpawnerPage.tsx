@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react'
-import { Server, Plus, Trash2, Save, FolderOpen, Copy, X, FileDown, ClipboardCopy, ChevronDown, ChevronRight, Rocket, Cpu, Menu, Key, Check } from 'lucide-react'
+import { Server, Plus, Trash2, Save, FolderOpen, Copy, X, FileDown, ClipboardCopy, ChevronDown, ChevronRight, Rocket, Cpu, Menu, Key, Check, Gift, Loader2, ExternalLink } from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
 import { useIsMobile } from '../hooks/useMediaQuery'
 import { useConnectionStore } from '../stores/connectionStore'
 import { useContainerStore } from '../stores/containerStore'
 import { useProcessStore } from '../stores/processStore'
-import { spawnAgent, spawnProcess, type SpawnConfig } from '../services/docker'
+import { useUIStore } from '../stores/uiStore'
+import { spawnAgent, spawnProcess, getOpenRouterFreeModels, spawnFreeAgent, type SpawnConfig, type OpenRouterFreeModel } from '../services/docker'
 import { fetchSettings, queueSave } from '../services/settingsSync'
 import { HelpHint } from '../components/common/HelpHint'
 
@@ -318,6 +319,7 @@ export function SpawnerPage() {
   const [showSaveDialog, setShowSaveDialog] = useState(false)
   const [showOutput, setShowOutput] = useState<'compose' | 'config' | 'env' | null>(null)
   const [spawning, setSpawning] = useState(false)
+  const [showFreeModal, setShowFreeModal] = useState(false)
   const [spawnResult, setSpawnResult] = useState<{ ok: boolean; message: string } | null>(null)
   const [providerKeys, setProviderKeys] = useState<ProviderKeys>(loadProviderKeys)
   const [keySaveFlash, setKeySaveFlash] = useState<string | null>(null)
@@ -543,8 +545,8 @@ export function SpawnerPage() {
       {/* Config form */}
       <div className="flex-1 overflow-y-auto p-4 md:p-6">
         <div className="mx-auto max-w-2xl">
-          {/* Header */}
-          <div className="mb-4 flex items-start justify-between gap-2 md:mb-6">
+          {/* Header — pinned so the Quick Free Agent / Save actions stay visible while scrolling the form */}
+          <div className="fd-spawn-header sticky top-0 z-20 -mx-4 mb-4 flex items-start justify-between gap-2 border-b border-zinc-800/60 px-4 py-3 md:-mx-6 md:mb-6 md:px-6">
             <div className="min-w-0">
               <h1 className="text-lg font-semibold truncate">
                 {activePresetId ? presets.find((p) => p.id === activePresetId)?.label || 'Edit Agent' : 'New Agent'}
@@ -564,6 +566,14 @@ export function SpawnerPage() {
               </button>
             </div>
           </div>
+
+          {/* Quick Free Agent — prominent CTA above the spawn-mode switcher */}
+          <button
+            onClick={() => setShowFreeModal(true)}
+            className="mb-4 flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-500 transition-colors"
+          >
+            <Gift className="h-4 w-4" /> Quick Free Agent — run on free OpenRouter models
+          </button>
 
           {/* Spawn mode toggle */}
           {useAuthStore.getState().dockerSpawnEnabled ? (
@@ -1042,6 +1052,8 @@ export function SpawnerPage() {
             }
             .input::placeholder { color: #52525b; }
             .input:focus { outline: none; border-color: rgba(139, 92, 246, 0.5); }
+            .fd-spawn-header { background: rgba(9, 9, 11, 0.85); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+            html.light .fd-spawn-header { background: rgba(255, 255, 255, 0.85); border-bottom-color: #e4e4e7; }
             html.light .input {
               background: #ffffff;
               border-color: #d4d4d8;
@@ -1050,6 +1062,131 @@ export function SpawnerPage() {
             html.light .input::placeholder { color: #a1a1aa; }
             html.light .input:focus { border-color: rgba(139, 92, 246, 0.5); }
           `}</style>
+        </div>
+      </div>
+
+      {showFreeModal && (
+        <FreeAgentModal
+          onClose={() => setShowFreeModal(false)}
+          onSpawned={() => { setShowFreeModal(false); fetchProcesses(); useUIStore.getState().setView('desktop') }}
+        />
+      )}
+    </div>
+  )
+}
+
+// ── Quick Free Agent (OpenRouter) modal ──
+
+function FreeAgentModal({ onClose, onSpawned }: { onClose: () => void; onSpawned: () => void }) {
+  const [name, setName] = useState('Freebie')
+  const [apiKey, setApiKey] = useState('')
+  const [models, setModels] = useState<OpenRouterFreeModel[]>([])
+  const [defaultModel, setDefaultModel] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [spawning, setSpawning] = useState(false)
+  const [error, setError] = useState('')
+
+  const fetchModels = async () => {
+    setError(''); setLoading(true)
+    try {
+      const { models: list } = await getOpenRouterFreeModels()
+      setModels(list)
+      if (list.length && !defaultModel) setDefaultModel(list[0].id)
+    } catch (e: any) {
+      setError(e?.message || 'Failed to fetch free models')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleSpawn = async () => {
+    if (!name.trim()) { setError('Give the agent a name.'); return }
+    if (!apiKey.trim()) { setError('Paste your OpenRouter API key.'); return }
+    if (!models.length || !defaultModel) { setError('Fetch the free models and pick a default first.'); return }
+    setError(''); setSpawning(true)
+    try {
+      await spawnFreeAgent({
+        name: name.trim(),
+        api_key: apiKey.trim(),
+        default_model: defaultModel,
+        models: models.map((m) => m.id),
+      })
+      setTimeout(onSpawned, 1500)
+    } catch (e: any) {
+      setError(e?.message || 'Failed to spawn agent')
+      setSpawning(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={onClose}>
+      <div className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-600/20 text-emerald-400">
+              <Gift className="h-5 w-5" />
+            </div>
+            <div>
+              <h2 className="text-lg font-semibold text-zinc-100">Quick Free Agent</h2>
+              <p className="text-xs text-zinc-500">Run on free OpenRouter models — no cost</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"><X className="h-4 w-4" /></button>
+        </div>
+
+        {/* Key instructions */}
+        <div className="mb-4 rounded-lg border border-zinc-800 bg-zinc-950/50 p-3 text-xs text-zinc-400">
+          <p className="mb-1.5 font-medium text-zinc-300">Get a free OpenRouter API key:</p>
+          <ol className="list-decimal space-y-0.5 pl-4">
+            <li>Sign up (free) at <a href="https://openrouter.ai" target="_blank" rel="noreferrer" className="text-emerald-400 hover:underline">openrouter.ai</a></li>
+            <li>Open <a href="https://openrouter.ai/settings/keys" target="_blank" rel="noreferrer" className="inline-flex items-center gap-0.5 text-emerald-400 hover:underline">Keys <ExternalLink className="h-3 w-3" /></a> and create a key</li>
+            <li>Paste it below — free models cost $0 (subject to rate limits)</li>
+          </ol>
+        </div>
+
+        <div className="space-y-3">
+          <div>
+            <label className="mb-1 block text-xs font-medium text-zinc-500">Agent Name</label>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Freebie"
+              className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-emerald-500/50 focus:outline-none" />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-medium text-zinc-500">OpenRouter API Key</label>
+            <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-or-v1-..."
+              className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-emerald-500/50 focus:outline-none" />
+          </div>
+
+          <div>
+            <div className="mb-1 flex items-center justify-between">
+              <label className="text-xs font-medium text-zinc-500">Free Models {models.length > 0 && <span className="text-zinc-600">({models.length})</span>}</label>
+              <button onClick={fetchModels} disabled={loading}
+                className="flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium text-emerald-400 hover:bg-emerald-600/10 disabled:opacity-50">
+                {loading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Rocket className="h-3 w-3" />}
+                {models.length ? 'Refresh list' : 'Fetch free models'}
+              </button>
+            </div>
+            {models.length > 0 ? (
+              <>
+                <p className="mb-1 text-[10px] text-zinc-600">Pick the default — all {models.length} are added to the agent's allowed models (switchable at runtime).</p>
+                <select value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)}
+                  className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-emerald-500/50 focus:outline-none">
+                  {models.map((m) => (
+                    <option key={m.id} value={m.id}>{m.id}{m.context_length ? `  ·  ${Math.round(m.context_length / 1000)}k ctx` : ''}</option>
+                  ))}
+                </select>
+              </>
+            ) : (
+              <p className="text-[11px] text-zinc-600">Click "Fetch free models" to load the current free list from OpenRouter (no key needed to list).</p>
+            )}
+          </div>
+
+          {error && <p className="text-xs text-red-400">{error}</p>}
+
+          <button onClick={handleSpawn} disabled={spawning}
+            className="mt-1 flex w-full items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50">
+            {spawning ? <><Loader2 className="h-4 w-4 animate-spin" /> Spawning…</> : <><Gift className="h-4 w-4" /> Spawn Free Agent</>}
+          </button>
         </div>
       </div>
     </div>

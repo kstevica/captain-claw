@@ -70,6 +70,8 @@ export interface ContainerInfo {
   ports: Record<string, unknown>
   web_port: number | null
   web_auth: string
+  /** Free-OpenRouter agent — eligible for "Refresh free models" */
+  freebie?: boolean
 }
 
 export interface ContainerDetail extends ContainerInfo {
@@ -188,7 +190,36 @@ export interface ProcessInfo {
   pid: number | null
   provider: string
   model: string
+  /** Free-OpenRouter agent — eligible for "Refresh free models" */
+  freebie?: boolean
 }
+
+// ── Free OpenRouter ("Freebie") agents ──
+
+export interface OpenRouterFreeModel {
+  id: string
+  name: string
+  context_length: number
+}
+
+export interface FreeAgentSpawnRequest {
+  name: string
+  description?: string
+  api_key: string
+  default_model: string
+  models: string[]
+  web_port?: number
+}
+
+export const getOpenRouterFreeModels = () =>
+  fdFetch<{ models: OpenRouterFreeModel[] }>('/openrouter/free-models')
+
+export const spawnFreeAgent = (body: FreeAgentSpawnRequest) =>
+  fdFetch<ProcessActionResult>('/spawn-free', { method: 'POST', body: JSON.stringify(body) })
+
+export const refreshFreeModels = (kind: 'process' | 'docker', identifier: string) =>
+  fdFetch<{ ok: boolean; updated: number; count: number; default_model: string; message: string }>(
+    `/agent-refresh-free-models/${kind}/${identifier}`, { method: 'POST' })
 
 export interface ProcessActionResult {
   ok: boolean

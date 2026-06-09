@@ -1,11 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Cpu, Play, Square, RotateCcw, Trash2, ScrollText, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Target, Pencil, Check, X, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser } from 'lucide-react'
+import { Cpu, Play, Square, RotateCcw, Trash2, ScrollText, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Target, Pencil, Check, X, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser, Gift } from 'lucide-react'
 import { useAgentMemoryTransfer } from '../../hooks/useAgentMemoryTransfer'
 import { ReflectionMergeModal } from './ReflectionMergeModal'
 import { PendingInsightsModal } from './PendingInsightsModal'
 import type { ProcessInfo } from '../../services/docker'
-import { getProcessLogs } from '../../services/docker'
+import { getProcessLogs, refreshFreeModels } from '../../services/docker'
 import { useProcessStore } from '../../stores/processStore'
 import { useChatStore } from '../../stores/chatStore'
 import { EmbeddedChat } from './EmbeddedChat'
@@ -91,6 +91,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
 }) {
   const { stopProcess, startProcess, restartProcess, removeProcess, cloneProcess, setDescription, setNameOverride, setForwardingTask, getForwardingTask, setConsultApproval, getConsultApproval, setCognitiveMode: storeCognitiveMode, getCognitiveMode, setEcoMode: storeEcoMode, getEcoMode, setNanoMode: storeNanoMode, getNanoMode } = useProcessStore()
   const openChat = useChatStore((s) => s.openChat)
+  const setModel = useChatStore((s) => s.setModel)
   const session = useChatStore((s) => s.sessions.get(`proc-${proc.slug}`))
   const busy = session?.busy ?? false
   const statusText = session?.statusText ?? ''
@@ -211,6 +212,11 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
     onImportStageMemory: () => memory.promptImport(true),
     onMergeReflection: () => setShowMergeReflection(true),
     onReviewPending: () => setShowPendingInsights(true),
+    freebie: proc.freebie ?? false,
+    onRefreshFreeModels: () => doAction('refresh-free', async () => {
+      const r = await refreshFreeModels('process', proc.slug)
+      alert(r.message || `Refreshed ${r.count} free models. Start the agent to use them.`)
+    }),
     memoryState: memory.state,
     memoryBusy: memory.busy,
   }
@@ -482,6 +488,11 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
                   )}
                   {proc.status}
                 </span>
+                {proc.freebie && (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-400" title="Free OpenRouter agent">
+                    <Gift className="h-3 w-3" /> Freebie
+                  </span>
+                )}
               </div>
             </div>
           </div>
@@ -515,6 +526,26 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
 
         {/* Model / Provider selector */}
         <ModelSelector kind="process" identifier={proc.slug} onModelChange={(p, m) => setModelOverride(proc.slug, p, m)} />
+
+        {/* Active model — live switch from the agent's allowed-models list (no restart).
+            Models arrive over the chat WS once connected. */}
+        {session?.connected && session.models.length > 0 && (
+          <div className="mb-3">
+            <label className="mb-1 block text-xs font-medium text-zinc-500">Active model</label>
+            <select
+              value={session.activeModel}
+              onChange={(e) => setModel(chatId, e.target.value)}
+              className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-emerald-500/50 focus:outline-none"
+              title="Switch the running agent's model — takes effect on the next message, no restart"
+            >
+              <option value="">Default model — {proc.model}</option>
+              {session.models.map((m) => (
+                <option key={m.selector || m.id} value={m.selector || m.id}>{m.label || m.id}</option>
+              ))}
+            </select>
+            <p className="mt-1 text-[10px] text-zinc-600">{session.models.length} allowed models · live switch, no restart</p>
+          </div>
+        )}
 
         {/* Cognitive Mode (runtime switch) */}
         <CognitiveModeSelector
@@ -715,7 +746,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   )
 }
 
-function ProcessActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart, onClone, onRemove, onConfig, onExportMemory, onExportFullMemory, onImportMemory, onImportStageMemory, onMergeReflection, onReviewPending, memoryState, memoryBusy, iconOnly }: {
+function ProcessActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart, onClone, onRemove, onConfig, onExportMemory, onExportFullMemory, onImportMemory, onImportStageMemory, onMergeReflection, onReviewPending, freebie, onRefreshFreeModels, memoryState, memoryBusy, iconOnly }: {
   isRunning: boolean
   actionLoading: string | null
   onStart: () => void
@@ -730,6 +761,8 @@ function ProcessActionsDropdown({ isRunning, actionLoading, onStart, onStop, onR
   onImportStageMemory: () => void
   onMergeReflection: () => void
   onReviewPending: () => void
+  freebie: boolean
+  onRefreshFreeModels: () => void
   memoryState: 'idle' | 'exporting' | 'importing'
   memoryBusy: boolean
   iconOnly?: boolean
@@ -765,6 +798,7 @@ function ProcessActionsDropdown({ isRunning, actionLoading, onStart, onStop, onR
     { icon: Play,      label: 'Start',   onClick: onStart,   loading: actionLoading === 'start',   accent: true, show: !isRunning },
     { icon: Square,    label: 'Stop',    onClick: onStop,    loading: actionLoading === 'stop',    show: isRunning },
     { icon: RotateCcw, label: 'Restart', onClick: onRestart, loading: actionLoading === 'restart', show: isRunning },
+    { icon: Gift,      label: isRunning ? 'Refresh free models (stop first)' : 'Refresh free models', onClick: onRefreshFreeModels, loading: actionLoading === 'refresh-free', show: freebie, disabled: isRunning },
     { icon: Settings,  label: 'Config',  onClick: onConfig },
     { icon: Download,  label: memoryState === 'exporting' ? 'Exporting…' : 'Export Memory', onClick: onExportMemory, loading: memoryState === 'exporting', show: isRunning, disabled: memoryBusy },
     { icon: Download,  label: 'Export Memory + Semantic', onClick: onExportFullMemory, show: isRunning, disabled: memoryBusy },

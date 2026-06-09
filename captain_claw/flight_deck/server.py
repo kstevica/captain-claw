@@ -754,6 +754,10 @@ class AgentConfig(BaseModel):
     max_tokens: int = 32768
     provider_api_key: str = ""
     base_url: str = ""
+    # Optional per-session selectable model list (config.model.allowed). Used by
+    # the free-OpenRouter "Freebie" spawn so all free models are available to
+    # switch between at runtime, with `model` as the default.
+    allowed_models: list[dict] = Field(default_factory=list)
 
     # BotPort
     botport_enabled: bool = True
@@ -848,6 +852,7 @@ def _build_config_yaml(c: AgentConfig) -> str:
                 if c.base_url
                 else (f"http://{dhost}:11434" if c.provider == "ollama" else "")
             ),
+            **({"allowed": c.allowed_models} if c.allowed_models else {}),
         },
         "context": {
             "max_tokens": 160000,
@@ -952,6 +957,7 @@ def _build_process_config_yaml(c: AgentConfig, agent_dir: Path) -> str:
                 if c.base_url
                 else ("http://127.0.0.1:11434" if c.provider == "ollama" else "")
             ),
+            **({"allowed": c.allowed_models} if c.allowed_models else {}),
         },
         "context": {
             "max_tokens": 160000,
@@ -4419,6 +4425,7 @@ class ProcessInfo(BaseModel):
     pid: int | None = None
     provider: str = ""
     model: str = ""
+    freebie: bool = False
 
 
 class ProcessActionResult(BaseModel):
@@ -4447,6 +4454,7 @@ async def list_processes(request: Request, user: dict | None = _required_user_de
             pid=entry.get("pid") if alive else None,
             provider=entry.get("provider", ""),
             model=entry.get("model", ""),
+            freebie=bool(entry.get("freebie", False)),
         ))
     return result
 
@@ -5214,6 +5222,204 @@ async def spawn_old_man(
         return await spawn_agent(config, request, user)
     else:
         return await spawn_process(config, request, user)
+
+
+# ── Free OpenRouter ("Freebie") agents ──
+
+OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
+
+
+def _is_free_openrouter_model(m: dict) -> bool:
+    mid = str(m.get("id", ""))
+    if mid.endswith(":free"):
+        return True
+    pricing = m.get("pricing", {}) or {}
+
+    def _zero(v) -> bool:
+        try:
+            return float(v) == 0.0
+        except Exception:
+            return False
+
+    return _zero(pricing.get("prompt")) and _zero(pricing.get("completion")) and _zero(pricing.get("request", "0"))
+
+
+async def _fetch_openrouter_free_models() -> list[dict]:
+    """Fetch OpenRouter's public model list (no key needed) and return the free
+    models that support tool calling — Captain Claw agents are tool-heavy, so a
+    model without ``tools`` in its supported parameters is useless here."""
+    import httpx
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.get(f"{OPENROUTER_API_BASE}/models")
+        r.raise_for_status()
+        data = r.json().get("data", []) or []
+    out: list[dict] = []
+    for m in data:
+        if not _is_free_openrouter_model(m):
+            continue
+        if "tools" not in (m.get("supported_parameters") or []):
+            continue
+        mid = str(m.get("id", ""))
+        ctx = m.get("context_length") or (m.get("top_provider", {}) or {}).get("context_length") or 0
+        try:
+            ctx = int(ctx or 0)
+        except Exception:
+            ctx = 0
+        out.append({"id": mid, "name": str(m.get("name", mid)), "context_length": ctx})
+    out.sort(key=lambda x: x["id"])
+    return out
+
+
+def _free_allowed_entries(model_ids: list[str]) -> list[dict]:
+    """Build config.model.allowed entries for a set of free OpenRouter model ids."""
+    return [
+        {"id": mid, "provider": "openrouter", "model": mid,
+         "base_url": OPENROUTER_API_BASE, "model_type": "llm"}
+        for mid in model_ids if mid
+    ]
+
+
+def _apply_free_models_to_configs(
+    agent_dir: Path, *, default_model: str, model_ids: list[str], set_api_key: str | None = None,
+) -> int:
+    """Patch model.{provider,model,base_url,allowed} (+ api_key if given) across all
+    3 config files for a freebie agent. Returns the number of files updated."""
+    allowed = _free_allowed_entries(model_ids)
+    config_paths = [
+        agent_dir / "config.yaml",
+        agent_dir / "data" / "home-config" / "config.yaml",
+        agent_dir / "data" / "home-config-parent" / ".captain-claw" / "config.yaml",
+    ]
+    count = 0
+    for cfg_path in config_paths:
+        if not cfg_path.is_file():
+            continue
+        try:
+            data = yaml.safe_load(cfg_path.read_text()) or {}
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        if not isinstance(data.get("model"), dict):
+            data["model"] = {}
+        data["model"]["provider"] = "openrouter"
+        data["model"]["model"] = default_model
+        data["model"]["base_url"] = OPENROUTER_API_BASE
+        if set_api_key is not None:
+            data["model"]["api_key"] = set_api_key
+        data["model"]["allowed"] = allowed
+        cfg_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True))
+        count += 1
+    return count
+
+
+@app.get("/fd/openrouter/free-models")
+async def openrouter_free_models(user: dict | None = _optional_user_dep):
+    """List currently-free OpenRouter models (public list, no key required)."""
+    try:
+        return {"models": await _fetch_openrouter_free_models()}
+    except Exception as exc:
+        raise HTTPException(502, f"Failed to fetch OpenRouter models: {exc}")
+
+
+class FreeAgentSpawnRequest(BaseModel):
+    name: str = "Freebie"
+    description: str = ""
+    api_key: str = ""
+    default_model: str = ""
+    models: list[str] = []  # free model ids to allow (empty = fetch all free)
+    web_port: int = 24080
+
+
+@app.post("/fd/spawn-free")
+async def spawn_free_agent(body: FreeAgentSpawnRequest, request: Request, user: dict | None = _optional_user_dep):
+    """Spawn a free OpenRouter ("Freebie") process agent: default model + all free
+    models as the per-session allowed list, marked freebie for later refresh."""
+    if not body.api_key.strip():
+        raise HTTPException(400, "An OpenRouter API key is required.")
+
+    model_ids = [m for m in (body.models or []) if m]
+    if not model_ids:
+        model_ids = [m["id"] for m in await _fetch_openrouter_free_models()]
+    if not model_ids:
+        raise HTTPException(502, "No free OpenRouter models are available right now.")
+
+    default_model = (body.default_model or model_ids[0]).strip()
+    if default_model not in model_ids:
+        model_ids = [default_model, *model_ids]
+
+    config = AgentConfig(
+        name=body.name or "Freebie",
+        description=body.description or "Free OpenRouter agent",
+        provider="openrouter",
+        model=default_model,
+        provider_api_key=body.api_key.strip(),
+        base_url=OPENROUTER_API_BASE,
+        allowed_models=_free_allowed_entries(model_ids),
+        web_port=body.web_port,
+    )
+
+    result = await spawn_process(config, request, user)
+
+    # Mark the agent as a freebie so the card can offer "Refresh free models".
+    registry = _load_process_registry()
+    if result.slug in registry:
+        registry[result.slug]["freebie"] = True
+        _save_process_registry(registry)
+
+    return result
+
+
+@app.post("/fd/agent-refresh-free-models/{kind}/{identifier}")
+async def refresh_free_models(
+    kind: str, identifier: str, request: Request, user: dict | None = _required_user_dep,
+):
+    """Re-fetch the current free OpenRouter models and rewrite the agent's
+    model.allowed list (and default if it dropped off) across all 3 config files.
+    The agent must be stopped — config is only read at startup."""
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+
+    # Guard: agent must be stopped.
+    if kind == "process":
+        if _process_is_alive(identifier):
+            raise HTTPException(409, "Stop the agent before refreshing free models.")
+    else:
+        try:
+            c = get_docker().containers.get(identifier)
+            if c.status == "running":
+                raise HTTPException(409, "Stop the agent before refreshing free models.")
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+
+    free = await _fetch_openrouter_free_models()
+    model_ids = [m["id"] for m in free]
+    if not model_ids:
+        raise HTTPException(502, "No free OpenRouter models are available right now.")
+
+    # Keep the current default if it's still free, otherwise pick the first.
+    current_default = ""
+    cfg_file = agent_dir / "config.yaml"
+    if cfg_file.is_file():
+        try:
+            current_default = ((yaml.safe_load(cfg_file.read_text()) or {}).get("model", {}) or {}).get("model", "")
+        except Exception:
+            current_default = ""
+    default_model = current_default if current_default in model_ids else model_ids[0]
+
+    updated = _apply_free_models_to_configs(agent_dir, default_model=default_model, model_ids=model_ids)
+    return {
+        "ok": True,
+        "updated": updated,
+        "count": len(model_ids),
+        "default_model": default_model,
+        "message": f"Refreshed {len(model_ids)} free models. Start the agent to use them.",
+    }
 
 
 # ── Static frontend serving ──
