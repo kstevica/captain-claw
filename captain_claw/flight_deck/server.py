@@ -1144,6 +1144,9 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
         mode_file = agent_dir / "data" / "home-config" / "cognitive_mode.txt"
         mode_file.write_text(config.cognitive_mode, encoding="utf-8")
 
+    # New agents deploy in eco mode by default.
+    _write_eco_flag_on_spawn(agent_dir)
+
     # Build volume mounts
     # CC WORKDIR is /app — it loads ./config.yaml from CWD (/app/config.yaml)
     # and ~/.captain-claw/config.yaml (home dir overlay, highest priority).
@@ -1889,6 +1892,38 @@ async def get_agent_eco_mode(
             return {"enabled": True}
 
     return {"enabled": False}
+
+
+def _write_eco_flag_on_spawn(agent_dir: Path, enabled: bool = True) -> None:
+    """Write the ``eco_mode.txt`` flag at spawn time so a new agent deploys
+    in eco mode (micro instructions + lazy tools) from its very first response.
+
+    Writes to every location an agent might read it from, covering both runtimes:
+
+      * Process agents run with ``HOME=data/home-config-parent`` and read
+        ``~/.captain-claw/eco_mode.txt`` → ``home-config-parent/.captain-claw/``.
+      * Docker agents bind-mount ``data/home-config`` as ``/home/claw/.captain-claw``,
+        so the agent reads ``home-config/eco_mode.txt`` directly.
+
+    The nested ``.captain-claw/eco_mode.txt`` files also match what the
+    ``/fd/agent-eco-mode`` GET endpoint reads, so the Flight Deck UI shows
+    the toggle as ON immediately after spawn.
+    """
+    if not enabled:
+        return
+    # Agent-read locations + FD UI state locations.
+    targets = [
+        agent_dir / "data" / "home-config-parent" / ".captain-claw" / "eco_mode.txt",
+        agent_dir / "data" / "home-config" / ".captain-claw" / "eco_mode.txt",
+        # Docker: home-config IS the container's ~/.captain-claw.
+        agent_dir / "data" / "home-config" / "eco_mode.txt",
+    ]
+    for target in targets:
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("on", encoding="utf-8")
+        except Exception as exc:  # best-effort; never fail a spawn over this
+            log.warning("Failed to write eco flag on spawn", path=str(target), error=str(exc))
 
 
 class AgentNanoModeUpdate(BaseModel):
@@ -4506,6 +4541,9 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
         mode_file = home_cc_dir / "cognitive_mode.txt"
         mode_file.write_text(config.cognitive_mode, encoding="utf-8")
 
+    # New agents deploy in eco mode by default.
+    _write_eco_flag_on_spawn(agent_dir)
+
     # Open log file
     log_file = agent_dir / "process.log"
     log_fh = open(log_file, "a")
@@ -5078,18 +5116,28 @@ OLD_MAN_TOOLS = [
 
 def _build_old_man_config(
     *,
+    name: str = "Old Man",
+    description: str = "",
     provider: str = "ollama",
     model: str = "minimax-m2.7:cloud",
     api_key: str = "",
+    base_url: str = "",
     web_port: int = 24080,
 ) -> AgentConfig:
-    """Return an AgentConfig pre-filled for Old Man supervisor mode."""
+    """Return an AgentConfig pre-filled for supervisor mode.
+
+    The agent keeps the Old Man supervisor tooling (hotkey listener, fleet
+    delegation), but its public identity (name/description) is taken from the
+    first-run onboarding wizard so the fleet's seed agent can be named by the
+    user instead of always being "Old Man".
+    """
     return AgentConfig(
-        name="Old Man",
-        description="Desktop supervisor — triages requests, delegates to fleet agents",
+        name=(name or "Old Man").strip(),
+        description=(description.strip() or "Desktop supervisor — triages requests, delegates to fleet agents"),
         provider=provider,
         model=model,
         provider_api_key=api_key,
+        base_url=base_url.strip(),
         tools=OLD_MAN_TOOLS,
         web_port=web_port,
         # Old Man adds old_man.enabled + hotkey overrides via env var
@@ -5102,10 +5150,17 @@ def _build_old_man_config(
 
 
 class OldManSpawnRequest(BaseModel):
-    """Minimal request body for the Old Man quick-spawn endpoint."""
+    """Request body for the supervisor quick-spawn endpoint.
+
+    ``name``/``description`` let the first-run onboarding wizard name the seed
+    supervisor agent; both default to the classic "Old Man" identity.
+    """
+    name: str = "Old Man"
+    description: str = ""
     provider: str = "ollama"
     model: str = "minimax-m2.7:cloud"
     api_key: str = ""
+    base_url: str = ""
     web_port: int = 24080
     mode: str = "auto"  # "docker", "process", or "auto" (try docker first)
 
@@ -5121,9 +5176,12 @@ async def spawn_old_man(
     Tries Docker first (if available), falls back to process spawn.
     """
     config = _build_old_man_config(
+        name=body.name,
+        description=body.description,
         provider=body.provider,
         model=body.model,
         api_key=body.api_key,
+        base_url=body.base_url,
         web_port=body.web_port,
     )
 

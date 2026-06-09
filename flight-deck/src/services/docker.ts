@@ -199,9 +199,14 @@ export interface ProcessActionResult {
 // ── Old Man quick-spawn ──
 
 export interface OldManSpawnRequest {
+  /** Public identity of the seed supervisor agent (defaults to "Old Man") */
+  name?: string
+  description?: string
   provider: string
   model: string
   api_key: string
+  /** Optional custom provider endpoint (OpenAI-compatible base URL, Ollama host, etc.) */
+  base_url?: string
   web_port?: number
   mode?: string  // "auto" | "docker" | "process"
 }

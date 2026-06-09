@@ -9,10 +9,11 @@ import { ContainerCard } from '../components/agents/ContainerCard'
 import { LocalAgentCard } from '../components/agents/LocalAgentCard'
 import { ProcessCard } from '../components/agents/ProcessCard'
 import { FileBrowser } from '../components/agents/FileBrowser'
-import { Radio, Plus, Server, LayoutGrid, Move, Zap, X, ChevronDown, Minimize2, Square, Play, Shuffle, Trash2, Wand2, Users, CheckCircle2 } from 'lucide-react'
+import { Radio, Plus, Server, LayoutGrid, Move, Zap, X, ChevronDown, Minimize2, Square, Play, Shuffle, Trash2, CheckCircle2 } from 'lucide-react'
 import { spawnOldMan, stopContainer as apiStopContainer, startContainer as apiStartContainer, stopProcess as apiStopProcess, startProcess as apiStartProcess, removeContainer as apiRemoveContainer, removeProcess as apiRemoveProcess } from '../services/docker'
 import type { AgentEndpoint } from '../services/fileTransfer'
 import { useGroupStore } from '../stores/groupStore'
+import { useDesktopPrefsStore } from '../stores/desktopPrefsStore'
 import { useOnboardingStore } from '../stores/onboardingStore'
 import { useUIStore } from '../stores/uiStore'
 import { useAuthStore } from '../stores/authStore'
@@ -104,6 +105,7 @@ export function DesktopPage() {
     return () => { _hydrateListeners.delete(onHydrate) }
   }, [])
   const groups = useGroupStore((s) => s.groups)
+  const hiddenAgentIds = useDesktopPrefsStore((s) => s.hiddenAgentIds)
   const { isMobile, isTablet } = useIsMobile()
   const compact = isMobile || isTablet
   // Force grid mode on mobile/tablet
@@ -158,18 +160,20 @@ export function DesktopPage() {
 
   // ── Bulk actions ──
 
-  // Build unified agent list (with optional group filter)
+  // Build unified agent list (with optional group filter + per-agent hide)
   const unifiedAgents: UnifiedAgent[] = useMemo(() => {
     const all: UnifiedAgent[] = [
       ...containers.map((c) => ({ kind: 'docker' as const, id: c.id, data: c })),
       ...processes.map((p) => ({ kind: 'process' as const, id: `proc-${p.slug}`, data: p })),
       ...localAgents.map((a) => ({ kind: 'local' as const, id: a.id, data: a })),
     ]
-    if (!groupFilter) return all
+    // Agents the user toggled off from the Director are kept off the canvas.
+    const visible = all.filter((a) => !hiddenAgentIds.includes(a.id))
+    if (!groupFilter) return visible
     const group = groups.find((g) => g.id === groupFilter)
-    if (!group) return all
-    return all.filter((a) => group.agentIds.includes(a.id))
-  }, [containers, processes, localAgents, groupFilter, groups])
+    if (!group) return visible
+    return visible.filter((a) => group.agentIds.includes(a.id))
+  }, [containers, processes, localAgents, groupFilter, groups, hiddenAgentIds])
 
   // ── Bulk actions (scoped to currently filtered agents) ──
 
@@ -404,6 +408,23 @@ export function DesktopPage() {
     )
   }
 
+  // First-run takeover: with an empty fleet, the very first thing the user
+  // sees is the spawn wizard — name an agent, pick a provider, and land on
+  // the Flight Deck. No empty agent-desktop chrome behind it.
+  if (!hasContent) {
+    return (
+      <div className="flex h-full items-start justify-center overflow-auto p-4 md:p-6">
+        <div className="w-full max-w-md pt-10 md:pt-16">
+          <div className="mb-6 text-center">
+            <h1 className="text-xl font-semibold text-zinc-100">Welcome to Flight Deck</h1>
+            <p className="mt-1 text-sm text-zinc-500">Launch your first agent to get started.</p>
+          </div>
+          <OldManOnboarding onSpawned={() => { fetchContainers(); fetchProcesses() }} />
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex h-full">
       <div className="flex-1 overflow-auto p-4 md:p-6">
@@ -419,7 +440,7 @@ export function DesktopPage() {
                 className="flex items-center gap-1.5 rounded-md bg-violet-600/20 px-2.5 py-1.5 text-xs font-medium text-violet-300 hover:bg-violet-600/30 border border-violet-600/30"
               >
                 <Zap className="h-3.5 w-3.5" />
-                {!isMobile && 'Spawn Old Man'}
+                {!isMobile && 'Spawn Supervisor'}
               </button>
             )}
             <GroupFilter selected={groupFilter} onChange={setGroupFilter} />
@@ -465,7 +486,7 @@ export function DesktopPage() {
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-zinc-500">
               <Server className="h-3.5 w-3.5" />
-              Agents ({agentCount})
+              Agents ({unifiedAgents.length} of {agentCount})
             </div>
             <div className="relative" ref={bulkMenuRef}>
               <button
@@ -563,48 +584,6 @@ export function DesktopPage() {
             )
           )}
         </div>
-
-        {!hasContent && (
-          <>
-            {/* Welcome guide for new users */}
-            {!onboarding.completed.desktop && (
-              <div className="mb-6 rounded-xl border border-zinc-800 bg-zinc-900/50 p-6">
-                <h2 className="mb-1 text-lg font-semibold text-zinc-200">Welcome to Flight Deck</h2>
-                <p className="mb-5 text-sm text-zinc-500">Get started in three steps to unlock the full power of your AI agent fleet.</p>
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                  {[
-                    { step: 'desktop' as const, icon: Zap, label: '1. Launch your first agent', desc: 'Spawn an AI agent with a single click. It will be ready to chat, execute tasks, and collaborate with other agents.', action: undefined },
-                    { step: 'forge' as const, icon: Wand2, label: '2. Build a team with Forge', desc: 'Describe a business objective and let AI design a specialized team of agents with roles, tools, and instructions.', action: () => setView('forge') },
-                    { step: 'council' as const, icon: Users, label: '3. Run a Council session', desc: 'Have your agents discuss topics, debate ideas, or review work together in moderated multi-round sessions.', action: () => setView('council') },
-                  ].map(({ step, icon: StepIcon, label, desc, action }) => (
-                    <button
-                      key={step}
-                      onClick={action}
-                      disabled={!action}
-                      className={`rounded-lg border p-4 text-left transition-colors ${
-                        onboarding.completed[step]
-                          ? 'border-emerald-500/20 bg-emerald-500/5'
-                          : step === 'desktop'
-                            ? 'border-violet-500/30 bg-violet-500/10'
-                            : 'border-zinc-800 hover:border-zinc-700 hover:bg-zinc-800/50'
-                      } ${!action ? 'cursor-default' : ''}`}
-                    >
-                      <div className="mb-2 flex items-center gap-2">
-                        {onboarding.completed[step]
-                          ? <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-                          : <StepIcon className={`h-4 w-4 ${step === 'desktop' ? 'text-violet-400' : 'text-zinc-500'}`} />
-                        }
-                        <span className={`text-sm font-medium ${onboarding.completed[step] ? 'text-emerald-300' : 'text-zinc-200'}`}>{label}</span>
-                      </div>
-                      <p className="text-xs leading-relaxed text-zinc-500">{desc}</p>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-            <OldManOnboarding onSpawned={() => { fetchContainers(); fetchProcesses() }} />
-          </>
-        )}
 
         {/* Next steps banner for users who just spawned their first agent */}
         {hasContent && !onboarding.completed.forge && !onboarding.isHintDismissed('desktop-next') && (
@@ -743,9 +722,12 @@ const PROVIDERS = [
 ]
 
 function OldManOnboarding({ onSpawned }: { onSpawned: () => void }) {
+  const [name, setName] = useState('Old Man')
+  const [description, setDescription] = useState('')
   const [provider, setProvider] = useState('gemini')
   const [model, setModel] = useState('gemini-3-flash-preview')
   const [apiKey, setApiKey] = useState('')
+  const [baseUrl, setBaseUrl] = useState('')
   const [spawning, setSpawning] = useState(false)
   const [error, setError] = useState('')
 
@@ -756,6 +738,10 @@ function OldManOnboarding({ onSpawned }: { onSpawned: () => void }) {
   }
 
   const handleSpawn = async () => {
+    if (!name.trim()) {
+      setError('Give your agent a name.')
+      return
+    }
     if (!apiKey.trim() && provider !== 'ollama') {
       setError('API key is required for cloud providers.')
       return
@@ -763,33 +749,65 @@ function OldManOnboarding({ onSpawned }: { onSpawned: () => void }) {
     setError('')
     setSpawning(true)
     try {
-      await spawnOldMan({ provider, model, api_key: apiKey, mode: 'auto' })
+      await spawnOldMan({
+        name: name.trim(),
+        description: description.trim(),
+        provider,
+        model,
+        api_key: apiKey,
+        base_url: baseUrl.trim(),
+        // Always a local process agent — the supervisor needs host access
+        // (hotkey, screen capture, desktop actions) and a Docker container's
+        // bind-mounted workspace isn't reliably writable on Docker Desktop.
+        mode: 'process',
+      })
       setTimeout(onSpawned, 2000) // give agent a moment to start
     } catch (e: any) {
-      setError(e.message || 'Failed to spawn Old Man')
+      setError(e.message || 'Failed to spawn agent')
     } finally {
       setSpawning(false)
     }
   }
 
   return (
-    <div className="mx-auto max-w-md pt-16">
+    <div className="mx-auto max-w-md">
       <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-6">
         <div className="mb-4 flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-violet-600/20 text-violet-400">
             <Zap className="h-5 w-5" />
           </div>
           <div>
-            <h2 className="text-lg font-semibold text-zinc-100">Start with Old Man</h2>
-            <p className="text-xs text-zinc-500">Your desktop supervisor agent</p>
+            <h2 className="text-lg font-semibold text-zinc-100">Launch your first agent</h2>
+            <p className="text-xs text-zinc-500">The supervisor that seeds your fleet</p>
           </div>
         </div>
         <p className="mb-5 text-sm text-zinc-400">
-          Old Man is your always-on assistant. It listens via hotkey, triages requests,
-          and can spawn &amp; delegate to other agents in the fleet.
+          This agent is your always-on supervisor. It listens via hotkey, triages requests,
+          and can spawn &amp; delegate to other agents in the fleet. Name it, pick a provider,
+          and you'll land on the Flight Deck.
         </p>
 
         <div className="space-y-3">
+          <div>
+            <label className="mb-1 block text-xs font-medium text-zinc-500">Agent Name</label>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Old Man"
+              className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-medium text-zinc-500">Short Description</label>
+            <input
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Desktop supervisor — triages requests, delegates to fleet agents"
+              className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
+            />
+          </div>
+
           <div>
             <label className="mb-1 block text-xs font-medium text-zinc-500">Provider</label>
             <select
@@ -825,6 +843,17 @@ function OldManOnboarding({ onSpawned }: { onSpawned: () => void }) {
             </div>
           )}
 
+          <div>
+            <label className="mb-1 block text-xs font-medium text-zinc-500">Base URL <span className="text-zinc-600">(optional)</span></label>
+            <input
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              placeholder="https://api.openai.com/v1 · http://localhost:11434 · …"
+              className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
+            />
+            <p className="mt-1 text-[10px] text-zinc-600">Override the provider endpoint — for self-hosted, OpenAI-compatible, or proxy servers.</p>
+          </div>
+
           {error && <p className="text-xs text-red-400">{error}</p>}
 
           <button
@@ -832,7 +861,7 @@ function OldManOnboarding({ onSpawned }: { onSpawned: () => void }) {
             disabled={spawning}
             className="mt-2 w-full rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
           >
-            {spawning ? 'Spawning...' : 'Launch Old Man'}
+            {spawning ? 'Spawning…' : 'Launch Agent'}
           </button>
         </div>
       </div>

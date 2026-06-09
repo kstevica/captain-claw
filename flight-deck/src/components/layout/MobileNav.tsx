@@ -1,4 +1,4 @@
-import { Monitor, BarChart3, GitBranch, Plus, Shield, Users, Wand2 } from 'lucide-react'
+import { Monitor, BarChart3, Plus, Shield, Users, Wand2 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { useAuthStore } from '../../stores/authStore'
 import type { ViewMode } from '../../types'
@@ -8,7 +8,6 @@ const navItems: { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?:
   { id: 'council', icon: Users, label: 'Council' },
   { id: 'spawner', icon: Plus, label: 'Spawn' },
   { id: 'forge', icon: Wand2, label: 'Forge' },
-  { id: 'workflow', icon: GitBranch, label: 'Workflows' },
   { id: 'operations', icon: BarChart3, label: 'Stats' },
   { id: 'admin', icon: Shield, label: 'Admin', adminOnly: true },
 ]

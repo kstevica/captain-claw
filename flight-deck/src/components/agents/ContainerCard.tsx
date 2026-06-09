@@ -490,8 +490,11 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
       {/* Drag handle area with compact toggle */}
       <div
         onPointerDown={onDragStart}
-        className={`flex items-center justify-end px-2 py-0.5 bg-zinc-800/30 ${onDragStart ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'bg-violet-500/10' : ''}`}
+        className={`flex items-center justify-end gap-1 px-2 py-0.5 bg-zinc-800/30 ${onDragStart ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'bg-violet-500/10' : ''}`}
       >
+        <span onPointerDown={(e) => e.stopPropagation()} className="relative z-10">
+          <ActionsDropdown {...actionProps} iconOnly />
+        </span>
         <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleViewMode} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 relative z-10" title="Compact card">
           <Minimize2 className="h-3 w-3" />
         </button>
@@ -544,27 +547,6 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
             </div>
           </div>
           <div className="flex items-center gap-1.5">
-            {isRunning && container.web_port && (
-              <>
-                <button
-                  onClick={() => openChat(container.id, agentName, 'localhost', container.web_port!, container.web_auth)}
-                  className="flex items-center gap-1 rounded-lg bg-violet-600/20 px-2 py-0.5 text-xs font-medium text-violet-300 hover:bg-violet-600/30"
-                >
-                  <MessageSquare className="h-3 w-3" />
-                  Chat
-                </button>
-                <OpenDropdown host="localhost" port={container.web_port} auth={container.web_auth} />
-              </>
-            )}
-            {isRunning && !container.web_port && (
-              <button
-                onClick={() => setShowConnect(!showConnect)}
-                className="flex items-center gap-1 rounded-lg px-2 py-0.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-              >
-                <MessageSquare className="h-3 w-3" />
-                Chat
-              </button>
-            )}
             <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${badgeCls}`}>
               {isRunning && (
                 <span className="relative flex h-1.5 w-1.5">
@@ -824,8 +806,25 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
               <Target className="h-3.5 w-3.5" /> Intentions
             </button>
           )}
-          <div className="flex-1" />
-          <ActionsDropdown {...actionProps} />
+          {isRunning && container.web_port && (
+            <button
+              onClick={() => openChat(container.id, agentName, 'localhost', container.web_port!, container.web_auth)}
+              className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            >
+              <MessageSquare className="h-3.5 w-3.5" /> Chat
+            </button>
+          )}
+          {isRunning && container.web_port && (
+            <OpenDropdown host="localhost" port={container.web_port} auth={container.web_auth} />
+          )}
+          {isRunning && !container.web_port && (
+            <button
+              onClick={() => setShowConnect(!showConnect)}
+              className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            >
+              <MessageSquare className="h-3.5 w-3.5" /> Chat
+            </button>
+          )}
         </div>
       </div>
 
@@ -911,7 +910,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
   )
 }
 
-function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart, onRebuild, onClone, onRemove, onConfig, onExportMemory, onExportFullMemory, onImportMemory, onImportStageMemory, onMergeReflection, onReviewPending, memoryState, memoryBusy, canMemory }: {
+function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart, onRebuild, onClone, onRemove, onConfig, onExportMemory, onExportFullMemory, onImportMemory, onImportStageMemory, onMergeReflection, onReviewPending, memoryState, memoryBusy, canMemory, iconOnly }: {
   isRunning: boolean
   actionLoading: string | null
   onStart: () => void
@@ -930,6 +929,7 @@ function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart,
   memoryState: 'idle' | 'exporting' | 'importing'
   memoryBusy: boolean
   canMemory: boolean
+  iconOnly?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const btnRef = useRef<HTMLButtonElement>(null)
@@ -981,12 +981,14 @@ function ActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart,
       <button
         ref={btnRef}
         onClick={() => { updatePos(); setOpen(!open) }}
-        className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium transition-colors ${
-          open ? 'bg-zinc-800 text-zinc-200' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
-        }`}
+        title={iconOnly ? 'Actions' : undefined}
+        className={iconOnly
+          ? `rounded p-0.5 transition-colors ${open ? 'text-zinc-300' : 'text-zinc-600 hover:text-zinc-400'}`
+          : `flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium transition-colors ${
+              open ? 'bg-zinc-800 text-zinc-200' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+            }`}
       >
-        <MoreVertical className="h-3.5 w-3.5" />
-        Actions
+        {iconOnly ? <Settings className="h-3 w-3" /> : <><MoreVertical className="h-3.5 w-3.5" />Actions</>}
       </button>
 
       {open && createPortal(

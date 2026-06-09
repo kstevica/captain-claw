@@ -16,12 +16,15 @@ import {
   Loader2,
   Wrench,
   MessageSquare,
+  Eye,
+  EyeOff,
   X,
 } from 'lucide-react'
 import { useContainerStore } from '../../stores/containerStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useProcessStore } from '../../stores/processStore'
 import { useChatStore } from '../../stores/chatStore'
+import { useDesktopPrefsStore } from '../../stores/desktopPrefsStore'
 import { GroupManager } from '../common/AgentGroups'
 
 // ── Types ──
@@ -88,6 +91,8 @@ export function DirectorPanel() {
   const processes = useProcessStore((s) => s.processes)
   const chatSessions = useChatStore((s) => s.sessions)
   const { openChat, sendMessage } = useChatStore()
+  const hiddenAgentIds = useDesktopPrefsStore((s) => s.hiddenAgentIds)
+  const toggleAgentHidden = useDesktopPrefsStore((s) => s.toggleAgentHidden)
 
   const [sortField, setSortField] = useState<SortField>('status')
   const [sortAsc, setSortAsc] = useState(true)
@@ -459,6 +464,8 @@ export function DirectorPanel() {
                 expanded={expandedActivity.has(agent.id)}
                 onToggle={() => toggleActivity(agent.id)}
                 onConnectChat={() => handleConnectChat(agent)}
+                hidden={hiddenAgentIds.includes(agent.id)}
+                onToggleHidden={() => toggleAgentHidden(agent.id)}
                 chatSessions={chatSessions}
               />
             ))}
@@ -482,12 +489,16 @@ function AgentRow({
   expanded,
   onToggle,
   onConnectChat,
+  hidden,
+  onToggleHidden,
   chatSessions,
 }: {
   agent: UnifiedAgentRow
   expanded: boolean
   onToggle: () => void
   onConnectChat: () => void
+  hidden: boolean
+  onToggleHidden: () => void
   chatSessions: Map<string, unknown>
 }) {
   const isRunning = /running|online/i.test(agent.status)
@@ -511,7 +522,7 @@ function AgentRow({
         {/* Name + status line */}
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <span className="truncate text-xs font-medium text-zinc-200">{agent.name}</span>
+            <span className={`truncate text-xs font-medium ${hidden ? 'text-zinc-500' : 'text-zinc-200'}`} title={hidden ? 'Hidden from Agent Desktop' : undefined}>{agent.name}</span>
             {agent.port && (
               <span className="text-[10px] font-mono text-zinc-600">:{agent.port}</span>
             )}
@@ -539,6 +550,17 @@ function AgentRow({
 
         {/* Right side: last active + actions */}
         <div className="flex items-center gap-1.5 flex-shrink-0">
+          <button
+            onClick={(e) => { e.stopPropagation(); onToggleHidden() }}
+            className={`rounded p-0.5 transition-all ${
+              hidden
+                ? 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
+                : 'text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300 opacity-0 group-hover:opacity-100'
+            }`}
+            title={hidden ? 'Show on Agent Desktop' : 'Hide from Agent Desktop'}
+          >
+            {hidden ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+          </button>
           {agent.lastMessageTime && (
             <div className="flex items-center gap-0.5 text-[10px] text-zinc-600" title={agent.lastMessageTime}>
               <Clock className="h-2.5 w-2.5" />

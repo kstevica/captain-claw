@@ -414,8 +414,11 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
     <div className={`rounded-xl border bg-zinc-900/50 overflow-hidden ${busy ? 'border-emerald-500/40' : 'border-zinc-800'}`}>
       <div
         onPointerDown={onDragStart}
-        className={`flex items-center justify-end px-2 py-0.5 bg-emerald-900/10 ${onDragStart ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'bg-emerald-500/10' : ''}`}
+        className={`flex items-center justify-end gap-1 px-2 py-0.5 bg-emerald-900/10 ${onDragStart ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'bg-emerald-500/10' : ''}`}
       >
+        <span onPointerDown={(e) => e.stopPropagation()} className="relative z-10">
+          <ProcessActionsDropdown {...actionProps} iconOnly />
+        </span>
         <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleViewMode} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 relative z-10" title="Compact card">
           <Minimize2 className="h-3 w-3" />
         </button>
@@ -479,15 +482,6 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
                   )}
                   {proc.status}
                 </span>
-                {isRunning && (
-                  <>
-                    <button onClick={() => openChat(chatId, agentName, 'localhost', proc.web_port, proc.web_auth)}
-                      className="flex items-center gap-1 rounded-lg px-2 py-0.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
-                      <MessageSquare className="h-3 w-3" /> Chat
-                    </button>
-                    <OpenDropdown host="localhost" port={proc.web_port} auth={proc.web_auth} />
-                  </>
-                )}
               </div>
             </div>
           </div>
@@ -671,8 +665,15 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
               <Target className="h-3.5 w-3.5" /> Intentions
             </button>
           )}
-          <div className="flex-1" />
-          <ProcessActionsDropdown {...actionProps} />
+          {isRunning && (
+            <button onClick={() => openChat(chatId, agentName, 'localhost', proc.web_port, proc.web_auth)}
+              className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+              <MessageSquare className="h-3.5 w-3.5" /> Chat
+            </button>
+          )}
+          {isRunning && (
+            <OpenDropdown host="localhost" port={proc.web_port} auth={proc.web_auth} />
+          )}
         </div>
       </div>
 
@@ -714,7 +715,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   )
 }
 
-function ProcessActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart, onClone, onRemove, onConfig, onExportMemory, onExportFullMemory, onImportMemory, onImportStageMemory, onMergeReflection, onReviewPending, memoryState, memoryBusy }: {
+function ProcessActionsDropdown({ isRunning, actionLoading, onStart, onStop, onRestart, onClone, onRemove, onConfig, onExportMemory, onExportFullMemory, onImportMemory, onImportStageMemory, onMergeReflection, onReviewPending, memoryState, memoryBusy, iconOnly }: {
   isRunning: boolean
   actionLoading: string | null
   onStart: () => void
@@ -731,6 +732,7 @@ function ProcessActionsDropdown({ isRunning, actionLoading, onStart, onStop, onR
   onReviewPending: () => void
   memoryState: 'idle' | 'exporting' | 'importing'
   memoryBusy: boolean
+  iconOnly?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const btnRef = useRef<HTMLButtonElement>(null)
@@ -779,10 +781,13 @@ function ProcessActionsDropdown({ isRunning, actionLoading, onStart, onStop, onR
   return (
     <>
       <button ref={btnRef} onClick={() => { updatePos(); setOpen(!open) }}
-        className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium transition-colors ${
-          open ? 'bg-zinc-800 text-zinc-200' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
-        }`}>
-        <MoreVertical className="h-3.5 w-3.5" /> Actions
+        title={iconOnly ? 'Actions' : undefined}
+        className={iconOnly
+          ? `rounded p-0.5 transition-colors ${open ? 'text-zinc-300' : 'text-zinc-600 hover:text-zinc-400'}`
+          : `flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium transition-colors ${
+              open ? 'bg-zinc-800 text-zinc-200' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+            }`}>
+        {iconOnly ? <Settings className="h-3 w-3" /> : <><MoreVertical className="h-3.5 w-3.5" /> Actions</>}
       </button>
       {open && createPortal(
         <div ref={menuRef} className="fixed z-[100] w-44 rounded-lg border border-zinc-700/50 bg-zinc-900 py-1 shadow-xl shadow-black/40"

@@ -543,25 +543,11 @@ function ChatContent({
     }
   }, [addFiles])
 
-  // Build visible messages: keep user + assistant, only last 3 tool/system
-  const visibleMessages = (() => {
-    const all = session.messages.filter((m) => m.role !== 'tool' || m.tool_name)
-    const result: ChatMessage[] = []
-    let toolCount = 0
-    for (let i = all.length - 1; i >= 0; i--) {
-      const m = all[i]
-      if (m.role === 'user' || m.role === 'assistant') {
-        toolCount = 0
-        result.unshift(m)
-      } else {
-        toolCount++
-        if (toolCount <= 3) {
-          result.unshift(m)
-        }
-      }
-    }
-    return result
-  })()
+  // Keep the full transcript — every tool call is shown. The intermediary
+  // activity (tools + narration) is grouped into a collapsible panel that
+  // streams while the turn runs and collapses to a tools-history summary once
+  // it finishes, so showing the whole process doesn't clutter the conversation.
+  const visibleMessages = session.messages.filter((m) => m.role !== 'tool' || m.tool_name)
 
   const pendingUploads = attachments.filter((a) => a.status === 'uploading').length
   const hasErrors = attachments.some((a) => a.status === 'error')
@@ -605,9 +591,20 @@ function ChatContent({
           </div>
         )}
 
-        {visibleMessages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} sourceName={session.containerName} agentId={session.containerId} />
-        ))}
+        {(() => {
+          const groups = groupActivity(visibleMessages)
+          return groups.map((grp, gi) =>
+            grp.kind === 'activity' ? (
+              <ActivityGroup
+                key={`act-${grp.items[0].id}`}
+                items={grp.items}
+                live={gi === groups.length - 1 && session.busy}
+              />
+            ) : (
+              <MessageBubble key={grp.items[0].id} message={grp.items[0]} sourceName={session.containerName} agentId={session.containerId} />
+            )
+          )
+        })()}
 
         {/* Busy indicator */}
         {session.busy && (
@@ -1274,6 +1271,92 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
         </div>
       </div>
       {actionButtons('left')}
+    </div>
+  )
+}
+
+// ── Intermediary "activity" stream (tool calls + between-step narration) ──
+//
+// During a turn the agent emits tool calls and short narration blurbs. These
+// are grouped into one tinted section that stacks until the turn finishes, so
+// they read as a connected activity log rather than loose grey lines. Each
+// type gets its own colour: tools (sky), narration (violet).
+
+function isActivityMessage(m: ChatMessage): boolean {
+  return m.role === 'tool' || (m.role === 'system' && !!m.narration)
+}
+
+function groupActivity(msgs: ChatMessage[]): { kind: 'activity' | 'single'; items: ChatMessage[] }[] {
+  const groups: { kind: 'activity' | 'single'; items: ChatMessage[] }[] = []
+  for (const m of msgs) {
+    if (isActivityMessage(m)) {
+      const last = groups[groups.length - 1]
+      if (last && last.kind === 'activity') last.items.push(m)
+      else groups.push({ kind: 'activity', items: [m] })
+    } else {
+      groups.push({ kind: 'single', items: [m] })
+    }
+  }
+  return groups
+}
+
+function ActivityGroup({ items, live }: { items: ChatMessage[]; live: boolean }) {
+  // Expanded & streaming while the turn runs; auto-collapses to a tools-history
+  // summary once it finishes. The user can still toggle it open afterwards.
+  const [collapsed, setCollapsed] = useState(!live)
+  useEffect(() => { setCollapsed(!live) }, [live])
+  const toolCount = items.filter((m) => m.role === 'tool').length
+  return (
+    <div className="mb-3 rounded-lg border border-zinc-800 bg-zinc-900/40 px-2.5 py-2">
+      <button
+        onClick={() => setCollapsed((c) => !c)}
+        className="flex w-full items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-zinc-500 hover:text-zinc-400"
+      >
+        <Wrench className="h-3 w-3" />
+        Activity{toolCount > 0 && <span className="text-zinc-600">· {toolCount} tool{toolCount !== 1 ? 's' : ''}</span>}
+        <span className="ml-auto">{collapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}</span>
+      </button>
+      {!collapsed && (
+        <div className="mt-1.5 space-y-0.5">
+          {items.map((m) =>
+            m.role === 'tool'
+              ? <ActivityToolRow key={m.id} message={m} />
+              : <ActivityNarration key={m.id} message={m} />
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ActivityToolRow({ message }: { message: ChatMessage }) {
+  const [expanded, setExpanded] = useState(false)
+  return (
+    <div>
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-xs text-zinc-500 hover:bg-zinc-800/50 hover:text-zinc-400"
+      >
+        <Wrench className="h-3 w-3" />
+        {message.peer_name && <span className="font-medium text-sky-600 dark:text-sky-400">{message.peer_name}</span>}
+        <span className="font-medium">{message.tool_name}</span>
+        {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+      </button>
+      {expanded && message.content && (
+        <pre className="ml-6 mt-1 max-h-40 overflow-auto rounded-md bg-zinc-900/80 p-2 text-xs text-zinc-400 font-mono">
+          {message.content.slice(0, 2000)}
+          {message.content.length > 2000 && '\n...truncated'}
+        </pre>
+      )}
+    </div>
+  )
+}
+
+function ActivityNarration({ message }: { message: ChatMessage }) {
+  return (
+    <div className="flex items-start gap-1.5 px-1.5 py-0.5 text-xs italic text-zinc-500">
+      <CircleDot className="mt-0.5 h-3 w-3 shrink-0 text-zinc-600" />
+      <span className="whitespace-pre-wrap">{message.content}</span>
     </div>
   )
 }
