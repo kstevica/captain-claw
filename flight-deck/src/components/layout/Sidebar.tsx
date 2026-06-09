@@ -17,12 +17,9 @@ import {
   Gamepad2,
   Cloud,
   FileText,
-  LayoutDashboard,
   AlarmClock,
   Workflow,
 } from 'lucide-react'
-import { useEffect } from 'react'
-import { useAppRuntime } from '../../app-runtime/store'
 import { useUIStore } from '../../stores/uiStore'
 import { APP_VERSION, BUILD_DATE } from '../../version'
 import { useAgentStore } from '../../stores/agentStore'
@@ -54,13 +51,6 @@ const navItems: { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?:
 export function Sidebar() {
   const { view, setView, sidebarOpen, toggleSidebar } = useUIStore()
   const { instances, wsConnected, selectInstance, selectedInstanceId, fetchInstances, fetchStats, fetchConcerns } = useAgentStore()
-  const availableApps = useAppRuntime((s) => s.availableApps)
-  const selectedAgentId = useAppRuntime((s) => s.agentId)
-  const refreshAppList = useAppRuntime((s) => s.refreshAppList)
-  const loadAgent = useAppRuntime((s) => s.loadAgent)
-  const requestAuthoring = useAppRuntime((s) => s.requestAuthoring)
-
-  useEffect(() => { refreshAppList() }, [refreshAppList])
   const { authEnabled, user: authUser } = useAuthStore()
   const { botportUrl, setBotportUrl } = useConnectionStore()
   const { sessions, chatOpen, switchChat } = useChatStore()
@@ -177,45 +167,6 @@ export function Sidebar() {
         ))}
       </nav>
 
-      {/* Registered apps */}
-      {sidebarOpen && (
-        <div className="border-t border-zinc-800 p-2">
-          <div className="flex items-center justify-between px-1 py-1">
-            <span className="text-xs font-medium uppercase tracking-wider text-zinc-500">
-              Apps ({availableApps.length})
-            </span>
-            <button
-              onClick={() => { setView('app'); requestAuthoring('new') }}
-              className="rounded px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-              title="Describe a new app"
-            >
-              + New
-            </button>
-          </div>
-          {availableApps.map((a) => {
-            const active = view === 'app' && selectedAgentId === a.id
-            return (
-              <button
-                key={a.id}
-                onClick={() => { setView('app'); loadAgent(a.id) }}
-                className={`mb-0.5 flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm transition-colors ${
-                  active
-                    ? 'bg-zinc-800 text-zinc-100'
-                    : 'text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200'
-                }`}
-              >
-                <LayoutDashboard className="h-3.5 w-3.5 shrink-0" />
-                <span className="min-w-0 flex-1 truncate">{a.name}</span>
-              </button>
-            )
-          })}
-          {availableApps.length === 0 && (
-            <p className="px-2.5 py-2 text-center text-[11px] text-zinc-600">
-              No apps yet — click + New to describe one.
-            </p>
-          )}
-        </div>
-      )}
 
       {/* Connected agents */}
       {sidebarOpen && (
