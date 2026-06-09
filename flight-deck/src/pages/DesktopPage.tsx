@@ -9,8 +9,8 @@ import { ContainerCard } from '../components/agents/ContainerCard'
 import { LocalAgentCard } from '../components/agents/LocalAgentCard'
 import { ProcessCard } from '../components/agents/ProcessCard'
 import { FileBrowser } from '../components/agents/FileBrowser'
-import { Radio, Plus, Server, LayoutGrid, Move, Zap, X, ChevronDown, Minimize2, Square, Play, Shuffle, Trash2, CheckCircle2 } from 'lucide-react'
-import { spawnOldMan, stopContainer as apiStopContainer, startContainer as apiStartContainer, stopProcess as apiStopProcess, startProcess as apiStartProcess, removeContainer as apiRemoveContainer, removeProcess as apiRemoveProcess } from '../services/docker'
+import { Radio, Plus, Server, LayoutGrid, Move, X, ChevronDown, Minimize2, Square, Play, Shuffle, Trash2, CheckCircle2 } from 'lucide-react'
+import { stopContainer as apiStopContainer, startContainer as apiStartContainer, stopProcess as apiStopProcess, startProcess as apiStartProcess, removeContainer as apiRemoveContainer, removeProcess as apiRemoveProcess } from '../services/docker'
 import type { AgentEndpoint } from '../services/fileTransfer'
 import { useGroupStore } from '../stores/groupStore'
 import { useDesktopPrefsStore } from '../stores/desktopPrefsStore'
@@ -89,7 +89,6 @@ export function DesktopPage() {
   const [showAddAgent, setShowAddAgent] = useState(false)
   const [showBulkMenu, setShowBulkMenu] = useState(false)
   const bulkMenuRef = useRef<HTMLDivElement>(null)
-  const [showOldManWizard, setShowOldManWizard] = useState(false)
   const [browsingAgent, setBrowsingAgent] = useState<AgentEndpoint | null>(null)
   const [positions, setPositions] = useState<Record<string, Position>>(loadPositions)
   const [layoutMode, setLayoutMode] = useState<'grid' | 'free'>(loadLayoutMode)
@@ -350,10 +349,6 @@ export function DesktopPage() {
     if (hasContent && !onboarding.completed.desktop) onboarding.completeStep('desktop')
   }, [hasContent]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Check if Old Man is already in the fleet
-  const hasOldMan = containers.some((c) => (c.agent_name || c.name || '').toLowerCase().includes('old-man') || (c.agent_name || c.name || '').toLowerCase().includes('old man'))
-    || processes.some((p) => (p.name || p.slug || '').toLowerCase().includes('old-man') || (p.name || p.slug || '').toLowerCase().includes('old man'))
-
   // Calculate canvas height for free mode
   const canvasHeight = useMemo(() => {
     if (layoutMode !== 'free') return 'auto'
@@ -408,18 +403,26 @@ export function DesktopPage() {
     )
   }
 
-  // First-run takeover: with an empty fleet, the very first thing the user
-  // sees is the spawn wizard — name an agent, pick a provider, and land on
-  // the Flight Deck. No empty agent-desktop chrome behind it.
+  // First-run empty state: with no agents, show a clean modal-style card that
+  // points the user to the Spawn Agent page.
   if (!hasContent) {
     return (
-      <div className="flex h-full items-start justify-center overflow-auto p-4 md:p-6">
-        <div className="w-full max-w-md pt-10 md:pt-16">
-          <div className="mb-6 text-center">
-            <h1 className="text-xl font-semibold text-zinc-100">Welcome to Flight Deck</h1>
-            <p className="mt-1 text-sm text-zinc-500">Launch your first agent to get started.</p>
+      <div className="flex h-full items-center justify-center p-6">
+        <div className="w-full max-w-sm rounded-2xl border border-zinc-800 bg-zinc-900/80 p-8 text-center shadow-xl shadow-black/30">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-violet-600/20 text-violet-400">
+            <Plus className="h-6 w-6" />
           </div>
-          <OldManOnboarding onSpawned={() => { fetchContainers(); fetchProcesses() }} />
+          <h2 className="mb-1.5 text-lg font-semibold text-zinc-100">No agents yet</h2>
+          <p className="mb-6 text-sm text-zinc-400">
+            Spawn your first agent to start building your fleet — choose a provider,
+            model, and tools on the Spawn Agent page.
+          </p>
+          <button
+            onClick={() => setView('spawner')}
+            className="w-full rounded-lg bg-violet-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-violet-500"
+          >
+            Create an agent
+          </button>
         </div>
       </div>
     )
@@ -434,15 +437,6 @@ export function DesktopPage() {
             <p className="text-xs text-zinc-500 sm:text-sm">Monitor and control your personal assistants</p>
           </div>
           <div className="flex items-center gap-2">
-            {!hasOldMan && (
-              <button
-                onClick={() => setShowOldManWizard(true)}
-                className="flex items-center gap-1.5 rounded-md bg-violet-600/20 px-2.5 py-1.5 text-xs font-medium text-violet-300 hover:bg-violet-600/30 border border-violet-600/30"
-              >
-                <Zap className="h-3.5 w-3.5" />
-                {!isMobile && 'Spawn Supervisor'}
-              </button>
-            )}
             <GroupFilter selected={groupFilter} onChange={setGroupFilter} />
             {!compact && layoutMode === 'free' && (
               <button
@@ -516,7 +510,7 @@ export function DesktopPage() {
                     <Shuffle className="h-3.5 w-3.5" /> Inverse started agents
                   </button>
                   <div className="my-1 border-t border-zinc-700/50" />
-                  <button onClick={() => { setShowBulkMenu(false); setShowAddAgent(!showAddAgent) }}
+                  <button onClick={() => { setShowBulkMenu(false); setView('spawner') }}
                     className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-700/50">
                     <Plus className="h-3.5 w-3.5" /> Add Local Agent
                   </button>
@@ -616,21 +610,6 @@ export function DesktopPage() {
           onClose={() => setBrowsingAgent(null)}
         />
       )}
-
-      {/* Old Man spawn wizard modal */}
-      {showOldManWizard && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="relative">
-            <button
-              onClick={() => setShowOldManWizard(false)}
-              className="absolute -top-2 -right-2 z-10 rounded-full bg-zinc-800 p-1 text-zinc-400 hover:text-zinc-200"
-            >
-              <X className="h-4 w-4" />
-            </button>
-            <OldManOnboarding onSpawned={() => { setShowOldManWizard(false); fetchContainers(); fetchProcesses() }} />
-          </div>
-        </div>
-      )}
     </div>
   )
 }
@@ -706,165 +685,5 @@ function AddAgentForm({ onAdd, onCancel }: {
         </button>
       </div>
     </form>
-  )
-}
-
-// ── Old Man onboarding wizard ──
-
-const PROVIDERS = [
-  { id: 'gemini', label: 'Google Gemini', defaultModel: 'gemini-3-flash-preview' },
-  { id: 'openai', label: 'OpenAI', defaultModel: 'gpt-5-mini' },
-  { id: 'anthropic', label: 'Anthropic', defaultModel: 'claude-sonnet-4-6' },
-  { id: 'ollama', label: 'Ollama (local)', defaultModel: 'minimax-m2.7:cloud' },
-  { id: 'openrouter', label: 'OpenRouter', defaultModel: 'google/gemini-3-flash' },
-  { id: 'xai', label: 'xAI', defaultModel: 'grok-3-mini' },
-  { id: 'litert', label: 'LiteRT (local Gemma)', defaultModel: 'litert-community/gemma-4-E4B-it-litert-lm' },
-]
-
-function OldManOnboarding({ onSpawned }: { onSpawned: () => void }) {
-  const [name, setName] = useState('Old Man')
-  const [description, setDescription] = useState('')
-  const [provider, setProvider] = useState('gemini')
-  const [model, setModel] = useState('gemini-3-flash-preview')
-  const [apiKey, setApiKey] = useState('')
-  const [baseUrl, setBaseUrl] = useState('')
-  const [spawning, setSpawning] = useState(false)
-  const [error, setError] = useState('')
-
-  const handleProviderChange = (p: string) => {
-    setProvider(p)
-    const preset = PROVIDERS.find((pr) => pr.id === p)
-    if (preset) setModel(preset.defaultModel)
-  }
-
-  const handleSpawn = async () => {
-    if (!name.trim()) {
-      setError('Give your agent a name.')
-      return
-    }
-    if (!apiKey.trim() && provider !== 'ollama') {
-      setError('API key is required for cloud providers.')
-      return
-    }
-    setError('')
-    setSpawning(true)
-    try {
-      await spawnOldMan({
-        name: name.trim(),
-        description: description.trim(),
-        provider,
-        model,
-        api_key: apiKey,
-        base_url: baseUrl.trim(),
-        // Always a local process agent — the supervisor needs host access
-        // (hotkey, screen capture, desktop actions) and a Docker container's
-        // bind-mounted workspace isn't reliably writable on Docker Desktop.
-        mode: 'process',
-      })
-      setTimeout(onSpawned, 2000) // give agent a moment to start
-    } catch (e: any) {
-      setError(e.message || 'Failed to spawn agent')
-    } finally {
-      setSpawning(false)
-    }
-  }
-
-  return (
-    <div className="mx-auto max-w-md">
-      <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-6">
-        <div className="mb-4 flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-violet-600/20 text-violet-400">
-            <Zap className="h-5 w-5" />
-          </div>
-          <div>
-            <h2 className="text-lg font-semibold text-zinc-100">Launch your first agent</h2>
-            <p className="text-xs text-zinc-500">The supervisor that seeds your fleet</p>
-          </div>
-        </div>
-        <p className="mb-5 text-sm text-zinc-400">
-          This agent is your always-on supervisor. It listens via hotkey, triages requests,
-          and can spawn &amp; delegate to other agents in the fleet. Name it, pick a provider,
-          and you'll land on the Flight Deck.
-        </p>
-
-        <div className="space-y-3">
-          <div>
-            <label className="mb-1 block text-xs font-medium text-zinc-500">Agent Name</label>
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Old Man"
-              className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="mb-1 block text-xs font-medium text-zinc-500">Short Description</label>
-            <input
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Desktop supervisor — triages requests, delegates to fleet agents"
-              className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="mb-1 block text-xs font-medium text-zinc-500">Provider</label>
-            <select
-              value={provider}
-              onChange={(e) => handleProviderChange(e.target.value)}
-              className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
-            >
-              {PROVIDERS.map((p) => (
-                <option key={p.id} value={p.id}>{p.label}</option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="mb-1 block text-xs font-medium text-zinc-500">Model</label>
-            <input
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
-            />
-          </div>
-
-          {provider !== 'ollama' && (
-            <div>
-              <label className="mb-1 block text-xs font-medium text-zinc-500">API Key</label>
-              <input
-                type="password"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder="sk-..."
-                className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
-              />
-            </div>
-          )}
-
-          <div>
-            <label className="mb-1 block text-xs font-medium text-zinc-500">Base URL <span className="text-zinc-600">(optional)</span></label>
-            <input
-              value={baseUrl}
-              onChange={(e) => setBaseUrl(e.target.value)}
-              placeholder="https://api.openai.com/v1 · http://localhost:11434 · …"
-              className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
-            />
-            <p className="mt-1 text-[10px] text-zinc-600">Override the provider endpoint — for self-hosted, OpenAI-compatible, or proxy servers.</p>
-          </div>
-
-          {error && <p className="text-xs text-red-400">{error}</p>}
-
-          <button
-            onClick={handleSpawn}
-            disabled={spawning}
-            className="mt-2 w-full rounded-md bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
-          >
-            {spawning ? 'Spawning…' : 'Launch Agent'}
-          </button>
-        </div>
-      </div>
-    </div>
   )
 }
