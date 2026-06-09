@@ -5257,6 +5257,13 @@ def main():
     parser.add_argument("--dev", action="store_true", help="Development mode (no static serving)")
     args = parser.parse_args()
 
+    # Record the actual bound port so spawned agents get a correct FD_URL
+    # callback. The FD_URL auto-injection (when an agent's env lacks it) reads
+    # FD_PORT; without this it would fall back to a hardcoded 25080 guess.
+    # setdefault: don't clobber an externally-provided value (e.g. a
+    # reverse-proxy public port that differs from the bind port).
+    os.environ.setdefault("FD_PORT", str(args.port))
+
     if not args.dev and not STATIC_DIR.is_dir():
         print(f"Warning: Static files not found at {STATIC_DIR}")
         print("Run 'cd flight-deck && npm run build' to build the frontend first.")
