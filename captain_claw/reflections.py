@@ -33,7 +33,7 @@ REFLECTIONS_DIR = Path("~/.captain-claw/reflections").expanduser()
 AUTO_REFLECT_COOLDOWN_SECONDS = 4 * 60 * 60
 
 # Minimum messages since last reflection to trigger auto-reflect.
-AUTO_REFLECT_MIN_MESSAGES = 10
+AUTO_REFLECT_MIN_MESSAGES = 20
 
 
 # ── Data model ────────────────────────────────────────────────────────
