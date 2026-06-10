@@ -15,6 +15,17 @@
 
 An open-source AI agent with multi-agent orchestration, autonomous cognitive systems, and a full management dashboard. Runs locally, supports every major LLM provider, and ships with 45 built-in tools.
 
+## What's New in 0.5.4
+
+**Parallel web research — fast, and honest about it.** A research-quality release. Fully additive.
+
+- **`web_fetch_batch`** — fetch a whole page of `web_search` results **in parallel**, clean text per URL. Each URL self-corrects: fast HTTP first, escalating to a headless browser only when a page is thin/JS-rendered (one shared Chromium, isolated context per URL). Never drops content (falls back to the fast result), and **self-installs** the browser in the background on first need. Enabled by default, advertised in eco mode.
+- **Honesty guards** — if a model claims it *searched/fetched the web* but called no web tool that turn, it's forced to actually do it (`tool_choice=required`). And *"refresh from the web, don't use memory"* now **skips memory injection** for that turn, so it can't answer from stale memory.
+- **Friendly launchers** — `flight-deck` (= `captain-claw-fd`) and `captain-claw-agent` (= `captain-claw-web`), as pip entry points and standalone binaries. `captain-claw` is unchanged.
+- **Flight Deck** — activity-narration blurbs render markdown (tables/bold/code); the sidebar "Apps" section is removed.
+
+See [RELEASE_NOTES_0.5.4.md](release-notes/RELEASE_NOTES_0.5.4.md). Backward compatible with 0.5.3.
+
 ## What's New in 0.5.3
 
 **Free agents — one OpenRouter key, a zero-cost fleet.** A free-models + desktop-standalone release. Fully additive.
@@ -25,7 +36,7 @@ An open-source AI agent with multi-agent orchestration, autonomous cognitive sys
 - **Flight Deck polish** — agent cards move Actions to a gear (⚙) with Chat/Open in the action row; the Director can **show/hide** agents (header reads "X of Y"); chat groups tool calls + narration into a **collapsible Activity panel**; the sidebar menu is reordered and trimmed.
 - **Fixes** — process agents **start reliably after an app restart** (bundled-binary resolution in the packaged app); FD records its bound port so the auto-injected `FD_URL` is always correct.
 
-See [RELEASE_NOTES_0.5.3.md](RELEASE_NOTES_0.5.3.md). Backward compatible with 0.5.2.
+See [RELEASE_NOTES_0.5.3.md](release-notes/RELEASE_NOTES_0.5.3.md). Backward compatible with 0.5.2.
 
 ## What's New in 0.5.2
 
@@ -37,7 +48,7 @@ See [RELEASE_NOTES_0.5.3.md](RELEASE_NOTES_0.5.3.md). Backward compatible with 0
 - **Faster trivial turns** — a one-line edit/lookup skips the contract→planner→gate pipeline (~10s saved); the `edit` tool gains batch edits + a closest-match hint.
 - **Glasses polish** — focus-walkable content cards and mode switcher; `/flow` control works from web chat.
 
-See [RELEASE_NOTES_0.5.2.md](RELEASE_NOTES_0.5.2.md). Backward compatible with 0.5.1.
+See [RELEASE_NOTES_0.5.2.md](release-notes/RELEASE_NOTES_0.5.2.md). Backward compatible with 0.5.1.
 
 ## What's New in 0.5.1
 
@@ -50,7 +61,7 @@ See [RELEASE_NOTES_0.5.2.md](RELEASE_NOTES_0.5.2.md). Backward compatible with 0
 - **Scheduling** — the Flight Deck **Scheduler** can now run a **Flow** (not just a prompt) on a timer — fire a self-contained briefing each morning.
 - **Smarter describe→flow** — the AI compiler knows the full vocabulary, so plain-English descriptions can produce the new primitives.
 
-New step types in the Builder, scheduler `flow_id` support, and a full `FLOWS.md` reference + five worked examples. See [RELEASE_NOTES_0.5.1.md](RELEASE_NOTES_0.5.1.md). Backward compatible with 0.5.0.
+New step types in the Builder, scheduler `flow_id` support, and a full `FLOWS.md` reference + five worked examples. See [RELEASE_NOTES_0.5.1.md](release-notes/RELEASE_NOTES_0.5.1.md). Backward compatible with 0.5.0.
 
 ## What's New in 0.5.0
 
@@ -63,7 +74,7 @@ New step types in the Builder, scheduler `flow_id` support, and a full `FLOWS.md
 - **Agents author their own flows** — the `synthesize_flow` tool (and a **Synthesize** composer in the UI) turn a plain-language goal into a validated, call-only flow in a curated **scratch space**. It earns promotion by running well (⭐ candidate / ⚠️ quarantined), with dedup + TTL/GC. **Promote** the good ones.
 - **Trust, built in** — a synthesized flow can't call a permanent *world-acting* flow until promoted; permanent names win over scratch (no shadowing); provenance tracked.
 
-New Flight Deck endpoints: `/fd/flows/synthesize`, `/fd/flows/scratch`, `/fd/flows/scratch/maintain`, `/fd/flows/{id}/promote`, `/fd/flows/runs/{id}/pause|resume|stop`. New agent tool: `synthesize_flow`. See [RELEASE_NOTES_0.5.0.md](RELEASE_NOTES_0.5.0.md) (with four worked examples) and the full [FLOWS.md](FLOWS.md) reference. Backward compatible — existing flows behave identically; the flows DB migrates in place.
+New Flight Deck endpoints: `/fd/flows/synthesize`, `/fd/flows/scratch`, `/fd/flows/scratch/maintain`, `/fd/flows/{id}/promote`, `/fd/flows/runs/{id}/pause|resume|stop`. New agent tool: `synthesize_flow`. See [RELEASE_NOTES_0.5.0.md](release-notes/RELEASE_NOTES_0.5.0.md) (with four worked examples) and the full [FLOWS.md](FLOWS.md) reference. Backward compatible — existing flows behave identically; the flows DB migrates in place.
 
 ## What's New in 0.4.33
 
@@ -78,7 +89,7 @@ New Flight Deck endpoints: `/fd/flows/synthesize`, `/fd/flows/scratch`, `/fd/flo
 - **Faces, hands-free** — a sticky `face` mode over WhatsApp/glasses: `face on` (recognize → card, or describe the scene if no face), `face enroll <name>` … `face off`; natural phrasings accepted.
 - **Learn it in-app** — a **📖 Flow language docs** button renders the full reference, and **Load example** drops in a guided, commented flow.
 
-New Flight Deck endpoints: `/fd/flows/dsl/compile`, `/fd/flows/dsl/decompile`, `/fd/flows/compile`, `/fd/flows/docs`, and agent `/api/chat/push`. See [RELEASE_NOTES_0.4.33.md](RELEASE_NOTES_0.4.33.md) and the full [FLOWS.md](FLOWS.md) reference. Backward compatible with 0.4.32.
+New Flight Deck endpoints: `/fd/flows/dsl/compile`, `/fd/flows/dsl/decompile`, `/fd/flows/compile`, `/fd/flows/docs`, and agent `/api/chat/push`. See [RELEASE_NOTES_0.4.33.md](release-notes/RELEASE_NOTES_0.4.33.md) and the full [FLOWS.md](FLOWS.md) reference. Backward compatible with 0.4.32.
 
 ## What's New in 0.4.32
 
@@ -91,7 +102,7 @@ New Flight Deck endpoints: `/fd/flows/dsl/compile`, `/fd/flows/dsl/decompile`, `
 - **Image Flows can override** the built-in WhatsApp image automation (selective by trigger), with fallback to the built-in.
 - **Reliability hardening** — no-auto-resend gate on relays, self-delegation blocked, busy peers queue instead of reject, auth resolved by agent (401 fix), capability-aware vision hint, and rich-session memory contamination fixed on image turns.
 
-Adds two agent endpoints (`/api/tool`, `/api/vision`, admin-locked). See [RELEASE_NOTES_0.4.32.md](RELEASE_NOTES_0.4.32.md). Backward compatible with 0.4.31.
+Adds two agent endpoints (`/api/tool`, `/api/vision`, admin-locked). See [RELEASE_NOTES_0.4.32.md](release-notes/RELEASE_NOTES_0.4.32.md). Backward compatible with 0.4.31.
 
 📖 **Full Flow language reference:** [FLOWS.md](FLOWS.md) — triggers, step types, the `{{…}}` templating, branch conditions, the code DSL, and the AI compiler, with a cookbook and troubleshooting.
 
@@ -105,7 +116,7 @@ Adds two agent endpoints (`/api/tool`, `/api/vision`, admin-locked). See [RELEAS
 - **WhatsApp + glasses** — inbound video handling and progressive "transcribing → transcript → analyzing frames" updates.
 - **Infra** — 800 MB upload limit + video file types, and Flight Deck shares `SONIOX_API_KEY` / WhatsApp creds with agents.
 
-Requires `ffmpeg` on the agent host. See [RELEASE_NOTES_0.4.31.md](RELEASE_NOTES_0.4.31.md). Backward compatible with 0.4.30.
+Requires `ffmpeg` on the agent host. See [RELEASE_NOTES_0.4.31.md](release-notes/RELEASE_NOTES_0.4.31.md). Backward compatible with 0.4.30.
 
 ## What's New in 0.4.30
 
@@ -115,7 +126,7 @@ Requires `ffmpeg` on the agent host. See [RELEASE_NOTES_0.4.31.md](RELEASE_NOTES
 - **Search by tag** — `intentions(action="search", tags=[…], match="any"|"all")`; exact matching (`vc` ≠ `vcfund`).
 - **Flight Deck panel** — tag chips per intention + a clickable tag-filter row.
 
-See [RELEASE_NOTES_0.4.30.md](RELEASE_NOTES_0.4.30.md). Backward compatible with 0.4.29.
+See [RELEASE_NOTES_0.4.30.md](release-notes/RELEASE_NOTES_0.4.30.md). Backward compatible with 0.4.29.
 
 ## What's New in 0.4.29
 
@@ -125,7 +136,7 @@ See [RELEASE_NOTES_0.4.30.md](RELEASE_NOTES_0.4.30.md). Backward compatible with
 - **Images work end-to-end** — multimodal Ollama models (minimax-m3, llava, qwen-vl) now **see images inline** via Ollama's `images[]` array (resized to bound tokens); `image_vision` is always available and falls back to the chat model; `read` refuses binaries with a clear "use image_vision"; manual composer upload of images is fixed; a blind agent can **delegate vision to a multimodal peer**.
 - **Delivery integrity** — a **serialized inbound queue** drains peer results one-at-a-time (no more duplicate "waiting" replies / races); delegate results are framed for clean relay; a **false-action-claim gate** catches an agent saying it delegated when it didn't; echoed `[INTERNAL CONTEXT]` blocks are stripped from replies.
 
-Backward compatible with 0.4.28. See [RELEASE_NOTES_0.4.29.md](RELEASE_NOTES_0.4.29.md) for the full breakdown.
+Backward compatible with 0.4.28. See [RELEASE_NOTES_0.4.29.md](release-notes/RELEASE_NOTES_0.4.29.md) for the full breakdown.
 
 - **WhatsApp bridge — two-way PA** (`captain_claw/flight_deck/whatsapp_bridge.py`): inbound text, **voice notes** (Soniox STT), location & contacts; outbound text, optional **voice replies** (Soniox TTS), and now **document sending** (`whatsapp_send_file` tool — send a saved file to the current chat or any number, with a robust MIME map for pptx/docx/xlsx/pdf/text). Allowlist-gated, with `/c` `/mute` slash commands.
 - **Caption-routed inbound images** — a photo is no longer force-fed to face recognition. Its caption routes it: *"who is this?"* → face recognition, *"summarise this"* → the agent's vision, *"remember this is Alice"* → **face enrollment**. A bare photo asks what to do. Face recognition stays entirely on Flight Deck.
@@ -136,7 +147,7 @@ Backward compatible with 0.4.28. See [RELEASE_NOTES_0.4.29.md](RELEASE_NOTES_0.4
 - **Reliable tool availability in Eco mode** — Google (Gmail/Drive/Calendar), WhatsApp, intentions, and the fleet tool are now always offered, fixing cases where Eco mode silently hid them.
 - **Reliability** — agents on thinking-mode models (e.g. DeepSeek thinking) no longer crash when a forced `tool_choice` is rejected; the call transparently retries without it.
 
-Backward compatible — existing 0.4.27 setups keep working unchanged. The WhatsApp bridge, scheduler, and Intentions generator are all opt-in. See [RELEASE_NOTES_0.4.28.md](RELEASE_NOTES_0.4.28.md) for the full breakdown and walkthroughs.
+Backward compatible — existing 0.4.27 setups keep working unchanged. The WhatsApp bridge, scheduler, and Intentions generator are all opt-in. See [RELEASE_NOTES_0.4.28.md](release-notes/RELEASE_NOTES_0.4.28.md) for the full breakdown and walkthroughs.
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the full changelog.
 

@@ -599,6 +599,46 @@ Smart fallback: tries plain HTTP first, then transparently retries through a hea
 | `url` | string | yes | URL to fetch |
 | `max_chars` | number | no | Max output chars (default: 100000) |
 
+### web_fetch_batch — NEW in 0.5.4
+
+Fetch **multiple URLs in parallel** and return clean text per URL. Use this
+instead of repeated `web_fetch` calls when you have several URLs to read — e.g.
+the results of a `web_search`.
+
+How it works:
+
+- **Fast → deep self-correction per URL.** A plain HTTP fetch runs first
+  (concurrency 8); only URLs that come back thin or JS-rendered escalate to a
+  headless browser. The "thin" check compares extracted text to raw-HTML size,
+  so genuinely short pages aren't needlessly escalated.
+- **Shared browser.** Deep fetches run in one Chromium with an isolated context
+  per URL (concurrency 3) — one launch, not N.
+- **Never drops content.** If the browser is unavailable, the fast-HTTP content
+  is surfaced anyway (matching `web_fetch(deep_fetch=false)`).
+- **Self-installing.** On the first deep need with no browser binary, a one-time
+  `playwright install chromium` runs in the background; the call returns fast
+  content immediately and deep mode works on the next call.
+- **Budgeted.** Caps at 10 URLs/call (extras are returned to the agent to fetch
+  in a follow-up call), 25k chars per URL, 150k total. Tunable under
+  `tools.web_fetch` (`batch_max_urls`, `batch_fast_concurrency`,
+  `batch_deep_concurrency`, `batch_per_url_max_chars`, `batch_total_max_chars`,
+  `batch_min_useful_chars`, `batch_fast_timeout`).
+
+The result is one labelled section per URL (`[URL]/[Status]/[Mode: fast|deep]`)
+plus a header summary (`Fetched 8/10 URLs (2 via deep browser, 0 failed)`).
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `urls` | array | yes | URLs to fetch (processed in parallel) |
+| `max_chars` | number | no | Per-URL char cap (overrides config default) |
+| `deep_fetch` | boolean | no | Force headless mode for all URLs (default: auto) |
+
+> **Honesty guard:** if the agent claims it searched/fetched the web but no web
+> tool (`web_search`/`web_fetch`/`web_fetch_batch`/`web_get`) actually ran that
+> turn, the runtime forces a corrective retry with `tool_choice=required`.
+> Asking it to "refresh from the web, don't use memory" also skips the automatic
+> memory-context injection for that turn.
+
 ### web_get
 
 Fetch a URL and return raw HTML source. Use only when you need the actual HTML markup for scraping, DOM analysis, or CSS selector inspection. For normal page reading, use `web_fetch` instead.
