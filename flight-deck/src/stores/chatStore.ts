@@ -867,7 +867,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
         addMessage(containerId, msg)
       }
-      updateSession(containerId, { busy: true, statusText: `Using ${toolName}...` })
+      // The monitor event arrives AFTER the tool finished (it carries the
+      // output) — setting "Using X..." here would show a stale phase while
+      // the agent is already back in the (slow) LLM call. The backend now
+      // emits accurate phase statuses ("Using X...", "Calling LLM (...)")
+      // via the `status` event, so only keep the busy flag here.
+      updateSession(containerId, { busy: true })
     })
 
     ws.on('approval_request', (data) => {

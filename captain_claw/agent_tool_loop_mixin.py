@@ -776,7 +776,9 @@ class AgentToolLoopMixin:
         _URL_TOOLS = {"web_fetch", "web_get"}
 
         for tc in tool_calls:
-            self._set_runtime_status("running script")
+            # Status reflects the phase START — the UI's "Using X..." must
+            # appear while the tool runs, not after it returns its output.
+            self._set_runtime_status(f"Using {tc.name}...")
             log.info("Executing tool", tool=tc.name, call_id=tc.id)
 
             # Parse arguments (could be string or dict)

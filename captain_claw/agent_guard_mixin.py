@@ -353,12 +353,44 @@ class AgentGuardMixin:
         _t0 = _time.monotonic()
         _error_occurred = False
         _stream_cb = getattr(self, "response_stream_callback", None)
+
+        # Surface the LLM call as a live status — the call (especially
+        # time-to-first-token) is usually the slowest part of a turn, and
+        # without this the UI keeps showing the previous tool as "in use".
+        _model_label = str(getattr(self.provider, "model", "") or "").strip()
+        _llm_status = f"Calling LLM ({_model_label})" if _model_label else "Calling LLM"
+        _label = str(interaction_label or "").strip()
+        if _label and _label != "conversation":
+            _llm_status += f" · {_label}"
+        _ctx = getattr(self, "last_context_window", {}) or {}
+        _ctx_tokens = int(_ctx.get("prompt_tokens", 0) or 0)
+        _ctx_budget = int(_ctx.get("context_budget_tokens", 0) or 0)
+        if _ctx_tokens:
+            _llm_status += f" · {_ctx_tokens:,} ctx tokens"
+            if _ctx_budget:
+                _llm_status += f" ({round(_ctx_tokens / _ctx_budget * 100)}%)"
+        self._set_runtime_status(f"{_llm_status}...")
+
+        # On the first streamed chunk, keep the same LLM details visible and
+        # just prefix a streaming icon — the model/context info stays useful
+        # for the whole call, the icon marks that tokens are flowing.
+        _on_chunk = _stream_cb
+        if _stream_cb is not None:
+            _streaming_started = False
+
+            def _on_chunk(chunk: str) -> None:
+                nonlocal _streaming_started
+                if not _streaming_started:
+                    _streaming_started = True
+                    self._set_runtime_status(f"⚡ {_llm_status}...")
+                _stream_cb(chunk)
+
         try:
             response = await self.provider.complete_with_callback(
                 messages=messages,
                 tools=tools,
                 max_tokens=max_tokens,
-                on_chunk=_stream_cb,
+                on_chunk=_on_chunk,
             )
         except Exception:
             _error_occurred = True

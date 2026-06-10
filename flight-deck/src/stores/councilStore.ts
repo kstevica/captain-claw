@@ -1045,7 +1045,9 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
               agents: state.activeSession.agents.map(ag => {
                 if (ag.id !== a.id) return ag
                 const history = [...ag.toolHistory, toolName].slice(-3)
-                return { ...ag, busy: true, statusText: `Using ${toolName}...`, toolHistory: history }
+                // Tool output arrives after the tool finished — phase status
+                // (statusText) is driven by the backend `status` events now.
+                return { ...ag, busy: true, toolHistory: history }
               }),
             },
           }

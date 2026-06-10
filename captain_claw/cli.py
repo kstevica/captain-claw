@@ -864,6 +864,13 @@ Commands:
         normalized = status.strip().lower()
         if normalized in allowed:
             self._runtime_status = normalized
+        elif normalized.startswith("using "):
+            # Descriptive tool status ("Using web_fetch...") → tool badge.
+            self._runtime_status = "running script"
+        elif "calling llm" in normalized:
+            # Descriptive LLM-call status → thinking badge; the ⚡ prefix
+            # marks that response tokens are already streaming.
+            self._runtime_status = "streaming" if normalized.startswith("⚡") else "thinking"
         else:
             self._runtime_status = "waiting"
         if self._assistant_output_active:
