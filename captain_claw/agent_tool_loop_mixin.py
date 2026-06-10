@@ -941,6 +941,68 @@ class AgentToolLoopMixin:
             if not hasattr(self, "_turn_tool_call_counts"):
                 self._turn_tool_call_counts = _dup_counts
 
+            # ── Blind-rewrite guard ────────────────────────────────
+            # A full (non-append) write to a path already written this
+            # turn, with NO feedback-gathering call in between (read,
+            # shell, browser, fetch, …), is almost always the model
+            # second-guessing itself and regenerating the file from
+            # scratch.  Redirect it to edit/finalize instead of burning
+            # the write.  Any feedback tool clears the tracked set, so
+            # legitimate write → test → rewrite iteration stays allowed,
+            # and reading the file first is the explicit escape hatch.
+            _BLIND_FEEDBACK_TOOLS = {
+                "read", "glob", "grep", "shell", "termux", "browser",
+                "screen_capture", "desktop_action", "web_fetch", "web_get",
+                "web_search", "web_fetch_batch", "edit", "file_edit",
+                "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract",
+            }
+            _blind_paths: set[str] = getattr(self, "_blind_write_paths", set())
+            self._blind_write_paths = _blind_paths
+            if _tool_lower in _BLIND_FEEDBACK_TOOLS:
+                _blind_paths.clear()
+            if (
+                _tool_lower in ("write", "file_write")
+                and isinstance(arguments, dict)
+                and not arguments.get("append")
+            ):
+                _bw_path = str(arguments.get("path", "")).strip()
+                _bw_key = os.path.abspath(_bw_path) if _bw_path else ""
+                if _bw_key and _bw_key in _blind_paths:
+                    blind_msg = (
+                        f"BLIND REWRITE BLOCKED: You already wrote `{_bw_path}` "
+                        "this turn and have gathered no new information since "
+                        "(no read/shell/browser/fetch call in between). The "
+                        "file is saved on disk and complete. Use the edit tool "
+                        "for targeted changes, or provide your final text "
+                        "response now. If you genuinely need a full rewrite, "
+                        "read the file first."
+                    )
+                    log.info(
+                        "Blind rewrite blocked",
+                        tool=tc.name,
+                        call_id=tc.id,
+                        path=_bw_path,
+                    )
+                    self._emit_thinking(
+                        f"🛡️ Blind rewrite blocked: {_bw_path}",
+                        tool=tc.name,
+                        phase="tool",
+                    )
+                    self._add_session_message(
+                        role="tool",
+                        content=blind_msg,
+                        tool_call_id=tc.id,
+                        tool_name=tc.name,
+                        tool_arguments={"path": _bw_path},
+                    )
+                    self._emit_tool_output(tc.name, {"path": _bw_path}, blind_msg)
+                    results.append({
+                        "tool_call_id": tc.id,
+                        "role": "tool",
+                        "content": blind_msg,
+                    })
+                    continue
+
             # ── Scale-progress: track last action for write hint ──
             # Instead of hard-blocking read-before-write (which caused
             # deadlocks when interacting with the dup detector), we
@@ -971,6 +1033,19 @@ class AgentToolLoopMixin:
                     task_policy=task_policy,
                     abort_event=abort_event,
                 )
+
+                # Register successful full writes for the blind-rewrite
+                # guard — a later write to the same path this turn is
+                # blocked unless a feedback tool runs in between.
+                if (
+                    result.success
+                    and _tool_lower in ("write", "file_write")
+                    and isinstance(arguments, dict)
+                    and not arguments.get("append")
+                ):
+                    _bw_done = str(arguments.get("path", "")).strip()
+                    if _bw_done:
+                        self._blind_write_paths.add(os.path.abspath(_bw_done))
 
                 # Add result to session
                 _result_content = result.content if result.success else f"Error: {result.error}"

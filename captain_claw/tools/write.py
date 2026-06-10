@@ -289,15 +289,27 @@ class WriteTool(Tool):
             result_msg = f"Written {len(content)} chars ({_line_count} lines) to {file_path}{redirect_note}"
             if _overwrite_info:
                 result_msg = f"{result_msg}\n{_overwrite_info}"
+            # Hint: prevent read-after-write waste (LLM sometimes reads
+            # back a file it just wrote, wasting an iteration) and
+            # second-guess rewrites (regenerating the whole file from
+            # scratch right after a successful write).
+            if append:
+                _hint = (
+                    "Do NOT read this file back — you already know its "
+                    "contents. Proceed to the next item."
+                )
+            else:
+                _hint = (
+                    "Do NOT read this file back — you already know its "
+                    "contents. The file is saved and complete; do NOT "
+                    "rewrite it from scratch. If it needs changes, use the "
+                    "edit tool for targeted modifications. If you are done, "
+                    "provide your final text response."
+                )
             return ToolResult(
                 success=True,
                 content=result_msg,
-                # Hint: prevent read-after-write waste (LLM sometimes reads
-                # back a file it just wrote, wasting an iteration).
-                system_hint=(
-                    "Do NOT read this file back — you already know its "
-                    "contents. Proceed to the next file."
-                ),
+                system_hint=_hint,
             )
             
         except Exception as e:

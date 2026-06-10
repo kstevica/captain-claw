@@ -13,6 +13,16 @@ from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
 
+# Interaction labels of post-turn background jobs. Their LLM calls happen
+# while the agent is otherwise idle, so the runtime status must be reset
+# to "ready" when they finish (the UI treats "ready" as the idle state).
+_BACKGROUND_MAINTENANCE_LABELS = {
+    "reflection",
+    "reflection_merge",
+    "insight_extraction",
+    "nervous_system_dream",
+}
+
 
 class AgentGuardMixin:
     """Guard evaluation and guarded completion/tool execution."""
@@ -397,6 +407,12 @@ class AgentGuardMixin:
             raise
         finally:
             _latency_ms = int((_time.monotonic() - _t0) * 1000)
+            # Background maintenance calls (reflection, insight extraction,
+            # dreaming) run AFTER the turn ended — nothing else resets the
+            # status, so without this the UI stays stuck on
+            # "Calling LLM · reflection..." until the next user turn.
+            if _label in _BACKGROUND_MAINTENANCE_LABELS:
+                self._set_runtime_status("ready")
 
         if turn_usage is not None:
             self._accumulate_usage(turn_usage, response.usage or {})

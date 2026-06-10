@@ -342,6 +342,9 @@ class AgentOrchestrationMixin:
         # detect the LLM re-requesting the exact same tool call and stop it
         # before wasting resources on an infinite re-fetch loop.
         self._turn_tool_call_counts: dict[str, int] = {}
+        # Reset blind-rewrite tracker — a full write in a PREVIOUS turn must
+        # not block a rewrite the user explicitly asked for in this turn.
+        self._blind_write_paths: set[str] = set()
         # Reset per-turn all-blocked streak counter.
         self._all_blocked_streak: int = 0
         # Reset tool-avoidance nudge flag (one nudge per turn max).
