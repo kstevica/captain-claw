@@ -405,8 +405,26 @@ def _is_openai_gpt5_family(provider: str, model: str) -> bool:
     return base.startswith("gpt-5")
 
 
+def _is_temperature_unsupported_model(provider: str, model: str) -> bool:
+    """True for models that reject the temperature parameter entirely.
+
+    Anthropic's Fable family deprecated temperature — sending it (even
+    temperature=1) returns a 400 ``temperature is deprecated for this
+    model``, so it must be omitted from the request, not just clamped.
+    """
+    base = str(model or "").split("/")[-1].lower()
+    return "fable" in base
+
+
 def _normalize_temperature_for_model(provider: str, model: str, temperature: float | None) -> float | None:
-    """Adjust temperature for provider/model constraints."""
+    """Adjust temperature for provider/model constraints.
+
+    Returns None when the parameter must be omitted entirely (callers that
+    build request payloads must drop the key when this is None).
+    """
+    # Models that reject temperature outright — omit it regardless of input.
+    if _is_temperature_unsupported_model(provider, model):
+        return None
     if temperature is None:
         return None
     # OpenAI GPT-5 family only accepts temperature=1.
@@ -1903,11 +1921,15 @@ class LiteLLMProvider(LLMProvider):
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": _convert_messages_for_openai_style(messages),
-            "temperature": resolved_temperature,
             "max_tokens": max_tokens or self.max_tokens,
             "stream": stream,
             "timeout": 180,
         }
+        # Omit temperature when the model doesn't accept it (e.g. Anthropic
+        # Fable family rejects it with a 400). _normalize_* returns None in
+        # that case.
+        if resolved_temperature is not None:
+            kwargs["temperature"] = resolved_temperature
         if tools:
             kwargs["tools"] = _convert_tools_for_openai_style(tools)
 
