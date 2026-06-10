@@ -276,6 +276,50 @@ async def google_status(
     }
 
 
+@router.get("/probe")
+async def google_probe(
+    _user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Live read-only health probe of the Google connection.
+
+    Unlike ``/status`` (which only checks that a refresh token is stored),
+    this refreshes the access token if needed and makes a real read-only
+    Google API call (userinfo). Drives the Connections traffic light:
+
+    - ``configured`` false / no tokens  → not connected (red)
+    - tokens present but the call fails  → connected-but-failing (yellow)
+    - userinfo succeeds                  → healthy (green)
+    """
+    db = get_db()
+    client = await _token_client(db)
+    if not client:
+        return {"configured": False, "connected": False, "ok": False,
+                "error": "Google OAuth not configured"}
+    tokens = await _load_tokens(db)
+    if not tokens or not tokens.refresh_token:
+        return {"configured": True, "connected": False, "ok": False,
+                "error": "Not connected — no stored tokens"}
+    try:
+        tokens = await _refresh_if_needed(db, client, tokens)
+    except Exception as exc:  # defensive — _refresh_if_needed swallows most
+        return {"configured": True, "connected": True, "ok": False,
+                "error": f"Token refresh failed: {exc}"}
+    if not tokens:
+        return {"configured": True, "connected": True, "ok": False,
+                "error": "Could not refresh access token"}
+    try:
+        info = await fetch_user_info(tokens.access_token)
+    except Exception as exc:
+        return {"configured": True, "connected": True, "ok": False,
+                "error": f"Read-only API call failed: {exc}"}
+    return {
+        "configured": True,
+        "connected": True,
+        "ok": True,
+        "email": info.get("email", ""),
+    }
+
+
 @router.get("/config")
 async def google_config_get(
     request: Request,

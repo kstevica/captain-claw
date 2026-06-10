@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useEffect } from 'react'
 import {
   Box,
   Settings2 as Cog,
@@ -19,12 +19,15 @@ import {
   Eye,
   EyeOff,
   X,
+  Plug,
+  Cloud,
 } from 'lucide-react'
 import { useContainerStore } from '../../stores/containerStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useProcessStore } from '../../stores/processStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useDesktopPrefsStore } from '../../stores/desktopPrefsStore'
+import { useConnectionsStore, type ConnectionStatus, type ConnectionHealth } from '../../stores/connectionsStore'
 import { GroupManager } from '../common/AgentGroups'
 
 // ── Types ──
@@ -297,7 +300,15 @@ export function DirectorPanel() {
     return items.slice(0, 30)
   }, [agents, chatSessions])
 
-  const [activeTab, setActiveTab] = useState<'agents' | 'activity' | 'groups'>('agents')
+  const [activeTab, setActiveTab] = useState<'agents' | 'activity' | 'groups' | 'connections'>('agents')
+
+  // Poll external connection health (Google + MCP) while the panel is mounted.
+  const startConnPolling = useConnectionsStore((s) => s.startPolling)
+  const stopConnPolling = useConnectionsStore((s) => s.stopPolling)
+  useEffect(() => {
+    startConnPolling(60000)
+    return () => stopConnPolling()
+  }, [startConnPolling, stopConnPolling])
 
   return (
     <div className="flex h-full flex-col border-r border-zinc-800 bg-zinc-950/60">
@@ -448,6 +459,14 @@ export function DirectorPanel() {
         >
           Groups
         </button>
+        <button
+          onClick={() => setActiveTab('connections')}
+          className={`flex-1 py-1.5 text-[11px] font-medium transition-colors ${
+            activeTab === 'connections' ? 'border-b-2 border-violet-500 text-violet-400' : 'text-zinc-500 hover:text-zinc-300'
+          }`}
+        >
+          Connections
+        </button>
       </div>
 
       {/* Content */}
@@ -472,10 +491,12 @@ export function DirectorPanel() {
           </div>
         ) : activeTab === 'activity' ? (
           <ActivityFeed items={activityFeed} />
-        ) : (
+        ) : activeTab === 'groups' ? (
           <div className="p-3">
             <GroupManager />
           </div>
+        ) : (
+          <ConnectionsPanel />
         )}
       </div>
     </div>
@@ -655,6 +676,83 @@ function RecentMessages({ agentId }: { agentId: string }) {
           <span className="text-zinc-500 truncate">{m.content?.slice(0, 100) || m.tool_name || ''}</span>
         </div>
       ))}
+    </div>
+  )
+}
+
+// ── Connections Panel ──
+
+const HEALTH_DOT: Record<ConnectionHealth, string> = {
+  green: 'bg-emerald-400',
+  yellow: 'bg-amber-400',
+  red: 'bg-red-400',
+  gray: 'bg-zinc-600',
+}
+
+const HEALTH_LABEL: Record<ConnectionHealth, string> = {
+  green: 'Healthy',
+  yellow: 'Degraded',
+  red: 'Offline',
+  gray: 'Disabled',
+}
+
+function ConnectionsPanel() {
+  const connections = useConnectionsStore((s) => s.connections)
+  const checking = useConnectionsStore((s) => s.checking)
+  const lastCheckedAt = useConnectionsStore((s) => s.lastCheckedAt)
+  const checkAll = useConnectionsStore((s) => s.checkAll)
+
+  return (
+    <div>
+      <div className="flex items-center justify-between border-b border-zinc-800/60 px-3 py-1.5">
+        <span className="text-[10px] text-zinc-600">
+          {lastCheckedAt ? `Checked ${relativeTime(new Date(lastCheckedAt).toISOString())}` : 'Not checked yet'}
+        </span>
+        <button
+          onClick={() => checkAll()}
+          disabled={checking}
+          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-40"
+          title="Re-check now"
+        >
+          {checking ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+          Check
+        </button>
+      </div>
+
+      {connections.length === 0 ? (
+        <div className="px-3 py-8 text-center text-xs text-zinc-600">
+          {checking ? 'Checking connections…' : 'No connections found.'}
+        </div>
+      ) : (
+        <div className="divide-y divide-zinc-800/40">
+          {connections.map((c) => (
+            <ConnectionRow key={c.id} conn={c} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ConnectionRow({ conn }: { conn: ConnectionStatus }) {
+  return (
+    <div className="flex items-start gap-2 px-3 py-2">
+      <div className="mt-0.5 flex-shrink-0">
+        {conn.kind === 'google' ? (
+          <Cloud className="h-3.5 w-3.5 text-blue-400/70" />
+        ) : (
+          <Plug className="h-3.5 w-3.5 text-violet-400/70" />
+        )}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <span className={`h-1.5 w-1.5 rounded-full flex-shrink-0 ${HEALTH_DOT[conn.health]}`} />
+          <span className="truncate text-xs font-medium text-zinc-200">{conn.label}</span>
+          <span className="text-[10px] text-zinc-600">·</span>
+          <span className="text-[10px] text-zinc-500">{HEALTH_LABEL[conn.health]}</span>
+        </div>
+        <p className="mt-0.5 text-[10px] text-zinc-500 break-words">{conn.detail}</p>
+      </div>
     </div>
   )
 }
