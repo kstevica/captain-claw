@@ -31,6 +31,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "edit": "Modify existing files by replacing specific text (find-and-replace)",
     "glob": "Find files by pattern (ALWAYS use this instead of shell find/ls for file searching — it automatically searches extra read folders too)",
     "web_fetch": "Fetch a URL and return clean readable TEXT (always text mode, never raw HTML)",
+    "web_fetch_batch": "Fetch MULTIPLE URLs in PARALLEL (clean text each). Use this — not repeated web_fetch — for several URLs, e.g. web_search results. Auto fast→deep per URL.",
     "web_get": "Fetch a URL and return raw HTML source (only for scraping/DOM inspection)",
     "web_search": "Search the web for up-to-date sources",
     "pdf_extract": "Extract a single .pdf file into markdown. ONLY for .pdf files. For multiple files in a folder use summarize_files instead.",
@@ -77,6 +78,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "edit": "modify files by replacing text",
     "glob": "find files by pattern",
     "web_fetch": "clean text from URL",
+    "web_fetch_batch": "fetch MANY URLs in parallel→text each (use for web_search results, not repeated web_fetch)",
     "web_get": "raw HTML from URL",
     "web_search": "web search",
     "pdf_extract": "single .pdf → markdown (for multiple files use summarize_files)",
@@ -2142,6 +2144,7 @@ class AgentContextMixin:
             TermuxTool,
             WebFetchTool,
             WebGetTool,
+            WebFetchBatchTool,
             WebSearchTool,
             WriteTool,
             XlsxExtractTool,
@@ -2172,6 +2175,7 @@ class AgentContextMixin:
             elif tool_name == "web_fetch":
                 self.tools.register(WebFetchTool())
                 self.tools.register(WebGetTool())
+                self.tools.register(WebFetchBatchTool())
             elif tool_name == "web_search":
                 self.tools.register(WebSearchTool())
             elif tool_name == "pdf_extract":
@@ -3287,7 +3291,11 @@ class AgentContextMixin:
                         msg.pop("_tc_counted", None)
                 candidate_messages.append(msg)
 
-        memory_note, memory_debug = self._build_tool_memory_note(
+        # Honour an explicit "use fresh/web data, not memory" request for this
+        # turn: skip the automatic memory + semantic-memory context injection.
+        _skip_memory = getattr(self, "_skip_memory_injection", False)
+
+        memory_note, memory_debug = (None, "") if _skip_memory else self._build_tool_memory_note(
             skipped_historical_tools,
             query=query,
         )
@@ -3307,7 +3315,7 @@ class AgentContextMixin:
                 )
                 self._last_memory_debug_signature = signature
 
-        semantic_note, semantic_debug = self._build_semantic_memory_note(query=query)
+        semantic_note, semantic_debug = (None, "") if _skip_memory else self._build_semantic_memory_note(query=query)
         if semantic_note:
             candidate_messages.append({
                 "role": "assistant",

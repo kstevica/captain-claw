@@ -1202,7 +1202,9 @@ function MessageBubble({ message, sourceName, agentId }: { message: ChatMessage;
       return (
         <div className="mb-1.5 flex items-start gap-1.5 pl-1 pr-6 text-xs italic text-zinc-500">
           <CircleDot className="mt-0.5 h-3 w-3 shrink-0 text-zinc-600" />
-          <span className="whitespace-pre-wrap">{message.content}</span>
+          <div className="fd-markdown min-w-0 flex-1">
+            <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{message.content}</Markdown>
+          </div>
         </div>
       )
     }
@@ -1356,7 +1358,9 @@ function ActivityNarration({ message }: { message: ChatMessage }) {
   return (
     <div className="flex items-start gap-1.5 px-1.5 py-0.5 text-xs italic text-zinc-500">
       <CircleDot className="mt-0.5 h-3 w-3 shrink-0 text-zinc-600" />
-      <span className="whitespace-pre-wrap">{message.content}</span>
+      <div className="fd-markdown min-w-0 flex-1">
+        <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{message.content}</Markdown>
+      </div>
     </div>
   )
 }

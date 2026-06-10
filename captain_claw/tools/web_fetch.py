@@ -115,11 +115,110 @@ _LOAD_MORE_SELECTORS = [
 ]
 
 
-async def _deep_fetch(url: str, max_scrolls: int = 20, scroll_pause: float = 1.0, max_seconds: float = 22.0) -> str:
-    """Use Playwright to fetch a page with full JS rendering, auto-scroll, and load-more clicking.
+# ── One-time, best-effort Chromium auto-install ──────────────────────
+# The browser binary is often absent even when the Playwright python package
+# is installed. Rather than depend on the agent self-healing (unreliable), we
+# kick off `playwright install chromium` ONCE in the background on the first
+# deep-fetch need. The triggering call falls back to fast content; subsequent
+# calls get a working browser. Fire-and-forget so we never hang a tool call.
 
-    Returns the final page HTML after all content has been loaded.
+_browser_install_attempted = False
+_browser_install_done = False
+_browser_install_task = None  # hold a reference so the task isn't GC'd mid-run
+
+
+async def _do_browser_install() -> None:
+    global _browser_install_done
+    import sys
+    try:
+        log.info("web_fetch: installing Playwright Chromium in the background (one-time)…")
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "playwright", "install", "chromium",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        rc = await proc.wait()
+        _browser_install_done = rc == 0
+        log.info("web_fetch: Chromium install finished (rc=%s)", rc)
+    except Exception as e:  # pragma: no cover
+        log.warning("web_fetch: Chromium install failed: %s", e)
+
+
+def _kick_browser_install() -> bool:
+    """Start a one-time background Chromium install. Sync + atomic (no await),
+    so concurrent callers can't double-trigger. Returns True if an install is
+    running/queued, False if not possible (no Playwright pkg / no loop)."""
+    global _browser_install_attempted, _browser_install_task
+    if not _HAS_PLAYWRIGHT or _browser_install_done:
+        return False
+    if _browser_install_attempted:
+        return True
+    _browser_install_attempted = True
+    try:
+        _browser_install_task = asyncio.create_task(_do_browser_install())
+        return True
+    except RuntimeError:
+        return False
+
+
+async def _deep_fetch_page(page, url: str, max_scrolls: int = 20, scroll_pause: float = 1.0, max_seconds: float = 22.0) -> str:
+    """Render *url* in an already-open Playwright *page*: navigate, auto-scroll,
+    click 'load more', and return the final HTML. Reusable across a shared
+    browser (one context/page per URL) so batch fetches don't relaunch Chromium.
     """
+    # domcontentloaded fires when the HTML is parsed — reliable. networkidle
+    # never settles on ad/tracker-heavy pages (a big chunk of the real web),
+    # so it just burns the time budget and times out with nothing. Cap total
+    # work with a deadline and return whatever has rendered on timeout.
+    deadline = asyncio.get_running_loop().time() + max_seconds
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=min(20000, int(max_seconds * 1000)))
+    except Exception as exc:
+        log.debug("deep_fetch: goto did not fully settle for %s (%s); using partial content", url, exc)
+
+    prev_height = 0
+    stable_rounds = 0
+
+    for _ in range(max_scrolls):
+        if asyncio.get_running_loop().time() >= deadline:
+            break
+        # Try clicking a "load more" button first.
+        clicked = False
+        for selector in _LOAD_MORE_SELECTORS:
+            try:
+                elements = await page.query_selector_all(selector)
+                for el in elements:
+                    text = (await el.inner_text()).strip().lower()
+                    if any(pat in text for pat in _LOAD_MORE_PATTERNS):
+                        if await el.is_visible():
+                            await el.click()
+                            clicked = True
+                            await asyncio.sleep(scroll_pause)
+                            break
+            except Exception:
+                continue
+            if clicked:
+                break
+
+        # Scroll to bottom.
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await asyncio.sleep(scroll_pause)
+
+        # Check if page height grew.
+        cur_height = await page.evaluate("document.body.scrollHeight")
+        if cur_height == prev_height and not clicked:
+            stable_rounds += 1
+            if stable_rounds >= 2:
+                break  # No new content after 2 stable rounds.
+        else:
+            stable_rounds = 0
+        prev_height = cur_height
+
+    return await page.content()
+
+
+async def _deep_fetch(url: str, max_scrolls: int = 20, scroll_pause: float = 1.0, max_seconds: float = 22.0) -> str:
+    """Single-URL deep fetch: launch a browser, render one page, return HTML."""
     if not _HAS_PLAYWRIGHT:
         raise RuntimeError(
             "deep_fetch requires Playwright. "
@@ -128,60 +227,18 @@ async def _deep_fetch(url: str, max_scrolls: int = 20, scroll_pause: float = 1.0
 
     pw = await async_playwright().start()
     try:
-        browser = await pw.chromium.launch(headless=True)
+        try:
+            browser = await pw.chromium.launch(headless=True)
+        except Exception:
+            # Browser binary missing — kick a one-time background install so the
+            # next attempt works, then surface the actionable error this time.
+            _kick_browser_install()
+            raise
         page = await browser.new_page(
             user_agent="Captain Claw/0.1.0 (Web Fetch Tool)",
             viewport={"width": 1280, "height": 800},
         )
-        # domcontentloaded fires when the HTML is parsed — reliable. networkidle
-        # never settles on ad/tracker-heavy pages (a big chunk of the real web),
-        # so it just burns the time budget and times out with nothing. Cap total
-        # work with a deadline and return whatever has rendered on timeout.
-        deadline = asyncio.get_running_loop().time() + max_seconds
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=min(20000, int(max_seconds * 1000)))
-        except Exception as exc:
-            log.debug("deep_fetch: goto did not fully settle for %s (%s); using partial content", url, exc)
-
-        prev_height = 0
-        stable_rounds = 0
-
-        for _ in range(max_scrolls):
-            if asyncio.get_running_loop().time() >= deadline:
-                break
-            # Try clicking a "load more" button first.
-            clicked = False
-            for selector in _LOAD_MORE_SELECTORS:
-                try:
-                    elements = await page.query_selector_all(selector)
-                    for el in elements:
-                        text = (await el.inner_text()).strip().lower()
-                        if any(pat in text for pat in _LOAD_MORE_PATTERNS):
-                            if await el.is_visible():
-                                await el.click()
-                                clicked = True
-                                await asyncio.sleep(scroll_pause)
-                                break
-                except Exception:
-                    continue
-                if clicked:
-                    break
-
-            # Scroll to bottom.
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await asyncio.sleep(scroll_pause)
-
-            # Check if page height grew.
-            cur_height = await page.evaluate("document.body.scrollHeight")
-            if cur_height == prev_height and not clicked:
-                stable_rounds += 1
-                if stable_rounds >= 2:
-                    break  # No new content after 2 stable rounds.
-            else:
-                stable_rounds = 0
-            prev_height = cur_height
-
-        html = await page.content()
+        html = await _deep_fetch_page(page, url, max_scrolls, scroll_pause, max_seconds)
     finally:
         try:
             await browser.close()
@@ -399,4 +456,284 @@ class WebGetTool(Tool):
 
     async def close(self):
         """Close the HTTP client."""
+        await self.client.aclose()
+
+
+# ── web_fetch_batch: parallel multi-URL fetch with fast→deep self-correction ──
+
+_JS_SHELL_MARKERS = (
+    "enable javascript", "please enable js", "javascript is required",
+    "you need to enable javascript", "requires javascript",
+)
+
+
+def _looks_thin(content: str, status: int, min_chars: int, raw_html_len: int) -> bool:
+    """Heuristic: did the fast HTTP fetch fail to capture real content
+    (HTTP error, a JS shell, or content hidden behind client-side rendering)?
+    If so, escalate to deep mode.
+
+    A page with little text is only "thin" if its HTML is much larger than the
+    extracted text (i.e. content is JS-rendered) — a genuinely short page
+    (e.g. example.com) has little HTML *and* little text and is NOT escalated.
+    """
+    if status >= 400:
+        return True
+    text = (content or "").strip()
+    low = text[:2000].lower()
+    if any(m in low for m in _JS_SHELL_MARKERS):
+        return True
+    if len(text) < min_chars:
+        # Short text — escalate only if the HTML is big relative to the text,
+        # which signals JS-rendered content the plain fetch couldn't see.
+        return raw_html_len > 4000 and len(text) < raw_html_len * 0.1
+    return False
+
+
+class _Outcome:
+    __slots__ = ("url", "ok", "mode", "status", "content", "error", "needs_deep")
+
+    def __init__(self, url: str):
+        self.url = url
+        self.ok = False
+        self.mode = ""
+        self.status = 0
+        self.content = ""
+        self.error = ""
+        self.needs_deep = False
+
+
+class WebFetchBatchTool(Tool):
+    """Fetch many URLs in parallel, each self-correcting fast→deep."""
+
+    name = "web_fetch_batch"
+    description = (
+        "Fetch MULTIPLE URLs in parallel and return clean readable text for each. "
+        "Use this instead of repeated web_fetch calls when you have several URLs to "
+        "read — e.g. the results of a web_search. Each URL self-corrects: a fast HTTP "
+        "fetch first, escalating to a headless browser only when the page is thin or "
+        "JS-rendered. Pass a 'urls' list; returns one labelled section per URL."
+    )
+    timeout_seconds = 120.0  # parallel batch; deep-mode escalation can be slow
+    parameters = {
+        "type": "object",
+        "properties": {
+            "urls": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "URLs to fetch (processed in parallel)",
+            },
+            "max_chars": {
+                "type": "number",
+                "description": "Optional per-URL character cap (overrides config default)",
+            },
+            "deep_fetch": {
+                "type": "boolean",
+                "description": (
+                    "Force headless-browser (deep) mode for every URL. Default: auto — "
+                    "fast HTTP first, deep only when a page comes back thin."
+                ),
+            },
+        },
+        "required": ["urls"],
+    }
+
+    def __init__(self):
+        self.client = _make_http_client()
+
+    async def execute(
+        self,
+        urls: Any = None,
+        max_chars: int | None = None,
+        deep_fetch: bool | None = None,
+        **kwargs: Any,
+    ) -> ToolResult:
+        cfg = get_config().tools.web_fetch
+
+        if isinstance(urls, str):
+            urls = [urls]
+        clean: list[str] = []
+        seen: set[str] = set()
+        for u in (urls or []):
+            if isinstance(u, str) and u.strip() and u.strip() not in seen:
+                seen.add(u.strip())
+                clean.append(u.strip())
+        if not clean:
+            return ToolResult(success=False, error="web_fetch_batch requires a non-empty 'urls' list.")
+
+        max_urls = max(1, int(getattr(cfg, "batch_max_urls", 10)))
+        overflow = clean[max_urls:]
+        targets = clean[:max_urls]
+
+        per_url_cap = max(1, int(max_chars) if max_chars is not None else int(getattr(cfg, "batch_per_url_max_chars", 25000)))
+        total_cap = max(1, int(getattr(cfg, "batch_total_max_chars", 150000)))
+        min_useful = int(getattr(cfg, "batch_min_useful_chars", 500))
+        fast_conc = max(1, int(getattr(cfg, "batch_fast_concurrency", 8)))
+        deep_conc = max(1, int(getattr(cfg, "batch_deep_concurrency", 3)))
+        fast_timeout = float(getattr(cfg, "batch_fast_timeout", 15.0))
+        force_deep = bool(deep_fetch)
+
+        outcomes = {u: _Outcome(u) for u in targets}
+
+        # ── Phase 1: fast HTTP (skipped when deep is forced) ──
+        if not force_deep:
+            fast_sem = asyncio.Semaphore(fast_conc)
+
+            async def _fast(u: str) -> None:
+                async with fast_sem:
+                    oc = outcomes[u]
+                    if _is_google_drive_url(u) and shutil.which("gws"):
+                        oc.error = _GDRIVE_FETCH_BLOCK_MSG
+                        return
+                    try:
+                        resp = await self.client.get(u, timeout=fast_timeout)
+                        oc.status = resp.status_code
+                        text = _extract_readable_text(resp.text, base_url=u)
+                        if _looks_thin(text, resp.status_code, min_useful, len(resp.text)):
+                            oc.needs_deep = True
+                            oc.content = text  # keep partial in case deep is unavailable
+                        else:
+                            oc.ok = True
+                            oc.mode = "fast"
+                            oc.content = text
+                    except Exception as e:
+                        oc.error = str(e)
+                        oc.needs_deep = True
+
+            await asyncio.gather(*[_fast(u) for u in targets])
+
+        # ── Phase 2: deep (forced, or the thin ones) ──
+        deep_urls = targets if force_deep else [u for u in targets if outcomes[u].needs_deep]
+        # "deep unavailable" = Playwright python pkg missing, OR present but its
+        # browser binary isn't installed (launch fails). Either way we surface
+        # the actionable install signal so the agent can self-heal and retry.
+        deep_unavailable = bool(deep_urls) and not _HAS_PLAYWRIGHT
+        if deep_urls and _HAS_PLAYWRIGHT:
+            launched = await self._deep_phase(deep_urls, outcomes, deep_conc)
+            if not launched:
+                deep_unavailable = True
+
+        # Salvage: if deep couldn't complete a URL but the fast HTTP phase
+        # captured content, surface that (same as web_fetch(deep_fetch=false))
+        # instead of dropping the URL. The deep-unavailable note still flags
+        # that the content may be a JS shell / partial.
+        for u in targets:
+            oc = outcomes[u]
+            if not oc.ok and oc.content:
+                oc.ok = True
+                oc.mode = "fast"
+
+        return self._aggregate(targets, outcomes, per_url_cap, total_cap, overflow, deep_unavailable)
+
+    async def _deep_phase(self, deep_urls: list[str], outcomes: dict, deep_conc: int) -> bool:
+        """Render the thin URLs in ONE shared browser, isolated per-URL context.
+        Returns True if the browser launched; False if the browser binary is
+        missing (so the caller can emit the install signal)."""
+        sem = asyncio.Semaphore(deep_conc)
+        pw = await async_playwright().start()
+        browser = None
+        try:
+            try:
+                browser = await pw.chromium.launch(headless=True)
+            except Exception as e:
+                log.warning("web_fetch_batch: browser launch failed (binary not installed?): %s", e)
+                _kick_browser_install()  # background self-heal for next time
+                return False
+
+            async def _deep(u: str) -> None:
+                async with sem:
+                    oc = outcomes[u]
+                    context = None
+                    try:
+                        context = await browser.new_context(
+                            user_agent="Captain Claw/0.1.0 (Web Fetch Tool)",
+                            viewport={"width": 1280, "height": 800},
+                        )
+                        page = await context.new_page()
+                        html = await _deep_fetch_page(page, u)
+                        oc.content = _extract_readable_text(html, base_url=u)
+                        oc.ok = True
+                        oc.mode = "deep"
+                        oc.status = 200
+                        oc.error = ""
+                        oc.needs_deep = False
+                    except Exception as e:
+                        if not oc.content:
+                            oc.error = (oc.error + " | " if oc.error else "") + f"deep fetch failed: {e}"
+                    finally:
+                        if context is not None:
+                            try:
+                                await context.close()
+                            except Exception:
+                                pass
+
+            await asyncio.gather(*[_deep(u) for u in deep_urls])
+            return True
+        finally:
+            if browser is not None:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            try:
+                await pw.stop()
+            except Exception:
+                pass
+
+    def _aggregate(self, targets, outcomes, per_url_cap, total_cap, overflow, deep_unavailable) -> ToolResult:
+        ok_count = sum(1 for u in targets if outcomes[u].ok)
+        deep_count = sum(1 for u in targets if outcomes[u].mode == "deep")
+        fail_count = len(targets) - ok_count
+
+        sections: list[str] = []
+        total = 0
+        budget_hit = False
+        for u in targets:
+            oc = outcomes[u]
+            if oc.ok and oc.content:
+                body = oc.content
+                if len(body) > per_url_cap:
+                    body = body[:per_url_cap] + "\n... [truncated]"
+                remaining = total_cap - total
+                if remaining <= 0:
+                    budget_hit = True
+                    sections.append(f"[URL: {u}]\n[Status: {oc.status}]\n[Mode: {oc.mode}]\n[Skipped: total output budget reached]")
+                    continue
+                if len(body) > remaining:
+                    body = body[:remaining] + "\n... [truncated: total budget]"
+                    budget_hit = True
+                total += len(body)
+                sections.append(f"[URL: {u}]\n[Status: {oc.status}]\n[Mode: {oc.mode}]\n[Size: {len(body)} chars]\n\n{body}")
+            else:
+                sections.append(f"[URL: {u}]\n[Status: {oc.status}]\n[FAILED: {oc.error or 'no content'}]")
+
+        header = f"Fetched {ok_count}/{len(targets)} URLs ({deep_count} via deep browser, {fail_count} failed)."
+        notes: list[str] = []
+        if deep_unavailable:
+            if _browser_install_attempted and not _browser_install_done:
+                notes.append(
+                    "Some URLs needed a headless browser (deep mode); a one-time Chromium "
+                    "install is running in the background now. The fast-HTTP content is shown "
+                    "below — retry web_fetch_batch shortly to deep-fetch them properly."
+                )
+            else:
+                notes.append(
+                    "Some URLs need a headless browser, but Playwright's browser isn't available. "
+                    "Run `pip install playwright && playwright install chromium`, then retry "
+                    "web_fetch_batch for the failed URLs."
+                )
+        if overflow:
+            notes.append(
+                f"{len(overflow)} URL(s) exceeded the per-call cap and were NOT fetched. "
+                f"Call web_fetch_batch again with: {overflow}"
+            )
+        if budget_hit:
+            notes.append("Output was truncated to fit the total size budget.")
+
+        out = header
+        if notes:
+            out += "\n" + "\n".join(f"- {n}" for n in notes)
+        out += "\n\n" + "\n\n---\n\n".join(sections)
+        return ToolResult(success=True, content=out)
+
+    async def close(self):
         await self.client.aclose()

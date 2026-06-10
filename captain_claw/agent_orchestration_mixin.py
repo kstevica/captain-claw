@@ -267,6 +267,42 @@ def _claims_delegation(text: str) -> bool:
     return bool(text and _DELEGATION_CLAIM_RE.search(str(text)))
 
 
+# Reply claims it searched/fetched the web (used to catch a model that
+# fabricates research instead of calling a web tool). EN + HR phrasing.
+_WEB_RESEARCH_CLAIM_RE = _re.compile(
+    r"(?i)("
+    r"(search|fetch|pull|scrap|gather|retriev)\w*\s+(the\s+|a\s+)?(web|online|internet|sources?|links?|urls?)|"
+    r"(web|fresh|new|live|latest)\s+search|searched\s+(the\s+)?web|"
+    r"(from|across)\s+\d+\s+(sources?|sites?|links?|izvora)|"
+    r"fetched\s+\d+\s+(sources?|sites?|links?|urls?)|"
+    r"paralelno\s+(dohvat|dohvać|dohvac)|dohvatio\s+\d+\s+izvora|pretraž\w*\s+web|"
+    r"svjež\w*\s+(pretrag|podatk)|fresh\s+(data|results|search)"
+    r")"
+)
+
+# User explicitly wants fresh/web data and NOT memory — disables the automatic
+# memory-context injection for that turn. EN + HR phrasing.
+_REFRESH_INTENT_RE = _re.compile(
+    r"(?i)("
+    r"don'?t\s+use\s+(your\s+|stuff\s+from\s+your\s+)?memory|without\s+(using\s+)?memory|"
+    r"not\s+from\s+(your\s+)?memory|ignore\s+(your\s+)?memory|"
+    r"ne\s+koristi\s+memoriju|bez\s+memorije|"
+    r"refresh\s+(the\s+)?(data|info)|fresh\s+(search|data|results)|"
+    r"search\s+the\s+web|from\s+the\s+web|svjež\w*\s+(pretrag|podatk)"
+    r")"
+)
+
+
+def _claims_web_research(text: str) -> bool:
+    """True if the reply claims it searched/fetched the web."""
+    return bool(text and _WEB_RESEARCH_CLAIM_RE.search(str(text)))
+
+
+def _wants_fresh_data(text: str) -> bool:
+    """True if the user asked for fresh/web data and to skip memory."""
+    return bool(text and _REFRESH_INTENT_RE.search(str(text)))
+
+
 class AgentOrchestrationMixin:
     """Core request orchestration: complete() and stream()."""
 
@@ -287,6 +323,10 @@ class AgentOrchestrationMixin:
             await self.initialize()
         self._last_memory_debug_signature = None
         self._last_semantic_memory_debug_signature = None
+        # When the user explicitly asks for fresh/web data (e.g. "refresh from
+        # the web, don't use memory"), skip the automatic memory-context
+        # injection for this whole turn so the agent can't lean on stale memory.
+        self._skip_memory_injection = _wants_fresh_data(user_input)
         restore_skill_env = self._apply_skill_env_overrides_for_run()
         skill_env_restored = False
 
@@ -2084,14 +2124,36 @@ class AgentOrchestrationMixin:
                 and not _delegated_this_turn
                 and _claims_delegation(_stall_resp_text)
             )
+            # False web-research claim: the reply says it searched/fetched the
+            # web, but no web tool ran THIS turn — i.e. the model fabricated the
+            # research (often pulling from memory instead). Force a corrective
+            # retry that actually calls the web tools.
+            _WEB_TOOLS = ("web_search", "web_fetch", "web_fetch_batch", "web_get")
+            _web_used_this_turn = any(
+                str(k).split("|", 1)[0] in _WEB_TOOLS
+                for k in getattr(self, "_turn_tool_call_counts", {})
+            )
+            _false_web_claim = (
+                not response.tool_calls
+                and not _web_used_this_turn
+                and _claims_web_research(_stall_resp_text)
+            )
             if (
                 not response.tool_calls
-                and (_looks_like_stall(_stall_resp_text) or _false_claim)
+                and (_looks_like_stall(_stall_resp_text) or _false_claim or _false_web_claim)
                 and self._stall_retry_count < MAX_STALL_RETRIES
             ):
                 self._stall_retry_count += 1
                 _has_tools = bool(tool_defs)
-                if _false_claim:
+                if _false_web_claim:
+                    _retry_instruction = (
+                        "You claimed you searched/fetched the web, but you did NOT call "
+                        "any web tool this turn — that claim is false. Call web_search NOW, "
+                        "then web_fetch_batch on the result URLs to read them in parallel. "
+                        "Do NOT use memory as a substitute for fresh web data, and never "
+                        "claim research you didn't perform."
+                    )
+                elif _false_claim:
                     _retry_instruction = (
                         "You said you delegated/sent the task to a peer, but you "
                         "did NOT call any tool this turn — that claim is false. To "
