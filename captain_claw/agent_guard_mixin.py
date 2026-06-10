@@ -364,36 +364,47 @@ class AgentGuardMixin:
         _error_occurred = False
         _stream_cb = getattr(self, "response_stream_callback", None)
 
+        # Background maintenance calls (reflection, insight extraction,
+        # dreaming) run AFTER the user's turn already finished and emitted
+        # "ready". They are internal housekeeping — surfacing a "Calling
+        # LLM..." busy status for them would flip the agent back to a busy
+        # state for tens of seconds after it told the user it was idle. So
+        # for these we suppress the status entirely and keep the agent in
+        # the waiting-for-input state throughout.
+        _label = str(interaction_label or "").strip()
+        _is_background = _label in _BACKGROUND_MAINTENANCE_LABELS
+
         # Surface the LLM call as a live status — the call (especially
         # time-to-first-token) is usually the slowest part of a turn, and
         # without this the UI keeps showing the previous tool as "in use".
-        _model_label = str(getattr(self.provider, "model", "") or "").strip()
-        _llm_status = f"Calling LLM ({_model_label})" if _model_label else "Calling LLM"
-        _label = str(interaction_label or "").strip()
-        if _label and _label != "conversation":
-            _llm_status += f" · {_label}"
-        _ctx = getattr(self, "last_context_window", {}) or {}
-        _ctx_tokens = int(_ctx.get("prompt_tokens", 0) or 0)
-        _ctx_budget = int(_ctx.get("context_budget_tokens", 0) or 0)
-        if _ctx_tokens:
-            _llm_status += f" · {_ctx_tokens:,} ctx tokens"
-            if _ctx_budget:
-                _llm_status += f" ({round(_ctx_tokens / _ctx_budget * 100)}%)"
-        self._set_runtime_status(f"{_llm_status}...")
-
-        # On the first streamed chunk, keep the same LLM details visible and
-        # just prefix a streaming icon — the model/context info stays useful
-        # for the whole call, the icon marks that tokens are flowing.
         _on_chunk = _stream_cb
-        if _stream_cb is not None:
-            _streaming_started = False
+        if not _is_background:
+            _model_label = str(getattr(self.provider, "model", "") or "").strip()
+            _llm_status = f"Calling LLM ({_model_label})" if _model_label else "Calling LLM"
+            if _label and _label != "conversation":
+                _llm_status += f" · {_label}"
+            _ctx = getattr(self, "last_context_window", {}) or {}
+            _ctx_tokens = int(_ctx.get("prompt_tokens", 0) or 0)
+            _ctx_budget = int(_ctx.get("context_budget_tokens", 0) or 0)
+            if _ctx_tokens:
+                _llm_status += f" · {_ctx_tokens:,} ctx tokens"
+                if _ctx_budget:
+                    _llm_status += f" ({round(_ctx_tokens / _ctx_budget * 100)}%)"
+            self._set_runtime_status(f"{_llm_status}...")
 
-            def _on_chunk(chunk: str) -> None:
-                nonlocal _streaming_started
-                if not _streaming_started:
-                    _streaming_started = True
-                    self._set_runtime_status(f"⚡ {_llm_status}...")
-                _stream_cb(chunk)
+            # On the first streamed chunk, keep the same LLM details visible
+            # and just prefix a streaming icon — the model/context info stays
+            # useful for the whole call, the icon marks that tokens are
+            # flowing.
+            if _stream_cb is not None:
+                _streaming_started = False
+
+                def _on_chunk(chunk: str) -> None:
+                    nonlocal _streaming_started
+                    if not _streaming_started:
+                        _streaming_started = True
+                        self._set_runtime_status(f"⚡ {_llm_status}...")
+                    _stream_cb(chunk)
 
         try:
             response = await self.provider.complete_with_callback(
@@ -407,11 +418,9 @@ class AgentGuardMixin:
             raise
         finally:
             _latency_ms = int((_time.monotonic() - _t0) * 1000)
-            # Background maintenance calls (reflection, insight extraction,
-            # dreaming) run AFTER the turn ended — nothing else resets the
-            # status, so without this the UI stays stuck on
-            # "Calling LLM · reflection..." until the next user turn.
-            if _label in _BACKGROUND_MAINTENANCE_LABELS:
+            # Safety net: if a background job somehow ran while a busy status
+            # was showing, make sure we land back in the idle state.
+            if _is_background:
                 self._set_runtime_status("ready")
 
         if turn_usage is not None:
