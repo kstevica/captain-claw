@@ -128,7 +128,7 @@ export const useConnectionsStore = create<ConnectionsStore>((set, get) => ({
     })
   },
 
-  startPolling: (everyMs = 60000) => {
+  startPolling: (everyMs = 600000) => {
     if (get().intervalId) return
     // Kick off an immediate check, then poll.
     get().checkAll()

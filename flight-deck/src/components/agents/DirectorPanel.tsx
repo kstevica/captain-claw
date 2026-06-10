@@ -306,7 +306,7 @@ export function DirectorPanel() {
   const startConnPolling = useConnectionsStore((s) => s.startPolling)
   const stopConnPolling = useConnectionsStore((s) => s.stopPolling)
   useEffect(() => {
-    startConnPolling(60000)
+    startConnPolling(600000) // 10 minutes
     return () => stopConnPolling()
   }, [startConnPolling, stopConnPolling])
 
