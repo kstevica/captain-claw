@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { AgentChatWS, type ChatMessage } from '../services/agentChat'
+import { AgentChatWS, type ChatMessage, type TokenUsage } from '../services/agentChat'
 import { useAuthStore } from './authStore'
 import { useContainerStore } from './containerStore'
 import { useLocalAgentStore } from './localAgentStore'
@@ -455,6 +455,9 @@ interface ChatSession {
   avgTokPerSec: number   // running average wall-clock tok/s
   _tokSamples: number    // number of samples for avg calculation
   llmTokPerSec: number   // real LLM generation speed (completion_tokens / llm_latency)
+  // Live cumulative token usage for the in-flight turn (input/output/cache),
+  // updated on each LLM call; null between turns.
+  liveTurnUsage: TokenUsage | null
   // Planning mode
   planningEnabled: boolean   // optimistic mirror of agent.plan_mode_auto
   planLevel: string          // optimistic mirror of agent.plan_mode_level
@@ -553,6 +556,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       avgTokPerSec: 0,
       _tokSamples: 0,
       llmTokPerSec: 0,
+      liveTurnUsage: null,
       planningEnabled: persisted?.planningEnabled ?? false,
       planLevel: persisted?.planLevel ?? 'plain',
       planState: persisted?.planState ?? null,
@@ -1267,9 +1271,52 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     })
 
     // Token generation speed tracking from usage events
+    // Live cumulative token usage for the in-flight turn — drives the
+    // input/output/cache counts in the activity-panel header.
+    ws.on('turn_usage', (data) => {
+      updateSession(containerId, {
+        liveTurnUsage: {
+          prompt_tokens: (data.prompt_tokens as number) || 0,
+          completion_tokens: (data.completion_tokens as number) || 0,
+          cache_read_input_tokens: (data.cache_read_input_tokens as number) || 0,
+          cache_creation_input_tokens: (data.cache_creation_input_tokens as number) || 0,
+          total_tokens: (data.total_tokens as number) || 0,
+        },
+      })
+    })
+
     ws.on('usage', (data) => {
       const last = data.last as Record<string, number> | undefined
       if (!last) return
+      // Freeze the turn's final usage onto the most recent tool message so the
+      // activity group keeps showing its own token counts after it collapses
+      // (and old groups don't all show the latest turn's numbers). Then clear
+      // the live counter for the next turn.
+      if ((last.prompt_tokens || 0) > 0 || (last.completion_tokens || 0) > 0) {
+        const frozen: TokenUsage = {
+          prompt_tokens: last.prompt_tokens || 0,
+          completion_tokens: last.completion_tokens || 0,
+          cache_read_input_tokens: last.cache_read_input_tokens || 0,
+          cache_creation_input_tokens: last.cache_creation_input_tokens || 0,
+          total_tokens: last.total_tokens || 0,
+        }
+        useChatStore.setState((state) => {
+          const s = state.sessions.get(containerId)
+          if (!s) return state
+          const msgs = s.messages.slice()
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            if (msgs[i].role === 'tool') {
+              msgs[i] = { ...msgs[i], usage: frozen }
+              break
+            }
+          }
+          const next = new Map(state.sessions)
+          next.set(containerId, { ...s, messages: msgs, liveTurnUsage: null })
+          return { sessions: next }
+        })
+      } else {
+        updateSession(containerId, { liveTurnUsage: null })
+      }
       const completionTokens = last.completion_tokens || 0
       if (completionTokens <= 0) return
       const s = useChatStore.getState().sessions.get(containerId)
@@ -1332,6 +1379,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       statusText: 'Thinking...',
       _busyStartedAt: Date.now(),
       nextStepOptions: [],
+      liveTurnUsage: null,
     })
     session.ws.send(content)
   },

@@ -45,7 +45,7 @@ import { FlowSelectorModal } from './FlowSelectorModal'
 import { PlanCard } from './PlanCard'
 import TraceTimeline from '../observability/TraceTimeline'
 import { uploadFileToAgent, formatSize } from '../../services/fileTransfer'
-import type { ChatMessage } from '../../services/agentChat'
+import type { ChatMessage, TokenUsage } from '../../services/agentChat'
 
 interface Attachment {
   id: string
@@ -361,7 +361,7 @@ function ChatContent({
   onSend,
   onCancel,
 }: {
-  session: { containerId: string; containerName: string; messages: ChatMessage[]; connected: boolean; busy: boolean; statusText: string; nextStepOptions?: NextStepOption[] }
+  session: { containerId: string; containerName: string; messages: ChatMessage[]; connected: boolean; busy: boolean; statusText: string; nextStepOptions?: NextStepOption[]; liveTurnUsage?: TokenUsage | null }
   containerId: string
   onSend: (content: string) => void
   onCancel: () => void
@@ -599,6 +599,7 @@ function ChatContent({
                 key={`act-${grp.items[0].id}`}
                 items={grp.items}
                 live={gi === groups.length - 1 && session.busy}
+                liveTurnUsage={gi === groups.length - 1 && session.busy ? session.liveTurnUsage ?? null : null}
               />
             ) : (
               <MessageBubble key={grp.items[0].id} message={grp.items[0]} sourceName={session.containerName} agentId={session.containerId} />
@@ -1302,12 +1303,24 @@ function groupActivity(msgs: ChatMessage[]): { kind: 'activity' | 'single'; item
   return groups
 }
 
-function ActivityGroup({ items, live }: { items: ChatMessage[]; live: boolean }) {
+function fmtTokens(n?: number): string {
+  const v = n || 0
+  if (v >= 1000) return `${(v / 1000).toFixed(v >= 10000 ? 0 : 1)}k`
+  return String(v)
+}
+
+function ActivityGroup({ items, live, liveTurnUsage }: { items: ChatMessage[]; live: boolean; liveTurnUsage?: TokenUsage | null }) {
   // Expanded & streaming while the turn runs; auto-collapses to a tools-history
   // summary once it finishes. The user can still toggle it open afterwards.
   const [collapsed, setCollapsed] = useState(!live)
   useEffect(() => { setCollapsed(!live) }, [live])
   const toolCount = items.filter((m) => m.role === 'tool').length
+  // Token usage: live cumulative counter while running, else the frozen value
+  // stamped onto one of this group's tool messages when the turn ended.
+  const usage: TokenUsage | null = live
+    ? (liveTurnUsage ?? null)
+    : (items.find((m) => m.usage)?.usage ?? null)
+  const hasUsage = !!usage && ((usage.prompt_tokens || 0) > 0 || (usage.completion_tokens || 0) > 0)
   return (
     <div className="mb-3 rounded-lg border border-zinc-800 bg-zinc-900/40 px-2.5 py-2">
       <button
@@ -1316,6 +1329,12 @@ function ActivityGroup({ items, live }: { items: ChatMessage[]; live: boolean })
       >
         <Wrench className="h-3 w-3" />
         Activity{toolCount > 0 && <span className="text-zinc-600">· {toolCount} tool{toolCount !== 1 ? 's' : ''}</span>}
+        {hasUsage && usage && (
+          <span className="text-zinc-600 normal-case" title="Tokens this turn — input / output / cached">
+            · {fmtTokens(usage.prompt_tokens)}↑ {fmtTokens(usage.completion_tokens)}↓
+            {(usage.cache_read_input_tokens || 0) > 0 ? ` · ${fmtTokens(usage.cache_read_input_tokens)} cached` : ''}
+          </span>
+        )}
         <span className="ml-auto">{collapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}</span>
       </button>
       {!collapsed && (

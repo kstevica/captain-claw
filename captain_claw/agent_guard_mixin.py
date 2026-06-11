@@ -427,6 +427,23 @@ class AgentGuardMixin:
             self._accumulate_usage(turn_usage, response.usage or {})
             turn_usage.setdefault("latency_ms", 0)
             turn_usage["latency_ms"] += _latency_ms
+            # Emit running cumulative usage so the UI can show input/output/
+            # cache tokens in the activity-panel header while the turn runs.
+            # Skipped for background maintenance (not part of the visible turn).
+            if not _is_background:
+                _bcast = getattr(self, "ws_broadcast", None)
+                if callable(_bcast):
+                    try:
+                        _bcast({
+                            "type": "turn_usage",
+                            "prompt_tokens": int(turn_usage.get("prompt_tokens", 0)),
+                            "completion_tokens": int(turn_usage.get("completion_tokens", 0)),
+                            "cache_read_input_tokens": int(turn_usage.get("cache_read_input_tokens", 0)),
+                            "cache_creation_input_tokens": int(turn_usage.get("cache_creation_input_tokens", 0)),
+                            "total_tokens": int(turn_usage.get("total_tokens", 0)),
+                        })
+                    except Exception:
+                        pass
 
         # Stash thinking-mode reasoning_content for the next
         # assistant-message persist call. ``_add_session_message``

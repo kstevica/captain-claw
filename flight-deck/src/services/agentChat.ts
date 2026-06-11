@@ -3,6 +3,14 @@
  * Connects to CC's /ws endpoint on the agent's web port.
  */
 
+export interface TokenUsage {
+  prompt_tokens?: number
+  completion_tokens?: number
+  cache_read_input_tokens?: number
+  cache_creation_input_tokens?: number
+  total_tokens?: number
+}
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant' | 'system' | 'tool'
@@ -19,6 +27,9 @@ export interface ChatMessage {
   peer_name?: string
   /** Live between-step narration blurb (rendered as a subtle system line). */
   narration?: boolean
+  /** Frozen cumulative turn token usage, stamped onto the last tool message
+   *  of an activity group when the turn ends. */
+  usage?: TokenUsage
 }
 
 type EventHandler = (data: Record<string, unknown>) => void
