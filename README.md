@@ -15,6 +15,18 @@
 
 An open-source AI agent with multi-agent orchestration, autonomous cognitive systems, and a full management dashboard. Runs locally, supports every major LLM provider, and ships with 45 built-in tools.
 
+## What's New in 0.5.5
+
+**Self-aware in time — timing context, live token meters, and a calmer agent.** A self-awareness + reliability release. Fully additive.
+
+- **Activity-timing context** — every turn the agent now knows *when*: last user message, last reply, last scheduled/cron run, the **next-run ETA** for this session, plus a part-of-day/weekday hint and conversation cadence. Real user messages are tracked separately from automated runs.
+- **Live token meters** — the Flight Deck activity panel header shows running input/output/cache tokens per turn (`Activity · 16 tools · 17.0k↑ 340↓ · 5.1k cached`), live while the turn runs and frozen onto each group when it ends.
+- **Connections panel** — a new **Connections** tab in the Director panel with a traffic-light per dependency: 🟢 healthy / 🟡 connected-but-failing / 🔴 offline / ⚪ disabled. Covers **Google** (a live read-only probe) and every enabled **MCP server** (read-only `tools/list`), polled every 10 min.
+- **Truthful phase statuses** — the status line shows the phase the agent is actually in (`Using web_fetch…` → `Calling LLM (model) · turn_3 · 17k ctx…` → ⚡ streaming), not the last thing it finished.
+- **Reliability fixes** — no more spurious *"I got stuck"* on topic switches; a finished task no longer derails into a generic greeting; no blind file double-writes; `temperature` omitted for Anthropic **Fable** models; background reflection/insight/dreaming run silently without making the agent look busy.
+
+See [RELEASE_NOTES_0.5.5.md](release-notes/RELEASE_NOTES_0.5.5.md). Backward compatible with 0.5.4.
+
 ## What's New in 0.5.4
 
 **Parallel web research — fast, and honest about it.** A research-quality release. Fully additive.

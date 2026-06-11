@@ -1,7 +1,7 @@
 """Captain Claw - A powerful console-based AI agent."""
 
-__version__ = "0.5.4"
-__build_date__ = "2026-06-10"
+__version__ = "0.5.5"
+__build_date__ = "2026-06-11"
 __author__ = "Stevica Kuharski"
 
 from captain_claw.config import Config

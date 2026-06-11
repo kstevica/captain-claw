@@ -27,6 +27,7 @@ For a quick overview and installation guide, see [README.md](README.md).
 - [Tools Reference](#tools-reference)
 - [Presentation Control (Decks)](#presentation-control-decks)
 - [File Editor (Flight Deck)](#file-editor-flight-deck)
+- [Director Panel (Flight Deck)](#director-panel-flight-deck)
 - [Configuration Reference](#configuration-reference)
   - [Config Load Precedence](#config-load-precedence)
   - [model](#model)
@@ -1305,6 +1306,54 @@ Agent text files are editable in place, not preview-only. In the file list, the
 
 Row actions in the file list (pin · view · ⧉ deck · ✎ edit · download) sit on
 their own line under the file path.
+
+---
+
+## Director Panel (Flight Deck)
+
+The Director is the left panel of the Agent Desktop. Besides the agent list,
+activity feed, and groups, it has a **Connections** tab (added in 0.5.5).
+
+### Connections tab
+
+Polls the external dependencies Flight Deck relies on and shows a traffic-light
+per connector, refreshed every **10 minutes** (with a manual **Check** button):
+
+| Light | Meaning |
+|-------|---------|
+| 🟢 Healthy | Connected **and** a read-only test call succeeded |
+| 🟡 Degraded | Connected but the read-only test failed |
+| 🔴 Offline | Not connected / not configured |
+| ⚪ Disabled | MCP server is turned off |
+
+- **Google** — a live read-only probe (`/fd/google/probe`): refreshes the access
+  token if needed and calls userinfo, so it reflects real reachability, not just
+  whether a token is stored.
+- **MCP servers** — each enabled server is tested with a read-only `tools/list`
+  (the existing per-server test). 🟡 vs 🔴 distinguishes a server that was
+  initialized before but now fails from one that never connected.
+
+### Activity panel token meters
+
+The chat's collapsible **Activity** panel header shows running token usage for
+the turn (added in 0.5.5):
+
+```
+Activity · 16 tools · 17.0k↑ 340↓ · 5.1k cached
+```
+
+Input (↑) / output (↓) / cache-read tokens — **live** while the turn runs,
+**frozen** onto each activity group when it ends so older turns keep their own
+counts. Cache figures appear only when the provider reports them.
+
+### Activity-timing context (agent-side)
+
+Every turn the agent's system prompt carries a compact timing block in addition
+to the current clock (added in 0.5.5): last user message, last reply, last
+scheduled/cron run, session start, the **next scheduled run ETA** for the
+session, a part-of-day/weekday hint, and a conversation-cadence count. Real user
+messages are tracked separately from cron/scheduler-driven runs. It renders as a
+one-liner in eco/micro mode and is omitted in nano.
 
 ---
 
