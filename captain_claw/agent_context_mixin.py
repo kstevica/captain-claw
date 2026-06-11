@@ -525,6 +525,50 @@ class AgentContextMixin:
         lines.append('You have a "todo" tool to manage these items.')
         return "\n".join(lines)
 
+    async def _refresh_cron_context_cache(self) -> None:
+        """Pre-fetch the soonest upcoming scheduled/cron run for THIS session
+        so the synchronous timing block can show a next-run ETA. Stores
+        ``self._next_cron_cache`` = {"eta_iso", "label"} or None."""
+        self._next_cron_cache = None
+        sm = getattr(self, "session_manager", None)
+        if sm is None or not self.session:
+            return
+        try:
+            from captain_claw.cron import schedule_to_text
+            from datetime import datetime, timezone
+
+            jobs = await sm.list_cron_jobs(active_only=True)
+            now = datetime.now(timezone.utc)
+            session_id = str(self.session.id)
+            best_iso: str | None = None
+            best_label = ""
+            for job in jobs:
+                if str(getattr(job, "session_id", "")) != session_id:
+                    continue
+                iso = str(getattr(job, "next_run_at", "") or "")
+                if not iso:
+                    continue
+                try:
+                    dt = datetime.fromisoformat(iso)
+                except (ValueError, TypeError):
+                    continue
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt < now:
+                    continue  # overdue/in-flight — not a useful "next" ETA
+                if best_iso is None or dt < datetime.fromisoformat(best_iso).replace(
+                    tzinfo=dt.tzinfo
+                ):
+                    best_iso = dt.isoformat()
+                    try:
+                        best_label = schedule_to_text(getattr(job, "schedule", {}) or {})
+                    except Exception:
+                        best_label = str(getattr(job, "kind", "") or "")
+            if best_iso:
+                self._next_cron_cache = {"eta_iso": best_iso, "label": best_label}
+        except Exception:
+            self._next_cron_cache = None
+
     async def _refresh_todo_context_cache(self) -> None:
         """Pre-fetch todo items so the sync note builder can use them."""
         cfg = get_config()
@@ -2747,6 +2791,14 @@ class AgentContextMixin:
         else:
             _detail = "normal"
         system_info_block = build_system_info_block(detail_level=_detail)
+        # Append activity-timing lines (last user message / reply / cron run /
+        # session start) so the model knows recency, not just the current clock.
+        _timing_block = self._build_timing_block(detail_level=_detail)
+        if _timing_block:
+            system_info_block = (
+                f"{system_info_block}\n{_timing_block}" if system_info_block
+                else _timing_block
+            )
 
         # Build extra read dirs block + file tree listings for system prompt.
         extra_read_dirs_block = ""

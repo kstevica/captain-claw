@@ -491,6 +491,8 @@ class AgentOrchestrationMixin:
             self._finalize_turn_usage(turn_usage)
             _restore_skill_env_once()
             self._last_complete_success = success
+            if success:
+                self._record_timing_event("last_assistant_at")
             return text
 
         async def _salvage_partial_result(reason: str) -> str:
@@ -619,7 +621,12 @@ class AgentOrchestrationMixin:
 
         # Add user message to session
         self._add_session_message("user", user_input)
+        # Stamp the last REAL user-message time (skip cron/scheduler-driven
+        # turns — those record their own automated-run timestamp instead).
+        if not getattr(self, "_turn_is_automated", False):
+            self._record_timing_event("last_user_msg_at")
         await self._auto_compact_if_needed()
+        await self._refresh_cron_context_cache()
         await self._refresh_todo_context_cache()
         await self._refresh_contacts_context_cache()
         await self._refresh_scripts_context_cache()

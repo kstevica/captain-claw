@@ -229,6 +229,10 @@ async def run_prompt_in_active_session(
                 ctx, cron_job_id, "user", prompt_text,
                 trigger=cron_trigger or "", source=cron_source or "",
             )
+            # Mark this as an automated run so the turn doesn't record a
+            # "last user message" timestamp, and stamp the cron/scheduler time.
+            agent._turn_is_automated = True
+            agent._record_timing_event("last_cron_at")
 
         started = time.perf_counter()
         assistant_text = ""
@@ -362,6 +366,10 @@ async def run_prompt_in_active_session(
                     pass
             if raise_on_error:
                 raise
+        finally:
+            # Always clear the automated-run marker so a later real user
+            # message in the same session records its timestamp correctly.
+            agent._turn_is_automated = False
 
     if not queue:
         await _execute()

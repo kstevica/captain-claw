@@ -148,6 +148,162 @@ class Agent(
             "memory_deep_select",
         }
 
+    # ── Activity timing ──────────────────────────────────────────────
+    # We stamp a few coarse timestamps into session metadata so the agent
+    # always knows, in addition to the current clock, when things last
+    # happened: the last real user message, its own last reply, and the
+    # last automated (cron/scheduler) run. Injected into the system prompt
+    # each turn so the model can reason about idle gaps and recency.
+
+    def _record_timing_event(self, kind: str) -> None:
+        """Stamp a timing event (UTC ISO) into ``session.metadata['timing']``."""
+        if not self.session or not isinstance(self.session.metadata, dict):
+            return
+        timing = self.session.metadata.get("timing")
+        if not isinstance(timing, dict):
+            timing = {}
+            self.session.metadata["timing"] = timing
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).isoformat()
+        timing[kind] = now_iso
+        # First activity we ever see for this session doubles as its start.
+        timing.setdefault("session_started_at", now_iso)
+
+    @staticmethod
+    def _humanize_age(seconds: float) -> str:
+        """Compact relative-age string: '12s', '5m', '3h', '2d' ago."""
+        s = int(max(0, seconds))
+        if s < 60:
+            return f"{s}s ago" if s else "just now"
+        m = s // 60
+        if m < 60:
+            return f"{m}m ago"
+        h = m // 60
+        if h < 24:
+            return f"{h}h ago"
+        return f"{h // 24}d ago"
+
+    @staticmethod
+    def _humanize_until(seconds: float) -> str:
+        """Compact forward-looking string: 'in 5m', 'in 3h', 'in 2d'.
+
+        Rounds to the nearest unit (not floor) so an ETA a few microseconds
+        under 2h reads 'in 2h', not a misleading 'in 1h'."""
+        s = max(0.0, float(seconds))
+        if s < 60:
+            return "in <1m"
+        minutes = s / 60
+        if minutes < 60:
+            return f"in {round(minutes)}m"
+        hours = minutes / 60
+        if hours < 24:
+            return f"in {round(hours)}h"
+        return f"in {round(hours / 24)}d"
+
+    @staticmethod
+    def _part_of_day(hour: int) -> str:
+        """Map an hour (0-23) to a coarse part-of-day label."""
+        if 5 <= hour < 12:
+            return "morning"
+        if 12 <= hour < 17:
+            return "afternoon"
+        if 17 <= hour < 22:
+            return "evening"
+        return "night"
+
+    def _build_timing_block(self, detail_level: str = "normal") -> str:
+        """Render the activity-timing lines for the system prompt.
+
+        Returns ``""`` for nano prompts or when nothing has been recorded."""
+        if detail_level == "nano":
+            return ""
+        if not self.session or not isinstance(self.session.metadata, dict):
+            return ""
+        timing = self.session.metadata.get("timing")
+        if not isinstance(timing, dict) or not timing:
+            return ""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+
+        def _ago(iso: str) -> str | None:
+            try:
+                dt = datetime.fromisoformat(str(iso))
+            except (ValueError, TypeError):
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return self._humanize_age((now - dt).total_seconds())
+
+        # Next scheduled/cron run ETA (forward-looking), from the cache the
+        # async refresh populated before this turn.
+        next_cron = getattr(self, "_next_cron_cache", None)
+        next_run_str = ""
+        if isinstance(next_cron, dict) and next_cron.get("eta_iso"):
+            try:
+                dt = datetime.fromisoformat(str(next_cron["eta_iso"]))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                until = self._humanize_until((dt - now).total_seconds())
+                label = str(next_cron.get("label", "") or "").strip()
+                next_run_str = f"{until} ({label})" if label else until
+            except (ValueError, TypeError):
+                next_run_str = ""
+
+        # Part-of-day + weekday, from LOCAL time (the absolute clock is already
+        # in the system-info block; this is a derived tone hint).
+        local_now = datetime.now()
+        weekday = local_now.strftime("%A")
+        is_weekend = local_now.weekday() >= 5
+        part = self._part_of_day(local_now.hour)
+        when_str = f"{weekday} {part}" + (" (weekend)" if is_weekend else "")
+
+        # Conversation cadence: user+assistant message count this session.
+        msg_count = 0
+        try:
+            msg_count = sum(
+                1 for m in (self.session.messages or [])
+                if str(m.get("role", "")).strip().lower() in ("user", "assistant")
+            )
+        except Exception:
+            msg_count = 0
+
+        # (key, full label, compact label)
+        rows = (
+            ("last_user_msg_at", "Last user message", "user"),
+            ("last_assistant_at", "Last reply", "reply"),
+            ("last_cron_at", "Last scheduled/cron run", "cron"),
+            ("session_started_at", "Session started", "started"),
+        )
+        if detail_level == "micro":
+            parts = [
+                f"{compact} {_ago(timing[key])}"
+                for key, _full, compact in rows
+                if timing.get(key) and _ago(timing[key])
+            ]
+            parts.append(when_str.lower())
+            if msg_count:
+                parts.append(f"{msg_count} msgs")
+            if next_run_str:
+                parts.append(f"next {next_run_str}")
+            return ("Activity: " + " | ".join(parts)) if parts else ""
+        lines = []
+        for key, full, _compact in rows:
+            iso = timing.get(key)
+            if not iso:
+                continue
+            ago = _ago(iso)
+            if not ago:
+                continue
+            lines.append(f"- {full}: {ago}")
+        lines.append(f"- Local time: {when_str}")
+        if msg_count:
+            lines.append(f"- Conversation: {msg_count} messages this session")
+        if next_run_str:
+            lines.append(f"- Next scheduled run: {next_run_str}")
+        if not lines:
+            return ""
+        return "Activity timing:\n" + "\n".join(lines)
+
     @staticmethod
     def _accumulate_usage(target: dict[str, int], usage: dict[str, int] | None) -> None:
         """Add usage values into target totals."""
