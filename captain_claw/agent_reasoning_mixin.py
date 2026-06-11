@@ -28,18 +28,15 @@ class AgentReasoningMixin:
 
     @staticmethod
     def _assistant_requests_clarification(response_text: str) -> bool:
-        """Heuristic: whether the assistant is BLOCKING on the user to choose or
-        clarify before it can proceed with a TASK.
+        """Heuristic: whether the assistant is asking the user to choose/clarify.
 
-        Deliberately strict — pin ONLY on an explicit task-clarification phrase.
-        Earlier versions also pinned any short reply ending in "?", but that
-        caught casual social questions ("How's your day going?", "How can I
-        help?"), so a harmless chit-chat answer ("pretty good!") then merged
-        stale context and force-enabled the contract pipeline — making a weak
-        model hallucinate a whole task. A real clarification almost always
-        offers choices or asks the user to specify; a social question does not.
-        Missing a terse clarification just means no context merge (cheap); a
-        false positive derails the next turn (expensive), so bias to not pin."""
+        Catches an explicit clarification phrase OR any short question (so terse
+        asks like "Which file?" still count). The crucial guard against social
+        false-positives ("How's your day going?") lives at the call site in
+        ``_update_clarification_state``: a question only pins as a clarification
+        when the message that PROMPTED it was a real task, not chit-chat. That
+        lets us keep genuine terse clarifications without re-introducing the
+        "pretty good!" → hallucinated-pipeline regression."""
         text = re.sub(r"\s+", " ", (response_text or "").strip())
         if not text or not text.endswith("?"):
             return False
@@ -48,7 +45,6 @@ class AgentReasoningMixin:
             "which would you like",
             "do you want me to",
             "would you like me to",
-            "do you want me to proceed",
             "should i proceed",
             "tell me your choices",
             "quick questions",
@@ -62,7 +58,50 @@ class AgentReasoningMixin:
             "which of",
             "what would you like me to",
         )
-        return any(phrase in lowered for phrase in prompts)
+        if any(phrase in lowered for phrase in prompts):
+            return True
+        # A short reply that ends in a question is plausibly a real ask; a long
+        # answer that merely tails off into one is not. The task-vs-chit-chat
+        # gate at the call site neutralizes social-question false positives.
+        return len(text) <= 200
+
+    # Greetings / acknowledgments / social one-liners — a message that is NONE
+    # of a task request. Used to decide a question back is social, not a
+    # clarification, and that a follow-up shouldn't force the task pipeline.
+    # NOTE: bare affirmatives (yes/yeah/ok/sure) are deliberately EXCLUDED —
+    # "yeah" answering "do you want me to proceed?" is a genuine clarification
+    # answer, and treating it as filler would drop the context the user wants
+    # kept. Only unambiguous chit-chat is matched.
+    _FILLER_RE = re.compile(
+        r"^(?:(?:"
+        r"hi+|hey+|hello+|yo+|hiya|sup|heya|"
+        r"good\s+(morning|afternoon|evening|night)|"
+        r"how\s+(are|r)\s+(you|ya|u)|how'?s\s+(it\s+going|your\s+day|things|life|everything)|"
+        r"what'?s\s+up|wassup|long\s+time|"
+        r"thanks?|thank\s+you|thx|cheers|much\s+appreciated|appreciate\s+it|"
+        r"cool|nice|awesome|perfect|sweet|excellent|"
+        r"sounds?\s+good|got\s+it|gotcha|makes\s+sense|fair\s+enough|"
+        r"lol+|haha+|hehe+|nice\s+one|"
+        r"(?:i'?m|i\s+am)\s+(good|fine|great|ok|okay|well|alright|doing\s+\w+)|"
+        r"pretty\s+(good|nice)|not\s+bad|all\s+good|doing\s+(good|well|fine|great)|"
+        r"good|fine|great|same|likewise"
+        r")[\s.!?,……🙂😊👍👋🎉]*){1,3}$",
+        re.I,
+    )
+
+    @staticmethod
+    def _is_conversational_filler(text: str) -> bool:
+        """True when the message is pure chit-chat (greeting, ack, social) and
+        carries no task request — so a question back to it is social, and a
+        follow-up to it should never force the heavyweight task pipeline."""
+        t = (text or "").strip()
+        if not t:
+            return True
+        if not re.search(r"[A-Za-z0-9]", t):
+            return True  # emoji/punctuation only
+        if len(re.findall(r"\S+", t)) <= 6 and AgentReasoningMixin._FILLER_RE.match(t):
+            return True
+        return False
 
     @staticmethod
     def _should_apply_pending_clarification(user_input: str) -> bool:
@@ -161,6 +200,13 @@ class AgentReasoningMixin:
             return user_input, False
         if not self._should_apply_pending_clarification(user_input):
             return user_input, False
+        # Pure chit-chat follow-up ("pretty good!", "no thanks", "cool") is NOT
+        # an answer to a task clarification — don't merge stale context or let
+        # it force the task pipeline. Clear the anchor and treat it plainly.
+        if self._is_conversational_filler(user_input):
+            state["pending"] = False
+            state.pop("anchor_request", None)
+            return user_input, False
         # Topic switch: if the new message reads as a fresh, self-contained
         # request rather than an answer to the pending question, do NOT merge
         # the stale context (which would both contaminate the new task and
@@ -231,7 +277,16 @@ class AgentReasoningMixin:
             self.session.metadata["clarification_state"] = {}
             meta = self.session.metadata["clarification_state"]
         now_iso = datetime.now(UTC).isoformat()
-        if self._assistant_requests_clarification(assistant_response):
+        # Only treat a question-back as a real clarification when the message
+        # that prompted it was an actual TASK request — not chit-chat. This is
+        # what stops "hi!" → "How's your day going?" from pinning (and then
+        # hijacking the next casual reply into the task pipeline), while keeping
+        # genuine clarifications after a real request ("edit the config" →
+        # "Which file?") working.
+        if (
+            self._assistant_requests_clarification(assistant_response)
+            and not self._is_conversational_filler(user_input)
+        ):
             meta["pending"] = True
             meta["anchor_request"] = str(effective_user_input or user_input).strip()[:12000]
             meta["updated_at"] = now_iso
