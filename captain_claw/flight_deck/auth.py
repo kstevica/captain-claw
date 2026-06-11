@@ -99,6 +99,20 @@ def get_db() -> FlightDeckDB:
     return _db
 
 
+def _fd_auth_enabled() -> bool:
+    """Whether Flight Deck JWT auth is enforced (mirrors server.AUTH_ENABLED)."""
+    return os.environ.get("FD_AUTH_ENABLED", "true").lower() in ("true", "1", "yes")
+
+
+# Synthetic user returned when auth is disabled (standalone desktop / local).
+_LOCAL_USER: dict = {
+    "id": "local",
+    "email": "local",
+    "display_name": "Local",
+    "role": "admin",
+}
+
+
 async def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
@@ -106,6 +120,15 @@ async def get_current_user(
     """FastAPI dependency — extracts and validates JWT, returns user dict.
     Falls back to ?fd_token= query param for direct-URL access (file downloads).
     """
+    # When auth is disabled (e.g. the standalone desktop app, FD_AUTH_ENABLED=
+    # false) the frontend never logs in, so there is no token. Routers that
+    # depend on get_current_user directly (connector config: Google / Codex /
+    # MCP) would 401. Return a synthetic local admin so they work — consistent
+    # with the server's _no_user bypass for endpoints using _required_user_dep.
+    if not _fd_auth_enabled():
+        request.state.user_id = _LOCAL_USER["id"]
+        request.state.user_role = _LOCAL_USER["role"]
+        return dict(_LOCAL_USER)
     token_str: str | None = None
     if credentials is not None:
         token_str = credentials.credentials

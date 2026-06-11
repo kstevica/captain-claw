@@ -28,18 +28,18 @@ class AgentReasoningMixin:
 
     @staticmethod
     def _assistant_requests_clarification(response_text: str) -> bool:
-        """Heuristic: whether assistant is BLOCKING on the user to choose/clarify
-        before it can proceed.
+        """Heuristic: whether the assistant is BLOCKING on the user to choose or
+        clarify before it can proceed with a TASK.
 
-        Deliberately strict. The previous rule fired on any reply containing two
-        or more question marks, which a chatty model trips almost every turn
-        ("Want me to add tests? Or ship as-is?"). That pinned a stale
-        clarification anchor that then hijacked the user's NEXT (often unrelated)
-        message — the root of the topic-switch "I got stuck" loop. We now only
-        treat a reply as a genuine clarification request when it actually reads
-        as a question the user must answer: it must END with a question mark AND
-        either offer explicit choices or be short enough to be predominantly the
-        question itself (not a long answer that merely tails off into one)."""
+        Deliberately strict — pin ONLY on an explicit task-clarification phrase.
+        Earlier versions also pinned any short reply ending in "?", but that
+        caught casual social questions ("How's your day going?", "How can I
+        help?"), so a harmless chit-chat answer ("pretty good!") then merged
+        stale context and force-enabled the contract pipeline — making a weak
+        model hallucinate a whole task. A real clarification almost always
+        offers choices or asks the user to specify; a social question does not.
+        Missing a terse clarification just means no context merge (cheap); a
+        false positive derails the next turn (expensive), so bias to not pin."""
         text = re.sub(r"\s+", " ", (response_text or "").strip())
         if not text or not text.endswith("?"):
             return False
@@ -48,19 +48,21 @@ class AgentReasoningMixin:
             "which would you like",
             "do you want me to",
             "would you like me to",
+            "do you want me to proceed",
+            "should i proceed",
             "tell me your choices",
             "quick questions",
             "so i proceed correctly",
             "could you clarify",
             "can you clarify",
+            "could you specify",
+            "can you specify",
             "which option",
-            "what would you like",
+            "which one",
+            "which of",
+            "what would you like me to",
         )
-        if any(phrase in lowered for phrase in prompts):
-            return True
-        # A short reply that ends in a question is plausibly a real ask; a long
-        # answer that happens to end with a question is not (it already answered).
-        return len(text) <= 280
+        return any(phrase in lowered for phrase in prompts)
 
     @staticmethod
     def _should_apply_pending_clarification(user_input: str) -> bool:

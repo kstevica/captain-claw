@@ -77,6 +77,34 @@ def _strip_planning_preamble(text: str) -> str:
         kept.append(p)
     return " ".join(kept).strip()
 
+
+def _looks_like_leaked_plan_json(text: str) -> bool:
+    """True if the final response is raw internal planning/contract JSON that
+    leaked as the user-facing answer. Weak models sometimes echo the task
+    contract ({"summary":…, "tasks":[…], "requirements":[…]}) instead of
+    actually answering. We catch it and nudge for a real reply."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    # Tolerate a ```json fence.
+    if t.startswith("```"):
+        t = t.strip("`").lstrip()
+        if t[:4].lower() == "json":
+            t = t[4:].lstrip()
+    if not t.startswith("{"):
+        return False
+    try:
+        obj = json.loads(t)
+    except Exception:
+        return False
+    if not isinstance(obj, dict):
+        return False
+    keys = {str(k).lower() for k in obj.keys()}
+    # Contract/plan shape: a task list plus requirements/summary/etc.
+    return "tasks" in keys and bool(
+        keys & {"requirements", "summary", "prefetch_urls", "checks"}
+    )
+
 # Tools that bring in new external / document content and may warrant
 # deferred scale re-extraction.  Lightweight tools like datastore, glob,
 # shell, todo do NOT qualify — they return structured local data that
@@ -1066,6 +1094,9 @@ class AgentOrchestrationMixin:
         # Nudge at most once per turn when a reasoning-preamble is about to be
         # shipped as the answer (see the no-tool finalize path below).
         _preamble_nudged = False
+        # Nudge at most once per turn when raw planning/contract JSON leaks as
+        # the final response (weak models echo the contract instead of answering).
+        _plan_leak_nudged = False
 
         for iteration in range(hard_turn_iterations):
             # ── External cancellation check ───────────────────────
@@ -2294,6 +2325,29 @@ class AgentOrchestrationMixin:
             # as the final answer — that's what leaves the user nudging "ok,
             # answer". Nudge once to produce the real answer instead. Scoped to
             # no-tool turns so it can't disrupt a genuine end-of-work summary.
+            # Leaked planning/contract JSON as the final answer — catch it and
+            # nudge for a plain reply (weak models echo the contract blob).
+            if (
+                _tools_executed_count == 0
+                and not _plan_leak_nudged
+                and _looks_like_leaked_plan_json(response.content)
+            ):
+                _plan_leak_nudged = True
+                log.warning(
+                    "Leaked plan/contract JSON detected as final response; nudging to answer",
+                    preview=str(response.content or "")[:160],
+                )
+                self._add_session_message(role="assistant", content=str(response.content or ""))
+                self._add_session_message(
+                    role="user",
+                    content=(
+                        "That was internal planning data (a task/contract object), NOT a "
+                        "response to the user. Never output planning JSON. Answer the user's "
+                        "message directly, in plain friendly language."
+                    ),
+                )
+                continue
+
             if (
                 _tools_executed_count == 0
                 and not _preamble_nudged
