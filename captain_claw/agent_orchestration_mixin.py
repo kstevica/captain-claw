@@ -2186,26 +2186,33 @@ class AgentOrchestrationMixin:
                 and not _web_used_this_turn
                 and _claims_web_research(_stall_resp_text)
             )
-            # If the turn already produced a substantive assistant reply, a
-            # short closing remark ("Sure, let me know if…") is NOT a stall —
-            # retrying it just burns iterations toward the stuck detector. The
-            # false-claim gates still fire (a lie must be corrected regardless).
-            _turn_produced_substantive_text = False
+            # A turn that already produced a real DELIVERABLE (a successful
+            # write/edit) or a substantive assistant reply is summarizing
+            # completed work — its wrap-up must never be treated as a stall OR
+            # a false claim. The model isn't evading work or lying; it did the
+            # work this turn. Without this guard a perfectly good "✅ Done —
+            # saved to <path>" summary gets killed (e.g. the false-web-claim
+            # gate misfires because the research happened in an EARLIER turn),
+            # and the forced-tool retry derails a weak model into a generic
+            # greeting.
+            _turn_produced_deliverable = False
             if self.session:
                 for _m in self.session.messages[turn_start_idx:]:
                     if (
                         _m.get("role") == "assistant"
                         and len(str(_m.get("content", "")).strip()) > 200
                     ):
-                        _turn_produced_substantive_text = True
+                        _turn_produced_deliverable = True
                         break
+            if not _turn_produced_deliverable and (
+                self._turn_has_successful_tool(turn_start_idx, "write")
+                or self._turn_has_successful_tool(turn_start_idx, "edit")
+            ):
+                _turn_produced_deliverable = True
             if (
                 not response.tool_calls
-                and (
-                    (_looks_like_stall(_stall_resp_text) and not _turn_produced_substantive_text)
-                    or _false_claim
-                    or _false_web_claim
-                )
+                and not _turn_produced_deliverable
+                and (_looks_like_stall(_stall_resp_text) or _false_claim or _false_web_claim)
                 and self._stall_retry_count < MAX_STALL_RETRIES
             ):
                 self._stall_retry_count += 1
