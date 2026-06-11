@@ -28,13 +28,22 @@ class AgentReasoningMixin:
 
     @staticmethod
     def _assistant_requests_clarification(response_text: str) -> bool:
-        """Heuristic: whether assistant is asking user to clarify before execution."""
+        """Heuristic: whether assistant is BLOCKING on the user to choose/clarify
+        before it can proceed.
+
+        Deliberately strict. The previous rule fired on any reply containing two
+        or more question marks, which a chatty model trips almost every turn
+        ("Want me to add tests? Or ship as-is?"). That pinned a stale
+        clarification anchor that then hijacked the user's NEXT (often unrelated)
+        message — the root of the topic-switch "I got stuck" loop. We now only
+        treat a reply as a genuine clarification request when it actually reads
+        as a question the user must answer: it must END with a question mark AND
+        either offer explicit choices or be short enough to be predominantly the
+        question itself (not a long answer that merely tails off into one)."""
         text = re.sub(r"\s+", " ", (response_text or "").strip())
-        if not text:
+        if not text or not text.endswith("?"):
             return False
         lowered = text.lower()
-        if lowered.count("?") >= 2:
-            return True
         prompts = (
             "which would you like",
             "do you want me to",
@@ -42,11 +51,16 @@ class AgentReasoningMixin:
             "tell me your choices",
             "quick questions",
             "so i proceed correctly",
-            "confirm",
+            "could you clarify",
+            "can you clarify",
+            "which option",
+            "what would you like",
         )
-        if any(phrase in lowered for phrase in prompts) and "?" in lowered:
+        if any(phrase in lowered for phrase in prompts):
             return True
-        return False
+        # A short reply that ends in a question is plausibly a real ask; a long
+        # answer that happens to end with a question is not (it already answered).
+        return len(text) <= 280
 
     @staticmethod
     def _should_apply_pending_clarification(user_input: str) -> bool:
@@ -66,6 +80,41 @@ class AgentReasoningMixin:
         if text.endswith("?"):
             return False
         return True
+
+    @staticmethod
+    def _looks_like_topic_switch(user_input: str, anchor: str) -> bool:
+        """True when the new message looks like a fresh self-contained request
+        rather than an answer to the pending clarification.
+
+        Two signals must agree: (a) the message opens like a new command or
+        question (an imperative verb or a wh-/"can you" opener), and (b) it
+        shares almost no content words with the pending anchor. A genuine
+        clarification answer is usually a short fragment ("the second one",
+        "make it formal") that neither opens like a command nor introduces a
+        wholly new vocabulary."""
+        text = (user_input or "").strip().lower()
+        if not text:
+            return False
+        _NEW_TASK_OPENERS = (
+            "make ", "create ", "write ", "build ", "generate ", "draw ",
+            "design ", "show ", "list ", "find ", "search ", "fetch ", "get ",
+            "read ", "open ", "play ", "explain ", "summarize ", "summarise ",
+            "translate ", "calculate ", "send ", "email ", "schedule ", "plan ",
+            "fix ", "debug ", "add ", "install ", "run ", "give me ", "tell me ",
+            "how ", "what ", "why ", "when ", "where ", "who ", "can you ",
+            "could you ", "i want ", "i need ", "let's ", "lets ", "help me ",
+        )
+        if not text.startswith(_NEW_TASK_OPENERS):
+            return False
+        def _content_words(s: str) -> set[str]:
+            return set(re.findall(r"[a-z0-9]{4,}", (s or "").lower()))
+        anchor_words = _content_words(anchor)
+        new_words = _content_words(user_input)
+        if not anchor_words or not new_words:
+            # No anchor vocabulary to compare against — the fresh opener alone
+            # is enough to treat it as a new task.
+            return True
+        return len(anchor_words & new_words) < 2
 
     @staticmethod
     def _user_requests_refetch(user_input: str) -> bool:
@@ -109,6 +158,15 @@ class AgentReasoningMixin:
         if not anchor:
             return user_input, False
         if not self._should_apply_pending_clarification(user_input):
+            return user_input, False
+        # Topic switch: if the new message reads as a fresh, self-contained
+        # request rather than an answer to the pending question, do NOT merge
+        # the stale context (which would both contaminate the new task and
+        # force the heavyweight contract pipeline). Clear the pending anchor
+        # and treat the message as a brand-new turn.
+        if self._looks_like_topic_switch(user_input, anchor):
+            state["pending"] = False
+            state.pop("anchor_request", None)
             return user_input, False
 
         wants_refetch = self._user_requests_refetch(user_input)

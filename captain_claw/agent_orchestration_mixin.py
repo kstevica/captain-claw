@@ -54,6 +54,29 @@ def _looks_like_planning_preamble(text: str) -> bool:
     n = sum(1 for m in _PREAMBLE_DECISION_MARKERS if m in low)
     return n >= 2 and len(t) < 400
 
+
+def _strip_planning_preamble(text: str) -> str:
+    """Drop a leading reasoning/meta preamble, returning the substantive
+    remainder (or '' if the whole message was preamble). Lets us ship the
+    real answer hiding behind a "The user is asking… I can answer this…"
+    opener instead of nudging the model and burning an iteration."""
+    t = (text or "").strip()
+    if not t:
+        return ""
+    parts = _re.split(r"(?<=[.!?])\s+", t)
+    kept: list[str] = []
+    dropping = True
+    for p in parts:
+        low = p.strip().lower()
+        if dropping and (
+            low.startswith(_PREAMBLE_META_STARTS)
+            or any(m in low for m in _PREAMBLE_DECISION_MARKERS)
+        ):
+            continue
+        dropping = False
+        kept.append(p)
+    return " ".join(kept).strip()
+
 # Tools that bring in new external / document content and may warrant
 # deferred scale re-extraction.  Lightweight tools like datastore, glob,
 # shell, todo do NOT qualify — they return structured local data that
@@ -413,9 +436,14 @@ class AgentOrchestrationMixin:
             self.planning_enabled,
             pipeline_mode=self.pipeline_mode,
         )
-        if clarification_context_applied:
+        if clarification_context_applied and not self._is_simple_request(user_input):
             # Clarification follow-ups usually represent partially-specified
             # continuations of a larger request; keep strict completion gating.
+            # But a SIMPLE follow-up (a short read-only ask or trivial edit)
+            # doesn't justify the heavyweight pipeline — forcing it there is
+            # what made trivial follow-ups loop until the stuck detector fired.
+            # Check the raw user message, not the merged input (the merge always
+            # looks "complex" because it splices in prior context).
             use_contract_pipeline = True
         # Workers should never use contract pipelines — they execute a
         # single focused task and should return as soon as it's done.
@@ -1170,6 +1198,16 @@ class AgentOrchestrationMixin:
                         _partial_stuck = await _salvage_partial_result(
                             "Agent is stuck and not making progress"
                         )
+                        # Conversational turn (no multi-step pipeline, no
+                        # completion requirements): a salvaged substantive reply
+                        # IS the answer. Return it cleanly instead of the
+                        # alarming "I got stuck" framing — the progress detector
+                        # simply doesn't count text answers as "progress".
+                        _conversational = (
+                            planning_pipeline is None and not completion_requirements
+                        )
+                        if _partial_stuck and _conversational:
+                            return finish(_partial_stuck, success=True)
                         if _partial_stuck:
                             return finish(
                                 "⚠️ I got stuck and couldn't make further "
@@ -2141,9 +2179,26 @@ class AgentOrchestrationMixin:
                 and not _web_used_this_turn
                 and _claims_web_research(_stall_resp_text)
             )
+            # If the turn already produced a substantive assistant reply, a
+            # short closing remark ("Sure, let me know if…") is NOT a stall —
+            # retrying it just burns iterations toward the stuck detector. The
+            # false-claim gates still fire (a lie must be corrected regardless).
+            _turn_produced_substantive_text = False
+            if self.session:
+                for _m in self.session.messages[turn_start_idx:]:
+                    if (
+                        _m.get("role") == "assistant"
+                        and len(str(_m.get("content", "")).strip()) > 200
+                    ):
+                        _turn_produced_substantive_text = True
+                        break
             if (
                 not response.tool_calls
-                and (_looks_like_stall(_stall_resp_text) or _false_claim or _false_web_claim)
+                and (
+                    (_looks_like_stall(_stall_resp_text) and not _turn_produced_substantive_text)
+                    or _false_claim
+                    or _false_web_claim
+                )
                 and self._stall_retry_count < MAX_STALL_RETRIES
             ):
                 self._stall_retry_count += 1
@@ -2230,6 +2285,22 @@ class AgentOrchestrationMixin:
                 and not _preamble_nudged
                 and _looks_like_planning_preamble(response.content)
             ):
+                # Prefer salvaging the real answer hiding behind the preamble
+                # over nudging-and-looping: strip the leading meta/decision
+                # sentences and, if a substantive answer remains, ship it.
+                _stripped = _strip_planning_preamble(str(response.content or ""))
+                if _stripped and len(_stripped) > 80:
+                    log.info(
+                        "Reasoning-preamble stripped; finalizing the remaining answer",
+                        kept_preview=_stripped[:160],
+                    )
+                    finalized, final_text, finish_success = await attempt_finalize(
+                        output_text=_stripped,
+                        iteration=iteration,
+                        finish_success=True,
+                    )
+                    if finalized:
+                        return finish(final_text, success=finish_success)
                 _preamble_nudged = True
                 log.warning(
                     "Reasoning-preamble detected as final response; nudging to answer",
