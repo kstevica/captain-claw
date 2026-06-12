@@ -129,6 +129,32 @@ def resolve_saved_file_for_kind(
 
 
 # ---------------------------------------------------------------------------
+# Completion confirmation
+# ---------------------------------------------------------------------------
+
+def format_cron_completion(
+    job_id: str | None, description: str, output: str = "", ok: bool = True,
+) -> str:
+    """Build a user-facing cron completion confirmation.
+
+    Always identifies the job and what it did — even when the task produced no
+    text output (e.g. it only wrote a file) — so the user gets a clear "done"
+    instead of silence. Any actual output is appended below the header line.
+    """
+    short_id = (job_id or "")[:8]
+    head = "✅" if ok else "⚠️"
+    status = "finished" if ok else "failed"
+    desc = " ".join((description or "").split())
+    if len(desc) > 120:
+        desc = desc[:117] + "…"
+    label = f"Cron {short_id}".rstrip()
+    line = f"{head} {label} {status}"
+    if desc:
+        line += f" — {desc}"
+    body = (output or "").strip()
+    return f"{line}\n\n{body}" if body else line
+
+
 # Script / tool execution in session
 # ---------------------------------------------------------------------------
 
@@ -231,11 +257,14 @@ async def run_script_or_tool_in_session(
                 f"[CRON] {trigger} {kind} run complete: {file_path}",
                 trigger=trigger, kind=kind, session_id=target_session.id,
             )
-            # Deliver output to platform (e.g. Telegram).
+            # Always confirm completion back to the request's origin.
             if ctx.on_cron_output:
                 try:
-                    summary = shell_output.strip()[:2000] or "Cron job completed."
-                    await ctx.on_cron_output(target_session.id, summary)
+                    desc = f"{trigger} {kind}: {file_path.name}"
+                    msg = format_cron_completion(
+                        cron_job_id, desc, shell_output.strip()[:2000], ok=True,
+                    )
+                    await ctx.on_cron_output(target_session.id, msg)
                 except Exception:
                     pass
             if agent.session:

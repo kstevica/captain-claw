@@ -292,14 +292,15 @@ async def run_prompt_in_active_session(
                     trigger=cron_trigger or "", source=cron_source or "",
                     output=truncate_history_text(assistant_text),
                 )
-                # Deliver cron output to platform (e.g. Telegram) if
-                # the session belongs to a platform user.
+                # Always confirm completion back to the request's origin —
+                # with the job id + task, even when the run produced no text.
                 if ctx.on_cron_output and agent.session:
                     try:
-                        outbound = assistant_text.strip()
-                        if not outbound:
-                            outbound = "Cron job completed."
-                        await ctx.on_cron_output(agent.session.id, outbound)
+                        from captain_claw.cron_dispatch import format_cron_completion
+                        msg = format_cron_completion(
+                            cron_job_id, prompt_text or "", assistant_text.strip(), ok=True,
+                        )
+                        await ctx.on_cron_output(agent.session.id, msg)
                     except Exception:
                         log.debug("on_cron_output callback failed", exc_info=True)
             if on_assistant_text:
