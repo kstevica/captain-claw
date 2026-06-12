@@ -234,6 +234,10 @@ async def handle_ws_message(
         # When the message arrived over WhatsApp, the bridge tags it with the
         # originating WAID so tools can target "the current WhatsApp chat".
         whatsapp_waid = str(data.get("whatsapp_waid", "")).strip() or None
+        # Durable origin descriptor ({kind, address}) so an async/cron result
+        # can be routed back to this source later. Bridges may send it
+        # explicitly; otherwise handle_chat synthesizes one from whatsapp_waid.
+        origin = data.get("origin") if isinstance(data.get("origin"), dict) else None
 
         # Multi-file support: collect all image/file paths into lists.
         image_paths: list[str] = []
@@ -273,6 +277,7 @@ async def handle_ws_message(
                 file_paths=file_paths if len(file_paths) > 1 else None,
                 rewind_to=rewind_to,
                 whatsapp_waid=whatsapp_waid,
+                origin=origin,
                 no_flow=bool(data.get("no_flow", False)),
                 deny_tools=[str(t) for t in (data.get("deny_tools") or [])],
                 no_broadcast=bool(data.get("no_broadcast", False)),

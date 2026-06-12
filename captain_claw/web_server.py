@@ -799,12 +799,22 @@ class WebServer:
 
         server = self
 
-        async def _cron_output_to_telegram(session_id: str, text: str) -> None:
-            """Deliver cron output to Telegram if the session belongs to a TG user."""
+        async def _cron_output_deliver(session_id: str, text: str) -> None:
+            """Route an async cron result back to wherever the session came
+            from. Under Flight Deck this goes through FD's origin-aware router
+            (WhatsApp / Telegram / channel); standalone, it falls back to the
+            agent's own Telegram bridge."""
+            # 1) Durable origin routing via Flight Deck (owns channel creds).
+            try:
+                from captain_claw.delivery import deliver_to_origin
+                if await deliver_to_origin(server.agent, session_id, text):
+                    return
+            except Exception:
+                log.debug("cron origin delivery failed; trying local fallback", exc_info=True)
+            # 2) Standalone fallback: local Telegram bridge (legacy behavior).
             bridge = server._telegram_bridge
             if not bridge:
                 return
-            # Reverse lookup: find user_id whose session matches.
             for user_id, sid in server._telegram_user_sessions.items():
                 if sid == session_id:
                     user_info = server._approved_telegram_users.get(user_id, {})
@@ -816,7 +826,7 @@ class WebServer:
         return RuntimeContext(
             agent=self.agent,
             ui=_WebCronUI(),  # type: ignore[arg-type]
-            on_cron_output=_cron_output_to_telegram,
+            on_cron_output=_cron_output_deliver,
         )
 
     # ── Delegated handlers ───────────────────────────────────────────

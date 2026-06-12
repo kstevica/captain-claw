@@ -145,6 +145,7 @@ async def handle_chat(
     file_paths: list[str] | None = None,
     rewind_to: str | None = None,
     whatsapp_waid: str | None = None,
+    origin: dict | None = None,
     no_flow: bool = False,
     deny_tools: list[str] | None = None,
     no_broadcast: bool = False,
@@ -202,6 +203,23 @@ async def handle_chat(
     if whatsapp_waid and getattr(agent, "session", None) is not None:
         try:
             agent.session.metadata["whatsapp_waid"] = whatsapp_waid
+        except Exception:
+            pass
+
+    # ── Stamp the durable origin so async/cron results can route back here ──
+    # Explicit origin from the bridge wins; otherwise synthesize from the WAID.
+    if getattr(agent, "session", None) is not None:
+        try:
+            from captain_claw.origin import (
+                KIND_WHATSAPP,
+                normalize_origin,
+                set_session_origin,
+            )
+            norm = normalize_origin(origin)
+            if norm:
+                set_session_origin(agent.session, norm["kind"], norm["address"])
+            elif whatsapp_waid:
+                set_session_origin(agent.session, KIND_WHATSAPP, whatsapp_waid)
         except Exception:
             pass
 

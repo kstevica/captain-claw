@@ -954,6 +954,9 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
             "type": "chat",
             "content": agent_content,
             "whatsapp_waid": waid,
+            # Durable origin so a deferred/cron result can be routed back here
+            # long after this live turn ends (see captain_claw.delivery).
+            "origin": {"kind": "whatsapp", "address": waid},
         }
         try:
             await ch.agent_ws.send(json.dumps(payload_obj))

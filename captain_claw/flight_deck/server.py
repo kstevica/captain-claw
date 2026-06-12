@@ -702,6 +702,7 @@ from captain_claw.flight_deck.messenger_bridge import router as messenger_router
 from captain_claw.flight_deck.whatsapp_bridge import router as whatsapp_router
 from captain_claw.flight_deck.fd_scheduler import router as scheduler_router
 from captain_claw.flight_deck.consciousness_routes import router as consciousness_router
+from captain_claw.flight_deck.delivery_routes import router as delivery_router
 
 app.include_router(auth_router)
 app.include_router(settings_router)
@@ -730,6 +731,7 @@ app.include_router(messenger_router)
 app.include_router(whatsapp_router)
 app.include_router(scheduler_router)
 app.include_router(consciousness_router)
+app.include_router(delivery_router)
 
 
 # ── Auth dependency helper ──
