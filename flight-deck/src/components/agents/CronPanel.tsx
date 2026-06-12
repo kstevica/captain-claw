@@ -143,14 +143,14 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
       >
         {/* Header */}
         <div className="flex items-center gap-2 border-b border-zinc-800 px-4 py-3">
-          <Clock className="h-4 w-4 text-emerald-400" />
+          <Clock className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
           <div className="min-w-0 flex-1">
             <div className="text-sm font-semibold text-zinc-100">Cron jobs</div>
             <div className="truncate text-xs text-zinc-500">{agentName}</div>
           </div>
           <button
             onClick={() => setCreating((v) => !v)}
-            className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium ${creating ? 'bg-emerald-950/40 text-emerald-300' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'}`}
+            className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium ${creating ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'}`}
             title="Create a new cron job"
           >
             <Plus className="h-3.5 w-3.5" /> New job
@@ -192,7 +192,7 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
               <button
                 onClick={createJob}
                 disabled={createBusy || !newSchedule.trim() || !newTask.trim()}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-700/60 bg-emerald-950/40 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-900/40 disabled:opacity-40"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-40 dark:border-emerald-700/60 dark:bg-emerald-950/40 dark:text-emerald-300 dark:hover:bg-emerald-900/40"
               >
                 {createBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />} Create job
               </button>
@@ -203,7 +203,7 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-3">
           {error && (
-            <div className="mb-3 flex items-center gap-2 rounded-lg border border-red-900/50 bg-red-950/30 px-3 py-2 text-sm text-red-300">
+            <div className="mb-3 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
               <AlertTriangle className="h-4 w-4 shrink-0" /> {error}
             </div>
           )}
@@ -220,12 +220,12 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
                 return (
                   <div key={job.id} className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
                     <div className="mb-1.5 flex items-center gap-2 text-xs">
-                      <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-emerald-400/80">{job.kind}</span>
+                      <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-emerald-600 dark:text-emerald-400/80">{job.kind}</span>
                       <span className="font-mono text-zinc-500">{job.id.slice(0, 8)}</span>
                       {paused ? (
-                        <span className="rounded-full bg-amber-950/40 px-2 py-0.5 text-amber-400">paused</span>
+                        <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400">paused</span>
                       ) : (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-950/40 px-2 py-0.5 text-emerald-400">
+                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400">
                           <CheckCircle2 className="h-3 w-3" /> active
                         </span>
                       )}
@@ -239,7 +239,7 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
                       <div className="mt-1 text-[11px] text-zinc-500">
                         last: {job.last_status}
                         {job.last_run_at ? ` (${relTime(job.last_run_at)})` : ''}
-                        {job.last_error ? <span className="text-red-400/80"> — {job.last_error}</span> : null}
+                        {job.last_error ? <span className="text-red-600 dark:text-red-400/80"> — {job.last_error}</span> : null}
                       </div>
                     )}
                     <div className="mt-2 flex items-center gap-1">
@@ -254,7 +254,7 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
                         <button
                           onClick={() => act(job, 'resume')}
                           disabled={busy === job.id + 'resume'}
-                          className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-emerald-400 hover:bg-zinc-800 disabled:opacity-40"
+                          className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-emerald-600 hover:bg-zinc-800 disabled:opacity-40 dark:text-emerald-400"
                         >
                           <Play className="h-3 w-3" /> Resume
                         </button>
@@ -262,7 +262,7 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
                         <button
                           onClick={() => act(job, 'pause')}
                           disabled={busy === job.id + 'pause'}
-                          className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-amber-400 hover:bg-zinc-800 disabled:opacity-40"
+                          className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-amber-600 hover:bg-zinc-800 disabled:opacity-40 dark:text-amber-400"
                         >
                           <Pause className="h-3 w-3" /> Pause
                         </button>
@@ -270,7 +270,7 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
                       <button
                         onClick={() => act(job, 'remove')}
                         disabled={busy === job.id + 'remove'}
-                        className="ml-auto inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-red-400/80 hover:bg-red-950/30 hover:text-red-300 disabled:opacity-40"
+                        className="ml-auto inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-100 hover:text-red-700 disabled:opacity-40 dark:text-red-400/80 dark:hover:bg-red-950/30 dark:hover:text-red-300"
                       >
                         <Trash2 className="h-3 w-3" /> Remove
                       </button>

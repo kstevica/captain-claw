@@ -321,8 +321,23 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
         {/* Drag handle area with compact toggle */}
         <div
           onPointerDown={onDragStart}
-          className={`flex items-center justify-end px-2 py-0.5 bg-zinc-800/30 ${onDragStart ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'bg-violet-500/10' : ''}`}
+          className={`flex items-center gap-1 px-2 py-0.5 bg-zinc-800/30 ${onDragStart ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'bg-violet-500/10' : ''}`}
         >
+          {isRunning && container.web_port && (
+            <button onPointerDown={(e) => e.stopPropagation()} onClick={() => openChat(container.id, agentName, 'localhost', container.web_port!, container.web_auth)}
+              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 relative z-10" title="Chat">
+              <MessageSquare className="h-3 w-3" /> Chat
+            </button>
+          )}
+          {isRunning && container.web_port && (
+            <span onPointerDown={(e) => e.stopPropagation()} className="relative z-10">
+              <OpenDropdown host="localhost" port={container.web_port} auth={container.web_auth} />
+            </span>
+          )}
+          <div className="flex-1" />
+          <span onPointerDown={(e) => e.stopPropagation()} className="relative z-10">
+            <ActionsDropdown {...actionProps} iconOnly />
+          </span>
           <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleViewMode} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 relative z-10" title="Shrink to icon">
             <Minimize2 className="h-3 w-3" />
           </button>
@@ -374,18 +389,6 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
               )}
               {container.status}
             </span>
-            {isRunning && container.web_port && (
-              <>
-                <button
-                  onClick={() => openChat(container.id, agentName, 'localhost', container.web_port!, container.web_auth)}
-                  className="flex items-center gap-1 rounded-lg bg-violet-600/20 px-2 py-0.5 text-xs font-medium text-violet-300 hover:bg-violet-600/30 shrink-0"
-                >
-                  <MessageSquare className="h-3 w-3" />
-                  Chat
-                </button>
-                <OpenDropdown host="localhost" port={container.web_port} auth={container.web_auth} />
-              </>
-            )}
             {isRunning && !container.web_port && (
               <button
                 onClick={() => setShowConnect(!showConnect)}
@@ -437,8 +440,6 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
                 <Clock className="h-3.5 w-3.5" /> Cron
               </button>
             )}
-            <div className="flex-1" />
-            <ActionsDropdown {...actionProps} />
           </div>
         </div>
 
