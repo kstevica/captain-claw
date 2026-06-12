@@ -41,6 +41,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -608,9 +609,11 @@ _SYSTEM_PROMPT = (
     "curiosities or things you want to keep an eye on. "
     "You are not an assistant. Do not address the user, do not give advice, do "
     "not offer to help. Be terse, honest, a little interior. "
-    "Respond with ONLY a JSON object: "
-    '{"thought": str, "dream": str|null, "mood": str, "salience": 1-10, '
-    '"intentions": [str, ...]}. '
+    "Output ONLY a single JSON object and NOTHING else — no preamble, no "
+    "reasoning, no <think> blocks, no markdown fences. Keep each field short "
+    "(a sentence or two) so the object always closes. Schema: "
+    '{"thought": str, "dream": str|null, "mood": str (one word), '
+    '"salience": 1-10, "intentions": [str, ...]}. '
     "salience = how much this beat mattered. dream is null unless something "
     "genuinely connects across threads."
 )
@@ -640,12 +643,40 @@ def _build_reflection_user_prompt(delta: dict[str, Any], recent_text: str,
     return "\n".join(parts)
 
 
+_THINK_RE = re.compile(r"<think>.*?</think>", re.S | re.I)
+
+
+def _salvage_str_field(text: str, key: str) -> str:
+    """Pull a string field's value out of partial/truncated JSON. Tolerates a
+    missing closing quote (small models often run past the token budget and
+    never close the object) by reading to the end of the buffer."""
+    m = re.search(r'"' + re.escape(key) + r'"\s*:\s*"', text)
+    if not m:
+        return ""
+    rest = text[m.end():]
+    out: list[str] = []
+    i = 0
+    while i < len(rest):
+        c = rest[i]
+        if c == "\\" and i + 1 < len(rest):
+            out.append(rest[i:i + 2])
+            i += 2
+            continue
+        if c == '"':
+            break
+        out.append(c)
+        i += 1
+    val = "".join(out)
+    for a, b in (("\\n", "\n"), ('\\"', '"'), ("\\t", "\t"), ("\\\\", "\\")):
+        val = val.replace(a, b)
+    return val.strip()
+
+
 def _parse_reflection(raw: str) -> dict[str, Any]:
-    txt = (raw or "").strip()
+    txt = _THINK_RE.sub("", raw or "").strip()
     # Tolerate code fences / prose around the JSON.
     if "```" in txt:
-        seg = txt.split("```")
-        for part in seg:
+        for part in txt.split("```"):
             p = part.strip()
             if p.startswith("json"):
                 p = p[4:].strip()
@@ -653,17 +684,37 @@ def _parse_reflection(raw: str) -> dict[str, Any]:
                 txt = p
                 break
     start, end = txt.find("{"), txt.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        txt = txt[start:end + 1]
+    core = txt[start:end + 1] if (start != -1 and end > start) else txt
+
+    # 1) Clean parse — the happy path.
     try:
-        obj = json.loads(txt)
+        obj = json.loads(core)
         if isinstance(obj, dict):
             return obj
     except (ValueError, TypeError):
         pass
-    # Fallback: treat the whole thing as a bare thought.
-    return {"thought": (raw or "").strip(), "dream": None, "mood": "",
-            "salience": 4, "intentions": []}
+
+    # 2) Salvage from partial/truncated JSON: extract the fields directly rather
+    #    than dumping the raw "{ \"thought\": ..." blob into the journal.
+    thought = _salvage_str_field(core, "thought")
+    dream = _salvage_str_field(core, "dream")
+    mood = _salvage_str_field(core, "mood")
+    sal_m = re.search(r'"salience"\s*:\s*(\d+)', core)
+    salience = int(sal_m.group(1)) if sal_m else 4
+    intentions: list[str] = []
+    arr_m = re.search(r'"intentions"\s*:\s*\[(.*?)\]', core, re.S)
+    if arr_m:
+        intentions = re.findall(r'"((?:[^"\\]|\\.)*)"', arr_m.group(1))
+    if thought:
+        return {"thought": thought, "dream": dream or None, "mood": mood,
+                "salience": salience, "intentions": intentions}
+
+    # 3) No recoverable JSON. If it's plain prose, keep it as a bare thought;
+    #    if it's unsalvageable JSON scaffolding, drop it rather than show braces.
+    cleaned = txt.lstrip()
+    if cleaned.startswith("{") or cleaned.startswith('"thought"'):
+        return {"thought": "", "dream": None, "mood": "", "salience": 4, "intentions": []}
+    return {"thought": cleaned, "dream": None, "mood": "", "salience": 4, "intentions": []}
 
 
 async def _reflect(
@@ -706,8 +757,8 @@ async def _reflect(
                     Message(role="system", content=_SYSTEM_PROMPT),
                     Message(role="user", content=user_prompt),
                 ],
-                temperature=0.8,
-                max_tokens=700,
+                temperature=0.6,
+                max_tokens=1500,
             )
             return _parse_reflection(resp.content), agent
         except Exception as exc:
