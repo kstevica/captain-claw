@@ -431,7 +431,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
     <div className={`rounded-xl border bg-zinc-900/50 overflow-hidden ${busy ? 'border-emerald-500/40' : 'border-zinc-800'}`}>
       <div
         onPointerDown={onDragStart}
-        className={`flex items-center justify-end gap-1 px-2 py-0.5 bg-emerald-900/10 ${onDragStart ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'bg-emerald-500/10' : ''}`}
+        className={`flex items-center gap-1 px-2 py-0.5 bg-emerald-900/10 ${onDragStart ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'bg-emerald-500/10' : ''}`}
       >
         {isRunning && (
           <button onPointerDown={(e) => e.stopPropagation()} onClick={() => openChat(chatId, agentName, 'localhost', proc.web_port, proc.web_auth)}
@@ -444,6 +444,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
             <OpenDropdown host="localhost" port={proc.web_port} auth={proc.web_auth} />
           </span>
         )}
+        <div className="flex-1" />
         <span onPointerDown={(e) => e.stopPropagation()} className="relative z-10">
           <ProcessActionsDropdown {...actionProps} iconOnly />
         </span>

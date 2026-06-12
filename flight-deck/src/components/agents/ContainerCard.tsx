@@ -506,7 +506,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
       {/* Drag handle area with compact toggle */}
       <div
         onPointerDown={onDragStart}
-        className={`flex items-center justify-end gap-1 px-2 py-0.5 bg-zinc-800/30 ${onDragStart ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'bg-violet-500/10' : ''}`}
+        className={`flex items-center gap-1 px-2 py-0.5 bg-zinc-800/30 ${onDragStart ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'bg-violet-500/10' : ''}`}
       >
         {isRunning && container.web_port && (
           <button onPointerDown={(e) => e.stopPropagation()} onClick={() => openChat(container.id, agentName, 'localhost', container.web_port!, container.web_auth)}
@@ -519,6 +519,7 @@ export function ContainerCard({ container, onBrowseFiles, onDragStart, isDraggin
             <OpenDropdown host="localhost" port={container.web_port} auth={container.web_auth} />
           </span>
         )}
+        <div className="flex-1" />
         <span onPointerDown={(e) => e.stopPropagation()} className="relative z-10">
           <ActionsDropdown {...actionProps} iconOnly />
         </span>
