@@ -155,6 +155,24 @@ def format_cron_completion(
     return f"{line}\n\n{body}" if body else line
 
 
+def wrap_cron_prompt(job_id: str | None, prompt_text: str) -> str:
+    """Frame a cron task so the model knows it is firing NOW — the awaited
+    moment has arrived — and should perform it directly, not re-schedule it or
+    promise to do it later. Without this, a deferred prompt reads like a fresh
+    request and the model replies "reminder set, I'll notify in N minutes",
+    which is nonsensical at fire time."""
+    sid = (job_id or "")[:8]
+    return (
+        f"[SCHEDULED TASK — cron job {sid} is firing NOW]\n"
+        "The time you were waiting for has arrived. Carry out the task below at "
+        "this moment and report the result directly to the user. Do NOT schedule "
+        "it again, do NOT set another reminder, and do NOT say you will do it "
+        "later or in N minutes — now is the moment. Reply in the same language "
+        "as the task.\n\n"
+        f"Task:\n{prompt_text}"
+    )
+
+
 # Script / tool execution in session
 # ---------------------------------------------------------------------------
 

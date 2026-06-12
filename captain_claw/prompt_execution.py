@@ -234,6 +234,16 @@ async def run_prompt_in_active_session(
             agent._turn_is_automated = True
             agent._record_timing_event("last_cron_at")
 
+        # For a cron run, frame the task to the model as firing NOW (the
+        # original prompt_text is kept for the confirmation + history).
+        model_prompt = prompt_text
+        if cron_job_id:
+            try:
+                from captain_claw.cron_dispatch import wrap_cron_prompt
+                model_prompt = wrap_cron_prompt(cron_job_id, prompt_text)
+            except Exception:
+                model_prompt = prompt_text
+
         started = time.perf_counter()
         assistant_text = ""
         try:
@@ -247,7 +257,7 @@ async def run_prompt_in_active_session(
                 chunks: list[str] = []
 
                 async def _consume_stream() -> None:
-                    async for chunk in agent.stream(prompt_text):
+                    async for chunk in agent.stream(model_prompt):
                         chunks.append(chunk)
                         ui.print_streaming(chunk)
                     ui.complete_stream_line()
@@ -266,7 +276,7 @@ async def run_prompt_in_active_session(
                     return
                 assistant_text = "".join(chunks)
             else:
-                response, cancelled = await run_cancellable(ui, agent.complete(prompt_text))
+                response, cancelled = await run_cancellable(ui, agent.complete(model_prompt))
                 if cancelled:
                     if cron_job_id:
                         await cron_chat_event(
