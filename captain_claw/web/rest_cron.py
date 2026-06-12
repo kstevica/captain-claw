@@ -56,19 +56,42 @@ async def create_cron_job(server: WebServer, request: web.Request) -> web.Respon
     except Exception:
         return web.json_response({"error": "Invalid JSON body"}, status=400)
 
-    kind = str(body.get("kind", "")).strip().lower()
+    kind = str(body.get("kind", "prompt")).strip().lower() or "prompt"
     if kind not in ("prompt", "script", "tool", "orchestrate"):
         return web.json_response({"error": "Invalid kind"}, status=400)
 
-    schedule = body.get("schedule")
-    if not isinstance(schedule, dict) or "type" not in schedule:
+    # Schedule: accept a parsed dict OR a human string ("in 5m", "every 15m",
+    # "daily 09:00") so the UI can create jobs without knowing the dict shape.
+    raw_sched = body.get("schedule")
+    if isinstance(raw_sched, str) and raw_sched.strip():
+        from captain_claw.cron import parse_schedule_tokens
+        try:
+            schedule, _ = parse_schedule_tokens(raw_sched.strip().split())
+        except Exception as e:
+            return web.json_response({"error": f"Bad schedule: {e}"}, status=400)
+    elif isinstance(raw_sched, dict) and "type" in raw_sched:
+        schedule = raw_sched
+    else:
         return web.json_response({"error": "Invalid schedule"}, status=400)
 
+    # Payload: an explicit dict, or build one from a plain `task` string.
     payload = body.get("payload")
     if not isinstance(payload, dict):
-        return web.json_response({"error": "Invalid payload"}, status=400)
+        task = str(body.get("task", "")).strip()
+        if not task:
+            return web.json_response({"error": "Invalid payload"}, status=400)
+        payload = (
+            {"text": task} if kind == "prompt"
+            else {"workflow": task} if kind == "orchestrate"
+            else {"path": task}
+        )
 
+    # Session: optional — default to the agent's current session so a job
+    # created from the UI runs (and reports) in the agent's main thread.
     session_id = str(body.get("session_id", "")).strip()
+    if not session_id:
+        sess = getattr(server.agent, "session", None)
+        session_id = str(sess.id) if sess is not None and getattr(sess, "id", None) else ""
     if not session_id:
         return web.json_response({"error": "session_id is required"}, status=400)
 

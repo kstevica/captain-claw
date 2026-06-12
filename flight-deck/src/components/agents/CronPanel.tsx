@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
-  Clock, Loader2, AlertTriangle, RefreshCw, X, Play, Pause, Trash2, CheckCircle2,
+  Clock, Loader2, AlertTriangle, RefreshCw, X, Play, Pause, Trash2, CheckCircle2, Plus,
 } from 'lucide-react'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
 
@@ -72,6 +72,10 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
+  const [creating, setCreating] = useState(false)
+  const [newSchedule, setNewSchedule] = useState('')
+  const [newTask, setNewTask] = useState('')
+  const [createBusy, setCreateBusy] = useState(false)
   const tokenQs = auth ? `?token=${encodeURIComponent(auth)}` : ''
   const base = `/agent-cron/${host}/${port}`
 
@@ -111,6 +115,26 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
     [base, tokenQs, refresh],
   )
 
+  const createJob = useCallback(async () => {
+    const schedule = newSchedule.trim()
+    const task = newTask.trim()
+    if (!schedule || !task) { setError('Schedule and task are both required.'); return }
+    setCreateBusy(true)
+    try {
+      await fdFetch(`${base}${tokenQs}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'prompt', schedule, task }),
+      })
+      setNewSchedule(''); setNewTask(''); setCreating(false); setError('')
+      await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setCreateBusy(false)
+    }
+  }, [base, tokenQs, newSchedule, newTask, refresh])
+
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
       <div
@@ -124,6 +148,13 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
             <div className="text-sm font-semibold text-zinc-100">Cron jobs</div>
             <div className="truncate text-xs text-zinc-500">{agentName}</div>
           </div>
+          <button
+            onClick={() => setCreating((v) => !v)}
+            className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium ${creating ? 'bg-emerald-950/40 text-emerald-300' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'}`}
+            title="Create a new cron job"
+          >
+            <Plus className="h-3.5 w-3.5" /> New job
+          </button>
           <button onClick={refresh} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300" title="Refresh">
             <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
           </button>
@@ -131,6 +162,43 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
             <X className="h-4 w-4" />
           </button>
         </div>
+
+        {/* New-job form */}
+        {creating && (
+          <div className="border-b border-zinc-800 bg-zinc-950/40 p-3 space-y-2">
+            <div>
+              <label className="mb-1 block text-[11px] uppercase tracking-wider text-zinc-500">Schedule</label>
+              <input
+                value={newSchedule}
+                onChange={(e) => setNewSchedule(e.target.value)}
+                placeholder="in 5m  ·  every 15m  ·  daily 09:00  ·  weekly mon 10:00"
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-emerald-500/50 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-[11px] uppercase tracking-wider text-zinc-500">Task</label>
+              <textarea
+                value={newTask}
+                onChange={(e) => setNewTask(e.target.value)}
+                rows={3}
+                placeholder="What should the agent do when this fires? e.g. Check my inbox and summarize anything new."
+                className="w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-emerald-500/50 focus:outline-none"
+              />
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button onClick={() => { setCreating(false); setError('') }} className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                Cancel
+              </button>
+              <button
+                onClick={createJob}
+                disabled={createBusy || !newSchedule.trim() || !newTask.trim()}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-700/60 bg-emerald-950/40 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-900/40 disabled:opacity-40"
+              >
+                {createBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />} Create job
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-3">

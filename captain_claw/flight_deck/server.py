@@ -3613,6 +3613,20 @@ async def agent_cron_list(
     return await _proxy_agent_intentions("GET", host, port, token, "/api/cron/jobs")
 
 
+@app.post("/fd/agent-cron/{host}/{port}")
+async def agent_cron_create(
+    host: str, port: int, request: Request, token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return await _proxy_agent_intentions(
+        "POST", host, port, token, "/api/cron/jobs", body=body
+    )
+
+
 @app.post("/fd/agent-cron/{host}/{port}/{job_id}/run")
 async def agent_cron_run(
     host: str, port: int, job_id: str, token: str = "",
