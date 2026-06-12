@@ -125,6 +125,12 @@ _ECO_CORE_TOOLS: frozenset[str] = frozenset({
     "web_fetch", "web_search",
     "google_mail", "google_drive", "google_calendar",
     "whatsapp_send_file", "intentions",
+    # Scheduling: cron self-describes as a frozen/always-available tool, and
+    # scheduling requests arrive in any language ("za 5 minuta", "in 5 min").
+    # The English-only intent patterns can't catch those, so keep cron in core
+    # — otherwise eco strips its schema and the agent can't defer, it just acts
+    # immediately. (See cron_tool.py "Frozen tool (always available)".)
+    "cron",
     # Vision: always offer image_vision/video_vision so attached media can be
     # analysed regardless of the caption's language (eco patterns are English).
     "image_vision", "video_vision",
@@ -179,20 +185,8 @@ _ECO_INTENT_PATTERNS: list[tuple[_re.Pattern[str], frozenset[str]]] = [
     # Calendar
     (_re.compile(r"\bcalendar\b|\bschedule\b|\bmeeting\b|\bagenda\b|\bevent\b", _re.I),
      frozenset({"google_calendar", "gws"})),
-    # Scheduling / reminders / deferred & recurring tasks → cron.
-    # Without this, eco mode strips the cron schema, so requests like
-    # "check my mail in 15 min", "remind me later", or "every hour" leave the
-    # agent with no way to defer — it just acts immediately instead.
-    (_re.compile(
-        r"\bcron\b|\bremind\b|\breminder\b|\blater\b|\btonight\b|\btomorrow\b"
-        r"|\brecurring\b|\bhourly\b|\bdaily\b|\bweekly\b|\bschedule[ds]?\b|\bscheduler\b"
-        r"|\bevery\s+(?:\d|day|hour|minute|morning|evening|night|week|month|"
-        r"mon|tue|wed|thu|fri|sat|sun)"
-        r"|\bin\s+\d+\s*(?:s|sec|secs|second|seconds|m|min|mins|minute|minutes|"
-        r"h|hr|hrs|hour|hours|d|day|days)\b"
-        r"|\bat\s+\d{1,2}:\d{2}\b|\bat\s+\d{1,2}\s*(?:am|pm)\b",
-        _re.I),
-     frozenset({"cron"})),
+    # NOTE: cron is intentionally NOT matched here — it lives in _ECO_CORE_TOOLS
+    # so scheduling works in any language, not just the English cues above.
     # Google Drive
     (_re.compile(r"\bdrive\b|\bgoogle\s+d(oc|rive)\b|\bshared\s+folder\b", _re.I),
      frozenset({"google_drive", "gws"})),
