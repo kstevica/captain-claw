@@ -216,13 +216,18 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
           ) : (
             <div className="space-y-2">
               {jobs.map((job) => {
-                const paused = !job.enabled
+                // Disabled + last_status 'paused' = user paused it; disabled
+                // otherwise (e.g. a consumed one-shot) = done, not pausable.
+                const paused = !job.enabled && (job.last_status || '').toLowerCase() === 'paused'
+                const done = !job.enabled && !paused
                 return (
                   <div key={job.id} className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
                     <div className="mb-1.5 flex items-center gap-2 text-xs">
                       <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-emerald-600 dark:text-emerald-400/80">{job.kind}</span>
                       <span className="font-mono text-zinc-500">{job.id.slice(0, 8)}</span>
-                      {paused ? (
+                      {done ? (
+                        <span className="rounded-full bg-zinc-200 px-2 py-0.5 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">done</span>
+                      ) : paused ? (
                         <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400">paused</span>
                       ) : (
                         <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400">
@@ -231,7 +236,7 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
                       )}
                       <span className="ml-auto text-zinc-500">
                         {job.schedule_text || '—'}
-                        {job.next_run_at && !paused ? ` · ${relTime(job.next_run_at)}` : ''}
+                        {job.next_run_at && job.enabled ? ` · ${relTime(job.next_run_at)}` : ''}
                       </span>
                     </div>
                     <p className="whitespace-pre-wrap break-words text-sm text-zinc-200">{taskDesc(job)}</p>
@@ -250,15 +255,7 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
                       >
                         {busy === job.id + 'run' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />} Run now
                       </button>
-                      {paused ? (
-                        <button
-                          onClick={() => act(job, 'resume')}
-                          disabled={busy === job.id + 'resume'}
-                          className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-emerald-600 hover:bg-zinc-800 disabled:opacity-40 dark:text-emerald-400"
-                        >
-                          <Play className="h-3 w-3" /> Resume
-                        </button>
-                      ) : (
+                      {job.enabled ? (
                         <button
                           onClick={() => act(job, 'pause')}
                           disabled={busy === job.id + 'pause'}
@@ -266,7 +263,15 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
                         >
                           <Pause className="h-3 w-3" /> Pause
                         </button>
-                      )}
+                      ) : paused ? (
+                        <button
+                          onClick={() => act(job, 'resume')}
+                          disabled={busy === job.id + 'resume'}
+                          className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-emerald-600 hover:bg-zinc-800 disabled:opacity-40 dark:text-emerald-400"
+                        >
+                          <Play className="h-3 w-3" /> Resume
+                        </button>
+                      ) : null}
                       <button
                         onClick={() => act(job, 'remove')}
                         disabled={busy === job.id + 'remove'}

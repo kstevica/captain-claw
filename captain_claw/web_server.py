@@ -803,7 +803,18 @@ class WebServer:
             """Route an async cron result back to wherever the session came
             from. Under Flight Deck this goes through FD's origin-aware router
             (WhatsApp / Telegram / channel); standalone, it falls back to the
-            agent's own Telegram bridge."""
+            agent's own Telegram bridge. Either way it's also surfaced in any
+            connected web chat for this agent (the cron UI is otherwise silent,
+            so a UI-created job would produce nothing visible)."""
+            # 0) Always show it in the connected web chat.
+            try:
+                server._broadcast({
+                    "type": "chat_message",
+                    "role": "assistant",
+                    "content": text,
+                })
+            except Exception:
+                log.debug("cron web broadcast failed", exc_info=True)
             # 1) Durable origin routing via Flight Deck (owns channel creds).
             try:
                 from captain_claw.delivery import deliver_to_origin
