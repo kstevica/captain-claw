@@ -19,6 +19,7 @@ import {
   FileText,
   AlarmClock,
   Workflow,
+  Brain,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { APP_VERSION, BUILD_DATE } from '../../version'
@@ -37,6 +38,7 @@ const navItems: { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?:
   { id: 'forge', icon: Wand2, label: 'Agent Forge' },
   { id: 'council', icon: Users, label: 'Council' },
   { id: 'flows', icon: Workflow, label: 'Flows' },
+  { id: 'observatory', icon: Brain, label: 'Observatory' },
   { id: 'today', icon: CalendarDays, label: 'Today' },
   { id: 'scheduler', icon: AlarmClock, label: 'Scheduler' },
   { id: 'skills', icon: Sparkles, label: 'Skills' },

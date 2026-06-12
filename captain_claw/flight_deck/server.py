@@ -584,6 +584,14 @@ async def lifespan(app: FastAPI):
         app.state.scheduler_stop = _sched_stop
         app.state.scheduler_task = asyncio.create_task(_sched_loop(_sched_stop))
         print("Flight Deck: scheduler started")
+    # ── Consciousness heartbeat (free-running, per-user inner life that quietly
+    # observes each user's agents). Disable with FD_CONSCIOUSNESS_DISABLED=true. ──
+    if os.environ.get("FD_CONSCIOUSNESS_DISABLED", "").lower() not in ("true", "1", "yes"):
+        from captain_claw.flight_deck.consciousness import heartbeat_loop as _hb_loop
+        _hb_stop = asyncio.Event()
+        app.state.consciousness_stop = _hb_stop
+        app.state.consciousness_task = asyncio.create_task(_hb_loop(_hb_stop))
+        print("Flight Deck: consciousness heartbeat started")
     # ── Flow engine (process automations: trigger → steps on the agent pool) ──
     try:
         from captain_claw.flight_deck.flows_store import FlowStore
@@ -613,6 +621,14 @@ async def lifespan(app: FastAPI):
         if hasattr(app.state, "scheduler_task"):
             try:
                 await asyncio.wait_for(app.state.scheduler_task, timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                pass
+    # Stop the consciousness heartbeat.
+    if hasattr(app.state, "consciousness_stop"):
+        app.state.consciousness_stop.set()
+        if hasattr(app.state, "consciousness_task"):
+            try:
+                await asyncio.wait_for(app.state.consciousness_task, timeout=5.0)
             except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
                 pass
     # Shutdown: stop all managed process agents
@@ -685,6 +701,7 @@ from captain_claw.flight_deck.face_routes import router as face_router
 from captain_claw.flight_deck.messenger_bridge import router as messenger_router
 from captain_claw.flight_deck.whatsapp_bridge import router as whatsapp_router
 from captain_claw.flight_deck.fd_scheduler import router as scheduler_router
+from captain_claw.flight_deck.consciousness_routes import router as consciousness_router
 
 app.include_router(auth_router)
 app.include_router(settings_router)
@@ -712,6 +729,7 @@ app.include_router(face_router)
 app.include_router(messenger_router)
 app.include_router(whatsapp_router)
 app.include_router(scheduler_router)
+app.include_router(consciousness_router)
 
 
 # ── Auth dependency helper ──
