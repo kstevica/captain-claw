@@ -3603,6 +3603,56 @@ async def agent_set_intention_status(
     )
 
 
+# ── Cron proxy (FD panel → agent /api/cron/jobs*) ─────────────────────
+
+
+@app.get("/fd/agent-cron/{host}/{port}")
+async def agent_cron_list(
+    host: str, port: int, token: str = "", user: dict | None = _required_user_dep,
+):
+    return await _proxy_agent_intentions("GET", host, port, token, "/api/cron/jobs")
+
+
+@app.post("/fd/agent-cron/{host}/{port}/{job_id}/run")
+async def agent_cron_run(
+    host: str, port: int, job_id: str, token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    return await _proxy_agent_intentions(
+        "POST", host, port, token, f"/api/cron/jobs/{job_id}/run"
+    )
+
+
+@app.post("/fd/agent-cron/{host}/{port}/{job_id}/pause")
+async def agent_cron_pause(
+    host: str, port: int, job_id: str, token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    return await _proxy_agent_intentions(
+        "POST", host, port, token, f"/api/cron/jobs/{job_id}/pause"
+    )
+
+
+@app.post("/fd/agent-cron/{host}/{port}/{job_id}/resume")
+async def agent_cron_resume(
+    host: str, port: int, job_id: str, token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    return await _proxy_agent_intentions(
+        "POST", host, port, token, f"/api/cron/jobs/{job_id}/resume"
+    )
+
+
+@app.delete("/fd/agent-cron/{host}/{port}/{job_id}")
+async def agent_cron_delete(
+    host: str, port: int, job_id: str, token: str = "",
+    user: dict | None = _required_user_dep,
+):
+    return await _proxy_agent_intentions(
+        "DELETE", host, port, token, f"/api/cron/jobs/{job_id}"
+    )
+
+
 class TransferRequest(BaseModel):
     src_host: str
     src_port: int

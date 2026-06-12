@@ -22,13 +22,19 @@ async def list_cron_jobs(server: WebServer, request: web.Request) -> web.Respons
         return web.json_response({"error": "Agent not initialized"}, status=503)
     sm = server.agent.session_manager
     jobs = await sm.list_cron_jobs(limit=200, active_only=False)
+    from captain_claw.cron import schedule_to_text
     result = []
     for j in jobs:
+        try:
+            schedule_text = schedule_to_text(j.schedule)
+        except Exception:
+            schedule_text = ""
         result.append({
             "id": j.id,
             "kind": j.kind,
             "payload": j.payload,
             "schedule": j.schedule,
+            "schedule_text": schedule_text,
             "session_id": j.session_id,
             "enabled": j.enabled,
             "created_at": j.created_at,

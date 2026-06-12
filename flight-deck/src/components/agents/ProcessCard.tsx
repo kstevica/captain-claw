@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Cpu, Play, Square, RotateCcw, Trash2, ScrollText, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Target, Pencil, Check, X, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser, Gift } from 'lucide-react'
+import { Cpu, Play, Square, RotateCcw, Trash2, ScrollText, ChevronUp, MessageSquare, Loader2, FolderOpen, Database, Target, Clock, Pencil, Check, X, Copy, MoreVertical, Minimize2, Maximize2, Settings, Leaf, Feather, Download, Upload, Brain, Inbox, ShieldAlert, Eraser, Gift } from 'lucide-react'
 import { useAgentMemoryTransfer } from '../../hooks/useAgentMemoryTransfer'
 import { ReflectionMergeModal } from './ReflectionMergeModal'
 import { PendingInsightsModal } from './PendingInsightsModal'
@@ -13,6 +13,7 @@ import { AgentGroupBadges } from '../common/AgentGroups'
 import { AgentConfigEditor } from './AgentConfigEditor'
 import { DatastoreBrowser } from './DatastoreBrowser'
 import { IntentionsPanel } from './IntentionsPanel'
+import { CronPanel } from './CronPanel'
 import { OpenDropdown } from '../common/OpenDropdown'
 import { CognitiveModeSelector } from '../common/CognitiveModeSelector'
 import { ModelSelector } from '../common/ModelSelector'
@@ -116,6 +117,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   const [showConfig, setShowConfig] = useState(false)
   const [showDatastore, setShowDatastore] = useState(false)
   const [showIntentions, setShowIntentions] = useState(false)
+  const [showCron, setShowCron] = useState(false)
   const [showMergeReflection, setShowMergeReflection] = useState(false)
   const [showPendingInsights, setShowPendingInsights] = useState(false)
   const cognitiveMode = getCognitiveMode(proc.slug)
@@ -235,6 +237,10 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
     <IntentionsPanel host="localhost" port={proc.web_port} auth={proc.web_auth} agentName={agentName} onClose={() => setShowIntentions(false)} />,
     document.body
   )
+  const cronModal = showCron && isRunning && createPortal(
+    <CronPanel host="localhost" port={proc.web_port} auth={proc.web_auth} agentName={agentName} onClose={() => setShowCron(false)} />,
+    document.body
+  )
 
   const mergeReflectionModal = showMergeReflection && isRunning && createPortal(
     <ReflectionMergeModal
@@ -291,7 +297,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
         <button onPointerDown={(e) => e.stopPropagation()} onClick={toggleViewMode} className="rounded p-0.5 text-zinc-600 hover:text-zinc-400 opacity-0 group-hover:opacity-100 transition-opacity" title="Expand card">
           <Maximize2 className="h-3 w-3" />
         </button>
-      </div>{configModal}{datastoreModal}{intentionsModal}{mergeReflectionModal}{pendingInsightsModal}</>
+      </div>{configModal}{datastoreModal}{intentionsModal}{cronModal}{mergeReflectionModal}{pendingInsightsModal}</>
     )
   }
 
@@ -383,6 +389,11 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
                 <Target className="h-3.5 w-3.5" /> Intentions
               </button>
             )}
+            {isRunning && (
+              <button onClick={() => setShowCron(true)} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                <Clock className="h-3.5 w-3.5" /> Cron
+              </button>
+            )}
             <div className="flex-1" />
             <ProcessActionsDropdown {...actionProps} />
           </div>
@@ -411,7 +422,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
           className="hidden"
           onChange={memory.handleFileSelected}
         />
-      </div>{configModal}{datastoreModal}{intentionsModal}{mergeReflectionModal}{pendingInsightsModal}</>
+      </div>{configModal}{datastoreModal}{intentionsModal}{cronModal}{mergeReflectionModal}{pendingInsightsModal}</>
     )
   }
 
@@ -422,6 +433,17 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
         onPointerDown={onDragStart}
         className={`flex items-center justify-end gap-1 px-2 py-0.5 bg-emerald-900/10 ${onDragStart ? 'cursor-grab active:cursor-grabbing' : ''} ${isDragging ? 'bg-emerald-500/10' : ''}`}
       >
+        {isRunning && (
+          <button onPointerDown={(e) => e.stopPropagation()} onClick={() => openChat(chatId, agentName, 'localhost', proc.web_port, proc.web_auth)}
+            className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 relative z-10" title="Chat">
+            <MessageSquare className="h-3 w-3" /> Chat
+          </button>
+        )}
+        {isRunning && (
+          <span onPointerDown={(e) => e.stopPropagation()} className="relative z-10">
+            <OpenDropdown host="localhost" port={proc.web_port} auth={proc.web_auth} />
+          </span>
+        )}
         <span onPointerDown={(e) => e.stopPropagation()} className="relative z-10">
           <ProcessActionsDropdown {...actionProps} iconOnly />
         </span>
@@ -697,13 +719,9 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
             </button>
           )}
           {isRunning && (
-            <button onClick={() => openChat(chatId, agentName, 'localhost', proc.web_port, proc.web_auth)}
-              className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
-              <MessageSquare className="h-3.5 w-3.5" /> Chat
+            <button onClick={() => setShowCron(true)} className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+              <Clock className="h-3.5 w-3.5" /> Cron
             </button>
-          )}
-          {isRunning && (
-            <OpenDropdown host="localhost" port={proc.web_port} auth={proc.web_auth} />
           )}
         </div>
       </div>
@@ -740,6 +758,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
       {configModal}
       {datastoreModal}
       {intentionsModal}
+      {cronModal}
       {mergeReflectionModal}
       {pendingInsightsModal}
     </div>
