@@ -15,6 +15,20 @@
 
 An open-source AI agent with multi-agent orchestration, autonomous cognitive systems, and a full management dashboard. Runs locally, supports every major LLM provider, and ships with 45 built-in tools.
 
+## What's New in 0.5.6
+
+**Archetypes & durable councils — model tiers, action points, and sessions that don't lose work.** A Flight Deck release for Agent Forge and Agent Council. Fully additive.
+
+- **Agent Forge: archetype library** — ~20 curated, ready-to-spawn agents (Deep Researcher, Code Reviewer, Project Coordinator, Deal Screener, …) in a gallery; start a team from templates or let the generator adapt them (`GET /fd/archetypes`).
+- **Agent Forge: model tiers** — LLM Settings is now a per-tier editor (Reasoning / Balanced / Fast / Long context), each with its own provider/model/key/base-URL/context length, persisted per-user. Agents resolve to a concrete model at spawn, so model choices live in one place.
+- **Council action points** — after synthesis, each agent extracts its own outstanding next steps (scoped to its part), each a self-contained brief; **Send** records it into that agent's `todo`/`intentions` with full context, and stays "Recorded" across reloads.
+- **Council restart & recover** — **Restart round** re-runs the current round from the top; a session reopened mid-round shows a recovery banner instead of a stale "in session" state.
+- **Council visibility & control** — model narration/reasoning surfaced in the activity log; an **Allow delegation** toggle (off by default) keeps a discussion turn from spawning sub-delegations; a stuck agent is auto-nudged to continue; per-turn wait raised to 60 min for slow/reasoning models; four more session types (interview, troubleshoot, critique, freeform).
+- **No more silent data loss** — council writes now refresh the token and retry (with an in-memory queue) on failure, so a long session no longer drops messages/votes/status when the access token rotates; connections use each agent's live token/port (no more flapping on reopened sessions).
+- **Polish** — the Agent Desktop group/role filter is now a modal; light-theme readability fixes across the council UI.
+
+See [RELEASE_NOTES_0.5.6.md](release-notes/RELEASE_NOTES_0.5.6.md). Backward compatible with 0.5.5.
+
 ## What's New in 0.5.5
 
 **Self-aware in time — timing context, live token meters, and a calmer agent.** A self-awareness + reliability release. Fully additive.

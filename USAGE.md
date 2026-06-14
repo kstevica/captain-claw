@@ -4222,10 +4222,13 @@ Agent Forge is a dedicated Flight Deck page that uses an LLM to decompose a busi
 **How it works:**
 
 1. Navigate to **Agent Forge** in the sidebar
-2. Configure the LLM provider, model, and API key (persisted across sessions)
+2. Configure **model tiers** under LLM Settings (see below) — persisted to your workspace
 3. Optionally add environment variables (e.g., `BRAVE_API_KEY`) that will be passed to all spawned agents
-4. Describe your objective in natural language
-5. Click **Decompose into Agents** — the LLM analyzes your goal and proposes a team
+4. Either **Start from a template** (the archetype gallery) or describe your objective and **Decompose into Agents** — the LLM analyzes your goal and proposes a team, biased toward the curated archetypes
+
+**Model tiers (NEW in 0.5.6):** LLM Settings is a per-tier model editor with four tiers — **Reasoning**, **Balanced**, **Fast / high-volume**, and **Long context** — each carrying its own provider, model, API key, base URL, and input/output context length. Pick which tier runs the decomposition ("Forge using"). Every agent (from the gallery or generator) is assigned a tier; at spawn the tier resolves to that concrete model, so model choices live in one place and a model release/reprice is a single edit. Settings persist per-user (multi-tenant) via `/fd/settings`.
+
+**Archetype library (NEW in 0.5.6):** a curated set of ~20 ready agents (Deep Researcher, Code Reviewer, Project Coordinator, Deal Screener, …) grouped by family, each a tuned role + cognitive mode + toolset + tier + fleet-instructions. Click **Start from a template** to stack archetypes into a team, or let the generator adapt them. Served from `instructions/archetypes.json` via `GET /fd/archetypes`; the generator's prompt is biased toward them.
 
 **What the LLM generates for each agent:**
 
@@ -4244,7 +4247,7 @@ Agent Forge is a dedicated Flight Deck page that uses an LLM to decompose a busi
 **Review phase:**
 
 - Edit any field (name, role, description, instructions, tools)
-- Change LLM provider/model per agent
+- Pick a **model tier** per agent, or set a custom provider/model (editing the model switches it off the tier)
 - Toggle agent type (process or Docker)
 - Designate a different lead agent (crown icon)
 - Add or remove agents
@@ -4270,6 +4273,10 @@ Agent Council is a multi-agent deliberation system where connected agents discus
 | Brainstorm | Creative ideation — agents build on ideas, suggest new angles |
 | Review | Critical analysis — agents examine work and provide constructive critique |
 | Planning | Task decomposition — agents break down tasks, identify risks, create steps |
+| Interview | Focused Q&A — one agent asks, others answer in depth |
+| Troubleshoot | Collaborative diagnosis — hypotheses, root-cause, fixes |
+| Critique | Adversarial stress-testing — actively hunt flaws and gaps |
+| Freeform | Unstructured discussion — no positional constraints |
 
 **How it works:**
 
@@ -4314,10 +4321,18 @@ Agents receive context from prior rounds when speaking. A configurable memory se
 | Minutes export | Export full session as Markdown (.md) with all rounds, synthesis, votes, and TL;DRs |
 | Cognitive mode display | Shows each agent's current cognitive mode and eco mode status in the sidebar |
 | Fleet instructions | Fleet instructions from Flight Deck are relayed to agents in the council |
+| Restart round (NEW 0.5.6) | Re-run the current round from the top — aborts the in-flight round, discards its messages, and runs it again |
+| Action Points (NEW 0.5.6) | After synthesis, each agent extracts its own outstanding next steps (scoped to its part — no full-transcript dump), shown per-agent. **Send** records a point into that agent's `todo`/`intentions` with full context preserved |
+| Allow delegation (NEW 0.5.6) | Off by default — agents can't use orchestration tools (`flight_deck`/`task_contract`/`consult_peer`) during a turn, since the council is the coordination layer. Turn on for planning sessions |
+| Allow passing | When off, every participant must contribute each round (a passed turn is re-nudged) |
+| Narration log (NEW 0.5.6) | The activity log surfaces the model's between-step narration and reasoning, for debugging long/looping turns |
+| Stuck auto-nudge (NEW 0.5.6) | If an agent returns the canned "I got stuck" reply, the council nudges it to continue (up to 3×) before moving on — and won't let the next agent speak until it does |
 
 **Session persistence:**
 
 All council sessions, messages, votes, and artifacts are persisted server-side in SQLite. Sessions can be reopened and reviewed after conclusion. TL;DRs and exports can be regenerated at any time.
+
+As of **0.5.6**, persistence is hardened for long sessions: every write goes through a token-refresh-and-retry path with an in-memory retry queue, so an access token expiring mid-session no longer silently drops messages, votes, or the final `concluded` status. Long agent turns checkpoint partial output, so a mid-turn server restart preserves what was generated. A reopened session that was interrupted mid-round shows a recovery banner (Restart round / Synthesize / Conclude) rather than a stale "in session" state, and agents reconnect using their current token/port.
 
 **Agent awareness:**
 
