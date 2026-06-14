@@ -1,15 +1,17 @@
 import { useState } from 'react'
-import { Send, SkipForward, FileText, CheckCircle, ChevronDown, Download, MessageSquareQuote, Pause } from 'lucide-react'
+import { Send, SkipForward, FileText, CheckCircle, ChevronDown, Download, MessageSquareQuote, Pause, RotateCcw } from 'lucide-react'
 import type { CouncilSession } from '../../stores/councilStore'
 
 interface CouncilControlsProps {
   session: CouncilSession
   speaking: string
+  roundRunning: boolean
   generatingArtifact: string
   autoAdvanceCountdown: number
   onInject: (content: string) => void
   onDirectAddress: (agentId: string, content: string) => void
   onAdvanceRound: () => void
+  onRestartRound: () => void
   onRequestSynthesis: () => void
   onConclude: () => void
   onCancelAutoAdvance: () => void
@@ -18,9 +20,9 @@ interface CouncilControlsProps {
 }
 
 export function CouncilControls({
-  session, speaking, generatingArtifact, autoAdvanceCountdown,
+  session, speaking, roundRunning, generatingArtifact, autoAdvanceCountdown,
   onInject, onDirectAddress,
-  onAdvanceRound, onRequestSynthesis, onConclude, onCancelAutoAdvance,
+  onAdvanceRound, onRestartRound, onRequestSynthesis, onConclude, onCancelAutoAdvance,
   onGenerateTldrs, onExportMd,
 }: CouncilControlsProps) {
   const [input, setInput] = useState('')
@@ -41,7 +43,11 @@ export function CouncilControls({
     .slice(0, 5)
   const completeMarker = `Round ${session.currentRound} complete`
   const isRoundComplete = !isBusy && recentSysMsgs.some(m => m.content.includes(completeMarker))
-  const isRoundInSession = isActive && !isRoundComplete
+  // A round that has begun but isn't complete AND has no loop running in this tab
+  // was interrupted (server stop/restart, or this session was just reloaded).
+  const isInterrupted = isActive && !isRoundComplete && !roundRunning && session.currentRound >= 1
+  // Actively running a round in this tab.
+  const isWorking = isActive && !isRoundComplete && roundRunning
   // Council was extended after the round ended — user needs a Continue button
   const canContinue = isActive && !isBusy && isRoundComplete && session.currentRound < session.maxRounds
 
@@ -100,13 +106,50 @@ export function CouncilControls({
 
   return (
     <div className="border-t border-zinc-700/50 bg-zinc-900/50 px-4 py-3 space-y-2">
-      {/* In-session status (round still running) */}
-      {isRoundInSession && (
+      {/* In-session status (round actively running in this tab) */}
+      {isWorking && (
         <div className="flex items-center gap-2 rounded-lg bg-zinc-800/50 px-3 py-2">
           <div className="h-2 w-2 rounded-full bg-violet-400 animate-pulse" />
-          <span className="text-xs text-zinc-400">
+          <span className="flex-1 text-xs text-zinc-400">
             Round {session.currentRound} in session{session.currentRound >= session.maxRounds ? ` / ${session.maxRounds}` : ''}...
           </span>
+          <button
+            onClick={() => { if (window.confirm(`Restart round ${session.currentRound}? This discards this round's messages and re-runs it from the top.`)) onRestartRound() }}
+            className="flex items-center gap-1 rounded-lg border border-amber-500/40 px-2.5 py-1 text-xs font-medium text-amber-400 hover:bg-amber-500/10"
+            title="Stop the current round and run it again"
+          >
+            <RotateCcw className="h-3 w-3" /> Restart round
+          </button>
+        </div>
+      )}
+
+      {/* Interrupted round — no loop is running (server stopped/restarted or the
+          session was just reopened). Offer to re-run it. */}
+      {isInterrupted && (
+        <div className="flex items-center gap-2 rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-2 flex-wrap">
+          <span className="flex-1 min-w-0 text-xs text-amber-300">
+            Round {session.currentRound} was interrupted — it isn't running. Restart to re-run it, or synthesize/conclude with what's saved.
+          </span>
+          <div className="flex items-center gap-2 ml-auto">
+            <button
+              onClick={() => { if (window.confirm(`Restart round ${session.currentRound}? This discards this round's partial messages and re-runs it from the top.`)) onRestartRound() }}
+              className="flex items-center gap-1 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500"
+            >
+              <RotateCcw className="h-3.5 w-3.5" /> Restart round {session.currentRound}
+            </button>
+            <button
+              onClick={onRequestSynthesis}
+              className="flex items-center gap-1 rounded-lg border border-cyan-500/40 px-3 py-1.5 text-xs font-medium text-cyan-400 hover:bg-cyan-500/10"
+            >
+              <FileText className="h-3.5 w-3.5" /> Synthesize
+            </button>
+            <button
+              onClick={onConclude}
+              className="flex items-center gap-1 rounded-lg border border-zinc-600 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-700/30"
+            >
+              <CheckCircle className="h-3.5 w-3.5" /> Conclude
+            </button>
+          </div>
         </div>
       )}
       {/* Round control bar */}
@@ -153,6 +196,14 @@ export function CouncilControls({
                   <SkipForward className="h-3.5 w-3.5" /> Next Round
                 </button>
               )}
+              <button
+                onClick={() => { if (window.confirm(`Restart round ${session.currentRound}? This discards this round's messages and re-runs it from the top.`)) onRestartRound() }}
+                disabled={isBusy}
+                className="flex items-center gap-1 rounded-lg border border-amber-500/40 px-3 py-1.5 text-xs font-medium text-amber-400 hover:bg-amber-500/10 disabled:opacity-40"
+                title="Discard this round and run it again"
+              >
+                <RotateCcw className="h-3.5 w-3.5" /> Restart
+              </button>
               <button
                 onClick={onRequestSynthesis}
                 disabled={isBusy}

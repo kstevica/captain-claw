@@ -52,6 +52,8 @@ const LOG_TYPE_COLORS: Record<string, string> = {
   error: 'text-red-400',
   connect: 'text-emerald-400',
   disconnect: 'text-red-400',
+  narration: 'text-sky-300 italic',
+  reasoning: 'text-zinc-500 italic',
 }
 
 const EXTEND_OPTIONS = [3, 5, 10, 20]
@@ -205,6 +207,34 @@ export function CouncilSidebar({
                   <div
                     className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
                       session.allowPass ? 'translate-x-4' : 'translate-x-0.5'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {/* Allow delegation toggle. When OFF (default), agents can't use
+                  orchestration tools (flight_deck/task_contract/consult_peer)
+                  during their turn — the council is the coordination layer, and
+                  sub-delegation causes no-progress loops. Turn ON for sessions
+                  where farming out subtasks is the point (e.g. planning). */}
+              <div
+                className="flex items-center justify-between text-xs"
+                title={
+                  session.allowDelegation
+                    ? 'Agents may delegate / orchestrate during their turn'
+                    : 'Agents contribute directly; delegation tools are disabled per turn'
+                }
+              >
+                <span className="text-zinc-500">Allow delegation</span>
+                <button
+                  onClick={() => store.getState().setAllowDelegation(!session.allowDelegation)}
+                  className={`relative h-5 w-9 rounded-full transition-colors ${
+                    session.allowDelegation ? 'bg-violet-600' : 'bg-zinc-700'
+                  }`}
+                >
+                  <div
+                    className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
+                      session.allowDelegation ? 'translate-x-4' : 'translate-x-0.5'
                     }`}
                   />
                 </button>
@@ -443,7 +473,7 @@ export function CouncilSidebar({
                 <span className={`shrink-0 ${LOG_TYPE_COLORS[entry.type] || 'text-zinc-400'}`}>
                   {entry.agentName || 'System'}
                 </span>
-                <span className="text-zinc-500 truncate">{entry.detail}</span>
+                <span className="text-zinc-500 truncate" title={entry.detail}>{entry.detail}</span>
               </div>
             )
           })}

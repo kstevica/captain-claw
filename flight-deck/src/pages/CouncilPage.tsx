@@ -8,6 +8,7 @@ import { CouncilControls } from '../components/council/CouncilControls'
 import { CouncilSidebar } from '../components/council/CouncilSidebar'
 import { SynthesisView } from '../components/council/SynthesisView'
 import { TldrPanel } from '../components/council/TldrPanel'
+import { ActionPointsPanel } from '../components/council/ActionPointsPanel'
 import { SessionCard } from '../components/council/SessionCard'
 
 type PageState = 'list' | 'setup' | 'active'
@@ -18,14 +19,14 @@ const SIDEBAR_DEFAULT_RATIO = 0.5
 
 export function CouncilPage() {
   const {
-    sessions, activeSession, loading, speaking, generatingArtifact, activityLog,
+    sessions, activeSession, loading, speaking, roundRunning, generatingArtifact, activityLog,
     autoAdvanceCountdown,
     loadSessionList, createSession, loadSession, deleteSession, clearActive,
-    startCouncil, advanceRound, requestSynthesis, concludeSession,
+    startCouncil, advanceRound, restartRound, requestSynthesis, concludeSession,
     cancelAutoAdvance,
     injectMessage, directAddress, muteAgent, pinMessage,
     connectAllAgents,
-    generateTldrs, exportMinutesMd,
+    generateTldrs, generateActionPoints, sendActionPointToAgent, exportMinutesMd,
   } = useCouncilStore()
 
   const [pageState, setPageState] = useState<PageState>('list')
@@ -97,6 +98,7 @@ export function CouncilPage() {
   // Synthesis message for special rendering
   const synthesisMsg = activeSession?.messages.find(m => m.role === 'synthesis')
   const tldrs = activeSession?.artifacts?.filter(a => a.kind === 'tldr') || []
+  const actionPoints = activeSession?.artifacts?.filter(a => a.kind === 'action_points') || []
 
   return (
     <div className="flex h-full flex-col">
@@ -227,6 +229,19 @@ export function CouncilPage() {
                 </div>
               )}
 
+              {/* Action points panel — available once the council has been synthesized */}
+              {(synthesisMsg || actionPoints.length > 0 || generatingArtifact === 'action_points') && (
+                <div className="shrink-0 px-4 pt-3">
+                  <ActionPointsPanel
+                    artifacts={actionPoints}
+                    generating={generatingArtifact === 'action_points'}
+                    busy={!!speaking}
+                    onGenerate={generateActionPoints}
+                    onSend={sendActionPointToAgent}
+                  />
+                </div>
+              )}
+
               {/* Discussion thread */}
               <CouncilDiscussion
                 session={activeSession}
@@ -238,11 +253,13 @@ export function CouncilPage() {
               <CouncilControls
                 session={activeSession}
                 speaking={speaking}
+                roundRunning={roundRunning}
                 generatingArtifact={generatingArtifact}
                 autoAdvanceCountdown={autoAdvanceCountdown}
                 onInject={injectMessage}
                 onDirectAddress={directAddress}
                 onAdvanceRound={advanceRound}
+                onRestartRound={restartRound}
                 onRequestSynthesis={requestSynthesis}
                 onConclude={concludeSession}
                 onCancelAutoAdvance={cancelAutoAdvance}

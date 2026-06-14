@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { AgentChatWS } from '../services/agentChat'
-import { useAuthStore } from './authStore'
+import { useAuthStore, refreshAccessToken } from './authStore'
 import { useContainerStore } from './containerStore'
 import { useProcessStore } from './processStore'
 import { uploadFileToAgent, transferFile } from '../services/fileTransfer'
@@ -28,11 +28,23 @@ export type MemoryRounds = 5 | 10 | 20 | 30 | 0  // 0 = indefinite
 export interface CouncilArtifact {
   id: number
   sessionId: string
-  kind: 'minutes_md' | 'minutes_html' | 'tldr'
+  kind: 'minutes_md' | 'minutes_html' | 'tldr' | 'action_points'
   agentId: string
   agentName: string
-  content: string
+  content: string  // for 'action_points': JSON.stringify(ActionPoint[])
   createdAt: string
+}
+
+// A single outstanding action point extracted per agent after synthesis. Each is
+// self-contained (context embedded) so it can be worked on without the council.
+export interface ActionPoint {
+  title: string
+  kind: 'todo' | 'intent'
+  context: string
+  task: string
+  done_when: string
+  refs: string[]
+  sent?: boolean   // recorded into the agent's todo/intentions — persisted in the artifact
 }
 
 export interface CouncilAgentDef {
@@ -56,7 +68,7 @@ export interface ActivityLogEntry {
   timestamp: string
   agentId: string
   agentName: string
-  type: 'tool' | 'status' | 'speaking' | 'done' | 'system' | 'moderator' | 'error' | 'connect' | 'disconnect'
+  type: 'tool' | 'status' | 'speaking' | 'done' | 'system' | 'moderator' | 'error' | 'connect' | 'disconnect' | 'narration' | 'reasoning'
   detail: string
 }
 
@@ -131,6 +143,14 @@ export interface CouncilSession {
    * want to allow passing for a specific session.
    */
   allowPass: boolean
+  /**
+   * Whether agents may delegate / orchestrate during their council turns
+   * (flight_deck, task_contract, consult_peer). Default false: the council IS
+   * the coordination layer, so sub-delegating inside a turn is redundant and
+   * causes no-progress loops. Flip on for sessions where farming out subtasks
+   * is the point (e.g. planning).
+   */
+  allowDelegation: boolean
   createdAt: string           // ISO timestamp of session creation
   concludedAt: string         // ISO timestamp when session concluded (empty if still active)
   config: { firstSpeaker: string }
@@ -176,7 +196,59 @@ const SESSION_TYPE_DESC: Record<SessionType, string> = {
   freeform: 'This is a freeform discussion. There are no structural constraints — speak naturally, follow tangents, and let the conversation evolve organically.',
 }
 
-const AGENT_TIMEOUT_MS = 300_000
+// Per-agent response timeout. Agents may run long chains of tool calls (deep
+// research, document processing) on slower/reasoning models, so this is set
+// generously high. The "Restart round" control is the escape hatch if an agent
+// genuinely hangs, rather than a short timeout that kills slow-but-valid work.
+const AGENT_TIMEOUT_MS = 3_600_000  // 60 minutes
+
+// When an agent's progress detector trips, the server returns a canned "I got
+// stuck…" / "budget exhausted" reply. In manual mode a human nudge ("continue")
+// usually unblocks it, so the council does the same automatically before
+// accepting the turn — and won't let the next agent speak until then.
+const MAX_STUCK_NUDGES = 3
+const STUCK_NUDGE_PROMPT =
+  'You ended your turn reporting that you got stuck and could not make further progress. ' +
+  'Do not give up and do not repeat that message. Pick up exactly where you left off, work ' +
+  'through the obstacle step by step, and deliver your actual contribution to the discussion. ' +
+  'If a tool call failed, try a different approach or reason it through directly. Provide a ' +
+  'substantive answer now.'
+
+// Substrings that identify the agent runtime's canned give-up replies. These are
+// NOT hardcoded here — they're fetched from the backend (single source:
+// captain_claw/agent_stuck.py) so the strings live in exactly one place. Empty
+// until loaded; populated on session load/start (well before any round runs).
+let _stuckMarkers: string[] = []
+
+async function apiLoadStuckMarkers(): Promise<void> {
+  try {
+    const res = await _authedFetch('/fd/council/stuck-markers')
+    if (!res.ok) return
+    const data = await res.json()
+    if (Array.isArray(data.markers)) {
+      _stuckMarkers = data.markers.map((m: string) => String(m).toLowerCase())
+    }
+  } catch { /* leave markers as-is; detection simply stays off until loaded */ }
+}
+
+// Orchestration/delegation tools denied during council speaker turns unless the
+// session opts into delegation. The council itself is the coordination layer, so
+// sub-delegating inside a turn is redundant and a common cause of no-progress
+// loops (re-contracting/re-gating at flat context). Research tools stay allowed.
+const DELEGATION_TOOLS = ['flight_deck', 'task_contract', 'consult_peer', 'botport']
+
+/** Collapse whitespace and clip long narration/reasoning for the activity log. */
+function _truncateLog(text: string, max = 160): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim()
+  return oneLine.length > max ? oneLine.slice(0, max - 1) + '…' : oneLine
+}
+
+/** True if a response is one of the agent runtime's canned give-up replies. */
+function isStuckResponse(text: string): boolean {
+  if (_stuckMarkers.length === 0) return false
+  const t = text.toLowerCase()
+  return _stuckMarkers.some(m => t.includes(m))
+}
 
 /** Simple {placeholder} template renderer. */
 function renderTemplate(template: string, vars: Record<string, string | number>): string {
@@ -194,80 +266,142 @@ function _headers(): Record<string, string> {
   return h
 }
 
+// All council REST calls go through this. Councils run long (60-min agent turns),
+// so the access token routinely expires mid-session; without a refresh+retry the
+// request just 401s and the write is dropped — silently losing messages, votes,
+// and status updates (round 1 saved, then nothing). On 401 we refresh the token
+// and retry once. build() re-reads _headers() so the retry uses the new token.
+async function _authedFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const build = (): RequestInit => ({
+    ...init,
+    headers: { ..._headers(), ...((init.headers as Record<string, string>) || {}) },
+    credentials: 'include',
+  })
+  let res = await fetch(url, build())
+  if (res.status === 401 && useAuthStore.getState().authEnabled) {
+    if (await refreshAccessToken()) res = await fetch(url, build())
+  }
+  return res
+}
+
+// ── Failed-write retry queue ─────────────────────────────────────
+// Belt-and-suspenders on top of _authedFetch's refresh-retry: if a persist STILL
+// fails (transient outage, refresh token briefly invalid), the write is queued
+// and re-sent on a backing-off timer so data lands late instead of being lost.
+// In-memory only (a tab close before drain loses it — but that data was never
+// persisted anyway). bodies are JSON strings, so RequestInit is safely reusable.
+interface PendingWrite { url: string; init: RequestInit; label: string; tries: number }
+const _writeQueue: PendingWrite[] = []
+let _drainTimer: ReturnType<typeof setTimeout> | null = null
+const _MAX_WRITE_TRIES = 12
+
+function _scheduleDrain(delayMs: number): void {
+  if (_drainTimer) return
+  _drainTimer = setTimeout(() => { _drainTimer = null; void _drainWrites() }, delayMs)
+}
+
+function _enqueueWrite(url: string, init: RequestInit, label: string): void {
+  _writeQueue.push({ url, init, label, tries: 0 })
+  _scheduleDrain(5000)
+}
+
+async function _drainWrites(): Promise<void> {
+  if (_writeQueue.length === 0) return
+  const batch = _writeQueue.splice(0, _writeQueue.length)
+  let anyFailed = false
+  for (const op of batch) {
+    let ok = false
+    try { ok = (await _authedFetch(op.url, op.init)).ok } catch { ok = false }
+    if (ok) continue
+    op.tries++
+    if (op.tries < _MAX_WRITE_TRIES) { _writeQueue.push(op); anyFailed = true }
+    else console.error('council: DROPPING write after retries —', op.label)
+  }
+  if (anyFailed || _writeQueue.length > 0) _scheduleDrain(10000)  // back off
+}
+
+/** Authed write that queues itself for retry if it fails (data-loss critical). */
+async function _persistWrite(url: string, init: RequestInit, label: string): Promise<Response> {
+  const res = await _authedFetch(url, init)
+  if (!res.ok) {
+    console.error('council: persist failed, queued for retry —', label, res.status)
+    _enqueueWrite(url, init, label)
+  }
+  return res
+}
+
 async function apiCreateSession(data: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const res = await fetch('/fd/council/sessions', {
-    method: 'POST', headers: _headers(), credentials: 'include',
-    body: JSON.stringify(data),
+  const res = await _authedFetch('/fd/council/sessions', {
+    method: 'POST', body: JSON.stringify(data),
   })
   if (!res.ok) throw new Error('Failed to create council session')
   return res.json()
 }
 
 async function apiListSessions(): Promise<CouncilSessionSummary[]> {
-  const res = await fetch('/fd/council/sessions', {
-    headers: _headers(), credentials: 'include',
-  })
+  const res = await _authedFetch('/fd/council/sessions')
   if (!res.ok) return []
   return res.json()
 }
 
 async function apiGetSession(id: string): Promise<Record<string, unknown> | null> {
-  const res = await fetch(`/fd/council/sessions/${encodeURIComponent(id)}`, {
-    headers: _headers(), credentials: 'include',
-  })
+  const res = await _authedFetch(`/fd/council/sessions/${encodeURIComponent(id)}`)
   if (!res.ok) return null
   return res.json()
 }
 
 async function apiUpdateSession(id: string, fields: Record<string, unknown>): Promise<void> {
-  await fetch(`/fd/council/sessions/${encodeURIComponent(id)}`, {
-    method: 'PUT', headers: _headers(), credentials: 'include',
-    body: JSON.stringify(fields),
-  })
+  await _persistWrite(`/fd/council/sessions/${encodeURIComponent(id)}`, {
+    method: 'PUT', body: JSON.stringify(fields),
+  }, `updateSession(${Object.keys(fields).join(',')})`)
 }
 
 async function apiDeleteSession(id: string): Promise<void> {
-  await fetch(`/fd/council/sessions/${encodeURIComponent(id)}`, {
-    method: 'DELETE', headers: _headers(), credentials: 'include',
-  })
+  await _authedFetch(`/fd/council/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 async function apiGetMessages(id: string): Promise<CouncilMessage[]> {
-  const res = await fetch(`/fd/council/sessions/${encodeURIComponent(id)}/messages`, {
-    headers: _headers(), credentials: 'include',
-  })
+  const res = await _authedFetch(`/fd/council/sessions/${encodeURIComponent(id)}/messages`)
   if (!res.ok) return []
   const rows = await res.json() as Record<string, unknown>[]
   return rows.map(rowToMessage)
 }
 
 async function apiAddMessages(id: string, messages: Record<string, unknown>[]): Promise<number[]> {
-  const res = await fetch(`/fd/council/sessions/${encodeURIComponent(id)}/messages`, {
-    method: 'POST', headers: _headers(), credentials: 'include',
-    body: JSON.stringify({ messages }),
-  })
+  const res = await _persistWrite(`/fd/council/sessions/${encodeURIComponent(id)}/messages`, {
+    method: 'POST', body: JSON.stringify({ messages }),
+  }, `addMessages(${messages.length})`)
   if (!res.ok) return []
   const data = await res.json()
   return data.ids || []
 }
 
 async function apiTogglePin(sessionId: string, messageId: number): Promise<void> {
-  await fetch(`/fd/council/sessions/${encodeURIComponent(sessionId)}/messages/${messageId}/pin`, {
-    method: 'PUT', headers: _headers(), credentials: 'include',
+  await _authedFetch(`/fd/council/sessions/${encodeURIComponent(sessionId)}/messages/${messageId}/pin`, {
+    method: 'PUT',
   })
+}
+
+async function apiDeleteMessages(sessionId: string, round: number): Promise<void> {
+  await _authedFetch(`/fd/council/sessions/${encodeURIComponent(sessionId)}/messages?round=${round}`, {
+    method: 'DELETE',
+  })
+}
+
+async function apiUpdateMessage(sessionId: string, messageId: number, fields: Record<string, unknown>): Promise<void> {
+  await _persistWrite(`/fd/council/sessions/${encodeURIComponent(sessionId)}/messages/${messageId}`, {
+    method: 'PUT', body: JSON.stringify(fields),
+  }, `updateMessage(${messageId})`)
 }
 
 async function apiAddVotes(id: string, votes: Record<string, unknown>[]): Promise<void> {
-  await fetch(`/fd/council/sessions/${encodeURIComponent(id)}/votes`, {
-    method: 'POST', headers: _headers(), credentials: 'include',
-    body: JSON.stringify({ votes }),
-  })
+  await _persistWrite(`/fd/council/sessions/${encodeURIComponent(id)}/votes`, {
+    method: 'POST', body: JSON.stringify({ votes }),
+  }, `addVotes(${votes.length})`)
 }
 
 async function apiGetVotes(id: string): Promise<CouncilVote[]> {
-  const res = await fetch(`/fd/council/sessions/${encodeURIComponent(id)}/votes`, {
-    headers: _headers(), credentials: 'include',
-  })
+  const res = await _authedFetch(`/fd/council/sessions/${encodeURIComponent(id)}/votes`)
   if (!res.ok) return []
   const rows = await res.json() as Record<string, unknown>[]
   return rows.map(r => ({
@@ -283,7 +417,7 @@ async function apiGetVotes(id: string): Promise<CouncilVote[]> {
 async function apiGetArtifacts(id: string, kind?: string): Promise<CouncilArtifact[]> {
   const url = new URL(`/fd/council/sessions/${encodeURIComponent(id)}/artifacts`, location.origin)
   if (kind) url.searchParams.set('kind', kind)
-  const res = await fetch(url.toString(), { headers: _headers(), credentials: 'include' })
+  const res = await _authedFetch(url.toString())
   if (!res.ok) return []
   const rows = await res.json() as Record<string, unknown>[]
   return rows.map(r => ({
@@ -300,10 +434,10 @@ async function apiGetArtifacts(id: string, kind?: string): Promise<CouncilArtifa
 async function apiUpsertArtifact(
   sessionId: string, kind: string, agentId: string, agentName: string, content: string,
 ): Promise<number> {
-  const res = await fetch(`/fd/council/sessions/${encodeURIComponent(sessionId)}/artifacts`, {
-    method: 'POST', headers: _headers(), credentials: 'include',
+  const res = await _persistWrite(`/fd/council/sessions/${encodeURIComponent(sessionId)}/artifacts`, {
+    method: 'POST',
     body: JSON.stringify({ kind, agent_id: agentId, agent_name: agentName, content }),
-  })
+  }, `artifact(${kind})`)
   if (!res.ok) return 0
   const data = await res.json()
   return data.id as number || 0
@@ -490,11 +624,16 @@ function buildTurnPrompt(
     ? `\nYou are ${speakerName}. Do NOT repeat these instructions, do NOT echo memory retrieval results, and do NOT address or refer to yourself in the third person. Respond directly in character.`
     : ''
 
+  // Keep a discussion turn a discussion (unless delegation is explicitly on).
+  const delegationNote = session.allowDelegation
+    ? ''
+    : '\nThis is a single contribution to the discussion, not a task to orchestrate. Do NOT delegate to other agents, create task contracts, or spin up sub-tasks — the council is already the coordination layer. Give your own analysis and stop. (Research tools like web_search are fine; delegation tools are disabled this turn.)'
+
   return renderTemplate(turnTemplate, {
     round,
     maxRounds: session.maxRounds,
     recentContributions: recentContributions + filesNudge,
-    directive: directiveText + identityNote,
+    directive: directiveText + identityNote + delegationNote,
     extensionNote,
   })
 }
@@ -548,6 +687,76 @@ function buildTldrPrompt(session: CouncilSession): string {
     totalRounds: session.currentRound,
     transcript: buildSessionTranscript(session),
   })
+}
+
+// Scoped action-points prompt: deliberately does NOT include the full transcript
+// (could be ~100kB). Each agent already participated, so we give it only its own
+// contributions + the synthesis + pinned items — a small slice — and ask for
+// self-contained action points it should own.
+function buildActionPointsPrompt(session: CouncilSession, agentId: string): string {
+  const own = session.messages
+    .filter(m => m.agentId === agentId && m.role === 'agent')
+    .map(m => `[Round ${m.round}] ${m.content}`).join('\n\n') || '(no recorded contributions)'
+  const synthesis = session.messages
+    .filter(m => m.role === 'synthesis')
+    .map(m => m.content).join('\n\n') || '(no synthesis recorded)'
+  const pinned = session.messages
+    .filter(m => m.pinned)
+    .map(m => `${m.agentName}: ${m.content}`).join('\n\n') || '(none)'
+  return [
+    'REFLECTION REQUEST — this is NOT a task to perform. You are only DESCRIBING work',
+    'for later, never doing it. Do NOT begin, attempt, or complete any of these action',
+    'points now. Do NOT take any action, do NOT use any tools, do NOT delegate to or',
+    'consult other agents, and do NOT call flight_deck, botport, task_contract,',
+    'web_fetch, write, or any other tool. Answer DIRECTLY and immediately from the',
+    'material below — you already have everything you need; there is nothing to look',
+    'up, produce, or coordinate. Your entire response is the JSON list and nothing else.',
+    '',
+    `The council on "${session.topic}" has concluded. You were one of the participants.`,
+    'List YOUR OWN outstanding action points — the next steps that follow from the',
+    'discussion and that you, in your role, would own (do not list other agents\'',
+    'work). These are descriptions to record, not instructions to execute now. Make',
+    'each FULLY SELF-CONTAINED so it can be worked on later without the council',
+    'transcript.',
+    '',
+    'Respond with ONLY a JSON array (0-6 items), no prose, no tool calls. Each item:',
+    '{"title": short imperative, "kind": "todo" (concrete near-term) | "intent" (proactive/recurring),',
+    ' "context": 2-4 sentences of background/decision motivating this,',
+    ' "task": precisely what to do, "done_when": completion criteria,',
+    ' "refs": [files/links/names mentioned, or []]}',
+    '',
+    '## Your contributions',
+    own,
+    '',
+    '## Final synthesis',
+    synthesis,
+    '',
+    '## Pinned items',
+    pinned,
+  ].join('\n')
+}
+
+/** Parse an LLM JSON-array response into ActionPoint[], tolerant of fences/prose. */
+function parseActionPoints(raw: string): ActionPoint[] {
+  let txt = raw.trim()
+  if (txt.startsWith('```')) {
+    txt = txt.split('\n').filter(l => !l.trim().startsWith('```')).join('\n')
+  }
+  const start = txt.indexOf('[')
+  const end = txt.lastIndexOf(']')
+  if (start === -1 || end === -1 || end < start) return []
+  try {
+    const arr = JSON.parse(txt.slice(start, end + 1))
+    if (!Array.isArray(arr)) return []
+    return arr.filter(x => x && typeof x.title === 'string').map(x => ({
+      title: String(x.title),
+      kind: x.kind === 'intent' ? 'intent' : 'todo',
+      context: String(x.context || ''),
+      task: String(x.task || ''),
+      done_when: String(x.done_when || ''),
+      refs: Array.isArray(x.refs) ? x.refs.map(String) : [],
+    }))
+  } catch { return [] }
 }
 
 function generateMinutesMd(session: CouncilSession, tldrs: CouncilArtifact[]): string {
@@ -697,6 +906,14 @@ function collectContextMessages(
 // Auto-advance timer stored outside Zustand (not serialisable)
 let _autoAdvanceTimerId: ReturnType<typeof setInterval> | null = null
 
+// Round epoch: incremented whenever the in-flight round must be invalidated
+// (e.g. "Restart round"). Round loops capture the epoch at start and bail if it
+// changes, so a stale loop can't append messages to a freshly-restarted round.
+let _roundEpoch = 0
+// When an agent response is being awaited, this unblocks it immediately (used by
+// restart so we don't wait out the full agent timeout on an in-flight turn).
+let _abortCollect: (() => void) | null = null
+
 // Pending file-write captures per agent, populated by the WS `monitor` handler
 // when an agent calls the `write` tool. Drained at the end of each speaker turn,
 // transferred to other council agents via Flight Deck's file-transfer endpoint,
@@ -736,6 +953,7 @@ function _persistConfig(sessionId: string, patch: Record<string, unknown>) {
     autoAdvance: s.autoAdvance,
     fileRefs: s.fileRefs,
     allowPass: s.allowPass,
+    allowDelegation: s.allowDelegation,
     ...patch,
   }
   apiUpdateSession(sessionId, { config: JSON.stringify(fullConfig) })
@@ -746,8 +964,9 @@ interface CouncilStore {
   activeSession: CouncilSession | null
   loading: boolean
   speaking: string   // agentId currently speaking, '' if idle
+  roundRunning: boolean  // true while a round loop is actively executing in this tab
   pendingFiles: File[]  // files to upload to agents on council start
-  generatingArtifact: '' | 'tldr' | 'minutes_md' | 'minutes_html'
+  generatingArtifact: '' | 'tldr' | 'minutes_md' | 'minutes_html' | 'action_points'
   activityLog: ActivityLogEntry[]
   autoAdvanceCountdown: number  // seconds remaining, 0 = not counting
 
@@ -764,10 +983,12 @@ interface CouncilStore {
   // Connection management
   connectAllAgents: () => void
   disconnectAllAgents: () => void
+  _ensureConnected: (timeoutMs?: number) => Promise<CouncilAgent[]>
 
   // Council orchestration
   startCouncil: () => Promise<void>
   advanceRound: () => Promise<void>
+  restartRound: () => Promise<void>
   requestSynthesis: () => Promise<void>
   concludeSession: () => Promise<void>
 
@@ -778,17 +999,20 @@ interface CouncilStore {
   pinMessage: (messageId: number) => void
   setMemoryRounds: (value: MemoryRounds) => void
   setAllowPass: (value: boolean) => void
+  setAllowDelegation: (value: boolean) => void
   setAutoAdvance: (value: boolean) => void
   extendRounds: (amount: number) => Promise<void>
   cancelAutoAdvance: () => void
 
   // Minutes & TL;DR
   generateTldrs: () => Promise<void>
+  generateActionPoints: () => Promise<void>
+  sendActionPointToAgent: (agentId: string, item: ActionPoint) => Promise<void>
   exportMinutesMd: () => void
 
   // Internal
-  _sendToAgent: (agentId: string, content: string, type?: 'chat' | 'btw') => void
-  _collectResponse: (agentId: string) => Promise<string>
+  _sendToAgent: (agentId: string, content: string, type?: 'chat' | 'btw', opts?: { noTools?: boolean; denyTools?: string[] }) => void
+  _collectResponse: (agentId: string, onChunk?: (acc: string) => void) => Promise<string>
   _addMessage: (msg: Omit<CouncilMessage, 'id' | 'localId' | 'createdAt'>) => Promise<void>
   _addSystemMessage: (round: number, content: string) => Promise<void>
   _persistSession: () => Promise<void>
@@ -806,6 +1030,7 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
   activeSession: null,
   loading: false,
   speaking: '',
+  roundRunning: false,
   pendingFiles: [],
   generatingArtifact: '',
   activityLog: [],
@@ -846,7 +1071,7 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       moderator_mode: cfg.moderatorMode,
       moderator_agent: cfg.moderatorAgentId,
       agents: JSON.stringify(agentDefs),
-      config: JSON.stringify({ firstSpeaker: cfg.firstSpeaker, memoryRounds: 10, originalMaxRounds: cfg.maxRounds, extensions: [], allowPass: false }),
+      config: JSON.stringify({ firstSpeaker: cfg.firstSpeaker, memoryRounds: 10, originalMaxRounds: cfg.maxRounds, extensions: [], allowPass: false, allowDelegation: false }),
     })
     const id = data.id as string
     // Stash files for upload during startCouncil
@@ -856,7 +1081,12 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
   },
 
   loadSession: async (id) => {
-    set({ loading: true })
+    // A freshly loaded session has no round loop running in this tab, even if
+    // its status is 'active' (server may have been restarted mid-round). Reset
+    // the flag so the UI shows a recover/restart prompt rather than "in session".
+    _roundEpoch += 1
+    set({ loading: true, roundRunning: false })
+    void apiLoadStuckMarkers()  // refresh stuck-detection markers from the backend
     try {
       const raw = await apiGetSession(id)
       if (!raw) return
@@ -902,6 +1132,7 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
         // existed will also default to false on reload — flip the
         // sidebar switch back on if you want the old behaviour.
         allowPass: (config.allowPass as boolean | undefined) ?? false,
+        allowDelegation: (config.allowDelegation as boolean | undefined) ?? false,
         createdAt: raw.created_at as string || '',
         concludedAt: (config.concludedAt as string) || '',
         config: { firstSpeaker: config.firstSpeaker || '' },
@@ -935,8 +1166,28 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     if (!s) return
 
     const agents = s.agents.map(a => {
-      if (a.ws) return a
-      const ws = new AgentChatWS(a.id, a.host, a.port, a.auth)
+      if (a.ws) {
+        // A ws object lingers after disconnect (e.g. on conclude). Revive a
+        // dropped socket instead of skipping it — otherwise reconnect attempts
+        // (e.g. before action-point extraction) silently no-op and report
+        // "no agents reachable".
+        if (!a.ws.connected) a.ws.connect()
+        return a
+      }
+      // Resolve the agent's CURRENT connection params from the live container/
+      // process stores — mirroring how the Chat panel connects — instead of the
+      // host/port/token snapshotted into the session at creation. Those rotate
+      // on (re)spawn/restart; a stale token makes the proxy accept the browser
+      // socket then fail to auth to the agent, producing a connect/disconnect
+      // flap. Fall back to the stored values when no live entry is found.
+      const { containers: _liveCs } = useContainerStore.getState()
+      const { processes: _livePs } = useProcessStore.getState()
+      const _liveC = _liveCs.find(c => c.id === a.id)
+      const _liveP = _livePs.find(p => `proc-${p.slug}` === a.id || p.slug === a.id)
+      const _host = (_liveC || _liveP) ? 'localhost' : a.host
+      const _port = _liveC?.web_port || _liveP?.web_port || a.port
+      const _auth = _liveC?.web_auth || _liveP?.web_auth || a.auth
+      const ws = new AgentChatWS(a.id, _host, _port, _auth)
 
       // On welcome, send peer_agents with fleet instructions (mirrors chatStore behavior)
       ws.on('welcome', () => {
@@ -1074,6 +1325,21 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
         })
       })
 
+      // Surface the model's between-step narration in the activity log — useful
+      // for debugging no-progress loops (what the model keeps re-deciding).
+      ws.on('narration', (data) => {
+        const text = String(data.text || '').trim()
+        if (text) get()._log(a.id, a.name, 'narration', _truncateLog(text))
+      })
+      // Inline reasoning text (distinct from the "thinking" status heartbeat).
+      ws.on('thinking', (data) => {
+        const text = String(data.text || '').trim()
+        // Skip the bare "Thinking…" placeholder and tool-phase echoes; keep real
+        // reasoning content (phase 'reasoning').
+        if (!text || text === 'Thinking…' || text === 'Thinking...') return
+        get()._log(a.id, a.name, 'reasoning', _truncateLog(text))
+      })
+
       ws.connect()
       return { ...a, ws, connected: false, busy: false, statusText: '', toolHistory: [] }
     })
@@ -1089,11 +1355,31 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     }
   },
 
+  // Connect agents (if needed) and poll until at least one is connected, up to
+  // timeoutMs. Returns the currently-connected, unmuted agents. Replaces fragile
+  // fixed-delay waits: agents on a slow/concluded session may take a while, and
+  // if they're offline this returns [] so callers can fail gracefully instead of
+  // proceeding on a stale snapshot.
+  _ensureConnected: async (timeoutMs = 12000) => {
+    const s = get().activeSession
+    if (!s) return []
+    if (s.agents.every(a => !a.ws?.connected)) get().connectAllAgents()
+    const deadline = Date.now() + timeoutMs
+    const live = () => get().activeSession?.agents.filter(a => a.ws?.connected && !a.muted) || []
+    while (Date.now() < deadline) {
+      if (live().length > 0) break
+      await new Promise(r => setTimeout(r, 600))
+    }
+    return live()
+  },
+
   // ── Orchestration ──
 
   startCouncil: async () => {
     const s = get().activeSession
     if (!s || s.status !== 'setup') return
+    set({ roundRunning: true })
+    void apiLoadStuckMarkers()  // ensure stuck-detection markers are loaded
 
     // Update status
     const updated: CouncilSession = {
@@ -1154,6 +1440,7 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
             autoAdvance: currentSession.autoAdvance,
             fileRefs,
             allowPass: currentSession.allowPass,
+            allowDelegation: currentSession.allowDelegation,
           }),
         })
       }
@@ -1206,6 +1493,10 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       return
     }
 
+    // Mark running up-front so the brief await window before the round loop
+    // starts isn't misread as an interrupted round.
+    set({ roundRunning: true })
+
     set({ activeSession: { ...s, currentRound: nextRound } })
     await apiUpdateSession(s.id, { current_round: nextRound })
     await get()._addSystemMessage(nextRound, `Round ${nextRound} begins.`)
@@ -1218,25 +1509,60 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     }
   },
 
+  restartRound: async () => {
+    const s = get().activeSession
+    if (!s || s.status !== 'active') return
+    const round = s.currentRound
+    if (round < 1) return
+
+    // Invalidate any in-flight round loop and unblock a waiting agent turn so we
+    // don't wait out the (long) agent timeout.
+    _roundEpoch += 1
+    _abortCollect?.()
+    get()._cancelAutoAdvanceTimer()
+    _pendingWrittenFiles.clear()
+    set({ speaking: '', roundRunning: true })
+
+    // Drop this round's messages locally and on the server, then re-run it.
+    set({
+      activeSession: {
+        ...get().activeSession!,
+        messages: get().activeSession!.messages.filter(m => m.round !== round),
+      },
+    })
+    await apiDeleteMessages(s.id, round)
+    await get()._addSystemMessage(round, `Round ${round} restarted.`)
+
+    const session = get().activeSession!
+    if (session.moderatorMode === 'moderator') {
+      await get()._runModeratorRound(round)
+    } else {
+      await get()._runRoundRobin(round)
+    }
+  },
+
   requestSynthesis: async () => {
     get()._cancelAutoAdvanceTimer()
     const s = get().activeSession
     if (!s) return
 
-    set({ activeSession: { ...s, status: 'synthesizing' } })
+    // Reconnect agents if needed (e.g. a reloaded/concluded session) and pick a
+    // reachable synthesizer BEFORE entering the 'synthesizing' state — otherwise
+    // a disconnected synth agent leaves the session stuck in 'synthesizing'.
+    const connected = await get()._ensureConnected()
+    const synthAgent =
+      (s.moderatorAgentId ? connected.find(a => a.id === s.moderatorAgentId) : undefined)
+      || connected[0]
+    if (!synthAgent) {
+      get()._log('', 'System', 'system', 'No agents are reachable — start the council\'s agents and try again.')
+      return  // status stays 'active' — not stuck
+    }
+    const synthId = synthAgent.id
+
+    set({ activeSession: { ...get().activeSession!, status: 'synthesizing' } })
     await apiUpdateSession(s.id, { status: 'synthesizing' })
     await get()._addSystemMessage(s.currentRound, 'Synthesizing discussion...')
     get()._log('', 'System', 'system', 'Starting synthesis phase')
-
-    // Pick synthesizer: moderator if available, otherwise first agent
-    const synthId = s.moderatorAgentId || s.agents[0]?.id
-    if (!synthId) return
-
-    const synthAgent = s.agents.find(a => a.id === synthId)
-    if (!synthAgent?.ws?.connected) {
-      await get()._addSystemMessage(s.currentRound, 'Synthesis agent is not connected.')
-      return
-    }
 
     const session = get().activeSession!
     const prompt = buildSynthesisPrompt(session)
@@ -1394,6 +1720,19 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     )
   },
 
+  setAllowDelegation: (value) => {
+    const s = get().activeSession
+    if (!s) return
+    set({ activeSession: { ...s, allowDelegation: value } })
+    _persistConfig(s.id, { allowDelegation: value })
+    get()._log(
+      '',
+      'System',
+      'system',
+      `Agent delegation ${value ? 'enabled — agents may orchestrate during their turn' : 'disabled — agents contribute directly, no sub-delegation'}`,
+    )
+  },
+
   setAutoAdvance: (value) => {
     const s = get().activeSession
     if (!s) return
@@ -1441,19 +1780,21 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     set({ generatingArtifact: 'tldr' })
     get()._log('', 'System', 'system', 'Generating TL;DRs from all agents...')
 
-    // Ensure agents are connected for concluded sessions
+    // Connect and wait for agents to hold a connection; bail clearly if offline.
     const needReconnect = s.agents.every(a => !a.ws?.connected)
-    if (needReconnect) get().connectAllAgents()
-    // Wait briefly for connections
-    if (needReconnect) await new Promise(r => setTimeout(r, 2000))
+    const connectedAgents = await get()._ensureConnected()
+    if (connectedAgents.length === 0) {
+      if (needReconnect) get().disconnectAllAgents()
+      set({ generatingArtifact: '' })
+      get()._log('', 'System', 'system', 'No agents are reachable — start the council\'s agents and try again.')
+      return
+    }
 
     const prompt = buildTldrPrompt(s)
     const newArtifacts: CouncilArtifact[] = []
 
     const currentSession = get().activeSession
     if (!currentSession) { set({ generatingArtifact: '' }); return }
-
-    const connectedAgents = currentSession.agents.filter(a => a.ws?.connected && !a.muted)
 
     for (const agent of connectedAgents) {
       get()._log(agent.id, agent.name, 'speaking', 'Generating TL;DR...')
@@ -1489,6 +1830,118 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     get()._log('', 'System', 'system', `TL;DRs generated from ${newArtifacts.length} agents`)
   },
 
+  generateActionPoints: async () => {
+    const s = get().activeSession
+    if (!s) return
+
+    set({ generatingArtifact: 'action_points' })
+    get()._log('', 'System', 'system', 'Extracting action points from all agents...')
+
+    // Connect and wait for agents to actually hold a connection. If none do, the
+    // council's agents are offline/unreachable — bail with a clear message rather
+    // than reporting "0 agents" after a fixed delay.
+    const needReconnect = s.agents.every(a => !a.ws?.connected)
+    const connectedAgents = await get()._ensureConnected()
+    if (connectedAgents.length === 0) {
+      if (needReconnect) get().disconnectAllAgents()
+      set({ generatingArtifact: '' })
+      get()._log('', 'System', 'system', 'No agents are reachable — start the council\'s agents and try again.')
+      return
+    }
+
+    const currentSession = get().activeSession
+    if (!currentSession) { set({ generatingArtifact: '' }); return }
+    const newArtifacts: CouncilArtifact[] = []
+
+    // Map per agent — each call is scoped to that agent's own slice, never the
+    // whole transcript, so context stays small regardless of council size.
+    for (const agent of connectedAgents) {
+      get()._log(agent.id, agent.name, 'speaking', 'Extracting action points...')
+      set({ speaking: agent.id })
+      // no_tools: hard enforcement — the agent literally cannot call any tool
+      // this turn, so extraction can only describe action points, never execute.
+      get()._sendToAgent(agent.id, buildActionPointsPrompt(currentSession, agent.id), 'chat', { noTools: true })
+      const raw = await get()._collectResponse(agent.id)
+      set({ speaking: '' })
+      const items = parseActionPoints(stripThinkingBlocks(raw))
+      get()._log(agent.id, agent.name, 'done', `${items.length} action point(s)`)
+      if (items.length === 0) continue
+      const content = JSON.stringify(items)
+      const artId = await apiUpsertArtifact(s.id, 'action_points', agent.id, agent.name, content)
+      newArtifacts.push({
+        id: artId, sessionId: s.id, kind: 'action_points',
+        agentId: agent.id, agentName: agent.name, content,
+        createdAt: new Date().toISOString(),
+      })
+    }
+
+    const updated = get().activeSession
+    if (updated) {
+      const others = updated.artifacts.filter(a => a.kind !== 'action_points')
+      set({ activeSession: { ...updated, artifacts: [...others, ...newArtifacts] } })
+    }
+
+    if (needReconnect && s.status === 'concluded') get().disconnectAllAgents()
+    set({ generatingArtifact: '' })
+    get()._log('', 'System', 'system', `Action points extracted from ${newArtifacts.length} agent(s)`)
+  },
+
+  sendActionPointToAgent: async (agentId, item) => {
+    const s = get().activeSession
+    if (!s) return
+    const name = s.agents.find(a => a.id === agentId)?.name || 'Agent'
+
+    // Reconnect (revives dropped sockets) and wait specifically for THIS agent.
+    await get()._ensureConnected()
+    const deadline = Date.now() + 12000
+    let agent = get().activeSession?.agents.find(a => a.id === agentId)
+    while (!agent?.ws?.connected && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 500))
+      agent = get().activeSession?.agents.find(a => a.id === agentId)
+    }
+    if (!agent?.ws?.connected) {
+      get()._log(agentId, name, 'system', 'Could not connect agent to record action point')
+      throw new Error('agent not reachable')
+    }
+
+    const toolDesc = item.kind === 'intent'
+      ? 'a proactive intention (use your `intentions` tool)'
+      : 'a todo (use your `todo` tool)'
+    const body = [
+      `Record the following as ${toolDesc}. Do NOT act on it now — just record it so it persists for you to work on later.`,
+      'IMPORTANT: preserve ALL of the detail below verbatim in the recorded item — put the full Task, Done-when, and References into the item\'s prompt/notes/body so you keep complete context when you eventually act on it. Do not summarise it away.',
+      '',
+      `Title: ${item.title}`,
+      `Context: ${item.context}`,
+      `Task: ${item.task}`,
+      `Done when: ${item.done_when}`,
+      item.refs.length ? `References: ${item.refs.join(', ')}` : '',
+    ].filter(Boolean).join('\n')
+
+    set({ speaking: agentId })
+    get()._sendToAgent(agentId, body)
+    await get()._collectResponse(agentId)
+    set({ speaking: '' })
+    get()._log(agentId, agent.name, 'system', `Recorded action point "${item.title}" → ${agent.name}`)
+
+    // Persist that this item was sent so the "Recorded" state survives a reload
+    // and it can't be re-sent (which would create a duplicate todo/intention).
+    const cur = get().activeSession
+    const art = cur?.artifacts.find(a => a.kind === 'action_points' && a.agentId === agentId)
+    if (cur && art) {
+      try {
+        const items: ActionPoint[] = JSON.parse(art.content)
+        const idx = items.findIndex(it => it.title === item.title && it.task === item.task)
+        if (idx >= 0 && !items[idx].sent) {
+          items[idx] = { ...items[idx], sent: true }
+          const content = JSON.stringify(items)
+          set({ activeSession: { ...cur, artifacts: cur.artifacts.map(a => a.id === art.id ? { ...a, content } : a) } })
+          await apiUpsertArtifact(cur.id, 'action_points', agentId, art.agentName, content)
+        }
+      } catch { /* ignore — confirmation just won't persist */ }
+    }
+  },
+
   exportMinutesMd: () => {
     const s = get().activeSession
     if (!s) return
@@ -1501,16 +1954,18 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
 
   // ── Internal helpers ──
 
-  _sendToAgent: (agentId, content, type = 'chat') => {
+  _sendToAgent: (agentId, content, type = 'chat', opts) => {
     const s = get().activeSession
     if (!s) return
     const agent = s.agents.find(a => a.id === agentId)
     if (!agent?.ws) return
     if (type === 'btw') agent.ws.sendBtw(content)
+    else if (opts?.noTools) agent.ws.sendJSON({ type: 'chat', content, no_tools: true })
+    else if (opts?.denyTools?.length) agent.ws.sendJSON({ type: 'chat', content, deny_tools: opts.denyTools })
     else agent.ws.send(content)
   },
 
-  _collectResponse: (agentId) => {
+  _collectResponse: (agentId, onChunk) => {
     return new Promise<string>((resolve) => {
       const s = get().activeSession
       if (!s) { resolve(''); return }
@@ -1523,26 +1978,36 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       const cleanup = () => {
         unsubs.forEach(u => u())
         clearTimeout(timer)
+        if (_abortCollect === abort) _abortCollect = null
       }
 
+      const finish = (val: string) => { cleanup(); resolve(val) }
+      // Lets restartRound() unblock this turn immediately instead of waiting out
+      // the (long) agent timeout. The caller checks the round epoch afterward.
+      const abort = () => finish(accumulated)
+      _abortCollect = abort
+
       const timer = setTimeout(() => {
-        cleanup()
-        resolve(accumulated || '(Agent timed out)')
+        finish(accumulated || '(Agent timed out)')
       }, AGENT_TIMEOUT_MS)
 
       unsubs.push(agent.ws!.on('chat_message', (data) => {
         if (data.role === 'assistant') {
           accumulated += (data.content as string) || ''
+          onChunk?.(accumulated)
         }
       }))
 
       unsubs.push(agent.ws!.on('status', (data) => {
         const text = (data.text as string || data.status as string || '').toLowerCase()
         if (!text || /^(ready|idle|done|completed)$/i.test(text)) {
-          cleanup()
-          resolve(accumulated)
+          finish(accumulated)
         }
       }))
+
+      // If the agent drops mid-turn (e.g. an unreachable/flapping agent), resolve
+      // with whatever we have instead of hanging until the long agent timeout.
+      unsubs.push(agent.ws!.on('_disconnected', () => finish(accumulated)))
     })
   },
 
@@ -1652,6 +2117,10 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
   _runSpeakerTurn: async (agentId, round, recentMsgs, directive?) => {
     const s = get().activeSession
     if (!s) return null
+    const epoch = _roundEpoch
+    // Deny orchestration/delegation tools for this turn unless the session opts
+    // in — keeps a discussion turn a discussion, not a delegation loop.
+    const turnOpts = s.allowDelegation ? undefined : { denyTools: DELEGATION_TOOLS }
 
     const agent = s.agents.find(a => a.id === agentId)
     if (!agent?.ws?.connected || agent.muted) {
@@ -1660,12 +2129,59 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     }
 
     const prompt = buildTurnPrompt(s, round, recentMsgs, directive, agent.name, agentId)
-    get()._sendToAgent(agentId, prompt)
+    get()._sendToAgent(agentId, prompt, 'chat', turnOpts)
     set({ speaking: agentId })
     get()._log(agentId, agent.name, 'speaking', `Speaking (round ${round})`)
 
-    const raw = await get()._collectResponse(agentId)
+    // Partial-response checkpointing: when a turn runs long, lazily (after a few
+    // seconds) persist the raw accumulated text to the server and keep updating
+    // it, so a mid-turn server kill preserves what was generated. The row is
+    // finalized in place below (or deleted by a restart). Fast turns never hit
+    // the threshold and just take the normal add-at-end path.
+    let partialId: number | null = null
+    let partialCreating = false
+    let lastCheckpoint = 0
+    const checkpoint = (acc: string) => {
+      if (_roundEpoch !== epoch || partialCreating) return
+      const now = Date.now()
+      if (now - lastCheckpoint < 3000) return
+      lastCheckpoint = now
+      if (partialId == null) {
+        partialCreating = true
+        apiAddMessages(s.id, [{
+          round, agent_id: agentId, agent_name: agent.name, role: 'agent',
+          action: '', suitability: 0, target_agent_id: '', content: acc,
+          pinned: 0, metadata: JSON.stringify({ partial: true }),
+        }]).then(ids => { partialId = ids[0] ?? null }).finally(() => { partialCreating = false })
+      } else {
+        apiUpdateMessage(s.id, partialId, { content: acc, metadata: JSON.stringify({ partial: true }) })
+      }
+    }
+
+    let raw = await get()._collectResponse(agentId, checkpoint)
     set({ speaking: '' })
+    // Round was restarted/invalidated while this agent was speaking — drop the
+    // turn entirely so it doesn't pollute the re-run.
+    if (_roundEpoch !== epoch) return null
+
+    // Agent reported being stuck — nudge it to continue (as a human would in
+    // manual mode) and re-collect, blocking this turn until it gives a real
+    // answer or we exhaust the nudge budget. The next agent can't speak until
+    // _runSpeakerTurn returns, so this naturally holds the round here.
+    let nudges = 0
+    while (isStuckResponse(stripThinkingBlocks(raw)) && nudges < MAX_STUCK_NUDGES) {
+      nudges++
+      get()._log(agentId, agent.name, 'system', `Reported stuck — nudging to continue (${nudges}/${MAX_STUCK_NUDGES})`)
+      get()._sendToAgent(agentId, STUCK_NUDGE_PROMPT, 'chat', turnOpts)
+      set({ speaking: agentId })
+      raw = await get()._collectResponse(agentId, checkpoint)
+      set({ speaking: '' })
+      if (_roundEpoch !== epoch) return null
+    }
+    if (nudges > 0 && isStuckResponse(stripThinkingBlocks(raw))) {
+      get()._log(agentId, agent.name, 'system', 'Still stuck after nudges — accepting response and moving on')
+    }
+
     get()._log(agentId, agent.name, 'done', 'Finished speaking')
     // Clear agent's tool history after turn
     set(state => {
@@ -1708,10 +2224,11 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
         agent.name,
         agentId,
       )
-      get()._sendToAgent(agentId, retryPrompt)
+      get()._sendToAgent(agentId, retryPrompt, 'chat', turnOpts)
       set({ speaking: agentId })
-      const retryRaw = await get()._collectResponse(agentId)
+      const retryRaw = await get()._collectResponse(agentId, checkpoint)
       set({ speaking: '' })
+      if (_roundEpoch !== epoch) return null
       const retryParsed = parseAgentResponse(retryRaw)
       if (retryParsed.action !== 'pass') {
         // Retry succeeded — use it.
@@ -1759,6 +2276,31 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       content: parsed.content,
       pinned: false,
       metadata,
+    }
+
+    // If a checkpoint create is still in flight, wait briefly so we finalize
+    // that row rather than orphaning it with a second message.
+    for (let i = 0; i < 20 && partialCreating; i++) {
+      await new Promise(r => setTimeout(r, 50))
+    }
+
+    if (partialId != null) {
+      // Finalize the checkpointed row in place: clear the partial flag, write the
+      // parsed content on the server, and surface it in the local view now.
+      await apiUpdateMessage(s.id, partialId, {
+        content: parsed.content,
+        action: parsed.action,
+        suitability: parsed.suitability,
+        target_agent_id: targetAgentId,
+        metadata: JSON.stringify(metadata),
+      })
+      const finalMsg: CouncilMessage = {
+        ...msg, id: partialId, localId: `srv-${partialId}`, createdAt: new Date().toISOString(),
+      }
+      set(state => state.activeSession
+        ? { activeSession: { ...state.activeSession, messages: [...state.activeSession.messages, finalMsg] } }
+        : state)
+      return finalMsg
     }
 
     await get()._addMessage(msg)
@@ -1841,6 +2383,8 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
   _runRoundRobin: async (round) => {
     const s = get().activeSession
     if (!s) return
+    const epoch = _roundEpoch
+    set({ roundRunning: true })
 
     // Agents who haven't spoken in this round yet (exclude moderator)
     const roundMessages = s.messages.filter(m => m.round === round && m.role === 'agent')
@@ -1875,7 +2419,7 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
 
     for (const agent of sorted) {
       const currentSession = get().activeSession
-      if (!currentSession || currentSession.status !== 'active') break
+      if (!currentSession || currentSession.status !== 'active' || _roundEpoch !== epoch) break
 
       // Collect context from prior rounds within memory budget
       const contextMsgs = collectContextMessages(
@@ -1884,7 +2428,11 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       await get()._runSpeakerTurn(agent.id, round, contextMsgs)
     }
 
+    // A restart bumped the epoch mid-round — the re-run owns completion (and
+    // the roundRunning flag), so bail without touching it.
+    if (_roundEpoch !== epoch) return
     await get()._addSystemMessage(round, `Round ${round} complete. Approve next round or request synthesis.`)
+    set({ roundRunning: false })
     // Start auto-advance countdown if enabled
     get()._startAutoAdvanceTimer()
   },
@@ -1892,6 +2440,8 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
   _runModeratorRound: async (round) => {
     const s = get().activeSession
     if (!s || !s.moderatorAgentId) return
+    const epoch = _roundEpoch
+    set({ roundRunning: true })
 
     const moderator = s.agents.find(a => a.id === s.moderatorAgentId)
     if (!moderator?.ws?.connected) {
@@ -1915,7 +2465,7 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
     // Let moderator manage turns until all agents have spoken
     for (let turn = 0; turn < totalNonMod; turn++) {
       const currentSession = get().activeSession
-      if (!currentSession || currentSession.status !== 'active') break
+      if (!currentSession || currentSession.status !== 'active' || _roundEpoch !== epoch) break
 
       // Get suitability scores
       const scores = await get()._getSuitabilityScores()
@@ -1938,6 +2488,7 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       set({ speaking: s.moderatorAgentId })
       const modResponseRaw = await get()._collectResponse(s.moderatorAgentId)
       set({ speaking: '' })
+      if (_roundEpoch !== epoch) break
 
       // Parse moderator's selection (strip thinking blocks first)
       const modResponse = stripThinkingBlocks(modResponseRaw)
@@ -1973,7 +2524,11 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       spokenThisRound.add(selectedAgent.id)
     }
 
+    // A restart bumped the epoch mid-round — the re-run owns completion (and
+    // the roundRunning flag), so bail without touching it.
+    if (_roundEpoch !== epoch) return
     await get()._addSystemMessage(round, `Round ${round} complete. Approve next round or request synthesis.`)
+    set({ roundRunning: false })
     // Start auto-advance countdown if enabled
     get()._startAutoAdvanceTimer()
   },

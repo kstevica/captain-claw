@@ -5,9 +5,20 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from captain_claw.agent_stuck import STUCK_MARKERS
 from captain_claw.flight_deck.auth import get_current_user, get_db
 
 router = APIRouter(prefix="/fd/council", tags=["council"])
+
+
+@router.get("/stuck-markers")
+async def stuck_markers(user: dict = Depends(get_current_user)):
+    """Substrings that identify an agent's canned 'give-up' reply.
+
+    Single source: captain_claw/agent_stuck.py. The Council UI fetches these so
+    the stuck-detection strings aren't duplicated in the frontend.
+    """
+    return {"markers": STUCK_MARKERS}
 
 
 # ── Request models ───────────────────────────────────────────────
@@ -38,6 +49,14 @@ class UpdateSessionRequest(BaseModel):
 
 class AddMessagesRequest(BaseModel):
     messages: list[dict]
+
+
+class UpdateMessageRequest(BaseModel):
+    content: str | None = None
+    action: str | None = None
+    suitability: float | None = None
+    target_agent_id: str | None = None
+    metadata: str | None = None
 
 
 class AddVotesRequest(BaseModel):
@@ -125,6 +144,33 @@ async def add_messages(
     if not ids:
         raise HTTPException(status_code=404, detail="Council session not found")
     return {"ok": True, "ids": ids}
+
+
+@router.put("/sessions/{session_id}/messages/{message_id}")
+async def update_message(
+    session_id: str, message_id: int, body: UpdateMessageRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Patch a message — used to checkpoint/finalize a streaming agent turn."""
+    db = get_db()
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    ok = await db.update_council_message(session_id, user["id"], message_id, fields)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Message or session not found")
+    return {"ok": True}
+
+
+@router.delete("/sessions/{session_id}/messages")
+async def delete_messages(
+    session_id: str, round: int,
+    user: dict = Depends(get_current_user),
+):
+    """Delete all messages for a round so it can be re-run (restart round)."""
+    db = get_db()
+    removed = await db.delete_council_messages(session_id, user["id"], round)
+    if removed < 0:
+        raise HTTPException(status_code=404, detail="Council session not found")
+    return {"ok": True, "removed": removed}
 
 
 @router.put("/sessions/{session_id}/messages/{message_id}/pin")

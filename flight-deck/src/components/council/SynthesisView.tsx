@@ -21,8 +21,8 @@ export function SynthesisView({ message, votes }: SynthesisViewProps) {
         onClick={() => setCollapsed(!collapsed)}
         className="flex w-full items-center gap-2 p-4 text-left hover:bg-cyan-500/5 transition-colors rounded-xl"
       >
-        <FileText className="h-4 w-4 text-cyan-400 shrink-0" />
-        <h3 className="text-sm font-medium text-cyan-300">Council Synthesis</h3>
+        <FileText className="h-4 w-4 text-cyan-600 dark:text-cyan-400 shrink-0" />
+        <h3 className="text-sm font-medium text-cyan-700 dark:text-cyan-300">Council Synthesis</h3>
         <span className="text-[10px] text-zinc-500">by {message.agentName}</span>
         {collapsed
           ? <ChevronRight className="h-3.5 w-3.5 text-zinc-500 ml-auto shrink-0" />
@@ -31,7 +31,7 @@ export function SynthesisView({ message, votes }: SynthesisViewProps) {
       </button>
       {!collapsed && (
         <div className="px-4 pb-4">
-          <div className="fd-markdown prose prose-sm prose-invert max-w-none text-zinc-300 leading-relaxed">
+          <div className="fd-markdown prose prose-sm dark:prose-invert max-w-none text-zinc-300 leading-relaxed">
             <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{message.content}</Markdown>
           </div>
           {votes && votes.length > 0 && (

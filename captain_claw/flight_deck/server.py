@@ -771,9 +771,17 @@ class AgentConfig(BaseModel):
     provider: str = "ollama"
     model: str = "minimax-m2.7:cloud"
     temperature: float = 0.7
-    max_tokens: int = 32768
+    max_tokens: int = 32768  # output token limit (max completion tokens)
+    max_context: int = 0  # input context window; 0 → default (160000)
     provider_api_key: str = ""
     base_url: str = ""
+    # Model recommendation tier (reason | balanced | fast | longctx). When set,
+    # the spawn endpoints resolve it to a concrete provider/model via the central
+    # tier table in instructions/archetypes.json, so model choices live in ONE
+    # place and survive model releases/reprices. To pin a specific model instead,
+    # leave `tier` empty and set provider/model explicitly (the Forge review step
+    # clears `tier` when the user overrides the model).
+    tier: str = ""
     # Optional per-session selectable model list (config.model.allowed). Used by
     # the free-OpenRouter "Freebie" spawn so all free models are available to
     # switch between at runtime, with `model` as the default.
@@ -818,6 +826,40 @@ class AgentConfig(BaseModel):
     # Ownership hint — used by internal callers (e.g. Old Man) that cannot
     # authenticate via JWT but need the spawned agent to inherit the owner.
     owner_hint: str = ""
+
+
+def _resolve_tier(config: AgentConfig) -> None:
+    """Resolve a model-recommendation `tier` to a concrete provider/model.
+
+    Tier definitions live in the central table in instructions/archetypes.json
+    (the same registry the Forge gallery reads). Keeping the tier→model mapping
+    in one place means a model release or reprice is a single-file edit rather
+    than touching every archetype.
+
+    Mutates `config` in place. No-op when `tier` is empty (the common case for
+    callers that pin provider/model directly). On a missing/invalid registry or
+    an unknown tier, logs and leaves provider/model untouched rather than failing
+    the spawn.
+    """
+    if not config.tier:
+        return
+    registry_file = Path(__file__).parent.parent / "instructions" / "archetypes.json"
+    try:
+        registry = json.loads(registry_file.read_text())
+        tier_def = (registry.get("tiers") or {}).get(config.tier)
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("Tier resolution failed; using provider/model as-is",
+                    tier=config.tier, error=str(exc))
+        return
+    if not tier_def:
+        log.warning("Unknown model tier; using provider/model as-is", tier=config.tier)
+        return
+    config.provider = tier_def.get("provider", config.provider)
+    config.model = tier_def.get("model", config.model)
+    if tier_def.get("base_url"):
+        config.base_url = tier_def["base_url"]
+    log.info("Resolved model tier",
+             tier=config.tier, provider=config.provider, model=config.model)
 
 
 class ContainerInfo(BaseModel):
@@ -875,7 +917,7 @@ def _build_config_yaml(c: AgentConfig) -> str:
             **({"allowed": c.allowed_models} if c.allowed_models else {}),
         },
         "context": {
-            "max_tokens": 160000,
+            "max_tokens": c.max_context if c.max_context > 0 else 160000,
             "compaction_threshold": 0.8,
             "compaction_ratio": 0.4,
         },
@@ -980,7 +1022,7 @@ def _build_process_config_yaml(c: AgentConfig, agent_dir: Path) -> str:
             **({"allowed": c.allowed_models} if c.allowed_models else {}),
         },
         "context": {
-            "max_tokens": 160000,
+            "max_tokens": c.max_context if c.max_context > 0 else 160000,
             "compaction_threshold": 0.8,
             "compaction_ratio": 0.4,
         },
@@ -1125,6 +1167,8 @@ def _schedule_fleet_notify(name: str, port: int, event: str = "joined", owner_id
 @app.post("/fd/spawn", response_model=ContainerActionResult)
 async def spawn_agent(config: AgentConfig, request: Request, user: dict | None = _optional_user_dep):
     """Spawn a new Captain Claw container."""
+    # Resolve a model-recommendation tier (if any) to a concrete provider/model.
+    _resolve_tier(config)
     # Check if docker spawn is allowed
     sys_cfg = await _get_system_config()
     docker_default = not os.environ.get("CAPTAIN_CLAW_DOCKER")
@@ -4555,6 +4599,8 @@ async def spawn_process(config: AgentConfig, request: Request, user: dict | None
 
 
 async def _spawn_process_locked(config: AgentConfig, request: Request, user: dict | None):
+    # Resolve a model-recommendation tier (if any) to a concrete provider/model.
+    _resolve_tier(config)
     # Rate limiting & agent count check
     if AUTH_ENABLED and user:
         check_api_rate_limit(user)
@@ -5082,6 +5128,10 @@ class ForgeRequest(BaseModel):
     provider: str = "anthropic"
     model: str = "claude-sonnet-4-20250514"
     api_key: str = ""
+    base_url: str = ""  # optional custom endpoint (matches the chosen tier)
+    # Output token budget for the decomposition. The frontend sends the forge
+    # tier's configured output_ctx so a big team's JSON isn't truncated.
+    max_tokens: int = 16384
     project_id: str = ""  # optional: forge agents for an existing project
 
 
@@ -5100,6 +5150,37 @@ async def forge_decompose(
     if not system_prompt_file.is_file():
         raise HTTPException(500, "Forge system prompt not found")
     system_prompt = system_prompt_file.read_text()
+
+    # Inject the curated archetype catalog so the generator biases toward proven
+    # shapes (reusing their cognitive_mode, tier, and tools) instead of inventing
+    # every agent from scratch. Built from the same registry the gallery reads, so
+    # it stays in sync; model ids are intentionally omitted (tier resolves them).
+    registry_file = instructions_dir / "archetypes.json"
+    if registry_file.is_file():
+        try:
+            reg = json.loads(registry_file.read_text())
+            tier_names = ", ".join((reg.get("tiers") or {}).keys())
+            cat_lines = [
+                "\n\n## Archetype Catalog",
+                "Prefer these proven archetypes when an agent's purpose matches one — "
+                "reuse its cognitive_mode, tier, and tools as the starting point and "
+                "adapt as needed. Only invent a bespoke agent when nothing fits.",
+                "",
+            ]
+            for a in reg.get("archetypes", []):
+                cat_lines.append(
+                    f"- {a['role']} [{a.get('family', '')}] — {a['description']} "
+                    f"(mode: {a['cognitive_mode']}, tier: {a['tier']}, "
+                    f"tools: {', '.join(a.get('tools', []))})"
+                )
+            if tier_names:
+                cat_lines.append(
+                    f"\nAssign EVERY agent a `tier` ({tier_names}) matched to its work. "
+                    "Do NOT output model ids — the platform resolves tier→model."
+                )
+            system_prompt += "\n".join(cat_lines)
+        except (OSError, json.JSONDecodeError):
+            pass
 
     # If forging for a project, augment the prompt with project context.
     user_prompt = body.prompt.strip()
@@ -5152,12 +5233,14 @@ async def forge_decompose(
     # Create an LLM provider and make the decomposition call
     try:
         from captain_claw.llm import create_provider, Message
+        forge_max_tokens = body.max_tokens if body.max_tokens > 0 else 16384
         provider = create_provider(
             provider=body.provider,
             model=body.model,
             api_key=body.api_key or None,
+            base_url=body.base_url or None,
             temperature=0.7,
-            max_tokens=16384,
+            max_tokens=forge_max_tokens,
         )
         response = await provider.complete(
             messages=[
@@ -5165,7 +5248,7 @@ async def forge_decompose(
                 Message(role="user", content=user_prompt),
             ],
             temperature=0.7,
-            max_tokens=16384,
+            max_tokens=forge_max_tokens,
         )
     except Exception as e:
         log.error("Forge LLM call failed", exc_info=True)
@@ -5188,6 +5271,24 @@ async def forge_decompose(
         result["project_id"] = body.project_id
 
     return result
+
+
+@app.get("/fd/archetypes")
+def list_archetypes(user: dict | None = _optional_user_dep):
+    """Serve the curated agent archetype registry.
+
+    Read by the Forge gallery (one-click spawn) and used to bias the Forge
+    generator's team composition. Single source of truth lives in
+    instructions/archetypes.json — edit `tiers` there when models change.
+    """
+    instructions_dir = Path(__file__).parent.parent / "instructions"
+    registry_file = instructions_dir / "archetypes.json"
+    if not registry_file.is_file():
+        raise HTTPException(500, "Archetype registry not found")
+    try:
+        return json.loads(registry_file.read_text())
+    except json.JSONDecodeError as e:
+        raise HTTPException(500, f"Archetype registry is invalid JSON: {e}")
 
 
 @app.get("/fd/health")

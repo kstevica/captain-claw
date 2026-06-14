@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react'
-import { Wand2, Loader2, Trash2, Plus, Rocket, ChevronDown, ChevronRight, Check, AlertTriangle, Cpu, Server, Crown, FolderKanban } from 'lucide-react'
+import { useState, useEffect, useRef } from 'react'
+import { Wand2, Loader2, Trash2, Plus, Rocket, ChevronDown, ChevronRight, Check, AlertTriangle, Cpu, Server, Crown, FolderKanban, Library, Gauge } from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
 import { useContainerStore } from '../stores/containerStore'
 import { useProcessStore } from '../stores/processStore'
@@ -8,40 +8,77 @@ import { useUIStore } from '../stores/uiStore'
 import { useOnboardingStore } from '../stores/onboardingStore'
 import { HelpHint } from '../components/common/HelpHint'
 import { spawnAgent, spawnProcess, type SpawnConfig } from '../services/docker'
-import { queueSave, registerHydrator } from '../services/settingsSync'
+import { queueSave, registerHydrator, fetchSettings } from '../services/settingsSync'
 import { refreshAccessToken } from '../stores/authStore'
 
-// ── LLM config persistence ──
+// ── Tier config persistence (per-user / multi-tenant via /fd/settings) ──
 
+// Legacy single-model config — read only, to migrate the API key forward.
 const FORGE_CONFIG_KEY = 'fd:forge-llm-config'
+// New per-user tier configuration: a model definition per tier + which tier
+// drives the Forge decomposition call.
+const TIERS_KEY = 'fd:forge-tiers'
+const ENV_VARS_KEY = 'fd:forge-env-vars'
 
-interface ForgeLLMConfig {
+interface LegacyForgeConfig {
+  provider?: string
+  model?: string
+  api_key?: string
+  base_url?: string
+}
+
+// One concrete model definition for a tier.
+interface TierConfig {
   provider: string
   model: string
   api_key: string
+  base_url: string
+  input_ctx: number   // max input context window
+  output_ctx: number  // max output (completion) tokens
 }
+type TierMap = Record<string, TierConfig>
 
-function loadForgeConfig(): ForgeLLMConfig {
+function loadLegacyConfig(): LegacyForgeConfig {
   try {
     return JSON.parse(localStorage.getItem(FORGE_CONFIG_KEY) || '{}')
   } catch {
-    return { provider: 'anthropic', model: 'claude-sonnet-4-20250514', api_key: '' }
+    return {}
   }
 }
 
-function saveForgeConfig(config: ForgeLLMConfig) {
-  const val = JSON.stringify(config)
-  if (useAuthStore.getState().authEnabled) queueSave(FORGE_CONFIG_KEY, val)
-  else localStorage.setItem(FORGE_CONFIG_KEY, val)
+function loadTierSettings(): { tiers: TierMap; forgeTier: string } | null {
+  try {
+    const raw = localStorage.getItem(TIERS_KEY)
+    if (!raw) return null
+    const p = JSON.parse(raw)
+    if (p && p.tiers && typeof p.tiers === 'object') {
+      return { tiers: p.tiers as TierMap, forgeTier: p.forgeTier || 'reason' }
+    }
+  } catch { /* ignore */ }
+  return null
 }
 
+// Write-through: always update localStorage (fast path / non-auth store) AND,
+// when auth is on, queue a debounced save to the per-user server settings.
+// Without the localStorage write, an in-session remount or fresh tab would read
+// stale/empty localStorage before async server hydration lands.
+function persistSetting(key: string, val: string) {
+  localStorage.setItem(key, val)
+  if (useAuthStore.getState().authEnabled) queueSave(key, val)
+}
+
+function saveTierSettings(tiers: TierMap, forgeTier: string) {
+  persistSetting(TIERS_KEY, JSON.stringify({ tiers, forgeTier }))
+}
+
+// Mirror server values into localStorage on login hydration so the fast path is
+// warm. The component also fetches authoritatively on mount (see ForgePage).
 registerHydrator((settings) => {
-  const raw = settings[FORGE_CONFIG_KEY]
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw)
-      localStorage.setItem(FORGE_CONFIG_KEY, JSON.stringify(parsed))
-    } catch { /* ignore */ }
+  for (const key of [TIERS_KEY, ENV_VARS_KEY]) {
+    const raw = settings[key]
+    if (raw) {
+      try { JSON.parse(raw); localStorage.setItem(key, raw) } catch { /* ignore */ }
+    }
   }
 })
 
@@ -60,11 +97,65 @@ interface AgentProposal {
   provider: string
   model: string
   providerApiKey: string
+  // Model-recommendation tier. When set, the backend resolves provider/model
+  // from the central tier table; cleared when the user pins a model explicitly.
+  tier?: string
+}
+
+// Curated archetype registry served by GET /fd/archetypes.
+interface Archetype {
+  id: string
+  family: string
+  role: string
+  lead?: boolean
+  cognitive_mode: string
+  tier: string
+  tools: string[]
+  description: string
+  fleet_instructions: string
+}
+
+interface TierDef {
+  label: string
+  use: string
+  provider: string
+  model: string
+  base_url?: string
+  input_ctx?: number
+  output_ctx?: number
+}
+
+interface ArchetypeRegistry {
+  tiers: Record<string, TierDef>
+  archetypes: Archetype[]
 }
 
 type Phase = 'input' | 'review' | 'spawning' | 'done'
 
 const PROVIDERS = ['anthropic', 'openai', 'ollama', 'gemini', 'xai', 'openrouter', 'litert']
+
+const TIER_ORDER = ['reason', 'balanced', 'fast', 'longctx']
+
+// Seed a tier map from the registry defaults, carrying the user's existing key
+// and provider forward (decision: "carry over key + provider"). The legacy
+// single model is replicated across tiers so spawns work immediately; the user
+// then differentiates each tier's model.
+function seedTiers(registry: ArchetypeRegistry, legacy: LegacyForgeConfig): TierMap {
+  const out: TierMap = {}
+  for (const t of TIER_ORDER) {
+    const def = registry.tiers[t]
+    if (!def) continue
+    out[t] = {
+      provider: legacy.provider || def.provider,
+      model: legacy.model || def.model,
+      api_key: legacy.api_key || '',
+      base_url: legacy.base_url || def.base_url || '',
+      input_ctx: def.input_ctx || 200000,
+      output_ctx: def.output_ctx || 32768,
+    }
+  }
+  return out
+}
 
 const DEFAULT_TOOLS = [
   'shell', 'read', 'write', 'glob', 'edit', 'web_fetch', 'web_search',
@@ -73,12 +164,12 @@ const DEFAULT_TOOLS = [
 
 // ── API call ──
 
-async function callForge(prompt: string, provider: string, model: string, apiKey: string, projectId?: string) {
+async function callForge(prompt: string, provider: string, model: string, apiKey: string, baseUrl: string, maxTokens: number, projectId?: string) {
   const { token, authEnabled } = useAuthStore.getState()
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (authEnabled && token) headers['Authorization'] = `Bearer ${token}`
 
-  const payload: Record<string, string> = { prompt, provider, model, api_key: apiKey }
+  const payload: Record<string, string | number> = { prompt, provider, model, api_key: apiKey, base_url: baseUrl, max_tokens: maxTokens }
   if (projectId) payload.project_id = projectId
 
   let res = await fetch('/fd/forge', {
@@ -119,18 +210,18 @@ interface SimpleProject {
 export function ForgePage() {
   const [phase, setPhase] = useState<Phase>('input')
   const [prompt, setPrompt] = useState('')
-  const [llmConfig, setLlmConfig] = useState<ForgeLLMConfig>(() => {
-    const saved = loadForgeConfig()
-    return {
-      provider: saved.provider || 'anthropic',
-      model: saved.model || 'claude-sonnet-4-20250514',
-      api_key: saved.api_key || '',
-    }
-  })
+  // Per-user tier configuration (the models behind each tier) + which tier runs
+  // the Forge decomposition. Seeded from the registry on first load.
+  const [tiers, setTiers] = useState<TierMap>(() => loadTierSettings()?.tiers || {})
+  const [forgeTier, setForgeTier] = useState<string>(() => loadTierSettings()?.forgeTier || 'reason')
+  // Gate seeding/persisting until the authoritative server load completes, so a
+  // slow fetch can't let the seed/persist effects overwrite real saved data.
+  // Without auth, localStorage is authoritative — ready immediately.
+  const [bootstrapped, setBootstrapped] = useState(() => !useAuthStore.getState().authEnabled)
   const [showSettings, setShowSettings] = useState(false)
   const [envVars, setEnvVars] = useState<{ key: string; value: string }[]>(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem('fd:forge-env-vars') || '[]')
+      const saved = JSON.parse(localStorage.getItem(ENV_VARS_KEY) || '[]')
       return Array.isArray(saved) ? saved : []
     } catch { return [] }
   })
@@ -140,6 +231,14 @@ export function ForgePage() {
   const [summary, setSummary] = useState('')
   const [agents, setAgents] = useState<AgentProposal[]>([])
   const [expandedAgent, setExpandedAgent] = useState<string | null>(null)
+  // Fleet-instructions textarea of the currently expanded card. Reset to the top
+  // on open — the long content otherwise lands scrolled down due to the browser
+  // anchoring the scroll position inside the textarea as the card lays out.
+  const fleetRef = useRef<HTMLTextAreaElement | null>(null)
+
+  // Archetype library (gallery)
+  const [registry, setRegistry] = useState<ArchetypeRegistry | null>(null)
+  const [showGallery, setShowGallery] = useState(false)
 
   // Project selector
   const [projects, setProjects] = useState<SimpleProject[]>([])
@@ -161,46 +260,124 @@ export function ForgePage() {
   const { setView } = useUIStore()
   const onboarding = useOnboardingStore()
 
+  // Authoritative load: when auth is on, the server (per-user settings) is the
+  // source of truth. Fetch on mount and hydrate state, then mark bootstrapped so
+  // the seed/persist effects may run. This survives the localStorage fast path
+  // being stale (e.g. saved server-only in a prior session).
   useEffect(() => {
-    saveForgeConfig(llmConfig)
-  }, [llmConfig])
+    if (!useAuthStore.getState().authEnabled) return
+    let cancelled = false
+    fetchSettings().then((s) => {
+      if (cancelled) return
+      const rawTiers = s[TIERS_KEY]
+      if (rawTiers) {
+        try {
+          const p = JSON.parse(rawTiers)
+          if (p?.tiers && typeof p.tiers === 'object') {
+            setTiers(p.tiers)
+            setForgeTier(p.forgeTier || 'reason')
+          }
+        } catch { /* ignore */ }
+      }
+      const rawEnv = s[ENV_VARS_KEY]
+      if (rawEnv) {
+        try {
+          const a = JSON.parse(rawEnv)
+          if (Array.isArray(a)) setEnvVars(a)
+        } catch { /* ignore */ }
+      }
+    }).catch(() => {}).finally(() => { if (!cancelled) setBootstrapped(true) })
+    return () => { cancelled = true }
+  }, [])
+
+  // Persist tier settings (per-user, multi-tenant) whenever they change. Gated
+  // on bootstrapped so the initial server load doesn't get clobbered.
+  useEffect(() => {
+    if (!bootstrapped || Object.keys(tiers).length === 0) return
+    saveTierSettings(tiers, forgeTier)
+  }, [tiers, forgeTier, bootstrapped])
 
   useEffect(() => {
     fetch('/fd/projects').then((r) => r.json()).then((list) => {
       setProjects((list || []).filter((p: SimpleProject) => p.status === 'active'))
     }).catch(() => {})
+    // Load the curated archetype library for the gallery.
+    fetch('/fd/archetypes').then((r) => r.json()).then((reg) => {
+      if (reg && Array.isArray(reg.archetypes)) setRegistry(reg)
+    }).catch(() => {})
     // Clear the forge-from-project trigger
     if (forgeProjectId) setForgeProjectId('')
   }, [])
 
+  // Seed tiers from the registry defaults on first load (carrying the legacy
+  // single-model key/provider forward). Runs once the registry arrives and the
+  // server load has settled, and only if the user has no saved tier config.
   useEffect(() => {
-    const val = JSON.stringify(envVars)
-    if (useAuthStore.getState().authEnabled) queueSave('fd:forge-env-vars', val)
-    else localStorage.setItem('fd:forge-env-vars', val)
-  }, [envVars])
+    if (!bootstrapped || !registry || Object.keys(tiers).length > 0) return
+    setTiers(seedTiers(registry, loadLegacyConfig()))
+  }, [bootstrapped, registry])
+
+  // On expanding a card, scroll its fleet-instructions textarea back to the top.
+  // Deferred to the next frame so it wins against the browser's scroll anchoring.
+  useEffect(() => {
+    if (!expandedAgent) return
+    const el = fleetRef.current
+    if (el) requestAnimationFrame(() => { el.scrollTop = 0 })
+  }, [expandedAgent])
+
+  const updateTier = (key: string, patch: Partial<TierConfig>) =>
+    setTiers((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }))
+
+  // Editing provider/model pins the agent to a custom model (clears its tier).
+  // Carry the tier's API key forward so a manual edit doesn't silently drop auth.
+  const pinAgentModel = (agent: AgentProposal, patch: Partial<AgentProposal>) => {
+    const next: Partial<AgentProposal> = { tier: '', ...patch }
+    const tc = agent.tier ? tiers[agent.tier] : undefined
+    if (tc && !agent.providerApiKey) next.providerApiKey = tc.api_key
+    updateAgent(agent.id, next)
+  }
+
+  // Persist env vars (per-user, multi-tenant), write-through to localStorage.
+  useEffect(() => {
+    if (!bootstrapped) return
+    persistSetting(ENV_VARS_KEY, JSON.stringify(envVars))
+  }, [envVars, bootstrapped])
 
   const handleDecompose = async () => {
     if (!prompt.trim()) return
+    const ft = tiers[forgeTier]
+    if (!ft || !ft.model.trim()) {
+      setError(`Configure the "${forgeTier}" tier model in LLM Settings before forging.`)
+      setShowSettings(true)
+      return
+    }
     setLoading(true)
     setError('')
     try {
-      const result = await callForge(prompt, llmConfig.provider, llmConfig.model, llmConfig.api_key, selectedProjectId || undefined)
+      const result = await callForge(prompt, ft.provider, ft.model, ft.api_key, ft.base_url, ft.output_ctx > 0 ? ft.output_ctx : 16384, selectedProjectId || undefined)
       setTeamName(result.team_name || 'Agent Team')
       setSummary(result.summary || '')
-      const proposals: AgentProposal[] = (result.agents || []).map((a: any, i: number) => ({
-        id: `forge-${Date.now()}-${i}`,
-        name: a.name || `agent-${i + 1}`,
-        role: a.role || 'Agent',
-        lead: a.lead === true,
-        description: a.description || '',
-        fleet_instructions: a.fleet_instructions || '',
-        tools: a.tools || DEFAULT_TOOLS,
-        cognitive_mode: a.cognitive_mode || 'neutra',
-        type: 'process' as const,
-        provider: llmConfig.provider,
-        model: llmConfig.model,
-        providerApiKey: llmConfig.api_key,
-      }))
+      const proposals: AgentProposal[] = (result.agents || []).map((a: any, i: number) => {
+        // Generated agents carry a tier; provider/model resolve from the user's
+        // tier config at spawn. Default to balanced if the model omitted one.
+        const tier = (typeof a.tier === 'string' && a.tier && tiers[a.tier]) ? a.tier : 'balanced'
+        const tc = tiers[tier]
+        return {
+          id: `forge-${Date.now()}-${i}`,
+          name: a.name || `agent-${i + 1}`,
+          role: a.role || 'Agent',
+          lead: a.lead === true,
+          description: a.description || '',
+          fleet_instructions: a.fleet_instructions || '',
+          tools: a.tools || DEFAULT_TOOLS,
+          cognitive_mode: a.cognitive_mode || 'neutra',
+          type: 'process' as const,
+          provider: tc?.provider || '',
+          model: tc?.model || '',
+          providerApiKey: '',
+          tier,
+        }
+      })
       setAgents(proposals)
       setPhase('review')
     } catch (e) {
@@ -223,6 +400,7 @@ export function ForgePage() {
   }
 
   const addAgent = () => {
+    const tc = tiers['balanced']
     setAgents((prev) => [...prev, {
       id: `forge-${Date.now()}-new`,
       name: 'new-agent',
@@ -233,10 +411,41 @@ export function ForgePage() {
       tools: DEFAULT_TOOLS,
       cognitive_mode: 'neutra',
       type: 'process',
-      provider: llmConfig.provider,
-      model: llmConfig.model,
-      providerApiKey: llmConfig.api_key,
+      provider: tc?.provider || '',
+      model: tc?.model || '',
+      providerApiKey: '',
+      tier: 'balanced',
     }])
+  }
+
+  // Add a library archetype to the team as a ready-to-spawn proposal. Provider/
+  // model are left empty so they resolve from the archetype's tier (the user's
+  // per-tier model config) at spawn; pinning a model in review clears the tier.
+  const addArchetype = (a: Archetype) => {
+    const tc = tiers[a.tier]
+    const proposal: AgentProposal = {
+      id: `arch-${a.id}-${Date.now()}`,
+      name: a.id,
+      role: a.role,
+      lead: a.lead === true,
+      description: a.description,
+      fleet_instructions: a.fleet_instructions,
+      tools: a.tools,
+      cognitive_mode: a.cognitive_mode || 'neutra',
+      type: 'process',
+      provider: tc?.provider || '',
+      model: tc?.model || '',
+      providerApiKey: '',
+      tier: a.tier,
+    }
+    // First archetype seeds the team name/summary if nothing is set yet.
+    if (agents.length === 0) {
+      if (!teamName) setTeamName(a.role)
+      if (!summary) setSummary(a.description)
+    }
+    setAgents((prev) => [...prev, proposal])
+    setExpandedAgent(proposal.id)
+    setPhase('review')
   }
 
   const handleSpawnAll = async () => {
@@ -266,17 +475,30 @@ export function ForgePage() {
       progress[agent.id] = 'spawning'
       setSpawnProgress({ ...progress })
 
+      // Resolve the tier to a concrete model from the user's per-tier config.
+      // Done client-side (multi-tenant: each workspace has its own models/keys),
+      // so we send concrete provider/model and clear `tier` for the backend.
+      const tc = agent.tier ? tiers[agent.tier] : undefined
+      const provider = tc ? tc.provider : agent.provider
+      const model = tc ? tc.model : agent.model
+      const apiKey = tc ? tc.api_key : agent.providerApiKey
+      const baseUrl = tc ? tc.base_url : ''
+      const maxTokens = tc && tc.output_ctx > 0 ? tc.output_ctx : 32768
+      const maxContext = tc && tc.input_ctx > 0 ? tc.input_ctx : 0
+
       const payload: SpawnConfig = {
         name: agent.name,
         description: agent.description,
         hostname: 'captain-claw',
         image: 'kstevica/captain-claw:latest',
-        provider: agent.provider,
-        model: agent.model,
+        provider,
+        model,
+        tier: '',
         temperature: 0.7,
-        max_tokens: 32768,
-        provider_api_key: agent.providerApiKey,
-        base_url: '',
+        max_tokens: maxTokens,
+        max_context: maxContext,
+        provider_api_key: apiKey,
+        base_url: baseUrl,
         botport_enabled: false,
         botport_url: '',
         botport_instance_name: '',
@@ -364,7 +586,7 @@ export function ForgePage() {
   const leadAgent = agents.find((a) => a.lead)
 
   return (
-    <div className="flex-1 overflow-auto p-4 md:p-6">
+    <div className="h-full overflow-auto p-4 md:p-6">
       <div className="mb-6">
         <h1 className="text-lg font-semibold flex items-center gap-2">
           <Wand2 className="h-5 w-5 text-violet-400" /> Agent Forge
@@ -381,42 +603,112 @@ export function ForgePage() {
               onClick={() => setShowSettings(!showSettings)}
               className="flex w-full items-center justify-between px-4 py-3 text-sm font-medium text-zinc-300 hover:bg-zinc-800/50"
             >
-              <span>LLM Settings — {llmConfig.provider}/{llmConfig.model}</span>
+              <span>LLM Settings — Model Tiers{tiers[forgeTier]?.model ? ` · forge: ${tiers[forgeTier].provider}/${tiers[forgeTier].model}` : ''}</span>
               {showSettings ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
             </button>
             {showSettings && (
               <div className="border-t border-zinc-800 px-4 py-3 space-y-3">
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-[11px] font-medium text-zinc-500 mb-1">Provider</label>
-                    <select
-                      value={llmConfig.provider}
-                      onChange={(e) => setLlmConfig({ ...llmConfig, provider: e.target.value })}
-                      className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
-                    >
-                      {PROVIDERS.map((p) => <option key={p} value={p}>{p}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-medium text-zinc-500 mb-1">Model</label>
-                    <input
-                      value={llmConfig.model}
-                      onChange={(e) => setLlmConfig({ ...llmConfig, model: e.target.value })}
-                      className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
-                      placeholder="claude-sonnet-4-20250514"
-                    />
-                  </div>
-                </div>
+                <p className="text-[11px] text-zinc-500">
+                  Each tier is a model definition. Agents (from the gallery or generated) run on the model of their tier. Settings are saved to your workspace.
+                </p>
+
+                {/* Which tier designs the team */}
                 <div>
-                  <label className="block text-[11px] font-medium text-zinc-500 mb-1">API Key</label>
-                  <input
-                    type="password"
-                    value={llmConfig.api_key}
-                    onChange={(e) => setLlmConfig({ ...llmConfig, api_key: e.target.value })}
+                  <label className="block text-[11px] font-medium text-zinc-500 mb-1">Forge using — model that designs the team</label>
+                  <select
+                    value={forgeTier}
+                    onChange={(e) => setForgeTier(e.target.value)}
                     className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
-                    placeholder="sk-..."
-                  />
+                  >
+                    {TIER_ORDER.filter((t) => tiers[t]).map((t) => (
+                      <option key={t} value={t}>
+                        {registry?.tiers[t]?.label || t} — {tiers[t].provider}/{tiers[t].model || '(unset)'}
+                      </option>
+                    ))}
+                  </select>
                 </div>
+
+                {/* Per-tier model definitions */}
+                {Object.keys(tiers).length === 0 ? (
+                  <p className="text-[11px] text-zinc-600">Loading model tiers…</p>
+                ) : (
+                  <div className="space-y-2.5">
+                    {TIER_ORDER.map((t) => {
+                      const tc = tiers[t]
+                      if (!tc) return null
+                      const def = registry?.tiers[t]
+                      return (
+                        <div key={t} className="rounded-lg border border-zinc-800 bg-zinc-950/40 p-3 space-y-2">
+                          <div className="flex items-center gap-2">
+                            <Gauge className="h-3.5 w-3.5 text-cyan-400 shrink-0" />
+                            <span className="text-sm font-medium text-zinc-200">{def?.label || t}</span>
+                            {def?.use && <span className="text-[11px] text-zinc-500 truncate">— {def.use}</span>}
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="block text-[10px] font-medium text-zinc-500 mb-1">Provider</label>
+                              <select
+                                value={tc.provider}
+                                onChange={(e) => updateTier(t, { provider: e.target.value })}
+                                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                              >
+                                {PROVIDERS.map((p) => <option key={p} value={p}>{p}</option>)}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="block text-[10px] font-medium text-zinc-500 mb-1">Model</label>
+                              <input
+                                value={tc.model}
+                                onChange={(e) => updateTier(t, { model: e.target.value })}
+                                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                                placeholder="model id"
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-medium text-zinc-500 mb-1">API Key</label>
+                            <input
+                              type="password"
+                              value={tc.api_key}
+                              onChange={(e) => updateTier(t, { api_key: e.target.value })}
+                              className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                              placeholder="sk-… (leave blank to use server env key)"
+                            />
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                            <div className="sm:col-span-2">
+                              <label className="block text-[10px] font-medium text-zinc-500 mb-1">Base URL</label>
+                              <input
+                                value={tc.base_url}
+                                onChange={(e) => updateTier(t, { base_url: e.target.value })}
+                                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                                placeholder="optional"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] font-medium text-zinc-500 mb-1">Input ctx</label>
+                              <input
+                                type="number"
+                                value={tc.input_ctx}
+                                onChange={(e) => updateTier(t, { input_ctx: Number(e.target.value) || 0 })}
+                                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] font-medium text-zinc-500 mb-1">Output ctx</label>
+                              <input
+                                type="number"
+                                value={tc.output_ctx}
+                                onChange={(e) => updateTier(t, { output_ctx: Number(e.target.value) || 0 })}
+                                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
 
                 {/* Additional API Keys / Environment Variables */}
                 <div>
@@ -456,6 +748,64 @@ export function ForgePage() {
               </div>
             )}
           </div>
+
+          {/* Archetype gallery — start from a curated template */}
+          {registry && registry.archetypes.length > 0 && (
+            <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 overflow-hidden">
+              <button
+                onClick={() => setShowGallery(!showGallery)}
+                className="flex w-full items-center justify-between px-4 py-3 text-sm font-medium text-zinc-300 hover:bg-zinc-800/50"
+              >
+                <span className="flex items-center gap-2">
+                  <Library className="h-4 w-4 text-violet-400" /> Start from a template — {registry.archetypes.length} archetypes
+                </span>
+                {showGallery ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+              </button>
+              {showGallery && (
+                <div className="border-t border-zinc-800 px-4 py-3 space-y-4">
+                  {[...new Set(registry.archetypes.map((a) => a.family))].map((family) => (
+                    <div key={family}>
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500 mb-2">{family}</p>
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                        {registry.archetypes.filter((a) => a.family === family).map((a) => (
+                          <button
+                            key={a.id}
+                            onClick={() => addArchetype(a)}
+                            title={`Add ${a.role} to the team`}
+                            className="group text-left rounded-lg border border-zinc-800 bg-zinc-950/50 p-3 hover:border-violet-500/40 hover:bg-zinc-900 transition-colors"
+                          >
+                            <div className="flex items-center justify-between gap-2 mb-1">
+                              <span className="flex items-center gap-1 text-sm font-medium text-zinc-200 truncate">
+                                {a.lead && <Crown className="h-3 w-3 text-amber-400 shrink-0" />}{a.role}
+                              </span>
+                              <Plus className="h-3.5 w-3.5 text-zinc-600 group-hover:text-violet-400 shrink-0" />
+                            </div>
+                            <p className="text-[11px] text-zinc-500 leading-snug mb-2">{a.description}</p>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="inline-flex items-center gap-1 rounded bg-cyan-600/15 border border-cyan-500/25 px-1.5 py-0.5 text-[10px] font-medium text-cyan-400"><Gauge className="h-2.5 w-2.5" />{a.tier}</span>
+                              <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">{a.cognitive_mode}</span>
+                              <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500">{a.tools.length} tools</span>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                  {agents.length > 0 && (
+                    <div className="flex items-center justify-between border-t border-zinc-800 pt-3">
+                      <span className="text-xs text-zinc-400">{agents.length} agent{agents.length !== 1 ? 's' : ''} staged</span>
+                      <button
+                        onClick={() => setPhase('review')}
+                        className="flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 transition-colors"
+                      >
+                        <Rocket className="h-4 w-4" /> Review {agents.length} →
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Forge intro for new users */}
           <HelpHint id="forge-intro" banner>
@@ -571,6 +921,7 @@ export function ForgePage() {
                         <span className="text-sm font-medium text-zinc-200 truncate">{agent.name}</span>
                         <span className="rounded-full bg-blue-600/20 border border-blue-500/30 px-2 py-0.5 text-[10px] font-semibold text-blue-400 shrink-0">{teamName || 'Team'}</span>
                         <span className="rounded-full bg-violet-600/20 border border-violet-500/30 px-2 py-0.5 text-[10px] font-semibold text-violet-400 shrink-0">{agent.role}</span>
+                        {agent.tier && <span className="inline-flex items-center gap-1 rounded-full bg-cyan-600/20 border border-cyan-500/30 px-2 py-0.5 text-[10px] font-semibold text-cyan-400 shrink-0"><Gauge className="h-2.5 w-2.5" />{agent.tier}</span>}
                         {agent.lead && <span className="rounded-full bg-amber-600/20 border border-amber-500/30 px-2 py-0.5 text-[10px] font-semibold text-amber-400 shrink-0">Lead</span>}
                       </div>
                       <p className="text-[11px] text-zinc-500 truncate mt-0.5">{agent.description}</p>
@@ -638,14 +989,40 @@ export function ForgePage() {
                           </select>
                         </div>
                       </div>
+                      {Object.keys(tiers).length > 0 && (
+                        <div>
+                          <label className="block text-[11px] font-medium text-zinc-500 mb-1">Model tier</label>
+                          <select
+                            value={agent.tier || ''}
+                            onChange={(e) => {
+                              const t = e.target.value
+                              // Selecting a tier fills provider/model from that tier's
+                              // config so the fields show the effective values.
+                              // "Custom" keeps the current provider/model.
+                              if (t && tiers[t]) updateAgent(agent.id, { tier: t, provider: tiers[t].provider, model: tiers[t].model })
+                              else updateAgent(agent.id, { tier: '' })
+                            }}
+                            className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                          >
+                            <option value="">Custom (pick provider &amp; model below)</option>
+                            {TIER_ORDER.filter((t) => tiers[t]).map((t) => (
+                              <option key={t} value={t}>{registry?.tiers[t]?.label || t} — {tiers[t].provider}/{tiers[t].model || '(unset)'}</option>
+                            ))}
+                          </select>
+                          {agent.tier && tiers[agent.tier] && (
+                            <p className="mt-1 text-[11px] text-cyan-500/80">Runs on {tiers[agent.tier].provider}/{tiers[agent.tier].model || '(unset)'} from your tier config. Editing provider or model below switches to Custom.</p>
+                          )}
+                        </div>
+                      )}
                       <div className="grid grid-cols-2 gap-3">
                         <div>
                           <label className="block text-[11px] font-medium text-zinc-500 mb-1">Provider</label>
                           <select
                             value={agent.provider}
-                            onChange={(e) => updateAgent(agent.id, { provider: e.target.value })}
+                            onChange={(e) => pinAgentModel(agent, { provider: e.target.value })}
                             className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
                           >
+                            {!PROVIDERS.includes(agent.provider) && <option value={agent.provider}>{agent.provider || '— select —'}</option>}
                             {PROVIDERS.map((p) => <option key={p} value={p}>{p}</option>)}
                           </select>
                         </div>
@@ -653,7 +1030,7 @@ export function ForgePage() {
                           <label className="block text-[11px] font-medium text-zinc-500 mb-1">Model</label>
                           <input
                             value={agent.model}
-                            onChange={(e) => updateAgent(agent.id, { model: e.target.value })}
+                            onChange={(e) => pinAgentModel(agent, { model: e.target.value })}
                             className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
                           />
                         </div>
@@ -671,6 +1048,7 @@ export function ForgePage() {
                       <div>
                         <label className="block text-[11px] font-medium text-zinc-500 mb-1">Fleet Instructions</label>
                         <textarea
+                          ref={fleetRef}
                           value={agent.fleet_instructions}
                           onChange={(e) => updateAgent(agent.id, { fleet_instructions: e.target.value })}
                           rows={8}

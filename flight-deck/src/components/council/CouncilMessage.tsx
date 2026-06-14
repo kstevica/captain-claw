@@ -95,6 +95,15 @@ export function CouncilMessageBubble({ message, onPin, agentNames }: CouncilMess
       <div className="mb-1.5 flex items-center gap-2 text-xs">
         <span className="font-medium text-zinc-200">{message.agentName}</span>
 
+        {(message.metadata as { partial?: boolean })?.partial && (
+          <span
+            className="rounded-full bg-amber-500/15 border border-amber-500/30 px-1.5 py-0.5 text-[10px] font-medium text-amber-400"
+            title="This turn was interrupted (server stopped mid-response). Partial text shown — restart the round to regenerate."
+          >
+            interrupted
+          </span>
+        )}
+
         {badge && (
           <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${badge.color}`}>
             {badge.label}

@@ -128,6 +128,17 @@ Each agent can be assigned a cognitive mode that shapes HOW it thinks — its re
 - `aeolian` — The Depth Researcher: thorough analysis, root-cause tracing, evidence-based. Best for: researchers, analysts, due diligence agents.
 - `locrian` — The Deconstructionist: challenges premises, radical questioning. Best for: retrospective leads, architecture critics, simplification agents.
 
+## Model Tier
+
+Assign each agent a `tier` — a model recommendation the platform resolves to a concrete model at spawn time. Do NOT output model ids; pick the tier that fits the work:
+
+- `reason` — strategy, architecture, adversarial review, synthesis (highest capability)
+- `balanced` — default knowledge work
+- `fast` — high-volume, routing, classification, monitoring
+- `longctx` — large-document summarize / extract
+
+When an agent aligns with an entry in the Archetype Catalog (appended below), reuse that archetype's tier rather than guessing.
+
 ## Response Format
 
 Respond ONLY with valid JSON matching this schema:
@@ -144,7 +155,8 @@ Respond ONLY with valid JSON matching this schema:
       "description": "One-sentence description of what this agent does",
       "fleet_instructions": "Detailed instructions including:\n- Primary responsibilities\n- Tool usage guidance (reference specific tools)\n- Standard Operating Procedure (pseudo-code playbook)\n- Collaboration patterns with other team members\n- Output expectations",
       "tools": ["shell", "read", "write", "glob", "edit", "web_fetch", "web_search", "personality", "playbooks", "scripts"],
-      "cognitive_mode": "neutra"
+      "cognitive_mode": "neutra",
+      "tier": "balanced"
     }
   ]
 }

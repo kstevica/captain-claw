@@ -280,6 +280,7 @@ async def handle_ws_message(
                 origin=origin,
                 no_flow=bool(data.get("no_flow", False)),
                 deny_tools=[str(t) for t in (data.get("deny_tools") or [])],
+                no_tools=bool(data.get("no_tools", False)),
                 no_broadcast=bool(data.get("no_broadcast", False)),
             )
 

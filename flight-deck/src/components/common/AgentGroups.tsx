@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { Tag, Plus, X, Trash2, Pencil, Check, Users, Briefcase } from 'lucide-react'
+import { Tag, Plus, X, Trash2, Pencil, Check, Users, Briefcase, ChevronDown, Filter } from 'lucide-react'
 import { useGroupStore } from '../../stores/groupStore'
 import type { GroupType } from '../../stores/groupStore'
 
@@ -302,42 +302,115 @@ export function GroupManager() {
 
 export function GroupFilter({ selected, onChange }: { selected: string | null; onChange: (id: string | null) => void }) {
   const allGroups = useGroupStore((s) => s.groups)
-  // Only show groups (not roles) in the filter bar
-  const groups = allGroups.filter(g => (g.type || 'group') === 'group')
+  const [open, setOpen] = useState(false)
 
-  if (groups.length === 0) return null
+  // Close the modal on Escape.
+  useEffect(() => {
+    if (!open) return
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [open])
+
+  const groups = allGroups.filter(g => (g.type || 'group') === 'group')
+  const roles = allGroups.filter(g => g.type === 'role')
+  if (groups.length === 0 && roles.length === 0) return null
+
+  const active = allGroups.find(g => g.id === selected) || null
+  const activeColors = active ? getColors(active.color) : null
+  const pick = (id: string | null) => { onChange(id); setOpen(false) }
+
+  const sections = [
+    { title: 'Groups', icon: Users, items: groups },
+    { title: 'Roles', icon: Briefcase, items: roles },
+  ].filter(s => s.items.length > 0)
 
   return (
-    <div className="flex items-center gap-1">
+    <>
+      {/* Trigger */}
       <button
-        onClick={() => onChange(null)}
-        className={`rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
-          selected === null
-            ? 'bg-zinc-700 text-zinc-200'
-            : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
-        }`}
+        onClick={() => setOpen(true)}
+        className="inline-flex items-center gap-1.5 rounded-full border border-zinc-700/50 bg-zinc-900 px-3 py-1 text-xs font-medium text-zinc-300 hover:border-zinc-600 hover:bg-zinc-800 transition-colors"
+        title="Filter by group or role"
       >
-        All
+        <Filter className="h-3 w-3 text-zinc-500" />
+        {active ? (
+          <span className="inline-flex items-center gap-1.5">
+            <span className={`h-1.5 w-1.5 rounded-full ${activeColors!.dot}`} />
+            {active.name}
+          </span>
+        ) : 'All agents'}
+        <ChevronDown className="h-3 w-3 text-zinc-500" />
       </button>
-      {groups.map((g) => {
-        const c = getColors(g.color)
-        const isActive = selected === g.id
-        return (
-          <button
-            key={g.id}
-            onClick={() => onChange(isActive ? null : g.id)}
-            className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors ${
-              isActive
-                ? `${c.bg} ${c.text} border ${c.border}`
-                : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
-            }`}
+
+      {/* Modal */}
+      {open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          onClick={() => setOpen(false)}
+        >
+          <div
+            className="flex max-h-[80vh] w-[420px] flex-col rounded-xl border border-zinc-800 bg-zinc-950 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
           >
-            <span className={`h-1.5 w-1.5 rounded-full ${c.dot}`} />
-            {g.name}
-            <span className="text-[9px] opacity-60">{g.agentIds.length}</span>
-          </button>
-        )
-      })}
-    </div>
+            <div className="flex items-center justify-between border-b border-zinc-800 px-5 py-3">
+              <div className="flex items-center gap-2">
+                <Filter className="h-4 w-4 text-violet-400" />
+                <h2 className="text-sm font-semibold text-zinc-200">Filter agents</h2>
+              </div>
+              <button
+                onClick={() => setOpen(false)}
+                className="rounded p-1 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
+              <button
+                onClick={() => pick(null)}
+                className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors ${
+                  selected === null ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-300 hover:bg-zinc-800/60'
+                }`}
+              >
+                <span className="h-2 w-2 rounded-full bg-zinc-500" />
+                <span className="flex-1 text-left">All agents</span>
+                {selected === null && <Check className="h-3.5 w-3.5 text-violet-400" />}
+              </button>
+
+              {sections.map(({ title, icon: Icon, items }) => (
+                <div key={title}>
+                  <div className="mb-1 flex items-center gap-1.5 px-1">
+                    <Icon className="h-3 w-3 text-zinc-500" />
+                    <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">{title}</span>
+                    <span className="text-[10px] text-zinc-600">{items.length}</span>
+                  </div>
+                  <div className="space-y-0.5">
+                    {items.map((g) => {
+                      const c = getColors(g.color)
+                      const isSel = selected === g.id
+                      return (
+                        <button
+                          key={g.id}
+                          onClick={() => pick(g.id)}
+                          className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors ${
+                            isSel ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-300 hover:bg-zinc-800/60'
+                          }`}
+                        >
+                          <span className={`h-2 w-2 rounded-full ${c.dot}`} />
+                          <span className="flex-1 text-left truncate">{g.name}</span>
+                          <span className="text-[10px] text-zinc-600">{g.agentIds.length}</span>
+                          {isSel && <Check className="h-3.5 w-3.5 text-violet-400 shrink-0" />}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   )
 }

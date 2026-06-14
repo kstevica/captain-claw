@@ -12,6 +12,11 @@ import json
 from typing import Any, AsyncIterator
 
 from captain_claw.agent_scale_detection_mixin import _build_scale_advisory
+from captain_claw.agent_stuck import (
+    MSG_BUDGET_EXHAUSTED,
+    MSG_RETRIES_EXHAUSTED,
+    MSG_STUCK,
+)
 from captain_claw.config import get_config
 from captain_claw.exceptions import GuardBlockedError, LLMAPIError, LLMError
 from captain_claw.llm import Message
@@ -1139,11 +1144,7 @@ class AgentOrchestrationMixin:
                             f"far:\n\n{_partial}",
                             success=False,
                         )
-                    return finish(
-                        "I wasn't able to complete the request — retries "
-                        "exhausted. Please try again or simplify the task.",
-                        success=False,
-                    )
+                    return finish(MSG_RETRIES_EXHAUSTED, success=False)
 
             # ── Iteration budget management ───────────────────────
             if iteration >= soft_turn_iterations:
@@ -1200,11 +1201,7 @@ class AgentOrchestrationMixin:
                             f"have so far:\n\n{_partial_budget}",
                             success=False,
                         )
-                    return finish(
-                        "I wasn't able to complete the request — iteration "
-                        "budget exhausted. Please try again or simplify the task.",
-                        success=False,
-                    )
+                    return finish(MSG_BUDGET_EXHAUSTED, success=False)
 
             # ── Progress / stagnation tracking ────────────────────
             current_snapshot = self._capture_turn_progress_snapshot(turn_start_idx, planning_pipeline)
@@ -1261,11 +1258,7 @@ class AgentOrchestrationMixin:
                                 f"far:\n\n{_partial_stuck}",
                                 success=False,
                             )
-                        return finish(
-                            "I got stuck and couldn't make further progress. "
-                            "Please try again or simplify the task.",
-                            success=False,
-                        )
+                        return finish(MSG_STUCK, success=False)
             else:
                 progress_window.append(False)
             previous_progress_snapshot = current_snapshot

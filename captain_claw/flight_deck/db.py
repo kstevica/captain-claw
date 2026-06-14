@@ -641,6 +641,58 @@ class FlightDeckDB:
         await self._db.commit()
         return True
 
+    async def update_council_message(
+        self, session_id: str, user_id: str, message_id: int, fields: dict,
+    ) -> bool:
+        """Patch a single message (used to checkpoint/finalize a streaming turn)."""
+        assert self._db is not None
+        sess = await self.get_council_session(session_id, user_id)
+        if not sess:
+            return False
+        allowed = ("content", "action", "suitability", "target_agent_id", "metadata")
+        sets, params = [], []
+        for k in allowed:
+            if k in fields:
+                sets.append(f"{k} = ?")
+                params.append(fields[k])
+        if not sets:
+            return False
+        params.extend([message_id, session_id])
+        await self._db.execute(
+            f"UPDATE council_messages SET {', '.join(sets)}"
+            " WHERE id = ? AND session_id = ?",
+            params,
+        )
+        await self._db.execute(
+            "UPDATE council_sessions SET updated_at = ? WHERE id = ?",
+            (_utcnow(), session_id),
+        )
+        await self._db.commit()
+        return True
+
+    async def delete_council_messages(
+        self, session_id: str, user_id: str, round_num: int,
+    ) -> int:
+        """Delete all messages for a given round (used to restart a round).
+
+        Returns the number of rows removed, or -1 if the session isn't owned by
+        the user / doesn't exist.
+        """
+        assert self._db is not None
+        sess = await self.get_council_session(session_id, user_id)
+        if not sess:
+            return -1
+        cur = await self._db.execute(
+            "DELETE FROM council_messages WHERE session_id = ? AND round = ?",
+            (session_id, round_num),
+        )
+        await self._db.execute(
+            "UPDATE council_sessions SET updated_at = ? WHERE id = ?",
+            (_utcnow(), session_id),
+        )
+        await self._db.commit()
+        return cur.rowcount
+
     # ── Council votes ────────────────────────────────────────────────
 
     async def add_council_votes(

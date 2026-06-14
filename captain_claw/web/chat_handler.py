@@ -148,6 +148,7 @@ async def handle_chat(
     origin: dict | None = None,
     no_flow: bool = False,
     deny_tools: list[str] | None = None,
+    no_tools: bool = False,
     no_broadcast: bool = False,
 ) -> None:
     """Process a chat message through the agent.
@@ -391,6 +392,7 @@ async def handle_chat(
         video_attachments=video_attachments,
         no_flow=no_flow,
         deny_tools=deny_tools,
+        no_tools=no_tools,
         no_broadcast=no_broadcast,
         flow_text=content,
         flow_attach={
@@ -520,6 +522,7 @@ async def _run_agent(
     video_attachments: list[str] | None = None,
     no_flow: bool = False,
     deny_tools: list[str] | None = None,
+    no_tools: bool = False,
     no_broadcast: bool = False,
     flow_text: str = "",
     flow_attach: dict | None = None,
@@ -596,10 +599,18 @@ async def _run_agent(
             _deny_tools += ["scripts", "shell"]
         if isinstance(content, str) and "[Delegated result from" in content:
             _deny_tools += ["flight_deck", "consult_peer"]
-        if _deny_tools:
+        # no_tools wins: an empty allow-list filters every tool away, so the agent
+        # can only answer in text (used by reflection-only turns like the Council
+        # action-points extraction, which must describe work, never execute it).
+        _turn_policy: dict | None = None
+        if no_tools:
+            _turn_policy = {"allow": []}
+        elif _deny_tools:
+            _turn_policy = {"deny": sorted(set(_deny_tools))}
+        if _turn_policy is not None:
             try:
                 _video_policy_slug = agent._current_session_slug()
-                agent.tools.set_session_policy(_video_policy_slug, {"deny": sorted(set(_deny_tools))})
+                agent.tools.set_session_policy(_video_policy_slug, _turn_policy)
             except Exception as exc:
                 log.warning("Could not set per-turn tool policy", error=str(exc))
                 _video_policy_slug = None

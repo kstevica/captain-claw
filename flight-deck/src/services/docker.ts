@@ -94,8 +94,14 @@ export interface SpawnConfig {
   image: string
   provider: string
   model: string
+  // Model-recommendation tier (reason | balanced | fast | longctx). When set,
+  // the backend resolves it to a concrete provider/model; leave empty to pin
+  // provider/model directly.
+  tier?: string
   temperature: number
   max_tokens: number
+  // Input context window (max_context). 0 → backend default.
+  max_context?: number
   provider_api_key: string
   base_url: string
   botport_enabled: boolean
