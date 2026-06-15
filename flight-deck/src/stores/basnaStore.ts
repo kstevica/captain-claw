@@ -417,7 +417,11 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       const res = await apiExecute({ session_id: sid, tiers, env_vars })
       const s = await apiGetSession(sid)
       const runs = await apiListRuns(sid)
-      set({ lastExecute: res, activeSession: s, runs })
+      // Refresh attachments from the updated session so files the agents
+      // generated during the run (kind: 'generated') surface in the UI's
+      // "Generated files" list — otherwise they're captured but unreachable.
+      set({ lastExecute: res, activeSession: s, runs,
+            ...(s ? { attachments: parseFiles(s.files) } : {}) })
       await get().loadSessions()
     } catch (e) {
       set({ error: e instanceof Error ? e.message : 'execute failed' })

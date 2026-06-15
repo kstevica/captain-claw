@@ -694,17 +694,7 @@ export function BasnaPage() {
               </div>
             )}
 
-            {/* Agent runs */}
-            {runs.length > 0 && (
-              <div className="space-y-2">
-                <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Agents ({runs.length})</span>
-                {runs.map((run) => (
-                  <AgentRow key={run.id} run={run} onFeedback={(s) => sendFeedback(run.id, s)} onView={viewFull} />
-                ))}
-              </div>
-            )}
-
-            {/* Generated files */}
+            {/* Generated files — sits between the compiled truth and the agents */}
             {attachments.some((a) => a.kind === 'generated') && (
               <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
                 <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">Generated files</div>
@@ -724,6 +714,16 @@ export function BasnaPage() {
                     </div>
                   ))}
                 </div>
+              </div>
+            )}
+
+            {/* Agent runs */}
+            {runs.length > 0 && (
+              <div className="space-y-2">
+                <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Agents ({runs.length})</span>
+                {runs.map((run) => (
+                  <AgentRow key={run.id} run={run} onFeedback={(s) => sendFeedback(run.id, s)} onView={viewFull} />
+                ))}
               </div>
             )}
           </div>
