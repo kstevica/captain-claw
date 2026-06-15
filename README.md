@@ -15,6 +15,18 @@
 
 An open-source AI agent with multi-agent orchestration, autonomous cognitive systems, and a full management dashboard. Runs locally, supports every major LLM provider, and ships with 45 built-in tools.
 
+## What's New in 0.5.7
+
+**Basna — a network-source ensemble that routes, runs, and merges a fleet.** A new Flight Deck mode parallel to Council, plus a dedicated Library page. Fully additive.
+
+- **Basna** — describe a task; a **router** (on a tier you pick, default Reasoning) selects the smallest set of specialist archetypes, spawns them fresh, runs them **blind and in parallel**, and **merges** their outputs weighted by each archetype's learned reliability — synthesizing only on genuine disagreement. It **learns** per-archetype reliability so routing improves, with a 👍/👎 override on every agent.
+- **Basna live progress** — a timestamped, persisted log streaming route → spawn → per-agent dispatch → merge → learn, including each agent's tool calls, **narration**, and LLM usage; export the log or any agent's activity.
+- **Basna attachments** — attach files or paste images; they're copied into every spawned agent's workspace (read / pdf_extract / xlsx_extract / image_vision). Files the agents **generate** are captured back onto the session and downloadable.
+- **Basna per-agent editor** — before a run, edit any agent's tier, provider/model/key/base-URL/context, cognitive mode, fleet instructions (system prompt), and extra task instructions; the compiled truth and each answer render as markdown with fullscreen + export-.md.
+- **Library page** — the **model tiers** editor and the **archetype gallery** moved out of Agent Forge into their own page; the gallery one-click-spawns an archetype, and Forge + Basna both consume the saved tier config.
+
+New endpoints under `/fd/basna/*`; new tables `basna_sessions` / `basna_runs` / `archetype_reliability` (migrate in place). See [RELEASE_NOTES_0.5.7.md](release-notes/RELEASE_NOTES_0.5.7.md). Backward compatible with 0.5.6.
+
 ## What's New in 0.5.6
 
 **Archetypes & durable councils — model tiers, action points, and sessions that don't lose work.** A Flight Deck release for Agent Forge and Agent Council. Fully additive.
@@ -188,6 +200,8 @@ captain-claw-fd    # http://0.0.0.0:25080
 ```
 
 - **Agent Forge** — Describe a business goal in plain text. An LLM designs a specialized team with roles, tools, operating procedures, and a lead coordinator. Review, customize, and spawn the entire team in one click.
+- **Basna** — A network-source ensemble. Describe a task and a router picks the smallest set of specialist archetypes, spawns them fresh, runs them blind and in parallel, and merges their answers weighted by each archetype's learned reliability (synthesizing only on disagreement). Attach files/images, edit each agent before the run, watch a live progress log, and download generated files. Reliability is learned per-archetype so routing improves over time.
+- **Library** — One place for your model tiers (Reasoning / Balanced / Fast / Long context, each with its own provider/model/key/base-URL/context) and the curated archetype gallery (one-click spawn). Agent Forge and Basna both resolve their models from here.
 - **Agent Council** — Structured multi-agent deliberation. Run brainstorms, debates, reviews, or planning sessions with 2-N agents. Each agent self-scores suitability, chooses actions (answer, challenge, refine, broaden), and responds in moderated rounds. A moderator synthesizes conclusions; all agents vote. Export as markdown minutes.
 - **Fleet Communication** — Agents discover peers automatically. Consult (synchronous ask) or delegate (asynchronous queue) tasks to specialist agents. Shared workspace and file transfer across the fleet.
 - **Director Panel** — Unified overview of all agents. Broadcast messages fleet-wide. Per-agent token/cost analytics, trace timelines, datastore browser, file browser, config editor.

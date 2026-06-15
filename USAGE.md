@@ -4215,6 +4215,30 @@ Cancels the upstream call cleanly when the client disconnects mid-stream. The ag
 - `FD_AGENT_SHARED_SECRET` — optional shared secret; same one used by Codex / Google.
 - `CAPTAIN_CLAW_FD_MCP_PATH` — override the storage file location (useful for tests).
 
+### Library (NEW in 0.5.7)
+
+The Library page is the single place for your **model tiers** and the **archetype gallery** (both moved out of Agent Forge in 0.5.7).
+
+- **Model tiers** — a per-tier editor with four tiers — **Reasoning**, **Balanced**, **Fast / high-volume**, **Long context** — each carrying its own provider, model, API key, base URL, and input/output context length, plus a "Forge using" selector and an "Additional API Keys" section (env vars passed to spawned agents). Persisted per-user via `/fd/settings`. **Agent Forge and Basna both resolve their models from here.**
+- **Archetype gallery** — the curated ~20 agents (Deep Researcher, Code Reviewer, Project Coordinator, Deal Screener, …). Click a card to **spawn that archetype directly** as an agent (its tier resolves to a concrete model). Served from `instructions/archetypes.json` via `GET /fd/archetypes`.
+
+### Basna (NEW in 0.5.7)
+
+Basna (sidebar: **Basna**) is a **network-source ensemble** — a one-shot, selective alternative to Council. You describe a task; Basna routes it to the smallest set of specialist archetypes, runs them in parallel, and merges their answers weighted by learned reliability.
+
+**How it works:**
+
+1. Open **Basna**; describe the task (optionally **attach files** or paste images), pick the **Router tier** (default Reasoning) and **Max agents**.
+2. **Route** — a router classifies the task (domain / difficulty / converge|diverge) and selects the minimal archetype subset, scaled to difficulty. Each pick shows its tier, resolved model, rationale, and prior reliability weight.
+3. Optionally **edit any agent** before running — tier (a picker that resets the model fields), provider, model, API key, base URL, in/out context, cognitive mode, fleet instructions (system prompt), extra task instructions, role. Per-agent overrides take precedence over the Library tier.
+4. **Run ensemble** — the chosen archetypes spawn fresh, run **blind and in parallel** (attached files are copied into each agent's workspace), then are torn down. A **live progress log** streams every stage (route → spawn → dispatch → merge → learn) with each agent's tool calls, **narration**, and LLM usage; the log and per-agent activity are exportable and persisted.
+5. Outputs are **merged** weighted by each archetype's learned reliability — a reasoning-tier synthesizer runs only on genuine disagreement. The compiled **truth** and each agent's answer render as markdown (fullscreen + export-.md). Files the agents generate are captured into a **Generated files** panel for download.
+6. Each contribution is scored against the truth and folded into per-archetype, per-domain **reliability**, so future routing improves; a 👍/👎 on any agent overrides the score.
+
+**Basna vs Council:** Council is a multi-round deliberation *among* agents that see each other; Basna is one-shot — agents run blind and independent and the result is a weighted merge, not a conversation.
+
+Endpoints under `/fd/basna`: `route`, `execute`, session CRUD, `sessions/{id}/runs`, `sessions/{id}/progress`, `sessions/{id}/files` (upload/download/delete), `runs/{id}/feedback`. Tables: `basna_sessions`, `basna_runs`, `archetype_reliability` (migrate in place).
+
 ### Agent Forge
 
 Agent Forge is a dedicated Flight Deck page that uses an LLM to decompose a business objective into a team of specialized AI agents.
@@ -4222,13 +4246,10 @@ Agent Forge is a dedicated Flight Deck page that uses an LLM to decompose a busi
 **How it works:**
 
 1. Navigate to **Agent Forge** in the sidebar
-2. Configure **model tiers** under LLM Settings (see below) — persisted to your workspace
-3. Optionally add environment variables (e.g., `BRAVE_API_KEY`) that will be passed to all spawned agents
-4. Either **Start from a template** (the archetype gallery) or describe your objective and **Decompose into Agents** — the LLM analyzes your goal and proposes a team, biased toward the curated archetypes
+2. Configure **model tiers** and env vars on the **Library** page (see above) — persisted to your workspace
+3. Describe your objective and **Decompose into Agents** — the LLM analyzes your goal and proposes a team, biased toward the curated archetypes
 
-**Model tiers (NEW in 0.5.6):** LLM Settings is a per-tier model editor with four tiers — **Reasoning**, **Balanced**, **Fast / high-volume**, and **Long context** — each carrying its own provider, model, API key, base URL, and input/output context length. Pick which tier runs the decomposition ("Forge using"). Every agent (from the gallery or generator) is assigned a tier; at spawn the tier resolves to that concrete model, so model choices live in one place and a model release/reprice is a single edit. Settings persist per-user (multi-tenant) via `/fd/settings`.
-
-**Archetype library (NEW in 0.5.6):** a curated set of ~20 ready agents (Deep Researcher, Code Reviewer, Project Coordinator, Deal Screener, …) grouped by family, each a tuned role + cognitive mode + toolset + tier + fleet-instructions. Click **Start from a template** to stack archetypes into a team, or let the generator adapt them. Served from `instructions/archetypes.json` via `GET /fd/archetypes`; the generator's prompt is biased toward them.
+**Model tiers & the archetype gallery moved to the [Library](#library-new-in-057) page in 0.5.7** (see above). Forge now *consumes* the saved per-tier config — it shows a "Configure in Library" hint, every generated agent is assigned a tier that resolves to a concrete model at spawn, and the decomposition prompt stays biased toward the curated archetypes from `instructions/archetypes.json` (`GET /fd/archetypes`).
 
 **What the LLM generates for each agent:**
 
