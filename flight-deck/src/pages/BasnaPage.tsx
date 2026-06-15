@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Network, Play, Sparkles, Plus, Trash2, ThumbsUp, ThumbsDown,
-  Loader2, Check, X, Wrench, Maximize2, Download, Paperclip, FileText, Image as ImageIcon,
-  SlidersHorizontal,
+  Loader2, Check, X, Wrench, Maximize2, Minimize2, Download, Paperclip, FileText, Image as ImageIcon,
+  SlidersHorizontal, Eye,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -110,31 +110,82 @@ function downloadMarkdown(filename: string, content: string) {
   URL.revokeObjectURL(url)
 }
 
-// Fullscreen modal that renders markdown content, with an export-to-.md button.
-function MarkdownModal({ title, content, onClose }: { title: string; content: string; onClose: () => void }) {
+type ViewMode = 'markdown' | 'html' | 'text'
+
+function fileExt(name: string): string {
+  const m = name.toLowerCase().match(/\.([a-z0-9]+)$/)
+  return m ? m[1] : ''
+}
+
+// File types we can preview in-app — markdown, html, plain text, and scripts.
+// Anything else stays download-only.
+const VIEWABLE_EXTS = new Set([
+  'md', 'markdown', 'txt', 'text', 'log', 'html', 'htm',
+  'json', 'csv', 'tsv', 'xml', 'yaml', 'yml', 'toml', 'ini',
+  'py', 'sh', 'bash', 'js', 'mjs', 'ts', 'tsx', 'jsx', 'css', 'sql',
+])
+function isViewable(name: string): boolean { return VIEWABLE_EXTS.has(fileExt(name)) }
+function viewModeForFile(name: string): ViewMode {
+  const e = fileExt(name)
+  if (e === 'md' || e === 'markdown') return 'markdown'
+  if (e === 'html' || e === 'htm') return 'html'
+  return 'text'
+}
+
+// Fullscreen-capable preview modal. Renders by mode: markdown (with GFM tables),
+// raw HTML (sandboxed iframe), or plain text / source. The maximise button grows
+// it to near-fullscreen; click the backdrop or ✕ to close.
+function FileModal({ title, content, mode, onClose }: {
+  title: string; content: string; mode: ViewMode; onClose: () => void
+}) {
+  const [maximized, setMaximized] = useState(false)
+  const ext = fileExt(title)
+  const exportName = ext ? title : `${slugify(title)}.md`
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
       <div
-        className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl"
+        className={`flex flex-col rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl ${
+          maximized ? 'h-[96vh] w-[97vw] max-w-none' : 'max-h-[90vh] w-full max-w-4xl'
+        }`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex shrink-0 items-center justify-between gap-2 border-b border-zinc-800 px-4 py-3">
           <span className="truncate text-sm font-medium text-zinc-200">{title}</span>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => downloadMarkdown(`${slugify(title)}.md`, content)}
+              onClick={() => setMaximized((m) => !m)}
+              title={maximized ? 'Restore' : 'Maximise'}
+              className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            >
+              {maximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+            </button>
+            <button
+              onClick={() => downloadMarkdown(exportName, content)}
               className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-200 hover:bg-zinc-800"
             >
-              <Download className="h-3.5 w-3.5" /> Export .md
+              <Download className="h-3.5 w-3.5" /> Export {ext ? `.${ext}` : '.md'}
             </button>
             <button onClick={onClose} className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
               <X className="h-4 w-4" />
             </button>
           </div>
         </div>
-        <div className="fd-markdown overflow-auto p-5 text-sm text-zinc-200 leading-relaxed">
-          <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
-        </div>
+        {mode === 'html' ? (
+          <iframe
+            title={title}
+            sandbox=""
+            srcDoc={content}
+            className="min-h-[60vh] w-full flex-1 rounded-b-xl bg-white"
+          />
+        ) : mode === 'markdown' ? (
+          <div className="fd-markdown flex-1 overflow-auto p-5 text-sm text-zinc-200 leading-relaxed">
+            <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+          </div>
+        ) : (
+          <pre className="flex-1 overflow-auto whitespace-pre-wrap break-words p-5 font-mono text-xs leading-relaxed text-zinc-300">
+            {content}
+          </pre>
+        )}
       </div>
     </div>
   )
@@ -285,14 +336,19 @@ export function BasnaPage() {
   const {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, executing, error,
-    routerTier, maxAgents, setRouterTier, setMaxAgents, addFiles, removeFile, downloadFile,
+    routerTier, maxAgents, setRouterTier, setMaxAgents, addFiles, removeFile, downloadFile, fetchFileText,
     updateSelected, loadSessions, selectSession, newSession, route, execute, sendFeedback, deleteSession,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
 
   const [intent, setIntent] = useState('')
-  const [modal, setModal] = useState<{ title: string; content: string } | null>(null)
-  const viewFull = (title: string, content: string) => setModal({ title, content })
+  const [modal, setModal] = useState<{ title: string; content: string; mode: ViewMode } | null>(null)
+  const viewFull = (title: string, content: string) => setModal({ title, content, mode: 'markdown' })
+  // Preview a generated file: fetch its text and render by type (md/html/text).
+  const viewFile = async (name: string) => {
+    const text = await fetchFileText(name)
+    setModal({ title: name, content: text, mode: viewModeForFile(name) })
+  }
   const [editing, setEditing] = useState<Record<number, boolean>>({})
   const progressRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -704,13 +760,24 @@ export function BasnaPage() {
                       <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
                       <span className="truncate text-zinc-300">{a.name}</span>
                       <span className="shrink-0 text-zinc-600">{Math.max(1, Math.round(a.size / 1024))}kb</span>
-                      <button
-                        onClick={() => downloadFile(a.name)}
-                        title="Download"
-                        className="ml-auto shrink-0 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
-                      >
-                        <Download className="h-3.5 w-3.5" />
-                      </button>
+                      <div className="ml-auto flex shrink-0 items-center gap-0.5">
+                        {isViewable(a.name) && (
+                          <button
+                            onClick={() => viewFile(a.name)}
+                            title="View"
+                            className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+                          >
+                            <Eye className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        <button
+                          onClick={() => downloadFile(a.name)}
+                          title="Download"
+                          className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -730,7 +797,7 @@ export function BasnaPage() {
         </div>
       </div>
 
-      {modal && <MarkdownModal title={modal.title} content={modal.content} onClose={() => setModal(null)} />}
+      {modal && <FileModal title={modal.title} content={modal.content} mode={modal.mode} onClose={() => setModal(null)} />}
     </div>
   )
 }

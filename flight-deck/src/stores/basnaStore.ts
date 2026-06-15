@@ -269,6 +269,7 @@ interface BasnaStore {
   addFiles: (files: FileList | File[]) => void
   removeFile: (name: string) => Promise<void>
   downloadFile: (name: string) => Promise<void>
+  fetchFileText: (name: string) => Promise<string>
 
   loadSessions: () => Promise<void>
   selectSession: (id: string) => Promise<void>
@@ -334,6 +335,15 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     a.download = name
     a.click()
     URL.revokeObjectURL(url)
+  },
+
+  // Fetch a generated file's content as text for in-app preview.
+  fetchFileText: async (name) => {
+    const sid = get().activeSession?.id
+    if (!sid) return ''
+    const res = await _authedFetch(`/fd/basna/sessions/${encodeURIComponent(sid)}/files/${encodeURIComponent(name)}`)
+    if (!res.ok) return ''
+    return res.text()
   },
 
   loadSessions: async () => {
