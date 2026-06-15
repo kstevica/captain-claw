@@ -32,6 +32,17 @@ export interface RouteSelected {
   tier: string
   why: string
   prior_weight: number
+  // Optional per-agent overrides set in the route editor (take precedence over
+  // the Library tier / archetype defaults at spawn + dispatch).
+  provider?: string
+  model?: string
+  api_key?: string
+  base_url?: string
+  max_context?: number
+  max_tokens?: number
+  cognitive_mode?: string
+  fleet_instructions?: string
+  extra?: string
 }
 
 export interface RoutePlan {
@@ -143,6 +154,12 @@ async function apiRoute(body: Record<string, unknown>): Promise<RoutePlan> {
   return res.json()
 }
 
+async function apiSaveRoute(sessionId: string, route: RoutePlan): Promise<void> {
+  await _authedFetch(`/fd/basna/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'PUT', body: JSON.stringify({ route: JSON.stringify(route) }),
+  })
+}
+
 async function apiExecute(body: Record<string, unknown>): Promise<ExecuteResult> {
   const res = await _authedFetch('/fd/basna/execute', {
     method: 'POST', body: JSON.stringify(body),
@@ -247,6 +264,7 @@ interface BasnaStore {
   loadSessions: () => Promise<void>
   selectSession: (id: string) => Promise<void>
   newSession: () => void
+  updateSelected: (index: number, patch: Partial<RouteSelected>) => void
   route: (intent: string, tiers: TierMap) => Promise<void>
   execute: (tiers: TierMap, envVars: EnvVar[]) => Promise<void>
   sendFeedback: (runId: number, success: boolean) => Promise<void>
@@ -328,6 +346,13 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
 
   newSession: () => set({ activeSession: null, routePlan: null, runs: [], lastExecute: null, progress: [], attachments: [], error: null }),
 
+  updateSelected: (index, patch) => {
+    const plan = get().routePlan
+    if (!plan) return
+    const selected = plan.selected.map((s, i) => (i === index ? { ...s, ...patch } : s))
+    set({ routePlan: { ...plan, selected } })
+  },
+
   route: async (intent, tiers) => {
     set({ routing: true, error: null })
     try {
@@ -366,6 +391,10 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
         set({ error: e instanceof Error ? e.message : 'file upload failed' })
         return
       }
+    }
+    // Persist any per-agent edits made in the route editor before the run.
+    if (get().routePlan) {
+      try { await apiSaveRoute(sid, get().routePlan as RoutePlan) } catch { /* ignore */ }
     }
     set({ executing: true, error: null, progress: [] })
     // Poll the live progress log while the (blocking) execute call runs.

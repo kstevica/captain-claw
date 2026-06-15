@@ -481,16 +481,18 @@ def _progress_done(session_id: str) -> None:
         p["active"] = False
 
 
-def _build_dispatch_prompt(arch: dict, intent: str, merge_kind: str, file_names: list[str] | None = None) -> str:
+def _build_dispatch_prompt(role: str, intent: str, merge_kind: str,
+                           file_names: list[str] | None = None, extra: str = "") -> str:
     """Frame the task for one ephemeral agent.
 
     The archetype's role + SOP (fleet_instructions) are delivered separately as
     the agent's fleet-level instructions (system prompt) via the peer_agents
     handshake — see _send_chat_and_collect — so this prompt is just the task plus
     a one-shot framing. Agents run blind (cannot see each other), keeping outputs
-    independent for the weighted merge.
+    independent for the weighted merge. `extra` is per-agent instructions the user
+    added in the route editor.
     """
-    role = arch.get("role", "Specialist")
+    role = role or "Specialist"
     if merge_kind == "diverge":
         framing = ("Contribute your distinct perspective. Surface options and angles "
                    "others might miss; do not try to be exhaustive on your own.")
@@ -506,9 +508,10 @@ def _build_dispatch_prompt(arch: dict, intent: str, merge_kind: str, file_names:
             "Use your read / pdf_extract / xlsx_extract / image_vision tools to work "
             "with them as needed.\n"
         )
+    extra_block = f"\n\n## Additional instructions\n{extra.strip()}\n" if extra and extra.strip() else ""
     return (
         f"You are the {role}, working as one independent member of a one-shot ensemble. "
-        f"{framing}\n\n## Task\n{intent}{files_block}\n\n"
+        f"{framing}\n\n## Task\n{intent}{files_block}{extra_block}\n\n"
         "You are working alone and cannot see the other members. Return only your final "
         "answer — no preamble, no meta-commentary about the ensemble."
     )
@@ -880,26 +883,31 @@ async def execute_route(
         # Resolve each archetype's tier to a concrete model from the Library config
         # when provided; otherwise let the backend resolve the registry tier.
         async def _spawn(sel: dict, arch: dict):
+            # Per-agent overrides from the route editor take precedence over the
+            # Library tier, which takes precedence over the registry tier default.
+            lt = (body.tiers or {}).get(sel["tier"]) or {}
+            provider = sel.get("provider") or lt.get("provider")
+            model = sel.get("model") or lt.get("model")
+            api_key = sel.get("api_key") or lt.get("api_key") or body.api_key or ""
+            base_url = sel.get("base_url") or lt.get("base_url") or ""
+            max_tokens = int(sel.get("max_tokens") or lt.get("output_ctx") or 0) or 32768
+            max_context = int(sel.get("max_context") or lt.get("input_ctx") or 0)
             base = dict(
                 name=f"basna-{sid8}-{run_tag}-{arch['id']}",
-                description=f"Basna ephemeral · {arch.get('role', '')}",
-                cognitive_mode=arch.get("cognitive_mode", "neutra"),
+                description=f"Basna ephemeral · {sel.get('role') or arch.get('role', '')}",
+                cognitive_mode=sel.get("cognitive_mode") or arch.get("cognitive_mode", "neutra"),
                 tools=arch.get("tools") or AgentConfig().tools,
                 env_vars=body.env_vars or [],
                 web_enabled=True, web_port=0,
             )
-            lt = (body.tiers or {}).get(sel["tier"])
-            if lt and lt.get("model"):
+            if model:
                 cfg = AgentConfig(
-                    **base, tier="",
-                    provider=lt.get("provider", ""), model=lt.get("model", ""),
-                    provider_api_key=lt.get("api_key") or body.api_key or "",
-                    base_url=lt.get("base_url") or "",
-                    max_tokens=int(lt.get("output_ctx") or 0) or 32768,
-                    max_context=int(lt.get("input_ctx") or 0) or 0,
+                    **base, tier="", provider=provider or "", model=model,
+                    provider_api_key=api_key, base_url=base_url,
+                    max_tokens=max_tokens, max_context=max_context,
                 )
             else:
-                cfg = AgentConfig(**base, tier=sel["tier"], provider_api_key=body.api_key or "")
+                cfg = AgentConfig(**base, tier=sel["tier"], provider_api_key=api_key)
             res = await spawn_process(cfg, request, user)
             # Materialize input files into this agent's workspace.
             if input_files and res.ok:
@@ -936,7 +944,9 @@ async def execute_route(
         # 2) Dispatch the task to each agent in parallel; log each tool call live
         # and each agent's completion as it returns.
         async def _dispatch_tracked(sp: dict) -> dict:
-            role = sp["arch"].get("role") or sp["arch"]["id"]
+            sel, arch = sp["sel"], sp["arch"]
+            role = sel.get("role") or arch.get("role") or arch["id"]
+            fleet = sel.get("fleet_instructions") or arch.get("fleet_instructions", "")
 
             def _on_action(act: dict) -> None:
                 if act["tool"] == "narration":
@@ -952,10 +962,10 @@ async def execute_route(
                          if not str(f.get("mime", "")).startswith("image/")]
             d = await _dispatch_one(
                 sp["port"], sp["auth"],
-                _build_dispatch_prompt(sp["arch"], sess["intent"], merge_kind,
-                                       [f["name"] for f in input_files]),
+                _build_dispatch_prompt(role, sess["intent"], merge_kind,
+                                       [f["name"] for f in input_files], extra=sel.get("extra", "")),
                 body.dispatch_timeout, on_action=_on_action,
-                fleet_instructions=sp["arch"].get("fleet_instructions", ""), agent_name=role,
+                fleet_instructions=fleet, agent_name=role,
                 file_paths=doc_paths, image_paths=img_paths,
             )
             mark = "✓" if d["ok"] else "✗"
@@ -967,7 +977,8 @@ async def execute_route(
         dispatched = await asyncio.gather(*[_dispatch_tracked(sp) for sp in spawned])
         for sp, d in zip(spawned, dispatched):
             results.append({
-                "archetype_id": sp["arch"]["id"], "role": sp["arch"].get("role", ""),
+                "archetype_id": sp["arch"]["id"],
+                "role": sp["sel"].get("role") or sp["arch"].get("role", ""),
                 "tier": sp["sel"]["tier"], "provider": "", "model": "",
                 "weight": float(sp["sel"].get("prior_weight", 0.7)),
                 "output": d["output"], "ok": d["ok"], "latency_ms": d["latency_ms"],
