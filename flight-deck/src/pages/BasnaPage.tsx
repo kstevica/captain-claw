@@ -1,9 +1,32 @@
 import { useEffect, useState } from 'react'
 import {
   Network, Play, Sparkles, Plus, Trash2, ThumbsUp, ThumbsDown,
-  ChevronDown, Loader2, Check, X,
+  Loader2, Check, X, Wrench,
 } from 'lucide-react'
+import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useBasnaStore, type BasnaSession, type BasnaRun } from '../stores/basnaStore'
+import { useTierConfig, TIER_ORDER } from '../services/tierConfig'
+
+// Demo / debug tasks — each exercises a different path through the pipeline.
+const BASNA_EXAMPLES: { label: string; text: string }[] = [
+  {
+    label: 'Data store choice',
+    text: "We're adding an append-only event log: ~50M records/month, written continuously, queried by time-range and user_id, with daily aggregations. Pick ONE data store — Postgres, ClickHouse, or DynamoDB — and give the single most important reason.",
+  },
+  {
+    label: 'Quick fact',
+    text: 'What does the SQL keyword EXPLAIN do? One sentence.',
+  },
+  {
+    label: 'Brainstorm options',
+    text: 'Brainstorm ways to cut cold-start latency for a serverless API. List distinct approaches — breadth over depth.',
+  },
+  {
+    label: 'Migration risk',
+    text: 'Name the single biggest risk in migrating a monolith to microservices.',
+  },
+]
 
 const DIFFICULTY_COLOR: Record<string, string> = {
   trivial: 'text-emerald-700 dark:text-emerald-300',
@@ -57,6 +80,8 @@ function SessionCard({ s, active, onOpen, onDelete }: {
 
 function AgentRow({ run, onFeedback }: { run: BasnaRun; onFeedback: (success: boolean) => void }) {
   const scored = run.success !== null
+  let actions: { tool: string; detail?: string }[] = []
+  try { actions = JSON.parse(run.actions || '[]') } catch { actions = [] }
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
       <div className="flex items-center justify-between gap-2">
@@ -76,7 +101,23 @@ function AgentRow({ run, onFeedback }: { run: BasnaRun; onFeedback: (success: bo
         <WeightBar value={run.weight_at_run} />
       </div>
       {run.output && (
-        <p className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap text-xs text-zinc-400">{run.output}</p>
+        <div className="fd-markdown mt-2 max-h-48 overflow-auto text-xs text-zinc-400 leading-relaxed">
+          <Markdown remarkPlugins={[remarkGfm]}>{run.output}</Markdown>
+        </div>
+      )}
+      {actions.length > 0 && (
+        <div className="mt-2 rounded-md border border-zinc-800 bg-zinc-950/40 p-2">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Actions ({actions.length})</div>
+          <div className="space-y-0.5">
+            {actions.map((a, i) => (
+              <div key={i} className="flex items-baseline gap-2 text-[11px]">
+                <Wrench className="h-3 w-3 shrink-0 text-zinc-600" />
+                <span className="font-mono text-zinc-400">{a.tool}</span>
+                {a.detail && <span className="truncate text-zinc-600">{a.detail}</span>}
+              </div>
+            ))}
+          </div>
+        </div>
       )}
       <div className="mt-2 flex items-center gap-2">
         <span className="text-[11px] text-zinc-500">Was this contribution good?</span>
@@ -101,14 +142,14 @@ function AgentRow({ run, onFeedback }: { run: BasnaRun; onFeedback: (success: bo
 
 export function BasnaPage() {
   const {
-    sessions, activeSession, routePlan, runs, lastExecute,
+    sessions, activeSession, routePlan, runs, lastExecute, progress,
     routing, executing, error,
-    apiKey, maxAgents, setApiKey, setMaxAgents,
+    routerTier, maxAgents, setRouterTier, setMaxAgents,
     loadSessions, selectSession, newSession, route, execute, sendFeedback, deleteSession,
   } = useBasnaStore()
+  const { tiers, registry } = useTierConfig()
 
   const [intent, setIntent] = useState('')
-  const [showAdvanced, setShowAdvanced] = useState(false)
 
   useEffect(() => { loadSessions() }, [loadSessions])
   useEffect(() => { setIntent(activeSession?.intent || '') }, [activeSession?.id, activeSession?.intent])
@@ -163,7 +204,36 @@ export function BasnaPage() {
                 placeholder="Describe the task. The router picks the smallest team that can answer it well."
                 className="w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950/60 p-2.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-sky-600 focus:outline-none"
               />
+              {!intent.trim() && (
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  <span className="text-[11px] text-zinc-600">Try:</span>
+                  {BASNA_EXAMPLES.map((ex) => (
+                    <button
+                      key={ex.label}
+                      onClick={() => setIntent(ex.text)}
+                      title={ex.text}
+                      className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2.5 py-1 text-[11px] text-sky-300 hover:bg-sky-500/20 transition-colors"
+                    >
+                      {ex.label}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="mt-3 flex flex-wrap items-center gap-3">
+                <label className="flex items-center gap-2 text-xs text-zinc-400">
+                  Router tier
+                  <select
+                    value={routerTier}
+                    onChange={(e) => setRouterTier(e.target.value)}
+                    title="Which Library tier picks the archetypes"
+                    className="rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none"
+                  >
+                    {TIER_ORDER.filter((t) => tiers[t]).map((t) => (
+                      <option key={t} value={t}>{registry?.tiers[t]?.label || t}</option>
+                    ))}
+                    {Object.keys(tiers).length === 0 && <option value="reason">reason</option>}
+                  </select>
+                </label>
                 <label className="flex items-center gap-2 text-xs text-zinc-400">
                   Max agents
                   <input
@@ -172,16 +242,9 @@ export function BasnaPage() {
                     className="w-16 rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none"
                   />
                 </label>
-                <button
-                  onClick={() => setShowAdvanced((v) => !v)}
-                  className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300"
-                >
-                  <ChevronDown className={`h-3.5 w-3.5 transition-transform ${showAdvanced ? 'rotate-180' : ''}`} />
-                  Advanced
-                </button>
                 <div className="ml-auto flex items-center gap-2">
                   <button
-                    onClick={() => route(intent)}
+                    onClick={() => route(intent, tiers)}
                     disabled={!canRoute}
                     className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
                   >
@@ -189,7 +252,7 @@ export function BasnaPage() {
                     Route
                   </button>
                   <button
-                    onClick={() => execute()}
+                    onClick={() => execute(tiers)}
                     disabled={!canRun}
                     className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40"
                   >
@@ -198,25 +261,35 @@ export function BasnaPage() {
                   </button>
                 </div>
               </div>
-              {showAdvanced && (
-                <div className="mt-3 border-t border-zinc-800 pt-3">
-                  <label className="mb-1.5 block text-xs font-medium text-zinc-400">
-                    Anthropic API key (optional — falls back to the server's env key)
-                  </label>
-                  <input
-                    type="password" value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
-                    placeholder="sk-ant-…"
-                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-2.5 py-1.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-sky-600 focus:outline-none"
-                  />
-                </div>
-              )}
               {error && (
                 <div className="mt-3 flex items-start gap-2 rounded-lg border border-rose-900/50 bg-rose-950/30 p-2.5 text-xs text-rose-300">
                   <X className="mt-0.5 h-3.5 w-3.5 shrink-0" /> {error}
                 </div>
               )}
             </div>
+
+            {/* Live progress log */}
+            {(executing || progress.length > 0) && (
+              <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
+                <div className="mb-2 flex items-center gap-2">
+                  {executing
+                    ? <Loader2 className="h-4 w-4 animate-spin text-sky-400" />
+                    : <Check className="h-4 w-4 text-emerald-500" />}
+                  <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Progress</span>
+                </div>
+                <div className="space-y-1">
+                  {progress.map((ev) => (
+                    <div key={ev.i} className="flex items-baseline gap-2 text-xs">
+                      <span className="w-16 shrink-0 font-mono text-[10px] uppercase text-zinc-600">{ev.stage}</span>
+                      <span className={ev.ok === false ? 'text-rose-400' : 'text-zinc-300'}>{ev.message}</span>
+                    </div>
+                  ))}
+                  {executing && progress.length === 0 && (
+                    <div className="text-xs text-zinc-500">Starting…</div>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Route plan */}
             {routePlan && (
@@ -262,7 +335,9 @@ export function BasnaPage() {
                     </span>
                   </span>
                 </div>
-                <p className="whitespace-pre-wrap text-sm text-zinc-200">{truth}</p>
+                <div className="fd-markdown text-sm text-zinc-200 leading-relaxed">
+                  <Markdown remarkPlugins={[remarkGfm]}>{truth}</Markdown>
+                </div>
               </div>
             )}
 

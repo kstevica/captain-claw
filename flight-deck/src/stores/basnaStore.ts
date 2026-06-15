@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { useAuthStore, refreshAccessToken } from './authStore'
+import type { TierMap } from '../services/tierConfig'
 
 // ── Types (mirror captain_claw/flight_deck/basna_routes.py) ──────────
 
@@ -45,6 +46,7 @@ export interface BasnaRun {
   tier: string
   weight_at_run: number
   output: string
+  actions: string         // JSON array of { tool, detail }
   success: number | null  // 1 / 0 / null
   latency_ms: number
   created_at: string
@@ -72,6 +74,13 @@ export interface ExecuteResult {
   learned: { archetype_id: string; run_id: number; success: boolean; weight: number }[]
   spawned: number
   dispatched: number
+}
+
+export interface ProgressEvent {
+  i: number
+  stage: string   // route | spawn | dispatch | merge | learn | done
+  message: string
+  ok?: boolean
 }
 
 // ── API helpers ──────────────────────────────────────────────────────
@@ -134,6 +143,12 @@ async function apiExecute(body: Record<string, unknown>): Promise<ExecuteResult>
   return res.json()
 }
 
+async function apiProgress(id: string): Promise<{ events: ProgressEvent[]; active: boolean }> {
+  const res = await _authedFetch(`/fd/basna/sessions/${encodeURIComponent(id)}/progress`)
+  if (!res.ok) return { events: [], active: false }
+  return res.json()
+}
+
 async function apiFeedback(runId: number, success: boolean): Promise<void> {
   await _authedFetch(`/fd/basna/runs/${runId}/feedback`, {
     method: 'POST', body: JSON.stringify({ success }),
@@ -150,7 +165,7 @@ export function parseRoute(s?: string): RoutePlan | null {
   }
 }
 
-const _API_KEY_LS = 'basna.apiKey'
+const _ROUTER_TIER_LS = 'basna.routerTier'
 
 // ── Store ────────────────────────────────────────────────────────────
 
@@ -160,23 +175,24 @@ interface BasnaStore {
   routePlan: RoutePlan | null
   runs: BasnaRun[]
   lastExecute: ExecuteResult | null
+  progress: ProgressEvent[]
 
   listLoading: boolean
   routing: boolean
   executing: boolean
   error: string | null
 
-  apiKey: string
+  routerTier: string   // which Library tier selects the archetypes (the router)
   maxAgents: number
 
-  setApiKey: (k: string) => void
+  setRouterTier: (t: string) => void
   setMaxAgents: (n: number) => void
 
   loadSessions: () => Promise<void>
   selectSession: (id: string) => Promise<void>
   newSession: () => void
-  route: (intent: string) => Promise<void>
-  execute: () => Promise<void>
+  route: (intent: string, tiers: TierMap) => Promise<void>
+  execute: (tiers: TierMap) => Promise<void>
   sendFeedback: (runId: number, success: boolean) => Promise<void>
   deleteSession: (id: string) => Promise<void>
 }
@@ -187,18 +203,19 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   routePlan: null,
   runs: [],
   lastExecute: null,
+  progress: [],
 
   listLoading: false,
   routing: false,
   executing: false,
   error: null,
 
-  apiKey: (typeof localStorage !== 'undefined' && localStorage.getItem(_API_KEY_LS)) || '',
+  routerTier: (typeof localStorage !== 'undefined' && localStorage.getItem(_ROUTER_TIER_LS)) || 'reason',
   maxAgents: 6,
 
-  setApiKey: (k) => {
-    try { localStorage.setItem(_API_KEY_LS, k) } catch { /* ignore */ }
-    set({ apiKey: k })
+  setRouterTier: (t) => {
+    try { localStorage.setItem(_ROUTER_TIER_LS, t) } catch { /* ignore */ }
+    set({ routerTier: t })
   },
   setMaxAgents: (n) => set({ maxAgents: Math.max(1, Math.min(10, n)) }),
 
@@ -215,19 +232,24 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     const s = await apiGetSession(id)
     if (!s) return
     const runs = await apiListRuns(id)
-    set({ activeSession: s, routePlan: parseRoute(s.route), runs, lastExecute: null, error: null })
+    set({ activeSession: s, routePlan: parseRoute(s.route), runs, lastExecute: null, progress: [], error: null })
   },
 
-  newSession: () => set({ activeSession: null, routePlan: null, runs: [], lastExecute: null, error: null }),
+  newSession: () => set({ activeSession: null, routePlan: null, runs: [], lastExecute: null, progress: [], error: null }),
 
-  route: async (intent) => {
+  route: async (intent, tiers) => {
     set({ routing: true, error: null })
     try {
       const sid = get().activeSession?.id
+      // The router runs on the user-selected Library tier (default reasoning).
+      const tc = tiers[get().routerTier]
+      const creds = tc?.model
+        ? { provider: tc.provider, model: tc.model, api_key: tc.api_key || undefined, base_url: tc.base_url || undefined }
+        : {}
       const plan = await apiRoute({
         intent,
         max_agents: get().maxAgents,
-        ...(get().apiKey ? { api_key: get().apiKey } : {}),
+        ...creds,
         ...(sid ? { session_id: sid } : {}),
       })
       const s = plan.session_id ? await apiGetSession(plan.session_id) : null
@@ -240,15 +262,17 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     }
   },
 
-  execute: async () => {
+  execute: async (tiers) => {
     const sid = get().activeSession?.id
     if (!sid) return
-    set({ executing: true, error: null })
+    set({ executing: true, error: null, progress: [] })
+    // Poll the live progress log while the (blocking) execute call runs.
+    const poll = setInterval(async () => {
+      try { const p = await apiProgress(sid); set({ progress: p.events || [] }) } catch { /* ignore */ }
+    }, 700)
     try {
-      const res = await apiExecute({
-        session_id: sid,
-        ...(get().apiKey ? { api_key: get().apiKey } : {}),
-      })
+      // Spawned agents + merge calls resolve their model/key from the Library tiers.
+      const res = await apiExecute({ session_id: sid, tiers })
       const s = await apiGetSession(sid)
       const runs = await apiListRuns(sid)
       set({ lastExecute: res, activeSession: s, runs })
@@ -256,6 +280,8 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     } catch (e) {
       set({ error: e instanceof Error ? e.message : 'execute failed' })
     } finally {
+      clearInterval(poll)
+      try { const p = await apiProgress(sid); set({ progress: p.events || [] }) } catch { /* ignore */ }
       set({ executing: false })
     }
   },

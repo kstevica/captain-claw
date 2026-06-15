@@ -370,6 +370,29 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
 
 _DONE_STATES = {"ready", "idle", "done", "completed"}
 
+# In-memory execution progress, polled by the UI during /execute. Keyed by
+# session_id, overwritten each run. Single-process (the FD server), best-effort.
+_PROGRESS: dict[str, dict] = {}
+_PROGRESS_MAX_SESSIONS = 50
+
+
+def _progress_start(session_id: str) -> None:
+    if len(_PROGRESS) > _PROGRESS_MAX_SESSIONS:
+        _PROGRESS.clear()
+    _PROGRESS[session_id] = {"events": [], "active": True}
+
+
+def _progress(session_id: str, stage: str, message: str, **extra) -> None:
+    p = _PROGRESS.get(session_id)
+    if p is not None:
+        p["events"].append({"i": len(p["events"]), "stage": stage, "message": message, **extra})
+
+
+def _progress_done(session_id: str) -> None:
+    p = _PROGRESS.get(session_id)
+    if p is not None:
+        p["active"] = False
+
 
 def _build_dispatch_prompt(arch: dict, intent: str, merge_kind: str) -> str:
     """Frame the task for one ephemeral agent as its archetype.
@@ -473,10 +496,9 @@ def _tier_creds(registry: dict, tier: str, api_key: str) -> dict:
             "base_url": t.get("base_url", "") or None, "api_key": api_key or None}
 
 
-async def _llm_conflict(good: list[dict], registry: dict, api_key: str) -> bool:
+async def _llm_conflict(good: list[dict], creds: dict) -> bool:
     """Fast-tier check: do these answers substantively agree? Default to disagree."""
     from captain_claw.llm import create_provider, Message
-    creds = _tier_creds(registry, "fast", api_key)
     listing = "\n\n".join(f"[{i+1}] {r['output'].strip()[:2000]}" for i, r in enumerate(good))
     prov = create_provider(temperature=0.0, max_tokens=256, **creds)
     resp = await prov.complete(messages=[
@@ -495,10 +517,9 @@ async def _llm_conflict(good: list[dict], registry: dict, api_key: str) -> bool:
         return False
 
 
-async def _llm_synthesize(good: list[dict], domain: str, registry: dict, api_key: str) -> str:
+async def _llm_synthesize(good: list[dict], domain: str, creds: dict) -> str:
     """Reason-tier reconciliation of disagreeing answers, trusting weight."""
     from captain_claw.llm import create_provider, Message
-    creds = _tier_creds(registry, "reason", api_key)
     listing = "\n\n".join(
         f"### {r['role']} (reliability weight {r['weight']:.2f})\n{r['output'].strip()}"
         for r in good
@@ -516,14 +537,13 @@ async def _llm_synthesize(good: list[dict], domain: str, registry: dict, api_key
     return resp.content.strip()
 
 
-async def _llm_judge(good: list[dict], truth: str, registry: dict, api_key: str) -> list[bool]:
+async def _llm_judge(good: list[dict], truth: str, creds: dict) -> list[bool]:
     """Fast-tier per-contribution verdict: did each support the final truth?
 
     Returns one bool per `good` entry, in order. Raises on unparseable output so
     the caller can leave those runs unscored rather than reward them by default.
     """
     from captain_claw.llm import create_provider, Message
-    creds = _tier_creds(registry, "fast", api_key)
     listing = "\n\n".join(f"[{i+1}] {r['output'].strip()[:2000]}" for i, r in enumerate(good))
     prov = create_provider(temperature=0.0, max_tokens=512, **creds)
     resp = await prov.complete(messages=[
@@ -581,13 +601,29 @@ async def _score_runs(results: list[dict], agg: dict, merge_kind: str, *, judge_
     return scores
 
 
-async def _send_chat_and_collect(port: int, token: str, prompt: str, timeout: float) -> str:
-    """Connect to an agent's /ws, send one chat, return its final reply when done."""
+def _summarize_tool_args(args) -> str:
+    """Concise one-line summary of a tool call's arguments for the action log."""
+    if isinstance(args, dict) and args:
+        return ", ".join(f"{k}={str(v)[:40]}" for k, v in list(args.items())[:2])[:120]
+    if args:
+        return str(args)[:120]
+    return ""
+
+
+async def _send_chat_and_collect(
+    port: int, token: str, prompt: str, timeout: float, on_action=None,
+) -> tuple[str, list[dict]]:
+    """Connect to an agent's /ws, send one chat, return (final reply, actions).
+
+    `actions` is the agent's tool calls (the `monitor` events Council also shows),
+    each {tool, detail}. `on_action(act)` is invoked live as each one arrives.
+    """
     import websockets
     uri = f"ws://localhost:{port}/ws" + (f"?token={token}" if token else "")
-    answer = ""
     last_err: Exception | None = None
     for attempt in range(10):  # the agent's web server may still be booting
+        answer = ""
+        actions: list[dict] = []
         try:
             async with websockets.connect(uri, max_size=8 * 1024 * 1024, open_timeout=10) as ws:
                 await asyncio.wait_for(ws.recv(), timeout=15)  # welcome
@@ -603,32 +639,46 @@ async def _send_chat_and_collect(port: int, token: str, prompt: str, timeout: fl
                     if mtype == "chat_message" and msg.get("role") == "assistant":
                         if msg.get("content"):
                             answer = msg["content"]  # keep the latest full reply
+                    elif mtype == "monitor" and not msg.get("replay"):
+                        act = {"tool": str(msg.get("tool_name") or msg.get("tool") or "tool"),
+                               "detail": _summarize_tool_args(msg.get("arguments"))}
+                        actions.append(act)
+                        if on_action:
+                            try:
+                                on_action(act)
+                            except Exception:
+                                pass
                     elif mtype == "status" and str(msg.get("status", "")).lower() in _DONE_STATES:
                         break
                     elif mtype == "error":
                         raise RuntimeError(msg.get("message", "agent error"))
-            return answer.strip()
+            return answer.strip(), actions
         except (ConnectionRefusedError, OSError) as e:
             last_err = e
             await asyncio.sleep(0.5 * (attempt + 1))
     raise RuntimeError(f"could not reach agent on port {port}: {last_err}")
 
 
-async def _dispatch_one(port: int, token: str, prompt: str, timeout: float) -> dict:
+async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_action=None) -> dict:
     started = time.monotonic()
     try:
-        out = await _send_chat_and_collect(port, token, prompt, timeout)
-        return {"ok": True, "output": out, "latency_ms": int((time.monotonic() - started) * 1000)}
+        out, actions = await _send_chat_and_collect(port, token, prompt, timeout, on_action=on_action)
+        return {"ok": True, "output": out, "actions": actions,
+                "latency_ms": int((time.monotonic() - started) * 1000)}
     except Exception as e:
         log.warning("Basna dispatch failed", error=str(e))
-        return {"ok": False, "output": "", "error": str(e),
+        return {"ok": False, "output": "", "actions": [], "error": str(e),
                 "latency_ms": int((time.monotonic() - started) * 1000)}
 
 
 class ExecuteRequest(BaseModel):
     session_id: str
-    # One API key covers all anthropic-tier agents + the merge calls; empty falls
-    # back to the provider's env var (the prod default).
+    # Per-tier model config from the Library: tier -> {provider, model, api_key,
+    # base_url, input_ctx, output_ctx}. Spawned agents and the merge calls resolve
+    # their model/key from here by tier; missing entries fall back to the registry
+    # tier defaults + the provider env var.
+    tiers: dict | None = None
+    # Fallback key when a tier omits one (empty -> provider env var).
     api_key: str = ""
     agent_max_tokens: int = Field(default=8192, ge=512, le=32768)
     dispatch_timeout: float = Field(default=600.0, ge=10.0, le=3600.0)
@@ -669,20 +719,38 @@ async def execute_route(
 
     await db.update_basna_session(body.session_id, user["id"], status="running")
 
-    sid8 = body.session_id[:8]
+    sid = body.session_id
+    _progress_start(sid)
+    sid8 = sid[:8]
     plan = [(s, arch_by_id[s["archetype_id"]]) for s in selected if s["archetype_id"] in arch_by_id]
+    _progress(sid, "route", f"Selected {len(plan)} archetype(s) · {domain} / {merge_kind}")
     spawned: list[dict] = []  # {sel, arch, slug, port, auth}
     results: list[dict] = []
     try:
+        _progress(sid, "spawn", f"Spawning {len(plan)} agent(s)…")
         # 1) Spawn the selected archetypes (spawn_process serializes internally).
+        # Resolve each archetype's tier to a concrete model from the Library config
+        # when provided; otherwise let the backend resolve the registry tier.
         async def _spawn(sel: dict, arch: dict):
-            cfg = AgentConfig(
+            base = dict(
                 name=f"basna-{sid8}-{arch['id']}",
                 description=f"Basna ephemeral · {arch.get('role', '')}",
-                tier=sel["tier"], cognitive_mode=arch.get("cognitive_mode", "neutra"),
+                cognitive_mode=arch.get("cognitive_mode", "neutra"),
                 tools=arch.get("tools") or AgentConfig().tools,
-                provider_api_key=body.api_key or "", web_enabled=True, web_port=0,
+                web_enabled=True, web_port=0,
             )
+            lt = (body.tiers or {}).get(sel["tier"])
+            if lt and lt.get("model"):
+                cfg = AgentConfig(
+                    **base, tier="",
+                    provider=lt.get("provider", ""), model=lt.get("model", ""),
+                    provider_api_key=lt.get("api_key") or body.api_key or "",
+                    base_url=lt.get("base_url") or "",
+                    max_tokens=int(lt.get("output_ctx") or 0) or 32768,
+                    max_context=int(lt.get("input_ctx") or 0) or 0,
+                )
+            else:
+                cfg = AgentConfig(**base, tier=sel["tier"], provider_api_key=body.api_key or "")
             res = await spawn_process(cfg, request, user)
             return sel, arch, res
 
@@ -702,21 +770,34 @@ async def execute_route(
                 continue
             spawned.append({"sel": sel, "arch": arch, "slug": res.slug,
                             "port": port, "auth": entry.get("web_auth", "")})
+        _progress(sid, "spawn", f"Spawned {len(spawned)}/{len(plan)}; dispatching…")
 
-        # 2) Dispatch the task to each agent in parallel and collect replies.
-        dispatched = await asyncio.gather(*[
-            _dispatch_one(
+        # 2) Dispatch the task to each agent in parallel; log each tool call live
+        # and each agent's completion as it returns.
+        async def _dispatch_tracked(sp: dict) -> dict:
+            role = sp["arch"].get("role") or sp["arch"]["id"]
+
+            def _on_action(act: dict) -> None:
+                detail = f": {act['detail']}" if act.get("detail") else ""
+                _progress(sid, "action", f"{role} → {act['tool']}{detail}")
+
+            d = await _dispatch_one(
                 sp["port"], sp["auth"],
                 _build_dispatch_prompt(sp["arch"], sess["intent"], merge_kind),
-                body.dispatch_timeout,
-            ) for sp in spawned
-        ])
+                body.dispatch_timeout, on_action=_on_action,
+            )
+            mark = "✓" if d["ok"] else "✗"
+            _progress(sid, "dispatch", f"{role} {mark} · {len(d['actions'])} action(s) ({d['latency_ms'] / 1000:.1f}s)", ok=d["ok"])
+            return d
+
+        dispatched = await asyncio.gather(*[_dispatch_tracked(sp) for sp in spawned])
         for sp, d in zip(spawned, dispatched):
             results.append({
                 "archetype_id": sp["arch"]["id"], "role": sp["arch"].get("role", ""),
                 "tier": sp["sel"]["tier"], "provider": "", "model": "",
                 "weight": float(sp["sel"].get("prior_weight", 0.7)),
                 "output": d["output"], "ok": d["ok"], "latency_ms": d["latency_ms"],
+                "actions": d.get("actions", []),
             })
     finally:
         # 3) Always tear the ephemeral agents down.
@@ -732,22 +813,36 @@ async def execute_route(
         run_ids = await db.add_basna_runs(body.session_id, user["id"], [{
             "archetype_id": r["archetype_id"], "role": r["role"], "tier": r["tier"],
             "weight_at_run": r["weight"], "output": r["output"],
+            "actions": json.dumps(r.get("actions", [])),
             "latency_ms": r["latency_ms"], "success": None,
         } for r in results])
 
+    # Resolve LLM creds for a tier from the Library config, falling back to the
+    # registry tier defaults + env key.
+    def _merge_creds(tier: str) -> dict:
+        lt = (body.tiers or {}).get(tier)
+        if lt and lt.get("model"):
+            return {"provider": lt.get("provider", "anthropic"), "model": lt.get("model", ""),
+                    "base_url": lt.get("base_url") or None,
+                    "api_key": lt.get("api_key") or body.api_key or None}
+        return _tier_creds(registry, tier, body.api_key)
+
     # 5) Compile the truth (weighted; LLM synthesis only on genuine conflict).
+    _progress(sid, "merge", "Compiling the truth…")
     agg = await _aggregate(
         results, merge_kind, domain,
-        conflict_fn=lambda good: _llm_conflict(good, registry, body.api_key),
-        synth_fn=lambda good: _llm_synthesize(good, domain, registry, body.api_key),
+        conflict_fn=lambda good: _llm_conflict(good, _merge_creds("fast")),
+        synth_fn=lambda good: _llm_synthesize(good, domain, _merge_creds("reason")),
     )
+    _progress(sid, "merge", f"Merged via {agg['method']} · confidence {agg['confidence']:.0%}")
 
     # 6) Close the learning loop: score each run against the truth and fold the
     # outcome into per-archetype reliability, so the next route's prior_weight
     # reflects what actually worked. This is what makes Basna improve over time.
+    _progress(sid, "learn", "Scoring contributions…")
     scores = await _score_runs(
         results, agg, merge_kind,
-        judge_fn=lambda good, truth: _llm_judge(good, truth, registry, body.api_key),
+        judge_fn=lambda good, truth: _llm_judge(good, truth, _merge_creds("fast")),
     )
     learned: list[dict] = []
     for r, rid in zip(results, run_ids):
@@ -765,6 +860,8 @@ async def execute_route(
         body.session_id, user["id"], status="done",
         truth=agg["truth"], confidence=agg["confidence"],
     )
+    _progress(sid, "done", f"Done · {len(results)} agent(s), {len(learned)} learned")
+    _progress_done(sid)
 
     return {
         "session_id": body.session_id, "domain": domain, "merge_kind": merge_kind,
@@ -772,11 +869,22 @@ async def execute_route(
         "method": agg["method"], "contributors": agg["contributors"],
         "agents": [{"archetype_id": r["archetype_id"], "role": r["role"],
                     "ok": r["ok"], "latency_ms": r["latency_ms"], "weight": r["weight"],
+                    "actions": r.get("actions", []),
                     "run_id": run_ids[i] if i < len(run_ids) else None,
                     "success": scores.get(r["archetype_id"])} for i, r in enumerate(results)],
         "learned": learned,
         "spawned": len(spawned), "dispatched": len(results),
     }
+
+
+@router.get("/sessions/{session_id}/progress")
+async def get_progress(session_id: str, user: dict = Depends(get_current_user)):
+    """Live execution progress for a session, polled by the UI during /execute."""
+    db = get_db()
+    sess = await db.get_basna_session(session_id, user["id"])
+    if not sess:
+        raise HTTPException(404, "session not found")
+    return _PROGRESS.get(session_id) or {"events": [], "active": False}
 
 
 class FeedbackRequest(BaseModel):

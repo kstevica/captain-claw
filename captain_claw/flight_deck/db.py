@@ -206,6 +206,7 @@ class FlightDeckDB:
                 tier           TEXT NOT NULL DEFAULT '',
                 weight_at_run  REAL NOT NULL DEFAULT 0.0,
                 output         TEXT NOT NULL DEFAULT '',
+                actions        TEXT NOT NULL DEFAULT '[]',  -- JSON: per-agent tool actions
                 success        INTEGER,            -- NULL until scored; 1 = success, 0 = fail
                 latency_ms     INTEGER NOT NULL DEFAULT 0,
                 created_at     TEXT NOT NULL
@@ -239,6 +240,14 @@ class FlightDeckDB:
             CREATE INDEX IF NOT EXISTS idx_prompts_user
                 ON prompts(user_id);
         """)
+        # Lightweight migrations: add columns introduced after a table first shipped.
+        for table, col, ddl in [
+            ("basna_runs", "actions", "TEXT NOT NULL DEFAULT '[]'"),
+        ]:
+            try:
+                await self._db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass  # column already exists
         await self._db.commit()
 
     # ── Users ────────────────────────────────────────────────────────
@@ -923,11 +932,12 @@ class FlightDeckDB:
             cur = await self._db.execute(
                 "INSERT INTO basna_runs"
                 " (session_id, archetype_id, role, provider, model, tier,"
-                "  weight_at_run, output, success, latency_ms, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "  weight_at_run, output, actions, success, latency_ms, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (session_id, r.get("archetype_id", ""), r.get("role", ""),
                  r.get("provider", ""), r.get("model", ""), r.get("tier", ""),
                  float(r.get("weight_at_run", 0.0)), r.get("output", ""),
+                 r.get("actions", "[]"),
                  r.get("success"), int(r.get("latency_ms", 0)), now),
             )
             ids.append(cur.lastrowid or 0)
