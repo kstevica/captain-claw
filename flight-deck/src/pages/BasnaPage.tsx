@@ -6,7 +6,7 @@ import {
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { useBasnaStore, parseAnalysis, type BasnaSession, type BasnaRun, type ProgressEvent } from '../stores/basnaStore'
+import { useBasnaStore, parseAnalysis, type BasnaSession, type BasnaRun, type ProgressEvent, type BasnaAnalysis } from '../stores/basnaStore'
 import { useTierConfig, TIER_ORDER, PROVIDERS } from '../services/tierConfig'
 
 const COGNITIVE_MODES = ['neutra', 'ionian', 'dorian', 'phrygian', 'lydian', 'mixolydian', 'aeolian', 'locrian']
@@ -112,6 +112,34 @@ function SessionCard({ s, active, onOpen, onDelete }: {
       </div>
     </div>
   )
+}
+
+function analysisToMarkdown(a: BasnaAnalysis): string {
+  const out: string[] = ['# Analysis', '']
+  if (a.agreement?.length) {
+    out.push('## Agreement', '')
+    for (const x of a.agreement) out.push(`- ${x}`)
+    out.push('')
+  }
+  if (a.differences?.length) {
+    out.push('## Key differences', '')
+    for (const d of a.differences) {
+      out.push(`### ${d.point}`)
+      for (const p of d.positions || []) out.push(`- **${p.by}** — ${p.stance}`)
+      out.push('')
+    }
+  }
+  if (a.unique?.length) {
+    out.push('## Unique insights', '')
+    for (const u of a.unique) out.push(`- **${u.by}** — ${u.insight}`)
+    out.push('')
+  }
+  if (a.blind_spots?.length) {
+    out.push('## Blind spots — covered by none', '')
+    for (const b of a.blind_spots) out.push(`- ${b}`)
+    out.push('')
+  }
+  return out.join('\n').trim()
 }
 
 function formatProgress(events: ProgressEvent[]): string {
@@ -778,6 +806,9 @@ export function BasnaPage() {
                 <div className="flex items-center gap-2">
                   <ScanSearch className="h-4 w-4 text-violet-600 dark:text-violet-400" />
                   <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Analysis</span>
+                  <div className="ml-auto">
+                    <OutputActions title="Analysis" content={analysisToMarkdown(analysis)} onView={viewFull} />
+                  </div>
                 </div>
 
                 {!!analysis.agreement?.length && (
