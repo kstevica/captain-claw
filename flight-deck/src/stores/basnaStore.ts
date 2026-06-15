@@ -97,9 +97,18 @@ export interface ExecuteResult {
 export interface ProgressEvent {
   i: number
   ts?: number     // epoch seconds (server clock)
-  stage: string   // route | spawn | dispatch | merge | learn | done
+  stage: string   // route | spawn | dispatch | action | narration | usage | merge | learn | done
   message: string
   ok?: boolean
+  // Structured fields on per-agent events, so the UI can group the stream into
+  // live per-agent panels instead of parsing the message string.
+  agent?: string  // role/name of the agent this event belongs to
+  tool?: string   // tool name on action/narration events
+  detail?: string // tool-arg summary on action/narration events
+  // Live cumulative token counts on `usage` events.
+  prompt_tokens?: number
+  completion_tokens?: number
+  total_tokens?: number
 }
 
 // ── API helpers ──────────────────────────────────────────────────────

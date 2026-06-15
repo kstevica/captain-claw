@@ -735,11 +735,15 @@ async def _send_chat_and_collect(
     port: int, token: str, prompt: str, timeout: float, on_action=None,
     fleet_instructions: str = "", agent_name: str = "",
     file_paths: list[str] | None = None, image_paths: list[str] | None = None,
+    on_usage=None,
 ) -> tuple[str, list[dict]]:
     """Connect to an agent's /ws, send one chat, return (final reply, actions).
 
     `actions` is the agent's tool calls (the `monitor` events Council also shows),
     each {tool, detail}. `on_action(act)` is invoked live as each one arrives.
+    `on_usage(prompt, completion, total)` is invoked live on each `turn_usage`
+    broadcast — the agent's running cumulative token counts for the current turn,
+    so the UI can show LLM usage as it climbs instead of only at the end.
     `fleet_instructions` are delivered via the peer_agents handshake so they land
     in the agent's system prompt (same path the UI uses), not just the message.
     """
@@ -783,9 +787,20 @@ async def _send_chat_and_collect(
                     _summarize_tool_args(msg.get("arguments")))
         elif mtype == "narration" and str(msg.get("text") or "").strip():
             _record("narration", str(msg["text"]).strip()[:280])
+        elif mtype == "turn_usage" and not msg.get("replay"):
+            # Live, running cumulative token counts emitted after each internal
+            # LLM call within the turn. Surfaced live (not persisted as an action)
+            # so the UI shows usage climbing instead of one number at the end.
+            if on_usage:
+                try:
+                    on_usage(int(msg.get("prompt_tokens", 0) or 0),
+                             int(msg.get("completion_tokens", 0) or 0),
+                             int(msg.get("total_tokens", 0) or 0))
+                except Exception:
+                    pass
         elif mtype == "usage" and not msg.get("replay"):
-            # Each turn's LLM usage — model + token counts (the agent does not
-            # broadcast full prompt/response, only this summary).
+            # End-of-turn LLM summary — model + final token counts (recorded once
+            # as an action so it's preserved in the run's persisted activity).
             u = msg.get("last") or msg.get("usage") or msg
             model = u.get("model") or msg.get("model") or ""
             it = u.get("input_tokens") or u.get("prompt_tokens")
@@ -876,13 +891,13 @@ async def _send_chat_and_collect(
 async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_action=None,
                         fleet_instructions: str = "", agent_name: str = "",
                         file_paths: list[str] | None = None,
-                        image_paths: list[str] | None = None) -> dict:
+                        image_paths: list[str] | None = None, on_usage=None) -> dict:
     started = time.monotonic()
     try:
         out, actions = await _send_chat_and_collect(
             port, token, prompt, timeout, on_action=on_action,
             fleet_instructions=fleet_instructions, agent_name=agent_name,
-            file_paths=file_paths, image_paths=image_paths)
+            file_paths=file_paths, image_paths=image_paths, on_usage=on_usage)
         return {"ok": True, "output": out, "actions": actions,
                 "latency_ms": int((time.monotonic() - started) * 1000)}
     except Exception as e:
@@ -1028,12 +1043,21 @@ async def execute_route(
             role = sel.get("role") or arch.get("role") or arch["id"]
             fleet = sel.get("fleet_instructions") or arch.get("fleet_instructions", "")
 
+            # Tag each event with structured fields (agent / tool / detail) so the
+            # UI can group the streaming log into live per-agent panels — not just
+            # parse the flat message string.
             def _on_action(act: dict) -> None:
                 if act["tool"] == "narration":
-                    _progress(sid, "narration", f"{role}: {act['detail']}")
+                    _progress(sid, "narration", f"{role}: {act['detail']}",
+                              agent=role, tool="narration", detail=act.get("detail", ""))
                 else:
                     detail = f": {act['detail']}" if act.get("detail") else ""
-                    _progress(sid, "action", f"{role} → {act['tool']}{detail}")
+                    _progress(sid, "action", f"{role} → {act['tool']}{detail}",
+                              agent=role, tool=act["tool"], detail=act.get("detail", ""))
+
+            def _on_usage(pt: int, ct: int, tt: int) -> None:
+                _progress(sid, "usage", f"{role} · {pt:,}→{ct:,} tok",
+                          agent=role, prompt_tokens=pt, completion_tokens=ct, total_tokens=tt)
 
             ws = DATA_DIR / sp["slug"] / "data" / "workspace"
             img_paths = [str(ws / f["name"]) for f in input_files
@@ -1046,7 +1070,7 @@ async def execute_route(
                                        [f["name"] for f in input_files], extra=sel.get("extra", "")),
                 body.dispatch_timeout, on_action=_on_action,
                 fleet_instructions=fleet, agent_name=role,
-                file_paths=doc_paths, image_paths=img_paths,
+                file_paths=doc_paths, image_paths=img_paths, on_usage=_on_usage,
             )
             mark = "✓" if d["ok"] else "✗"
             extra = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"

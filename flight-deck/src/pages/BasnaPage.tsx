@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Network, Play, Sparkles, Plus, Trash2, ThumbsUp, ThumbsDown,
   Loader2, Check, X, Wrench, Maximize2, Download, Paperclip, FileText, Image as ImageIcon,
@@ -231,6 +231,56 @@ function AgentRow({ run, onFeedback, onView }: { run: BasnaRun; onFeedback: (suc
   )
 }
 
+// Compact token count: 1_234 → "1.2k", 244_461 → "244k".
+function fmtTok(n?: number): string {
+  if (!n || n <= 0) return '0'
+  if (n >= 10000) return Math.round(n / 1000) + 'k'
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k'
+  return String(n)
+}
+
+interface LiveAgent { role: string; actions: ProgressEvent[]; usage?: ProgressEvent }
+
+// Live per-agent panels built from the streaming progress events while the run
+// is in flight — each agent's tool calls and running LLM token usage, before the
+// final persisted runs (with output + feedback) take over at the end.
+function LiveAgentsPanel({ agents }: { agents: LiveAgent[] }) {
+  return (
+    <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
+      {agents.map((a) => (
+        <div key={a.role} className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-sky-400" />
+              <span className="truncate text-sm font-medium text-zinc-200">{a.role}</span>
+            </div>
+            {a.usage && (
+              <span className="shrink-0 font-mono text-[10px] tabular-nums text-zinc-500" title="LLM tokens (prompt → completion)">
+                {fmtTok(a.usage.prompt_tokens)}→{fmtTok(a.usage.completion_tokens)} tok
+              </span>
+            )}
+          </div>
+          <div className="mt-1.5 text-[10px] font-semibold uppercase tracking-wide text-zinc-600">
+            Activity ({a.actions.length})
+          </div>
+          <div className="mt-1 max-h-48 space-y-0.5 overflow-auto">
+            {a.actions.slice(-14).map((ev) => (
+              <div key={ev.i} className="flex items-baseline gap-2 text-[11px]">
+                {ev.stage === 'narration'
+                  ? <Sparkles className="h-3 w-3 shrink-0 text-zinc-500" />
+                  : <Wrench className="h-3 w-3 shrink-0 text-zinc-600" />}
+                <span className="shrink-0 font-mono text-zinc-400">{ev.tool}</span>
+                {ev.detail && <span className="truncate text-zinc-600">{ev.detail}</span>}
+              </div>
+            ))}
+            {a.actions.length === 0 && <div className="text-[11px] text-zinc-600">working…</div>}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export function BasnaPage() {
   const {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
@@ -275,6 +325,22 @@ export function BasnaPage() {
   const canRun = !!routePlan && !!activeSession && !executing
   const truth = lastExecute?.truth ?? activeSession?.truth ?? ''
   const confidence = lastExecute?.confidence ?? activeSession?.confidence ?? 0
+
+  // Group the streaming progress into live per-agent panels (preserving the
+  // order each agent first appears). `usage` events update the running token
+  // counter; everything else is a tool call / narration in that agent's feed.
+  const liveAgents = useMemo<LiveAgent[]>(() => {
+    const byRole = new Map<string, LiveAgent>()
+    const order: string[] = []
+    for (const ev of progress) {
+      if (!ev.agent) continue
+      let a = byRole.get(ev.agent)
+      if (!a) { a = { role: ev.agent, actions: [] }; byRole.set(ev.agent, a); order.push(ev.agent) }
+      if (ev.stage === 'usage') a.usage = ev
+      else a.actions.push(ev)
+    }
+    return order.map((r) => byRole.get(r) as LiveAgent)
+  }, [progress])
 
   return (
     <div className="flex h-full flex-col">
@@ -554,6 +620,16 @@ export function BasnaPage() {
                     )
                   })}
                 </div>
+              </div>
+            )}
+
+            {/* Live per-agent panels — actions + running LLM usage as they stream */}
+            {executing && liveAgents.length > 0 && (
+              <div className="space-y-2">
+                <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                  Agents working ({liveAgents.length})
+                </span>
+                <LiveAgentsPanel agents={liveAgents} />
               </div>
             )}
 
