@@ -15,10 +15,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import mimetypes
+import shutil
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from captain_claw.flight_deck.auth import get_current_user, get_db
@@ -48,6 +51,33 @@ def _load_registry() -> dict:
         return json.loads(registry_file.read_text())
     except json.JSONDecodeError as e:
         raise HTTPException(500, f"Archetype registry is invalid JSON: {e}")
+
+
+_MAX_FILE_BYTES = 25 * 1024 * 1024
+
+
+def _safe_name(name: str) -> str:
+    base = Path(name or "upload").name.strip() or "upload"
+    return base.replace("/", "_").replace("\\", "_")
+
+
+def _session_files_dir(session_id: str) -> Path:
+    from captain_claw.flight_deck.server import DATA_DIR
+    d = DATA_DIR / "basna_files" / session_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _guess_mime(name: str) -> str:
+    return mimetypes.guess_type(name)[0] or "application/octet-stream"
+
+
+def _parse_files(sess: dict) -> list[dict]:
+    try:
+        f = json.loads(sess.get("files") or "[]")
+        return f if isinstance(f, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
 
 
 def _difficulty_cap(difficulty: str, max_agents: int) -> int:
@@ -236,6 +266,7 @@ async def delete_session(session_id: str, user: dict = Depends(get_current_user)
     ok = await db.delete_basna_session(session_id, user["id"])
     if not ok:
         raise HTTPException(404, "session not found")
+    shutil.rmtree(_session_files_dir(session_id), ignore_errors=True)
     return {"deleted": True}
 
 
@@ -247,6 +278,61 @@ async def list_runs(session_id: str, user: dict = Depends(get_current_user)):
     if not sess:
         raise HTTPException(404, "session not found")
     return await db.list_basna_runs(session_id, user["id"])
+
+
+@router.post("/sessions/{session_id}/files")
+async def upload_files(
+    session_id: str, files: list[UploadFile] = File(...),
+    user: dict = Depends(get_current_user),
+):
+    """Attach files to a session. Stored on disk + recorded on the session; at
+    execute they're copied into every spawned agent's workspace."""
+    db = get_db()
+    sess = await db.get_basna_session(session_id, user["id"])
+    if not sess:
+        raise HTTPException(404, "session not found")
+    d = _session_files_dir(session_id)
+    by_name = {f["name"]: f for f in _parse_files(sess)}
+    for uf in files:
+        content = await uf.read()
+        if len(content) > _MAX_FILE_BYTES:
+            raise HTTPException(413, f"{uf.filename} exceeds 25MB")
+        name = _safe_name(uf.filename or "upload")
+        (d / name).write_bytes(content)
+        by_name[name] = {"name": name, "mime": uf.content_type or "application/octet-stream",
+                         "size": len(content), "kind": "input"}
+    merged = list(by_name.values())
+    await db.update_basna_session(session_id, user["id"], files=json.dumps(merged))
+    return {"files": merged}
+
+
+@router.get("/sessions/{session_id}/files/{name}")
+async def download_file(session_id: str, name: str, user: dict = Depends(get_current_user)):
+    db = get_db()
+    sess = await db.get_basna_session(session_id, user["id"])
+    if not sess:
+        raise HTTPException(404, "session not found")
+    safe = _safe_name(name)
+    path = _session_files_dir(session_id) / safe
+    if not path.is_file():
+        raise HTTPException(404, "file not found")
+    return FileResponse(path, filename=safe, media_type=_guess_mime(safe))
+
+
+@router.delete("/sessions/{session_id}/files/{name}")
+async def delete_file(session_id: str, name: str, user: dict = Depends(get_current_user)):
+    db = get_db()
+    sess = await db.get_basna_session(session_id, user["id"])
+    if not sess:
+        raise HTTPException(404, "session not found")
+    safe = _safe_name(name)
+    try:
+        (_session_files_dir(session_id) / safe).unlink()
+    except OSError:
+        pass
+    merged = [f for f in _parse_files(sess) if f["name"] != safe]
+    await db.update_basna_session(session_id, user["id"], files=json.dumps(merged))
+    return {"files": merged}
 
 
 # ── Router endpoint ──────────────────────────────────────────────────
@@ -395,7 +481,7 @@ def _progress_done(session_id: str) -> None:
         p["active"] = False
 
 
-def _build_dispatch_prompt(arch: dict, intent: str, merge_kind: str) -> str:
+def _build_dispatch_prompt(arch: dict, intent: str, merge_kind: str, file_names: list[str] | None = None) -> str:
     """Frame the task for one ephemeral agent.
 
     The archetype's role + SOP (fleet_instructions) are delivered separately as
@@ -411,9 +497,18 @@ def _build_dispatch_prompt(arch: dict, intent: str, merge_kind: str) -> str:
     else:
         framing = ("Give your single best answer. Be decisive and concise — one clear "
                    "position, not a survey of possibilities.")
+    files_block = ""
+    if file_names:
+        listed = "\n".join(f"- {n}" for n in file_names)
+        files_block = (
+            "\n\n## Attached files (in your working directory)\n"
+            f"{listed}\n"
+            "Use your read / pdf_extract / xlsx_extract / image_vision tools to work "
+            "with them as needed.\n"
+        )
     return (
         f"You are the {role}, working as one independent member of a one-shot ensemble. "
-        f"{framing}\n\n## Task\n{intent}\n\n"
+        f"{framing}\n\n## Task\n{intent}{files_block}\n\n"
         "You are working alone and cannot see the other members. Return only your final "
         "answer — no preamble, no meta-commentary about the ensemble."
     )
@@ -615,6 +710,7 @@ def _summarize_tool_args(args) -> str:
 async def _send_chat_and_collect(
     port: int, token: str, prompt: str, timeout: float, on_action=None,
     fleet_instructions: str = "", agent_name: str = "",
+    file_paths: list[str] | None = None, image_paths: list[str] | None = None,
 ) -> tuple[str, list[dict]]:
     """Connect to an agent's /ws, send one chat, return (final reply, actions).
 
@@ -640,7 +736,12 @@ async def _send_chat_and_collect(
                         "self": {"name": agent_name or "agent",
                                  "fleet_instructions": fleet_instructions},
                     }))
-                await ws.send(json.dumps({"type": "chat", "content": prompt}))
+                chat_msg: dict = {"type": "chat", "content": prompt}
+                if file_paths:
+                    chat_msg["file_paths"] = file_paths
+                if image_paths:
+                    chat_msg["image_paths"] = image_paths
+                await ws.send(json.dumps(chat_msg))
 
                 def _record(kind: str, detail: str) -> None:
                     act = {"tool": kind, "detail": detail}
@@ -690,12 +791,15 @@ async def _send_chat_and_collect(
 
 
 async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_action=None,
-                        fleet_instructions: str = "", agent_name: str = "") -> dict:
+                        fleet_instructions: str = "", agent_name: str = "",
+                        file_paths: list[str] | None = None,
+                        image_paths: list[str] | None = None) -> dict:
     started = time.monotonic()
     try:
         out, actions = await _send_chat_and_collect(
             port, token, prompt, timeout, on_action=on_action,
-            fleet_instructions=fleet_instructions, agent_name=agent_name)
+            fleet_instructions=fleet_instructions, agent_name=agent_name,
+            file_paths=file_paths, image_paths=image_paths)
         return {"ok": True, "output": out, "actions": actions,
                 "latency_ms": int((time.monotonic() - started) * 1000)}
     except Exception as e:
@@ -747,6 +851,12 @@ async def execute_route(
     seeds = {a["id"]: float(a.get("reliability_seed", 0.7)) for a in registry.get("archetypes", [])}
     domain = route.get("domain", "general")
     merge_kind = route.get("merge_kind", "converge")
+    session_files = _parse_files(sess)
+    # Only user-supplied inputs are fed to agents; prior generated artifacts are
+    # kept on the session but not re-fed (avoids feeding outputs back as inputs).
+    input_files = [f for f in session_files if f.get("kind") != "generated"]
+    input_names = {f["name"] for f in input_files}
+    generated_files: list[dict] = []
 
     # Lazy import to avoid a circular import (server imports this module).
     from captain_claw.flight_deck.server import (
@@ -759,6 +869,7 @@ async def execute_route(
     sid = body.session_id
     _progress_start(sid)
     sid8 = sid[:8]
+    run_tag = format(int(time.time()), "x")[-6:]  # unique per run → no slug collisions on re-run
     plan = [(s, arch_by_id[s["archetype_id"]]) for s in selected if s["archetype_id"] in arch_by_id]
     _progress(sid, "route", f"Selected {len(plan)} archetype(s) · {domain} / {merge_kind}")
     spawned: list[dict] = []  # {sel, arch, slug, port, auth}
@@ -770,7 +881,7 @@ async def execute_route(
         # when provided; otherwise let the backend resolve the registry tier.
         async def _spawn(sel: dict, arch: dict):
             base = dict(
-                name=f"basna-{sid8}-{arch['id']}",
+                name=f"basna-{sid8}-{run_tag}-{arch['id']}",
                 description=f"Basna ephemeral · {arch.get('role', '')}",
                 cognitive_mode=arch.get("cognitive_mode", "neutra"),
                 tools=arch.get("tools") or AgentConfig().tools,
@@ -790,6 +901,15 @@ async def execute_route(
             else:
                 cfg = AgentConfig(**base, tier=sel["tier"], provider_api_key=body.api_key or "")
             res = await spawn_process(cfg, request, user)
+            # Materialize input files into this agent's workspace.
+            if input_files and res.ok:
+                ws = DATA_DIR / res.slug / "data" / "workspace"
+                src = _session_files_dir(body.session_id)
+                for f in input_files:
+                    try:
+                        shutil.copy2(src / f["name"], ws / f["name"])
+                    except OSError as e:
+                        log.warning("Basna file copy failed", file=f["name"], error=str(e))
             return sel, arch, res
 
         spawn_out = await asyncio.gather(
@@ -799,12 +919,15 @@ async def execute_route(
         for item in spawn_out:
             if isinstance(item, Exception):
                 log.warning("Basna spawn failed", error=str(item))
+                _progress(sid, "spawn", f"spawn failed: {str(item)[:200]}", ok=False)
                 continue
             sel, arch, res = item
             entry = proc_reg.get(res.slug) or {}
             port = entry.get("web_port")
             if not res.ok or not port:
-                log.warning("Basna spawn unusable", slug=res.slug, ok=res.ok)
+                log.warning("Basna spawn unusable", slug=res.slug, ok=res.ok, message=res.message)
+                _progress(sid, "spawn",
+                          f"{arch.get('role') or arch['id']}: unusable — {res.message or 'no port'}", ok=False)
                 continue
             spawned.append({"sel": sel, "arch": arch, "slug": res.slug,
                             "port": port, "auth": entry.get("web_auth", "")})
@@ -816,17 +939,29 @@ async def execute_route(
             role = sp["arch"].get("role") or sp["arch"]["id"]
 
             def _on_action(act: dict) -> None:
-                detail = f": {act['detail']}" if act.get("detail") else ""
-                _progress(sid, "action", f"{role} → {act['tool']}{detail}")
+                if act["tool"] == "narration":
+                    _progress(sid, "narration", f"{role}: {act['detail']}")
+                else:
+                    detail = f": {act['detail']}" if act.get("detail") else ""
+                    _progress(sid, "action", f"{role} → {act['tool']}{detail}")
 
+            ws = DATA_DIR / sp["slug"] / "data" / "workspace"
+            img_paths = [str(ws / f["name"]) for f in input_files
+                         if str(f.get("mime", "")).startswith("image/")]
+            doc_paths = [str(ws / f["name"]) for f in input_files
+                         if not str(f.get("mime", "")).startswith("image/")]
             d = await _dispatch_one(
                 sp["port"], sp["auth"],
-                _build_dispatch_prompt(sp["arch"], sess["intent"], merge_kind),
+                _build_dispatch_prompt(sp["arch"], sess["intent"], merge_kind,
+                                       [f["name"] for f in input_files]),
                 body.dispatch_timeout, on_action=_on_action,
                 fleet_instructions=sp["arch"].get("fleet_instructions", ""), agent_name=role,
+                file_paths=doc_paths, image_paths=img_paths,
             )
             mark = "✓" if d["ok"] else "✗"
-            _progress(sid, "dispatch", f"{role} {mark} · {len(d['actions'])} action(s) ({d['latency_ms'] / 1000:.1f}s)", ok=d["ok"])
+            extra = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"
+            _progress(sid, "dispatch",
+                      f"{role} {mark} · {len(d['actions'])} action(s) ({d['latency_ms'] / 1000:.1f}s){extra}", ok=d["ok"])
             return d
 
         dispatched = await asyncio.gather(*[_dispatch_tracked(sp) for sp in spawned])
@@ -839,9 +974,33 @@ async def execute_route(
                 "actions": d.get("actions", []),
             })
     finally:
-        # 3) Always remove the ephemeral agents — fully, not just "stopped", so
+        # 3a) Capture any files the agents generated, BEFORE teardown deletes their
+        # workspaces — so generated content is preserved on the session.
+        dest_dir = _session_files_dir(body.session_id)
+        seen_gen: set[str] = set()
+        for sp in spawned:
+            ws = DATA_DIR / sp["slug"] / "data" / "workspace"
+            if not ws.is_dir():
+                continue
+            for p in sorted(ws.rglob("*")):
+                if not p.is_file() or p.name in input_names:
+                    continue
+                # Disambiguate collisions across agents by prefixing the archetype.
+                out_name = p.name
+                if out_name in seen_gen:
+                    out_name = f"{sp['arch']['id']}__{p.name}"
+                seen_gen.add(out_name)
+                try:
+                    shutil.copy2(p, dest_dir / out_name)
+                    generated_files.append({"name": out_name, "mime": _guess_mime(out_name),
+                                            "size": p.stat().st_size, "kind": "generated"})
+                except OSError as e:
+                    log.warning("Basna generated-file capture failed", file=p.name, error=str(e))
+        if generated_files:
+            _progress(sid, "files", f"Captured {len(generated_files)} generated file(s)")
+
+        # 3b) Always remove the ephemeral agents — fully, not just "stopped", so
         # they don't pile up in the fleet. Their outputs/actions live in basna_runs.
-        import shutil
         for sp in spawned:
             try:
                 _do_stop_process(sp["slug"])
@@ -907,9 +1066,13 @@ async def execute_route(
         learned.append({"archetype_id": r["archetype_id"], "run_id": rid,
                         "success": succ, "weight": rel["weight"]})
 
+    files_by_name = {f["name"]: f for f in session_files}
+    for g in generated_files:
+        files_by_name[g["name"]] = g
     await db.update_basna_session(
         body.session_id, user["id"], status="done",
         truth=agg["truth"], confidence=agg["confidence"],
+        files=json.dumps(list(files_by_name.values())),
     )
     _progress(sid, "done", f"Done · {len(results)} agent(s), {len(learned)} learned")
     _progress_done(sid)

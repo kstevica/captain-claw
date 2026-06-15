@@ -191,6 +191,7 @@ class FlightDeckDB:
                 confidence   REAL NOT NULL DEFAULT 0.0,
                 config       TEXT NOT NULL DEFAULT '{}',
                 progress     TEXT NOT NULL DEFAULT '[]',  -- JSON: execution progress log
+                files        TEXT NOT NULL DEFAULT '[]',  -- JSON: attached files [{name,mime,size}]
                 created_at   TEXT NOT NULL,
                 updated_at   TEXT NOT NULL
             );
@@ -245,6 +246,7 @@ class FlightDeckDB:
         for table, col, ddl in [
             ("basna_runs", "actions", "TEXT NOT NULL DEFAULT '[]'"),
             ("basna_sessions", "progress", "TEXT NOT NULL DEFAULT '[]'"),
+            ("basna_sessions", "files", "TEXT NOT NULL DEFAULT '[]'"),
         ]:
             try:
                 await self._db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
@@ -897,7 +899,7 @@ class FlightDeckDB:
     ) -> bool:
         assert self._db is not None
         allowed = {"intent", "domain", "difficulty", "merge_kind", "status",
-                   "route", "truth", "confidence", "config", "progress"}
+                   "route", "truth", "confidence", "config", "progress", "files"}
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return False

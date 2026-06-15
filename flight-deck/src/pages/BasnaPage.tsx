@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Network, Play, Sparkles, Plus, Trash2, ThumbsUp, ThumbsDown,
-  Loader2, Check, X, Wrench, Maximize2, Download,
+  Loader2, Check, X, Wrench, Maximize2, Download, Paperclip, FileText, Image as ImageIcon,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { useBasnaStore, type BasnaSession, type BasnaRun } from '../stores/basnaStore'
+import { useBasnaStore, type BasnaSession, type BasnaRun, type ProgressEvent } from '../stores/basnaStore'
 import { useTierConfig, TIER_ORDER } from '../services/tierConfig'
 
 // Demo / debug tasks — each exercises a different path through the pipeline.
@@ -84,6 +84,13 @@ function SessionCard({ s, active, onOpen, onDelete }: {
       </div>
     </button>
   )
+}
+
+function formatProgress(events: ProgressEvent[]): string {
+  return events.map((e) => {
+    const t = e.ts ? new Date(e.ts * 1000).toLocaleTimeString([], { hour12: false }) : ''
+    return `${t}  ${e.stage.toUpperCase().padEnd(10)} ${e.message}`
+  }).join('\n')
 }
 
 function slugify(s: string): string {
@@ -176,7 +183,19 @@ function AgentRow({ run, onFeedback, onView }: { run: BasnaRun; onFeedback: (suc
       )}
       {actions.length > 0 && (
         <div className="mt-2 rounded-md border border-zinc-800 bg-zinc-950/40 p-2">
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Activity ({actions.length})</div>
+          <div className="mb-1 flex items-center gap-2">
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Activity ({actions.length})</span>
+            <button
+              onClick={() => downloadMarkdown(
+                `${slugify(run.role || run.archetype_id)}-activity.md`,
+                actions.map((a) => `- ${a.tool}${a.detail ? ': ' + a.detail : ''}`).join('\n'),
+              )}
+              title="Export activity"
+              className="rounded p-0.5 text-zinc-600 hover:text-zinc-300"
+            >
+              <Download className="h-3 w-3" />
+            </button>
+          </div>
           <div className="space-y-0.5">
             {actions.map((a, i) => (
               <div key={i} className="flex items-baseline gap-2 text-[11px]">
@@ -211,9 +230,9 @@ function AgentRow({ run, onFeedback, onView }: { run: BasnaRun; onFeedback: (suc
 
 export function BasnaPage() {
   const {
-    sessions, activeSession, routePlan, runs, lastExecute, progress,
+    sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, executing, error,
-    routerTier, maxAgents, setRouterTier, setMaxAgents,
+    routerTier, maxAgents, setRouterTier, setMaxAgents, addFiles, removeFile, downloadFile,
     loadSessions, selectSession, newSession, route, execute, sendFeedback, deleteSession,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
@@ -222,6 +241,22 @@ export function BasnaPage() {
   const [modal, setModal] = useState<{ title: string; content: string } | null>(null)
   const viewFull = (title: string, content: string) => setModal({ title, content })
   const progressRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [dragOver, setDragOver] = useState(false)
+
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const imgs: File[] = []
+    for (const it of Array.from(e.clipboardData?.items || [])) {
+      if (it.type.startsWith('image/')) {
+        const f = it.getAsFile()
+        if (f) {
+          const ext = it.type.split('/')[1] || 'png'
+          imgs.push(f.name && f.name !== 'image.png' ? f : new File([f], `pasted-${Date.now()}.${ext}`, { type: it.type }))
+        }
+      }
+    }
+    if (imgs.length) addFiles(imgs)
+  }
 
   // Keep the progress log pinned to the newest line as events stream in.
   useEffect(() => {
@@ -273,15 +308,43 @@ export function BasnaPage() {
         <div className="flex-1 overflow-auto p-4 md:p-6">
           <div className="mx-auto max-w-3xl space-y-5">
             {/* Intent + controls */}
-            <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
+            <div
+              className={`rounded-lg border bg-zinc-900/50 p-4 ${dragOver ? 'border-sky-500' : 'border-zinc-800'}`}
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(e) => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files) }}
+            >
               <label className="mb-1.5 block text-xs font-medium text-zinc-400">Task / intent</label>
               <textarea
                 value={intent}
                 onChange={(e) => setIntent(e.target.value)}
+                onPaste={handlePaste}
                 rows={9}
-                placeholder="Describe the task. The router picks the smallest team that can answer it well."
+                placeholder="Describe the task, or attach/drop/paste files. The router picks the smallest team that can answer it well."
                 className="w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950/60 p-2.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-sky-600 focus:outline-none"
               />
+
+              {/* Attachments */}
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                >
+                  <Paperclip className="h-3.5 w-3.5" /> Attach
+                </button>
+                <input
+                  ref={fileInputRef} type="file" multiple className="hidden"
+                  onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = '' }}
+                />
+                {attachments.filter((a) => a.kind !== 'generated').map((a) => (
+                  <span key={a.name} className="flex items-center gap-1.5 rounded-full border border-zinc-700 bg-zinc-800/60 px-2 py-0.5 text-[11px] text-zinc-300">
+                    {a.mime.startsWith('image/') ? <ImageIcon className="h-3 w-3 text-zinc-500" /> : <FileText className="h-3 w-3 text-zinc-500" />}
+                    {a.name}
+                    <span className="text-zinc-600">{Math.max(1, Math.round(a.size / 1024))}kb</span>
+                    <button onClick={() => removeFile(a.name)} className="text-zinc-500 hover:text-rose-400"><X className="h-3 w-3" /></button>
+                  </span>
+                ))}
+              </div>
               {!intent.trim() && (
                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
                   <span className="text-[11px] text-zinc-600">Try:</span>
@@ -393,6 +456,13 @@ export function BasnaPage() {
                   {progress.length > 30 && (
                     <span className="text-[10px] text-zinc-600">showing last 30 of {progress.length}</span>
                   )}
+                  <button
+                    onClick={() => downloadMarkdown('basna-progress.md', formatProgress(progress))}
+                    title="Export progress log"
+                    className="ml-auto rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                  </button>
                 </div>
                 <div ref={progressRef} className="max-h-72 space-y-1 overflow-auto">
                   {progress.slice(-30).map((ev) => (
@@ -401,7 +471,11 @@ export function BasnaPage() {
                         {ev.ts ? new Date(ev.ts * 1000).toLocaleTimeString([], { hour12: false }) : ''}
                       </span>
                       <span className="w-16 shrink-0 font-mono text-[10px] uppercase text-zinc-600">{ev.stage}</span>
-                      <span className={ev.ok === false ? 'text-rose-400' : 'text-zinc-300'}>{ev.message}</span>
+                      <span className={
+                        ev.stage === 'narration' ? 'text-zinc-100 font-medium'
+                          : ev.ok === false ? 'text-rose-400'
+                          : 'text-zinc-400'
+                      }>{ev.message}</span>
                     </div>
                   ))}
                   {executing && progress.length === 0 && (
@@ -439,6 +513,29 @@ export function BasnaPage() {
                 {runs.map((run) => (
                   <AgentRow key={run.id} run={run} onFeedback={(s) => sendFeedback(run.id, s)} onView={viewFull} />
                 ))}
+              </div>
+            )}
+
+            {/* Generated files */}
+            {attachments.some((a) => a.kind === 'generated') && (
+              <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
+                <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">Generated files</div>
+                <div className="space-y-1">
+                  {attachments.filter((a) => a.kind === 'generated').map((a) => (
+                    <div key={a.name} className="flex items-center gap-2 text-xs">
+                      <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                      <span className="truncate text-zinc-300">{a.name}</span>
+                      <span className="shrink-0 text-zinc-600">{Math.max(1, Math.round(a.size / 1024))}kb</span>
+                      <button
+                        onClick={() => downloadFile(a.name)}
+                        title="Download"
+                        className="ml-auto shrink-0 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </div>

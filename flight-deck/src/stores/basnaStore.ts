@@ -16,9 +16,15 @@ export interface BasnaSession {
   confidence: number
   config: string
   progress: string   // JSON array of ProgressEvent
+  files: string      // JSON array of BasnaFile
   created_at: string
   updated_at: string
 }
+
+export interface BasnaFile { name: string; mime: string; size: number; kind?: 'input' | 'generated' }
+
+// Client-side attachment: a BasnaFile plus the local blob (until uploaded).
+export interface AttachedFile extends BasnaFile { file?: File; uploaded: boolean }
 
 export interface RouteSelected {
   archetype_id: string
@@ -151,6 +157,30 @@ async function apiProgress(id: string): Promise<{ events: ProgressEvent[]; activ
   return res.json()
 }
 
+async function apiUploadFiles(sessionId: string, files: File[]): Promise<{ files: BasnaFile[] }> {
+  const form = new FormData()
+  for (const f of files) form.append('files', f)
+  const build = (): RequestInit => {
+    const { token, authEnabled } = useAuthStore.getState()
+    const headers: Record<string, string> = {}  // no Content-Type — browser sets multipart boundary
+    if (authEnabled && token) headers['Authorization'] = `Bearer ${token}`
+    return { method: 'POST', headers, credentials: 'include', body: form }
+  }
+  const url = `/fd/basna/sessions/${encodeURIComponent(sessionId)}/files`
+  let res = await fetch(url, build())
+  if (res.status === 401 && useAuthStore.getState().authEnabled) {
+    if (await refreshAccessToken()) res = await fetch(url, build())
+  }
+  if (!res.ok) throw new Error((await res.text()) || 'file upload failed')
+  return res.json()
+}
+
+async function apiDeleteFile(sessionId: string, name: string): Promise<void> {
+  await _authedFetch(`/fd/basna/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  })
+}
+
 async function apiFeedback(runId: number, success: boolean): Promise<void> {
   await _authedFetch(`/fd/basna/runs/${runId}/feedback`, {
     method: 'POST', body: JSON.stringify({ success }),
@@ -177,6 +207,16 @@ function parseProgress(s?: string): ProgressEvent[] {
   }
 }
 
+function parseFiles(s?: string): AttachedFile[] {
+  if (!s) return []
+  try {
+    const a = JSON.parse(s)
+    return Array.isArray(a) ? (a as BasnaFile[]).map((f) => ({ ...f, uploaded: true })) : []
+  } catch {
+    return []
+  }
+}
+
 const _ROUTER_TIER_LS = 'basna.routerTier'
 
 // ── Store ────────────────────────────────────────────────────────────
@@ -188,6 +228,7 @@ interface BasnaStore {
   runs: BasnaRun[]
   lastExecute: ExecuteResult | null
   progress: ProgressEvent[]
+  attachments: AttachedFile[]
 
   listLoading: boolean
   routing: boolean
@@ -199,6 +240,9 @@ interface BasnaStore {
 
   setRouterTier: (t: string) => void
   setMaxAgents: (n: number) => void
+  addFiles: (files: FileList | File[]) => void
+  removeFile: (name: string) => Promise<void>
+  downloadFile: (name: string) => Promise<void>
 
   loadSessions: () => Promise<void>
   selectSession: (id: string) => Promise<void>
@@ -216,6 +260,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   runs: [],
   lastExecute: null,
   progress: [],
+  attachments: [],
 
   listLoading: false,
   routing: false,
@@ -231,6 +276,39 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   },
   setMaxAgents: (n) => set({ maxAgents: Math.max(1, Math.min(10, n)) }),
 
+  addFiles: (files) => {
+    const incoming = Array.from(files).map((f): AttachedFile => ({
+      name: f.name, mime: f.type || 'application/octet-stream', size: f.size, file: f, uploaded: false,
+    }))
+    // Replace any existing entry with the same name.
+    const byName = new Map(get().attachments.map((a) => [a.name, a]))
+    for (const a of incoming) byName.set(a.name, a)
+    set({ attachments: Array.from(byName.values()) })
+  },
+
+  removeFile: async (name) => {
+    const a = get().attachments.find((x) => x.name === name)
+    const sid = get().activeSession?.id
+    if (a?.uploaded && sid) {
+      try { await apiDeleteFile(sid, name) } catch { /* ignore */ }
+    }
+    set({ attachments: get().attachments.filter((x) => x.name !== name) })
+  },
+
+  downloadFile: async (name) => {
+    const sid = get().activeSession?.id
+    if (!sid) return
+    const res = await _authedFetch(`/fd/basna/sessions/${encodeURIComponent(sid)}/files/${encodeURIComponent(name)}`)
+    if (!res.ok) return
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = name
+    a.click()
+    URL.revokeObjectURL(url)
+  },
+
   loadSessions: async () => {
     set({ listLoading: true })
     try {
@@ -244,10 +322,11 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     const s = await apiGetSession(id)
     if (!s) return
     const runs = await apiListRuns(id)
-    set({ activeSession: s, routePlan: parseRoute(s.route), runs, lastExecute: null, progress: parseProgress(s.progress), error: null })
+    set({ activeSession: s, routePlan: parseRoute(s.route), runs, lastExecute: null,
+          progress: parseProgress(s.progress), attachments: parseFiles(s.files), error: null })
   },
 
-  newSession: () => set({ activeSession: null, routePlan: null, runs: [], lastExecute: null, progress: [], error: null }),
+  newSession: () => set({ activeSession: null, routePlan: null, runs: [], lastExecute: null, progress: [], attachments: [], error: null }),
 
   route: async (intent, tiers) => {
     set({ routing: true, error: null })
@@ -277,6 +356,17 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   execute: async (tiers, envVars) => {
     const sid = get().activeSession?.id
     if (!sid) return
+    // Upload any attachments not yet on the server before the run.
+    const pending = get().attachments.filter((a) => !a.uploaded && a.file)
+    if (pending.length) {
+      try {
+        const res = await apiUploadFiles(sid, pending.map((a) => a.file as File))
+        set({ attachments: (res.files || []).map((f) => ({ ...f, uploaded: true })) })
+      } catch (e) {
+        set({ error: e instanceof Error ? e.message : 'file upload failed' })
+        return
+      }
+    }
     set({ executing: true, error: null, progress: [] })
     // Poll the live progress log while the (blocking) execute call runs.
     const poll = setInterval(async () => {
