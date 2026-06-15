@@ -1098,6 +1098,8 @@ async def execute_route(
             ws = DATA_DIR / sp["slug"] / "data" / "workspace"
             if not ws.is_dir():
                 continue
+            # The agent (role) that produced these files — shown in the UI list.
+            agent_role = sp["sel"].get("role") or sp["arch"].get("role") or sp["arch"]["id"]
             for p in sorted(ws.rglob("*")):
                 if not p.is_file() or p.name in input_names:
                     continue
@@ -1109,7 +1111,8 @@ async def execute_route(
                 try:
                     shutil.copy2(p, dest_dir / out_name)
                     generated_files.append({"name": out_name, "mime": _guess_mime(out_name),
-                                            "size": p.stat().st_size, "kind": "generated"})
+                                            "size": p.stat().st_size, "kind": "generated",
+                                            "agent": agent_role})
                 except OSError as e:
                     log.warning("Basna generated-file capture failed", file=p.name, error=str(e))
                     continue

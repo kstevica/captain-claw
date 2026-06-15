@@ -21,7 +21,7 @@ export interface BasnaSession {
   updated_at: string
 }
 
-export interface BasnaFile { name: string; mime: string; size: number; kind?: 'input' | 'generated' }
+export interface BasnaFile { name: string; mime: string; size: number; kind?: 'input' | 'generated'; agent?: string }
 
 // Client-side attachment: a BasnaFile plus the local blob (until uploaded).
 export interface AttachedFile extends BasnaFile { file?: File; uploaded: boolean }
