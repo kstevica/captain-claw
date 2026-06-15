@@ -239,6 +239,16 @@ async def delete_session(session_id: str, user: dict = Depends(get_current_user)
     return {"deleted": True}
 
 
+@router.get("/sessions/{session_id}/runs")
+async def list_runs(session_id: str, user: dict = Depends(get_current_user)):
+    """Per-agent runs for a session — powers the run-trace UI and feedback thumbs."""
+    db = get_db()
+    sess = await db.get_basna_session(session_id, user["id"])
+    if not sess:
+        raise HTTPException(404, "session not found")
+    return await db.list_basna_runs(session_id, user["id"])
+
+
 # ── Router endpoint ──────────────────────────────────────────────────
 
 @router.post("/route")
@@ -761,8 +771,9 @@ async def execute_route(
         "truth": agg["truth"], "confidence": agg["confidence"],
         "method": agg["method"], "contributors": agg["contributors"],
         "agents": [{"archetype_id": r["archetype_id"], "role": r["role"],
-                    "ok": r["ok"], "latency_ms": r["latency_ms"],
-                    "weight": r["weight"]} for r in results],
+                    "ok": r["ok"], "latency_ms": r["latency_ms"], "weight": r["weight"],
+                    "run_id": run_ids[i] if i < len(run_ids) else None,
+                    "success": scores.get(r["archetype_id"])} for i, r in enumerate(results)],
         "learned": learned,
         "spawned": len(spawned), "dispatched": len(results),
     }

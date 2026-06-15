@@ -16,6 +16,7 @@ import { ForgePage } from './pages/ForgePage'
 import { LoginPage } from './pages/LoginPage'
 import { AdminPage } from './pages/AdminPage'
 import { CouncilPage } from './pages/CouncilPage'
+import { BasnaPage } from './pages/BasnaPage'
 import { TodayPage } from './pages/TodayPage'
 import { SkillsPage } from './pages/SkillsPage'
 import { GamesPage } from './pages/GamesPage'
@@ -305,6 +306,7 @@ function AppContent() {
       {view === 'forge' && <ForgePage />}
       {view === 'admin' && <AdminPage />}
       {view === 'council' && <CouncilPage />}
+      {view === 'basna' && <BasnaPage />}
       {view === 'connections' && <ConnectionsPage />}
       {view === 'gpu-cloud' && <GPUCloudPage />}
       {view === 'scheduler' && <SchedulerPage />}
