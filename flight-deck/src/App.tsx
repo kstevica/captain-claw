@@ -13,6 +13,7 @@ import { OperationsPage } from './pages/OperationsPage'
 import { WorkflowPage } from './pages/WorkflowPage'
 import { SpawnerPage } from './pages/SpawnerPage'
 import { ForgePage } from './pages/ForgePage'
+import { LibraryPage } from './pages/LibraryPage'
 import { LoginPage } from './pages/LoginPage'
 import { AdminPage } from './pages/AdminPage'
 import { CouncilPage } from './pages/CouncilPage'
@@ -304,6 +305,7 @@ function AppContent() {
       {view === 'games' && <GamesPage />}
       {view === 'spawner' && <SpawnerPage />}
       {view === 'forge' && <ForgePage />}
+      {view === 'library' && <LibraryPage />}
       {view === 'admin' && <AdminPage />}
       {view === 'council' && <CouncilPage />}
       {view === 'basna' && <BasnaPage />}

@@ -21,6 +21,7 @@ import {
   Workflow,
   Brain,
   Network,
+  Library,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { APP_VERSION, BUILD_DATE } from '../../version'
@@ -37,6 +38,7 @@ const navItems: { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?:
   { id: 'desktop', icon: Monitor, label: 'Agent Desktop' },
   { id: 'spawner', icon: Plus, label: 'Spawn Agent' },
   { id: 'forge', icon: Wand2, label: 'Agent Forge' },
+  { id: 'library', icon: Library, label: 'Library' },
   { id: 'council', icon: Users, label: 'Council' },
   { id: 'basna', icon: Network, label: 'Basna' },
   { id: 'flows', icon: Workflow, label: 'Flows' },
