@@ -177,6 +177,55 @@ class FlightDeckDB:
             CREATE INDEX IF NOT EXISTS idx_council_artifacts_session
                 ON council_artifacts(session_id);
 
+            -- ── Basna: router → selective spawn → weighted merge → learning ──
+            CREATE TABLE IF NOT EXISTS basna_sessions (
+                id           TEXT PRIMARY KEY,
+                user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                intent       TEXT NOT NULL DEFAULT '',
+                domain       TEXT NOT NULL DEFAULT '',
+                difficulty   TEXT NOT NULL DEFAULT '',
+                merge_kind   TEXT NOT NULL DEFAULT 'converge',
+                status       TEXT NOT NULL DEFAULT 'routing',
+                route        TEXT NOT NULL DEFAULT '{}',
+                truth        TEXT NOT NULL DEFAULT '',
+                confidence   REAL NOT NULL DEFAULT 0.0,
+                config       TEXT NOT NULL DEFAULT '{}',
+                created_at   TEXT NOT NULL,
+                updated_at   TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_basna_sessions_user
+                ON basna_sessions(user_id);
+
+            CREATE TABLE IF NOT EXISTS basna_runs (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id     TEXT NOT NULL REFERENCES basna_sessions(id) ON DELETE CASCADE,
+                archetype_id   TEXT NOT NULL DEFAULT '',
+                role           TEXT NOT NULL DEFAULT '',
+                provider       TEXT NOT NULL DEFAULT '',
+                model          TEXT NOT NULL DEFAULT '',
+                tier           TEXT NOT NULL DEFAULT '',
+                weight_at_run  REAL NOT NULL DEFAULT 0.0,
+                output         TEXT NOT NULL DEFAULT '',
+                success        INTEGER,            -- NULL until scored; 1 = success, 0 = fail
+                latency_ms     INTEGER NOT NULL DEFAULT 0,
+                created_at     TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_basna_runs_session
+                ON basna_runs(session_id);
+
+            -- Learned, per-user reliability of each archetype within a domain.
+            CREATE TABLE IF NOT EXISTS archetype_reliability (
+                user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                archetype_id TEXT NOT NULL,
+                domain       TEXT NOT NULL DEFAULT '',
+                successes    INTEGER NOT NULL DEFAULT 0,
+                fails        INTEGER NOT NULL DEFAULT 0,
+                runs         INTEGER NOT NULL DEFAULT 0,
+                weight       REAL NOT NULL DEFAULT 0.7,
+                updated_at   TEXT NOT NULL,
+                PRIMARY KEY (user_id, archetype_id, domain)
+            );
+
             CREATE TABLE IF NOT EXISTS prompts (
                 id         TEXT PRIMARY KEY,
                 user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -793,6 +842,246 @@ class FlightDeckDB:
             )
         await self._db.commit()
         return True
+
+    # ── Basna sessions ───────────────────────────────────────────────
+
+    async def create_basna_session(
+        self, user_id: str, intent: str, config: str = "{}",
+    ) -> dict:
+        assert self._db is not None
+        now = _utcnow()
+        sid = _uuid()
+        await self._db.execute(
+            "INSERT INTO basna_sessions"
+            " (id, user_id, intent, domain, difficulty, merge_kind, status,"
+            "  route, truth, confidence, config, created_at, updated_at)"
+            " VALUES (?, ?, ?, '', '', 'converge', 'routing', '{}', '', 0.0, ?, ?, ?)",
+            (sid, user_id, intent, config, now, now),
+        )
+        await self._db.commit()
+        return {"id": sid, "user_id": user_id, "intent": intent, "domain": "",
+                "difficulty": "", "merge_kind": "converge", "status": "routing",
+                "route": "{}", "truth": "", "confidence": 0.0, "config": config,
+                "created_at": now, "updated_at": now}
+
+    async def list_basna_sessions(self, user_id: str) -> list[dict]:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM basna_sessions WHERE user_id = ? ORDER BY updated_at DESC",
+            (user_id,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def get_basna_session(self, session_id: str, user_id: str) -> dict | None:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM basna_sessions WHERE id = ? AND user_id = ?",
+            (session_id, user_id),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def update_basna_session(
+        self, session_id: str, user_id: str, **fields,
+    ) -> bool:
+        assert self._db is not None
+        allowed = {"intent", "domain", "difficulty", "merge_kind", "status",
+                   "route", "truth", "confidence", "config"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return False
+        updates["updated_at"] = _utcnow()
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        vals = list(updates.values()) + [session_id, user_id]
+        cur = await self._db.execute(
+            f"UPDATE basna_sessions SET {set_clause} WHERE id = ? AND user_id = ?", vals,
+        )
+        await self._db.commit()
+        return cur.rowcount > 0
+
+    async def delete_basna_session(self, session_id: str, user_id: str) -> bool:
+        assert self._db is not None
+        cur = await self._db.execute(
+            "DELETE FROM basna_sessions WHERE id = ? AND user_id = ?",
+            (session_id, user_id),
+        )
+        await self._db.commit()
+        return cur.rowcount > 0
+
+    # ── Basna runs ───────────────────────────────────────────────────
+
+    async def add_basna_runs(
+        self, session_id: str, user_id: str, runs: list[dict],
+    ) -> list[int]:
+        assert self._db is not None
+        sess = await self.get_basna_session(session_id, user_id)
+        if not sess:
+            return []
+        now = _utcnow()
+        ids: list[int] = []
+        for r in runs:
+            cur = await self._db.execute(
+                "INSERT INTO basna_runs"
+                " (session_id, archetype_id, role, provider, model, tier,"
+                "  weight_at_run, output, success, latency_ms, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (session_id, r.get("archetype_id", ""), r.get("role", ""),
+                 r.get("provider", ""), r.get("model", ""), r.get("tier", ""),
+                 float(r.get("weight_at_run", 0.0)), r.get("output", ""),
+                 r.get("success"), int(r.get("latency_ms", 0)), now),
+            )
+            ids.append(cur.lastrowid or 0)
+        await self._db.execute(
+            "UPDATE basna_sessions SET updated_at = ? WHERE id = ?", (now, session_id),
+        )
+        await self._db.commit()
+        return ids
+
+    async def list_basna_runs(self, session_id: str, user_id: str) -> list[dict]:
+        assert self._db is not None
+        sess = await self.get_basna_session(session_id, user_id)
+        if not sess:
+            return []
+        async with self._db.execute(
+            "SELECT * FROM basna_runs WHERE session_id = ? ORDER BY id ASC",
+            (session_id,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def score_basna_run(
+        self, run_id: int, user_id: str, success: bool,
+    ) -> bool:
+        """Mark a run success/fail, ownership-checked via the parent session."""
+        assert self._db is not None
+        cur = await self._db.execute(
+            "UPDATE basna_runs SET success = ?"
+            " WHERE id = ? AND session_id IN"
+            " (SELECT id FROM basna_sessions WHERE user_id = ?)",
+            (1 if success else 0, run_id, user_id),
+        )
+        await self._db.commit()
+        return cur.rowcount > 0
+
+    # ── Archetype reliability (learned routing weights) ──────────────
+
+    @staticmethod
+    def _reliability_weight(
+        successes: int, fails: int, seed: float = 0.7, alpha: float = 4.0,
+    ) -> float:
+        """Bayesian-shrunk success rate toward `seed`, penalizing fails 2×.
+
+        No data → returns `seed`; as runs accrue it approaches the empirical
+        rate. Fails count double so an unreliable archetype decays quickly.
+        """
+        numerator = successes + alpha * seed
+        denominator = successes + 2.0 * fails + alpha
+        w = numerator / denominator if denominator > 0 else seed
+        return max(0.05, min(0.99, w))
+
+    async def get_archetype_reliability(
+        self, user_id: str, domain: str | None = None,
+    ) -> list[dict]:
+        assert self._db is not None
+        query = "SELECT * FROM archetype_reliability WHERE user_id = ?"
+        params: list = [user_id]
+        if domain is not None:
+            query += " AND domain = ?"
+            params.append(domain)
+        async with self._db.execute(query, params) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def get_archetype_weight(
+        self, user_id: str, archetype_id: str, domain: str, seed: float = 0.7,
+    ) -> float:
+        """Current learned weight for an archetype in a domain; `seed` if unseen."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT weight FROM archetype_reliability"
+            " WHERE user_id = ? AND archetype_id = ? AND domain = ?",
+            (user_id, archetype_id, domain),
+        ) as cur:
+            row = await cur.fetchone()
+            return float(row["weight"]) if row else seed
+
+    async def record_archetype_outcome(
+        self, user_id: str, archetype_id: str, domain: str,
+        success: bool, seed: float = 0.7,
+    ) -> dict:
+        """Upsert one outcome and recompute the learned weight."""
+        assert self._db is not None
+        now = _utcnow()
+        async with self._db.execute(
+            "SELECT successes, fails FROM archetype_reliability"
+            " WHERE user_id = ? AND archetype_id = ? AND domain = ?",
+            (user_id, archetype_id, domain),
+        ) as cur:
+            row = await cur.fetchone()
+        successes = (row["successes"] if row else 0) + (1 if success else 0)
+        fails = (row["fails"] if row else 0) + (0 if success else 1)
+        runs = successes + fails
+        weight = self._reliability_weight(successes, fails, seed)
+        await self._db.execute(
+            "INSERT INTO archetype_reliability"
+            " (user_id, archetype_id, domain, successes, fails, runs, weight, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(user_id, archetype_id, domain) DO UPDATE SET"
+            " successes = excluded.successes, fails = excluded.fails,"
+            " runs = excluded.runs, weight = excluded.weight,"
+            " updated_at = excluded.updated_at",
+            (user_id, archetype_id, domain, successes, fails, runs, weight, now),
+        )
+        await self._db.commit()
+        return {"user_id": user_id, "archetype_id": archetype_id, "domain": domain,
+                "successes": successes, "fails": fails, "runs": runs,
+                "weight": weight, "updated_at": now}
+
+    async def get_basna_run(self, run_id: int, user_id: str) -> dict | None:
+        """One run, ownership-checked via its parent session."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT r.* FROM basna_runs r JOIN basna_sessions s ON r.session_id = s.id"
+            " WHERE r.id = ? AND s.user_id = ?",
+            (run_id, user_id),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def adjust_archetype_reliability(
+        self, user_id: str, archetype_id: str, domain: str,
+        d_success: int, d_fail: int, seed: float = 0.7,
+    ) -> dict:
+        """Apply signed deltas to the success/fail counters and recompute weight.
+
+        Used to *revise* a learned outcome (e.g. a human thumbs flipping an
+        auto-scored run) without double-counting: move one from one bucket to the
+        other rather than appending a fresh outcome. Counters never go negative.
+        """
+        assert self._db is not None
+        now = _utcnow()
+        async with self._db.execute(
+            "SELECT successes, fails FROM archetype_reliability"
+            " WHERE user_id = ? AND archetype_id = ? AND domain = ?",
+            (user_id, archetype_id, domain),
+        ) as cur:
+            row = await cur.fetchone()
+        successes = max(0, (row["successes"] if row else 0) + d_success)
+        fails = max(0, (row["fails"] if row else 0) + d_fail)
+        runs = successes + fails
+        weight = self._reliability_weight(successes, fails, seed)
+        await self._db.execute(
+            "INSERT INTO archetype_reliability"
+            " (user_id, archetype_id, domain, successes, fails, runs, weight, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(user_id, archetype_id, domain) DO UPDATE SET"
+            " successes = excluded.successes, fails = excluded.fails,"
+            " runs = excluded.runs, weight = excluded.weight,"
+            " updated_at = excluded.updated_at",
+            (user_id, archetype_id, domain, successes, fails, runs, weight, now),
+        )
+        await self._db.commit()
+        return {"user_id": user_id, "archetype_id": archetype_id, "domain": domain,
+                "successes": successes, "fails": fails, "runs": runs,
+                "weight": weight, "updated_at": now}
 
     # ── Prompts ─────────────────────────────────────────────────────
 

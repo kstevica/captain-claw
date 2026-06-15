@@ -685,6 +685,7 @@ from captain_claw.flight_deck.settings_routes import router as settings_router
 from captain_claw.flight_deck.chat_routes import router as chat_router
 from captain_claw.flight_deck.admin_routes import router as admin_router
 from captain_claw.flight_deck.council_routes import router as council_router
+from captain_claw.flight_deck.basna_routes import router as basna_router
 from captain_claw.flight_deck.google_oauth_routes import router as google_oauth_router
 from captain_claw.flight_deck.codex_oauth_routes import router as codex_oauth_router
 from captain_claw.flight_deck.games_routes import router as games_router
@@ -709,6 +710,7 @@ app.include_router(settings_router)
 app.include_router(chat_router)
 app.include_router(admin_router)
 app.include_router(council_router)
+app.include_router(basna_router)
 app.include_router(google_oauth_router)
 app.include_router(codex_oauth_router)
 app.include_router(games_router)
