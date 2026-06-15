@@ -385,7 +385,8 @@ def _progress_start(session_id: str) -> None:
 def _progress(session_id: str, stage: str, message: str, **extra) -> None:
     p = _PROGRESS.get(session_id)
     if p is not None:
-        p["events"].append({"i": len(p["events"]), "stage": stage, "message": message, **extra})
+        p["events"].append({"i": len(p["events"]), "ts": time.time(),
+                            "stage": stage, "message": message, **extra})
 
 
 def _progress_done(session_id: str) -> None:
@@ -395,14 +396,15 @@ def _progress_done(session_id: str) -> None:
 
 
 def _build_dispatch_prompt(arch: dict, intent: str, merge_kind: str) -> str:
-    """Frame the task for one ephemeral agent as its archetype.
+    """Frame the task for one ephemeral agent.
 
-    fleet_instructions are not baked into the spawned agent's config, so we
-    deliver the archetype's role + SOP inline. Agents run blind (they cannot see
-    each other), which keeps their outputs independent for the weighted merge.
+    The archetype's role + SOP (fleet_instructions) are delivered separately as
+    the agent's fleet-level instructions (system prompt) via the peer_agents
+    handshake — see _send_chat_and_collect — so this prompt is just the task plus
+    a one-shot framing. Agents run blind (cannot see each other), keeping outputs
+    independent for the weighted merge.
     """
     role = arch.get("role", "Specialist")
-    fi = arch.get("fleet_instructions", "")
     if merge_kind == "diverge":
         framing = ("Contribute your distinct perspective. Surface options and angles "
                    "others might miss; do not try to be exhaustive on your own.")
@@ -411,7 +413,7 @@ def _build_dispatch_prompt(arch: dict, intent: str, merge_kind: str) -> str:
                    "position, not a survey of possibilities.")
     return (
         f"You are the {role}, working as one independent member of a one-shot ensemble. "
-        f"{framing}\n\n{fi}\n\n## Task\n{intent}\n\n"
+        f"{framing}\n\n## Task\n{intent}\n\n"
         "You are working alone and cannot see the other members. Return only your final "
         "answer — no preamble, no meta-commentary about the ensemble."
     )
@@ -612,11 +614,14 @@ def _summarize_tool_args(args) -> str:
 
 async def _send_chat_and_collect(
     port: int, token: str, prompt: str, timeout: float, on_action=None,
+    fleet_instructions: str = "", agent_name: str = "",
 ) -> tuple[str, list[dict]]:
     """Connect to an agent's /ws, send one chat, return (final reply, actions).
 
     `actions` is the agent's tool calls (the `monitor` events Council also shows),
     each {tool, detail}. `on_action(act)` is invoked live as each one arrives.
+    `fleet_instructions` are delivered via the peer_agents handshake so they land
+    in the agent's system prompt (same path the UI uses), not just the message.
     """
     import websockets
     uri = f"ws://localhost:{port}/ws" + (f"?token={token}" if token else "")
@@ -627,7 +632,25 @@ async def _send_chat_and_collect(
         try:
             async with websockets.connect(uri, max_size=8 * 1024 * 1024, open_timeout=10) as ws:
                 await asyncio.wait_for(ws.recv(), timeout=15)  # welcome
+                if fleet_instructions:
+                    # Set fleet-level instructions (archetype role + SOP) into the
+                    # agent's system prompt before the task turn.
+                    await ws.send(json.dumps({
+                        "type": "peer_agents", "agents": [],
+                        "self": {"name": agent_name or "agent",
+                                 "fleet_instructions": fleet_instructions},
+                    }))
                 await ws.send(json.dumps({"type": "chat", "content": prompt}))
+
+                def _record(kind: str, detail: str) -> None:
+                    act = {"tool": kind, "detail": detail}
+                    actions.append(act)
+                    if on_action:
+                        try:
+                            on_action(act)
+                        except Exception:
+                            pass
+
                 deadline = asyncio.get_event_loop().time() + timeout
                 while True:
                     rem = deadline - asyncio.get_event_loop().time()
@@ -640,14 +663,21 @@ async def _send_chat_and_collect(
                         if msg.get("content"):
                             answer = msg["content"]  # keep the latest full reply
                     elif mtype == "monitor" and not msg.get("replay"):
-                        act = {"tool": str(msg.get("tool_name") or msg.get("tool") or "tool"),
-                               "detail": _summarize_tool_args(msg.get("arguments"))}
-                        actions.append(act)
-                        if on_action:
-                            try:
-                                on_action(act)
-                            except Exception:
-                                pass
+                        _record(str(msg.get("tool_name") or msg.get("tool") or "tool"),
+                                _summarize_tool_args(msg.get("arguments")))
+                    elif mtype == "narration" and str(msg.get("text") or "").strip():
+                        _record("narration", str(msg["text"]).strip()[:280])
+                    elif mtype == "usage" and not msg.get("replay"):
+                        # Each turn's LLM usage — model + token counts (the agent does
+                        # not broadcast full prompt/response, only this summary).
+                        u = msg.get("last") or msg.get("usage") or msg
+                        model = u.get("model") or msg.get("model") or ""
+                        it = u.get("input_tokens") or u.get("prompt_tokens")
+                        ot = u.get("output_tokens") or u.get("completion_tokens")
+                        tok = f"{it}→{ot} tok" if (it is not None or ot is not None) else ""
+                        detail = " · ".join(x for x in [str(model), tok] if x)
+                        if detail:
+                            _record("llm", detail)
                     elif mtype == "status" and str(msg.get("status", "")).lower() in _DONE_STATES:
                         break
                     elif mtype == "error":
@@ -659,10 +689,13 @@ async def _send_chat_and_collect(
     raise RuntimeError(f"could not reach agent on port {port}: {last_err}")
 
 
-async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_action=None) -> dict:
+async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_action=None,
+                        fleet_instructions: str = "", agent_name: str = "") -> dict:
     started = time.monotonic()
     try:
-        out, actions = await _send_chat_and_collect(port, token, prompt, timeout, on_action=on_action)
+        out, actions = await _send_chat_and_collect(
+            port, token, prompt, timeout, on_action=on_action,
+            fleet_instructions=fleet_instructions, agent_name=agent_name)
         return {"ok": True, "output": out, "actions": actions,
                 "latency_ms": int((time.monotonic() - started) * 1000)}
     except Exception as e:
@@ -678,6 +711,9 @@ class ExecuteRequest(BaseModel):
     # their model/key from here by tier; missing entries fall back to the registry
     # tier defaults + the provider env var.
     tiers: dict | None = None
+    # Additional env vars / API keys passed to every spawned agent (the Library's
+    # "Additional API Keys" — e.g. BRAVE_API_KEY for web search). [{key, value}].
+    env_vars: list[dict] | None = None
     # Fallback key when a tier omits one (empty -> provider env var).
     api_key: str = ""
     agent_max_tokens: int = Field(default=8192, ge=512, le=32768)
@@ -715,6 +751,7 @@ async def execute_route(
     # Lazy import to avoid a circular import (server imports this module).
     from captain_claw.flight_deck.server import (
         AgentConfig, spawn_process, _do_stop_process, _load_process_registry,
+        _save_process_registry, _processes, DATA_DIR,
     )
 
     await db.update_basna_session(body.session_id, user["id"], status="running")
@@ -737,6 +774,7 @@ async def execute_route(
                 description=f"Basna ephemeral · {arch.get('role', '')}",
                 cognitive_mode=arch.get("cognitive_mode", "neutra"),
                 tools=arch.get("tools") or AgentConfig().tools,
+                env_vars=body.env_vars or [],
                 web_enabled=True, web_port=0,
             )
             lt = (body.tiers or {}).get(sel["tier"])
@@ -785,6 +823,7 @@ async def execute_route(
                 sp["port"], sp["auth"],
                 _build_dispatch_prompt(sp["arch"], sess["intent"], merge_kind),
                 body.dispatch_timeout, on_action=_on_action,
+                fleet_instructions=sp["arch"].get("fleet_instructions", ""), agent_name=role,
             )
             mark = "✓" if d["ok"] else "✗"
             _progress(sid, "dispatch", f"{role} {mark} · {len(d['actions'])} action(s) ({d['latency_ms'] / 1000:.1f}s)", ok=d["ok"])
@@ -800,12 +839,24 @@ async def execute_route(
                 "actions": d.get("actions", []),
             })
     finally:
-        # 3) Always tear the ephemeral agents down.
+        # 3) Always remove the ephemeral agents — fully, not just "stopped", so
+        # they don't pile up in the fleet. Their outputs/actions live in basna_runs.
+        import shutil
         for sp in spawned:
             try:
                 _do_stop_process(sp["slug"])
             except Exception as e:
-                log.warning("Basna teardown failed", slug=sp["slug"], error=str(e))
+                log.warning("Basna teardown stop failed", slug=sp["slug"], error=str(e))
+        if spawned:
+            reg = _load_process_registry()  # reload after the stops above persisted
+            for sp in spawned:
+                reg.pop(sp["slug"], None)
+                _processes.pop(sp["slug"], None)
+                try:
+                    shutil.rmtree(DATA_DIR / sp["slug"], ignore_errors=True)
+                except Exception:
+                    pass
+            _save_process_registry(reg)
 
     # 4) Persist one run per agent (success scored below, once the truth is known).
     run_ids: list[int] = []
@@ -862,6 +913,10 @@ async def execute_route(
     )
     _progress(sid, "done", f"Done · {len(results)} agent(s), {len(learned)} learned")
     _progress_done(sid)
+    # Persist the progress log so reopening the session shows it.
+    await db.update_basna_session(
+        sid, user["id"], progress=json.dumps((_PROGRESS.get(sid) or {}).get("events", [])),
+    )
 
     return {
         "session_id": body.session_id, "domain": domain, "merge_kind": merge_kind,

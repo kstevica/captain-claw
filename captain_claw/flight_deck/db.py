@@ -190,6 +190,7 @@ class FlightDeckDB:
                 truth        TEXT NOT NULL DEFAULT '',
                 confidence   REAL NOT NULL DEFAULT 0.0,
                 config       TEXT NOT NULL DEFAULT '{}',
+                progress     TEXT NOT NULL DEFAULT '[]',  -- JSON: execution progress log
                 created_at   TEXT NOT NULL,
                 updated_at   TEXT NOT NULL
             );
@@ -243,6 +244,7 @@ class FlightDeckDB:
         # Lightweight migrations: add columns introduced after a table first shipped.
         for table, col, ddl in [
             ("basna_runs", "actions", "TEXT NOT NULL DEFAULT '[]'"),
+            ("basna_sessions", "progress", "TEXT NOT NULL DEFAULT '[]'"),
         ]:
             try:
                 await self._db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
@@ -895,7 +897,7 @@ class FlightDeckDB:
     ) -> bool:
         assert self._db is not None
         allowed = {"intent", "domain", "difficulty", "merge_kind", "status",
-                   "route", "truth", "confidence", "config"}
+                   "route", "truth", "confidence", "config", "progress"}
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return False

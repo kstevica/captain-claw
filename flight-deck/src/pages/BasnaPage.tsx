@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Network, Play, Sparkles, Plus, Trash2, ThumbsUp, ThumbsDown,
-  Loader2, Check, X, Wrench,
+  Loader2, Check, X, Wrench, Maximize2, Download,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -10,6 +10,14 @@ import { useTierConfig, TIER_ORDER } from '../services/tierConfig'
 
 // Demo / debug tasks — each exercises a different path through the pipeline.
 const BASNA_EXAMPLES: { label: string; text: string }[] = [
+  {
+    label: 'EU expansion (complex)',
+    text: `We're a 20-person B2B SaaS selling AI-powered contract-review software to US mid-market law firms (~$2M ARR, growing ~8%/month). Decide whether we should expand into the EU in the next two quarters.
+
+Weigh, with evidence: (1) GDPR and the EU AI Act's implications for a legal-AI tool — obligations, timelines, and risk classification; (2) the competitive landscape in DACH and France — who's already there and how we'd differentiate; (3) data-residency and localization costs (hosting, language, support, legal); (4) the realistic revenue opportunity versus the distraction risk to our US growth.
+
+End with ONE clear recommendation (go / no-go / phased) and the three specific conditions that would flip the decision.`,
+  },
   {
     label: 'Data store choice',
     text: "We're adding an append-only event log: ~50M records/month, written continuously, queried by time-range and user_id, with daily aggregations. Pick ONE data store — Postgres, ClickHouse, or DynamoDB — and give the single most important reason.",
@@ -78,7 +86,65 @@ function SessionCard({ s, active, onOpen, onDelete }: {
   )
 }
 
-function AgentRow({ run, onFeedback }: { run: BasnaRun; onFeedback: (success: boolean) => void }) {
+function slugify(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'basna'
+}
+
+function downloadMarkdown(filename: string, content: string) {
+  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+// Fullscreen modal that renders markdown content, with an export-to-.md button.
+function MarkdownModal({ title, content, onClose }: { title: string; content: string; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+      <div
+        className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-zinc-800 px-4 py-3">
+          <span className="truncate text-sm font-medium text-zinc-200">{title}</span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => downloadMarkdown(`${slugify(title)}.md`, content)}
+              className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-200 hover:bg-zinc-800"
+            >
+              <Download className="h-3.5 w-3.5" /> Export .md
+            </button>
+            <button onClick={onClose} className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+        <div className="fd-markdown overflow-auto p-5 text-sm text-zinc-200 leading-relaxed">
+          <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Compact fullscreen + export buttons reused by the truth card and agent cards.
+function OutputActions({ title, content, onView }: { title: string; content: string; onView: (t: string, c: string) => void }) {
+  return (
+    <div className="flex items-center gap-1">
+      <button onClick={() => onView(title, content)} title="Fullscreen" className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
+        <Maximize2 className="h-3.5 w-3.5" />
+      </button>
+      <button onClick={() => downloadMarkdown(`${slugify(title)}.md`, content)} title="Export .md" className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
+        <Download className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  )
+}
+
+function AgentRow({ run, onFeedback, onView }: { run: BasnaRun; onFeedback: (success: boolean) => void; onView: (t: string, c: string) => void }) {
   const scored = run.success !== null
   let actions: { tool: string; detail?: string }[] = []
   try { actions = JSON.parse(run.actions || '[]') } catch { actions = [] }
@@ -94,7 +160,10 @@ function AgentRow({ run, onFeedback }: { run: BasnaRun; onFeedback: (success: bo
               : <Badge className="text-rose-700 dark:text-rose-300">fail</Badge>
           )}
         </div>
-        <span className="text-[11px] text-zinc-500">{(run.latency_ms / 1000).toFixed(1)}s</span>
+        <div className="flex items-center gap-2">
+          {run.output && <OutputActions title={run.role || run.archetype_id} content={run.output} onView={onView} />}
+          <span className="text-[11px] text-zinc-500">{(run.latency_ms / 1000).toFixed(1)}s</span>
+        </div>
       </div>
       <div className="mt-2 flex items-center gap-2">
         <span className="w-16 shrink-0 text-[11px] text-zinc-500">weight {run.weight_at_run.toFixed(2)}</span>
@@ -107,7 +176,7 @@ function AgentRow({ run, onFeedback }: { run: BasnaRun; onFeedback: (success: bo
       )}
       {actions.length > 0 && (
         <div className="mt-2 rounded-md border border-zinc-800 bg-zinc-950/40 p-2">
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Actions ({actions.length})</div>
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Activity ({actions.length})</div>
           <div className="space-y-0.5">
             {actions.map((a, i) => (
               <div key={i} className="flex items-baseline gap-2 text-[11px]">
@@ -147,9 +216,18 @@ export function BasnaPage() {
     routerTier, maxAgents, setRouterTier, setMaxAgents,
     loadSessions, selectSession, newSession, route, execute, sendFeedback, deleteSession,
   } = useBasnaStore()
-  const { tiers, registry } = useTierConfig()
+  const { tiers, registry, envVars } = useTierConfig()
 
   const [intent, setIntent] = useState('')
+  const [modal, setModal] = useState<{ title: string; content: string } | null>(null)
+  const viewFull = (title: string, content: string) => setModal({ title, content })
+  const progressRef = useRef<HTMLDivElement>(null)
+
+  // Keep the progress log pinned to the newest line as events stream in.
+  useEffect(() => {
+    const el = progressRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [progress.length])
 
   useEffect(() => { loadSessions() }, [loadSessions])
   useEffect(() => { setIntent(activeSession?.intent || '') }, [activeSession?.id, activeSession?.intent])
@@ -200,7 +278,7 @@ export function BasnaPage() {
               <textarea
                 value={intent}
                 onChange={(e) => setIntent(e.target.value)}
-                rows={3}
+                rows={9}
                 placeholder="Describe the task. The router picks the smallest team that can answer it well."
                 className="w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950/60 p-2.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-sky-600 focus:outline-none"
               />
@@ -252,7 +330,7 @@ export function BasnaPage() {
                     Route
                   </button>
                   <button
-                    onClick={() => execute(tiers)}
+                    onClick={() => execute(tiers, envVars)}
                     disabled={!canRun}
                     className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40"
                   >
@@ -268,29 +346,6 @@ export function BasnaPage() {
               )}
             </div>
 
-            {/* Live progress log */}
-            {(executing || progress.length > 0) && (
-              <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
-                <div className="mb-2 flex items-center gap-2">
-                  {executing
-                    ? <Loader2 className="h-4 w-4 animate-spin text-sky-400" />
-                    : <Check className="h-4 w-4 text-emerald-500" />}
-                  <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Progress</span>
-                </div>
-                <div className="space-y-1">
-                  {progress.map((ev) => (
-                    <div key={ev.i} className="flex items-baseline gap-2 text-xs">
-                      <span className="w-16 shrink-0 font-mono text-[10px] uppercase text-zinc-600">{ev.stage}</span>
-                      <span className={ev.ok === false ? 'text-rose-400' : 'text-zinc-300'}>{ev.message}</span>
-                    </div>
-                  ))}
-                  {executing && progress.length === 0 && (
-                    <div className="text-xs text-zinc-500">Starting…</div>
-                  )}
-                </div>
-              </div>
-            )}
-
             {/* Route plan */}
             {routePlan && (
               <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
@@ -304,19 +359,54 @@ export function BasnaPage() {
                 </div>
                 {routePlan.rationale && <p className="mb-3 text-xs text-zinc-400">{routePlan.rationale}</p>}
                 <div className="space-y-2">
-                  {routePlan.selected.map((sel) => (
+                  {routePlan.selected.map((sel) => {
+                    const tc = tiers[sel.tier]
+                    return (
                     <div key={sel.archetype_id} className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5">
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-sm font-medium text-zinc-200">{sel.role || sel.archetype_id}</span>
                         <Badge className="text-sky-700 dark:text-sky-300">{sel.tier}</Badge>
                       </div>
+                      <p className="mt-0.5 font-mono text-[11px] text-zinc-600">
+                        {tc?.model ? `${tc.provider}/${tc.model}` : `${sel.tier} tier (model from server)`}
+                      </p>
                       {sel.why && <p className="mt-1 text-xs text-zinc-500">{sel.why}</p>}
                       <div className="mt-2 flex items-center gap-2">
                         <span className="w-20 shrink-0 text-[11px] text-zinc-500">prior {sel.prior_weight.toFixed(2)}</span>
                         <WeightBar value={sel.prior_weight} />
                       </div>
                     </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Live progress log */}
+            {(executing || progress.length > 0) && (
+              <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
+                <div className="mb-2 flex items-center gap-2">
+                  {executing
+                    ? <Loader2 className="h-4 w-4 animate-spin text-sky-400" />
+                    : <Check className="h-4 w-4 text-emerald-500" />}
+                  <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Progress</span>
+                  {progress.length > 30 && (
+                    <span className="text-[10px] text-zinc-600">showing last 30 of {progress.length}</span>
+                  )}
+                </div>
+                <div ref={progressRef} className="max-h-72 space-y-1 overflow-auto">
+                  {progress.slice(-30).map((ev) => (
+                    <div key={ev.i} className="flex items-baseline gap-2 text-xs">
+                      <span className="shrink-0 font-mono text-[10px] tabular-nums text-zinc-600">
+                        {ev.ts ? new Date(ev.ts * 1000).toLocaleTimeString([], { hour12: false }) : ''}
+                      </span>
+                      <span className="w-16 shrink-0 font-mono text-[10px] uppercase text-zinc-600">{ev.stage}</span>
+                      <span className={ev.ok === false ? 'text-rose-400' : 'text-zinc-300'}>{ev.message}</span>
+                    </div>
                   ))}
+                  {executing && progress.length === 0 && (
+                    <div className="text-xs text-zinc-500">Starting…</div>
+                  )}
                 </div>
               </div>
             )}
@@ -334,6 +424,7 @@ export function BasnaPage() {
                       <span className="block h-full rounded-full bg-emerald-500" style={{ width: `${Math.round(confidence * 100)}%` }} />
                     </span>
                   </span>
+                  <OutputActions title="Compiled truth" content={truth} onView={viewFull} />
                 </div>
                 <div className="fd-markdown text-sm text-zinc-200 leading-relaxed">
                   <Markdown remarkPlugins={[remarkGfm]}>{truth}</Markdown>
@@ -346,13 +437,15 @@ export function BasnaPage() {
               <div className="space-y-2">
                 <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Agents ({runs.length})</span>
                 {runs.map((run) => (
-                  <AgentRow key={run.id} run={run} onFeedback={(s) => sendFeedback(run.id, s)} />
+                  <AgentRow key={run.id} run={run} onFeedback={(s) => sendFeedback(run.id, s)} onView={viewFull} />
                 ))}
               </div>
             )}
           </div>
         </div>
       </div>
+
+      {modal && <MarkdownModal title={modal.title} content={modal.content} onClose={() => setModal(null)} />}
     </div>
   )
 }

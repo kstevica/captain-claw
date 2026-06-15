@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { useAuthStore, refreshAccessToken } from './authStore'
-import type { TierMap } from '../services/tierConfig'
+import type { TierMap, EnvVar } from '../services/tierConfig'
 
 // ── Types (mirror captain_claw/flight_deck/basna_routes.py) ──────────
 
@@ -15,6 +15,7 @@ export interface BasnaSession {
   truth: string
   confidence: number
   config: string
+  progress: string   // JSON array of ProgressEvent
   created_at: string
   updated_at: string
 }
@@ -78,6 +79,7 @@ export interface ExecuteResult {
 
 export interface ProgressEvent {
   i: number
+  ts?: number     // epoch seconds (server clock)
   stage: string   // route | spawn | dispatch | merge | learn | done
   message: string
   ok?: boolean
@@ -165,6 +167,16 @@ export function parseRoute(s?: string): RoutePlan | null {
   }
 }
 
+function parseProgress(s?: string): ProgressEvent[] {
+  if (!s) return []
+  try {
+    const a = JSON.parse(s)
+    return Array.isArray(a) ? (a as ProgressEvent[]) : []
+  } catch {
+    return []
+  }
+}
+
 const _ROUTER_TIER_LS = 'basna.routerTier'
 
 // ── Store ────────────────────────────────────────────────────────────
@@ -192,7 +204,7 @@ interface BasnaStore {
   selectSession: (id: string) => Promise<void>
   newSession: () => void
   route: (intent: string, tiers: TierMap) => Promise<void>
-  execute: (tiers: TierMap) => Promise<void>
+  execute: (tiers: TierMap, envVars: EnvVar[]) => Promise<void>
   sendFeedback: (runId: number, success: boolean) => Promise<void>
   deleteSession: (id: string) => Promise<void>
 }
@@ -232,7 +244,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     const s = await apiGetSession(id)
     if (!s) return
     const runs = await apiListRuns(id)
-    set({ activeSession: s, routePlan: parseRoute(s.route), runs, lastExecute: null, progress: [], error: null })
+    set({ activeSession: s, routePlan: parseRoute(s.route), runs, lastExecute: null, progress: parseProgress(s.progress), error: null })
   },
 
   newSession: () => set({ activeSession: null, routePlan: null, runs: [], lastExecute: null, progress: [], error: null }),
@@ -262,7 +274,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     }
   },
 
-  execute: async (tiers) => {
+  execute: async (tiers, envVars) => {
     const sid = get().activeSession?.id
     if (!sid) return
     set({ executing: true, error: null, progress: [] })
@@ -271,8 +283,10 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       try { const p = await apiProgress(sid); set({ progress: p.events || [] }) } catch { /* ignore */ }
     }, 700)
     try {
-      // Spawned agents + merge calls resolve their model/key from the Library tiers.
-      const res = await apiExecute({ session_id: sid, tiers })
+      // Spawned agents + merge calls resolve their model/key from the Library tiers;
+      // env vars (Library "Additional API Keys") are passed to every agent.
+      const env_vars = (envVars || []).filter((e) => e.key.trim() && e.value.trim())
+      const res = await apiExecute({ session_id: sid, tiers, env_vars })
       const s = await apiGetSession(sid)
       const runs = await apiListRuns(sid)
       set({ lastExecute: res, activeSession: s, runs })
