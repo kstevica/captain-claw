@@ -4,7 +4,7 @@
 // consumes the saved tiers to run decomposition and resolve models at spawn)
 // read from here, so there is ONE source of truth for the per-user tier config.
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useAuthStore } from '../stores/authStore'
 import { queueSave, registerHydrator, fetchSettings } from './settingsSync'
 
@@ -12,9 +12,12 @@ import { queueSave, registerHydrator, fetchSettings } from './settingsSync'
 
 // Legacy single-model config — read only, to migrate the API key forward.
 export const FORGE_CONFIG_KEY = 'fd:forge-llm-config'
-// Per-user tier configuration: a model definition per tier + which tier drives
-// the Forge decomposition call.
+// Per-user tier configuration. Now holds MULTIPLE named sets plus the id of the
+// active one: `{ sets: TierSet[], activeSetId }`. Older single-set payloads
+// (`{ tiers, forgeTier }`) are migrated forward on read. Each set is a
+// self-contained profile: its own 4 tiers, Forge tier, and additional API keys.
 export const TIERS_KEY = 'fd:forge-tiers'
+// Legacy global env vars — read only, folded into the migrated "Default" set.
 export const ENV_VARS_KEY = 'fd:forge-env-vars'
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -67,6 +70,19 @@ export interface ArchetypeRegistry {
 
 export interface EnvVar { key: string; value: string }
 
+// A named, self-contained model profile: the 4 tier definitions, which tier
+// drives the Forge decomposition, and its own additional API keys. The user can
+// keep several (e.g. "All Anthropic", "Local Ollama") and switch the active one.
+export interface TierSet {
+  id: string
+  name: string
+  tiers: TierMap
+  forgeTier: string
+  envVars: EnvVar[]
+}
+
+interface SetsBlob { sets: TierSet[]; activeSetId: string }
+
 // ── Constants ────────────────────────────────────────────────────────
 
 export const PROVIDERS = ['anthropic', 'openai', 'ollama', 'gemini', 'xai', 'openrouter', 'litert']
@@ -88,13 +104,40 @@ export function loadLegacyConfig(): LegacyForgeConfig {
   }
 }
 
-export function loadTierSettings(): { tiers: TierMap; forgeTier: string } | null {
+// A short unique id for a set. crypto.randomUUID where available, else a cheap
+// random fallback (collisions are harmless — only used to key local sets).
+export function newSetId(): string {
+  try { return crypto.randomUUID() } catch { /* older browsers */ }
+  return 'set-' + Math.random().toString(36).slice(2, 10)
+}
+
+// Parse the persisted tier blob into the multi-set shape, migrating the older
+// single-set payload (`{ tiers, forgeTier }` + a separate global env-vars blob)
+// forward into one "Default" set. Returns null when there's nothing usable.
+export function parseSetsBlob(rawTiers?: string | null, rawEnv?: string | null): SetsBlob | null {
+  if (!rawTiers) return null
   try {
-    const raw = localStorage.getItem(TIERS_KEY)
-    if (!raw) return null
-    const p = JSON.parse(raw)
-    if (p && p.tiers && typeof p.tiers === 'object') {
-      return { tiers: p.tiers as TierMap, forgeTier: p.forgeTier || 'reason' }
+    const p = JSON.parse(rawTiers)
+    if (Array.isArray(p?.sets) && p.sets.length > 0) {
+      const sets = (p.sets as TierSet[]).map((s) => ({
+        id: s.id || newSetId(),
+        name: s.name || 'Set',
+        tiers: s.tiers || {},
+        forgeTier: s.forgeTier || 'reason',
+        envVars: Array.isArray(s.envVars) ? s.envVars : [],
+      }))
+      const activeSetId = sets.some((s) => s.id === p.activeSetId) ? p.activeSetId : sets[0].id
+      return { sets, activeSetId }
+    }
+    // Legacy single-set shape — wrap it, folding in the old global env vars.
+    if (p?.tiers && typeof p.tiers === 'object') {
+      let env: EnvVar[] = []
+      try { const a = JSON.parse(rawEnv || '[]'); if (Array.isArray(a)) env = a } catch { /* ignore */ }
+      const set: TierSet = {
+        id: newSetId(), name: 'Default', tiers: p.tiers as TierMap,
+        forgeTier: p.forgeTier || 'reason', envVars: env,
+      }
+      return { sets: [set], activeSetId: set.id }
     }
   } catch { /* ignore */ }
   return null
@@ -107,8 +150,18 @@ export function persistSetting(key: string, val: string) {
   if (useAuthStore.getState().authEnabled) queueSave(key, val)
 }
 
-export function saveTierSettings(tiers: TierMap, forgeTier: string) {
-  persistSetting(TIERS_KEY, JSON.stringify({ tiers, forgeTier }))
+export function saveSets(sets: TierSet[], activeSetId: string) {
+  persistSetting(TIERS_KEY, JSON.stringify({ sets, activeSetId }))
+}
+
+// Deep-copy a set (tiers + env vars are nested) so edits to a duplicate don't
+// alias the source. A fresh id/name are applied by the caller.
+export function cloneSet(s: TierSet): TierSet {
+  return {
+    id: s.id, name: s.name, forgeTier: s.forgeTier,
+    tiers: Object.fromEntries(Object.entries(s.tiers).map(([k, v]) => [k, { ...v }])),
+    envVars: s.envVars.map((e) => ({ ...e })),
+  }
 }
 
 // Seed a tier map from the registry defaults, carrying the user's existing key
@@ -131,6 +184,20 @@ export function seedTiers(registry: ArchetypeRegistry, legacy: LegacyForgeConfig
   return out
 }
 
+// Build a brand-new set seeded from the registry defaults (carrying the legacy
+// single-model key/provider forward), with empty additional API keys.
+export function freshSet(
+  registry: ArchetypeRegistry | null, legacy: LegacyForgeConfig, name: string,
+): TierSet {
+  return {
+    id: newSetId(),
+    name,
+    tiers: registry ? seedTiers(registry, legacy) : {},
+    forgeTier: 'reason',
+    envVars: [],
+  }
+}
+
 // Mirror server values into localStorage on login hydration so the fast path is
 // warm. Registered once at module load (the module is a singleton).
 registerHydrator((settings) => {
@@ -145,6 +212,8 @@ registerHydrator((settings) => {
 // ── Shared state hook ────────────────────────────────────────────────
 
 export interface TierConfigState {
+  // Active-set view — what Forge/Basna/Library spawns consume. The setters all
+  // mutate the active set, so existing read-only consumers need no changes.
   tiers: TierMap
   setTiers: React.Dispatch<React.SetStateAction<TierMap>>
   forgeTier: string
@@ -154,25 +223,36 @@ export interface TierConfigState {
   registry: ArchetypeRegistry | null
   bootstrapped: boolean
   updateTier: (key: string, patch: Partial<TierConfig>) => void
+  // Multi-set management (Library page).
+  sets: TierSet[]
+  activeSetId: string
+  setActiveSet: (id: string) => void
+  addSet: (name?: string) => string
+  duplicateSet: (id: string) => string
+  renameSet: (id: string, name: string) => void
+  deleteSet: (id: string) => void
 }
 
 /**
  * Load (server-authoritative when auth is on), seed-from-registry, and persist
- * the per-user tier config + env vars + the archetype registry. Used by both the
- * Library editor and Agent Forge so they share one persisted source of truth.
+ * the per-user tier sets + the archetype registry. Used by the Library editor
+ * (which manages sets) and by Agent Forge / Basna (which read the active set),
+ * so there is ONE persisted source of truth.
  */
 export function useTierConfig(): TierConfigState {
-  const [tiers, setTiers] = useState<TierMap>(() => loadTierSettings()?.tiers || {})
-  const [forgeTier, setForgeTier] = useState<string>(() => loadTierSettings()?.forgeTier || 'reason')
+  // Compute the initial blob once from localStorage (avoids generating mismatched
+  // migration ids across two lazy initializers).
+  const initRef = useRef<SetsBlob | null>(null)
+  if (initRef.current === null) {
+    initRef.current = parseSetsBlob(
+      localStorage.getItem(TIERS_KEY), localStorage.getItem(ENV_VARS_KEY),
+    ) || { sets: [], activeSetId: '' }
+  }
+  const [sets, setSets] = useState<TierSet[]>(() => initRef.current!.sets)
+  const [activeSetId, setActiveSetId] = useState<string>(() => initRef.current!.activeSetId)
   // Gate seeding/persisting until the authoritative server load completes, so a
   // slow fetch can't let the seed/persist effects overwrite real saved data.
   const [bootstrapped, setBootstrapped] = useState(() => !useAuthStore.getState().authEnabled)
-  const [envVars, setEnvVars] = useState<EnvVar[]>(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(ENV_VARS_KEY) || '[]')
-      return Array.isArray(saved) ? saved : []
-    } catch { return [] }
-  })
   const [registry, setRegistry] = useState<ArchetypeRegistry | null>(null)
 
   // Authoritative load when auth is on, then mark bootstrapped.
@@ -181,23 +261,8 @@ export function useTierConfig(): TierConfigState {
     let cancelled = false
     fetchSettings().then((s) => {
       if (cancelled) return
-      const rawTiers = s[TIERS_KEY]
-      if (rawTiers) {
-        try {
-          const p = JSON.parse(rawTiers)
-          if (p?.tiers && typeof p.tiers === 'object') {
-            setTiers(p.tiers)
-            setForgeTier(p.forgeTier || 'reason')
-          }
-        } catch { /* ignore */ }
-      }
-      const rawEnv = s[ENV_VARS_KEY]
-      if (rawEnv) {
-        try {
-          const a = JSON.parse(rawEnv)
-          if (Array.isArray(a)) setEnvVars(a)
-        } catch { /* ignore */ }
-      }
+      const blob = parseSetsBlob(s[TIERS_KEY], s[ENV_VARS_KEY])
+      if (blob) { setSets(blob.sets); setActiveSetId(blob.activeSetId) }
     }).catch(() => {}).finally(() => { if (!cancelled) setBootstrapped(true) })
     return () => { cancelled = true }
   }, [])
@@ -209,26 +274,75 @@ export function useTierConfig(): TierConfigState {
     }).catch(() => {})
   }, [])
 
-  // Seed tiers from registry defaults once, if the user has no saved config.
+  // Seed one "Default" set from registry defaults if the user has none saved.
   useEffect(() => {
-    if (!bootstrapped || !registry || Object.keys(tiers).length > 0) return
-    setTiers(seedTiers(registry, loadLegacyConfig()))
-  }, [bootstrapped, registry, tiers])
+    if (!bootstrapped || !registry || sets.length > 0) return
+    const def = freshSet(registry, loadLegacyConfig(), 'Default')
+    setSets([def]); setActiveSetId(def.id)
+  }, [bootstrapped, registry, sets])
 
-  // Persist tier settings whenever they change (gated on bootstrapped).
+  // Keep the active id valid (e.g. after a delete, or a migration id mismatch).
   useEffect(() => {
-    if (!bootstrapped || Object.keys(tiers).length === 0) return
-    saveTierSettings(tiers, forgeTier)
-  }, [tiers, forgeTier, bootstrapped])
+    if (sets.length > 0 && !sets.some((s) => s.id === activeSetId)) setActiveSetId(sets[0].id)
+  }, [sets, activeSetId])
 
-  // Persist env vars, write-through to localStorage.
+  // Persist whenever the sets or the active selection change (gated on bootstrap).
   useEffect(() => {
-    if (!bootstrapped) return
-    persistSetting(ENV_VARS_KEY, JSON.stringify(envVars))
-  }, [envVars, bootstrapped])
+    if (!bootstrapped || sets.length === 0) return
+    saveSets(sets, activeSetId)
+  }, [sets, activeSetId, bootstrapped])
 
+  // ── Active-set view + mutators ──────────────────────────────────────
+  const activeSet = sets.find((s) => s.id === activeSetId) || sets[0] || null
+  const tiers = activeSet?.tiers || {}
+  const forgeTier = activeSet?.forgeTier || 'reason'
+  const envVars = activeSet?.envVars || []
+
+  // Apply an updater to the active set, immutably.
+  const patchActive = (updater: (s: TierSet) => TierSet) =>
+    setSets((prev) => prev.map((s) => (s.id === (activeSet?.id ?? activeSetId) ? updater(s) : s)))
+
+  const setTiers: React.Dispatch<React.SetStateAction<TierMap>> = (action) =>
+    patchActive((s) => ({
+      ...s,
+      tiers: typeof action === 'function'
+        ? (action as (p: TierMap) => TierMap)(s.tiers) : action,
+    }))
+  const setForgeTier = (t: string) => patchActive((s) => ({ ...s, forgeTier: t }))
+  const setEnvVars: React.Dispatch<React.SetStateAction<EnvVar[]>> = (action) =>
+    patchActive((s) => ({
+      ...s,
+      envVars: typeof action === 'function'
+        ? (action as (p: EnvVar[]) => EnvVar[])(s.envVars) : action,
+    }))
   const updateTier = (key: string, patch: Partial<TierConfig>) =>
-    setTiers((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }))
+    patchActive((s) => ({ ...s, tiers: { ...s.tiers, [key]: { ...s.tiers[key], ...patch } } }))
 
-  return { tiers, setTiers, forgeTier, setForgeTier, envVars, setEnvVars, registry, bootstrapped, updateTier }
+  // ── Set management ──────────────────────────────────────────────────
+  const setActiveSet = (id: string) => setActiveSetId(id)
+  const addSet = (name?: string): string => {
+    const s = freshSet(registry, loadLegacyConfig(), name || `Set ${sets.length + 1}`)
+    setSets((prev) => [...prev, s]); setActiveSetId(s.id)
+    return s.id
+  }
+  const duplicateSet = (id: string): string => {
+    const src = sets.find((s) => s.id === id) || activeSet
+    if (!src) return ''
+    const copy = { ...cloneSet(src), id: newSetId(), name: `${src.name} copy` }
+    setSets((prev) => [...prev, copy]); setActiveSetId(copy.id)
+    return copy.id
+  }
+  const renameSet = (id: string, name: string) =>
+    setSets((prev) => prev.map((s) => (s.id === id ? { ...s, name } : s)))
+  const deleteSet = (id: string) => {
+    if (sets.length <= 1) return  // always keep at least one set
+    const next = sets.filter((s) => s.id !== id)
+    setSets(next)
+    if (activeSetId === id) setActiveSetId(next[0].id)
+  }
+
+  return {
+    tiers, setTiers, forgeTier, setForgeTier, envVars, setEnvVars, registry, bootstrapped, updateTier,
+    sets, activeSetId, setActiveSet, addSet, duplicateSet, renameSet, deleteSet,
+  }
 }

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import {
   Library, Gauge, Trash2, Plus, Crown, Loader2, Check, AlertTriangle, Rocket,
+  Layers, Copy,
 } from 'lucide-react'
 import { useProcessStore } from '../stores/processStore'
 import { spawnProcess, type SpawnConfig } from '../services/docker'
@@ -13,7 +14,10 @@ type SpawnState = 'spawning' | 'done' | 'error'
 export function LibraryPage() {
   const {
     tiers, forgeTier, setForgeTier, envVars, setEnvVars, registry, updateTier,
+    sets, activeSetId, setActiveSet, addSet, duplicateSet, renameSet, deleteSet,
   } = useTierConfig()
+
+  const activeSet = sets.find((s) => s.id === activeSetId) || sets[0]
 
   const { setFleetInstructions, setDescription, setNameOverride, fetchProcesses } = useProcessStore()
 
@@ -106,6 +110,59 @@ export function LibraryPage() {
           <p className="text-[11px] text-zinc-500">
             Each tier is a model definition. Agents (from the gallery or Agent Forge) run on the model of their tier. Settings are saved to your workspace.
           </p>
+
+          {/* ── Tier sets: pick the active profile, or manage them ── */}
+          <div className="rounded-lg border border-violet-500/20 bg-violet-500/[0.04] p-3 space-y-2">
+            <div className="flex items-center gap-2">
+              <Layers className="h-4 w-4 text-violet-400 shrink-0" />
+              <span className="text-sm font-medium text-zinc-200">Tier Sets</span>
+              <span className="text-[11px] text-zinc-500 truncate">— the active set drives Forge, Basna &amp; spawns</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={activeSetId}
+                onChange={(e) => setActiveSet(e.target.value)}
+                className="min-w-[10rem] flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+              >
+                {sets.map((s) => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
+              <button
+                onClick={() => addSet()}
+                title="New set (seeded from defaults)"
+                className="flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-xs text-zinc-300 hover:border-violet-500/40 hover:text-zinc-100"
+              >
+                <Plus className="h-3.5 w-3.5" /> New
+              </button>
+              <button
+                onClick={() => duplicateSet(activeSetId)}
+                title="Duplicate the active set"
+                className="flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-xs text-zinc-300 hover:border-violet-500/40 hover:text-zinc-100"
+              >
+                <Copy className="h-3.5 w-3.5" /> Duplicate
+              </button>
+              <button
+                onClick={() => { if (sets.length > 1 && confirm(`Delete tier set "${activeSet?.name}"?`)) deleteSet(activeSetId) }}
+                disabled={sets.length <= 1}
+                title={sets.length <= 1 ? 'Keep at least one set' : 'Delete the active set'}
+                className="flex items-center gap-1 rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-xs text-zinc-400 hover:border-red-500/40 hover:text-red-400 disabled:opacity-40 disabled:hover:border-zinc-700 disabled:hover:text-zinc-400"
+              >
+                <Trash2 className="h-3.5 w-3.5" /> Delete
+              </button>
+            </div>
+            {activeSet && (
+              <div>
+                <label className="block text-[10px] font-medium text-zinc-500 mb-1">Set name</label>
+                <input
+                  value={activeSet.name}
+                  onChange={(e) => renameSet(activeSetId, e.target.value)}
+                  className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                  placeholder="e.g. All Anthropic, Local Ollama"
+                />
+              </div>
+            )}
+          </div>
 
           {/* Which tier designs the team in Forge */}
           <div>
@@ -207,7 +264,7 @@ export function LibraryPage() {
 
           {/* Additional API Keys / Environment Variables */}
           <div>
-            <label className="block text-[11px] font-medium text-zinc-500 mb-1">Additional API Keys (passed to all agents)</label>
+            <label className="block text-[11px] font-medium text-zinc-500 mb-1">Additional API Keys — part of this set, passed to agents it spawns</label>
             <div className="space-y-2">
               {envVars.map((ev, i) => (
                 <div key={i} className="flex items-center gap-2">
