@@ -72,6 +72,17 @@ def _guess_mime(name: str) -> str:
     return mimetypes.guess_type(name)[0] or "application/octet-stream"
 
 
+# Generated files we can fall back to as an agent's "output" when it answered by
+# writing a document and left its chat reply empty (the merge reads text, not bytes).
+_TEXT_EXTS = {".md", ".markdown", ".txt", ".csv", ".tsv", ".json", ".html",
+              ".htm", ".xml", ".yaml", ".yml", ".rst", ".log", ".tex"}
+_MAX_TEXT_FALLBACK_BYTES = 4 * 1024 * 1024  # don't slurp a giant artifact as "output"
+
+
+def _is_texty(name: str, mime: str) -> bool:
+    return mime.startswith("text/") or Path(name).suffix.lower() in _TEXT_EXTS
+
+
 def _parse_files(sess: dict) -> list[dict]:
     try:
         f = json.loads(sess.get("files") or "[]")
@@ -551,6 +562,16 @@ def _merge_diverge(good: list[dict]) -> dict:
     }
 
 
+def _usable(r: dict) -> bool:
+    """A run contributes to the merge if it produced real content — either its
+    chat reply (`ok`) or, when it answered by writing a file, the captured
+    artifact text backfilled into `output` (`produced_file`). Without this, an
+    agent that delivers a document and ends its turn with an empty reply is
+    silently dropped and the merge compiles from nothing."""
+    return bool((r.get("ok") or r.get("produced_file"))
+                and (r.get("output") or "").strip())
+
+
 async def _aggregate(
     results: list[dict], merge_kind: str, domain: str, *,
     conflict_fn, synth_fn,
@@ -563,7 +584,7 @@ async def _aggregate(
     `conflict_fn(good) -> bool` and `synth_fn(good) -> str` are injected so the
     merge logic is testable without live models.
     """
-    good = [r for r in results if r.get("ok") and (r.get("output") or "").strip()]
+    good = [r for r in results if _usable(r)]
     if not good:
         return {"truth": "", "confidence": 0.0, "method": "empty", "contributors": []}
 
@@ -677,7 +698,7 @@ async def _score_runs(results: list[dict], agg: dict, merge_kind: str, *, judge_
     scores: dict[str, bool] = {}
     good: list[dict] = []
     for r in results:
-        if r.get("ok") and (r.get("output") or "").strip():
+        if _usable(r):
             good.append(r)
         else:
             scores[r["archetype_id"]] = False
@@ -724,72 +745,131 @@ async def _send_chat_and_collect(
     """
     import websockets
     uri = f"ws://localhost:{port}/ws" + (f"?token={token}" if token else "")
+    # State persists across reconnects: the task is sent exactly once, and a
+    # dropped long-poll socket resumes listening rather than restarting the turn.
+    answer = ""
+    actions: list[dict] = []
+    sent = False
+    deadline: float | None = None
     last_err: Exception | None = None
-    for attempt in range(10):  # the agent's web server may still be booting
-        answer = ""
-        actions: list[dict] = []
+
+    def _record(kind: str, detail: str) -> None:
+        act = {"tool": kind, "detail": detail}
+        actions.append(act)
+        if on_action:
+            try:
+                on_action(act)
+            except Exception:
+                pass
+
+    def _handle(msg: dict) -> bool:
+        """Apply one inbound message; return True when the turn is complete."""
+        nonlocal answer
+        mtype = msg.get("type")
+        if mtype == "chat_message" and msg.get("role") == "assistant":
+            if msg.get("content"):
+                answer = msg["content"]  # keep the latest full reply
+        elif mtype == "replay_batch":
+            # On reconnect the committed history arrives bundled here; recover the
+            # latest assistant reply so a turn that finished while we were
+            # disconnected isn't lost. Replayed tool calls are skipped (counted
+            # live already) to avoid double-recording.
+            for m in (msg.get("messages") or []):
+                if (m.get("type") == "chat_message" and m.get("role") == "assistant"
+                        and m.get("content")):
+                    answer = m["content"]
+        elif mtype == "monitor" and not msg.get("replay"):
+            _record(str(msg.get("tool_name") or msg.get("tool") or "tool"),
+                    _summarize_tool_args(msg.get("arguments")))
+        elif mtype == "narration" and str(msg.get("text") or "").strip():
+            _record("narration", str(msg["text"]).strip()[:280])
+        elif mtype == "usage" and not msg.get("replay"):
+            # Each turn's LLM usage — model + token counts (the agent does not
+            # broadcast full prompt/response, only this summary).
+            u = msg.get("last") or msg.get("usage") or msg
+            model = u.get("model") or msg.get("model") or ""
+            it = u.get("input_tokens") or u.get("prompt_tokens")
+            ot = u.get("output_tokens") or u.get("completion_tokens")
+            tok = f"{it}→{ot} tok" if (it is not None or ot is not None) else ""
+            detail = " · ".join(x for x in [str(model), tok] if x)
+            if detail:
+                _record("llm", detail)
+        elif mtype == "status" and str(msg.get("status", "")).lower() in _DONE_STATES:
+            # End-of-turn only once the turn actually ran — a fresh agent's boot
+            # "ready" carries no actions or answer and must not end us early. An
+            # agent that delivered via a file write ends with no answer but real
+            # actions, so `actions` is the signal there.
+            return bool(actions or answer.strip())
+        elif mtype == "replay_done":
+            # Reconnected after the turn committed: the replay already carried the
+            # final reply, so we're done.
+            return bool(answer.strip())
+        elif mtype == "error":
+            m = str(msg.get("message", "") or "")
+            # "busy" means the agent is still finishing OUR turn on the original
+            # connection — not fatal. Keep listening; results are broadcast to
+            # every client, including this reconnected one.
+            if "busy" in m.lower():
+                return False
+            raise RuntimeError(m or "agent error")
+        return False
+
+    # The retry loop covers two cases: the agent's web server may still be booting
+    # (initial connect), and the long-poll socket may drop mid-turn. We send the
+    # task only on the first connection; reconnects just re-attach and listen, so
+    # we never re-trigger the agent's busy guard or discard collected work.
+    for attempt in range(10):
         try:
-            async with websockets.connect(uri, max_size=8 * 1024 * 1024, open_timeout=10) as ws:
+            async with websockets.connect(
+                uri, max_size=8 * 1024 * 1024, open_timeout=10,
+                ping_interval=20, ping_timeout=30,
+            ) as ws:
                 await asyncio.wait_for(ws.recv(), timeout=15)  # welcome
-                if fleet_instructions:
-                    # Set fleet-level instructions (archetype role + SOP) into the
-                    # agent's system prompt before the task turn.
-                    await ws.send(json.dumps({
-                        "type": "peer_agents", "agents": [],
-                        "self": {"name": agent_name or "agent",
-                                 "fleet_instructions": fleet_instructions},
-                    }))
-                chat_msg: dict = {"type": "chat", "content": prompt}
-                if file_paths:
-                    chat_msg["file_paths"] = file_paths
-                if image_paths:
-                    chat_msg["image_paths"] = image_paths
-                await ws.send(json.dumps(chat_msg))
+                if not sent:
+                    if fleet_instructions:
+                        # Fleet-level instructions (archetype role + SOP) into the
+                        # agent's system prompt before the task turn.
+                        await ws.send(json.dumps({
+                            "type": "peer_agents", "agents": [],
+                            "self": {"name": agent_name or "agent",
+                                     "fleet_instructions": fleet_instructions},
+                        }))
+                    chat_msg: dict = {"type": "chat", "content": prompt}
+                    if file_paths:
+                        chat_msg["file_paths"] = file_paths
+                    if image_paths:
+                        chat_msg["image_paths"] = image_paths
+                    await ws.send(json.dumps(chat_msg))
+                    sent = True
+                    deadline = asyncio.get_event_loop().time() + timeout
 
-                def _record(kind: str, detail: str) -> None:
-                    act = {"tool": kind, "detail": detail}
-                    actions.append(act)
-                    if on_action:
-                        try:
-                            on_action(act)
-                        except Exception:
-                            pass
-
-                deadline = asyncio.get_event_loop().time() + timeout
                 while True:
                     rem = deadline - asyncio.get_event_loop().time()
                     if rem <= 0:
-                        break
-                    raw = await asyncio.wait_for(ws.recv(), timeout=min(rem, 60))
-                    msg = json.loads(raw)
-                    mtype = msg.get("type")
-                    if mtype == "chat_message" and msg.get("role") == "assistant":
-                        if msg.get("content"):
-                            answer = msg["content"]  # keep the latest full reply
-                    elif mtype == "monitor" and not msg.get("replay"):
-                        _record(str(msg.get("tool_name") or msg.get("tool") or "tool"),
-                                _summarize_tool_args(msg.get("arguments")))
-                    elif mtype == "narration" and str(msg.get("text") or "").strip():
-                        _record("narration", str(msg["text"]).strip()[:280])
-                    elif mtype == "usage" and not msg.get("replay"):
-                        # Each turn's LLM usage — model + token counts (the agent does
-                        # not broadcast full prompt/response, only this summary).
-                        u = msg.get("last") or msg.get("usage") or msg
-                        model = u.get("model") or msg.get("model") or ""
-                        it = u.get("input_tokens") or u.get("prompt_tokens")
-                        ot = u.get("output_tokens") or u.get("completion_tokens")
-                        tok = f"{it}→{ot} tok" if (it is not None or ot is not None) else ""
-                        detail = " · ".join(x for x in [str(model), tok] if x)
-                        if detail:
-                            _record("llm", detail)
-                    elif mtype == "status" and str(msg.get("status", "")).lower() in _DONE_STATES:
-                        break
-                    elif mtype == "error":
-                        raise RuntimeError(msg.get("message", "agent error"))
-            return answer.strip(), actions
-        except (ConnectionRefusedError, OSError) as e:
+                        return answer.strip(), actions  # overall budget spent
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=min(rem, 30))
+                    except asyncio.TimeoutError:
+                        # A quiet socket is not a dead one: the agent may be deep in
+                        # an LLM synthesis with nothing to stream. Keep waiting until
+                        # the overall deadline rather than tearing the turn down and
+                        # re-sending it (which the agent rejects as "busy").
+                        continue
+                    if _handle(json.loads(raw)):
+                        return answer.strip(), actions
+        except (ConnectionRefusedError, OSError, websockets.ConnectionClosed) as e:
+            # TimeoutError (an OSError subclass) and ConnectionClosed land here for a
+            # genuinely dead socket. If we already have the answer, or the budget is
+            # spent, stop; otherwise reconnect and resume listening — without
+            # re-sending the task.
             last_err = e
+            if sent and answer.strip():
+                return answer.strip(), actions
+            if deadline is not None and asyncio.get_event_loop().time() >= deadline:
+                return answer.strip(), actions
             await asyncio.sleep(0.5 * (attempt + 1))
+    if sent and (answer.strip() or actions):
+        return answer.strip(), actions
     raise RuntimeError(f"could not reach agent on port {port}: {last_err}")
 
 
@@ -989,7 +1069,8 @@ async def execute_route(
         # workspaces — so generated content is preserved on the session.
         dest_dir = _session_files_dir(body.session_id)
         seen_gen: set[str] = set()
-        for sp in spawned:
+        gen_text_by_idx: dict[int, list[str]] = {}  # spawn index → captured text
+        for i, sp in enumerate(spawned):
             ws = DATA_DIR / sp["slug"] / "data" / "workspace"
             if not ws.is_dir():
                 continue
@@ -1007,8 +1088,26 @@ async def execute_route(
                                             "size": p.stat().st_size, "kind": "generated"})
                 except OSError as e:
                     log.warning("Basna generated-file capture failed", file=p.name, error=str(e))
+                    continue
+                # Keep this agent's textual artifacts around as a merge fallback.
+                if _is_texty(out_name, _guess_mime(out_name)) and p.stat().st_size <= _MAX_TEXT_FALLBACK_BYTES:
+                    try:
+                        gen_text_by_idx.setdefault(i, []).append(p.read_text(errors="replace"))
+                    except OSError:
+                        pass
         if generated_files:
             _progress(sid, "files", f"Captured {len(generated_files)} generated file(s)")
+
+        # When an agent answered by writing a document and left its chat reply
+        # empty, fall back to that document so the merge has something to compile.
+        # `results` is index-aligned with `spawned`.
+        for i, r in enumerate(results):
+            if (r.get("output") or "").strip():
+                continue
+            texts = gen_text_by_idx.get(i)
+            if texts:
+                r["output"] = "\n\n".join(t.strip() for t in texts if t.strip()).strip()
+                r["produced_file"] = True
 
         # 3b) Always remove the ephemeral agents — fully, not just "stopped", so
         # they don't pile up in the fleet. Their outputs/actions live in basna_runs.

@@ -629,11 +629,17 @@ function buildTurnPrompt(
     ? ''
     : '\nThis is a single contribution to the discussion, not a task to orchestrate. Do NOT delegate to other agents, create task contracts, or spin up sub-tasks — the council is already the coordination layer. Give your own analysis and stop. (Research tools like web_search are fine; delegation tools are disabled this turn.)'
 
+  // Tabular output is the most common way agents waste a turn: they write a
+  // Python script to build an .xlsx and that fails or produces nothing useful.
+  // Forbid it firmly on every turn and point at the two supported paths.
+  const tabularNote =
+    '\nDo NOT write Python scripts (or any other code) to generate .xlsx / Excel / spreadsheet files. If you need to save data in tabular format, either write a Markdown table to a `.md` file, or use the `datastore` tool to store it in a relational table. Never produce spreadsheets via generated code.'
+
   return renderTemplate(turnTemplate, {
     round,
     maxRounds: session.maxRounds,
     recentContributions: recentContributions + filesNudge,
-    directive: directiveText + identityNote + delegationNote,
+    directive: directiveText + identityNote + delegationNote + tabularNote,
     extensionNote,
   })
 }
