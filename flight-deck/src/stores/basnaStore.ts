@@ -17,8 +17,17 @@ export interface BasnaSession {
   config: string
   progress: string   // JSON array of ProgressEvent
   files: string      // JSON array of BasnaFile
+  analysis: string   // JSON BasnaAnalysis (cross-agent comparison)
   created_at: string
   updated_at: string
+}
+
+// Cross-agent analysis surfaced above the compiled truth (Fusion-style).
+export interface BasnaAnalysis {
+  agreement?: string[]
+  differences?: { point: string; positions?: { by: string; stance: string }[] }[]
+  unique?: { by: string; insight: string }[]
+  blind_spots?: string[]
 }
 
 export interface BasnaFile { name: string; mime: string; size: number; kind?: 'input' | 'generated'; agent?: string }
@@ -88,6 +97,7 @@ export interface ExecuteResult {
   confidence: number
   method: string
   contributors: string[]
+  analysis?: BasnaAnalysis | null
   agents: ExecuteAgent[]
   learned: { archetype_id: string; run_id: number; success: boolean; weight: number }[]
   spawned: number
@@ -160,6 +170,14 @@ async function apiRoute(body: Record<string, unknown>): Promise<RoutePlan> {
     method: 'POST', body: JSON.stringify(body),
   })
   if (!res.ok) throw new Error((await res.text()) || 'route failed')
+  return res.json()
+}
+
+async function apiRecompile(sessionId: string, tiers: TierMap): Promise<Partial<ExecuteResult>> {
+  const res = await _authedFetch(`/fd/basna/sessions/${encodeURIComponent(sessionId)}/recompile`, {
+    method: 'POST', body: JSON.stringify({ tiers }),
+  })
+  if (!res.ok) throw new Error((await res.text()) || 'recompile failed')
   return res.json()
 }
 
@@ -243,6 +261,18 @@ function parseFiles(s?: string): AttachedFile[] {
   }
 }
 
+export function parseAnalysis(s?: string): BasnaAnalysis | null {
+  if (!s) return null
+  try {
+    const o = JSON.parse(s)
+    if (!o || typeof o !== 'object') return null
+    // Treat an empty object as "no analysis".
+    return Object.keys(o).length ? (o as BasnaAnalysis) : null
+  } catch {
+    return null
+  }
+}
+
 const _ROUTER_TIER_LS = 'basna.routerTier'
 
 // ── Store ────────────────────────────────────────────────────────────
@@ -259,6 +289,7 @@ interface BasnaStore {
   listLoading: boolean
   routing: boolean
   executing: boolean
+  recompiling: boolean
   error: string | null
 
   routerTier: string   // which Library tier selects the archetypes (the router)
@@ -277,6 +308,7 @@ interface BasnaStore {
   updateSelected: (index: number, patch: Partial<RouteSelected>) => void
   route: (intent: string, tiers: TierMap) => Promise<void>
   execute: (tiers: TierMap, envVars: EnvVar[]) => Promise<void>
+  recompile: (tiers: TierMap) => Promise<void>
   sendFeedback: (runId: number, success: boolean) => Promise<void>
   deleteSession: (id: string) => Promise<void>
 }
@@ -293,6 +325,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   listLoading: false,
   routing: false,
   executing: false,
+  recompiling: false,
   error: null,
 
   routerTier: (typeof localStorage !== 'undefined' && localStorage.getItem(_ROUTER_TIER_LS)) || 'reason',
@@ -439,6 +472,25 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       clearInterval(poll)
       try { const p = await apiProgress(sid); set({ progress: p.events || [] }) } catch { /* ignore */ }
       set({ executing: false })
+    }
+  },
+
+  recompile: async (tiers) => {
+    const sid = get().activeSession?.id
+    if (!sid) return
+    set({ recompiling: true, error: null })
+    try {
+      const res = await apiRecompile(sid, tiers)
+      const s = await apiGetSession(sid)
+      set({
+        activeSession: s,
+        attachments: s ? parseFiles(s.files) : get().attachments,
+        lastExecute: { ...(get().lastExecute || {} as ExecuteResult), ...res } as ExecuteResult,
+      })
+    } catch (e) {
+      set({ error: e instanceof Error ? e.message : 'recompile failed' })
+    } finally {
+      set({ recompiling: false })
     }
   },
 

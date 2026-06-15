@@ -54,6 +54,10 @@ def _load_registry() -> dict:
 
 
 _MAX_FILE_BYTES = 25 * 1024 * 1024
+# Merge-step LLM timeouts (seconds) — a slow/hung provider must not stall the run
+# forever; on timeout the merge degrades to the best-weighted answer.
+_MERGE_TIMEOUT = 90    # fast-tier conflict check
+_SYNTH_TIMEOUT = 300   # reason-tier synthesis / analysis
 
 
 def _safe_name(name: str) -> str:
@@ -597,38 +601,58 @@ async def _aggregate(
                 "method": "single", "contributors": [r["archetype_id"]]}
 
     mean_w = _mean_weight(good)
-    agree = await conflict_fn(good)
-    if agree:
-        best = max(good, key=lambda r: r["weight"])
-        return {"truth": best["output"].strip(),
-                "confidence": round(min(0.99, mean_w + 0.1), 3),
-                "method": "weighted_pick",
-                "contributors": [r["archetype_id"] for r in good]}
-    merged = await synth_fn(good)
-    return {"truth": merged.strip(),
-            "confidence": round(max(0.05, mean_w - 0.2), 3),
-            "method": "synthesis",
+    try:
+        agree = await conflict_fn(good)
+    except Exception as e:
+        log.warning("Basna conflict check failed; taking best-weighted", error=str(e))
+        agree = True  # degrade: skip synthesis, take the best-weighted answer
+    if not agree:
+        try:
+            merged = await synth_fn(good)
+            return {"truth": merged.strip(),
+                    "confidence": round(max(0.05, mean_w - 0.2), 3),
+                    "method": "synthesis",
+                    "contributors": [r["archetype_id"] for r in good]}
+        except Exception as e:
+            log.warning("Basna synthesis failed; falling back to best-weighted", error=str(e))
+    # Agreement, or a failed/timed-out conflict/synthesis → always return a truth.
+    best = max(good, key=lambda r: r["weight"])
+    return {"truth": best["output"].strip(),
+            "confidence": round(min(0.99, mean_w + 0.1), 3),
+            "method": "weighted_pick",
             "contributors": [r["archetype_id"] for r in good]}
 
 
 def _tier_creds(registry: dict, tier: str, api_key: str) -> dict:
     t = (registry.get("tiers") or {}).get(tier, {})
     return {"provider": t.get("provider", "anthropic"), "model": t.get("model", ""),
-            "base_url": t.get("base_url", "") or None, "api_key": api_key or None}
+            "base_url": t.get("base_url", "") or None, "api_key": api_key or None,
+            "output_ctx": int(t.get("output_ctx") or 0)}
+
+
+def _provider_call(creds: dict, *, temperature: float, default_max: int, cap: int) -> tuple:
+    """Build (create_provider, max_tokens) from merge creds — honoring the tier's
+    output_ctx so a long synthesis isn't truncated by a hardcoded cap. Pops the
+    non-provider `output_ctx` key before constructing the provider."""
+    from captain_claw.llm import create_provider
+    c = {k: v for k, v in creds.items() if k != "output_ctx"}
+    out = int(creds.get("output_ctx") or 0)
+    max_tokens = min(max(out or default_max, default_max), cap)
+    return create_provider(temperature=temperature, max_tokens=max_tokens, **c), max_tokens
 
 
 async def _llm_conflict(good: list[dict], creds: dict) -> bool:
     """Fast-tier check: do these answers substantively agree? Default to disagree."""
-    from captain_claw.llm import create_provider, Message
+    from captain_claw.llm import Message
     listing = "\n\n".join(f"[{i+1}] {r['output'].strip()[:2000]}" for i, r in enumerate(good))
-    prov = create_provider(temperature=0.0, max_tokens=256, **creds)
+    prov, mt = _provider_call(creds, temperature=0.0, default_max=256, cap=512)
     resp = await prov.complete(messages=[
         Message(role="system", content=(
             "You compare independent answers to the same task. Reply ONLY with JSON "
             '{"agree": true} if they reach substantively the same conclusion, or '
             '{"agree": false} if they materially disagree on the answer.')),
         Message(role="user", content=listing),
-    ], temperature=0.0, max_tokens=256)
+    ], temperature=0.0, max_tokens=mt)
     content = resp.content.strip()
     if content.startswith("```"):
         content = "\n".join(l for l in content.split("\n") if not l.strip().startswith("```"))
@@ -640,22 +664,82 @@ async def _llm_conflict(good: list[dict], creds: dict) -> bool:
 
 async def _llm_synthesize(good: list[dict], domain: str, creds: dict) -> str:
     """Reason-tier reconciliation of disagreeing answers, trusting weight."""
-    from captain_claw.llm import create_provider, Message
+    from captain_claw.llm import Message
     listing = "\n\n".join(
         f"### {r['role']} (reliability weight {r['weight']:.2f})\n{r['output'].strip()}"
         for r in good
     )
-    prov = create_provider(temperature=0.3, max_tokens=4096, **creds)
+    prov, mt = _provider_call(creds, temperature=0.3, default_max=8192, cap=32768)
     resp = await prov.complete(messages=[
         Message(role="system", content=(
             f"Independent specialists gave conflicting answers in the {domain} domain. "
-            "Reconcile them into one correct answer. Weigh higher-reliability "
-            "contributors more, but follow the evidence over the weight when a "
-            "lower-weighted contributor is clearly right. State the resolved answer "
-            "directly; do not narrate the disagreement.")),
+            "Reconcile them into one correct, complete answer — do not truncate or "
+            "abbreviate; if the inputs are long documents, produce the full merged "
+            "document. Weigh higher-reliability contributors more, but follow the "
+            "evidence over the weight when a lower-weighted contributor is clearly "
+            "right. State the resolved answer directly; do not narrate the disagreement.")),
         Message(role="user", content=listing),
-    ], temperature=0.3, max_tokens=4096)
+    ], temperature=0.3, max_tokens=mt)
     return resp.content.strip()
+
+
+async def _llm_analysis(good: list[dict], domain: str, creds: dict) -> dict | None:
+    """Cross-agent analysis: where the independent answers agree, where they
+    differ (attributed), what each uniquely contributed, and what NONE addressed.
+
+    Returns a dict with keys agreement / differences / unique / blind_spots, or
+    None if the model output can't be parsed.
+    """
+    from captain_claw.llm import Message
+    listing = "\n\n".join(
+        f"### {r['role']}\n{r['output'].strip()[:3500]}" for r in good
+    )
+    prov, mt = _provider_call(creds, temperature=0.2, default_max=4096, cap=8192)
+    resp = await prov.complete(messages=[
+        Message(role="system", content=(
+            f"You are comparing {len(good)} independent expert answers to the same "
+            f"task ({domain}). Produce a rigorous comparison. Attribute points to "
+            "contributors by their role name. Reply ONLY with JSON of this shape:\n"
+            '{"agreement": ["points all/most converge on"],\n'
+            ' "differences": [{"point": "what they disagree about", '
+            '"positions": [{"by": "Role", "stance": "their position"}]}],\n'
+            ' "unique": [{"by": "Role", "insight": "something only this one raised"}],\n'
+            ' "blind_spots": ["important aspects NONE of the answers addressed"]}\n'
+            "Be specific and concise. Blind spots are the most valuable part — "
+            "think about what a careful reviewer would notice is missing.")),
+        Message(role="user", content=listing),
+    ], temperature=0.2, max_tokens=mt)
+    content = resp.content.strip()
+    if content.startswith("```"):
+        content = "\n".join(l for l in content.split("\n") if not l.strip().startswith("```"))
+    # Tolerate prose wrapped around the JSON object.
+    if not content.startswith("{"):
+        s, e = content.find("{"), content.rfind("}")
+        if s != -1 and e > s:
+            content = content[s:e + 1]
+    try:
+        obj = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+
+    # Normalize key variants so a model that says "key_differences" or
+    # "blind spots" still populates the panel.
+    def _arr(*keys: str) -> list:
+        for k in keys:
+            v = obj.get(k)
+            if isinstance(v, list):
+                return v
+        return []
+
+    norm = {
+        "agreement": _arr("agreement", "agreements", "consensus", "agreed"),
+        "differences": _arr("differences", "key_differences", "keyDifferences", "disagreements"),
+        "unique": _arr("unique", "unique_insights", "uniqueInsights"),
+        "blind_spots": _arr("blind_spots", "blindspots", "blind spots", "blindSpots", "gaps", "missing"),
+    }
+    return norm if any(norm.values()) else None
 
 
 async def _llm_judge(good: list[dict], truth: str, creds: dict) -> list[bool]:
@@ -664,9 +748,9 @@ async def _llm_judge(good: list[dict], truth: str, creds: dict) -> list[bool]:
     Returns one bool per `good` entry, in order. Raises on unparseable output so
     the caller can leave those runs unscored rather than reward them by default.
     """
-    from captain_claw.llm import create_provider, Message
+    from captain_claw.llm import Message
     listing = "\n\n".join(f"[{i+1}] {r['output'].strip()[:2000]}" for i, r in enumerate(good))
-    prov = create_provider(temperature=0.0, max_tokens=512, **creds)
+    prov, mt = _provider_call(creds, temperature=0.0, default_max=512, cap=1024)
     resp = await prov.complete(messages=[
         Message(role="system", content=(
             "Given a FINAL answer and several independent contributions, decide for "
@@ -674,7 +758,7 @@ async def _llm_judge(good: list[dict], truth: str, creds: dict) -> list[bool]:
             "final answer. Reply ONLY with a JSON array of booleans — one per "
             "contribution, in order, same length as the input.")),
         Message(role="user", content=f"FINAL ANSWER:\n{truth[:4000]}\n\nCONTRIBUTIONS:\n{listing}"),
-    ], temperature=0.0, max_tokens=512)
+    ], temperature=0.0, max_tokens=mt)
     content = resp.content.strip()
     if content.startswith("```"):
         content = "\n".join(l for l in content.split("\n") if not l.strip().startswith("```"))
@@ -1075,7 +1159,8 @@ async def execute_route(
             mark = "✓" if d["ok"] else "✗"
             extra = "" if d["ok"] else f" — {str(d.get('error', ''))[:160]}"
             _progress(sid, "dispatch",
-                      f"{role} {mark} · {len(d['actions'])} action(s) ({d['latency_ms'] / 1000:.1f}s){extra}", ok=d["ok"])
+                      f"{role} {mark} · {len(d['actions'])} action(s) ({d['latency_ms'] / 1000:.1f}s){extra}",
+                      ok=d["ok"], agent=role)
             return d
 
         dispatched = await asyncio.gather(*[_dispatch_tracked(sp) for sp in spawned])
@@ -1171,17 +1256,37 @@ async def execute_route(
         if lt and lt.get("model"):
             return {"provider": lt.get("provider", "anthropic"), "model": lt.get("model", ""),
                     "base_url": lt.get("base_url") or None,
-                    "api_key": lt.get("api_key") or body.api_key or None}
+                    "api_key": lt.get("api_key") or body.api_key or None,
+                    "output_ctx": int(lt.get("output_ctx") or 0)}
         return _tier_creds(registry, tier, body.api_key)
 
     # 5) Compile the truth (weighted; LLM synthesis only on genuine conflict).
     _progress(sid, "merge", "Compiling the truth…")
     agg = await _aggregate(
         results, merge_kind, domain,
-        conflict_fn=lambda good: _llm_conflict(good, _merge_creds("fast")),
-        synth_fn=lambda good: _llm_synthesize(good, domain, _merge_creds("reason")),
+        conflict_fn=lambda good: asyncio.wait_for(_llm_conflict(good, _merge_creds("fast")), _MERGE_TIMEOUT),
+        synth_fn=lambda good: asyncio.wait_for(_llm_synthesize(good, domain, _merge_creds("reason")), _SYNTH_TIMEOUT),
     )
     _progress(sid, "merge", f"Merged via {agg['method']} · confidence {agg['confidence']:.0%}")
+
+    # 5b) Cross-agent analysis — agreement, attributed differences, unique
+    # insights, and blind spots none of the agents covered. Only when ≥2 agents
+    # actually contributed (a single answer has nothing to compare against).
+    analysis: dict | None = None
+    good_results = [r for r in results if _usable(r)]
+    if len(good_results) >= 2:
+        _progress(sid, "merge", "Analyzing agreement & blind spots…")
+        try:
+            analysis = await asyncio.wait_for(
+                _llm_analysis(good_results, domain, _merge_creds("reason")), _SYNTH_TIMEOUT)
+        except Exception as e:
+            log.warning("Basna analysis failed", error=str(e))
+        if analysis:
+            _progress(sid, "merge", "Analysis: {} agreement · {} differences · {} blind spots".format(
+                len(analysis.get("agreement") or []), len(analysis.get("differences") or []),
+                len(analysis.get("blind_spots") or [])))
+        else:
+            _progress(sid, "merge", "Analysis: none produced", ok=False)
 
     # 6) Close the learning loop: score each run against the truth and fold the
     # outcome into per-archetype reliability, so the next route's prior_weight
@@ -1210,6 +1315,7 @@ async def execute_route(
         body.session_id, user["id"], status="done",
         truth=agg["truth"], confidence=agg["confidence"],
         files=json.dumps(list(files_by_name.values())),
+        analysis=json.dumps(analysis or {}),
     )
     _progress(sid, "done", f"Done · {len(results)} agent(s), {len(learned)} learned")
     _progress_done(sid)
@@ -1222,6 +1328,7 @@ async def execute_route(
         "session_id": body.session_id, "domain": domain, "merge_kind": merge_kind,
         "truth": agg["truth"], "confidence": agg["confidence"],
         "method": agg["method"], "contributors": agg["contributors"],
+        "analysis": analysis,
         "agents": [{"archetype_id": r["archetype_id"], "role": r["role"],
                     "ok": r["ok"], "latency_ms": r["latency_ms"], "weight": r["weight"],
                     "actions": r.get("actions", []),
@@ -1230,6 +1337,85 @@ async def execute_route(
         "learned": learned,
         "spawned": len(spawned), "dispatched": len(results),
     }
+
+
+class RecompileRequest(BaseModel):
+    tiers: dict | None = None
+    api_key: str = ""
+
+
+@router.post("/sessions/{session_id}/recompile")
+async def recompile_route(
+    session_id: str, body: RecompileRequest, user: dict = Depends(get_current_user),
+):
+    """Recompute the truth + analysis from the already-persisted agent runs — no
+    re-spawn, no re-dispatch. Use to recover when the merge stalled or failed, or
+    to re-merge after changing tiers. Does not re-score reliability."""
+    db = get_db()
+    sess = await db.get_basna_session(session_id, user["id"])
+    if not sess:
+        raise HTTPException(404, "session not found")
+    runs = await db.list_basna_runs(session_id, user["id"])
+    results = [{
+        "archetype_id": r.get("archetype_id", ""), "role": r.get("role", ""),
+        "weight": float(r.get("weight_at_run", 0.7) or 0.7),
+        "output": r.get("output", "") or "",
+        "ok": bool((r.get("output") or "").strip()),
+    } for r in runs]
+    if not any(_usable(r) for r in results):
+        raise HTTPException(400, "no agent outputs to compile")
+
+    registry = _load_registry()
+    domain = sess.get("domain") or "general"
+    merge_kind = sess.get("merge_kind") or "converge"
+
+    def _merge_creds(tier: str) -> dict:
+        lt = (body.tiers or {}).get(tier)
+        if lt and lt.get("model"):
+            return {"provider": lt.get("provider", "anthropic"), "model": lt.get("model", ""),
+                    "base_url": lt.get("base_url") or None,
+                    "api_key": lt.get("api_key") or body.api_key or None,
+                    "output_ctx": int(lt.get("output_ctx") or 0)}
+        return _tier_creds(registry, tier, body.api_key)
+
+    # Reconcile generated files captured to disk but never persisted (a stalled
+    # run saves files to the session dir in `finally`, before the final DB save).
+    files_out = _parse_files(sess)
+    existing_names = {f["name"] for f in files_out}
+    fdir = _session_files_dir(session_id)
+    for p in sorted(fdir.iterdir()):
+        if p.is_file() and p.name not in existing_names:
+            files_out.append({"name": p.name, "mime": _guess_mime(p.name),
+                              "size": p.stat().st_size, "kind": "generated"})
+
+    agg = await _aggregate(
+        results, merge_kind, domain,
+        conflict_fn=lambda good: asyncio.wait_for(_llm_conflict(good, _merge_creds("fast")), _MERGE_TIMEOUT),
+        synth_fn=lambda good: asyncio.wait_for(_llm_synthesize(good, domain, _merge_creds("reason")), _SYNTH_TIMEOUT),
+    )
+
+    # Run the analysis only if the session doesn't already have one.
+    try:
+        prev = json.loads(sess.get("analysis") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        prev = {}
+    analysis = prev if isinstance(prev, dict) and prev else None
+    good_results = [r for r in results if _usable(r)]
+    if analysis is None and len(good_results) >= 2:
+        try:
+            analysis = await asyncio.wait_for(
+                _llm_analysis(good_results, domain, _merge_creds("reason")), _SYNTH_TIMEOUT)
+        except Exception as e:
+            log.warning("Basna recompile analysis failed", error=str(e))
+
+    await db.update_basna_session(
+        session_id, user["id"], status="done",
+        truth=agg["truth"], confidence=agg["confidence"],
+        analysis=json.dumps(analysis or {}), files=json.dumps(files_out),
+    )
+    return {"session_id": session_id, "truth": agg["truth"], "confidence": agg["confidence"],
+            "method": agg["method"], "contributors": agg["contributors"],
+            "analysis": analysis, "files": files_out}
 
 
 @router.get("/sessions/{session_id}/progress")

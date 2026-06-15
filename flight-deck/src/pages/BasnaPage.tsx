@@ -2,11 +2,11 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Network, Play, Sparkles, Plus, Trash2, ThumbsUp, ThumbsDown,
   Loader2, Check, X, Wrench, Maximize2, Minimize2, Download, Paperclip, FileText, Image as ImageIcon,
-  SlidersHorizontal, Eye,
+  SlidersHorizontal, Eye, ScanSearch, AlertTriangle, RefreshCw,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { useBasnaStore, type BasnaSession, type BasnaRun, type ProgressEvent } from '../stores/basnaStore'
+import { useBasnaStore, parseAnalysis, type BasnaSession, type BasnaRun, type ProgressEvent } from '../stores/basnaStore'
 import { useTierConfig, TIER_ORDER, PROVIDERS } from '../services/tierConfig'
 
 const COGNITIVE_MODES = ['neutra', 'ionian', 'dorian', 'phrygian', 'lydian', 'mixolydian', 'aeolian', 'locrian']
@@ -61,31 +61,56 @@ function WeightBar({ value }: { value: number }) {
   )
 }
 
+function timeAgo(iso?: string): string {
+  if (!iso) return ''
+  const t = new Date(iso).getTime()
+  if (isNaN(t)) return ''
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000))
+  if (s < 60) return 'now'
+  const m = Math.floor(s / 60); if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60); if (h < 24) return `${h}h`
+  const d = Math.floor(h / 24); if (d < 7) return `${d}d`
+  return new Date(t).toLocaleDateString()
+}
+
+const STATUS_DOT: Record<string, string> = {
+  routing: 'bg-sky-400', routed: 'bg-zinc-400', running: 'bg-amber-400',
+  done: 'bg-emerald-500', error: 'bg-rose-500',
+}
+
 function SessionCard({ s, active, onOpen, onDelete }: {
   s: BasnaSession; active: boolean; onOpen: () => void; onDelete: () => void
 }) {
+  const working = s.status === 'running' || s.status === 'routing'
   return (
-    <button
+    <div
       onClick={onOpen}
-      className={`group w-full rounded-lg border p-2.5 text-left transition-colors ${
+      className={`group relative cursor-pointer rounded-lg border p-2.5 pl-3 transition-colors ${
         active ? 'border-sky-600/60 bg-sky-950/30' : 'border-zinc-800 bg-zinc-900/50 hover:bg-zinc-800/50'
       }`}
     >
-      <div className="flex items-start justify-between gap-2">
-        <p className="line-clamp-2 text-xs font-medium text-zinc-200">{s.intent || '(untitled)'}</p>
-        <span
+      {active && <span className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-sky-500" />}
+      <div className="flex items-start gap-2">
+        <span className="mt-0.5 shrink-0">
+          {working
+            ? <Loader2 className="h-3 w-3 animate-spin text-amber-400" />
+            : <span className={`block h-2 w-2 rounded-full ${STATUS_DOT[s.status] || 'bg-zinc-500'}`} />}
+        </span>
+        <p className="line-clamp-2 flex-1 text-xs font-medium leading-snug text-zinc-200">{s.intent || '(untitled)'}</p>
+        <button
           onClick={(e) => { e.stopPropagation(); onDelete() }}
           className="shrink-0 rounded p-0.5 text-zinc-600 opacity-0 transition-opacity hover:text-rose-400 group-hover:opacity-100"
         >
           <Trash2 className="h-3.5 w-3.5" />
-        </span>
+        </button>
       </div>
-      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-        {s.domain && <Badge className="text-zinc-300">{s.domain}</Badge>}
-        {s.difficulty && <Badge className={DIFFICULTY_COLOR[s.difficulty] || 'text-zinc-300'}>{s.difficulty}</Badge>}
-        <Badge className="text-zinc-400">{s.status}</Badge>
+      <div className="mt-1.5 flex items-center gap-1.5 pl-5 text-[10px] text-zinc-500">
+        {s.domain && <span className="truncate rounded bg-zinc-800/70 px-1.5 py-0.5 text-zinc-400">{s.domain}</span>}
+        {s.difficulty && <span className={`font-medium ${DIFFICULTY_COLOR[s.difficulty] || 'text-zinc-400'}`}>{s.difficulty}</span>}
+        {s.status === 'done' && s.confidence > 0 && <span>· {Math.round(s.confidence * 100)}%</span>}
+        <span className="ml-auto shrink-0 tabular-nums text-zinc-600">{timeAgo(s.updated_at || s.created_at)}</span>
       </div>
-    </button>
+    </div>
   )
 }
 
@@ -290,7 +315,7 @@ function fmtTok(n?: number): string {
   return String(n)
 }
 
-interface LiveAgent { role: string; actions: ProgressEvent[]; usage?: ProgressEvent }
+interface LiveAgent { role: string; actions: ProgressEvent[]; usage?: ProgressEvent; done?: boolean; ok?: boolean }
 
 // Live per-agent panels built from the streaming progress events while the run
 // is in flight — each agent's tool calls and running LLM token usage, before the
@@ -302,7 +327,11 @@ function LiveAgentsPanel({ agents }: { agents: LiveAgent[] }) {
         <div key={a.role} className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
           <div className="flex items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
-              <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-sky-400" />
+              {a.done
+                ? (a.ok === false
+                    ? <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-rose-400" />
+                    : <Check className="h-3.5 w-3.5 shrink-0 text-emerald-500" />)
+                : <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-sky-400" />}
               <span className="truncate text-sm font-medium text-zinc-200">{a.role}</span>
             </div>
             {a.usage && (
@@ -335,9 +364,9 @@ function LiveAgentsPanel({ agents }: { agents: LiveAgent[] }) {
 export function BasnaPage() {
   const {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
-    routing, executing, error,
+    routing, executing, recompiling, error,
     routerTier, maxAgents, setRouterTier, setMaxAgents, addFiles, removeFile, downloadFile, fetchFileText,
-    updateSelected, loadSessions, selectSession, newSession, route, execute, sendFeedback, deleteSession,
+    updateSelected, loadSessions, selectSession, newSession, route, execute, recompile, sendFeedback, deleteSession,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
 
@@ -381,6 +410,7 @@ export function BasnaPage() {
   const canRun = !!routePlan && !!activeSession && !executing
   const truth = lastExecute?.truth ?? activeSession?.truth ?? ''
   const confidence = lastExecute?.confidence ?? activeSession?.confidence ?? 0
+  const analysis = lastExecute?.analysis ?? parseAnalysis(activeSession?.analysis)
 
   // Group the streaming progress into live per-agent panels (preserving the
   // order each agent first appears). `usage` events update the running token
@@ -393,6 +423,7 @@ export function BasnaPage() {
       let a = byRole.get(ev.agent)
       if (!a) { a = { role: ev.agent, actions: [] }; byRole.set(ev.agent, a); order.push(ev.agent) }
       if (ev.stage === 'usage') a.usage = ev
+      else if (ev.stage === 'dispatch') { a.done = true; a.ok = ev.ok !== false }
       else a.actions.push(ev)
     }
     return order.map((r) => byRole.get(r) as LiveAgent)
@@ -417,17 +448,28 @@ export function BasnaPage() {
 
       <div className="flex flex-1 overflow-hidden">
         {/* Session list */}
-        <div className="w-64 shrink-0 space-y-2 overflow-auto border-r border-zinc-800 p-3">
-          {sessions.length === 0 && <p className="px-1 text-xs text-zinc-600">No runs yet.</p>}
+        <div className="flex w-64 shrink-0 flex-col overflow-hidden border-r border-zinc-800">
+          <div className="flex items-center justify-between px-3 pt-3 pb-1.5">
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Runs</span>
+            {sessions.length > 0 && <span className="text-[10px] tabular-nums text-zinc-600">{sessions.length}</span>}
+          </div>
+          <div className="flex-1 space-y-1.5 overflow-auto px-3 pb-3">
+          {sessions.length === 0 && <p className="px-1 py-2 text-xs text-zinc-600">No runs yet — describe a task and Route.</p>}
           {sessions.map((s) => (
             <SessionCard
               key={s.id}
               s={s}
               active={activeSession?.id === s.id}
               onOpen={() => selectSession(s.id)}
-              onDelete={() => deleteSession(s.id)}
+              onDelete={() => {
+                const label = (s.intent || '').trim().slice(0, 80)
+                if (window.confirm(`Delete this Basna run?${label ? `\n\n"${label}${(s.intent || '').length > 80 ? '…' : ''}"` : ''}`)) {
+                  deleteSession(s.id)
+                }
+              }}
             />
           ))}
+          </div>
         </div>
 
         {/* Detail */}
@@ -729,6 +771,71 @@ export function BasnaPage() {
               </div>
             )}
 
+            {/* Cross-agent analysis */}
+            {analysis && (
+              ((analysis.agreement?.length || analysis.differences?.length || analysis.unique?.length || analysis.blind_spots?.length) ? (
+              <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <ScanSearch className="h-4 w-4 text-violet-600 dark:text-violet-400" />
+                  <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Analysis</span>
+                </div>
+
+                {!!analysis.agreement?.length && (
+                  <div>
+                    <div className="mb-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300">Agreement</div>
+                    <ul className="ml-4 list-disc space-y-1 text-sm text-zinc-200">
+                      {analysis.agreement.map((a, i) => <li key={i}>{a}</li>)}
+                    </ul>
+                  </div>
+                )}
+
+                {!!analysis.differences?.length && (
+                  <div>
+                    <div className="mb-1 text-xs font-semibold text-amber-700 dark:text-amber-300">Key differences</div>
+                    <div className="space-y-2">
+                      {analysis.differences.map((d, i) => (
+                        <div key={i} className="text-sm">
+                          <div className="text-zinc-200">{d.point}</div>
+                          {!!d.positions?.length && (
+                            <div className="ml-3 mt-0.5 space-y-0.5">
+                              {d.positions.map((p, j) => (
+                                <div key={j} className="text-zinc-400">
+                                  <span className="font-mono text-zinc-400">{p.by}</span> — {p.stance}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {!!analysis.unique?.length && (
+                  <div>
+                    <div className="mb-1 text-xs font-semibold text-sky-700 dark:text-sky-300">Unique insights</div>
+                    <ul className="ml-4 list-disc space-y-1 text-sm text-zinc-200">
+                      {analysis.unique.map((u, i) => (
+                        <li key={i}><span className="font-mono text-zinc-400">{u.by}</span> — {u.insight}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {!!analysis.blind_spots?.length && (
+                  <div className="rounded-md border border-rose-300 bg-rose-50 p-3 dark:border-rose-900/40 dark:bg-rose-950/20">
+                    <div className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-rose-700 dark:text-rose-300">
+                      <AlertTriangle className="h-3.5 w-3.5" /> Blind spots — covered by none
+                    </div>
+                    <ul className="ml-4 list-disc space-y-1 text-sm text-rose-800 dark:text-rose-200/90">
+                      {analysis.blind_spots.map((b, i) => <li key={i}>{b}</li>)}
+                    </ul>
+                  </div>
+                )}
+              </div>
+              ) : null)
+            )}
+
             {/* Truth */}
             {truth && (
               <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
@@ -742,11 +849,37 @@ export function BasnaPage() {
                       <span className="block h-full rounded-full bg-emerald-500" style={{ width: `${Math.round(confidence * 100)}%` }} />
                     </span>
                   </span>
+                  <button
+                    onClick={() => recompile(tiers)}
+                    disabled={recompiling}
+                    title="Recompile the truth + analysis from the agent outputs"
+                    className="flex items-center gap-1 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${recompiling ? 'animate-spin' : ''}`} />
+                  </button>
                   <OutputActions title="Compiled truth" content={truth} onView={viewFull} />
                 </div>
                 <div className="fd-markdown text-sm text-zinc-200 leading-relaxed">
                   <Markdown remarkPlugins={[remarkGfm]}>{truth}</Markdown>
                 </div>
+              </div>
+            )}
+
+            {/* Recovery: agents produced outputs but the merge didn't finish */}
+            {!truth && !executing && runs.length > 0 && (
+              <div className="flex items-center gap-3 rounded-lg border border-yellow-400 bg-yellow-100 p-4 dark:border-amber-500/40 dark:bg-amber-400/10">
+                <AlertTriangle className="h-4 w-4 shrink-0 text-orange-600 dark:text-orange-400" />
+                <span className="text-xs font-medium text-orange-700 dark:text-orange-300">
+                  No compiled truth — the merge may have stalled or failed. The {runs.length} agent output(s) are saved; recompile from them.
+                </span>
+                <button
+                  onClick={() => recompile(tiers)}
+                  disabled={recompiling}
+                  className="ml-auto flex shrink-0 items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40"
+                >
+                  {recompiling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                  Compile truth
+                </button>
               </div>
             )}
 
