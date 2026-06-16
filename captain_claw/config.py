@@ -845,6 +845,11 @@ class AutonomousWorkConfig(BaseModel):
     # human-approved); explicit grants gate auto-fire once that lands (Phase 4).
     granted_actions: list[str] = Field(default_factory=list)
 
+    # ── #2 Event sources — per-user poller enables (take effect when the
+    # FD-side Google adapter is connected). ──
+    event_calendar_enabled: bool = False
+    event_gmail_enabled: bool = False
+
     db_path: str = "~/.captain-claw/autonomy.db"
 
 

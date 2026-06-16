@@ -146,7 +146,7 @@ function ActionCard({ action, onApprove, onReject, onUndo }: {
 
 export function AutonomousWorkPage() {
   const {
-    config, defaults, actions, reliability, log, catalog, loading, saving, error,
+    config, defaults, actions, reliability, log, catalog, events, loading, saving, error,
     loadAll, loadActions, setField, save, approve, reject, undo, nudge,
   } = useAutonomyStore()
   const [tab, setTab] = useState<'control' | 'activity'>('control')
@@ -365,6 +365,13 @@ export function AutonomousWorkPage() {
               </div>
             </div>
 
+            <Section title="Event sources" desc="What the loop watches in your world. New events become arbiter candidates. (Calendar/Gmail polling takes effect once a Google account is connected.)">
+              <Toggle label="Google Calendar" hint="Poll upcoming/changed events"
+                checked={config.event_calendar_enabled} onChange={(v) => set('event_calendar_enabled', v)} />
+              <Toggle label="Gmail" hint="Poll important new mail"
+                checked={config.event_gmail_enabled} onChange={(v) => set('event_gmail_enabled', v)} />
+            </Section>
+
             {/* Save bar */}
             <div className="flex items-center gap-3">
               <button onClick={onSave} disabled={saving}
@@ -415,6 +422,22 @@ export function AutonomousWorkPage() {
                   Awaiting your approval ({pending.length})
                 </h2>
                 {pending.map((a) => <ActionCard key={a.id} action={a} onApprove={approve} onReject={reject} onUndo={undo} />)}
+              </div>
+            )}
+
+            {events.length > 0 && (
+              <div className="flex flex-col gap-2">
+                <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Recent events</h2>
+                <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-2 text-[11px]">
+                  {events.slice(0, 20).map((e) => (
+                    <div key={e.id} className="flex items-center gap-2 border-b border-zinc-800/40 py-1 last:border-0">
+                      <span className="shrink-0 rounded-full bg-zinc-800 px-2 py-0.5 text-zinc-300">{e.source}</span>
+                      <span className="truncate text-zinc-200">{e.summary}</span>
+                      <span className="ml-auto shrink-0 text-zinc-600">{e.status}</span>
+                      <span className="shrink-0 text-zinc-600">{relTime(e.ingested_at)}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
 

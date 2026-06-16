@@ -25,6 +25,8 @@ export interface AutonomyConfig {
   max_intentions_per_reflection: number
   reflection_intention_max_risk: string
   granted_actions: string[]
+  event_calendar_enabled: boolean
+  event_gmail_enabled: boolean
   db_path: string
 }
 
@@ -66,6 +68,15 @@ export interface LogEntry {
   level: string   // info | warn | error
   event: string
   detail: string
+}
+
+export interface EventEntry {
+  id: string
+  source: string
+  event_type: string
+  summary: string
+  status: string   // new | surfaced | acted | ignored
+  ingested_at: string
 }
 
 export interface CatalogItem {
@@ -110,6 +121,7 @@ interface AutonomyStore {
   reliability: ReliabilityRow[]
   log: LogEntry[]
   catalog: CatalogItem[]
+  events: EventEntry[]
   loading: boolean
   saving: boolean
   error: string | null
@@ -131,6 +143,7 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
   reliability: [],
   log: [],
   catalog: [],
+  events: [],
   loading: false,
   saving: false,
   error: null,
@@ -138,18 +151,20 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
   loadAll: async () => {
     set({ loading: true, error: null })
     try {
-      const [cfgRes, actRes, relRes, logRes, catRes] = await Promise.all([
+      const [cfgRes, actRes, relRes, logRes, catRes, evtRes] = await Promise.all([
         _authedFetch('/fd/autonomy/config'),
         _authedFetch('/fd/autonomy/actions?limit=100'),
         _authedFetch('/fd/autonomy/reliability'),
         _authedFetch('/fd/autonomy/log?limit=100'),
         _authedFetch('/fd/autonomy/catalog'),
+        _authedFetch('/fd/events?limit=50'),
       ])
       const cfg = cfgRes.ok ? await cfgRes.json() : {}
       const act = actRes.ok ? await actRes.json() : {}
       const rel = relRes.ok ? await relRes.json() : {}
       const lg = logRes.ok ? await logRes.json() : {}
       const cat = catRes.ok ? await catRes.json() : {}
+      const ev = evtRes.ok ? await evtRes.json() : {}
       set({
         config: cfg.config ?? null,
         defaults: cfg.defaults ?? null,
@@ -157,6 +172,7 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
         reliability: rel.reliability ?? [],
         log: lg.log ?? [],
         catalog: cat.catalog ?? [],
+        events: ev.events ?? [],
       })
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) })
@@ -168,14 +184,16 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
   loadActions: async (status?: string) => {
     try {
       const qs = status ? `?status=${encodeURIComponent(status)}&limit=100` : '?limit=100'
-      const [actRes, relRes, logRes] = await Promise.all([
+      const [actRes, relRes, logRes, evtRes] = await Promise.all([
         _authedFetch(`/fd/autonomy/actions${qs}`),
         _authedFetch('/fd/autonomy/reliability'),
         _authedFetch('/fd/autonomy/log?limit=100'),
+        _authedFetch('/fd/events?limit=50'),
       ])
       if (actRes.ok) set({ actions: (await actRes.json()).actions ?? [] })
       if (relRes.ok) set({ reliability: (await relRes.json()).reliability ?? [] })
       if (logRes.ok) set({ log: (await logRes.json()).log ?? [] })
+      if (evtRes.ok) set({ events: (await evtRes.json()).events ?? [] })
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) })
     }

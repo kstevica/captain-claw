@@ -35,7 +35,7 @@ class Adapter:
     name: str                       # also the event `source`
     interval_seconds: float
     poll: PollFn
-    enabled: Callable[[], bool]     # source-level on/off (config/env)
+    enabled: Callable[[str], bool]  # per-user on/off (env / per-user config)
     requires_google: bool = False
 
 
@@ -62,7 +62,7 @@ async def poll_user(user_id: str) -> int:
     ingested = 0
     for ad in _ADAPTERS:
         try:
-            if not ad.enabled():
+            if not ad.enabled(user_id):
                 continue
             if ad.requires_google and not _google_connected():
                 continue
@@ -94,18 +94,18 @@ async def events_loop(stop_event: asyncio.Event) -> None:
     _log.info("events loop started")
     while not stop_event.is_set():
         try:
-            cfg = get_config().events
+            # The loop always ticks (cheap — adapters self-gate per user). The
+            # synthetic source falls back to the local bucket when no agents run.
             synthetic = os.environ.get("CLAW_EVENTS_SYNTHETIC", "").lower() in ("1", "true", "yes")
-            if cfg.poll_enabled or synthetic:
-                from captain_claw.flight_deck.consciousness import distinct_owners_with_agents
-                users = distinct_owners_with_agents() or (["local"] if synthetic else [])
-                for uid in users:
-                    if stop_event.is_set():
-                        break
-                    n = await poll_user(uid)
-                    if n > 0:
-                        _log.info("events: ingested %d for %s", n, uid)
-                        _nudge(uid)
+            from captain_claw.flight_deck.consciousness import distinct_owners_with_agents
+            users = distinct_owners_with_agents() or (["local"] if synthetic else [])
+            for uid in users:
+                if stop_event.is_set():
+                    break
+                n = await poll_user(uid)
+                if n > 0:
+                    _log.info("events: ingested %d for %s", n, uid)
+                    _nudge(uid)
         except Exception as exc:
             _log.warning("events loop iteration error: %s", exc)
         try:
@@ -151,7 +151,7 @@ register(Adapter(
     name="synthetic",
     interval_seconds=float(os.environ.get("CLAW_EVENTS_SYNTHETIC_INTERVAL", "60") or 60),
     poll=_synthetic_poll,
-    enabled=lambda: os.environ.get("CLAW_EVENTS_SYNTHETIC", "").lower() in ("1", "true", "yes"),
+    enabled=lambda _uid: os.environ.get("CLAW_EVENTS_SYNTHETIC", "").lower() in ("1", "true", "yes"),
 ))
 
 # Real adapters (Calendar, Gmail) are registered in event_sources_google.py once
