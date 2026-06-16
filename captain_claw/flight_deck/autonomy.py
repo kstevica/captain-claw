@@ -34,7 +34,7 @@ AUTONOMY_LEVELS = ("off", "propose", "act_low_risk", "act")
 # Lifecycle of a ledger row.
 ACTION_STATUSES = (
     "candidate", "queued", "awaiting_approval", "dispatched",
-    "done", "rejected", "expired",
+    "done", "rejected", "expired", "undone",
 )
 
 
@@ -430,6 +430,29 @@ class AutonomyStore:
                 (uid,),
             ).fetchall()
         return [self._row_to_action(r) for r in rows]
+
+    def update_payload(self, action_id: str, patch: dict[str, Any]) -> None:
+        """Merge ``patch`` into an action's payload JSON (e.g. attach the reverse
+        call after dispatch)."""
+        with self._lock:
+            conn = self._c()
+            r = conn.execute(
+                "SELECT payload FROM autonomous_actions WHERE id = ?", (action_id,)
+            ).fetchone()
+            if not r:
+                return
+            try:
+                payload = json.loads(r["payload"] or "{}")
+            except (ValueError, TypeError):
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            payload.update(patch or {})
+            conn.execute(
+                "UPDATE autonomous_actions SET payload = ? WHERE id = ?",
+                (json.dumps(payload), action_id),
+            )
+            conn.commit()
 
     @staticmethod
     def _row_to_action(r: sqlite3.Row) -> dict[str, Any]:

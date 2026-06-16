@@ -91,3 +91,18 @@ async def run_action(user_id: str, action_id: str, args: dict[str, Any]) -> dict
         return {**res, **meta}
 
     return {"ok": False, "error": f"home '{spec.get('home')}' not supported yet", **meta}
+
+
+async def undo_action(user_id: str, action: dict[str, Any]) -> dict[str, Any]:
+    """Run the reverse call captured on a dispatched action's payload, undoing it.
+    Returns ``{ok, content, error}``."""
+    reverse = (action.get("payload") or {}).get("reverse")
+    if not isinstance(reverse, dict) or not reverse.get("tool"):
+        return {"ok": False, "error": "no reverse available for this action"}
+    from captain_claw.flight_deck.fd_dispatch import _strongest_agent
+    agent = _strongest_agent(user_id)
+    if not agent:
+        return {"ok": False, "error": "no running agent to undo through"}
+    res = await run_tool_on_agent(agent, reverse["tool"], reverse.get("args") or {})
+    _log.info("undo_action %s via %s → ok=%s", action.get("id"), reverse["tool"], res.get("ok"))
+    return res

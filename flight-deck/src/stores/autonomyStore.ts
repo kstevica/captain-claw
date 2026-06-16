@@ -107,6 +107,7 @@ interface AutonomyStore {
   save: () => Promise<void>
   approve: (id: string) => Promise<void>
   reject: (id: string) => Promise<void>
+  undo: (id: string) => Promise<void>
   nudge: () => Promise<{ proposed: number; reason?: string }>
 }
 
@@ -196,6 +197,11 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
 
   reject: async (id: string) => {
     const res = await _authedFetch(`/fd/autonomy/actions/${encodeURIComponent(id)}/reject`, { method: 'POST' })
+    if (res.ok) await get().loadActions()
+  },
+
+  undo: async (id: string) => {
+    const res = await _authedFetch(`/fd/autonomy/actions/${encodeURIComponent(id)}/undo`, { method: 'POST' })
     if (res.ok) await get().loadActions()
   },
 

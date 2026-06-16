@@ -239,6 +239,14 @@ async def _dispatch_tool_action(user_id: str, action: dict[str, Any]) -> dict[st
     ok = bool(res.get("ok"))
     note = str(res.get("content") or res.get("error") or "")[:500]
 
+    # Capture the reverse handle (for one-tap undo) from the real result.
+    if ok:
+        from captain_claw.flight_deck import action_catalog
+        spec = action_catalog.get_action(action_id)
+        reverse = action_catalog.build_reverse(spec, res.get("content", "")) if spec else None
+        if reverse:
+            store.update_payload(action["id"], {"reverse": reverse})
+
     cfg = resolve_config(user_id)
     if cfg.get("learning_enabled") and str(cfg.get("judge_mode") or "both") in ("auto", "both"):
         store.record_outcome(user_id, "tool_action", str(action.get("domain") or "general"),

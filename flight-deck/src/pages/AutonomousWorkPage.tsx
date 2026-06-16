@@ -89,10 +89,13 @@ const STATUS_CHIP: Record<string, string> = {
   expired: 'bg-zinc-800 text-zinc-500',
 }
 
-function ActionCard({ action, onApprove, onReject }: {
+function ActionCard({ action, onApprove, onReject, onUndo }: {
   action: AutonomyAction; onApprove: (id: string) => void; onReject: (id: string) => void
+  onUndo: (id: string) => void
 }) {
   const pending = action.status === 'awaiting_approval'
+  const canUndo = action.status === 'done' && action.outcome === 'success'
+    && !!(action.payload as { reverse?: unknown } | undefined)?.reverse
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-3">
       <div className="mb-1 flex flex-wrap items-center gap-2 text-[11px]">
@@ -126,6 +129,17 @@ function ActionCard({ action, onApprove, onReject }: {
           </button>
         </div>
       )}
+      {canUndo && (
+        <div className="mt-3">
+          <button
+            onClick={() => onUndo(action.id)}
+            title="Reverse this action (e.g. delete the created event/job)"
+            className="rounded-lg border border-zinc-700 px-3 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
+          >
+            Undo
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -133,7 +147,7 @@ function ActionCard({ action, onApprove, onReject }: {
 export function AutonomousWorkPage() {
   const {
     config, defaults, actions, reliability, log, loading, saving, error,
-    loadAll, loadActions, setField, save, approve, reject, nudge,
+    loadAll, loadActions, setField, save, approve, reject, undo, nudge,
   } = useAutonomyStore()
   const [tab, setTab] = useState<'control' | 'activity'>('control')
   const [savedAt, setSavedAt] = useState(false)
@@ -359,7 +373,7 @@ export function AutonomousWorkPage() {
                 <h2 className="text-xs font-semibold uppercase tracking-wider text-amber-600 dark:text-amber-400">
                   Awaiting your approval ({pending.length})
                 </h2>
-                {pending.map((a) => <ActionCard key={a.id} action={a} onApprove={approve} onReject={reject} />)}
+                {pending.map((a) => <ActionCard key={a.id} action={a} onApprove={approve} onReject={reject} onUndo={undo} />)}
               </div>
             )}
 
@@ -371,7 +385,7 @@ export function AutonomousWorkPage() {
                   for now this is the audit trail it will write to.
                 </div>
               ) : (
-                recent.map((a) => <ActionCard key={a.id} action={a} onApprove={approve} onReject={reject} />)
+                recent.map((a) => <ActionCard key={a.id} action={a} onApprove={approve} onReject={reject} onUndo={undo} />)
               )}
             </div>
 

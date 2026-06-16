@@ -131,6 +131,27 @@ async def reject_action_route(
         "reliability": learned}
 
 
+@router.post("/actions/{action_id}/undo")
+async def undo_action_route(
+    action_id: str,
+    request: Request,
+    _user: dict | None = Depends(get_optional_user),
+):
+    """Undo a completed reversible action by running its captured reverse call."""
+    uid = _user_id(request)
+    store = get_store()
+    action = store.get_action(action_id)
+    if not action or action.get("user_id") not in (uid, "local"):
+        raise HTTPException(status_code=404, detail="Action not found")
+    if not (action.get("payload") or {}).get("reverse"):
+        raise HTTPException(status_code=400, detail="No reverse available for this action")
+    from captain_claw.flight_deck.actions import undo_action
+    res = await undo_action(uid, action)
+    if res.get("ok"):
+        store.update_status(action_id, "undone", outcome_note="undone by user")
+    return {"action": store.get_action(action_id), "undo": res}
+
+
 @router.get("/reliability")
 async def reliability_route(
     request: Request,

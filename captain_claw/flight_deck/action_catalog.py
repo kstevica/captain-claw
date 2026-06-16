@@ -21,7 +21,12 @@ e.g. the tool's action sub-type) merged with the validated user/agent args.
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+# Both the cron and calendar tools print the created id as "ID: <value>", so one
+# extractor pulls the reverse handle from a ToolResult's text content.
+_ID_RE = re.compile(r"\bID:\s*(\S+)")
 
 # action_id → spec
 CATALOG: dict[str, dict[str, Any]] = {
@@ -158,3 +163,20 @@ def build_tool_call(spec: dict[str, Any], args: dict[str, Any]) -> tuple[str, di
         if key in args and args[key] is not None:
             merged[key] = args[key]
     return spec["tool"], merged
+
+
+def build_reverse(spec: dict[str, Any], result_content: str) -> dict[str, Any] | None:
+    """Build the concrete reverse call ``{tool, args}`` for an action that just
+    ran, extracting the id from its ToolResult ``result_content``. Returns None
+    when the action has no reverse or the id can't be found."""
+    rev = spec.get("reverse")
+    if not rev:
+        return None
+    m = _ID_RE.search(result_content or "")
+    if not m:
+        return None
+    extracted_id = m.group(1).strip().rstrip(".")
+    args: dict[str, Any] = dict(rev.get("base_args") or {})
+    for arg_name, _src in (rev.get("args_from_result") or {}).items():
+        args[arg_name] = extracted_id  # only "id" is supported as the source today
+    return {"tool": rev["tool"], "args": args}
