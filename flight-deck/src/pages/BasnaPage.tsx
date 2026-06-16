@@ -501,8 +501,11 @@ export function BasnaPage() {
 
   const visibleSessions = agentOnly ? sessions.filter((s) => agentOrigin(s.config)) : sessions
 
-  const canRoute = intent.trim().length > 0 && !routing
-  const canRun = !!routePlan && !!activeSession && !executing
+  // A run already in flight (e.g. a deepen that route+ran server-side) must not
+  // be re-routed or re-run. 'routed' stays runnable — that's the normal Route→Run step.
+  const activeBusy = !!activeSession && (activeSession.status === 'running' || activeSession.status === 'routing')
+  const canRoute = intent.trim().length > 0 && !routing && !activeBusy
+  const canRun = !!routePlan && !!activeSession && !executing && !activeBusy
   const truth = lastExecute?.truth ?? activeSession?.truth ?? ''
   const confidence = lastExecute?.confidence ?? activeSession?.confidence ?? 0
   const analysis = lastExecute?.analysis ?? parseAnalysis(activeSession?.analysis)
