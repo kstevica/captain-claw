@@ -13,7 +13,20 @@
 
 [![Glasses Bridge demo](https://img.youtube.com/vi/ZTepr5PP3WQ/maxresdefault.jpg)](https://www.youtube.com/shorts/ZTepr5PP3WQ)
 
-An open-source AI agent with multi-agent orchestration, autonomous cognitive systems, and a full management dashboard. Runs locally, supports every major LLM provider, and ships with 45 built-in tools.
+An open-source AI agent with multi-agent orchestration, autonomous cognitive systems, and a full management dashboard. Runs locally, supports every major LLM provider, and ships with 47 built-in tools.
+
+## What's New in 0.6.0
+
+**Agentic Basna & per-tenant archetypes — agents that start their own ensembles, and a library you can extend.** Fully additive.
+
+- **Per-tenant archetypes** — the curated archetype set is now a **base** you build on. Create your own archetypes on the **Library** page, by hand or **generated from a prompt**; override a base archetype (same id) or add new ones. They appear everywhere base ones do — the Library gallery, **Agent Forge** team composition, and **Basna** routing (with per-user learned reliability).
+- **Basna as an agent tool** — a new always-available **`basna`** tool lets an agent **read** its owner's Basna sessions like a datastore (sessions, compiled truth, cross-agent analysis, per-agent output + activity, generated files) and **start** new runs.
+- **Agent-initiated Basna runs (v2)** — `basna start` kicks off an **autonomous** multi-agent run from any channel (web / WhatsApp / glasses / API): Flight Deck auto-titles, routes, and **executes the ensemble server-side**, then **reports the result back to the agent** to relay to the user. Fire-and-forget, capped per owner. An explicit "run a Basna…" is relayed to the tool deterministically.
+- **Basna session titles** — type one or it's auto-generated from the task; editable inline and shown in the run list.
+- **Basna run monitoring** — agent-started runs are badged with their origin channel in the unified run list, with an "agent" filter, **live polling** while runs are in flight, and colour-coded confidence.
+- **Fixes** — the agent's system-prompt tool list now includes **every** registered tool; a false-positive "claimed web research" guard that hijacked weak models into a `web_search` loop is fixed; autonomous spawns are plan-aware and correctly owned.
+
+New tables `user_archetypes` / `basna_sessions.title` (migrate in place); new endpoints under `/fd/archetypes/*` and `/fd/basna/agent/*`. See [RELEASE_NOTES_0.6.0.md](release-notes/RELEASE_NOTES_0.6.0.md). Backward compatible with 0.5.7.
 
 ## What's New in 0.5.7
 
@@ -325,9 +338,9 @@ botport                   # Agent-to-agent routing hub
 
 First run starts onboarding automatically. For Ollama, no key needed — set `provider: ollama` in `config.yaml`.
 
-## 46 Built-in Tools
+## 47 Built-in Tools
 
-Shell, file I/O, web fetch/search, browser automation, PDF/DOCX/XLSX/PPTX extraction, image generation (DALL-E), OCR, vision, TTS, STT, email (SMTP/Mailgun/SendGrid), Google Workspace (Drive, Docs, Sheets, Slides, Gmail, Calendar), WhatsApp file delivery, intentions (proactive future actions), desktop automation, screen capture with voice commands, persistent cross-session memory (todos, contacts, scripts, APIs, playbooks), datastore (SQLite tables with protection rules), deep memory (Typesense), personality system, cron scheduling, BotPort fleet discovery, and Termux (Android).
+Shell, file I/O, web fetch/search, browser automation, PDF/DOCX/XLSX/PPTX extraction, image generation (DALL-E), OCR, vision, TTS, STT, email (SMTP/Mailgun/SendGrid), Google Workspace (Drive, Docs, Sheets, Slides, Gmail, Calendar), WhatsApp file delivery, intentions (proactive future actions), desktop automation, screen capture with voice commands, persistent cross-session memory (todos, contacts, scripts, APIs, playbooks), datastore (SQLite tables with protection rules), deep memory (Typesense), Basna (read and start multi-agent ensemble runs), personality system, cron scheduling, BotPort fleet discovery, and Termux (Android).
 
 See [USAGE.md](USAGE.md#tools-reference) for the full reference.
 

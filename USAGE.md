@@ -1006,6 +1006,32 @@ Discover and communicate with peer agents in the Flight Deck environment. Always
 
 Unlike `consult_peer` (which uses the static peer list pushed at connect time), `flight_deck` always queries the live fleet — so newly spawned agents are immediately discoverable.
 
+### basna
+
+Read and start **Basna** runs — a parallel ensemble of specialist agents that researches/analyses a task and merges their work into one answer. Always available when running under Flight Deck; scoped to the calling agent's owner (resolved by the agent's auth token).
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `start`, `list`, `get`, `agents`, `output`, `truth`, `analysis`, `files`, `get_file` |
+| `task` | string | for `start` | The task to run — a clear, self-contained statement of what to research/produce |
+| `title` | string | no | Optional title for a `start` run; auto-generated from the task if blank |
+| `max_agents` | number | no | Cap on agents for `start` (1–10, default 6) |
+| `session_id` | string | for read actions | Target session (all actions except `list`) |
+| `archetype_id` | string | for `output` | Which agent's full output to return |
+| `name` | string | for `get_file` | File to fetch from the session |
+| `query` / `status` / `limit` | — | no | Filters for `list` |
+
+**Actions:**
+- **`start`** — launches a **new autonomous Basna run** on `task`. Flight Deck auto-titles, routes the minimal team, executes the ensemble **server-side** (no UI), and **reports completion back to this agent** so it can relay the result to the user — on whatever channel the request came from (web / WhatsApp / glasses / API). Fire-and-forget: returns immediately. Uses the owner's saved Library tiers (falling back to built-in defaults); capped at 2 concurrent agent-started runs per owner.
+- **`list`** — the owner's sessions (optional `query` substring, `status`, `limit`): id, title, domain, status, confidence, agent/file counts.
+- **`get`** — full detail of one session: routed archetypes, compiled truth, confidence, files.
+- **`agents`** — per-agent runs for a session: role, tier, weight, success, latency, and tool activity.
+- **`output`** — one agent's full output (`session_id` + `archetype_id`).
+- **`truth`** / **`analysis`** — the compiled answer + confidence / the cross-agent agreement, differences, and blind spots.
+- **`files`** / **`get_file`** — list a session's files / fetch one (text inline, otherwise saved into the agent's workspace).
+
+When the user explicitly asks to "run/execute a Basna…", the request is relayed straight to `start` deterministically (the agent does not do the research itself).
+
 ### screen_capture
 
 Capture a screenshot of the user's screen and optionally analyze it with a vision model. Requires `pip install captain-claw[screen]`.
@@ -4220,7 +4246,8 @@ Cancels the upstream call cleanly when the client disconnects mid-stream. The ag
 The Library page is the single place for your **model tiers** and the **archetype gallery** (both moved out of Agent Forge in 0.5.7).
 
 - **Model tiers** — a per-tier editor with four tiers — **Reasoning**, **Balanced**, **Fast / high-volume**, **Long context** — each carrying its own provider, model, API key, base URL, and input/output context length, plus a "Forge using" selector and an "Additional API Keys" section (env vars passed to spawned agents). Persisted per-user via `/fd/settings`. **Agent Forge and Basna both resolve their models from here.**
-- **Archetype gallery** — the curated ~20 agents (Deep Researcher, Code Reviewer, Project Coordinator, Deal Screener, …). Click a card to **spawn that archetype directly** as an agent (its tier resolves to a concrete model). Served from `instructions/archetypes.json` via `GET /fd/archetypes`.
+- **Archetype gallery** — the curated ~20 base agents (Deep Researcher, Code Reviewer, Project Coordinator, Deal Screener, …). Click a card to **spawn that archetype directly** as an agent (its tier resolves to a concrete model). Served from `instructions/archetypes.json`.
+- **Custom archetypes (NEW in 0.6.0)** — the curated set is a **base** you extend. Use **New archetype** to create your own — by hand (role, family, description, cognitive mode, tier, tools, keywords, fleet instructions) or **generated from a prompt** (describe the agent and an LLM drafts a complete archetype to review). A custom archetype with the same id **overrides** the base one for you; new ids are added alongside. Custom cards are badged with edit/delete. Your archetypes appear everywhere base ones do — the gallery, **Agent Forge** composition, and **Basna** routing. `GET /fd/archetypes` returns the merged base+user registry; CRUD + `generate` live under `/fd/archetypes/*`; stored per-user in `user_archetypes`.
 
 ### Basna (NEW in 0.5.7)
 
@@ -4237,7 +4264,11 @@ Basna (sidebar: **Basna**) is a **network-source ensemble** — a one-shot, sele
 
 **Basna vs Council:** Council is a multi-round deliberation *among* agents that see each other; Basna is one-shot — agents run blind and independent and the result is a weighted merge, not a conversation.
 
-Endpoints under `/fd/basna`: `route`, `execute`, session CRUD, `sessions/{id}/runs`, `sessions/{id}/progress`, `sessions/{id}/files` (upload/download/delete), `runs/{id}/feedback`. Tables: `basna_sessions`, `basna_runs`, `archetype_reliability` (migrate in place).
+**Session titles (NEW in 0.6.0)** — every run has a **title**: type one, or it's auto-generated from the task (the router returns a concise title; a heuristic covers the fallback path). Editable inline; shown in the run list with the task as a subline.
+
+**Agent-initiated runs (NEW in 0.6.0)** — agents can start and read Basna themselves via the always-available **`basna`** tool (see [Tools Reference → basna](#basna)). `basna start` kicks off an **autonomous** run from any channel (web / WhatsApp / glasses / API): Flight Deck auto-titles, routes, and executes the ensemble **server-side**, then **reports the result back to the agent** to relay to the user. Fire-and-forget, capped at 2 concurrent per owner. When the user explicitly says "run/execute a Basna…", the agent relays the task to the tool deterministically rather than doing the research itself. Such runs are **badged with their origin channel** in the unified run list (with an "agent" filter), and the list **polls live** while runs are in flight. Agent-facing endpoints live under `/fd/basna/agent/*` (read + `start`).
+
+Endpoints under `/fd/basna`: `route`, `execute`, session CRUD, `sessions/{id}/runs`, `sessions/{id}/progress`, `sessions/{id}/files` (upload/download/delete), `runs/{id}/feedback`, and the agent-identity `agent/*` set. Tables: `basna_sessions` (now with `title`), `basna_runs`, `archetype_reliability` (migrate in place).
 
 ### Agent Forge
 
