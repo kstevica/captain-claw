@@ -159,14 +159,16 @@ primary one.
 pulse so a busy inbox can't flood the arbiter. Retention/cleanup of old events.
 
 ### #2 phases
-1. **Spine:** `external_events` table + store methods + a manual `POST /fd/events/ingest`
-   to insert test events. Arbiter reads `new` events as candidates (grant/flag-gated).
-2. **First poller — Calendar:** `poll_calendar` adapter (upcoming/changed) on the
-   events loop; debounced `pulse(force)` on new events. (Calendar first: lower
-   volume, naturally maps to reversible `calendar.hold` actions from #1.)
-3. **Gmail poller:** `poll_gmail` (important unread) — higher volume, needs good
-   dedup + surfacing caps.
-4. **Webhook receiver + per-source controls UI.**
+1. ✅ **Spine:** `external_events` (dedup, status flow) + `/fd/events/ingest` +
+   `GET /fd/events`; arbiter reads `new` events as candidates, marks them surfaced.
+2. ✅ **Poller framework:** `event_sources.py` (Adapter registry, per-user gating,
+   interval/cursor, `events_loop`) + synthetic adapter (env-gated) to validate the
+   loop with no creds; debounced pulse on new events. Events/sources UI on the page
+   (Calendar/Gmail per-user toggles + recent-events feed).
+3. ⬜ **Calendar then Gmail adapters (FD-side Google):** `event_sources_google.py`
+   (guarded import already wired) — fetch via FD's OAuth tokens, normalize, dedup
+   by message/event id. DEFERRED: needs a connected Google account to validate.
+4. ⬜ **Webhook receiver (verified push) + richer source controls.**
 
 ### #2 files
 - New: `captain_claw/flight_deck/events.py` (store + adapters + loop),
