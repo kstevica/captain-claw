@@ -818,15 +818,25 @@ async def _deepen_run(owner: str, parent_session_id: str, user: dict) -> dict:
         raise HTTPException(400, "This run has no compiled result to build on yet.")
 
     parent_title = (parent.get("title") or parent.get("intent") or "")[:50]
-    # Slice of the prior synthesis carried into the deepen intent. Kept modest
-    # because it rides in every worker's message history (resent each internal
-    # step × N workers), so the token cost is a per-step multiplier.
+    # Inline only a preview of the prior synthesis — it rides in every worker's
+    # message history (resent each internal step × N workers), so the token cost
+    # is a per-step multiplier. When the full text is larger, ship it as a
+    # workspace file the workers read on demand instead of re-inlining all of it.
     _DEEPEN_TRUTH_CHARS = 16_000
+    _PRIOR_FILE = "prior-synthesis.md"
+    big = len(truth) > _DEEPEN_TRUTH_CHARS
+    file_note = (
+        f"\nThe COMPLETE prior synthesis is in your workspace as `{_PRIOR_FILE}` — "
+        "read it for full context before addressing the blind spots.\n"
+        if big else ""
+    )
     intent = (
         "Continue and deepen a prior multi-agent investigation — focus ONLY on its "
         "blind spots, the aspects no prior answer addressed.\n\n"
-        f"PRIOR SYNTHESIS:\n{truth[:_DEEPEN_TRUTH_CHARS]}\n\n"
-        "BLIND SPOTS to resolve:\n"
+        f"PRIOR SYNTHESIS{' (preview — full text in the workspace file)' if big else ''}:\n"
+        f"{truth[:_DEEPEN_TRUTH_CHARS]}\n"
+        + file_note
+        + "\nBLIND SPOTS to resolve:\n"
         + "\n".join(f"- {b}" for b in blind[:12])
         + "\n\nInvestigate and resolve these blind spots and extend the synthesis. "
           "Do not repeat what is already settled above."
@@ -843,10 +853,19 @@ async def _deepen_run(owner: str, parent_session_id: str, user: dict) -> dict:
         user,
     )
     sid = route["session_id"]
-    await db.update_basna_session(
-        sid, owner,
-        config=json.dumps({"kind": "deepen", "parent_session_id": parent_session_id}),
-    )
+    update_kwargs: dict[str, Any] = {
+        "config": json.dumps({"kind": "deepen", "parent_session_id": parent_session_id}),
+    }
+    if big:
+        # Write the full synthesis as an input file; execute_route copies every
+        # non-generated session file into each worker's workspace.
+        body_bytes = truth.encode("utf-8")
+        (_session_files_dir(sid) / _PRIOR_FILE).write_bytes(body_bytes)
+        update_kwargs["files"] = json.dumps([{
+            "name": _PRIOR_FILE, "mime": "text/markdown",
+            "size": len(body_bytes), "kind": "input",
+        }])
+    await db.update_basna_session(sid, owner, **update_kwargs)
 
     exec_req = ExecuteRequest(session_id=sid, tiers=tiers or None, env_vars=env_vars or None)
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
