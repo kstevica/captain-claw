@@ -241,6 +241,11 @@ async def maybe_run_arbiter(
         suppress_below = float(cfg.get("suppress_below_weight", 0.25))
         emit("ranked", f"{len(actions)} action(s) returned: " +
              ("; ".join(f"{a['kind']}:{a['title']}={a['score']:.2f}" for a in actions[:5]) or "(none)"))
+        if not actions:
+            # Show the raw reply so we can tell "model chose to wait ([])" from
+            # "model answered in a shape we rejected (e.g. kind outside the enum)".
+            raw = (resp.content or "").strip().replace("\n", " ")
+            emit("ranker raw reply", raw[:600] or "(empty)", "warn")
 
         # Filter: threshold, learned-loser suppression, dedup. Keep the best one.
         viable = []
