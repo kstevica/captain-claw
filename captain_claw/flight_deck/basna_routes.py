@@ -18,6 +18,7 @@ import json
 import mimetypes
 import shutil
 import time
+import types
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
@@ -388,7 +389,8 @@ async def delete_file(session_id: str, name: str, user: dict = Depends(get_curre
 
 class _AgentReq(BaseModel):
     source_port: int = 0
-    owner_id: str = ""           # fallback when port→owner resolution misses
+    web_auth: str = ""           # the agent's own auth token (primary identity)
+    owner_id: str = ""           # last-resort hint (FD_OWNER_ID env)
     session_id: str = ""
     name: str = ""               # for file fetch
     query: str = ""              # for sessions list
@@ -398,10 +400,19 @@ class _AgentReq(BaseModel):
 
 
 def _resolve_owner(body: _AgentReq) -> str:
-    """Authoritative owner for an agent request: registry(port) → owner_id hint."""
+    """Authoritative owner for an agent request.
+
+    Tries the agent's unique web_auth token first (most reliable — survives a
+    spawn-time port reassignment), then its source port, then the FD_OWNER_ID
+    hint it sent.
+    """
+    from captain_claw.flight_deck.server import (
+        _resolve_agent_owner, _resolve_agent_owner_by_auth,
+    )
     owner = ""
-    if body.source_port:
-        from captain_claw.flight_deck.server import _resolve_agent_owner
+    if body.web_auth:
+        owner = _resolve_agent_owner_by_auth(body.web_auth) or ""
+    if not owner and body.source_port:
         owner = _resolve_agent_owner(int(body.source_port)) or ""
     owner = owner or (body.owner_id or "").strip()
     if not owner:
@@ -477,6 +488,214 @@ async def agent_get_file(body: _AgentReq):
     return FileResponse(path, filename=safe, media_type=_guess_mime(safe))
 
 
+# ── Agent-initiated runs (v2): start a Basna autonomously ────────────
+# An agent hands a task to FD; FD auto-titles, routes, and executes the ensemble
+# server-side (no frontend), then reports completion back to the originating
+# agent so it can relay the result on the user's channel. Fire-and-forget.
+
+_MAX_AGENT_RUNS_PER_OWNER = 2          # concurrency cap (confirmed with user)
+_active_agent_runs: dict[str, set[str]] = {}   # owner_id → {session_id, …}
+_basna_agent_tasks: set = set()        # strong refs so tasks aren't GC'd
+
+
+class AgentStartReq(_AgentReq):
+    task: str = ""                     # the (possibly rephrased) task to run
+    title: str = ""                    # optional; auto-generated when blank
+    max_agents: int = Field(default=6, ge=1, le=10)
+    # Origin channel, so the completion result reaches the user where they asked.
+    origin_platform: str = "web"
+    origin_user_id: str = ""
+    origin_chat_id: int = 0
+    source_host: str = "localhost"
+
+
+async def _load_owner_tiers(db, owner_id: str) -> tuple[dict, list]:
+    """Return (tiers_map, env_vars) from the owner's saved Library config.
+
+    Reads the `fd:forge-tiers` setting (a `{sets, activeSetId}` blob — the active
+    set's `tiers`/`envVars` are what the UI would use). Falls back to the legacy
+    single-set shape, then to ({}, []) so execution uses the registry tiers.
+    """
+    try:
+        settings = await db.get_all_settings(owner_id)
+    except Exception:
+        return {}, []
+    raw = settings.get("fd:forge-tiers")
+    if not raw:
+        return {}, []
+    try:
+        blob = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}, []
+    sets = blob.get("sets") if isinstance(blob, dict) else None
+    if isinstance(sets, list) and sets:
+        active_id = blob.get("activeSetId")
+        chosen = next((s for s in sets if s.get("id") == active_id), sets[0])
+        return chosen.get("tiers") or {}, chosen.get("envVars") or []
+    # Legacy single-set shape: {tiers, forgeTier} + separate env-vars key.
+    if isinstance(blob, dict) and isinstance(blob.get("tiers"), dict):
+        env: list = []
+        try:
+            ev = json.loads(settings.get("fd:forge-env-vars") or "[]")
+            if isinstance(ev, list):
+                env = ev
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return blob["tiers"], env
+    return {}, []
+
+
+async def _notify_source_agent(
+    *, source_host: str, source_port: int, origin: dict,
+    title: str, session_id: str, ok: bool, summary: str,
+) -> None:
+    """Deliver a Basna completion back to the originating agent (delegate-style).
+
+    Opens a WebSocket to the agent's port (auth resolved server-side) and sends a
+    `notification` with `trigger_response`, carrying origin channel info so the
+    agent's reply lands where the user asked. Best-effort; logs on failure.
+    """
+    import websockets
+    from captain_claw.flight_deck.server import _resolve_agent_auth
+    if not source_port:
+        return
+    auth = _resolve_agent_auth(int(source_port))
+    params = f"?token={auth}" if auth else ""
+    url = f"ws://{source_host or 'localhost'}:{source_port}/ws{params}"
+    verb = "finished successfully" if ok else "ran into an error"
+    callback_msg = (
+        f"[Basna run '{title}' {verb}] This is the RESULT of the autonomous Basna "
+        f"run you started (session {session_id}). Relay it to the user now, "
+        f"concisely, in their language. Do NOT start another Basna and do NOT say "
+        f"you are still waiting — you already have the outcome below:\n\n{summary}"
+    )
+    payload: dict = {"type": "notification", "content": callback_msg, "trigger_response": True}
+    if origin.get("platform") and origin["platform"] != "web":
+        payload["origin_platform"] = origin["platform"]
+        payload["origin_user_id"] = origin.get("user_id", "")
+        payload["origin_chat_id"] = origin.get("chat_id", 0)
+    try:
+        async with websockets.connect(url, open_timeout=10, close_timeout=5) as ws:
+            welcome = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+            if welcome.get("type") != "welcome":
+                return
+            while True:  # skip the session replay before our message
+                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                if msg.get("type") == "replay_done":
+                    break
+            await ws.send(json.dumps(payload))
+            try:
+                await asyncio.wait_for(ws.recv(), timeout=30)
+            except asyncio.TimeoutError:
+                pass
+    except Exception as exc:
+        log.warning("Basna completion delivery failed",
+                    session_id=session_id, port=source_port, error=str(exc))
+
+
+async def _run_and_notify(
+    user: dict, session_id: str, title: str, exec_req,
+    source_host: str, source_port: int, origin: dict,
+) -> None:
+    """Background: execute the routed Basna, then notify the originating agent."""
+    owner = user["id"]
+    ok = False
+    try:
+        # Pass the FULL user record so plan/quota checks (max agents, spawn rate)
+        # see the owner's real plan instead of defaulting to free, plus a stub
+        # request whose `.state.user_id` is the owner — `spawn_process` reads it
+        # to stamp each spawned agent's owner.
+        stub_request = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
+        result = await execute_route(exec_req, stub_request, user)
+        ok = True
+        conf = result.get("confidence", 0.0)
+        contributors = result.get("contributors") or []
+        truth = (result.get("truth") or "").strip()
+        summary = (
+            f"Confidence {conf:.0%} · {len(contributors)} agent(s).\n\n"
+            f"{truth[:1800]}{'…' if len(truth) > 1800 else ''}"
+        )
+    except Exception as exc:
+        log.warning("Agent-started Basna execution failed", session_id=session_id, error=str(exc))
+        summary = f"The run could not complete: {exc}"
+    finally:
+        runs = _active_agent_runs.get(owner)
+        if runs:
+            runs.discard(session_id)
+            if not runs:
+                _active_agent_runs.pop(owner, None)
+    await _notify_source_agent(
+        source_host=source_host, source_port=source_port, origin=origin,
+        title=title, session_id=session_id, ok=ok, summary=summary,
+    )
+
+
+@router.post("/agent/start")
+async def agent_start(body: AgentStartReq):
+    """Start a Basna run on behalf of the calling agent's owner (fire-and-forget).
+
+    Routes synchronously (fast), then executes the ensemble in a background task
+    and reports completion back to the agent. Capped per owner.
+    """
+    owner = _resolve_owner(body)
+    task = (body.task or "").strip()
+    if not task:
+        raise HTTPException(400, "task is required")
+
+    active = _active_agent_runs.setdefault(owner, set())
+    if len(active) >= _MAX_AGENT_RUNS_PER_OWNER:
+        return {
+            "status": "rejected",
+            "reason": f"You already have {len(active)} Basna run(s) in progress "
+                      f"(limit {_MAX_AGENT_RUNS_PER_OWNER}). Wait for one to finish.",
+        }
+
+    db = get_db()
+    # Full user record — carries `metadata.plan` so plan/quota checks during
+    # spawn see the owner's real plan, not the free-tier default.
+    user = await db.get_user_by_id(owner) or {"id": owner}
+    tiers, env_vars = await _load_owner_tiers(db, owner)
+    fast = (tiers or {}).get("fast", {})
+
+    # 1) Route synchronously (creates + routes the session, auto-titles).
+    route = await route_intent(
+        RouteRequest(
+            intent=task, title=body.title, max_agents=body.max_agents,
+            provider=fast.get("provider", ""), model=fast.get("model", ""),
+            api_key=fast.get("api_key", ""), base_url=fast.get("base_url", ""),
+        ),
+        user,
+    )
+    session_id = route["session_id"]
+    title = route.get("title", "") or task[:60]
+    selected = route.get("selected", [])
+
+    # Mark the session as agent-started (+ its origin channel) so the UI can
+    # badge it in the unified Basna list.
+    await db.update_basna_session(
+        session_id, owner,
+        config=json.dumps({"source": "agent", "origin_platform": body.origin_platform}),
+    )
+
+    # 2) Execute in the background; report completion back to the agent.
+    active.add(session_id)
+    exec_req = ExecuteRequest(
+        session_id=session_id, tiers=tiers or None, env_vars=env_vars or None,
+    )
+    origin = {
+        "platform": body.origin_platform, "user_id": body.origin_user_id,
+        "chat_id": body.origin_chat_id,
+    }
+    t = asyncio.create_task(_run_and_notify(
+        user, session_id, title, exec_req, body.source_host, body.source_port, origin,
+    ))
+    _basna_agent_tasks.add(t)
+    t.add_done_callback(_basna_agent_tasks.discard)
+
+    return {"status": "running", "session_id": session_id, "title": title,
+            "n_agents": len(selected)}
+
+
 # ── Router endpoint ──────────────────────────────────────────────────
 
 @router.post("/route")
@@ -503,6 +722,7 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
         reliability.setdefault(r["archetype_id"], []).append(r)
 
     # Resolve fast-tier creds for the router call.
+    registry = _load_registry()
     tiers = registry.get("tiers", {})
     fast = tiers.get("fast", {})
     provider = body.provider or fast.get("provider", "anthropic")
@@ -1167,6 +1387,9 @@ async def execute_route(
     archetypes = await merged_archetypes(db, user["id"])
     arch_by_id = {a["id"]: a for a in archetypes}
     seeds = {a["id"]: float(a.get("reliability_seed", 0.7)) for a in archetypes}
+    # Registry tiers — the fallback for merge-step creds when no Library tier is
+    # supplied (used by the `_merge_creds` closure below).
+    registry = _load_registry()
     domain = route.get("domain", "general")
     merge_kind = route.get("merge_kind", "converge")
     session_files = _parse_files(sess)

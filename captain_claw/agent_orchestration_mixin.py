@@ -366,6 +366,49 @@ _REFRESH_INTENT_RE = _re.compile(
 )
 
 
+# Explicit "run a Basna" command — when the user asks for a Basna ensemble run,
+# we relay the task to the `basna` tool deterministically instead of leaving the
+# choice to the model (weak models otherwise research it themselves). EN + HR.
+_BASNA_RUN_RE = _re.compile(
+    r"(?i)("
+    r"\b(run|execute|start|launch|kick\s*off|spin\s*up|fire\s*up|begin|do|create)\b"
+    r"[^.!?\n]{0,40}?\bbasn[aeu]\b"
+    r"|\bbasn[aeu]\b[^.!?\n]{0,20}?\b(run|execute|start|launch)\b"
+    r"|\b(pokreni|izvr[šs]i|kreni)\b[^.!?\n]{0,40}?\bbasn[aeu]\b"
+    r")"
+)
+
+
+def _detect_basna_run(user_input: str) -> str | None:
+    """If the message is a 'run a Basna' command, return the task to run, else None."""
+    if not user_input:
+        return None
+    # Never relay on injected system envelopes — the Basna/delegate COMPLETION
+    # callbacks ("[Basna run '…' finished] … Relay it to the user …") mention
+    # "Basna run" and would otherwise re-trigger an endless chain of new runs.
+    stripped_lead = user_input.lstrip()
+    if stripped_lead.startswith("[") or "Basna run you started" in user_input:
+        return None
+    if not _BASNA_RUN_RE.search(user_input):
+        return None
+    msg = user_input.strip()
+    # 1) Explicit "task is/task:" marker wins.
+    m = _re.search(r"(?i)\btask\s*(?:is|:)\s*(.+)", msg, _re.S)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    # 2) Strip a leading "…run/execute a basna [on|about|:]" command prefix.
+    stripped = _re.sub(
+        r"(?i)^\s*(let'?s|please|can you|could you|go|hey|ok|okay)?\s*[,:]?\s*"
+        r"(run|execute|start|launch|kick\s*off|spin\s*up|fire\s*up|do|begin|create)\s+"
+        r"(a\s+|an\s+|new\s+|the\s+|another\s+)?basn[aeu]\b\s*(run\s+)?"
+        r"(on|about|for|to|regarding|:|—|-)?\s*",
+        "", msg, count=1)
+    if stripped and stripped != msg and len(stripped.strip()) >= 8:
+        return stripped.strip()
+    # 3) Fall back to the whole message; the router/auto-title handles it.
+    return msg
+
+
 def _claims_web_research(text: str) -> bool:
     """True if the reply claims it searched/fetched the web."""
     return bool(text and _WEB_RESEARCH_CLAIM_RE.search(str(text)))
@@ -394,6 +437,27 @@ class AgentOrchestrationMixin:
         """
         if not self._initialized:
             await self.initialize()
+
+        # Deterministic Basna relay: when the user explicitly asks to run/execute
+        # a Basna, hand the task straight to the `basna` tool rather than relying
+        # on the model to pick the tool — weak models otherwise do the research
+        # themselves. Covers every channel (web/whatsapp/glasses/api) since they
+        # all funnel through complete().
+        _tools = getattr(self, "tools", None)
+        if _tools is not None and _tools.has_tool("basna"):
+            _basna_task = _detect_basna_run(user_input)
+            if _basna_task:
+                self._add_session_message(role="user", content=user_input)
+                try:
+                    _res = await self._execute_tool_with_guard(
+                        "basna", {"action": "start", "task": _basna_task}, "basna-relay",
+                    )
+                    _reply = (getattr(_res, "content", "") or "").strip() or "Basna run started."
+                except Exception as _e:  # noqa: BLE001 — surface a clean message
+                    _reply = f"I couldn't start the Basna run: {_e}"
+                self._add_session_message(role="assistant", content=_reply)
+                return _reply
+
         self._last_memory_debug_signature = None
         self._last_semantic_memory_debug_signature = None
         # When the user explicitly asks for fresh/web data (e.g. "refresh from

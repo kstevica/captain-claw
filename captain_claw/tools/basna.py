@@ -35,13 +35,19 @@ _TEXT_EXTS = {".md", ".markdown", ".txt", ".csv", ".tsv", ".json", ".html",
 class BasnaTool(Tool):
     name = "basna"
     description = (
-        "Read your owner's Basna sessions (multi-agent ensemble runs) like a datastore. "
-        "Actions: 'list' (browse/search sessions), 'get' (full detail of one session: route, "
-        "compiled truth, confidence, analysis, files), 'agents' (per-agent runs with their tool "
-        "activity, success and latency), 'output' (one agent's full output), 'truth' (the compiled "
-        "answer), 'analysis' (cross-agent agreement/differences/blind-spots), 'files' (list a "
-        "session's files), 'get_file' (fetch a generated/input file — text inline, else saved to "
-        "your workspace). Use 'list' first to find a session id."
+        "Run and read Basna — a parallel ensemble of specialist agents that researches/analyses a "
+        "task and merges their work into one answer. "
+        "MANDATORY: whenever the user asks to run, start, execute, kick off, launch, or 'do a "
+        "Basna' (e.g. 'run a basna on X', 'execute new basna', 'have the Basna team research X', "
+        "'spin up a basna'), you MUST call this tool with action='start' and pass their request as "
+        "`task`. In that case do NOT do the work yourself — do NOT call web_search, web_fetch, "
+        "browser, or read to research it; the Basna ensemble's own agents do all of that. Your only "
+        "job is to hand off the task and, later, relay the result. 'start' returns immediately "
+        "(fire-and-forget) and notifies you when the run finishes. "
+        "READ your owner's past/running sessions like a datastore: 'list' (browse/search), 'get' "
+        "(full detail), 'agents' (per-agent runs + tool activity), 'output' (one agent's full "
+        "output), 'truth' (compiled answer), 'analysis' (agreement/differences/blind-spots), "
+        "'files' (list), 'get_file' (fetch a file). Use 'list' to find a session id."
     )
     timeout_seconds = 60.0
 
@@ -50,8 +56,11 @@ class BasnaTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["list", "get", "agents", "output", "truth", "analysis", "files", "get_file"],
+                "enum": ["start", "list", "get", "agents", "output", "truth", "analysis", "files", "get_file"],
                 "description": (
+                    "'start' — launch a NEW autonomous Basna run on `task` (optional `title`, "
+                    "`max_agents`); use this when the user asks to run/execute/start a Basna, and "
+                    "do NOT research it yourself. Returns immediately, reports back when done. "
                     "'list' — your sessions (optional `query` substring, `status`, `limit`). "
                     "'get' — full session by `session_id`. "
                     "'agents' — per-agent runs for `session_id`. "
@@ -62,7 +71,10 @@ class BasnaTool(Tool):
                     "'get_file' — fetch `name` from `session_id`."
                 ),
             },
-            "session_id": {"type": "string", "description": "Target session id (all actions except 'list')."},
+            "task": {"type": "string", "description": "The task to run for 'start' — a clear, self-contained statement of what to research/produce."},
+            "title": {"type": "string", "description": "Optional short title for the run ('start'); auto-generated if blank."},
+            "max_agents": {"type": "integer", "description": "Optional cap on agents for 'start' (1-10, default 6)."},
+            "session_id": {"type": "string", "description": "Target session id (all read actions except 'list')."},
             "archetype_id": {"type": "string", "description": "Agent/archetype id for the 'output' action."},
             "name": {"type": "string", "description": "File name for the 'get_file' action."},
             "query": {"type": "string", "description": "Substring filter over title/intent/truth for 'list'."},
@@ -92,13 +104,24 @@ class BasnaTool(Tool):
         except Exception:
             return 0
 
-    async def _post(self, fd_url: str, path: str, payload: dict) -> Any:
-        import httpx
-        body = {
+    def _own_auth(self) -> str:
+        try:
+            from captain_claw.config import get_config
+            return get_config().web.auth_token or ""
+        except Exception:
+            return ""
+
+    def _identity(self) -> dict:
+        """Identity FD uses to resolve this agent's owner (auth token is primary)."""
+        return {
+            "web_auth": self._own_auth(),
             "source_port": self._own_port(),
             "owner_id": os.environ.get("FD_OWNER_ID", ""),
-            **payload,
         }
+
+    async def _post(self, fd_url: str, path: str, payload: dict) -> Any:
+        import httpx
+        body = {**self._identity(), **payload}
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(f"{fd_url}{path}", json=body)
         if resp.status_code == 404:
@@ -115,6 +138,8 @@ class BasnaTool(Tool):
         if not fd_url:
             return ToolResult(success=False, error="Flight Deck URL unavailable; cannot reach Basna.")
         try:
+            if action == "start":
+                return await self._start(fd_url, **kwargs)
             if action == "list":
                 return await self._list(fd_url, **kwargs)
             if action == "get":
@@ -137,6 +162,40 @@ class BasnaTool(Tool):
             return ToolResult(success=False, error=f"Basna request failed: {e}")
 
     # ── actions ──────────────────────────────────────────────────────
+
+    async def _start(self, fd_url: str, **kwargs: Any) -> ToolResult:
+        """Launch a new autonomous Basna run; fire-and-forget with a callback."""
+        task = (kwargs.get("task") or kwargs.get("query") or "").strip()
+        if not task:
+            return ToolResult(success=False, error="Provide `task` describing what the Basna run should do.")
+        # Detect the originating channel so the completion result reaches the user
+        # where they asked (mirrors the flight_deck delegate tool).
+        agent = kwargs.get("_agent")
+        origin_platform, origin_user_id, origin_chat_id = "web", "", 0
+        if agent and hasattr(agent, "_user_id") and hasattr(agent, "_telegram_chat_id"):
+            origin_platform = "telegram"
+            origin_user_id = str(getattr(agent, "_user_id", ""))
+            origin_chat_id = int(getattr(agent, "_telegram_chat_id", 0))
+        payload = {
+            "task": task,
+            "title": kwargs.get("title", "") or "",
+            "max_agents": int(kwargs.get("max_agents") or 6),
+            "origin_platform": origin_platform,
+            "origin_user_id": origin_user_id,
+            "origin_chat_id": origin_chat_id,
+            "source_host": "localhost",
+        }
+        r = await self._post(fd_url, "/fd/basna/agent/start", payload)
+        if isinstance(r, dict) and r.get("_error"):
+            return ToolResult(success=False, error=r["_error"])
+        data = r.json()
+        if data.get("status") == "rejected":
+            return ToolResult(success=True, content=f"Not started — {data.get('reason', 'at concurrency limit')}.")
+        return ToolResult(success=True, content=(
+            f"Started Basna run **{data.get('title') or task[:60]}** "
+            f"({data.get('n_agents', '?')} agent(s), session {data.get('session_id')}). "
+            f"It's running autonomously — I'll report the result back here when it finishes."
+        ))
 
     async def _list(self, fd_url: str, **kwargs: Any) -> ToolResult:
         r = await self._post(fd_url, "/fd/basna/agent/sessions", {
@@ -290,9 +349,7 @@ class BasnaTool(Tool):
         if not sid or not name:
             return ToolResult(success=False, error="session_id and name are required.")
         import httpx
-        body = {"source_port": self._own_port(),
-                "owner_id": os.environ.get("FD_OWNER_ID", ""),
-                "session_id": sid, "name": name}
+        body = {**self._identity(), "session_id": sid, "name": name}
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(f"{fd_url}/fd/basna/agent/file", json=body)
         if resp.status_code == 404:

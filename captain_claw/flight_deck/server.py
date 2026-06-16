@@ -2271,6 +2271,29 @@ def _resolve_agent_owner(port: int) -> str:
     return ""
 
 
+def _resolve_agent_owner_by_auth(token: str) -> str:
+    """Resolve an agent's owning user_id by its unique web_auth token.
+
+    More reliable than port-based lookup (a spawn-time port reassignment can make
+    an agent's configured port differ from its registry entry): the auth token is
+    unique per agent and stored in both its config and the registry/Docker label.
+    """
+    if not token:
+        return ""
+    try:
+        client = get_docker()
+        for c in client.containers.list(filters={"label": CONTAINER_LABEL}):
+            labels = c.labels or {}
+            if labels.get("flight-deck.web-auth", "") == token:
+                return labels.get(OWNER_LABEL, "") or ""
+    except Exception:
+        pass
+    for slug, entry in _load_process_registry().items():
+        if entry.get("web_auth") == token and entry.get("owner"):
+            return entry["owner"]
+    return ""
+
+
 # ── Flow engine helpers ────────────────────────────────────────────────
 
 def _running_agents() -> list[dict[str, Any]]:
@@ -4690,8 +4713,10 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
         if ev.get("key"):
             environment[ev["key"]] = ev.get("value", "")
 
-    # Resolve owner: authenticated user > owner_hint > infer from existing registry
-    owner_id = getattr(request.state, "user_id", "") or config.owner_hint
+    # Resolve owner: authenticated user > owner_hint > infer from existing registry.
+    # `request` may be a lightweight stub (headless/background spawns), so reach
+    # for `.state.user_id` defensively rather than assuming a real Request.
+    owner_id = getattr(getattr(request, "state", None), "user_id", "") or config.owner_hint
     if not owner_id:
         # Fallback: inherit owner from an existing agent in the registry.
         # Covers the case where an internal caller (e.g. Old Man spawned before

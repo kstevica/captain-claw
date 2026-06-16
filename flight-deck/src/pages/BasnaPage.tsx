@@ -78,10 +78,28 @@ const STATUS_DOT: Record<string, string> = {
   done: 'bg-emerald-500', error: 'bg-rose-500',
 }
 
+// Confidence colour for the run list: green high, amber mid, rose low.
+function confColor(c: number): string {
+  if (c >= 0.7) return 'text-emerald-600 dark:text-emerald-400'
+  if (c >= 0.4) return 'text-amber-600 dark:text-amber-400'
+  return 'text-rose-600 dark:text-rose-400'
+}
+
+// Agent-started runs carry {source:'agent', origin_platform} in their config.
+function agentOrigin(config?: string): string | null {
+  if (!config) return null
+  try {
+    const c = JSON.parse(config)
+    if (c && c.source === 'agent') return c.origin_platform || 'agent'
+  } catch { /* ignore */ }
+  return null
+}
+
 function SessionCard({ s, active, onOpen, onDelete }: {
   s: BasnaSession; active: boolean; onOpen: () => void; onDelete: () => void
 }) {
   const working = s.status === 'running' || s.status === 'routing'
+  const origin = agentOrigin(s.config)
   return (
     <div
       onClick={onOpen}
@@ -110,9 +128,19 @@ function SessionCard({ s, active, onOpen, onDelete }: {
         </button>
       </div>
       <div className="mt-1.5 flex items-center gap-1.5 pl-5 text-[10px] text-zinc-500">
+        {origin && (
+          <span
+            title={`Started by an agent${origin !== 'agent' ? ` from ${origin}` : ''}`}
+            className="flex shrink-0 items-center gap-1 rounded bg-violet-500/15 border border-violet-500/25 px-1.5 py-0.5 font-medium text-violet-700 dark:text-violet-300"
+          >
+            <Sparkles className="h-2.5 w-2.5" />agent{origin !== 'agent' ? `·${origin}` : ''}
+          </span>
+        )}
         {s.domain && <span className="truncate rounded bg-zinc-800/70 px-1.5 py-0.5 text-zinc-400">{s.domain}</span>}
         {s.difficulty && <span className={`font-medium ${DIFFICULTY_COLOR[s.difficulty] || 'text-zinc-400'}`}>{s.difficulty}</span>}
-        {s.status === 'done' && s.confidence > 0 && <span>· {Math.round(s.confidence * 100)}%</span>}
+        {s.status === 'done' && s.confidence > 0 && (
+          <span className={`font-medium ${confColor(s.confidence)}`}>· {Math.round(s.confidence * 100)}%</span>
+        )}
         <span className="ml-auto shrink-0 tabular-nums text-zinc-600">{timeAgo(s.updated_at || s.created_at)}</span>
       </div>
     </div>
@@ -399,12 +427,13 @@ export function BasnaPage() {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, executing, recompiling, error,
     routerTier, maxAgents, setRouterTier, setMaxAgents, addFiles, removeFile, downloadFile, fetchFileText,
-    updateSelected, loadSessions, selectSession, newSession, route, saveTitle, execute, recompile, sendFeedback, deleteSession,
+    updateSelected, loadSessions, pollRunning, selectSession, newSession, route, saveTitle, execute, recompile, sendFeedback, deleteSession,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
 
   const [intent, setIntent] = useState('')
   const [title, setTitle] = useState('')
+  const [agentOnly, setAgentOnly] = useState(false)
   const [modal, setModal] = useState<{ title: string; content: string; mode: ViewMode } | null>(null)
   const viewFull = (title: string, content: string) => setModal({ title, content, mode: 'markdown' })
   // Preview a generated file: fetch its text and render by type (md/html/text).
@@ -440,6 +469,17 @@ export function BasnaPage() {
   useEffect(() => { loadSessions() }, [loadSessions])
   useEffect(() => { setIntent(activeSession?.intent || '') }, [activeSession?.id, activeSession?.intent])
   useEffect(() => { setTitle(activeSession?.title || '') }, [activeSession?.id, activeSession?.title])
+
+  // Live monitor: while any run (incl. agent-started) is mid-flight, poll the
+  // list status + the open session's progress every few seconds; stop when idle.
+  const anyRunning = sessions.some((s) => ['routing', 'routed', 'running'].includes(s.status))
+  useEffect(() => {
+    if (!anyRunning || executing) return
+    const iv = setInterval(() => { pollRunning() }, 4000)
+    return () => clearInterval(iv)
+  }, [anyRunning, executing, pollRunning])
+
+  const visibleSessions = agentOnly ? sessions.filter((s) => agentOrigin(s.config)) : sessions
 
   const canRoute = intent.trim().length > 0 && !routing
   const canRun = !!routePlan && !!activeSession && !executing
@@ -484,13 +524,26 @@ export function BasnaPage() {
       <div className="flex flex-1 overflow-hidden">
         {/* Session list */}
         <div className="flex w-80 shrink-0 flex-col overflow-hidden border-r border-zinc-800 lg:w-96">
-          <div className="flex items-center justify-between px-3 pt-3 pb-1.5">
+          <div className="flex items-center gap-2 px-3 pt-3 pb-1.5">
             <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Runs</span>
-            {sessions.length > 0 && <span className="text-[10px] tabular-nums text-zinc-600">{sessions.length}</span>}
+            {sessions.some((s) => agentOrigin(s.config)) && (
+              <button
+                onClick={() => setAgentOnly((v) => !v)}
+                title="Show only agent-started runs"
+                className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium border transition-colors ${
+                  agentOnly
+                    ? 'border-violet-500/40 bg-violet-500/15 text-violet-700 dark:text-violet-300'
+                    : 'border-zinc-700 text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                <Sparkles className="h-2.5 w-2.5" /> agent
+              </button>
+            )}
+            {visibleSessions.length > 0 && <span className="ml-auto text-[10px] tabular-nums text-zinc-600">{visibleSessions.length}</span>}
           </div>
           <div className="flex-1 space-y-1.5 overflow-auto px-3 pb-3">
-          {sessions.length === 0 && <p className="px-1 py-2 text-xs text-zinc-600">No runs yet — describe a task and Route.</p>}
-          {sessions.map((s) => (
+          {visibleSessions.length === 0 && <p className="px-1 py-2 text-xs text-zinc-600">{agentOnly ? 'No agent-started runs yet.' : 'No runs yet — describe a task and Route.'}</p>}
+          {visibleSessions.map((s) => (
             <SessionCard
               key={s.id}
               s={s}

@@ -312,6 +312,7 @@ interface BasnaStore {
   fetchFileText: (name: string) => Promise<string>
 
   loadSessions: () => Promise<void>
+  pollRunning: () => Promise<void>
   selectSession: (id: string) => Promise<void>
   newSession: () => void
   updateSelected: (index: number, patch: Partial<RouteSelected>) => void
@@ -395,6 +396,28 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       set({ sessions: await apiListSessions() })
     } finally {
       set({ listLoading: false })
+    }
+  },
+
+  // Live monitor: while runs execute in the background (incl. agent-started
+  // ones), refresh the list status and the open session's progress/result.
+  // No-op during a manual execute, which drives its own polling.
+  pollRunning: async () => {
+    if (get().executing) return
+    try { set({ sessions: await apiListSessions() }) } catch { /* ignore */ }
+    const a = get().activeSession
+    if (a && ['routing', 'routed', 'running'].includes(a.status)) {
+      try {
+        const p = await apiProgress(a.id)
+        if (p.events?.length) set({ progress: p.events })
+      } catch { /* ignore */ }
+      const fresh = await apiGetSession(a.id).catch(() => null)
+      if (fresh && fresh.status !== a.status) {
+        set({ activeSession: fresh, routePlan: parseRoute(fresh.route),
+              runs: await apiListRuns(fresh.id).catch(() => []),
+              attachments: parseFiles(fresh.files) })
+        if (fresh.status === 'done') set({ progress: parseProgress(fresh.progress) })
+      }
     }
   },
 
