@@ -179,9 +179,16 @@ async def _execute_and_judge(user_id: str, action: dict[str, Any], agent: dict[s
         learn = bool(cfg.get("learning_enabled")) and \
             str(cfg.get("judge_mode") or "both") in ("auto", "both")
 
+        kind = str(action.get("kind") or "")
         if not res.get("ok"):
             success: bool | None = False
             note = str(res.get("error") or "execution failed")[:500]
+        elif kind == "nudge":
+            # A nudge SUCCEEDS by being delivered — its whole job is to reach the
+            # user. LLM-judging "did it accomplish reaching out" wrongly fails good
+            # nudges and would suppress them via reliability. Delivery == success.
+            success = True
+            note = output[:300] or "delivered"
         elif learn:
             verdict = await _judge_outcome(user_id, action, output)
             success = bool(verdict["success"])
