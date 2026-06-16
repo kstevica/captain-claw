@@ -296,7 +296,14 @@ async def handle_ws_message(
                                     "ok": False, "error": "no tool or agent"})
             return
         try:
-            res = await server.agent._execute_tool_with_guard(tool, args, "autonomous-action")
+            # The action catalog is the authority for a deterministic invocation,
+            # so explicitly allow the named tool past the per-session tool policy
+            # (which exists to constrain the LLM mid-turn). The script_tool guard
+            # still runs; if the tool lacks creds it errors normally.
+            res = await server.agent._execute_tool_with_guard(
+                tool, args, "autonomous-action",
+                task_policy={"also_allow": [tool]},
+            )
             await server._send(ws, {
                 "type": "tool_result", "req_id": req_id,
                 "ok": bool(getattr(res, "success", False)),
