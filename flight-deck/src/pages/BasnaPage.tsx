@@ -486,6 +486,11 @@ export function BasnaPage() {
   const truth = lastExecute?.truth ?? activeSession?.truth ?? ''
   const confidence = lastExecute?.confidence ?? activeSession?.confidence ?? 0
   const analysis = lastExecute?.analysis ?? parseAnalysis(activeSession?.analysis)
+  // Subject for download filenames: the run's title, else the first words of the
+  // task — so analysis/truth export as "<subject>-analysis.md" / "…-compiled-truth.md".
+  const subject = (activeSession?.title || '').trim()
+    || (activeSession?.intent || '').trim().split(/\s+/).slice(0, 8).join(' ')
+    || 'basna'
 
   // Group the streaming progress into live per-agent panels (preserving the
   // order each agent first appears). `usage` events update the running token
@@ -888,7 +893,7 @@ export function BasnaPage() {
                   <ScanSearch className="h-4 w-4 text-violet-600 dark:text-violet-400" />
                   <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Analysis</span>
                   <div className="ml-auto">
-                    <OutputActions title="Analysis" content={analysisToMarkdown(analysis)} onView={viewFull} />
+                    <OutputActions title={`${subject} — Analysis`} content={analysisToMarkdown(analysis)} onView={viewFull} />
                   </div>
                 </div>
 
@@ -969,7 +974,7 @@ export function BasnaPage() {
                   >
                     <RefreshCw className={`h-3.5 w-3.5 ${recompiling ? 'animate-spin' : ''}`} />
                   </button>
-                  <OutputActions title="Compiled truth" content={truth} onView={viewFull} />
+                  <OutputActions title={`${subject} — Compiled truth`} content={truth} onView={viewFull} />
                 </div>
                 <div className="fd-markdown text-sm text-zinc-200 leading-relaxed">
                   <Markdown remarkPlugins={[remarkGfm]}>{truth}</Markdown>
