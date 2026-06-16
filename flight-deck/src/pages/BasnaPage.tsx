@@ -96,7 +96,12 @@ function SessionCard({ s, active, onOpen, onDelete }: {
             ? <Loader2 className="h-3 w-3 animate-spin text-amber-400" />
             : <span className={`block h-2 w-2 rounded-full ${STATUS_DOT[s.status] || 'bg-zinc-500'}`} />}
         </span>
-        <p className="line-clamp-2 flex-1 text-xs font-medium leading-snug text-zinc-200">{s.intent || '(untitled)'}</p>
+        <div className="min-w-0 flex-1">
+          <p className="line-clamp-2 text-xs font-medium leading-snug text-zinc-200" title={s.intent || ''}>{s.title || s.intent || '(untitled)'}</p>
+          {s.title && s.intent && (
+            <p className="mt-0.5 line-clamp-1 text-[10px] leading-snug text-zinc-500" title={s.intent}>{s.intent}</p>
+          )}
+        </div>
         <button
           onClick={(e) => { e.stopPropagation(); onDelete() }}
           className="shrink-0 rounded p-0.5 text-zinc-600 opacity-0 transition-opacity hover:text-rose-400 group-hover:opacity-100"
@@ -394,11 +399,12 @@ export function BasnaPage() {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, executing, recompiling, error,
     routerTier, maxAgents, setRouterTier, setMaxAgents, addFiles, removeFile, downloadFile, fetchFileText,
-    updateSelected, loadSessions, selectSession, newSession, route, execute, recompile, sendFeedback, deleteSession,
+    updateSelected, loadSessions, selectSession, newSession, route, saveTitle, execute, recompile, sendFeedback, deleteSession,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
 
   const [intent, setIntent] = useState('')
+  const [title, setTitle] = useState('')
   const [modal, setModal] = useState<{ title: string; content: string; mode: ViewMode } | null>(null)
   const viewFull = (title: string, content: string) => setModal({ title, content, mode: 'markdown' })
   // Preview a generated file: fetch its text and render by type (md/html/text).
@@ -433,6 +439,7 @@ export function BasnaPage() {
 
   useEffect(() => { loadSessions() }, [loadSessions])
   useEffect(() => { setIntent(activeSession?.intent || '') }, [activeSession?.id, activeSession?.intent])
+  useEffect(() => { setTitle(activeSession?.title || '') }, [activeSession?.id, activeSession?.title])
 
   const canRoute = intent.trim().length > 0 && !routing
   const canRun = !!routePlan && !!activeSession && !executing
@@ -476,7 +483,7 @@ export function BasnaPage() {
 
       <div className="flex flex-1 overflow-hidden">
         {/* Session list */}
-        <div className="flex w-64 shrink-0 flex-col overflow-hidden border-r border-zinc-800">
+        <div className="flex w-80 shrink-0 flex-col overflow-hidden border-r border-zinc-800 lg:w-96">
           <div className="flex items-center justify-between px-3 pt-3 pb-1.5">
             <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Runs</span>
             {sessions.length > 0 && <span className="text-[10px] tabular-nums text-zinc-600">{sessions.length}</span>}
@@ -490,8 +497,9 @@ export function BasnaPage() {
               active={activeSession?.id === s.id}
               onOpen={() => selectSession(s.id)}
               onDelete={() => {
-                const label = (s.intent || '').trim().slice(0, 80)
-                if (window.confirm(`Delete this Basna run?${label ? `\n\n"${label}${(s.intent || '').length > 80 ? '…' : ''}"` : ''}`)) {
+                const raw = (s.title || s.intent || '').trim()
+                const label = raw.slice(0, 80)
+                if (window.confirm(`Delete this Basna run?${label ? `\n\n"${label}${raw.length > 80 ? '…' : ''}"` : ''}`)) {
                   deleteSession(s.id)
                 }
               }}
@@ -510,6 +518,26 @@ export function BasnaPage() {
               onDragLeave={() => setDragOver(false)}
               onDrop={(e) => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files) }}
             >
+              <label className="mb-1.5 block text-xs font-medium text-zinc-400">
+                Title <span className="font-normal text-zinc-600">— optional, auto-generated from the task if blank</span>
+              </label>
+              <div className="mb-3 flex items-center gap-2">
+                <input
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="e.g. Q3 competitor scan"
+                  className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-2.5 py-1.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-sky-600 focus:outline-none"
+                />
+                {activeSession && title.trim() !== (activeSession.title || '') && (
+                  <button
+                    onClick={() => saveTitle(title)}
+                    title="Save title"
+                    className="flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
+                  >
+                    <Check className="h-3.5 w-3.5" /> Save
+                  </button>
+                )}
+              </div>
               <label className="mb-1.5 block text-xs font-medium text-zinc-400">Task / intent</label>
               <textarea
                 value={intent}
@@ -581,7 +609,7 @@ export function BasnaPage() {
                 </label>
                 <div className="ml-auto flex items-center gap-2">
                   <button
-                    onClick={() => route(intent, tiers)}
+                    onClick={() => route(intent, tiers, title)}
                     disabled={!canRoute}
                     className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
                   >

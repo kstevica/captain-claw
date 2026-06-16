@@ -43,6 +43,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "clipboard": "Read or write the system clipboard. Supports text, images, and files.",
     "gws": "Google Workspace CLI — access Google Drive (list, search, download, create), Docs (read, append), Calendar (list, search, create, agenda), and Gmail (list, search, read, threads). Uses the `gws` binary.",
     "datastore": "Manage persistent relational data tables (create, query, insert, update, delete, import/export)",
+    "basna": "Read your past Basna multi-agent sessions like a datastore — list/search sessions and pull the compiled truth, cross-agent analysis, per-agent outputs, and generated files (read-only).",
     "insights": "Search and manage persistent cross-session insights — facts, contacts, decisions, preferences, deadlines auto-extracted from conversations. Actions: search, list, add, update, delete.",
     "personality": "Read or update the agent personality profile (name, description, background, expertise)",
     "browser": "Control a headless browser for web app interaction. Supports observe/act (page understanding), click/type with nth-match disambiguation, login with encrypted credentials + cookie persistence, network capture for API discovery, API replay (execute captured APIs directly — skip the browser!), and multi-app sessions. Use for login flows, form filling, and interacting with dynamic/React web apps.",
@@ -93,6 +94,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "clipboard": "read/write system clipboard",
     "gws": "Google Workspace: Drive, Docs, Calendar, Gmail",
     "datastore": "persistent relational tables",
+    "basna": "read past Basna sessions (compiled truth, analysis, agent outputs, files)",
     "insights": "persistent cross-session insights (facts, contacts, decisions, deadlines)",
     "personality": "agent personality profile",
     "browser": "headless browser for dynamic web apps",
@@ -101,6 +103,21 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "summarize_files": "ALWAYS use for reviewing/analysing/summarising multiple files in a folder — handles PDF/DOCX/XLSX/PPTX internally, returns summary file path",
     "desktop_action": "desktop GUI: click/type/scroll/keys/open apps (use with screen_capture)",
 }
+
+
+def _short_tool_desc(text: str, limit: int = 160) -> str:
+    """Condense a tool's own `description` to one line for the prompt list:
+    its first sentence, or a truncation. Used as the fallback when a registered
+    tool isn't in the curated description dicts above (keeps the inventory
+    complete and self-maintaining instead of silently dropping the tool)."""
+    text = " ".join((text or "").split())
+    if not text:
+        return ""
+    for sep in (". ", "! ", "? "):
+        i = text.find(sep)
+        if 0 < i < limit:
+            return text[:i + 1]
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
 
 
 class AgentContextMixin:
@@ -2326,6 +2343,10 @@ class AgentContextMixin:
         # for live peer discovery instead of relying on static pushed peer list.
         from captain_claw.tools.flight_deck import FlightDeckTool
         self.tools.register(FlightDeckTool())
+        # Basna read access — always registered; reads the owner's Basna sessions
+        # (returns a clear error if FD_URL / owner is unavailable).
+        from captain_claw.tools.basna import BasnaTool
+        self.tools.register(BasnaTool())
         # Code-app authoring — always registered; calls return a clear error
         # if FD_URL isn't available, so registration cost is negligible.
         from captain_claw.tools.app_runner import AppRunnerTool
@@ -2582,15 +2603,18 @@ class AgentContextMixin:
             "run the call themselves; those statements are false."
         )
 
+        # Fall back to a tool's OWN description for anything not in the curated
+        # dicts, so every registered (callable) tool is listed — not just the
+        # hand-maintained subset. Keeps "what tools do you have?" answerable.
+        def _desc_for(name: str) -> str:
+            d = descs.get(name)
+            if d:
+                return d
+            tool = self.tools.get(name)
+            return _short_tool_desc(getattr(tool, "description", "") if tool else "") or name
+
         if use_micro:
-            parts = []
-            for name in registered:
-                desc = descs.get(name)
-                if not desc and name.startswith("mcp_"):
-                    tool = self.tools.get(name)
-                    desc = getattr(tool, "description", name) if tool else None
-                if desc:
-                    parts.append(f"{name} ({desc})")
+            parts = [f"{name} ({_desc_for(name)})" for name in registered]
             if not parts:
                 return ""
             tail = (" " + _mcp_policy) if _has_mcp else ""
@@ -2598,12 +2622,7 @@ class AgentContextMixin:
         else:
             lines = ["Available tools:"]
             for name in registered:
-                desc = descs.get(name)
-                if not desc and name.startswith("mcp_"):
-                    tool = self.tools.get(name)
-                    desc = getattr(tool, "description", name) if tool else None
-                if desc:
-                    lines.append(f"- {name}: {desc}")
+                lines.append(f"- {name}: {_desc_for(name)}")
             if _has_mcp:
                 lines.append("")
                 lines.append(_mcp_policy)

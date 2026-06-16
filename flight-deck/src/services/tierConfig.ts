@@ -4,7 +4,7 @@
 // consumes the saved tiers to run decomposition and resolve models at spawn)
 // read from here, so there is ONE source of truth for the per-user tier config.
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useAuthStore } from '../stores/authStore'
 import { queueSave, registerHydrator, fetchSettings } from './settingsSync'
 
@@ -50,7 +50,8 @@ export interface TierDef {
   output_ctx?: number
 }
 
-// Curated archetype registry served by GET /fd/archetypes.
+// Archetype registry served by GET /fd/archetypes — base set merged with the
+// caller's own custom archetypes (the latter tagged source: 'user').
 export interface Archetype {
   id: string
   family: string
@@ -61,10 +62,16 @@ export interface Archetype {
   tools: string[]
   description: string
   fleet_instructions: string
+  keywords?: string[]
+  reliability_seed?: number
+  // 'user' archetypes are editable/deletable; 'base' come from the JSON file.
+  source?: 'base' | 'user'
+  overrides?: boolean
 }
 
 export interface ArchetypeRegistry {
   tiers: Record<string, TierDef>
+  base_tools?: string[]
   archetypes: Archetype[]
 }
 
@@ -221,6 +228,7 @@ export interface TierConfigState {
   envVars: EnvVar[]
   setEnvVars: React.Dispatch<React.SetStateAction<EnvVar[]>>
   registry: ArchetypeRegistry | null
+  refreshRegistry: () => void
   bootstrapped: boolean
   updateTier: (key: string, patch: Partial<TierConfig>) => void
   // Multi-set management (Library page).
@@ -267,12 +275,19 @@ export function useTierConfig(): TierConfigState {
     return () => { cancelled = true }
   }, [])
 
-  // Load the curated archetype registry (tiers + gallery).
-  useEffect(() => {
-    fetch('/fd/archetypes').then((r) => r.json()).then((reg) => {
-      if (reg && Array.isArray(reg.archetypes)) setRegistry(reg)
-    }).catch(() => {})
+  // Load the archetype registry (tiers + merged gallery: base + the user's own).
+  // Sent authenticated so the server can include this user's custom archetypes.
+  const refreshRegistry = useCallback(() => {
+    const { token, authEnabled } = useAuthStore.getState()
+    const headers: Record<string, string> = {}
+    if (authEnabled && token) headers['Authorization'] = `Bearer ${token}`
+    fetch('/fd/archetypes', { headers, credentials: 'include' })
+      .then((r) => r.json())
+      .then((reg) => { if (reg && Array.isArray(reg.archetypes)) setRegistry(reg) })
+      .catch(() => {})
   }, [])
+
+  useEffect(() => { refreshRegistry() }, [refreshRegistry])
 
   // Seed one "Default" set from registry defaults if the user has none saved.
   useEffect(() => {
@@ -342,7 +357,7 @@ export function useTierConfig(): TierConfigState {
   }
 
   return {
-    tiers, setTiers, forgeTier, setForgeTier, envVars, setEnvVars, registry, bootstrapped, updateTier,
+    tiers, setTiers, forgeTier, setForgeTier, envVars, setEnvVars, registry, refreshRegistry, bootstrapped, updateTier,
     sets, activeSetId, setActiveSet, addSet, duplicateSet, renameSet, deleteSet,
   }
 }

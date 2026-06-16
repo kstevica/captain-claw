@@ -1,21 +1,129 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Library, Gauge, Trash2, Plus, Crown, Loader2, Check, AlertTriangle, Rocket,
-  Layers, Copy,
+  Layers, Copy, Pencil, Sparkles, X,
 } from 'lucide-react'
 import { useProcessStore } from '../stores/processStore'
 import { spawnProcess, type SpawnConfig } from '../services/docker'
 import {
   useTierConfig, PROVIDERS, TIER_ORDER, type Archetype,
 } from '../services/tierConfig'
+import {
+  createArchetype, updateArchetype, deleteArchetype, generateArchetype,
+  type ArchetypeInput,
+} from '../services/archetypes'
 
 type SpawnState = 'spawning' | 'done' | 'error'
 
+const COGNITIVE_MODES = [
+  'neutra', 'ionian', 'dorian', 'phrygian', 'lydian', 'mixolydian', 'aeolian', 'locrian',
+]
+
+function slugify(s: string): string {
+  return s.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+}
+
 export function LibraryPage() {
   const {
-    tiers, forgeTier, setForgeTier, envVars, setEnvVars, registry, updateTier,
+    tiers, forgeTier, setForgeTier, envVars, setEnvVars, registry, refreshRegistry, updateTier,
     sets, activeSetId, setActiveSet, addSet, duplicateSet, renameSet, deleteSet,
   } = useTierConfig()
+
+  // Archetype editor: null = closed; otherwise the draft being edited. `editingId`
+  // is the existing archetype_id when editing (PUT), or null for a new one (POST).
+  const [editor, setEditor] = useState<ArchetypeInput | null>(null)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editorErr, setEditorErr] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [genPrompt, setGenPrompt] = useState('')
+  const [generating, setGenerating] = useState(false)
+
+  const blankDraft = (): ArchetypeInput => ({
+    archetype_id: '', role: '', family: 'Custom', description: '',
+    cognitive_mode: 'neutra', tier: 'balanced',
+    tools: registry?.base_tools ? [...registry.base_tools] : [],
+    fleet_instructions: '', keywords: [], lead: false, reliability_seed: 0.7,
+  })
+
+  const openNew = () => { setEditingId(null); setEditorErr(''); setGenPrompt(''); setEditor(blankDraft()) }
+  const openEdit = (a: Archetype) => {
+    setEditingId(a.id); setEditorErr(''); setGenPrompt('')
+    setEditor({
+      archetype_id: a.id, role: a.role, family: a.family || 'Custom',
+      description: a.description || '', cognitive_mode: a.cognitive_mode || 'neutra',
+      tier: a.tier || 'balanced', tools: a.tools || [],
+      fleet_instructions: a.fleet_instructions || '', keywords: a.keywords || [],
+      lead: !!a.lead, reliability_seed: a.reliability_seed ?? 0.7,
+    })
+  }
+  const closeEditor = () => { setEditor(null); setEditingId(null) }
+
+  // Tool palette for the multiselect: every tool the platform's archetypes use
+  // (base_tools ∪ all archetypes' tools), so the list stays data-driven.
+  const knownTools = useMemo(() => {
+    const s = new Set<string>(registry?.base_tools || [])
+    registry?.archetypes.forEach((a) => a.tools?.forEach((t) => s.add(t)))
+    return [...s].sort()
+  }, [registry])
+  // Union with the draft's own tools so a generated/custom tool still shows.
+  const toolOptions = editor
+    ? [...new Set([...knownTools, ...editor.tools])].sort()
+    : knownTools
+  const toggleTool = (t: string) =>
+    setEditor((e) => e ? ({
+      ...e,
+      tools: e.tools.includes(t) ? e.tools.filter((x) => x !== t) : [...e.tools, t],
+    }) : e)
+
+  const generateDraft = async () => {
+    if (!genPrompt.trim()) return
+    const ft = tiers[forgeTier]
+    setGenerating(true); setEditorErr('')
+    try {
+      const draft = await generateArchetype(
+        genPrompt.trim(), ft?.provider || '', ft?.model || '',
+        ft?.api_key || '', ft?.base_url || '', ft?.output_ctx || 0,
+      )
+      // Keep the user's chosen id when editing an existing archetype.
+      if (editingId) draft.archetype_id = editingId
+      setEditor(draft)
+    } catch (e) {
+      setEditorErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  const saveDraft = async () => {
+    if (!editor) return
+    const body: ArchetypeInput = {
+      ...editor,
+      archetype_id: slugify(editor.archetype_id || editor.role),
+    }
+    if (!body.role.trim()) { setEditorErr('Role is required'); return }
+    if (!body.archetype_id) { setEditorErr('An id (or role) is required'); return }
+    setSaving(true); setEditorErr('')
+    try {
+      if (editingId) await updateArchetype(editingId, body)
+      else await createArchetype(body)
+      refreshRegistry()
+      closeEditor()
+    } catch (e) {
+      setEditorErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const removeArchetype = async (a: Archetype) => {
+    if (!confirm(`Delete your archetype "${a.role}"?${a.overrides ? ' This restores the base version.' : ''}`)) return
+    try {
+      await deleteArchetype(a.id)
+      refreshRegistry()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e))
+    }
+  }
 
   const activeSet = sets.find((s) => s.id === activeSetId) || sets[0]
 
@@ -307,6 +415,13 @@ export function LibraryPage() {
               Archetypes{registry ? ` — ${registry.archetypes.length}` : ''}
             </h2>
             <span className="text-[11px] text-zinc-500">click to spawn</span>
+            <button
+              onClick={openNew}
+              title="Create your own archetype"
+              className="ml-auto flex items-center gap-1 rounded-lg border border-violet-300 bg-violet-50 px-2.5 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-100 dark:border-violet-500/30 dark:bg-violet-500/10 dark:font-normal dark:text-violet-200 dark:hover:bg-violet-500/20"
+            >
+              <Plus className="h-3.5 w-3.5" /> New archetype
+            </button>
           </div>
           {!registry ? (
             <p className="text-[11px] text-zinc-600">Loading archetypes…</p>
@@ -318,36 +433,57 @@ export function LibraryPage() {
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
                     {registry.archetypes.filter((a) => a.family === family).map((a) => {
                       const st = spawnState[a.id]
+                      const isUser = a.source === 'user'
                       return (
-                        <button
-                          key={a.id}
-                          onClick={() => spawnArchetype(a)}
-                          disabled={st === 'spawning'}
-                          title={`Spawn ${a.role}`}
-                          className="group text-left rounded-lg border border-zinc-800 bg-zinc-950/50 p-3 hover:border-violet-500/40 hover:bg-zinc-900 transition-colors disabled:opacity-60"
-                        >
-                          <div className="flex items-center justify-between gap-2 mb-1">
-                            <span className="flex items-center gap-1 text-sm font-medium text-zinc-200 truncate">
-                              {a.lead && <Crown className="h-3 w-3 text-amber-400 shrink-0" />}{a.role}
-                            </span>
-                            {st === 'spawning' ? <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-400 shrink-0" />
-                              : st === 'done' ? <Check className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
-                              : st === 'error' ? <AlertTriangle className="h-3.5 w-3.5 text-red-400 shrink-0" />
-                              : <Rocket className="h-3.5 w-3.5 text-zinc-600 group-hover:text-violet-400 shrink-0" />}
-                          </div>
-                          <p className="text-[11px] text-zinc-500 leading-snug mb-2">{a.description}</p>
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="inline-flex items-center gap-1 rounded bg-cyan-600/15 border border-cyan-500/25 px-1.5 py-0.5 text-[10px] font-medium text-cyan-400"><Gauge className="h-2.5 w-2.5" />{a.tier}</span>
-                            <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">{a.cognitive_mode}</span>
-                            <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500">{a.tools.length} tools</span>
-                          </div>
-                          {st === 'error' && spawnMsg[a.id] && (
-                            <p className="mt-1.5 text-[10px] text-red-400">{spawnMsg[a.id]}</p>
+                        <div key={a.id} className="group relative rounded-lg border border-zinc-800 bg-zinc-950/50 hover:border-violet-500/40 hover:bg-zinc-900 transition-colors">
+                          {isUser && (
+                            <div className="absolute top-1.5 right-1.5 z-10 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button
+                                onClick={(e) => { e.stopPropagation(); openEdit(a) }}
+                                title="Edit archetype"
+                                className="rounded p-1 text-zinc-500 hover:text-violet-300 hover:bg-zinc-800"
+                              >
+                                <Pencil className="h-3 w-3" />
+                              </button>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); removeArchetype(a) }}
+                                title={a.overrides ? 'Delete (restores base version)' : 'Delete archetype'}
+                                className="rounded p-1 text-zinc-500 hover:text-red-400 hover:bg-zinc-800"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                              </button>
+                            </div>
                           )}
-                          {st === 'done' && (
-                            <p className="mt-1.5 text-[10px] text-emerald-400">Spawned — see Agent Desktop</p>
-                          )}
-                        </button>
+                          <button
+                            onClick={() => spawnArchetype(a)}
+                            disabled={st === 'spawning'}
+                            title={`Spawn ${a.role}`}
+                            className="w-full text-left p-3 disabled:opacity-60"
+                          >
+                            <div className="flex items-center justify-between gap-2 mb-1">
+                              <span className="flex items-center gap-1 text-sm font-medium text-zinc-200 truncate">
+                                {a.lead && <Crown className="h-3 w-3 text-amber-400 shrink-0" />}{a.role}
+                                {isUser && <span className="rounded bg-violet-500/15 border border-violet-500/25 px-1 py-0.5 text-[9px] font-medium text-violet-700 dark:text-violet-300 shrink-0">{a.overrides ? 'custom·override' : 'custom'}</span>}
+                              </span>
+                              {st === 'spawning' ? <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-400 shrink-0" />
+                                : st === 'done' ? <Check className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+                                : st === 'error' ? <AlertTriangle className="h-3.5 w-3.5 text-red-400 shrink-0" />
+                                : <Rocket className="h-3.5 w-3.5 text-zinc-600 group-hover:text-violet-400 shrink-0" />}
+                            </div>
+                            <p className="text-[11px] text-zinc-500 leading-snug mb-2">{a.description}</p>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="inline-flex items-center gap-1 rounded bg-cyan-600/15 border border-cyan-500/25 px-1.5 py-0.5 text-[10px] font-medium text-cyan-400"><Gauge className="h-2.5 w-2.5" />{a.tier}</span>
+                              <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">{a.cognitive_mode}</span>
+                              <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500">{a.tools.length} tools</span>
+                            </div>
+                            {st === 'error' && spawnMsg[a.id] && (
+                              <p className="mt-1.5 text-[10px] text-red-400">{spawnMsg[a.id]}</p>
+                            )}
+                            {st === 'done' && (
+                              <p className="mt-1.5 text-[10px] text-emerald-400">Spawned — see Agent Desktop</p>
+                            )}
+                          </button>
+                        </div>
                       )
                     })}
                   </div>
@@ -357,6 +493,190 @@ export function LibraryPage() {
           )}
         </div>
       </div>
+
+      {/* ── Archetype editor modal ── */}
+      {editor && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-auto bg-black/60 p-4" onClick={closeEditor}>
+          <div
+            className="my-8 w-full max-w-2xl rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2 border-b border-zinc-800 px-4 py-3">
+              <Library className="h-4 w-4 text-violet-400" />
+              <h3 className="text-sm font-medium text-zinc-200">
+                {editingId ? 'Edit archetype' : 'New archetype'}
+              </h3>
+              <button onClick={closeEditor} className="ml-auto rounded p-1 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3 p-4">
+              {/* Generate from prompt */}
+              <div className="rounded-lg border border-violet-500/20 bg-violet-500/[0.04] p-3 space-y-2">
+                <div className="flex items-center gap-1.5">
+                  <Sparkles className="h-3.5 w-3.5 text-violet-400" />
+                  <span className="text-xs font-medium text-zinc-200">Generate from a prompt</span>
+                  <span className="text-[10px] text-zinc-500">— fills the form below; review before saving</span>
+                </div>
+                <textarea
+                  value={genPrompt}
+                  onChange={(e) => setGenPrompt(e.target.value)}
+                  rows={2}
+                  placeholder="e.g. A meticulous contract reviewer that flags risky clauses in vendor agreements"
+                  className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                />
+                <button
+                  onClick={generateDraft}
+                  disabled={generating || !genPrompt.trim()}
+                  className="flex items-center gap-1.5 rounded-lg border border-violet-300 bg-violet-50 px-3 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-100 dark:border-violet-500/30 dark:bg-violet-500/10 dark:font-normal dark:text-violet-200 dark:hover:bg-violet-500/20 disabled:opacity-50"
+                >
+                  {generating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                  {generating ? 'Generating…' : 'Generate draft'}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[10px] font-medium text-zinc-500 mb-1">Role *</label>
+                  <input
+                    value={editor.role}
+                    onChange={(e) => setEditor({ ...editor, role: e.target.value })}
+                    placeholder="Contract Reviewer"
+                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-medium text-zinc-500 mb-1">
+                    ID {editingId ? '(fixed)' : '(auto from role)'}
+                  </label>
+                  <input
+                    value={editor.archetype_id}
+                    disabled={!!editingId}
+                    onChange={(e) => setEditor({ ...editor, archetype_id: e.target.value })}
+                    placeholder="contract-reviewer"
+                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none disabled:opacity-60"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-medium text-zinc-500 mb-1">Description</label>
+                <input
+                  value={editor.description}
+                  onChange={(e) => setEditor({ ...editor, description: e.target.value })}
+                  placeholder="One sentence on what this agent does."
+                  className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                />
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[10px] font-medium text-zinc-500 mb-1">Family</label>
+                  <input
+                    value={editor.family}
+                    onChange={(e) => setEditor({ ...editor, family: e.target.value })}
+                    placeholder="Custom"
+                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-medium text-zinc-500 mb-1">Tier</label>
+                  <select
+                    value={editor.tier}
+                    onChange={(e) => setEditor({ ...editor, tier: e.target.value })}
+                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                  >
+                    {TIER_ORDER.map((t) => <option key={t} value={t}>{registry?.tiers[t]?.label || t}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] font-medium text-zinc-500 mb-1">Cognitive mode</label>
+                  <select
+                    value={editor.cognitive_mode}
+                    onChange={(e) => setEditor({ ...editor, cognitive_mode: e.target.value })}
+                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                  >
+                    {COGNITIVE_MODES.map((m) => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-medium text-zinc-500 mb-1">
+                  Tools — click to toggle{editor.tools.length ? ` (${editor.tools.length} selected)` : ''}
+                </label>
+                <div className="flex flex-wrap gap-1.5 rounded-lg border border-zinc-700 bg-zinc-950/40 p-2">
+                  {toolOptions.map((t) => {
+                    const on = editor.tools.includes(t)
+                    return (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => toggleTool(t)}
+                        className={`rounded px-2 py-0.5 text-[11px] font-mono border transition-colors ${
+                          on
+                            ? 'border-violet-500/40 bg-violet-500/15 text-violet-700 dark:text-violet-200'
+                            : 'border-zinc-700 bg-zinc-900/40 text-zinc-500 hover:border-zinc-600 hover:text-zinc-300'
+                        }`}
+                      >
+                        {t}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-medium text-zinc-500 mb-1">Keywords (comma-separated — used by the Basna router)</label>
+                <input
+                  value={editor.keywords.join(', ')}
+                  onChange={(e) => setEditor({ ...editor, keywords: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })}
+                  placeholder="contracts, legal, risk, clauses"
+                  className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-medium text-zinc-500 mb-1">Fleet instructions — the agent's operating manual</label>
+                <textarea
+                  value={editor.fleet_instructions}
+                  onChange={(e) => setEditor({ ...editor, fleet_instructions: e.target.value })}
+                  rows={8}
+                  placeholder="You are a … Your job is to … Standard operating procedure: 1) …"
+                  className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                />
+              </div>
+
+              <label className="flex items-center gap-2 text-xs text-zinc-300">
+                <input
+                  type="checkbox"
+                  checked={editor.lead}
+                  onChange={(e) => setEditor({ ...editor, lead: e.target.checked })}
+                  className="accent-violet-500"
+                />
+                Lead / coordinator role
+              </label>
+
+              {editorErr && <p className="text-[11px] text-red-400">{editorErr}</p>}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-zinc-800 px-4 py-3">
+              <button onClick={closeEditor} className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-300 hover:text-zinc-100">
+                Cancel
+              </button>
+              <button
+                onClick={saveDraft}
+                disabled={saving}
+                className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-50"
+              >
+                {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                {editingId ? 'Save changes' : 'Create archetype'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

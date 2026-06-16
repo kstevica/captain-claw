@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from captain_claw.flight_deck.archetypes import merged_archetypes
 from captain_claw.flight_deck.auth import get_current_user, get_db
 from captain_claw.logging import get_logger
 
@@ -207,8 +208,33 @@ def _normalize_route(
 
 # ── Request models ───────────────────────────────────────────────────
 
+def _title_from_intent(intent: str, max_words: int = 8, max_chars: int = 60) -> str:
+    """Cheap fallback title from the task text: first sentence/line, trimmed.
+
+    Used when neither the user nor the LLM router supplies a title (e.g. the
+    keyword-fallback route path)."""
+    text = " ".join((intent or "").split())
+    if not text:
+        return "Untitled"
+    # Stop at the first sentence boundary if it comes early.
+    for sep in (". ", "? ", "! ", "\n"):
+        idx = text.find(sep)
+        if 0 < idx < max_chars:
+            text = text[:idx]
+            break
+    words = text.split()
+    if len(words) > max_words:
+        text = " ".join(words[:max_words]) + "…"
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip() + "…"
+    text = text.strip(" .,:;-—")
+    return (text[:1].upper() + text[1:]) if text else "Untitled"
+
+
 class RouteRequest(BaseModel):
     intent: str
+    # Optional user-supplied title; auto-generated from the task when blank.
+    title: str = ""
     # LLM creds for the router call. Omit to use the fast tier from the registry;
     # api_key falls back to the provider's env var when empty.
     provider: str = ""
@@ -223,10 +249,12 @@ class RouteRequest(BaseModel):
 
 class CreateSessionRequest(BaseModel):
     intent: str
+    title: str = ""
     config: str = "{}"
 
 
 class UpdateSessionRequest(BaseModel):
+    title: str | None = None
     intent: str | None = None
     domain: str | None = None
     difficulty: str | None = None
@@ -251,7 +279,8 @@ async def create_session(body: CreateSessionRequest, user: dict = Depends(get_cu
     if not body.intent.strip():
         raise HTTPException(400, "intent is required")
     db = get_db()
-    return await db.create_basna_session(user["id"], body.intent.strip(), body.config)
+    title = body.title.strip() or _title_from_intent(body.intent)
+    return await db.create_basna_session(user["id"], body.intent.strip(), body.config, title=title)
 
 
 @router.get("/sessions/{session_id}")
@@ -350,6 +379,104 @@ async def delete_file(session_id: str, name: str, user: dict = Depends(get_curre
     return {"files": merged}
 
 
+# ── Agent-facing internal endpoints ──────────────────────────────────
+# These let a spawned agent read its OWNER's Basna data via the `basna` tool.
+# They carry no user JWT; instead the caller is identified by its web port (the
+# same trust model as the flight_deck peer endpoints) and scoped to that agent's
+# owner. The agent passes its own `source_port` plus `owner_id` (from FD_OWNER_ID)
+# as a fallback for dev setups where the port isn't in the registry.
+
+class _AgentReq(BaseModel):
+    source_port: int = 0
+    owner_id: str = ""           # fallback when port→owner resolution misses
+    session_id: str = ""
+    name: str = ""               # for file fetch
+    query: str = ""              # for sessions list
+    status: str = ""
+    limit: int = Field(default=50, ge=1, le=500)
+    archetype_id: str = ""       # for a single run's output
+
+
+def _resolve_owner(body: _AgentReq) -> str:
+    """Authoritative owner for an agent request: registry(port) → owner_id hint."""
+    owner = ""
+    if body.source_port:
+        from captain_claw.flight_deck.server import _resolve_agent_owner
+        owner = _resolve_agent_owner(int(body.source_port)) or ""
+    owner = owner or (body.owner_id or "").strip()
+    if not owner:
+        raise HTTPException(403, "could not resolve calling agent's owner")
+    return owner
+
+
+def _session_summary(r: dict) -> dict:
+    """Compact session view for the agent `list` action (drops big text blobs)."""
+    try:
+        sel = (json.loads(r.get("route") or "{}").get("selected") or [])
+    except json.JSONDecodeError:
+        sel = []
+    return {
+        "id": r.get("id"), "title": r.get("title", ""), "intent": r.get("intent", ""),
+        "domain": r.get("domain", ""), "difficulty": r.get("difficulty", ""),
+        "merge_kind": r.get("merge_kind", ""), "status": r.get("status", ""),
+        "confidence": r.get("confidence", 0.0),
+        "n_agents": len(sel), "n_files": len(_parse_files(r)),
+        "created_at": r.get("created_at"), "updated_at": r.get("updated_at"),
+    }
+
+
+@router.post("/agent/sessions")
+async def agent_list_sessions(body: _AgentReq):
+    """List the calling agent's owner's Basna sessions (filtered, summarized)."""
+    owner = _resolve_owner(body)
+    db = get_db()
+    rows = await db.list_basna_sessions(owner)
+    if body.status:
+        rows = [r for r in rows if r.get("status") == body.status]
+    if body.query:
+        q = body.query.lower()
+        rows = [r for r in rows
+                if q in (f"{r.get('title','')} {r.get('intent','')} {r.get('truth','')}").lower()]
+    return {"sessions": [_session_summary(r) for r in rows[:body.limit]]}
+
+
+@router.post("/agent/session")
+async def agent_get_session(body: _AgentReq):
+    """Full session detail (route, truth, analysis, files) for the owner."""
+    owner = _resolve_owner(body)
+    db = get_db()
+    sess = await db.get_basna_session(body.session_id, owner)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    return sess
+
+
+@router.post("/agent/runs")
+async def agent_list_runs(body: _AgentReq):
+    """Per-agent runs (output, tool actions, success, latency) for a session."""
+    owner = _resolve_owner(body)
+    db = get_db()
+    sess = await db.get_basna_session(body.session_id, owner)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    return {"runs": await db.list_basna_runs(body.session_id, owner)}
+
+
+@router.post("/agent/file")
+async def agent_get_file(body: _AgentReq):
+    """Stream a session's file (generated or input) to the owning agent."""
+    owner = _resolve_owner(body)
+    db = get_db()
+    sess = await db.get_basna_session(body.session_id, owner)
+    if not sess:
+        raise HTTPException(404, "session not found")
+    safe = _safe_name(body.name)
+    path = _session_files_dir(body.session_id) / safe
+    if not path.is_file():
+        raise HTTPException(404, "file not found")
+    return FileResponse(path, filename=safe, media_type=_guess_mime(safe))
+
+
 # ── Router endpoint ──────────────────────────────────────────────────
 
 @router.post("/route")
@@ -365,8 +492,7 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
         raise HTTPException(400, "intent is required")
 
     db = get_db()
-    registry = _load_registry()
-    archetypes = registry.get("archetypes", [])
+    archetypes = await merged_archetypes(db, user["id"])
     archetypes_by_id = {a["id"]: a for a in archetypes}
     seeds = {a["id"]: float(a.get("reliability_seed", 0.7)) for a in archetypes}
 
@@ -448,6 +574,11 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
     route["source"] = source
     route["elapsed_ms"] = int((time.monotonic() - started) * 1000)
 
+    # Resolve a session title: explicit user title > the router LLM's title >
+    # a cheap heuristic from the task. Computed once, applied below.
+    llm_title = (raw.get("title") or "").strip() if isinstance(raw, dict) else ""
+    resolved_title = body.title.strip() or llm_title or _title_from_intent(intent)
+
     # Persist onto a session (create one if the caller didn't supply an id).
     session_id = body.session_id.strip()
     if session_id:
@@ -455,14 +586,19 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
         if not sess:
             raise HTTPException(404, "session not found")
     else:
-        sess = await db.create_basna_session(user["id"], intent)
+        sess = await db.create_basna_session(user["id"], intent, title=resolved_title)
         session_id = sess["id"]
-    await db.update_basna_session(
-        session_id, user["id"],
+    update_fields = dict(
         domain=route["domain"], difficulty=route["difficulty"],
         merge_kind=route["merge_kind"], route=json.dumps(route), status="routed",
     )
+    # Backfill the title on an existing session that has none, or honor an
+    # explicit user-supplied title; never clobber a previously set title.
+    if body.title.strip() or not (sess.get("title") or "").strip():
+        update_fields["title"] = resolved_title
+    await db.update_basna_session(session_id, user["id"], **update_fields)
 
+    route["title"] = update_fields.get("title", sess.get("title") or "")
     route["session_id"] = session_id
     return route
 
@@ -1028,9 +1164,9 @@ async def execute_route(
     if not selected:
         raise HTTPException(400, "session has no route; call /fd/basna/route first")
 
-    registry = _load_registry()
-    arch_by_id = {a["id"]: a for a in registry.get("archetypes", [])}
-    seeds = {a["id"]: float(a.get("reliability_seed", 0.7)) for a in registry.get("archetypes", [])}
+    archetypes = await merged_archetypes(db, user["id"])
+    arch_by_id = {a["id"]: a for a in archetypes}
+    seeds = {a["id"]: float(a.get("reliability_seed", 0.7)) for a in archetypes}
     domain = route.get("domain", "general")
     merge_kind = route.get("merge_kind", "converge")
     session_files = _parse_files(sess)
@@ -1447,9 +1583,9 @@ async def run_feedback(
         raise HTTPException(404, "run not found")
     sess = await db.get_basna_session(run["session_id"], user["id"])
     domain = (sess.get("domain") if sess else "") or "general"
-    registry = _load_registry()
+    archetypes = await merged_archetypes(db, user["id"])
     seed = next(
-        (float(a.get("reliability_seed", 0.7)) for a in registry.get("archetypes", [])
+        (float(a.get("reliability_seed", 0.7)) for a in archetypes
          if a["id"] == run["archetype_id"]), 0.7,
     )
 

@@ -691,6 +691,7 @@ from captain_claw.flight_deck.codex_oauth_routes import router as codex_oauth_ro
 from captain_claw.flight_deck.games_routes import router as games_router
 from captain_claw.flight_deck.vastai_routes import router as vastai_router
 from captain_claw.flight_deck.prompt_routes import router as prompt_router
+from captain_claw.flight_deck.archetype_routes import router as archetype_router
 from captain_claw.flight_deck.project_routes import router as project_router
 from captain_claw.flight_deck.mcp_routes import router as mcp_router
 from captain_claw.flight_deck.app_routes import router as apps_router
@@ -716,6 +717,7 @@ app.include_router(codex_oauth_router)
 app.include_router(games_router)
 app.include_router(vastai_router)
 app.include_router(prompt_router)
+app.include_router(archetype_router)
 app.include_router(project_router)
 app.include_router(mcp_router)
 # Legacy manifest-based app routes. The agent-coded app runtime
@@ -2232,6 +2234,39 @@ def _resolve_agent_auth(port: int) -> str:
             return entry.get("web_auth", "")
     if matches:
         return matches[0][1].get("web_auth", "")
+
+    return ""
+
+
+def _resolve_agent_owner(port: int) -> str:
+    """Resolve the owning user_id of the agent at `web_port`, or "" if unknown.
+
+    The authority is the same per-agent identity used by `_resolve_agent_auth`:
+    a Docker label or the process-registry entry (which stores `owner` at spawn
+    time). Used by the internal /fd/basna/agent/* endpoints to scope an agent's
+    Basna access to its owner without a user JWT.
+    """
+    # Check Docker containers (owner stamped as a label at spawn time).
+    try:
+        client = get_docker()
+        for c in client.containers.list(filters={"label": CONTAINER_LABEL}):
+            labels = c.labels or {}
+            wp = labels.get("flight-deck.web-port", "")
+            if wp and int(wp) == port:
+                owner = labels.get(OWNER_LABEL, "")
+                if owner:
+                    return owner
+    except Exception:
+        pass
+
+    # Process registry — prefer a live process over stale entries on the same port.
+    registry = _load_process_registry()
+    matches = [(slug, e) for slug, e in registry.items() if e.get("web_port") == port]
+    for slug, entry in matches:
+        if _process_is_alive(slug):
+            return entry.get("owner", "") or ""
+    if matches:
+        return matches[0][1].get("owner", "") or ""
 
     return ""
 
@@ -5155,12 +5190,14 @@ async def forge_decompose(
 
     # Inject the curated archetype catalog so the generator biases toward proven
     # shapes (reusing their cognitive_mode, tier, and tools) instead of inventing
-    # every agent from scratch. Built from the same registry the gallery reads, so
-    # it stays in sync; model ids are intentionally omitted (tier resolves them).
-    registry_file = instructions_dir / "archetypes.json"
-    if registry_file.is_file():
-        try:
-            reg = json.loads(registry_file.read_text())
+    # every agent from scratch. Built from the same merged registry the gallery
+    # reads (base + this user's own archetypes), so it stays in sync; model ids
+    # are intentionally omitted (tier resolves them).
+    try:
+        from captain_claw.flight_deck.archetypes import merged_registry
+        from captain_claw.flight_deck.auth import get_db
+        reg = await merged_registry(get_db(), user["id"] if user else None)
+        if reg:
             tier_names = ", ".join((reg.get("tiers") or {}).keys())
             cat_lines = [
                 "\n\n## Archetype Catalog",
@@ -5181,8 +5218,10 @@ async def forge_decompose(
                     "Do NOT output model ids — the platform resolves tier→model."
                 )
             system_prompt += "\n".join(cat_lines)
-        except (OSError, json.JSONDecodeError):
-            pass
+    except Exception:
+        # Catalog injection is a best-effort bias; never fail a forge over it
+        # (e.g. a not-yet-initialized DB in a standalone deployment).
+        pass
 
     # If forging for a project, augment the prompt with project context.
     user_prompt = body.prompt.strip()
@@ -5273,24 +5312,6 @@ async def forge_decompose(
         result["project_id"] = body.project_id
 
     return result
-
-
-@app.get("/fd/archetypes")
-def list_archetypes(user: dict | None = _optional_user_dep):
-    """Serve the curated agent archetype registry.
-
-    Read by the Forge gallery (one-click spawn) and used to bias the Forge
-    generator's team composition. Single source of truth lives in
-    instructions/archetypes.json — edit `tiers` there when models change.
-    """
-    instructions_dir = Path(__file__).parent.parent / "instructions"
-    registry_file = instructions_dir / "archetypes.json"
-    if not registry_file.is_file():
-        raise HTTPException(500, "Archetype registry not found")
-    try:
-        return json.loads(registry_file.read_text())
-    except json.JSONDecodeError as e:
-        raise HTTPException(500, f"Archetype registry is invalid JSON: {e}")
 
 
 @app.get("/fd/health")

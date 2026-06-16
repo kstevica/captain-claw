@@ -6,6 +6,7 @@ import type { TierMap, EnvVar } from '../services/tierConfig'
 
 export interface BasnaSession {
   id: string
+  title: string
   intent: string
   domain: string
   difficulty: string
@@ -187,6 +188,14 @@ async function apiSaveRoute(sessionId: string, route: RoutePlan): Promise<void> 
   })
 }
 
+async function apiSaveTitle(sessionId: string, title: string): Promise<BasnaSession | null> {
+  const res = await _authedFetch(`/fd/basna/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'PUT', body: JSON.stringify({ title }),
+  })
+  if (!res.ok) return null
+  return res.json()
+}
+
 async function apiExecute(body: Record<string, unknown>): Promise<ExecuteResult> {
   const res = await _authedFetch('/fd/basna/execute', {
     method: 'POST', body: JSON.stringify(body),
@@ -306,7 +315,8 @@ interface BasnaStore {
   selectSession: (id: string) => Promise<void>
   newSession: () => void
   updateSelected: (index: number, patch: Partial<RouteSelected>) => void
-  route: (intent: string, tiers: TierMap) => Promise<void>
+  route: (intent: string, tiers: TierMap, title?: string) => Promise<void>
+  saveTitle: (title: string) => Promise<void>
   execute: (tiers: TierMap, envVars: EnvVar[]) => Promise<void>
   recompile: (tiers: TierMap) => Promise<void>
   sendFeedback: (runId: number, success: boolean) => Promise<void>
@@ -405,7 +415,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
     set({ routePlan: { ...plan, selected } })
   },
 
-  route: async (intent, tiers) => {
+  route: async (intent, tiers, title = '') => {
     set({ routing: true, error: null })
     try {
       const sid = get().activeSession?.id
@@ -417,6 +427,7 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       const plan = await apiRoute({
         intent,
         max_agents: get().maxAgents,
+        ...(title.trim() ? { title: title.trim() } : {}),
         ...creds,
         ...(sid ? { session_id: sid } : {}),
       })
@@ -427,6 +438,18 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
       set({ error: e instanceof Error ? e.message : 'route failed' })
     } finally {
       set({ routing: false })
+    }
+  },
+
+  saveTitle: async (title) => {
+    const sid = get().activeSession?.id
+    if (!sid) return
+    const updated = await apiSaveTitle(sid, title.trim())
+    if (updated) {
+      set((st) => ({
+        activeSession: st.activeSession?.id === sid ? updated : st.activeSession,
+        sessions: st.sessions.map((s) => (s.id === sid ? { ...s, title: updated.title } : s)),
+      }))
     }
   },
 

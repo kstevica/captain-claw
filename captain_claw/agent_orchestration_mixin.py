@@ -333,14 +333,23 @@ def _claims_delegation(text: str) -> bool:
 
 # Reply claims it searched/fetched the web (used to catch a model that
 # fabricates research instead of calling a web tool). EN + HR phrasing.
+# Matches a claim of COMPLETED web research — the thing this detector exists to
+# catch (a model that says "I searched the web and found…" without calling a web
+# tool). It must NOT match a model that merely *describes* its web tools
+# ("web_search to search the web", "web_fetch_batch fetches URLs"), *proposes* to
+# search ("I'll search the web for…"), or *asks* what to search ("what would you
+# like me to search the web for?"). Those are present/future/capability phrasings,
+# not false completion claims, and matching them hijacks ordinary replies (e.g.
+# answering "what tools do you have?") into a forced web_search loop. Hence:
+# require past-tense / completion signals only.
 _WEB_RESEARCH_CLAIM_RE = _re.compile(
     r"(?i)("
-    r"(search|fetch|pull|scrap|gather|retriev)\w*\s+(the\s+|a\s+)?(web|online|internet|sources?|links?|urls?)|"
-    r"(web|fresh|new|live|latest)\s+search|searched\s+(the\s+)?web|"
+    r"(searched|fetched|pulled|scraped|gathered|retrieved|browsed|crawled|queried)\s+"
+    r"(the\s+|a\s+|\d+\s+|through\s+)?(web|online|internet|sources?|links?|urls?|sites?)|"
     r"(from|across)\s+\d+\s+(sources?|sites?|links?|izvora)|"
-    r"fetched\s+\d+\s+(sources?|sites?|links?|urls?)|"
-    r"paralelno\s+(dohvat|dohvać|dohvac)|dohvatio\s+\d+\s+izvora|pretraž\w*\s+web|"
-    r"svjež\w*\s+(pretrag|podatk)|fresh\s+(data|results|search)"
+    r"based\s+on\s+(my\s+)?(latest\s+|recent\s+)?(web\s+)?(search|research)|"
+    r"according\s+to\s+(the\s+)?(sources?|search\s+results?)|"
+    r"paralelno\s+(dohvat|dohvać|dohvac)\w*|dohvatio\s+\d+\s+izvora|pretražio\s+(sam\s+)?web"
     r")"
 )
 

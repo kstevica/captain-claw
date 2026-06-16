@@ -181,6 +181,7 @@ class FlightDeckDB:
             CREATE TABLE IF NOT EXISTS basna_sessions (
                 id           TEXT PRIMARY KEY,
                 user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                title        TEXT NOT NULL DEFAULT '',
                 intent       TEXT NOT NULL DEFAULT '',
                 domain       TEXT NOT NULL DEFAULT '',
                 difficulty   TEXT NOT NULL DEFAULT '',
@@ -242,6 +243,24 @@ class FlightDeckDB:
             );
             CREATE INDEX IF NOT EXISTS idx_prompts_user
                 ON prompts(user_id);
+
+            -- Per-user (per-tenant) agent archetypes. The base set lives in
+            -- instructions/archetypes.json; rows here are added on top and, when
+            -- archetype_id matches a base one, shadow it for that user. `data`
+            -- holds the full archetype JSON (role, family, keywords,
+            -- cognitive_mode, tier, tools, description, fleet_instructions,
+            -- lead, reliability_seed).
+            CREATE TABLE IF NOT EXISTS user_archetypes (
+                id           TEXT PRIMARY KEY,
+                user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                archetype_id TEXT NOT NULL,
+                data         TEXT NOT NULL DEFAULT '{}',
+                created_at   TEXT NOT NULL,
+                updated_at   TEXT NOT NULL,
+                UNIQUE(user_id, archetype_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_archetypes_user
+                ON user_archetypes(user_id);
         """)
         # Lightweight migrations: add columns introduced after a table first shipped.
         for table, col, ddl in [
@@ -249,6 +268,7 @@ class FlightDeckDB:
             ("basna_sessions", "progress", "TEXT NOT NULL DEFAULT '[]'"),
             ("basna_sessions", "files", "TEXT NOT NULL DEFAULT '[]'"),
             ("basna_sessions", "analysis", "TEXT NOT NULL DEFAULT '{}'"),
+            ("basna_sessions", "title", "TEXT NOT NULL DEFAULT ''"),
         ]:
             try:
                 await self._db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
@@ -861,20 +881,20 @@ class FlightDeckDB:
     # ── Basna sessions ───────────────────────────────────────────────
 
     async def create_basna_session(
-        self, user_id: str, intent: str, config: str = "{}",
+        self, user_id: str, intent: str, config: str = "{}", title: str = "",
     ) -> dict:
         assert self._db is not None
         now = _utcnow()
         sid = _uuid()
         await self._db.execute(
             "INSERT INTO basna_sessions"
-            " (id, user_id, intent, domain, difficulty, merge_kind, status,"
+            " (id, user_id, title, intent, domain, difficulty, merge_kind, status,"
             "  route, truth, confidence, config, created_at, updated_at)"
-            " VALUES (?, ?, ?, '', '', 'converge', 'routing', '{}', '', 0.0, ?, ?, ?)",
-            (sid, user_id, intent, config, now, now),
+            " VALUES (?, ?, ?, ?, '', '', 'converge', 'routing', '{}', '', 0.0, ?, ?, ?)",
+            (sid, user_id, title, intent, config, now, now),
         )
         await self._db.commit()
-        return {"id": sid, "user_id": user_id, "intent": intent, "domain": "",
+        return {"id": sid, "user_id": user_id, "title": title, "intent": intent, "domain": "",
                 "difficulty": "", "merge_kind": "converge", "status": "routing",
                 "route": "{}", "truth": "", "confidence": 0.0, "config": config,
                 "created_at": now, "updated_at": now}
@@ -900,7 +920,7 @@ class FlightDeckDB:
         self, session_id: str, user_id: str, **fields,
     ) -> bool:
         assert self._db is not None
-        allowed = {"intent", "domain", "difficulty", "merge_kind", "status",
+        allowed = {"title", "intent", "domain", "difficulty", "merge_kind", "status",
                    "route", "truth", "confidence", "config", "progress", "files", "analysis"}
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
@@ -1159,6 +1179,65 @@ class FlightDeckDB:
         async with self._db.execute(
             "DELETE FROM prompts WHERE id = ? AND user_id = ?",
             (prompt_id, user_id),
+        ) as cur:
+            await self._db.commit()
+            return (cur.rowcount or 0) > 0
+
+    # ── User archetypes ──────────────────────────────────────────────
+
+    async def list_user_archetypes(self, user_id: str) -> list[dict]:
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            "SELECT * FROM user_archetypes WHERE user_id = ? ORDER BY updated_at DESC",
+            (user_id,),
+        )
+        return [dict(r) for r in rows]
+
+    async def get_user_archetype(self, user_id: str, archetype_id: str) -> dict | None:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM user_archetypes WHERE user_id = ? AND archetype_id = ?",
+            (user_id, archetype_id),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def create_user_archetype(
+        self, user_id: str, archetype_id: str, data: str,
+    ) -> dict:
+        assert self._db is not None
+        now = _utcnow()
+        aid = _uuid()
+        await self._db.execute(
+            "INSERT INTO user_archetypes (id, user_id, archetype_id, data, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (aid, user_id, archetype_id, data, now, now),
+        )
+        await self._db.commit()
+        return {"id": aid, "user_id": user_id, "archetype_id": archetype_id,
+                "data": data, "created_at": now, "updated_at": now}
+
+    async def update_user_archetype(
+        self, user_id: str, archetype_id: str, data: str,
+    ) -> dict | None:
+        assert self._db is not None
+        existing = await self.get_user_archetype(user_id, archetype_id)
+        if not existing:
+            return None
+        now = _utcnow()
+        await self._db.execute(
+            "UPDATE user_archetypes SET data = ?, updated_at = ?"
+            " WHERE user_id = ? AND archetype_id = ?",
+            (data, now, user_id, archetype_id),
+        )
+        await self._db.commit()
+        return await self.get_user_archetype(user_id, archetype_id)
+
+    async def delete_user_archetype(self, user_id: str, archetype_id: str) -> bool:
+        assert self._db is not None
+        async with self._db.execute(
+            "DELETE FROM user_archetypes WHERE user_id = ? AND archetype_id = ?",
+            (user_id, archetype_id),
         ) as cur:
             await self._db.commit()
             return (cur.rowcount or 0) > 0

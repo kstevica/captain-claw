@@ -34,6 +34,7 @@ Return **ONLY** a JSON object — no prose, no markdown fences:
 
 ```
 {
+  "title": "Concise 3–6 word label for this task",
   "domain": "research",
   "difficulty": "hard",
   "merge_kind": "converge",
@@ -45,4 +46,4 @@ Return **ONLY** a JSON object — no prose, no markdown fences:
 }
 ```
 
-`archetype_id` MUST be an id from the catalog. `tier` is optional (omit to use the archetype's default). Keep `why` to a short phrase.
+`title` is a short human-readable name for the session (≤6 words, no trailing punctuation). `archetype_id` MUST be an id from the catalog. `tier` is optional (omit to use the archetype's default). Keep `why` to a short phrase.
