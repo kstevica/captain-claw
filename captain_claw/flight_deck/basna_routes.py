@@ -1460,12 +1460,19 @@ async def execute_route(
             base_url = sel.get("base_url") or lt.get("base_url") or ""
             max_tokens = int(sel.get("max_tokens") or lt.get("output_ctx") or 0) or 32768
             max_context = int(sel.get("max_context") or lt.get("input_ctx") or 0)
+            # No recursion: a Basna worker must never be able to start another
+            # Basna. Strip the `basna` tool from the spawn (this also disables the
+            # deterministic relay, which is gated on has_tool("basna")) and stamp
+            # an env marker the tool double-checks.
+            _worker_tools = [
+                t for t in (arch.get("tools") or AgentConfig().tools) if t != "basna"
+            ]
             base = dict(
                 name=f"basna-{sid8}-{run_tag}-{arch['id']}",
                 description=f"Basna ephemeral · {sel.get('role') or arch.get('role', '')}",
                 cognitive_mode=sel.get("cognitive_mode") or arch.get("cognitive_mode", "neutra"),
-                tools=arch.get("tools") or AgentConfig().tools,
-                env_vars=body.env_vars or [],
+                tools=_worker_tools,
+                env_vars=(body.env_vars or []) + [{"key": "CLAW_BASNA_WORKER", "value": "1"}],
                 web_enabled=True, web_port=0,
             )
             if model:

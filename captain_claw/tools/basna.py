@@ -165,6 +165,14 @@ class BasnaTool(Tool):
 
     async def _start(self, fd_url: str, **kwargs: Any) -> ToolResult:
         """Launch a new autonomous Basna run; fire-and-forget with a callback."""
+        # No recursion: a Basna worker (spawned by a run, stamped with this env
+        # marker) must never start another Basna. Belt to the tool-stripping done
+        # at spawn — covers the relay, /basna, and any model-initiated call.
+        if str(os.environ.get("CLAW_BASNA_WORKER", "")).strip().lower() in ("1", "true", "yes"):
+            return ToolResult(
+                success=False,
+                error="Basna runs cannot be started from inside a Basna run (recursion is not allowed).",
+            )
         task = (kwargs.get("task") or kwargs.get("query") or "").strip()
         if not task:
             return ToolResult(success=False, error="Provide `task` describing what the Basna run should do.")
