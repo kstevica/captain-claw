@@ -884,8 +884,10 @@ export function BasnaPage() {
               </div>
             )}
 
-            {/* Live per-agent panels — actions + running LLM usage as they stream */}
-            {executing && liveAgents.length > 0 && (
+            {/* Live per-agent panels — actions + running LLM usage as they stream.
+                Show while THIS client executes OR the active run is in flight
+                (e.g. a deepen that route+ran server-side — executing is false there). */}
+            {(executing || activeBusy) && liveAgents.length > 0 && (
               <div className="space-y-2">
                 <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
                   Agents working ({liveAgents.length})
