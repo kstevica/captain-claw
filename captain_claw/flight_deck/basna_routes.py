@@ -506,6 +506,10 @@ class AgentStartReq(_AgentReq):
     origin_platform: str = "web"
     origin_user_id: str = ""
     origin_chat_id: int = 0
+    # Durable origin ({kind,address}) — the channel-agnostic delivery target used
+    # for whatsapp/telegram/glasses/channel completions (see delivery_routes).
+    origin_kind: str = ""
+    origin_address: str = ""
     source_host: str = "localhost"
 
 
@@ -624,6 +628,31 @@ async def _run_and_notify(
             runs.discard(session_id)
             if not runs:
                 _active_agent_runs.pop(owner, None)
+    # Land the result on the channel the request came from. Channel origins
+    # (whatsapp/telegram/glasses/channel) go through FD's durable origin sink —
+    # the same one cron/scheduled results use — which guarantees delivery to the
+    # right address. Web (and any delivery failure) falls back to relaying through
+    # the source agent so it still shows up in the web chat.
+    kind = str(origin.get("kind") or "").strip().lower()
+    address = str(origin.get("address") or "").strip()
+    if kind and kind != "web" and address:
+        try:
+            from captain_claw.flight_deck.delivery_routes import (
+                deliver_to_origin as _deliver_origin,
+            )
+            delivered, note = await _deliver_origin(
+                {"kind": kind, "address": address},
+                f"🐻🐰 Basna — {title}\n\n{summary}",
+            )
+            log.info("Basna result delivered to origin",
+                     kind=kind, delivered=delivered, note=note)
+            if delivered:
+                return
+            log.warning("Basna origin delivery not sent; relaying via source agent",
+                        kind=kind, note=note)
+        except Exception as exc:
+            log.warning("Basna origin delivery error; relaying via source agent",
+                        error=str(exc))
     await _notify_source_agent(
         source_host=source_host, source_port=source_port, origin=origin,
         title=title, session_id=session_id, ok=ok, summary=summary,
@@ -685,6 +714,7 @@ async def agent_start(body: AgentStartReq):
     origin = {
         "platform": body.origin_platform, "user_id": body.origin_user_id,
         "chat_id": body.origin_chat_id,
+        "kind": body.origin_kind, "address": body.origin_address,
     }
     t = asyncio.create_task(_run_and_notify(
         user, session_id, title, exec_req, body.source_host, body.source_port, origin,

@@ -169,13 +169,28 @@ class BasnaTool(Tool):
         if not task:
             return ToolResult(success=False, error="Provide `task` describing what the Basna run should do.")
         # Detect the originating channel so the completion result reaches the user
-        # where they asked (mirrors the flight_deck delegate tool).
+        # where they asked. Prefer the session's *durable* origin (set per inbound
+        # message — covers whatsapp/glasses/channel/web); fall back to the telegram
+        # per-user agent attrs. Both feed the same {kind,address} pair FD delivers on.
         agent = kwargs.get("_agent")
         origin_platform, origin_user_id, origin_chat_id = "web", "", 0
-        if agent and hasattr(agent, "_user_id") and hasattr(agent, "_telegram_chat_id"):
+        origin_kind, origin_address = "", ""
+        try:
+            from captain_claw.origin import get_session_origin
+            _o = get_session_origin(getattr(agent, "session", None)) if agent else None
+        except Exception:
+            _o = None
+        if _o:
+            origin_kind, origin_address = _o["kind"], _o["address"]
+            if origin_kind == "telegram":
+                origin_platform = "telegram"
+                origin_user_id = origin_address
+                origin_chat_id = int(origin_address) if origin_address.isdigit() else 0
+        elif agent and getattr(agent, "_telegram_chat_id", 0):
             origin_platform = "telegram"
             origin_user_id = str(getattr(agent, "_user_id", ""))
             origin_chat_id = int(getattr(agent, "_telegram_chat_id", 0))
+            origin_kind, origin_address = "telegram", str(origin_chat_id)
         payload = {
             "task": task,
             "title": kwargs.get("title", "") or "",
@@ -183,6 +198,8 @@ class BasnaTool(Tool):
             "origin_platform": origin_platform,
             "origin_user_id": origin_user_id,
             "origin_chat_id": origin_chat_id,
+            "origin_kind": origin_kind,
+            "origin_address": origin_address,
             "source_host": "localhost",
         }
         r = await self._post(fd_url, "/fd/basna/agent/start", payload)
