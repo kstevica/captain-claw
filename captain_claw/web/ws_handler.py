@@ -296,6 +296,15 @@ async def handle_ws_message(
                                     "ok": False, "error": "no tool or agent"})
             return
         try:
+            # Refresh the Google-connected cache. The registry auto-hides Google
+            # tools when that flag is stale/False, and it's normally refreshed only
+            # during an agent turn — which run_tool skips — so a connected agent
+            # would otherwise look disconnected and get policy-blocked.
+            try:
+                from captain_claw.google_oauth_manager import GoogleOAuthManager
+                await GoogleOAuthManager(server.agent.session_manager).is_connected()
+            except Exception:
+                pass
             # The action catalog is the authority for a deterministic invocation,
             # so explicitly allow the named tool past the per-session tool policy
             # (which exists to constrain the LLM mid-turn). The script_tool guard
