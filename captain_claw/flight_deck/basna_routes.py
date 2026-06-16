@@ -818,9 +818,10 @@ async def _deepen_run(owner: str, parent_session_id: str, user: dict) -> dict:
         raise HTTPException(400, "This run has no compiled result to build on yet.")
 
     parent_title = (parent.get("title") or parent.get("intent") or "")[:50]
-    # Carry a large slice of the prior synthesis forward (~20-25k tokens) so the
-    # deepen run reasons over the full context, not a thin summary.
-    _DEEPEN_TRUTH_CHARS = 80_000
+    # Slice of the prior synthesis carried into the deepen intent. Kept modest
+    # because it rides in every worker's message history (resent each internal
+    # step × N workers), so the token cost is a per-step multiplier.
+    _DEEPEN_TRUTH_CHARS = 16_000
     intent = (
         "Continue and deepen a prior multi-agent investigation — focus ONLY on its "
         "blind spots, the aspects no prior answer addressed.\n\n"
