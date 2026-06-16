@@ -158,6 +158,24 @@ async def _load_tokens(db: FlightDeckDB) -> GoogleOAuthTokens | None:
         return None
 
 
+async def get_valid_google_access_token() -> str | None:
+    """FD-side: a currently-valid Google access token (refreshed if needed), or
+    None when Google isn't connected. Used by the event-spine pollers (#2) to call
+    the Calendar/Gmail APIs directly from Flight Deck."""
+    try:
+        db = get_db()
+        client = await _token_client(db)
+        if not client:
+            return None
+        tokens = await _load_tokens(db)
+        if not tokens or not tokens.refresh_token:
+            return None
+        tokens = await _refresh_if_needed(db, client, tokens)
+        return tokens.access_token if tokens else None
+    except Exception:
+        return None
+
+
 async def _store_tokens(db: FlightDeckDB, tokens: GoogleOAuthTokens) -> None:
     await db.set_system_setting(
         _K_TOKENS,
