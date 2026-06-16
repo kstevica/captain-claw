@@ -812,7 +812,7 @@ class AutonomousWorkConfig(BaseModel):
     # ── Master ──
     enabled: bool = False                       # hard kill switch for the whole loop
     autonomy_level: str = "propose"             # off | propose | act_low_risk | act
-    max_autonomy_level: str = "propose"         # shipped ceiling; autonomy_level clamps to this
+    max_autonomy_level: str = "act_low_risk"    # shipped ceiling; autonomy_level clamps to this
 
     # ── Topic 1 — Arbiter ──
     arbiter_on_pulse: bool = True               # run the arbiter inside the heartbeat pulse
@@ -825,7 +825,7 @@ class AutonomousWorkConfig(BaseModel):
 
     # ── Topic 2 — Efferent dispatch ──
     allow_auto_dispatch: bool = False           # low-risk actions fire without approval
-    low_risk_kinds: list[str] = Field(default_factory=lambda: ["nudge", "run_prompt_readonly"])
+    low_risk_kinds: list[str] = Field(default_factory=lambda: ["nudge"])
     high_risk_requires_approval: bool = True
 
     # ── Topic 3 — Judge & learn ──

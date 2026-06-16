@@ -244,7 +244,6 @@ async def maybe_run_arbiter(
                 "considered": len(actions)}
 
     chosen = viable[0]
-    # Propose mode (the shipped ceiling): never dispatch — wait for approval.
     row = store.add_action(
         user_id,
         kind=chosen["kind"],
@@ -256,7 +255,23 @@ async def maybe_run_arbiter(
         score=chosen["score"],
         status="awaiting_approval",
     )
-    _log.info("arbiter: proposed %r (%s, score=%.2f) for %s",
+
+    # Topic 2: low-risk actions may fire without approval once the level allows it.
+    # Everything else stays awaiting_approval (the propose path).
+    from captain_claw.flight_deck.fd_dispatch import dispatch_action, should_auto_dispatch
+
+    dispatched = False
+    if should_auto_dispatch(cfg, row):
+        disp = await dispatch_action(user_id, row)
+        if disp["ok"]:
+            store.update_status(row["id"], "dispatched", ref_id=disp["target"])
+            dispatched = True
+        else:
+            store.update_status(row["id"], "awaiting_approval", outcome_note=disp["note"])
+
+    _log.info("arbiter: %s %r (%s, score=%.2f) for %s",
+              "dispatched" if dispatched else "proposed",
               chosen["title"], chosen["kind"], chosen["score"], user_id)
-    return {"ran": True, "proposed": 1, "action_id": row.get("id"),
-            "title": chosen["title"], "considered": len(actions)}
+    return {"ran": True, "proposed": 1, "dispatched": dispatched,
+            "action_id": row.get("id"), "title": chosen["title"],
+            "considered": len(actions)}

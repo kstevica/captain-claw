@@ -120,10 +120,15 @@ High-risk requires approval.
    — ceiling is propose). `/fd/autonomy/nudge` now forces a pulse; page has "Run arbiter now".
    NOTE: Topic 4 delivered *through* the Arbiter into the unified ledger (one backlog, one approval
    surface) rather than as separate agent intentions.
-3. **Phase 3 — Topic 2 dispatch at act_low_risk:** auto-fire low-risk. NOT built — deliberately
-   beyond the shipped `propose` ceiling; needs a ceiling-raise decision. Shared FD→agent dispatch
-   helper (extract Basna's `_notify_source_agent`) + LLM `judge_outcome` (the `judge_mode` auto/both
-   path) land here, calling the same `record_outcome` Phase 4 already uses.
+3. **Phase 3 — Topic 2 dispatch at act_low_risk:** ✅ done. Ceiling raised to `act_low_risk`
+   (`autonomy_level` default stays `propose` → no behavior change until opted in). `fd_dispatch.py`:
+   `dispatch_action` hands an action to the user's strongest agent via WS notification +
+   `trigger_response` (generalised from Basna's `_notify_source_agent`); `should_auto_dispatch`
+   gates auto-fire (act_low_risk → low_risk_kinds ∩ risk=low; act → non-high). Wired into the Arbiter
+   (auto-dispatch low-risk → status `dispatched`, else `awaiting_approval`) and the approve route
+   (human approve → dispatch, fallback `queued` if no agent). `low_risk_kinds` default = `["nudge"]`.
+   KNOWN GAP: auto-dispatched low-risk actions get no learning signal yet (no execution-outcome
+   judge / result callback) — the `judge_mode` auto/both execution path is the remaining follow-up.
 4. **Phase 4 — Topic 3 learning:** ✅ done. Approve/Reject → `record_human_feedback` →
    `record_outcome` (gated by `learning_enabled` + `judge_mode` ∈ human/both). Arbiter reads weights
    and suppresses kinds below `suppress_below_weight`; dedup now also blocks re-proposing a title seen

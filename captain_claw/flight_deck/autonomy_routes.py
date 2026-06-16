@@ -93,15 +93,23 @@ async def approve_action_route(
     request: Request,
     _user: dict | None = Depends(get_optional_user),
 ):
-    """Approve a pending action. Phase 1 moves it to 'queued'; later phases hand
-    it to dispatch / follow_through."""
+    """Approve a pending action: record the positive signal, then dispatch it to
+    the user's strongest agent. Falls back to 'queued' if no agent is reachable."""
     uid = _user_id(request)
     store = get_store()
     action = store.get_action(action_id)
     if not action or action.get("user_id") not in (uid, "local"):
         raise HTTPException(status_code=404, detail="Action not found")
     learned = record_human_feedback(uid, action, True)
-    return {"action": store.update_status(action_id, "queued"), "reliability": learned}
+
+    from captain_claw.flight_deck.fd_dispatch import dispatch_action
+
+    disp = await dispatch_action(uid, action)
+    if disp["ok"]:
+        updated = store.update_status(action_id, "dispatched", ref_id=disp["target"])
+    else:
+        updated = store.update_status(action_id, "queued", outcome_note=disp["note"])
+    return {"action": updated, "reliability": learned, "dispatch": disp}
 
 
 @router.post("/actions/{action_id}/reject")
