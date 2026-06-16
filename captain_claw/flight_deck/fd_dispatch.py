@@ -76,6 +76,9 @@ def should_auto_dispatch(cfg: dict[str, Any], action: dict[str, Any]) -> bool:
       not required).
     - otherwise (off / propose): never.
     """
+    # stop_run is a destructive safety action — always human-approved, never auto.
+    if str(action.get("kind")) == "stop_run":
+        return False
     if not cfg.get("allow_auto_dispatch"):
         return False
     level = str(cfg.get("autonomy_level") or "off")
@@ -187,11 +190,43 @@ async def _execute_and_judge(user_id: str, action: dict[str, Any], agent: dict[s
         store.update_status(aid, "done", outcome="fail", outcome_note=f"dispatch error: {exc}"[:500])
 
 
+async def _dispatch_stop_run(user_id: str, action: dict[str, Any]) -> dict[str, Any]:
+    """Carry out an approved stop_run: hard-stop the targeted run in-process
+    (no agent involved). Idempotent — stopping an already-finished run is a
+    success (nothing left to stop)."""
+    store = get_store()
+    payload = action.get("payload") or {}
+    system = str(payload.get("system") or "basna").lower()
+    target = str(payload.get("target") or "").strip()
+    if not target:
+        store.update_status(action["id"], "rejected", outcome="fail",
+                            outcome_note="stop_run had no target")
+        return {"ok": False, "target": "", "note": "stop_run missing target"}
+    try:
+        if system == "council":
+            from captain_claw.flight_deck.auth import get_db
+            await get_db().update_council_session(target, user_id, status="cancelled")
+            note = "council deliberation cancelled"
+        else:
+            from captain_claw.flight_deck.basna_routes import _cancel_basna_run
+            res = await _cancel_basna_run(target, user_id)
+            note = f"stopped {res.get('stopped_workers', 0)} worker(s)"
+        store.update_status(action["id"], "done", outcome="success", outcome_note=note)
+        store.log(user_id, f"stop_run: {system}", f"{target} — {note}")
+        return {"ok": True, "target": target, "note": note}
+    except Exception as exc:
+        store.update_status(action["id"], "done", outcome="fail", outcome_note=str(exc)[:300])
+        store.log(user_id, "error: stop_run failed", f"{system} {target}: {exc}", "error")
+        return {"ok": False, "target": target, "note": str(exc)}
+
+
 async def dispatch_action(user_id: str, action: dict[str, Any]) -> dict[str, Any]:
     """Execute one action by handing it to the strongest agent, in the background.
     Marks the action ``dispatched`` and spawns the run+judge task. Returns
     ``{ok, target, note}`` — ok=False (note set) when no agent is reachable, and
     the action keeps its prior status for the caller to resolve."""
+    if str(action.get("kind")) == "stop_run":
+        return await _dispatch_stop_run(user_id, action)
     agent = _strongest_agent(user_id)
     if not agent:
         return {"ok": False, "target": "", "note": "no running agent to dispatch to"}

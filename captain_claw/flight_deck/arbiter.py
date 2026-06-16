@@ -25,7 +25,7 @@ from captain_claw.flight_deck.autonomy import get_store, resolve_config
 _log = logging.getLogger(__name__)
 
 # Action kinds the arbiter may propose (must match the ledger / later dispatch).
-_KINDS = ("nudge", "run_prompt", "basna", "materialize_schedule")
+_KINDS = ("nudge", "run_prompt", "basna", "materialize_schedule", "stop_run")
 _RISKS = ("low", "normal", "high")
 
 _SYSTEM_PROMPT = (
@@ -38,15 +38,19 @@ _SYSTEM_PROMPT = (
     "an empty array [] ONLY if every candidate is pure internal musing with no "
     "externalizable step, or merely repeats something already proposed.\n\n"
     "Reply with ONLY a JSON array of 0 or 1 objects:\n"
-    '{"kind": one of ["nudge","run_prompt","basna","materialize_schedule"], '
+    '{"kind": one of ["nudge","run_prompt","basna","materialize_schedule","stop_run"], '
     '"title": short imperative, "rationale": one sentence on why now, '
     '"risk": "low" | "normal" | "high", "domain": short slug e.g. "ops"/"research", '
-    '"score": 0.0-1.0 how valuable/timely}\n\n'
+    '"score": 0.0-1.0 how valuable/timely, '
+    '"target": run session id (stop_run only), "system": "basna" (stop_run only)}\n\n'
     "Kind/risk mapping (use these exact kinds): a proactive message to the user is "
     'kind="nudge", risk="low". Running a task with the agent\'s tools is '
     'kind="run_prompt" (risk "normal", or "high" if it sends/changes external data). '
     'A multi-agent research run is kind="basna". Setting up a recurring/scheduled job '
-    'is kind="materialize_schedule".\n'
+    'is kind="materialize_schedule". If a candidate shows a run is stuck, looping, or '
+    'runaway AND it matches one of the "active runs" listed below, propose '
+    'kind="stop_run" with that run\'s session id as "target" (risk "normal") — this '
+    "is a safety action and will be held for the user to approve.\n"
     "Score honestly: a genuinely useful action is ~0.7-0.9; score low only if you "
     "doubt it helps. Don't invent busywork, and never duplicate the 'already "
     "proposed' list.\n\n"
@@ -158,7 +162,42 @@ def _parse_actions(text: str) -> list[dict[str, Any]]:
             "risk": risk,
             "domain": (str(raw.get("domain") or "general").strip() or "general")[:40],
             "score": score,
+            # stop_run carries the run to halt.
+            "target": str(raw.get("target") or "").strip()[:80],
+            "system": (str(raw.get("system") or "basna").strip().lower() or "basna"),
         })
+    return out
+
+
+async def _gather_active_runs(user_id: str) -> list[dict[str, Any]]:
+    """Currently-running Basna runs the arbiter could stop (owner-scoped). Sourced
+    from the live worker/task registries so it only ever lists genuinely-running,
+    stoppable runs."""
+    try:
+        from captain_claw.flight_deck.auth import get_db
+        from captain_claw.flight_deck.basna_routes import (
+            _active_agent_runs,
+            _run_workers,
+        )
+    except Exception:
+        return []
+    db = get_db()
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    candidates = set(_active_agent_runs.get(user_id, set())) | set(_run_workers.keys())
+    for sid in candidates:
+        if sid in seen:
+            continue
+        seen.add(sid)
+        try:
+            sess = await db.get_basna_session(sid, user_id)  # None if not owner's
+        except Exception:
+            sess = None
+        if sess and str(sess.get("status") or "") not in ("done", "cancelled", "error"):
+            out.append({
+                "system": "basna", "session_id": sid,
+                "title": (sess.get("title") or sess.get("intent") or "")[:60],
+            })
     return out
 
 
@@ -234,10 +273,18 @@ async def maybe_run_arbiter(
             dup_hint = "\n\nAlready proposed (do not repeat): " + "; ".join(
                 a["title"] for a in open_actions[:8]
             )
+        # Active runs the arbiter may target with stop_run (owner-scoped, live).
+        active_runs = await _gather_active_runs(user_id)
+        valid_targets = {r["session_id"] for r in active_runs}
+        run_hint = ""
+        if active_runs:
+            run_hint = "\n\nActive runs (stop_run target = the session id):\n" + "\n".join(
+                f"- {r['session_id']} · {r['title']}" for r in active_runs[:8]
+            )
         user_prompt = (
             "Candidate goals the assistant has surfaced to itself:\n"
             + "\n".join(f"- {c}" for c in candidates)
-            + rel_hint + dup_hint
+            + rel_hint + dup_hint + run_hint
         )
 
         # Think through the same agent that authored the reflection.
@@ -285,6 +332,10 @@ async def maybe_run_arbiter(
             if rel_by_kind.get(a["kind"], 1.0) < suppress_below:
                 emit("dropped: kind suppressed", f"{a['kind']} weight {rel_by_kind.get(a['kind']):.2f} < {suppress_below}", routine=True)
                 continue
+            if a["kind"] == "stop_run" and a.get("target") not in valid_targets:
+                # Don't let it stop a run it can't see (or hallucinate a session id).
+                emit("dropped: stop_run unknown target", str(a.get("target")), "warn")
+                continue
             viable.append(a)
         viable.sort(key=lambda a: a["score"], reverse=True)
 
@@ -294,11 +345,14 @@ async def maybe_run_arbiter(
                     "considered": len(actions)}
 
         chosen = viable[0]
+        _payload = None
+        if chosen["kind"] == "stop_run":
+            _payload = {"system": chosen.get("system") or "basna", "target": chosen.get("target")}
         row = store.add_action(
             user_id,
             kind=chosen["kind"], title=chosen["title"], rationale=chosen["rationale"],
             source="reflection", risk=chosen["risk"], domain=chosen["domain"],
-            score=chosen["score"], status="awaiting_approval",
+            score=chosen["score"], status="awaiting_approval", payload=_payload,
         )
 
         from captain_claw.flight_deck.fd_dispatch import dispatch_action, should_auto_dispatch
