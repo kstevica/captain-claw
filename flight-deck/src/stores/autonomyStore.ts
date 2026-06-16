@@ -98,6 +98,7 @@ interface AutonomyStore {
   save: () => Promise<void>
   approve: (id: string) => Promise<void>
   reject: (id: string) => Promise<void>
+  nudge: () => Promise<{ proposed: number; reason?: string }>
 }
 
 export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
@@ -177,5 +178,13 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
   reject: async (id: string) => {
     const res = await _authedFetch(`/fd/autonomy/actions/${encodeURIComponent(id)}/reject`, { method: 'POST' })
     if (res.ok) await get().loadActions()
+  },
+
+  nudge: async () => {
+    const res = await _authedFetch('/fd/autonomy/nudge', { method: 'POST' })
+    const data = res.ok ? await res.json() : {}
+    await get().loadActions()
+    const arb = data.arbiter || {}
+    return { proposed: arb.proposed ?? 0, reason: arb.reason ?? data.pulse ?? data.reason }
   },
 }))

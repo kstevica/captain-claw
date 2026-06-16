@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Cpu, Sliders, ListChecks, Loader2, AlertCircle, Check, ShieldCheck, Gauge } from 'lucide-react'
+import { Cpu, Sliders, ListChecks, Loader2, AlertCircle, Check, ShieldCheck, Gauge, Play } from 'lucide-react'
 import { useAutonomyStore, type AutonomyConfig, type AutonomyAction } from '../stores/autonomyStore'
 
 // Theming (see index.css): zinc is auto-remapped in light mode, so zinc classes
@@ -133,10 +133,12 @@ function ActionCard({ action, onApprove, onReject }: {
 export function AutonomousWorkPage() {
   const {
     config, defaults, actions, reliability, loading, saving, error,
-    loadAll, setField, save, approve, reject,
+    loadAll, setField, save, approve, reject, nudge,
   } = useAutonomyStore()
   const [tab, setTab] = useState<'control' | 'activity'>('control')
   const [savedAt, setSavedAt] = useState(false)
+  const [nudging, setNudging] = useState(false)
+  const [nudgeMsg, setNudgeMsg] = useState<string | null>(null)
 
   useEffect(() => { loadAll() }, [loadAll])
 
@@ -323,6 +325,27 @@ export function AutonomousWorkPage() {
         {/* ── Activity tab ── */}
         {tab === 'activity' && (
           <div className="mx-auto flex max-w-3xl flex-col gap-6">
+            <div className="flex items-center gap-3">
+              <button
+                onClick={async () => {
+                  setNudging(true); setNudgeMsg(null)
+                  try {
+                    const r = await nudge()
+                    setNudgeMsg(r.proposed > 0 ? `Proposed ${r.proposed} action` : `Nothing proposed (${r.reason || 'quiet'})`)
+                  } catch (e) {
+                    setNudgeMsg(e instanceof Error ? e.message : String(e))
+                  } finally { setNudging(false) }
+                }}
+                disabled={nudging || !config?.enabled}
+                title={config?.enabled ? 'Force one arbiter pass now' : 'Enable autonomous work first'}
+                className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40"
+              >
+                {nudging ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                Run arbiter now
+              </button>
+              {nudgeMsg && <span className="text-xs text-zinc-400">{nudgeMsg}</span>}
+            </div>
+
             {pending.length > 0 && (
               <div className="flex flex-col gap-2">
                 <h2 className="text-xs font-semibold uppercase tracking-wider text-amber-600 dark:text-amber-400">

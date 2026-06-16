@@ -110,7 +110,15 @@ Concurrency cap (default 2), daily cap, quiet hours. Every action logged with ra
 High-risk requires approval.
 
 ## Phasing
-1. **Phase 1 — Spine + cockpit (off):** config, tables, router, page (Control + read-only Activity). ← current
-2. **Phase 2 — Topic 4 + Arbiter in propose mode:** proposes work; human Approve/Reject.
+1. **Phase 1 — Spine + cockpit (off):** config, tables, router, page (Control + read-only Activity). ✅ done
+2. **Phase 2 — Arbiter in propose mode + Topic 4:** ✅ done. `arbiter.py` runs inside `pulse()`
+   after `_reflect()`; gathers candidates from the consciousness reflection (intentions + thought)
+   plus — when `reflection_to_intention` is on (Topic 4) — the latest agent self-reflection bullets
+   via `load_latest_reflection()`; one LLM rank pass through the reflection's author agent; filters
+   by `arbiter_min_score`, learned-loser suppression (`suppress_below_weight`), dedup vs open ledger,
+   daily/concurrent caps, quiet hours; writes the single best as `awaiting_approval` (never dispatches
+   — ceiling is propose). `/fd/autonomy/nudge` now forces a pulse; page has "Run arbiter now".
+   NOTE: Topic 4 delivered *through* the Arbiter into the unified ledger (one backlog, one approval
+   surface) rather than as separate agent intentions.
 3. **Phase 3 — Topic 2 dispatch at act_low_risk:** auto-fire low-risk (future release; ceiling is propose for now).
-4. **Phase 4 — Topic 3 learning:** outcomes → reliability → Arbiter suppression.
+4. **Phase 4 — Topic 3 learning:** outcomes → reliability → Arbiter suppression (read-back already wired).

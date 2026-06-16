@@ -320,6 +320,32 @@ class AutonomyStore:
             conn.commit()
         return self.get_action(action_id)
 
+    def count_since(self, user_id: str, iso_cutoff: str) -> int:
+        """How many actions this user created at/after ``iso_cutoff`` — the
+        daily-cap counter. ISO-8601 strings sort lexicographically, so a string
+        comparison is a correct time comparison here."""
+        uid = _norm_user(user_id)
+        with self._lock:
+            r = self._c().execute(
+                "SELECT COUNT(*) AS n FROM autonomous_actions"
+                " WHERE user_id = ? AND created_at >= ?",
+                (uid, iso_cutoff),
+            ).fetchone()
+        return int(r["n"] if r else 0)
+
+    def open_actions(self, user_id: str) -> list[dict[str, Any]]:
+        """In-flight actions — candidate/awaiting/queued/dispatched — used for the
+        concurrency cap and for dedup against what's already proposed."""
+        uid = _norm_user(user_id)
+        with self._lock:
+            rows = self._c().execute(
+                "SELECT * FROM autonomous_actions WHERE user_id = ?"
+                " AND status IN ('candidate','awaiting_approval','queued','dispatched')"
+                " ORDER BY created_at DESC",
+                (uid,),
+            ).fetchall()
+        return [self._row_to_action(r) for r in rows]
+
     @staticmethod
     def _row_to_action(r: sqlite3.Row) -> dict[str, Any]:
         d = dict(r)

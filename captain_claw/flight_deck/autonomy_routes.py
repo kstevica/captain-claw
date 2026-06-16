@@ -133,8 +133,19 @@ async def nudge_route(
     request: Request,
     _user: dict | None = Depends(get_optional_user),
 ):
-    """Force one arbiter pass now. No-op in Phase 1 (the Arbiter lands in Phase 2)."""
+    """Force one heartbeat now (forces a reflection, which runs the Arbiter).
+    Returns the arbiter outcome so the page can show what, if anything, it proposed."""
     uid = _user_id(request)
     cfg = resolve_config(uid)
-    return {"ok": True, "ran": False, "reason": "arbiter not enabled yet",
+    if not cfg.get("enabled"):
+        return {"ok": True, "ran": False, "reason": "disabled",
+                "autonomy_level": cfg.get("autonomy_level", "off")}
+    try:
+        from captain_claw.flight_deck.consciousness import pulse
+
+        result = await pulse(uid, force=True)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"pulse failed: {exc}") from exc
+    return {"ok": True, "pulse": result.get("reason"),
+            "arbiter": result.get("arbiter"),
             "autonomy_level": cfg.get("autonomy_level", "off")}

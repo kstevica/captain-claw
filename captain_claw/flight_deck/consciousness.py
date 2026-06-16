@@ -827,6 +827,16 @@ async def pulse(user_id: str, *, force: bool = False) -> dict[str, Any]:
     if isinstance(intentions, list) and intentions:
         store.replace_intentions(uid, [str(i) for i in intentions])
 
+    # Autonomous Work: let the Arbiter decide if anything is worth proposing.
+    # Non-fatal — a heartbeat must never break because the loop is opted-in.
+    arbiter_result: dict[str, Any] | None = None
+    try:
+        from captain_claw.flight_deck.arbiter import maybe_run_arbiter
+
+        arbiter_result = await maybe_run_arbiter(uid, reflection, author, agent_slugs)
+    except Exception as exc:
+        _log.debug("arbiter pass failed (non-fatal): %s", exc)
+
     store.save_state(uid, cursor=delta["cursor"], pulse_inc=1,
                      thought_inc=len(entries), touched_thought=bool(entries))
 
@@ -838,6 +848,7 @@ async def pulse(user_id: str, *, force: bool = False) -> dict[str, Any]:
         "agents": len(delta["agents"]),
         "entries": entries,
         "mood": mood,
+        "arbiter": arbiter_result,
     }
 
 
