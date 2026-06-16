@@ -22,6 +22,7 @@ import {
   Brain,
   Network,
   Library,
+  Cpu,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { APP_VERSION, BUILD_DATE } from '../../version'
@@ -43,6 +44,7 @@ const navItems: { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?:
   { id: 'basna', icon: Network, label: 'Basna' },
   { id: 'flows', icon: Workflow, label: 'Flows' },
   { id: 'observatory', icon: Brain, label: 'Observatory' },
+  { id: 'autonomous-work', icon: Cpu, label: 'Autonomous Work' },
   { id: 'today', icon: CalendarDays, label: 'Today' },
   { id: 'scheduler', icon: AlarmClock, label: 'Scheduler' },
   { id: 'skills', icon: Sparkles, label: 'Skills' },

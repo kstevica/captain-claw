@@ -30,6 +30,7 @@ import { AppCodePage } from './pages/AppCodePage'
 import { SchedulerPage } from './pages/SchedulerPage'
 import { FlowsPage } from './pages/FlowsPage'
 import { ObservatoryPage } from './pages/ObservatoryPage'
+import { AutonomousWorkPage } from './pages/AutonomousWorkPage'
 import { useUIStore } from './stores/uiStore'
 import { useAgentStore } from './stores/agentStore'
 import { useAuthStore, checkAuthStatus, refreshAccessToken } from './stores/authStore'
@@ -301,6 +302,7 @@ function AppContent() {
       {view === 'workflow' && <WorkflowPage />}
       {view === 'flows' && <FlowsPage />}
       {view === 'observatory' && <ObservatoryPage />}
+      {view === 'autonomous-work' && <AutonomousWorkPage />}
       {view === 'skills' && <SkillsPage />}
       {view === 'games' && <GamesPage />}
       {view === 'spawner' && <SpawnerPage />}

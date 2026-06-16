@@ -798,6 +798,50 @@ class NervousSystemConfig(BaseModel):
     maturation_skip_importance: int = 9         # >= this importance skips maturation (fortissimo)
 
 
+class AutonomousWorkConfig(BaseModel):
+    """Closed-loop autonomy — the Arbiter, efferent dispatch, learning, and the
+    reflection→intention feed (see docs/autonomous-work-plan.md).
+
+    These are the *global defaults*; per-user overrides live in the Flight Deck
+    ``user_settings`` table and win when present. Ships fully off: nothing acts
+    until a user opts in from the Autonomous Work page. ``autonomy_level`` is the
+    graduated throttle and is clamped to ``max_autonomy_level`` (the shipped
+    ceiling — currently "propose", so the loop only ever *proposes* work).
+    """
+
+    # ── Master ──
+    enabled: bool = False                       # hard kill switch for the whole loop
+    autonomy_level: str = "propose"             # off | propose | act_low_risk | act
+    max_autonomy_level: str = "propose"         # shipped ceiling; autonomy_level clamps to this
+
+    # ── Topic 1 — Arbiter ──
+    arbiter_on_pulse: bool = True               # run the arbiter inside the heartbeat pulse
+    arbiter_min_score: float = 0.6              # ignore candidates below this priority
+    max_actions_per_day: int = 6
+    max_concurrent_actions: int = 2             # mirrors Basna's 2/owner cap
+    candidate_lookback_hours: int = 24
+    quiet_hours_start: int = 22                 # 22:00
+    quiet_hours_end: int = 8                    # 08:00 (wraps midnight)
+
+    # ── Topic 2 — Efferent dispatch ──
+    allow_auto_dispatch: bool = False           # low-risk actions fire without approval
+    low_risk_kinds: list[str] = Field(default_factory=lambda: ["nudge", "run_prompt_readonly"])
+    high_risk_requires_approval: bool = True
+
+    # ── Topic 3 — Judge & learn ──
+    learning_enabled: bool = True
+    judge_mode: str = "both"                    # auto (LLM) | human | both
+    reliability_seed: float = 0.6
+    suppress_below_weight: float = 0.25         # stop proposing kinds that keep failing
+
+    # ── Topic 4 — Reflections → intentions ──
+    reflection_to_intention: bool = False
+    max_intentions_per_reflection: int = 2
+    reflection_intention_max_risk: str = "low"  # low | normal | high
+
+    db_path: str = "~/.captain-claw/autonomy.db"
+
+
 class CognitiveMetricsConfig(BaseModel):
     """Musical cognition tracking and measurement."""
 
@@ -1056,6 +1100,7 @@ class Config(BaseSettings):
     intentions: IntentionsConfig = Field(default_factory=IntentionsConfig)
     nervous_system: NervousSystemConfig = Field(default_factory=NervousSystemConfig)
     sister_session: SisterSessionConfig = Field(default_factory=SisterSessionConfig)
+    autonomous_work: AutonomousWorkConfig = Field(default_factory=AutonomousWorkConfig)
     cognitive_metrics: CognitiveMetricsConfig = Field(default_factory=CognitiveMetricsConfig)
     cognitive_tempo: CognitiveTempoConfig = Field(default_factory=CognitiveTempoConfig)
     cognitive_mode: CognitiveModeConfig = Field(default_factory=CognitiveModeConfig)
