@@ -25,7 +25,7 @@ from captain_claw.flight_deck.autonomy import get_store, resolve_config
 _log = logging.getLogger(__name__)
 
 # Action kinds the arbiter may propose (must match the ledger / later dispatch).
-_KINDS = ("nudge", "run_prompt", "basna", "materialize_schedule", "stop_run")
+_KINDS = ("nudge", "run_prompt", "basna", "materialize_schedule", "stop_run", "tool_action")
 _RISKS = ("low", "normal", "high")
 
 _SYSTEM_PROMPT = (
@@ -38,19 +38,23 @@ _SYSTEM_PROMPT = (
     "an empty array [] ONLY if every candidate is pure internal musing with no "
     "externalizable step, or merely repeats something already proposed.\n\n"
     "Reply with ONLY a JSON array of 0 or 1 objects:\n"
-    '{"kind": one of ["nudge","run_prompt","basna","materialize_schedule","stop_run"], '
+    '{"kind": one of ["nudge","run_prompt","basna","materialize_schedule","stop_run","tool_action"], '
     '"title": short imperative, "rationale": one sentence on why now, '
     '"risk": "low" | "normal" | "high", "domain": short slug e.g. "ops"/"research", '
     '"score": 0.0-1.0 how valuable/timely, '
-    '"target": run session id (stop_run only), "system": "basna" (stop_run only)}\n\n'
+    '"target": run session id (stop_run only), "system": "basna" (stop_run only), '
+    '"action_id": catalog id (tool_action only), "args": {…} (tool_action only)}\n\n'
     "Kind/risk mapping (use these exact kinds): a proactive message to the user is "
     'kind="nudge", risk="low". Running a task with the agent\'s tools is '
     'kind="run_prompt" (risk "normal", or "high" if it sends/changes external data). '
     'A multi-agent research run is kind="basna". Setting up a recurring/scheduled job '
-    'is kind="materialize_schedule". If a candidate shows a run is stuck, looping, or '
-    'runaway AND it matches one of the "active runs" listed below, propose '
-    'kind="stop_run" with that run\'s session id as "target" (risk "normal") — this '
-    "is a safety action and will be held for the user to approve.\n"
+    'is kind="materialize_schedule". If a candidate maps cleanly onto one of the '
+    'concrete actions in the "action catalog" below, prefer kind="tool_action" with '
+    'its "action_id" and an "args" object filling that action\'s required fields '
+    "(verbatim from the candidate — never invent facts like emails, times, or names). "
+    'If a candidate shows a run is stuck, looping, or runaway AND it matches an '
+    '"active run" below, propose kind="stop_run" with that run\'s session id as '
+    '"target" (risk "normal"). stop_run and tool_action are held for approval.\n'
     "Score honestly: a genuinely useful action is ~0.7-0.9; score low only if you "
     "doubt it helps. Don't invent busywork, and never duplicate the 'already "
     "proposed' list.\n\n"
@@ -165,6 +169,9 @@ def _parse_actions(text: str) -> list[dict[str, Any]]:
             # stop_run carries the run to halt.
             "target": str(raw.get("target") or "").strip()[:80],
             "system": (str(raw.get("system") or "basna").strip().lower() or "basna"),
+            # tool_action carries the catalog action + its args.
+            "action_id": str(raw.get("action_id") or "").strip()[:64],
+            "args": raw.get("args") if isinstance(raw.get("args"), dict) else {},
         })
     return out
 
@@ -281,10 +288,21 @@ async def maybe_run_arbiter(
             run_hint = "\n\nActive runs (stop_run target = the session id):\n" + "\n".join(
                 f"- {r['session_id']} · {r['title']}" for r in active_runs[:8]
             )
+        # Concrete actions the arbiter may take via tool_action. Human-only and
+        # un-granted actions are withheld so they can't be proposed.
+        from captain_claw.flight_deck.action_catalog import list_catalog
+        granted = set(cfg.get("granted_actions") or [])
+        catalog = [a for a in list_catalog() if not a["human_only"]
+                   and (not granted or a["grant"] in granted or a["id"] in granted)]
+        cat_hint = ""
+        if catalog:
+            cat_hint = "\n\nAction catalog (tool_action — action_id + args filling required):\n" + "\n".join(
+                f"- {a['id']}: {a['label']} · required args: {a['required']}" for a in catalog
+            )
         user_prompt = (
             "Candidate goals the assistant has surfaced to itself:\n"
             + "\n".join(f"- {c}" for c in candidates)
-            + rel_hint + dup_hint + run_hint
+            + rel_hint + dup_hint + run_hint + cat_hint
         )
 
         # Think through the same agent that authored the reflection.
@@ -336,6 +354,20 @@ async def maybe_run_arbiter(
                 # Don't let it stop a run it can't see (or hallucinate a session id).
                 emit("dropped: stop_run unknown target", str(a.get("target")), "warn")
                 continue
+            if a["kind"] == "tool_action":
+                # Resolve against the catalog; risk/reversibility come from the
+                # catalog, never the LLM. Drop unknown/human-only/invalid-arg actions.
+                from captain_claw.flight_deck import action_catalog
+                spec = action_catalog.get_action(a.get("action_id"))
+                if not spec or spec.get("human_only"):
+                    emit("dropped: tool_action not allowed", str(a.get("action_id")), "warn")
+                    continue
+                ok_args, arg_err = action_catalog.validate_args(spec, a.get("args") or {})
+                if not ok_args:
+                    emit("dropped: tool_action bad args", f"{a.get('action_id')}: {arg_err}", "warn")
+                    continue
+                a["risk"] = spec["risk"]
+                a["reversibility"] = spec["reversibility"]
             viable.append(a)
         viable.sort(key=lambda a: a["score"], reverse=True)
 
@@ -348,6 +380,8 @@ async def maybe_run_arbiter(
         _payload = None
         if chosen["kind"] == "stop_run":
             _payload = {"system": chosen.get("system") or "basna", "target": chosen.get("target")}
+        elif chosen["kind"] == "tool_action":
+            _payload = {"action_id": chosen.get("action_id"), "args": chosen.get("args") or {}}
         row = store.add_action(
             user_id,
             kind=chosen["kind"], title=chosen["title"], rationale=chosen["rationale"],

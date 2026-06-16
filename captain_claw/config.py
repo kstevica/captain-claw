@@ -839,6 +839,12 @@ class AutonomousWorkConfig(BaseModel):
     max_intentions_per_reflection: int = 2
     reflection_intention_max_risk: str = "low"  # low | normal | high
 
+    # ── #1 Action catalog — per-user grants ──
+    # Which catalog actions/grants the arbiter may propose & (later) auto-fire.
+    # Empty = the arbiter may PROPOSE any non-human-only catalog action (still
+    # human-approved); explicit grants gate auto-fire once that lands (Phase 4).
+    granted_actions: list[str] = Field(default_factory=list)
+
     db_path: str = "~/.captain-claw/autonomy.db"
 
 

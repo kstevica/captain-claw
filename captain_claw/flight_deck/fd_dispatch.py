@@ -79,6 +79,10 @@ def should_auto_dispatch(cfg: dict[str, Any], action: dict[str, Any]) -> bool:
     # stop_run is a destructive safety action — always human-approved, never auto.
     if str(action.get("kind")) == "stop_run":
         return False
+    # tool_action stays propose-only until per-action grants (Phase 4) decide
+    # which catalog actions may auto-fire; reversibility/risk gating rides on that.
+    if str(action.get("kind")) == "tool_action":
+        return False
     if not cfg.get("allow_auto_dispatch"):
         return False
     level = str(cfg.get("autonomy_level") or "off")
@@ -220,6 +224,33 @@ async def _dispatch_stop_run(user_id: str, action: dict[str, Any]) -> dict[str, 
         return {"ok": False, "target": target, "note": str(exc)}
 
 
+async def _dispatch_tool_action(user_id: str, action: dict[str, Any]) -> dict[str, Any]:
+    """Run a catalog action via the deterministic rail and record the grounded
+    outcome (the ToolResult success — no LLM judge needed). The reverse handle for
+    undo is captured in Phase 2 (this turn's follow-up)."""
+    store = get_store()
+    payload = action.get("payload") or {}
+    action_id = str(payload.get("action_id") or "")
+    args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+    store.update_status(action["id"], "dispatched")
+    from captain_claw.flight_deck.actions import run_action
+
+    res = await run_action(user_id, action_id, args)
+    ok = bool(res.get("ok"))
+    note = str(res.get("content") or res.get("error") or "")[:500]
+
+    cfg = resolve_config(user_id)
+    if cfg.get("learning_enabled") and str(cfg.get("judge_mode") or "both") in ("auto", "both"):
+        store.record_outcome(user_id, "tool_action", str(action.get("domain") or "general"),
+                             ok, seed=float(cfg.get("reliability_seed", 0.6)))
+    store.update_status(action["id"], "done",
+                        outcome="success" if ok else "fail", outcome_note=note)
+    store.log(user_id, f"tool_action: {action_id}", note, "info" if ok else "warn")
+    # ok=True means "executed" so the approve route doesn't re-queue; the ledger
+    # outcome carries whether the tool itself succeeded.
+    return {"ok": True, "target": action_id, "note": note}
+
+
 async def dispatch_action(user_id: str, action: dict[str, Any]) -> dict[str, Any]:
     """Execute one action by handing it to the strongest agent, in the background.
     Marks the action ``dispatched`` and spawns the run+judge task. Returns
@@ -227,6 +258,8 @@ async def dispatch_action(user_id: str, action: dict[str, Any]) -> dict[str, Any
     the action keeps its prior status for the caller to resolve."""
     if str(action.get("kind")) == "stop_run":
         return await _dispatch_stop_run(user_id, action)
+    if str(action.get("kind")) == "tool_action":
+        return await _dispatch_tool_action(user_id, action)
     agent = _strongest_agent(user_id)
     if not agent:
         return {"ok": False, "target": "", "note": "no running agent to dispatch to"}
