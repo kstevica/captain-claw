@@ -202,6 +202,20 @@ async def _execute_and_judge(user_id: str, action: dict[str, Any], agent: dict[s
             # nudges and would suppress them via reliability. Delivery == success.
             success = True
             note = output[:300] or "delivered"
+            # Also push the nudge to the user's WhatsApp (the agent turn already
+            # surfaces it in web chat; this fans it out to WhatsApp too).
+            if output and cfg.get("nudge_to_whatsapp", True):
+                try:
+                    from captain_claw.flight_deck.whatsapp_bridge import _allowed_waids, push_to_waid
+                    waids = list(_allowed_waids())
+                    sent = 0
+                    for waid in waids:
+                        if await push_to_waid(waid, output):
+                            sent += 1
+                    if waids:
+                        store.log(user_id, "nudge → whatsapp", f"sent to {sent}/{len(waids)} recipient(s)")
+                except Exception as exc:
+                    _log.debug("nudge whatsapp delivery failed: %s", exc)
         elif learn:
             verdict = await _judge_outcome(user_id, action, output)
             success = bool(verdict["success"])

@@ -842,6 +842,10 @@ class AutonomousWorkConfig(BaseModel):
     trust_threshold: float = 0.85
     trust_min_runs: int = 3
 
+    # Also deliver proactive nudges to the user's WhatsApp (the configured
+    # WHATSAPP_ALLOWED_WAIDS), not just the agent's web chat.
+    nudge_to_whatsapp: bool = True
+
     # ── #5 Grounded verification — confirm a side effect actually landed ──
     # After a catalog action with a verify spec runs, read it back; if it's
     # definitively absent, the outcome is downgraded to fail so trust never builds
