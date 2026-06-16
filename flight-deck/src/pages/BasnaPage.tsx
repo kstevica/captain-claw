@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Network, Play, Sparkles, Plus, Trash2, ThumbsUp, ThumbsDown,
   Loader2, Check, X, Wrench, Maximize2, Minimize2, Download, Paperclip, FileText, Image as ImageIcon,
-  SlidersHorizontal, Eye, ScanSearch, AlertTriangle, RefreshCw, Square,
+  SlidersHorizontal, Eye, ScanSearch, AlertTriangle, RefreshCw, Square, CornerDownRight,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -91,6 +91,16 @@ function agentOrigin(config?: string): string | null {
   try {
     const c = JSON.parse(config)
     if (c && c.source === 'agent') return c.origin_platform || 'agent'
+  } catch { /* ignore */ }
+  return null
+}
+
+// Deepen runs carry {kind:'deepen', parent_session_id} in their config.
+function parentIdOf(config?: string): string | null {
+  if (!config) return null
+  try {
+    const c = JSON.parse(config)
+    if (c && c.kind === 'deepen' && c.parent_session_id) return String(c.parent_session_id)
   } catch { /* ignore */ }
   return null
 }
@@ -587,6 +597,31 @@ export function BasnaPage() {
               onDragLeave={() => setDragOver(false)}
               onDrop={(e) => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files) }}
             >
+              {activeSession && (() => {
+                const pid = parentIdOf(activeSession.config)
+                const parent = pid ? sessions.find((s) => s.id === pid) : null
+                const children = sessions.filter((s) => parentIdOf(s.config) === activeSession.id)
+                if (!parent && children.length === 0) return null
+                const linkCls = 'flex items-center gap-1 text-left text-violet-700 hover:underline dark:text-violet-300'
+                return (
+                  <div className="mb-3 flex flex-col gap-1 rounded-lg border border-violet-300 bg-violet-50 px-3 py-2 text-[11px] dark:border-violet-900/40 dark:bg-violet-950/20">
+                    {parent && (
+                      <button onClick={() => selectSession(parent.id)} className={linkCls}>
+                        <CornerDownRight className="h-3 w-3 shrink-0" />
+                        <span className="truncate">deepened from “{parent.title || parent.intent || 'run'}”</span>
+                      </button>
+                    )}
+                    {children.map((ch) => (
+                      <button key={ch.id} onClick={() => selectSession(ch.id)} className={linkCls}>
+                        <ScanSearch className="h-3 w-3 shrink-0" />
+                        <span className="truncate">
+                          deepened into “{ch.title || ch.intent || 'run'}”{ch.status !== 'done' ? ` · ${ch.status}` : ''}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )
+              })()}
               <label className="mb-1.5 block text-xs font-medium text-zinc-400">
                 Title <span className="font-normal text-zinc-600">— optional, auto-generated from the task if blank</span>
               </label>
