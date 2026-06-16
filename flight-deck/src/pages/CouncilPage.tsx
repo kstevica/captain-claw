@@ -21,7 +21,7 @@ export function CouncilPage() {
   const {
     sessions, activeSession, loading, speaking, roundRunning, generatingArtifact, activityLog,
     autoAdvanceCountdown,
-    loadSessionList, createSession, loadSession, deleteSession, clearActive,
+    loadSessionList, createSession, loadSession, deleteSession, cancelSession, clearActive,
     startCouncil, advanceRound, restartRound, requestSynthesis, concludeSession,
     cancelAutoAdvance,
     injectMessage, directAddress, muteAgent, pinMessage,
@@ -189,6 +189,7 @@ export function CouncilPage() {
                     session={s}
                     onOpen={handleOpen}
                     onDelete={handleDelete}
+                    onCancel={cancelSession}
                   />
                 ))}
               </div>

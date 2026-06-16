@@ -322,6 +322,7 @@ interface BasnaStore {
   recompile: (tiers: TierMap) => Promise<void>
   sendFeedback: (runId: number, success: boolean) => Promise<void>
   deleteSession: (id: string) => Promise<void>
+  cancelSession: (id: string) => Promise<void>
 }
 
 export const useBasnaStore = create<BasnaStore>((set, get) => ({
@@ -549,6 +550,11 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   deleteSession: async (id) => {
     await apiDeleteSession(id)
     if (get().activeSession?.id === id) get().newSession()
+    await get().loadSessions()
+  },
+
+  cancelSession: async (id) => {
+    await _authedFetch(`/fd/basna/sessions/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
     await get().loadSessions()
   },
 }))

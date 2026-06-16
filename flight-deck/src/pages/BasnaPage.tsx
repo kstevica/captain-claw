@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Network, Play, Sparkles, Plus, Trash2, ThumbsUp, ThumbsDown,
   Loader2, Check, X, Wrench, Maximize2, Minimize2, Download, Paperclip, FileText, Image as ImageIcon,
-  SlidersHorizontal, Eye, ScanSearch, AlertTriangle, RefreshCw,
+  SlidersHorizontal, Eye, ScanSearch, AlertTriangle, RefreshCw, Square,
 } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -95,10 +95,10 @@ function agentOrigin(config?: string): string | null {
   return null
 }
 
-function SessionCard({ s, active, onOpen, onDelete }: {
-  s: BasnaSession; active: boolean; onOpen: () => void; onDelete: () => void
+function SessionCard({ s, active, onOpen, onDelete, onCancel }: {
+  s: BasnaSession; active: boolean; onOpen: () => void; onDelete: () => void; onCancel: () => void
 }) {
-  const working = s.status === 'running' || s.status === 'routing'
+  const working = s.status === 'running' || s.status === 'routing' || s.status === 'routed'
   const origin = agentOrigin(s.config)
   return (
     <div
@@ -120,6 +120,15 @@ function SessionCard({ s, active, onOpen, onDelete }: {
             <p className="mt-0.5 line-clamp-1 text-[10px] leading-snug text-zinc-500" title={s.intent}>{s.intent}</p>
           )}
         </div>
+        {working && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onCancel() }}
+            title="Stop this run"
+            className="shrink-0 rounded p-0.5 text-amber-500 transition-colors hover:text-rose-400"
+          >
+            <Square className="h-3.5 w-3.5 fill-current" />
+          </button>
+        )}
         <button
           onClick={(e) => { e.stopPropagation(); onDelete() }}
           className="shrink-0 rounded p-0.5 text-zinc-600 opacity-0 transition-opacity hover:text-rose-400 group-hover:opacity-100"
@@ -427,7 +436,7 @@ export function BasnaPage() {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, executing, recompiling, error,
     routerTier, maxAgents, setRouterTier, setMaxAgents, addFiles, removeFile, downloadFile, fetchFileText,
-    updateSelected, loadSessions, pollRunning, selectSession, newSession, route, saveTitle, execute, recompile, sendFeedback, deleteSession,
+    updateSelected, loadSessions, pollRunning, selectSession, newSession, route, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
 
@@ -561,6 +570,7 @@ export function BasnaPage() {
                   deleteSession(s.id)
                 }
               }}
+              onCancel={() => cancelSession(s.id)}
             />
           ))}
           </div>

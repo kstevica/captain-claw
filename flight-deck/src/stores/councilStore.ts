@@ -984,6 +984,7 @@ interface CouncilStore {
   createSession: (cfg: CreateSessionConfig) => Promise<string>
   loadSession: (id: string) => Promise<void>
   deleteSession: (id: string) => Promise<void>
+  cancelSession: (id: string) => Promise<void>
   clearActive: () => void
 
   // Connection management
@@ -1157,6 +1158,11 @@ export const useCouncilStore = create<CouncilStore>((set, get) => ({
       get().disconnectAllAgents()
       set({ activeSession: null })
     }
+    await get().loadSessionList()
+  },
+
+  cancelSession: async (id) => {
+    await _authedFetch(`/fd/council/sessions/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
     await get().loadSessionList()
   },
 
