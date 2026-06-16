@@ -88,13 +88,16 @@ the autonomy config (reuse `autonomy_config` / `AutonomousWorkConfig`) — a
 ("Allowed actions"). Default: empty (nothing actable until the user opts in).
 
 ### #1 phases
-1. **Primitive + catalog skeleton:** `run_tool` WS path + `action_catalog.py` with
-   the v1 entries + arg validation. No arbiter wiring yet — unit-exercise via a
-   manual `POST /fd/autonomy/run-action` test endpoint.
-2. **Reversibility + undo:** capture reverse handles, `/undo` endpoint + UI button.
-3. **Arbiter `tool_action`:** catalog into the prompt (grant-filtered), propose +
-   validate + dispatch; ship at propose ceiling, low-risk-reversible auto-eligible.
-4. **Grants UI:** per-user allowed-actions toggles.
+1. ✅ **Primitive + catalog:** `run_tool` WS rail + `action_catalog.py` + manual
+   `/run-action`. Proven on dev (note.write writes a file). Fixes: also_allow past
+   the per-session policy; refresh the Google-connected cache before exec.
+2. ✅ **Reversibility + undo:** `build_reverse` (id from ToolResult), capture at
+   dispatch, `/undo` + UI Undo button.
+3. ✅ **Arbiter `tool_action`:** catalog in the prompt (grant-filtered), propose +
+   validate (risk/reversibility from catalog) + dispatch via the rail with a
+   grounded outcome. Propose-only for now.
+4. ⬜ **Grants UI + auto-fire:** per-user allowed-actions toggles; let granted
+   reversible/low-risk actions auto-fire (this is also the #3 trust hook).
 
 ### #1 files
 - New: `captain_claw/flight_deck/action_catalog.py`
