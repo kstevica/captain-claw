@@ -56,11 +56,14 @@ class BasnaTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["start", "list", "get", "agents", "output", "truth", "analysis", "files", "get_file"],
+                "enum": ["start", "deepen", "list", "get", "agents", "output", "truth", "analysis", "files", "get_file"],
                 "description": (
                     "'start' — launch a NEW autonomous Basna run on `task` (optional `title`, "
                     "`max_agents`); use this when the user asks to run/execute/start a Basna, and "
                     "do NOT research it yourself. Returns immediately, reports back when done. "
+                    "'deepen' — launch a follow-up run on `session_id` that resolves that finished "
+                    "run's BLIND SPOTS, seeded with its compiled truth; use when the user wants to "
+                    "dig further into what the prior run missed. "
                     "'list' — your sessions (optional `query` substring, `status`, `limit`). "
                     "'get' — full session by `session_id`. "
                     "'agents' — per-agent runs for `session_id`. "
@@ -140,6 +143,8 @@ class BasnaTool(Tool):
         try:
             if action == "start":
                 return await self._start(fd_url, **kwargs)
+            if action == "deepen":
+                return await self._deepen(fd_url, **kwargs)
             if action == "list":
                 return await self._list(fd_url, **kwargs)
             if action == "get":
@@ -220,6 +225,26 @@ class BasnaTool(Tool):
             f"Started Basna run **{data.get('title') or task[:60]}** "
             f"({data.get('n_agents', '?')} agent(s), session {data.get('session_id')}). "
             f"It's running autonomously — I'll report the result back here when it finishes."
+        ))
+
+    async def _deepen(self, fd_url: str, **kwargs: Any) -> ToolResult:
+        """Launch a follow-up run that resolves a finished run's blind spots."""
+        if str(os.environ.get("CLAW_BASNA_WORKER", "")).strip().lower() in ("1", "true", "yes"):
+            return ToolResult(
+                success=False,
+                error="Cannot start runs (including deepen) from inside a Basna run.",
+            )
+        sid = (kwargs.get("session_id") or "").strip()
+        if not sid:
+            return ToolResult(success=False, error="Provide `session_id` of the finished run to deepen.")
+        r = await self._post(fd_url, "/fd/basna/agent/deepen", {"session_id": sid})
+        if isinstance(r, dict) and r.get("_error"):
+            return ToolResult(success=False, error=r["_error"])
+        data = r.json()
+        return ToolResult(success=True, content=(
+            f"Started a deepen run **{data.get('title') or 'follow-up'}** "
+            f"({data.get('n_agents', '?')} agent(s), session {data.get('session_id')}) "
+            f"focused on the prior run's blind spots. I'll report back when it finishes."
         ))
 
     async def _list(self, fd_url: str, **kwargs: Any) -> ToolResult:

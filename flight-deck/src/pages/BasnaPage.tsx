@@ -436,13 +436,14 @@ export function BasnaPage() {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, executing, recompiling, error,
     routerTier, maxAgents, setRouterTier, setMaxAgents, addFiles, removeFile, downloadFile, fetchFileText,
-    updateSelected, loadSessions, pollRunning, selectSession, newSession, route, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession,
+    updateSelected, loadSessions, pollRunning, selectSession, newSession, route, saveTitle, execute, recompile, sendFeedback, deleteSession, cancelSession, deepenSession,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
 
   const [intent, setIntent] = useState('')
   const [title, setTitle] = useState('')
   const [agentOnly, setAgentOnly] = useState(false)
+  const [deepening, setDeepening] = useState(false)
   const [modal, setModal] = useState<{ title: string; content: string; mode: ViewMode } | null>(null)
   const viewFull = (title: string, content: string) => setModal({ title, content, mode: 'markdown' })
   // Preview a generated file: fetch its text and render by type (md/html/text).
@@ -957,6 +958,23 @@ export function BasnaPage() {
                     <ul className="ml-4 list-disc space-y-1 text-sm text-rose-800 dark:text-rose-200/90">
                       {analysis.blind_spots.map((b, i) => <li key={i}>{b}</li>)}
                     </ul>
+                    {activeSession?.status === 'done' && truth && (
+                      <button
+                        onClick={async () => {
+                          if (!activeSession) return
+                          setDeepening(true)
+                          try { await deepenSession(activeSession.id) }
+                          catch { /* surfaced by store error path */ }
+                          finally { setDeepening(false) }
+                        }}
+                        disabled={deepening}
+                        title="Spawn a follow-up run focused on these blind spots, seeded with this run's result"
+                        className="mt-3 flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+                      >
+                        {deepening ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ScanSearch className="h-3.5 w-3.5" />}
+                        Investigate blind spots
+                      </button>
+                    )}
                   </div>
                 )}
               </div>

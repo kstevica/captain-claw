@@ -323,6 +323,7 @@ interface BasnaStore {
   sendFeedback: (runId: number, success: boolean) => Promise<void>
   deleteSession: (id: string) => Promise<void>
   cancelSession: (id: string) => Promise<void>
+  deepenSession: (id: string) => Promise<void>
 }
 
 export const useBasnaStore = create<BasnaStore>((set, get) => ({
@@ -556,5 +557,13 @@ export const useBasnaStore = create<BasnaStore>((set, get) => ({
   cancelSession: async (id) => {
     await _authedFetch(`/fd/basna/sessions/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
     await get().loadSessions()
+  },
+
+  deepenSession: async (id) => {
+    const res = await _authedFetch(`/fd/basna/sessions/${encodeURIComponent(id)}/deepen`, { method: 'POST' })
+    if (!res.ok) throw new Error((await res.text()) || 'deepen failed')
+    const data = await res.json()
+    await get().loadSessions()
+    if (data.session_id) await get().selectSession(data.session_id)
   },
 }))

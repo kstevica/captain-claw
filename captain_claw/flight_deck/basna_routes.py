@@ -795,6 +795,86 @@ async def agent_start(body: AgentStartReq):
             "n_agents": len(selected)}
 
 
+# ── Deepen: a follow-up run that resolves a finished run's blind spots ──
+
+async def _deepen_run(owner: str, parent_session_id: str, user: dict) -> dict:
+    """Create + route + execute a follow-up run seeded with a finished run's
+    compiled truth and its blind spots, focused on resolving those gaps. Returns
+    the new session id. Background execution — the result lands on the new session,
+    which the UI polls / the agent can read back with the basna tool."""
+    db = get_db()
+    parent = await db.get_basna_session(parent_session_id, owner)
+    if not parent:
+        raise HTTPException(404, "session not found")
+    truth = (parent.get("truth") or "").strip()
+    try:
+        analysis = json.loads(parent.get("analysis") or "{}")
+    except (ValueError, TypeError):
+        analysis = {}
+    blind = [str(b).strip() for b in (analysis.get("blind_spots") or []) if str(b).strip()]
+    if not blind:
+        raise HTTPException(400, "This run has no blind spots to investigate.")
+    if not truth:
+        raise HTTPException(400, "This run has no compiled result to build on yet.")
+
+    parent_title = (parent.get("title") or parent.get("intent") or "")[:50]
+    intent = (
+        "Continue and deepen a prior multi-agent investigation — focus ONLY on its "
+        "blind spots, the aspects no prior answer addressed.\n\n"
+        f"PRIOR SYNTHESIS:\n{truth[:4000]}\n\n"
+        "BLIND SPOTS to resolve:\n"
+        + "\n".join(f"- {b}" for b in blind[:12])
+        + "\n\nInvestigate and resolve these blind spots and extend the synthesis. "
+          "Do not repeat what is already settled above."
+    )
+
+    tiers, env_vars = await _load_owner_tiers(db, owner)
+    fast = (tiers or {}).get("fast", {})
+    route = await route_intent(
+        RouteRequest(
+            intent=intent, title=f"Deepen: {parent_title}"[:80], max_agents=6,
+            provider=fast.get("provider", ""), model=fast.get("model", ""),
+            api_key=fast.get("api_key", ""), base_url=fast.get("base_url", ""),
+        ),
+        user,
+    )
+    sid = route["session_id"]
+    await db.update_basna_session(
+        sid, owner,
+        config=json.dumps({"kind": "deepen", "parent_session_id": parent_session_id}),
+    )
+
+    exec_req = ExecuteRequest(session_id=sid, tiers=tiers or None, env_vars=env_vars or None)
+    stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
+    t = asyncio.create_task(execute_route(exec_req, stub, user))
+    _basna_agent_tasks.add(t)
+    _agent_run_tasks[sid] = t
+
+    def _on_done(_t: Any, _sid: str = sid) -> None:
+        _basna_agent_tasks.discard(_t)
+        _agent_run_tasks.pop(_sid, None)
+
+    t.add_done_callback(_on_done)
+    return {"session_id": sid, "title": route.get("title", "") or f"Deepen: {parent_title}",
+            "n_agents": len(route.get("selected", []))}
+
+
+@router.post("/sessions/{session_id}/deepen")
+async def deepen_session(session_id: str, user: dict = Depends(get_current_user)):
+    """UI 'Investigate blind spots' — spawn a follow-up run on this run's gaps."""
+    res = await _deepen_run(user["id"], session_id, user)
+    return {"ok": True, **res}
+
+
+@router.post("/agent/deepen")
+async def agent_deepen(body: _AgentReq):
+    """Agent/tool entry: deepen a finished run by its session id."""
+    owner = _resolve_owner(body)
+    full_user = await get_db().get_user_by_id(owner) or {"id": owner}
+    res = await _deepen_run(owner, body.session_id, full_user)
+    return {"status": "running", **res}
+
+
 # ── Router endpoint ──────────────────────────────────────────────────
 
 @router.post("/route")
