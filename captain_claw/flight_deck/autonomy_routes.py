@@ -204,6 +204,49 @@ async def log_route(
     return {"log": get_store().list_log(uid, limit=limit)}
 
 
+@router.get("/plans")
+async def list_plans_route(request: Request, status_filter: str | None = None,
+                           limit: int = 50, _user: dict | None = Depends(get_optional_user)):
+    """Active + past plans (#4) with their step progress."""
+    uid = _user_id(request)
+    from captain_claw.flight_deck.plans import get_store as plans_store
+    return {"plans": plans_store().list_plans(uid, status=status_filter, limit=limit)}
+
+
+@router.post("/plans")
+async def create_plan_route(request: Request, _user: dict | None = Depends(get_optional_user)):
+    """Decompose a goal into steps and create a plan. Body: {goal}."""
+    uid = _user_id(request)
+    body = await request.json()
+    goal = str((body or {}).get("goal") or "").strip()
+    if not goal:
+        raise HTTPException(status_code=400, detail="goal is required")
+    from captain_claw.flight_deck.plans import decompose_goal, get_store as plans_store
+    steps = await decompose_goal(uid, goal)
+    if not steps:
+        raise HTTPException(status_code=422, detail="Could not decompose the goal into steps")
+    plan = plans_store().create_plan(uid, goal, steps)
+    return {"ok": True, "plan": plan}
+
+
+@router.post("/plans/{plan_id}/advance")
+async def advance_plan_route(plan_id: str, request: Request, _user: dict | None = Depends(get_optional_user)):
+    """Run the plan's next step (manual advance = approval for that step)."""
+    uid = _user_id(request)
+    from captain_claw.flight_deck.plans import advance_one, get_store as plans_store
+    res = await advance_one(uid, plan_id, auto=False)
+    return {"result": res, "plan": plans_store().get_plan(plan_id)}
+
+
+@router.post("/plans/{plan_id}/abandon")
+async def abandon_plan_route(plan_id: str, request: Request, _user: dict | None = Depends(get_optional_user)):
+    """Abandon a plan and roll back its completed reversible steps."""
+    uid = _user_id(request)
+    from captain_claw.flight_deck.plans import abandon_plan, get_store as plans_store
+    res = await abandon_plan(uid, plan_id)
+    return {"result": res, "plan": plans_store().get_plan(plan_id)}
+
+
 @router.get("/catalog")
 async def catalog_route(
     request: Request,

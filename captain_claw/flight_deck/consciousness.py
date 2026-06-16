@@ -865,6 +865,17 @@ async def pulse(user_id: str, *, force: bool = False) -> dict[str, Any]:
         except Exception:
             pass
 
+    # Long-horizon planning (#4): nudge active plans forward one step each pulse.
+    # auto=True runs only trust-eligible steps; the rest pause for approval.
+    try:
+        from captain_claw.flight_deck.autonomy import resolve_config
+        if resolve_config(uid).get("enabled"):
+            from captain_claw.flight_deck.plans import advance_one, get_store as _plans_store
+            for _pl in _plans_store().list_plans(uid, status="active", limit=5):
+                await advance_one(uid, _pl["id"], auto=True)
+    except Exception as exc:
+        _log.debug("plan advance failed (non-fatal): %s", exc)
+
     store.save_state(uid, cursor=delta["cursor"], pulse_inc=1,
                      thought_inc=len(entries), touched_thought=bool(entries))
 
