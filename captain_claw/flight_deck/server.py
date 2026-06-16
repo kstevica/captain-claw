@@ -592,6 +592,14 @@ async def lifespan(app: FastAPI):
         app.state.consciousness_stop = _hb_stop
         app.state.consciousness_task = asyncio.create_task(_hb_loop(_hb_stop))
         print("Flight Deck: consciousness heartbeat started")
+    # ── Event spine poll loop (#2): source adapters → external_events → arbiter.
+    # Disable with FD_EVENTS_DISABLED=true. Adapters self-gate, so it's cheap. ──
+    if os.environ.get("FD_EVENTS_DISABLED", "").lower() not in ("true", "1", "yes"):
+        from captain_claw.flight_deck.event_sources import events_loop as _ev_loop
+        _ev_stop = asyncio.Event()
+        app.state.events_stop = _ev_stop
+        app.state.events_task = asyncio.create_task(_ev_loop(_ev_stop))
+        print("Flight Deck: event spine poll loop started")
     # ── Flow engine (process automations: trigger → steps on the agent pool) ──
     try:
         from captain_claw.flight_deck.flows_store import FlowStore

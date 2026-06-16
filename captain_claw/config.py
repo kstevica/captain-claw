@@ -848,6 +848,17 @@ class AutonomousWorkConfig(BaseModel):
     db_path: str = "~/.captain-claw/autonomy.db"
 
 
+class EventsConfig(BaseModel):
+    """Event-ingestion spine (#2) — pollers that feed the autonomous loop."""
+
+    poll_enabled: bool = False        # master switch for real source pollers
+    poll_seconds: int = 120           # how often the events loop ticks
+    calendar_enabled: bool = False    # poll Google Calendar
+    gmail_enabled: bool = False       # poll Gmail
+    calendar_interval_seconds: int = 300
+    gmail_interval_seconds: int = 300
+
+
 class CognitiveMetricsConfig(BaseModel):
     """Musical cognition tracking and measurement."""
 
@@ -1107,6 +1118,7 @@ class Config(BaseSettings):
     nervous_system: NervousSystemConfig = Field(default_factory=NervousSystemConfig)
     sister_session: SisterSessionConfig = Field(default_factory=SisterSessionConfig)
     autonomous_work: AutonomousWorkConfig = Field(default_factory=AutonomousWorkConfig)
+    events: EventsConfig = Field(default_factory=EventsConfig)
     cognitive_metrics: CognitiveMetricsConfig = Field(default_factory=CognitiveMetricsConfig)
     cognitive_tempo: CognitiveTempoConfig = Field(default_factory=CognitiveTempoConfig)
     cognitive_mode: CognitiveModeConfig = Field(default_factory=CognitiveModeConfig)

@@ -79,9 +79,46 @@ class EventsStore:
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedup
                     ON external_events(user_id, source, dedup_key)
                     WHERE dedup_key != '';
+
+                -- Per-(user, source) poll state: when we last polled + an opaque
+                -- cursor (calendar syncToken, gmail historyId, …).
+                CREATE TABLE IF NOT EXISTS poll_state (
+                    user_id      TEXT NOT NULL,
+                    source       TEXT NOT NULL,
+                    last_poll_at REAL NOT NULL DEFAULT 0,
+                    cursor       TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (user_id, source)
+                );
                 """
             )
             self._c().commit()
+
+    # ── poll state (for source adapters) ───────────────────────────────
+
+    def get_poll_state(self, user_id: str, source: str) -> dict[str, Any]:
+        uid = _norm_user(user_id)
+        with self._lock:
+            r = self._c().execute(
+                "SELECT last_poll_at, cursor FROM poll_state WHERE user_id = ? AND source = ?",
+                (uid, source),
+            ).fetchone()
+        return {"last_poll_at": float(r["last_poll_at"]) if r else 0.0,
+                "cursor": (r["cursor"] if r else "") or ""}
+
+    def set_poll_state(self, user_id: str, source: str, *, last_poll_at: float, cursor: str | None = None) -> None:
+        uid = _norm_user(user_id)
+        with self._lock:
+            conn = self._c()
+            existing = self.get_poll_state(uid, source)
+            cur = existing["cursor"] if cursor is None else cursor
+            conn.execute(
+                "INSERT INTO poll_state (user_id, source, last_poll_at, cursor)"
+                " VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(user_id, source) DO UPDATE SET"
+                " last_poll_at = excluded.last_poll_at, cursor = excluded.cursor",
+                (uid, source, last_poll_at, cur),
+            )
+            conn.commit()
 
     def add_event(
         self,
