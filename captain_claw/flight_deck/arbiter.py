@@ -260,7 +260,23 @@ async def maybe_run_arbiter(
         candidates = _gather_candidates(
             reflection, include_reflections=bool(cfg.get("reflection_to_intention")),
         )
-        emit("arbiter pass", f"trigger={trigger}, level={level}, {len(candidates)} candidate(s)")
+        # External-world events (#2): surface new events as candidates so the loop
+        # reacts to the user's world. Mark them surfaced so they're seen once.
+        event_ids: list[str] = []
+        try:
+            from captain_claw.flight_deck.events import get_store as _events_store
+            evstore = _events_store()
+            new_events = evstore.list_new(user_id, limit=5)
+            for ev in new_events:
+                candidates.append(f"(event · {ev['source']}) {ev['summary']}")
+                event_ids.append(ev["id"])
+            if event_ids:
+                evstore.mark(event_ids, "surfaced")
+        except Exception as exc:
+            _log.debug("event intake failed (non-fatal): %s", exc)
+
+        emit("arbiter pass", f"trigger={trigger}, level={level}, {len(candidates)} candidate(s)"
+             + (f", {len(event_ids)} event(s)" if event_ids else ""))
         if not candidates:
             emit("skipped: no candidates", "reflection produced no intentions/thought to act on", "warn")
             return {"ran": False, "reason": "no-candidates"}
