@@ -374,7 +374,10 @@ _BASNA_RUN_RE = _re.compile(
     r"\b(run|execute|start|launch|kick\s*off|spin\s*up|fire\s*up|begin|do|create)\b"
     r"[^.!?\n]{0,40}?\bbasn[aeu]\b"
     r"|\bbasn[aeu]\b[^.!?\n]{0,20}?\b(run|execute|start|launch)\b"
-    r"|\b(pokreni|izvr[šs]i|kreni)\b[^.!?\n]{0,40}?\bbasn[aeu]\b"
+    # Croatian: match the verb *stem* so infinitive / 1pl forms count too
+    # (pokreni / pokrenuti / pokrenimo, izvrši / izvršiti, …) — the bare imperative
+    # was missing "pokrenuti", which is why "pokrenuti basnu" never relayed.
+    r"|\b(pokren\w*|izvr[šs]\w*|kreni)\b[^.!?\n]{0,40}?\bbasn[aeu]\b"
     r")"
 )
 
