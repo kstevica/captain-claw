@@ -315,6 +315,16 @@ async def delete_session(session_id: str, user: dict = Depends(get_current_user)
     return {"deleted": True}
 
 
+@router.post("/sessions/{session_id}/cancel")
+async def cancel_session(session_id: str, user: dict = Depends(get_current_user)):
+    """Hard-stop an in-flight run (UI Stop button or the arbiter's stop_run)."""
+    sess = await get_db().get_basna_session(session_id, user["id"])
+    if not sess:
+        raise HTTPException(404, "session not found")
+    res = await _cancel_basna_run(session_id, user["id"])
+    return {"ok": True, **res}
+
+
 @router.get("/sessions/{session_id}/runs")
 async def list_runs(session_id: str, user: dict = Depends(get_current_user)):
     """Per-agent runs for a session — powers the run-trace UI and feedback thumbs."""
@@ -496,6 +506,43 @@ async def agent_get_file(body: _AgentReq):
 _MAX_AGENT_RUNS_PER_OWNER = 2          # concurrency cap (confirmed with user)
 _active_agent_runs: dict[str, set[str]] = {}   # owner_id → {session_id, …}
 _basna_agent_tasks: set = set()        # strong refs so tasks aren't GC'd
+_run_workers: dict[str, list[str]] = {}        # session_id → spawned worker slugs
+_agent_run_tasks: dict[str, Any] = {}          # session_id → asyncio.Task (agent runs)
+
+# Run-rate circuit breaker: stop a runaway burst of agent-started runs (e.g. a
+# recursion that slips past other guards) regardless of LLM judgment.
+_MAX_AGENT_RUNS_PER_WINDOW = 6         # max agent-started runs …
+_AGENT_RUN_WINDOW_SECONDS = 300.0      # … per owner in this rolling window (5 min)
+_agent_run_starts: dict[str, list[float]] = {}  # owner_id → [monotonic start times]
+
+
+async def _cancel_basna_run(session_id: str, owner: str) -> dict:
+    """Hard-stop a Basna run: kill its spawned workers (this tears the run's
+    compute down — the in-flight dispatch sees the sockets die and unwinds),
+    cancel the background task, free the concurrency slot, mark it cancelled.
+    Idempotent; safe for UI-started and agent-started runs alike."""
+    stopped = 0
+    for slug in list(_run_workers.get(session_id, []) or []):
+        try:
+            from captain_claw.flight_deck.server import _do_stop_process
+            _do_stop_process(slug)
+            stopped += 1
+        except Exception as exc:
+            log.warning("cancel: worker stop failed", slug=slug, error=str(exc))
+    t = _agent_run_tasks.get(session_id)
+    if t is not None and not t.done():
+        t.cancel()
+    runs = _active_agent_runs.get(owner)
+    if runs:
+        runs.discard(session_id)
+        if not runs:
+            _active_agent_runs.pop(owner, None)
+    try:
+        await get_db().update_basna_session(session_id, owner, status="cancelled")
+    except Exception as exc:
+        log.warning("cancel: status update failed", session_id=session_id, error=str(exc))
+    log.info("Basna run cancelled", session_id=session_id, stopped_workers=stopped)
+    return {"stopped_workers": stopped}
 
 
 class AgentStartReq(_AgentReq):
@@ -679,6 +726,22 @@ async def agent_start(body: AgentStartReq):
                       f"(limit {_MAX_AGENT_RUNS_PER_OWNER}). Wait for one to finish.",
         }
 
+    # Run-rate circuit breaker: a deterministic guard against a runaway burst
+    # (e.g. a recursion that slips past other checks). Trips regardless of LLM
+    # judgment, so it's the reliable floor under the arbiter's stop_run action.
+    now_mono = time.monotonic()
+    starts = _agent_run_starts.setdefault(owner, [])
+    starts[:] = [s for s in starts if now_mono - s < _AGENT_RUN_WINDOW_SECONDS]
+    if len(starts) >= _MAX_AGENT_RUNS_PER_WINDOW:
+        log.warning("Basna run-rate breaker tripped", owner=owner, recent=len(starts))
+        return {
+            "status": "rejected",
+            "reason": f"Run-rate limit hit ({_MAX_AGENT_RUNS_PER_WINDOW} runs / "
+                      f"{int(_AGENT_RUN_WINDOW_SECONDS / 60)} min) — cooling down to "
+                      f"prevent a runaway loop.",
+        }
+    starts.append(now_mono)
+
     db = get_db()
     # Full user record — carries `metadata.plan` so plan/quota checks during
     # spawn see the owner's real plan, not the free-tier default.
@@ -720,7 +783,13 @@ async def agent_start(body: AgentStartReq):
         user, session_id, title, exec_req, body.source_host, body.source_port, origin,
     ))
     _basna_agent_tasks.add(t)
-    t.add_done_callback(_basna_agent_tasks.discard)
+    _agent_run_tasks[session_id] = t
+
+    def _on_done(_t: Any, _sid: str = session_id) -> None:
+        _basna_agent_tasks.discard(_t)
+        _agent_run_tasks.pop(_sid, None)
+
+    t.add_done_callback(_on_done)
 
     return {"status": "running", "session_id": session_id, "title": title,
             "n_agents": len(selected)}
@@ -1515,6 +1584,8 @@ async def execute_route(
             spawned.append({"sel": sel, "arch": arch, "slug": res.slug,
                             "port": port, "auth": entry.get("web_auth", "")})
         _progress(sid, "spawn", f"Spawned {len(spawned)}/{len(plan)}; dispatching…")
+        # Track workers so a Stop/stop_run can hard-kill this run mid-flight.
+        _run_workers[body.session_id] = [sp["slug"] for sp in spawned]
 
         # 2) Dispatch the task to each agent in parallel; log each tool call live
         # and each agent's completion as it returns.
@@ -1634,6 +1705,7 @@ async def execute_route(
                 except Exception:
                     pass
             _save_process_registry(reg)
+        _run_workers.pop(body.session_id, None)
 
     # 4) Persist one run per agent (success scored below, once the truth is known).
     run_ids: list[int] = []

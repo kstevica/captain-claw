@@ -123,6 +123,18 @@ async def delete_session(session_id: str, user: dict = Depends(get_current_user)
     return {"ok": True}
 
 
+@router.post("/sessions/{session_id}/cancel")
+async def cancel_session(session_id: str, user: dict = Depends(get_current_user)):
+    """Stop a council deliberation — marks it cancelled so no further rounds run.
+    Council uses already-running agents (nothing ephemeral to kill), so a status
+    flag is the stop. The arbiter's stop_run and the UI Stop button both hit this."""
+    db = get_db()
+    ok = await db.update_council_session(session_id, user["id"], status="cancelled")
+    if not ok:
+        raise HTTPException(status_code=404, detail="Council session not found")
+    return {"ok": True, "status": "cancelled"}
+
+
 # ── Message endpoints ────────────────────────────────────────────
 
 @router.get("/sessions/{session_id}/messages")
