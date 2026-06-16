@@ -296,6 +296,18 @@ async def maybe_run_arbiter(
             dup_hint = "\n\nAlready proposed (do not repeat): " + "; ".join(
                 a["title"] for a in open_actions[:8]
             )
+        # Recently COMPLETED actions — so the arbiter doesn't re-propose reworded
+        # variants of work it already did (auto-fired actions go straight to done,
+        # leaving the "open" list, so they must be surfaced separately).
+        done_recent = [
+            a["title"] for a in store.list_actions(user_id, limit=40)
+            if a.get("status") in ("done", "dispatched", "undone")
+            and a.get("created_at", "") >= look_cutoff
+        ]
+        if done_recent:
+            dup_hint += ("\n\nAlready DONE recently (do NOT re-propose these or any "
+                         "reworded variant — move on to something else): "
+                         + "; ".join(done_recent[:10]))
         # Active runs the arbiter may target with stop_run (owner-scoped, live).
         active_runs = await _gather_active_runs(user_id)
         valid_targets = {r["session_id"] for r in active_runs}
