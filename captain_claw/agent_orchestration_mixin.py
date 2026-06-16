@@ -382,6 +382,19 @@ _BASNA_RUN_RE = _re.compile(
 )
 
 
+BASNA_COMMAND_HELP = (
+    "📣 *Basna* — a parallel multi-agent research ensemble.\n\n"
+    "It routes your task to the right specialist agents, runs them in parallel, "
+    "merges their answers (weighted by learned reliability), and delivers one "
+    "compiled result back here.\n\n"
+    "Usage:\n"
+    "  `/basna <task>` — start a run on <task>\n\n"
+    "Example:\n"
+    "  `/basna why are bears and rabbits the most common characters in jokes`\n\n"
+    "It runs in the background; you'll get the answer when it's ready."
+)
+
+
 def _detect_basna_run(user_input: str) -> str | None:
     """If the message is a 'run a Basna' command, return the task to run, else None."""
     if not user_input:
@@ -429,6 +442,25 @@ class AgentOrchestrationMixin:
     # complete() — main entry point
     # ------------------------------------------------------------------
 
+    async def run_basna_command(self, args: str) -> str:
+        """Shared `/basna` command body. With no args, returns help; otherwise
+        starts a Basna run via the tool (deterministic — no model in the loop).
+        Called from complete() (WhatsApp/other), the web slash handler, and the
+        Telegram dispatcher, so the command behaves identically on every channel."""
+        task = (args or "").strip()
+        if not task:
+            return BASNA_COMMAND_HELP
+        tools = getattr(self, "tools", None)
+        if tools is None or not tools.has_tool("basna"):
+            return "The Basna tool isn't available on this agent."
+        try:
+            res = await self._execute_tool_with_guard(
+                "basna", {"action": "start", "task": task}, "basna-command",
+            )
+            return (getattr(res, "content", "") or "").strip() or "Basna run started."
+        except Exception as exc:  # noqa: BLE001 — surface a clean message
+            return f"I couldn't start the Basna run: {exc}"
+
     async def complete(self, user_input: str) -> str:
         """Process user input and return response.
 
@@ -440,6 +472,16 @@ class AgentOrchestrationMixin:
         """
         if not self._initialized:
             await self.initialize()
+
+        # `/basna` slash command. Channels that intercept slash commands (web,
+        # Telegram) call run_basna_command directly; this branch covers the ones
+        # that funnel raw text through complete() (WhatsApp, API).
+        _st = user_input.strip()
+        if _st.lower() == "/basna" or _st.lower().startswith("/basna "):
+            _reply = await self.run_basna_command(_st[len("/basna"):])
+            self._add_session_message(role="user", content=user_input)
+            self._add_session_message(role="assistant", content=_reply)
+            return _reply
 
         # Deterministic Basna relay: when the user explicitly asks to run/execute
         # a Basna, hand the task straight to the `basna` tool rather than relying

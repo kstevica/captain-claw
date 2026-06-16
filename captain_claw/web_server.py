@@ -166,6 +166,7 @@ COMMANDS: list[dict[str, str]] = [
     {"command": "/monitor trace on|off", "description": "Toggle LLM trace logging", "category": "Monitor"},
     {"command": "/approve user telegram <token>", "description": "Approve a Telegram user pairing", "category": "Telegram"},
     {"command": "/orchestrate <request>", "description": "Run parallel multi-session orchestration", "category": "Orchestrator"},
+    {"command": "/basna <task>", "description": "Run a Basna — parallel multi-agent research ensemble", "category": "Orchestrator"},
     {"command": "/screenshot [prompt]", "description": "Capture screen and analyze with vision", "category": "Screen"},
     {"command": "/reflection", "description": "Show latest self-reflection", "category": "Reflections"},
     {"command": "/reflection generate", "description": "Trigger a new self-reflection", "category": "Reflections"},

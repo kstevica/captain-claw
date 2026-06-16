@@ -93,6 +93,7 @@ class RuntimeContext:
             "Run/search/install skill: /skill <name> [args] | /skill search <criteria> | /skill install <github-url> | /skill install <skill-name> [install-id]",
         ),
         ("cron", "Manage cron jobs: list, add, pause, resume, run"),
+        ("basna", "Run a Basna — parallel multi-agent research ensemble"),
         ("todo", "Manage to-do items"),
         ("contacts", "Manage address book contacts"),
         ("scripts", "Manage script memory"),

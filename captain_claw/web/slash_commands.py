@@ -323,6 +323,9 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
         elif cmd in ("/insights",):
             result = await handle_insights_command(server, args.strip())
 
+        elif cmd in ("/basna",):
+            result = await server.agent.run_basna_command(args.strip())
+
         elif cmd in ("/screenshot",):
             result = await _handle_screenshot_command(server, ws, args.strip())
 

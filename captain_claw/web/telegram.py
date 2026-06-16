@@ -341,7 +341,8 @@ async def _handle_telegram_message(server: WebServer, message: TelegramMessage) 
             await _tg_send(
                 server, message.chat_id,
                 "Send any text to chat with your session.\n"
-                "Commands: /clear, /history, /compact, /config, /session, /cron\n"
+                "Commands: /clear, /history, /compact, /config, /session, /cron, /basna\n"
+                "/basna <task> runs a parallel multi-agent research ensemble.\n"
                 "Each Telegram user has a dedicated session.",
                 reply_to_message_id=message.message_id,
             )
@@ -633,6 +634,9 @@ async def execute_telegram_command(
 
         if cmd in ("/cron",):
             return await _tg_handle_cron_command(server, args.strip(), user_agent)
+
+        if cmd in ("/basna",):
+            return await user_agent.run_basna_command(args.strip())
 
         if cmd in ("/orchestrate",):
             return None
