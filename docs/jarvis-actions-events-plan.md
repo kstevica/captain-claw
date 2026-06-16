@@ -96,8 +96,13 @@ the autonomy config (reuse `autonomy_config` / `AutonomousWorkConfig`) — a
 3. ✅ **Arbiter `tool_action`:** catalog in the prompt (grant-filtered), propose +
    validate (risk/reversibility from catalog) + dispatch via the rail with a
    grounded outcome. Propose-only for now.
-4. ⬜ **Grants UI + auto-fire:** per-user allowed-actions toggles; let granted
-   reversible/low-risk actions auto-fire (this is also the #3 trust hook).
+4. ✅ **Grants UI + auto-fire:** `granted_actions` gates auto-fire (not proposals);
+   `should_auto_dispatch` fires a tool_action only when granted + reversible +
+   low-risk + level ≥ act_low_risk. "Allowed actions" panel on the page. This is
+   the #3 trust hook in seed form.
+
+**#1 DONE.** Next: #2 event-ingestion spine (poll-first Calendar → Gmail → arbiter
+candidates), then #3 (extend the trust gate to per-action reliability), #4, #5.
 
 ### #1 files
 - New: `captain_claw/flight_deck/action_catalog.py`
