@@ -79,10 +79,24 @@ def should_auto_dispatch(cfg: dict[str, Any], action: dict[str, Any]) -> bool:
     # stop_run is a destructive safety action — always human-approved, never auto.
     if str(action.get("kind")) == "stop_run":
         return False
-    # tool_action stays propose-only until per-action grants (Phase 4) decide
-    # which catalog actions may auto-fire; reversibility/risk gating rides on that.
+    # tool_action auto-fires only when the user has GRANTED that action (or its
+    # grant category) AND it's reversible + low-risk + not human-only — the
+    # explicit trust hook. Everything else stays propose→approve.
     if str(action.get("kind")) == "tool_action":
-        return False
+        if not cfg.get("allow_auto_dispatch"):
+            return False
+        if str(cfg.get("autonomy_level") or "off") not in ("act_low_risk", "act"):
+            return False
+        from captain_claw.flight_deck.action_catalog import get_action
+        payload = action.get("payload") or {}
+        action_id = str(payload.get("action_id") or "")
+        spec = get_action(action_id)
+        if (not spec or spec.get("human_only")
+                or spec.get("reversibility") not in ("read_only", "reversible")
+                or spec.get("risk") != "low"):
+            return False
+        granted = set(cfg.get("granted_actions") or [])
+        return action_id in granted or spec.get("grant") in granted
     if not cfg.get("allow_auto_dispatch"):
         return False
     level = str(cfg.get("autonomy_level") or "off")

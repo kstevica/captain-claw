@@ -288,12 +288,11 @@ async def maybe_run_arbiter(
             run_hint = "\n\nActive runs (stop_run target = the session id):\n" + "\n".join(
                 f"- {r['session_id']} · {r['title']}" for r in active_runs[:8]
             )
-        # Concrete actions the arbiter may take via tool_action. Human-only and
-        # un-granted actions are withheld so they can't be proposed.
+        # Concrete actions the arbiter may PROPOSE via tool_action — any
+        # non-human-only catalog action. Whether one auto-fires vs awaits approval
+        # is decided downstream by grants + reversibility (should_auto_dispatch).
         from captain_claw.flight_deck.action_catalog import list_catalog
-        granted = set(cfg.get("granted_actions") or [])
-        catalog = [a for a in list_catalog() if not a["human_only"]
-                   and (not granted or a["grant"] in granted or a["id"] in granted)]
+        catalog = [a for a in list_catalog() if not a["human_only"]]
         cat_hint = ""
         if catalog:
             cat_hint = "\n\nAction catalog (tool_action — action_id + args filling required):\n" + "\n".join(

@@ -24,6 +24,7 @@ export interface AutonomyConfig {
   reflection_to_intention: boolean
   max_intentions_per_reflection: number
   reflection_intention_max_risk: string
+  granted_actions: string[]
   db_path: string
 }
 
@@ -67,6 +68,17 @@ export interface LogEntry {
   detail: string
 }
 
+export interface CatalogItem {
+  id: string
+  label: string
+  risk: string
+  reversibility: string   // read_only | reversible | irreversible
+  grant: string
+  human_only: boolean
+  args: string[]
+  required: string[]
+}
+
 // ── API helpers (auth token + 401 refresh, mirroring basnaStore) ──────
 
 function _headers(): Record<string, string> {
@@ -97,6 +109,7 @@ interface AutonomyStore {
   actions: AutonomyAction[]
   reliability: ReliabilityRow[]
   log: LogEntry[]
+  catalog: CatalogItem[]
   loading: boolean
   saving: boolean
   error: string | null
@@ -117,6 +130,7 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
   actions: [],
   reliability: [],
   log: [],
+  catalog: [],
   loading: false,
   saving: false,
   error: null,
@@ -124,22 +138,25 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
   loadAll: async () => {
     set({ loading: true, error: null })
     try {
-      const [cfgRes, actRes, relRes, logRes] = await Promise.all([
+      const [cfgRes, actRes, relRes, logRes, catRes] = await Promise.all([
         _authedFetch('/fd/autonomy/config'),
         _authedFetch('/fd/autonomy/actions?limit=100'),
         _authedFetch('/fd/autonomy/reliability'),
         _authedFetch('/fd/autonomy/log?limit=100'),
+        _authedFetch('/fd/autonomy/catalog'),
       ])
       const cfg = cfgRes.ok ? await cfgRes.json() : {}
       const act = actRes.ok ? await actRes.json() : {}
       const rel = relRes.ok ? await relRes.json() : {}
       const lg = logRes.ok ? await logRes.json() : {}
+      const cat = catRes.ok ? await catRes.json() : {}
       set({
         config: cfg.config ?? null,
         defaults: cfg.defaults ?? null,
         actions: act.actions ?? [],
         reliability: rel.reliability ?? [],
         log: lg.log ?? [],
+        catalog: cat.catalog ?? [],
       })
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) })

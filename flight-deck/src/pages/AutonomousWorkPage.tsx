@@ -146,7 +146,7 @@ function ActionCard({ action, onApprove, onReject, onUndo }: {
 
 export function AutonomousWorkPage() {
   const {
-    config, defaults, actions, reliability, log, loading, saving, error,
+    config, defaults, actions, reliability, log, catalog, loading, saving, error,
     loadAll, loadActions, setField, save, approve, reject, undo, nudge,
   } = useAutonomyStore()
   const [tab, setTab] = useState<'control' | 'activity'>('control')
@@ -323,6 +323,47 @@ export function AutonomousWorkPage() {
                 </select>
               </Field>
             </Section>
+
+            {/* Allowed actions (grants → auto-fire) */}
+            <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
+              <div className="mb-3">
+                <h3 className="text-sm font-semibold text-zinc-100">Allowed actions (auto-fire)</h3>
+                <p className="mt-0.5 text-[11px] text-zinc-500">
+                  Checked reversible, low-risk actions fire <em>without</em> approval once the level is ≥ Act (low risk).
+                  Everything else is always proposed for your approval.
+                </p>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                {catalog.map((a) => {
+                  const eligible = !a.human_only && a.risk === 'low'
+                    && (a.reversibility === 'reversible' || a.reversibility === 'read_only')
+                  const granted = (config.granted_actions || []).includes(a.id)
+                  return (
+                    <label key={a.id} className={`flex items-center gap-2 text-xs ${eligible ? '' : 'opacity-60'}`}>
+                      <input
+                        type="checkbox"
+                        disabled={!eligible}
+                        checked={eligible && granted}
+                        onChange={(e) => {
+                          const cur = new Set(config.granted_actions || [])
+                          if (e.target.checked) cur.add(a.id); else cur.delete(a.id)
+                          set('granted_actions', Array.from(cur))
+                        }}
+                        className="rounded border border-zinc-700 bg-zinc-950 accent-sky-600 disabled:opacity-40"
+                      />
+                      <span className="font-medium text-zinc-200">{a.label}</span>
+                      <span className="text-zinc-600">· {a.risk} · {a.reversibility}</span>
+                      {!eligible && (
+                        <span className="ml-auto rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-400">
+                          approval only
+                        </span>
+                      )}
+                    </label>
+                  )
+                })}
+                {catalog.length === 0 && <span className="text-xs text-zinc-600">No catalog actions.</span>}
+              </div>
+            </div>
 
             {/* Save bar */}
             <div className="flex items-center gap-3">
