@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from captain_claw.flight_deck.auth import get_optional_user
 from captain_claw.flight_deck.consciousness import (
-    _model_rank,
+    _agent_rank,
     _user_agents,
     agent_name_for_slug,
     get_store,
@@ -57,11 +57,7 @@ async def get_consciousness(
     # Don't leak the raw cursor internals to the UI.
     state.pop("cursor", None)
     # The agents this user could think through, strongest first.
-    agents = sorted(
-        _user_agents(uid),
-        key=lambda a: _model_rank(a.get("provider", ""), a.get("model", "")),
-        reverse=True,
-    )
+    agents = sorted(_user_agents(uid), key=_agent_rank, reverse=True)
     agent_dicts = [
         {"slug": a["slug"], "name": a["name"], "model": a.get("model", ""), "offline": False}
         for a in agents

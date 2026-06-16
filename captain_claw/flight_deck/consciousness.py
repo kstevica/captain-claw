@@ -416,6 +416,7 @@ def _user_agents(user_id: str) -> list[dict[str, Any]]:
             "auth": str(entry.get("web_auth", "") or ""),
             "provider": str(entry.get("provider", "") or ""),
             "model": str(entry.get("model", "") or ""),
+            "tier": str(entry.get("tier", "") or ""),
         })
     return out
 
@@ -446,6 +447,28 @@ def _model_rank(provider: str, model: str) -> int:
         if any(n in m for n in needles):
             return score
     return 40  # named but unrecognized — above the tiny tier, below the giants
+
+
+# Library tiers (instructions/archetypes.json), strongest → weakest. ``reason``
+# is the heaviest model; ``longctx`` shares balanced's model but is tuned for
+# context, not reasoning; ``fast`` is the cheap/high-volume tier.
+_TIER_RANK: dict[str, int] = {
+    "reason": 100,
+    "balanced": 80,
+    "longctx": 70,
+    "fast": 40,
+}
+
+
+def _agent_rank(agent: dict[str, Any]) -> int:
+    """Capability rank for picking the strongest brain. Prefers the agent's
+    Library tier (the explicit, intended ordering); falls back to the model-name
+    heuristic for agents with no recorded tier (spawned before it was persisted,
+    or registered externally)."""
+    tier = str(agent.get("tier", "") or "").strip().lower()
+    if tier in _TIER_RANK:
+        return _TIER_RANK[tier]
+    return _model_rank(str(agent.get("provider", "")), str(agent.get("model", "")))
 
 
 def agent_name_for_slug(slug: str) -> str:
@@ -730,10 +753,7 @@ async def _reflect(
     agents = delta.get("agents") or []
     if not agents:
         return None
-    ranked = sorted(
-        agents, key=lambda a: _model_rank(a.get("provider", ""), a.get("model", "")),
-        reverse=True,
-    )
+    ranked = sorted(agents, key=_agent_rank, reverse=True)
     if preferred_slug:
         pinned = [a for a in ranked if a["slug"] == preferred_slug]
         rest = [a for a in ranked if a["slug"] != preferred_slug]

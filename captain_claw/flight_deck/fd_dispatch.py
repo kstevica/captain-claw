@@ -41,16 +41,12 @@ _JUDGE_SYSTEM = (
 def _strongest_agent(user_id: str) -> dict[str, Any] | None:
     """The user's most capable running agent, or None if none are up."""
     try:
-        from captain_claw.flight_deck.consciousness import _model_rank, _user_agents
+        from captain_claw.flight_deck.consciousness import _agent_rank, _user_agents
 
         agents = _user_agents(user_id)
         if not agents:
             return None
-        return sorted(
-            agents,
-            key=lambda a: _model_rank(a.get("provider", ""), a.get("model", "")),
-            reverse=True,
-        )[0]
+        return sorted(agents, key=_agent_rank, reverse=True)[0]
     except Exception:
         return None
 

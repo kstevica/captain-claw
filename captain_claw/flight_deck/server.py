@@ -4786,6 +4786,7 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
         "pid": None,  # filled in below once Popen returns
         "provider": config.provider,
         "model": config.model,
+        "tier": config.tier,
         "owner": owner_id,
     }
     _save_process_registry(registry)
