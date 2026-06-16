@@ -49,7 +49,9 @@ _SYSTEM_PROMPT = (
     'is kind="materialize_schedule".\n'
     "Score honestly: a genuinely useful action is ~0.7-0.9; score low only if you "
     "doubt it helps. Don't invent busywork, and never duplicate the 'already "
-    "proposed' list."
+    "proposed' list.\n\n"
+    "Output ONLY the JSON array — no preamble, no reasoning, no markdown fences. "
+    "Your reply must start with '[' and end with ']'."
 )
 
 
@@ -102,18 +104,34 @@ def _gather_candidates(reflection: dict[str, Any], *, include_reflections: bool 
 
 
 def _parse_actions(text: str) -> list[dict[str, Any]]:
-    """Defensively pull a JSON array of action objects out of the LLM reply."""
+    """Defensively pull action objects out of the LLM reply — tolerates a prose
+    preamble, markdown fences, a bare array, or a single bare object."""
     txt = (text or "").strip()
+    # Strip ```json … ``` fences if present.
+    if txt.startswith("```"):
+        txt = re.sub(r"^```[a-zA-Z]*\n?", "", txt)
+        txt = re.sub(r"\n?```$", "", txt).strip()
+
+    data: Any = None
     try:
         data = json.loads(txt)
     except (ValueError, TypeError):
+        # Prose-then-JSON: grab the first array, else the first object.
         m = re.search(r"\[.*\]", txt, re.S)
-        if not m:
-            return []
-        try:
-            data = json.loads(m.group(0))
-        except (ValueError, TypeError):
-            return []
+        if m:
+            try:
+                data = json.loads(m.group(0))
+            except (ValueError, TypeError):
+                data = None
+        if data is None:
+            m2 = re.search(r"\{.*\}", txt, re.S)
+            if m2:
+                try:
+                    data = json.loads(m2.group(0))
+                except (ValueError, TypeError):
+                    data = None
+    if data is None:
+        return []
     if isinstance(data, dict):
         data = [data]
     if not isinstance(data, list):
@@ -237,7 +255,7 @@ async def maybe_run_arbiter(
                     Message(role="user", content=user_prompt),
                 ],
                 temperature=0.3,
-                max_tokens=600,
+                max_tokens=1500,
             )
         except Exception as exc:
             _log.warning("arbiter: no agent could rank: %s", exc)
