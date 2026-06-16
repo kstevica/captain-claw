@@ -22,6 +22,7 @@ from captain_claw.flight_deck.auth import get_optional_user
 from captain_claw.flight_deck.autonomy import (
     global_defaults,
     get_store,
+    record_human_feedback,
     resolve_config,
     save_config,
 )
@@ -99,7 +100,8 @@ async def approve_action_route(
     action = store.get_action(action_id)
     if not action or action.get("user_id") not in (uid, "local"):
         raise HTTPException(status_code=404, detail="Action not found")
-    return {"action": store.update_status(action_id, "queued")}
+    learned = record_human_feedback(uid, action, True)
+    return {"action": store.update_status(action_id, "queued"), "reliability": learned}
 
 
 @router.post("/actions/{action_id}/reject")
@@ -114,8 +116,10 @@ async def reject_action_route(
     action = store.get_action(action_id)
     if not action or action.get("user_id") not in (uid, "local"):
         raise HTTPException(status_code=404, detail="Action not found")
+    learned = record_human_feedback(uid, action, False)
     return {"action": store.update_status(
-        action_id, "rejected", outcome="fail", outcome_note="rejected by user")}
+        action_id, "rejected", outcome="fail", outcome_note="rejected by user"),
+        "reliability": learned}
 
 
 @router.get("/reliability")

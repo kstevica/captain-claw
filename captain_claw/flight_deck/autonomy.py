@@ -113,6 +113,31 @@ def save_config(user_id: str, overrides: dict[str, Any]) -> dict[str, Any]:
     return resolve_config(user_id)
 
 
+def record_human_feedback(
+    user_id: str, action: dict[str, Any], approved: bool,
+) -> dict[str, Any] | None:
+    """Turn an Approve/Reject into a reliability outcome (Topic 3, human side).
+
+    In propose mode this is the live learning signal: reliability for an action
+    ``(kind, domain)`` tracks whether proposals of that shape get *accepted*, so
+    the Arbiter stops surfacing kinds the user keeps rejecting. Gated by
+    ``learning_enabled`` and ``judge_mode`` (human|both). Best-effort: returns the
+    updated reliability row, or None when learning is off for this user.
+    """
+    cfg = resolve_config(user_id)
+    if not cfg.get("learning_enabled"):
+        return None
+    if str(cfg.get("judge_mode") or "both") not in ("human", "both"):
+        return None
+    return get_store().record_outcome(
+        user_id,
+        str(action.get("kind") or "nudge"),
+        str(action.get("domain") or "general"),
+        bool(approved),
+        seed=float(cfg.get("reliability_seed", 0.6)),
+    )
+
+
 # ── Store ──────────────────────────────────────────────────────────────
 
 class AutonomyStore:
@@ -332,6 +357,18 @@ class AutonomyStore:
                 (uid, iso_cutoff),
             ).fetchone()
         return int(r["n"] if r else 0)
+
+    def recent_titles(self, user_id: str, iso_cutoff: str) -> set[str]:
+        """Lowercased titles of any action created since ``iso_cutoff`` — used to
+        stop the Arbiter re-proposing something just rejected (or recently done)."""
+        uid = _norm_user(user_id)
+        with self._lock:
+            rows = self._c().execute(
+                "SELECT title FROM autonomous_actions"
+                " WHERE user_id = ? AND created_at >= ?",
+                (uid, iso_cutoff),
+            ).fetchall()
+        return {str(r["title"]).strip().lower() for r in rows if r["title"]}
 
     def open_actions(self, user_id: str) -> list[dict[str, Any]]:
         """In-flight actions — candidate/awaiting/queued/dispatched — used for the

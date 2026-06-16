@@ -120,5 +120,12 @@ High-risk requires approval.
    — ceiling is propose). `/fd/autonomy/nudge` now forces a pulse; page has "Run arbiter now".
    NOTE: Topic 4 delivered *through* the Arbiter into the unified ledger (one backlog, one approval
    surface) rather than as separate agent intentions.
-3. **Phase 3 — Topic 2 dispatch at act_low_risk:** auto-fire low-risk (future release; ceiling is propose for now).
-4. **Phase 4 — Topic 3 learning:** outcomes → reliability → Arbiter suppression (read-back already wired).
+3. **Phase 3 — Topic 2 dispatch at act_low_risk:** auto-fire low-risk. NOT built — deliberately
+   beyond the shipped `propose` ceiling; needs a ceiling-raise decision. Shared FD→agent dispatch
+   helper (extract Basna's `_notify_source_agent`) + LLM `judge_outcome` (the `judge_mode` auto/both
+   path) land here, calling the same `record_outcome` Phase 4 already uses.
+4. **Phase 4 — Topic 3 learning:** ✅ done. Approve/Reject → `record_human_feedback` →
+   `record_outcome` (gated by `learning_enabled` + `judge_mode` ∈ human/both). Arbiter reads weights
+   and suppresses kinds below `suppress_below_weight`; dedup now also blocks re-proposing a title seen
+   in the lookback window (so a rejected proposal doesn't boomerang). In propose mode reliability
+   tracks *proposal acceptance*; the LLM judge of *execution* outcomes is the Phase 3 auto/both path.

@@ -137,8 +137,12 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
   loadActions: async (status?: string) => {
     try {
       const qs = status ? `?status=${encodeURIComponent(status)}&limit=100` : '?limit=100'
-      const res = await _authedFetch(`/fd/autonomy/actions${qs}`)
-      if (res.ok) set({ actions: (await res.json()).actions ?? [] })
+      const [actRes, relRes] = await Promise.all([
+        _authedFetch(`/fd/autonomy/actions${qs}`),
+        _authedFetch('/fd/autonomy/reliability'),
+      ])
+      if (actRes.ok) set({ actions: (await actRes.json()).actions ?? [] })
+      if (relRes.ok) set({ reliability: (await relRes.json()).reliability ?? [] })
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) })
     }

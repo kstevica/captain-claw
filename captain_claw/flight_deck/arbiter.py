@@ -165,7 +165,14 @@ async def maybe_run_arbiter(
     open_actions = store.open_actions(user_id)
     if len(open_actions) >= int(cfg.get("max_concurrent_actions", 2)):
         return {"ran": False, "reason": "concurrent-cap"}
-    open_titles = {a["title"].strip().lower() for a in open_actions}
+    # Dedup against what's open AND anything proposed in the lookback window —
+    # so a just-rejected proposal doesn't immediately boomerang back.
+    look_cutoff = (
+        datetime.now(timezone.utc)
+        - timedelta(hours=int(cfg.get("candidate_lookback_hours", 24)))
+    ).isoformat()
+    dedup_titles = store.recent_titles(user_id, look_cutoff)
+    dedup_titles |= {a["title"].strip().lower() for a in open_actions}
 
     candidates = _gather_candidates(
         reflection, include_reflections=bool(cfg.get("reflection_to_intention")),
@@ -185,7 +192,7 @@ async def maybe_run_arbiter(
             f"{r['kind']}={r['weight']:.2f}" for r in reliability[:8]
         )
     dup_hint = ""
-    if open_titles:
+    if dedup_titles:
         dup_hint = "\n\nAlready proposed (do not repeat): " + "; ".join(
             a["title"] for a in open_actions[:8]
         )
@@ -225,7 +232,7 @@ async def maybe_run_arbiter(
     for a in actions:
         if a["score"] < min_score:
             continue
-        if a["title"].strip().lower() in open_titles:
+        if a["title"].strip().lower() in dedup_titles:
             continue
         if rel_by_kind.get(a["kind"], 1.0) < suppress_below:
             continue
