@@ -260,14 +260,12 @@ async def maybe_run_arbiter(
     # Everything else stays awaiting_approval (the propose path).
     from captain_claw.flight_deck.fd_dispatch import dispatch_action, should_auto_dispatch
 
+    # dispatch_action owns the dispatched→done transitions (and the async judge);
+    # on failure the row keeps its awaiting_approval status for the human.
     dispatched = False
     if should_auto_dispatch(cfg, row):
         disp = await dispatch_action(user_id, row)
-        if disp["ok"]:
-            store.update_status(row["id"], "dispatched", ref_id=disp["target"])
-            dispatched = True
-        else:
-            store.update_status(row["id"], "awaiting_approval", outcome_note=disp["note"])
+        dispatched = disp["ok"]
 
     _log.info("arbiter: %s %r (%s, score=%.2f) for %s",
               "dispatched" if dispatched else "proposed",

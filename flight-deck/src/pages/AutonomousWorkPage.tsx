@@ -133,7 +133,7 @@ function ActionCard({ action, onApprove, onReject }: {
 export function AutonomousWorkPage() {
   const {
     config, defaults, actions, reliability, loading, saving, error,
-    loadAll, setField, save, approve, reject, nudge,
+    loadAll, loadActions, setField, save, approve, reject, nudge,
   } = useAutonomyStore()
   const [tab, setTab] = useState<'control' | 'activity'>('control')
   const [savedAt, setSavedAt] = useState(false)
@@ -141,6 +141,14 @@ export function AutonomousWorkPage() {
   const [nudgeMsg, setNudgeMsg] = useState<string | null>(null)
 
   useEffect(() => { loadAll() }, [loadAll])
+
+  // While watching the Activity feed, poll — dispatched actions finish and get
+  // judged in the background, so status/outcome/reliability move without input.
+  useEffect(() => {
+    if (tab !== 'activity') return
+    const id = setInterval(() => { loadActions() }, 8000)
+    return () => clearInterval(id)
+  }, [tab, loadActions])
 
   const ceiling = config?.max_autonomy_level || 'propose'
   const allowedLevels = useMemo(() => {

@@ -1,14 +1,18 @@
-"""Efferent dispatch (Topic 2) — turning a chosen action into real work.
+"""Efferent dispatch (Topic 2) + execution-outcome judge (Topic 3, auto side).
 
-The Arbiter decides *what*; this module does it. Every kind is delivered the same
-way: as an instruction to the user's strongest running agent over its WebSocket,
-with ``trigger_response`` so the agent carries it out with its own tools and
-replies on the user's channel. This is the exact mechanism Basna uses to hand a
-finished run back to its originating agent (``_notify_source_agent``) — generalised.
+The Arbiter decides *what*; this module does it and then learns from how it went.
 
-Auto-dispatch only happens at autonomy_level ``act_low_risk``+ for low-risk kinds,
-or ``act`` for normal-risk; the Arbiter and the approve route gate it. Best-effort:
-if no agent is running, dispatch reports failure and the action stays pending.
+Dispatch hands an action to the user's strongest running agent — reusing Basna's
+proven ``_dispatch_one`` (send an instruction, stream the turn to completion,
+collect the final output + tool actions). It runs as a background task so the
+heartbeat / approve request returns immediately; the action moves to ``dispatched``
+now and to ``done`` when the turn finishes.
+
+When it finishes, an LLM judge decides whether the result accomplished the intent
+(gated by ``judge_mode`` ∈ auto/both and ``learning_enabled``) and records the
+outcome into reliability — the same signal a human Approve/Reject produces, so
+auto-fired actions learn too. The ledger always reflects what happened; reliability
+only moves when the dials allow it.
 """
 
 from __future__ import annotations
@@ -16,9 +20,22 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any
 
+from captain_claw.flight_deck.autonomy import get_store, resolve_config
+
 _log = logging.getLogger(__name__)
+
+# Keep references to in-flight judge tasks so they aren't garbage-collected.
+_BG_TASKS: set[asyncio.Task] = set()
+
+_JUDGE_SYSTEM = (
+    "You are a strict evaluator. Given an action the assistant was asked to carry "
+    "out and the result it produced, decide whether the action was accomplished. "
+    'Reply with ONLY JSON: {"success": true|false, "why": "one short sentence"}. '
+    "Be honest: partial, refused, or error results are failures."
+)
 
 
 def _strongest_agent(user_id: str) -> dict[str, Any] | None:
@@ -55,54 +72,6 @@ def _instruction_for(action: dict[str, Any]) -> str:
     return f"[Autonomous task] {title}\n\n{rationale}".strip()
 
 
-async def deliver_to_agent(agent: dict[str, Any], content: str) -> bool:
-    """Send a notification to one agent's WebSocket so it acts and replies to the
-    user. Mirrors Basna's ``_notify_source_agent``. Returns True on delivery."""
-    import websockets
-
-    port = int(agent.get("port") or 0)
-    if not port:
-        return False
-    host = agent.get("host") or "localhost"
-    auth = str(agent.get("auth") or "")
-    params = f"?token={auth}" if auth else ""
-    url = f"ws://{host}:{port}/ws{params}"
-    payload = {"type": "notification", "content": content, "trigger_response": True}
-    try:
-        async with websockets.connect(url, open_timeout=10, close_timeout=5) as ws:
-            welcome = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
-            if welcome.get("type") != "welcome":
-                return False
-            while True:  # skip the session replay before our message
-                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
-                if msg.get("type") == "replay_done":
-                    break
-            await ws.send(json.dumps(payload))
-            try:
-                await asyncio.wait_for(ws.recv(), timeout=30)
-            except asyncio.TimeoutError:
-                pass
-        return True
-    except Exception as exc:
-        _log.warning("dispatch delivery failed (port=%s): %s", port, exc)
-        return False
-
-
-async def dispatch_action(user_id: str, action: dict[str, Any]) -> dict[str, Any]:
-    """Execute one action by handing it to the strongest agent. Returns
-    ``{ok, target, note}`` — ok=False (with a note) when no agent is reachable."""
-    agent = _strongest_agent(user_id)
-    if not agent:
-        return {"ok": False, "target": "", "note": "no running agent to dispatch to"}
-    content = _instruction_for(action)
-    ok = await deliver_to_agent(agent, content)
-    return {
-        "ok": ok,
-        "target": agent.get("slug", "") if ok else "",
-        "note": "" if ok else "agent delivery failed",
-    }
-
-
 def should_auto_dispatch(cfg: dict[str, Any], action: dict[str, Any]) -> bool:
     """Whether this action may fire WITHOUT human approval, per the dials.
 
@@ -123,3 +92,115 @@ def should_auto_dispatch(cfg: dict[str, Any], action: dict[str, Any]) -> bool:
             return not cfg.get("high_risk_requires_approval", True)
         return True
     return False
+
+
+async def _judge_outcome(
+    user_id: str, action: dict[str, Any], output: str,
+) -> dict[str, Any]:
+    """LLM verdict on whether ``output`` accomplished ``action``. Returns
+    ``{"success": bool, "why": str}``; defaults to failure if unparseable."""
+    agent = _strongest_agent(user_id)
+    if not agent:
+        return {"success": False, "why": "no agent to judge with"}
+    try:
+        from captain_claw.games.remote_provider import RemoteLLMProvider
+        from captain_claw.llm import Message
+
+        provider = RemoteLLMProvider(
+            host=agent["host"], port=agent["port"], auth=agent["auth"],
+            name=agent.get("name", ""),
+        )
+        user_prompt = (
+            f"Intended action ({action.get('kind')}): {action.get('title')}\n"
+            f"Why: {action.get('rationale')}\n\n"
+            f"Result the assistant produced:\n{(output or '(no output)')[:4000]}\n\n"
+            "Did it accomplish the intent?"
+        )
+        resp = await provider.complete(
+            messages=[
+                Message(role="system", content=_JUDGE_SYSTEM),
+                Message(role="user", content=user_prompt),
+            ],
+            temperature=0.0,
+            max_tokens=200,
+        )
+    except Exception as exc:
+        return {"success": False, "why": f"judge error: {exc}"}
+
+    txt = (resp.content or "").strip()
+    try:
+        data = json.loads(txt)
+    except (ValueError, TypeError):
+        m = re.search(r"\{.*\}", txt, re.S)
+        data = {}
+        if m:
+            try:
+                data = json.loads(m.group(0))
+            except (ValueError, TypeError):
+                data = {}
+    return {
+        "success": bool(data.get("success", False)),
+        "why": str(data.get("why", "") or "")[:500],
+    }
+
+
+async def _execute_and_judge(user_id: str, action: dict[str, Any], agent: dict[str, Any]) -> None:
+    """Background: run the action on ``agent``, judge the result, learn, mark done.
+    Never raises — it's fire-and-forget off the heartbeat / approve request."""
+    store = get_store()
+    aid = action["id"]
+    try:
+        from captain_claw.flight_deck.basna_routes import _dispatch_one
+
+        res = await _dispatch_one(
+            int(agent.get("port") or 0), str(agent.get("auth", "")),
+            _instruction_for(action), 180.0,
+        )
+        output = str(res.get("output") or "").strip()
+        cfg = resolve_config(user_id)
+        learn = bool(cfg.get("learning_enabled")) and \
+            str(cfg.get("judge_mode") or "both") in ("auto", "both")
+
+        if not res.get("ok"):
+            success: bool | None = False
+            note = str(res.get("error") or "execution failed")[:500]
+        elif learn:
+            verdict = await _judge_outcome(user_id, action, output)
+            success = bool(verdict["success"])
+            note = verdict["why"] or output[:300]
+        else:
+            success = None  # nothing judged it; record the result, no verdict
+            note = output[:500]
+
+        if learn and success is not None:
+            store.record_outcome(
+                user_id, str(action.get("kind") or "nudge"),
+                str(action.get("domain") or "general"), bool(success),
+                seed=float(cfg.get("reliability_seed", 0.6)),
+            )
+        outcome = None if success is None else ("success" if success else "fail")
+        store.update_status(aid, "done", outcome=outcome, outcome_note=note)
+        _log.info("dispatch: action %s done (outcome=%s)", aid, outcome)
+    except Exception as exc:
+        _log.warning("dispatch execute/judge failed for %s: %s", aid, exc)
+        store.update_status(aid, "done", outcome="fail", outcome_note=f"dispatch error: {exc}"[:500])
+
+
+async def dispatch_action(user_id: str, action: dict[str, Any]) -> dict[str, Any]:
+    """Execute one action by handing it to the strongest agent, in the background.
+    Marks the action ``dispatched`` and spawns the run+judge task. Returns
+    ``{ok, target, note}`` — ok=False (note set) when no agent is reachable, and
+    the action keeps its prior status for the caller to resolve."""
+    agent = _strongest_agent(user_id)
+    if not agent:
+        return {"ok": False, "target": "", "note": "no running agent to dispatch to"}
+    store = get_store()
+    store.update_status(action["id"], "dispatched", ref_id=agent.get("slug", ""))
+    try:
+        task = asyncio.create_task(_execute_and_judge(user_id, dict(action), agent))
+        _BG_TASKS.add(task)
+        task.add_done_callback(_BG_TASKS.discard)
+    except RuntimeError:
+        # No running loop (e.g. a sync test harness): execute inline best-effort.
+        await _execute_and_judge(user_id, dict(action), agent)
+    return {"ok": True, "target": agent.get("slug", ""), "note": ""}

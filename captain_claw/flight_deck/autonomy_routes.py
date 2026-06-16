@@ -105,11 +105,12 @@ async def approve_action_route(
     from captain_claw.flight_deck.fd_dispatch import dispatch_action
 
     disp = await dispatch_action(uid, action)
-    if disp["ok"]:
-        updated = store.update_status(action_id, "dispatched", ref_id=disp["target"])
-    else:
-        updated = store.update_status(action_id, "queued", outcome_note=disp["note"])
-    return {"action": updated, "reliability": learned, "dispatch": disp}
+    if not disp["ok"]:
+        # No agent to run it — park as queued for a later pass.
+        store.update_status(action_id, "queued", outcome_note=disp["note"])
+    # On success dispatch_action already moved it to dispatched (and the async
+    # judge will move it to done) — just return the current row.
+    return {"action": store.get_action(action_id), "reliability": learned, "dispatch": disp}
 
 
 @router.post("/actions/{action_id}/reject")

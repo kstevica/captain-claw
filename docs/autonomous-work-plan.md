@@ -127,8 +127,11 @@ High-risk requires approval.
    gates auto-fire (act_low_risk → low_risk_kinds ∩ risk=low; act → non-high). Wired into the Arbiter
    (auto-dispatch low-risk → status `dispatched`, else `awaiting_approval`) and the approve route
    (human approve → dispatch, fallback `queued` if no agent). `low_risk_kinds` default = `["nudge"]`.
-   KNOWN GAP: auto-dispatched low-risk actions get no learning signal yet (no execution-outcome
-   judge / result callback) — the `judge_mode` auto/both execution path is the remaining follow-up.
+   Execution-outcome judge ✅ wired: dispatch reuses Basna's `_dispatch_one` to run the action and
+   capture output (background task → `dispatched` then `done`), then an LLM `_judge_outcome` decides
+   success (gated by `judge_mode` ∈ auto/both + `learning_enabled`) and records it into reliability —
+   so auto-fired actions learn too, not just human-approved ones. Ledger always reflects what happened;
+   reliability moves only when the dials allow. Activity tab polls (8s) so background completions show.
 4. **Phase 4 — Topic 3 learning:** ✅ done. Approve/Reject → `record_human_feedback` →
    `record_outcome` (gated by `learning_enabled` + `judge_mode` ∈ human/both). Arbiter reads weights
    and suppresses kinds below `suppress_below_weight`; dedup now also blocks re-proposing a title seen
