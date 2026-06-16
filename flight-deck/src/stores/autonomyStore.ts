@@ -81,6 +81,24 @@ export interface EventEntry {
   ingested_at: string
 }
 
+export interface PlanStep {
+  idx: number
+  title: string
+  kind: string
+  action_id: string
+  status: string   // pending | running | done | failed | skipped
+  result: string
+}
+
+export interface Plan {
+  id: string
+  goal: string
+  status: string   // active | paused | done | failed | abandoned
+  steps: PlanStep[]
+  note: string
+  created_at: string
+}
+
 export interface CatalogItem {
   id: string
   label: string
@@ -124,6 +142,7 @@ interface AutonomyStore {
   log: LogEntry[]
   catalog: CatalogItem[]
   events: EventEntry[]
+  plans: Plan[]
   loading: boolean
   saving: boolean
   error: string | null
@@ -136,6 +155,9 @@ interface AutonomyStore {
   reject: (id: string) => Promise<void>
   undo: (id: string) => Promise<void>
   nudge: () => Promise<{ proposed: number; reason?: string }>
+  createPlan: (goal: string) => Promise<void>
+  advancePlan: (id: string) => Promise<void>
+  abandonPlan: (id: string) => Promise<void>
 }
 
 export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
@@ -146,6 +168,7 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
   log: [],
   catalog: [],
   events: [],
+  plans: [],
   loading: false,
   saving: false,
   error: null,
@@ -153,13 +176,14 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
   loadAll: async () => {
     set({ loading: true, error: null })
     try {
-      const [cfgRes, actRes, relRes, logRes, catRes, evtRes] = await Promise.all([
+      const [cfgRes, actRes, relRes, logRes, catRes, evtRes, plnRes] = await Promise.all([
         _authedFetch('/fd/autonomy/config'),
         _authedFetch('/fd/autonomy/actions?limit=100'),
         _authedFetch('/fd/autonomy/reliability'),
         _authedFetch('/fd/autonomy/log?limit=100'),
         _authedFetch('/fd/autonomy/catalog'),
         _authedFetch('/fd/events?limit=50'),
+        _authedFetch('/fd/autonomy/plans?limit=50'),
       ])
       const cfg = cfgRes.ok ? await cfgRes.json() : {}
       const act = actRes.ok ? await actRes.json() : {}
@@ -167,6 +191,7 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
       const lg = logRes.ok ? await logRes.json() : {}
       const cat = catRes.ok ? await catRes.json() : {}
       const ev = evtRes.ok ? await evtRes.json() : {}
+      const pl = plnRes.ok ? await plnRes.json() : {}
       set({
         config: cfg.config ?? null,
         defaults: cfg.defaults ?? null,
@@ -175,6 +200,7 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
         log: lg.log ?? [],
         catalog: cat.catalog ?? [],
         events: ev.events ?? [],
+        plans: pl.plans ?? [],
       })
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) })
@@ -248,5 +274,22 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
     await get().loadActions()
     const arb = data.arbiter || {}
     return { proposed: arb.proposed ?? 0, reason: arb.reason ?? data.pulse ?? data.reason }
+  },
+
+  createPlan: async (goal: string) => {
+    const res = await _authedFetch('/fd/autonomy/plans', { method: 'POST', body: JSON.stringify({ goal }) })
+    if (!res.ok) throw new Error((await res.text()) || 'plan creation failed')
+    const pl = await _authedFetch('/fd/autonomy/plans?limit=50')
+    if (pl.ok) set({ plans: (await pl.json()).plans ?? [] })
+  },
+
+  advancePlan: async (id: string) => {
+    const res = await _authedFetch(`/fd/autonomy/plans/${encodeURIComponent(id)}/advance`, { method: 'POST' })
+    if (res.ok) { const pl = await _authedFetch('/fd/autonomy/plans?limit=50'); if (pl.ok) set({ plans: (await pl.json()).plans ?? [] }) }
+  },
+
+  abandonPlan: async (id: string) => {
+    const res = await _authedFetch(`/fd/autonomy/plans/${encodeURIComponent(id)}/abandon`, { method: 'POST' })
+    if (res.ok) { const pl = await _authedFetch('/fd/autonomy/plans?limit=50'); if (pl.ok) set({ plans: (await pl.json()).plans ?? [] }) }
   },
 }))

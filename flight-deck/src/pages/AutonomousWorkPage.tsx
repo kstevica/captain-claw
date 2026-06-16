@@ -146,9 +146,12 @@ function ActionCard({ action, onApprove, onReject, onUndo }: {
 
 export function AutonomousWorkPage() {
   const {
-    config, defaults, actions, reliability, log, catalog, events, loading, saving, error,
+    config, defaults, actions, reliability, log, catalog, events, plans, loading, saving, error,
     loadAll, loadActions, setField, save, approve, reject, undo, nudge,
+    createPlan, advancePlan, abandonPlan,
   } = useAutonomyStore()
+  const [planGoal, setPlanGoal] = useState('')
+  const [creatingPlan, setCreatingPlan] = useState(false)
   const [tab, setTab] = useState<'control' | 'activity'>('control')
   const [savedAt, setSavedAt] = useState(false)
   const [nudging, setNudging] = useState(false)
@@ -422,6 +425,65 @@ export function AutonomousWorkPage() {
                 Run arbiter now
               </button>
               {nudgeMsg && <span className="text-xs text-zinc-400">{nudgeMsg}</span>}
+            </div>
+
+            {/* Plans (#4) */}
+            <div className="flex flex-col gap-2">
+              <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Plans</h2>
+              <div className="flex gap-2">
+                <input
+                  value={planGoal}
+                  onChange={(e) => setPlanGoal(e.target.value)}
+                  placeholder="Give it a goal, e.g. 'prep for the FRC AGM'…"
+                  className={`${inputCls} flex-1`}
+                />
+                <button
+                  onClick={async () => {
+                    if (!planGoal.trim()) return
+                    setCreatingPlan(true)
+                    try { await createPlan(planGoal.trim()); setPlanGoal('') }
+                    catch { /* surfaced via error */ }
+                    finally { setCreatingPlan(false) }
+                  }}
+                  disabled={creatingPlan || !planGoal.trim()}
+                  className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40"
+                >
+                  {creatingPlan ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                  Plan it
+                </button>
+              </div>
+              {plans.map((p) => (
+                <div key={p.id} className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-3">
+                  <div className="mb-1 flex items-center gap-2 text-[11px]">
+                    <span className={`rounded-full px-2 py-0.5 ${STATUS_CHIP[p.status] || 'bg-zinc-800 text-zinc-300'}`}>{p.status}</span>
+                    <span className="font-medium text-zinc-100">{p.goal}</span>
+                    <span className="ml-auto text-zinc-600">{relTime(p.created_at)}</span>
+                  </div>
+                  <ol className="ml-4 list-decimal space-y-0.5 text-xs">
+                    {p.steps.map((s) => (
+                      <li key={s.idx} className={
+                        s.status === 'done' ? 'text-emerald-600 dark:text-emerald-400'
+                          : s.status === 'failed' ? 'text-rose-600 dark:text-rose-400'
+                          : s.status === 'skipped' ? 'text-zinc-600 line-through' : 'text-zinc-300'}>
+                        {s.title} <span className="text-zinc-600">· {s.kind}{s.action_id ? `:${s.action_id}` : ''} · {s.status}</span>
+                      </li>
+                    ))}
+                  </ol>
+                  {(p.status === 'active' || p.status === 'paused') && (
+                    <div className="mt-2 flex gap-2">
+                      <button onClick={() => advancePlan(p.id)}
+                        className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-500">
+                        Run next step
+                      </button>
+                      <button onClick={() => abandonPlan(p.id)}
+                        className="rounded-lg border border-zinc-700 px-3 py-1 text-xs font-medium text-zinc-200 hover:bg-zinc-800">
+                        Abandon
+                      </button>
+                    </div>
+                  )}
+                  {p.note && <p className="mt-1 text-[11px] text-zinc-500">{p.note}</p>}
+                </div>
+              ))}
             </div>
 
             {pending.length > 0 && (
