@@ -129,13 +129,23 @@ def record_human_feedback(
         return None
     if str(cfg.get("judge_mode") or "both") not in ("human", "both"):
         return None
+    kind, domain = reliability_key(action)
     return get_store().record_outcome(
-        user_id,
-        str(action.get("kind") or "nudge"),
-        str(action.get("domain") or "general"),
-        bool(approved),
+        user_id, kind, domain, bool(approved),
         seed=float(cfg.get("reliability_seed", 0.6)),
     )
+
+
+def reliability_key(action: dict[str, Any]) -> tuple[str, str]:
+    """The (kind, domain) a reliability outcome is recorded under. For tool_action
+    we key by the catalog action_id so each concrete action earns trust on its own
+    (calendar.hold independent of mail.draft); other kinds key by their domain."""
+    kind = str(action.get("kind") or "nudge")
+    if kind == "tool_action":
+        aid = str((action.get("payload") or {}).get("action_id") or "").strip()
+        if aid:
+            return kind, aid
+    return kind, str(action.get("domain") or "general")
 
 
 # ── Store ──────────────────────────────────────────────────────────────
@@ -515,6 +525,17 @@ class AutonomyStore:
             "successes": successes, "fails": fails, "runs": successes + fails,
             "weight": weight, "updated_at": now,
         }
+
+    def reliability_for(self, user_id: str, kind: str, domain: str) -> dict[str, Any] | None:
+        """The learned reliability row for one (kind, domain), or None — the trust
+        gate reads this to decide whether an action has earned auto-fire."""
+        uid = _norm_user(user_id)
+        with self._lock:
+            r = self._c().execute(
+                "SELECT * FROM autonomy_reliability WHERE user_id = ? AND kind = ? AND domain = ?",
+                (uid, kind, (domain or "general").strip() or "general"),
+            ).fetchone()
+        return dict(r) if r else None
 
     def list_reliability(self, user_id: str) -> list[dict[str, Any]]:
         uid = _norm_user(user_id)

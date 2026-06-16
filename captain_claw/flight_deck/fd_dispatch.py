@@ -95,8 +95,21 @@ def should_auto_dispatch(cfg: dict[str, Any], action: dict[str, Any]) -> bool:
                 or spec.get("reversibility") not in ("read_only", "reversible")
                 or spec.get("risk") != "low"):
             return False
+        # Manual override: an explicit grant trusts it outright.
         granted = set(cfg.get("granted_actions") or [])
-        return action_id in granted or spec.get("grant") in granted
+        if action_id in granted or spec.get("grant") in granted:
+            return True
+        # Earned trust (#3): auto-promote once this specific action's learned
+        # reliability clears the bar over enough runs. Demotes automatically when
+        # the weight falls back below threshold (fails count double in the weight).
+        try:
+            rel = get_store().reliability_for(str(action.get("user_id") or ""), "tool_action", action_id)
+            if rel and float(rel.get("weight", 0)) >= float(cfg.get("trust_threshold", 0.85)) \
+                    and int(rel.get("runs", 0)) >= int(cfg.get("trust_min_runs", 3)):
+                return True
+        except Exception:
+            pass
+        return False
     if not cfg.get("allow_auto_dispatch"):
         return False
     level = str(cfg.get("autonomy_level") or "off")
@@ -270,8 +283,9 @@ async def _dispatch_tool_action(user_id: str, action: dict[str, Any]) -> dict[st
 
     cfg = resolve_config(user_id)
     if cfg.get("learning_enabled") and str(cfg.get("judge_mode") or "both") in ("auto", "both"):
-        store.record_outcome(user_id, "tool_action", str(action.get("domain") or "general"),
-                             ok, seed=float(cfg.get("reliability_seed", 0.6)))
+        from captain_claw.flight_deck.autonomy import reliability_key
+        rk, rd = reliability_key(action)  # per-action-id trust bucket
+        store.record_outcome(user_id, rk, rd, ok, seed=float(cfg.get("reliability_seed", 0.6)))
     store.update_status(action["id"], "done",
                         outcome="success" if ok else "fail", outcome_note=note)
     store.log(user_id, f"tool_action: {action_id}", note, "info" if ok else "warn")

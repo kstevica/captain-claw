@@ -21,6 +21,8 @@ export interface AutonomyConfig {
   judge_mode: string              // auto | human | both
   reliability_seed: number
   suppress_below_weight: number
+  trust_threshold: number
+  trust_min_runs: number
   reflection_to_intention: boolean
   max_intentions_per_reflection: number
   reflection_intention_max_risk: string

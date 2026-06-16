@@ -338,6 +338,18 @@ export function AutonomousWorkPage() {
                   const eligible = !a.human_only && a.risk === 'low'
                     && (a.reversibility === 'reversible' || a.reversibility === 'read_only')
                   const granted = (config.granted_actions || []).includes(a.id)
+                  // Trust rung from learned reliability (kind=tool_action, domain=action id).
+                  const rel = reliability.find((r) => r.kind === 'tool_action' && r.domain === a.id)
+                  let badge = { text: 'approval only', cls: 'bg-zinc-800 text-zinc-400' }
+                  if (eligible) {
+                    if (granted) badge = { text: 'auto · granted', cls: 'bg-sky-50 text-sky-700 dark:bg-sky-950/40 dark:text-sky-400' }
+                    else if (rel && rel.weight >= (config.trust_threshold ?? 0.85) && rel.runs >= (config.trust_min_runs ?? 3))
+                      badge = { text: `auto · trusted ${rel.weight.toFixed(2)}`, cls: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400' }
+                    else if (rel && rel.weight < (config.suppress_below_weight ?? 0.25))
+                      badge = { text: `suppressed ${rel.weight.toFixed(2)}`, cls: 'bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-400' }
+                    else if (rel) badge = { text: `learning ${rel.weight.toFixed(2)} · ${rel.runs}✓✗`, cls: 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400' }
+                    else badge = { text: 'propose', cls: 'bg-zinc-800 text-zinc-400' }
+                  }
                   return (
                     <label key={a.id} className={`flex items-center gap-2 text-xs ${eligible ? '' : 'opacity-60'}`}>
                       <input
@@ -353,11 +365,7 @@ export function AutonomousWorkPage() {
                       />
                       <span className="font-medium text-zinc-200">{a.label}</span>
                       <span className="text-zinc-600">· {a.risk} · {a.reversibility}</span>
-                      {!eligible && (
-                        <span className="ml-auto rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-400">
-                          approval only
-                        </span>
-                      )}
+                      <span className={`ml-auto rounded-full px-2 py-0.5 text-[10px] ${badge.cls}`}>{badge.text}</span>
                     </label>
                   )
                 })}

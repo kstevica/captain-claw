@@ -834,6 +834,14 @@ class AutonomousWorkConfig(BaseModel):
     reliability_seed: float = 0.6
     suppress_below_weight: float = 0.25         # stop proposing kinds that keep failing
 
+    # ── #3 Trust ladder — earn auto-fire by demonstrated reliability ──
+    # A reversible, low-risk tool_action auto-promotes to auto-fire once its
+    # learned reliability ≥ trust_threshold over ≥ trust_min_runs outcomes — so
+    # trust is earned via your approvals, and lost (demoted) when it starts failing.
+    # Explicit grants remain a manual override that skips the earning.
+    trust_threshold: float = 0.85
+    trust_min_runs: int = 3
+
     # ── Topic 4 — Reflections → intentions ──
     reflection_to_intention: bool = False
     max_intentions_per_reflection: int = 2

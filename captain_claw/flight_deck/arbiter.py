@@ -283,8 +283,16 @@ async def maybe_run_arbiter(
 
         reliability = store.list_reliability(user_id)
         rel_by_kind: dict[str, float] = {}
+        rel_by_pair: dict[tuple[str, str], float] = {}   # (kind, domain) — per-action for tool_action
         for r in reliability:
             rel_by_kind[r["kind"]] = min(rel_by_kind.get(r["kind"], 1.0), float(r["weight"]))
+            rel_by_pair[(r["kind"], r["domain"])] = float(r["weight"])
+
+        def _weight_for(a: dict[str, Any]) -> float:
+            # tool_action trust/suppression is per concrete action_id; others per kind.
+            if a["kind"] == "tool_action" and a.get("action_id"):
+                return rel_by_pair.get(("tool_action", a["action_id"]), 1.0)
+            return rel_by_kind.get(a["kind"], 1.0)
 
         rel_hint = ""
         if reliability:
@@ -374,8 +382,10 @@ async def maybe_run_arbiter(
             if a["title"].strip().lower() in dedup_titles:
                 emit("dropped: already proposed", a["title"], routine=True)
                 continue
-            if rel_by_kind.get(a["kind"], 1.0) < suppress_below:
-                emit("dropped: kind suppressed", f"{a['kind']} weight {rel_by_kind.get(a['kind']):.2f} < {suppress_below}", routine=True)
+            if _weight_for(a) < suppress_below:
+                emit("dropped: suppressed (low reliability)",
+                     f"{a['kind']}{':' + a['action_id'] if a.get('action_id') else ''} "
+                     f"weight {_weight_for(a):.2f} < {suppress_below}", routine=True)
                 continue
             if a["kind"] == "stop_run" and a.get("target") not in valid_targets:
                 # Don't let it stop a run it can't see (or hallucinate a session id).
