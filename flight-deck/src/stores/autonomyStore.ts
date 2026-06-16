@@ -59,6 +59,14 @@ export interface ReliabilityRow {
   updated_at: string
 }
 
+export interface LogEntry {
+  id: number
+  ts: string
+  level: string   // info | warn | error
+  event: string
+  detail: string
+}
+
 // ── API helpers (auth token + 401 refresh, mirroring basnaStore) ──────
 
 function _headers(): Record<string, string> {
@@ -88,6 +96,7 @@ interface AutonomyStore {
   defaults: AutonomyConfig | null
   actions: AutonomyAction[]
   reliability: ReliabilityRow[]
+  log: LogEntry[]
   loading: boolean
   saving: boolean
   error: string | null
@@ -106,6 +115,7 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
   defaults: null,
   actions: [],
   reliability: [],
+  log: [],
   loading: false,
   saving: false,
   error: null,
@@ -113,19 +123,22 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
   loadAll: async () => {
     set({ loading: true, error: null })
     try {
-      const [cfgRes, actRes, relRes] = await Promise.all([
+      const [cfgRes, actRes, relRes, logRes] = await Promise.all([
         _authedFetch('/fd/autonomy/config'),
         _authedFetch('/fd/autonomy/actions?limit=100'),
         _authedFetch('/fd/autonomy/reliability'),
+        _authedFetch('/fd/autonomy/log?limit=100'),
       ])
       const cfg = cfgRes.ok ? await cfgRes.json() : {}
       const act = actRes.ok ? await actRes.json() : {}
       const rel = relRes.ok ? await relRes.json() : {}
+      const lg = logRes.ok ? await logRes.json() : {}
       set({
         config: cfg.config ?? null,
         defaults: cfg.defaults ?? null,
         actions: act.actions ?? [],
         reliability: rel.reliability ?? [],
+        log: lg.log ?? [],
       })
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) })
@@ -137,12 +150,14 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
   loadActions: async (status?: string) => {
     try {
       const qs = status ? `?status=${encodeURIComponent(status)}&limit=100` : '?limit=100'
-      const [actRes, relRes] = await Promise.all([
+      const [actRes, relRes, logRes] = await Promise.all([
         _authedFetch(`/fd/autonomy/actions${qs}`),
         _authedFetch('/fd/autonomy/reliability'),
+        _authedFetch('/fd/autonomy/log?limit=100'),
       ])
       if (actRes.ok) set({ actions: (await actRes.json()).actions ?? [] })
       if (relRes.ok) set({ reliability: (await relRes.json()).reliability ?? [] })
+      if (logRes.ok) set({ log: (await logRes.json()).log ?? [] })
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) })
     }

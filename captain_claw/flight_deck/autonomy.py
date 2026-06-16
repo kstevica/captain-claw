@@ -211,9 +211,57 @@ class AutonomyStore:
                     overrides  TEXT NOT NULL DEFAULT '{}',
                     updated_at TEXT NOT NULL
                 );
+
+                -- Append-only trace of what the loop did: every arbiter pass,
+                -- skip reason, dispatch, judge verdict, and error. The page's
+                -- live log reads this so nothing is swallowed silently.
+                CREATE TABLE IF NOT EXISTS autonomy_log (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id    TEXT NOT NULL,
+                    ts         TEXT NOT NULL,
+                    level      TEXT NOT NULL DEFAULT 'info',  -- info|warn|error
+                    event      TEXT NOT NULL,
+                    detail     TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_log_user
+                    ON autonomy_log(user_id, id DESC);
                 """
             )
             self._c().commit()
+
+    # ── live log ───────────────────────────────────────────────────────
+
+    def log(self, user_id: str, event: str, detail: str = "", level: str = "info") -> None:
+        """Append one trace line. Best-effort: never raises into the caller."""
+        uid = _norm_user(user_id)
+        try:
+            with self._lock:
+                conn = self._c()
+                conn.execute(
+                    "INSERT INTO autonomy_log (user_id, ts, level, event, detail)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (uid, _utcnow_iso(), level, str(event)[:200], str(detail)[:1000]),
+                )
+                # Trim to the most recent 500 per user so it can't grow forever.
+                conn.execute(
+                    "DELETE FROM autonomy_log WHERE user_id = ? AND id NOT IN ("
+                    " SELECT id FROM autonomy_log WHERE user_id = ? ORDER BY id DESC LIMIT 500)",
+                    (uid, uid),
+                )
+                conn.commit()
+        except Exception:
+            pass
+
+    def list_log(self, user_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        uid = _norm_user(user_id)
+        limit = max(1, min(500, limit))
+        with self._lock:
+            rows = self._c().execute(
+                "SELECT id, ts, level, event, detail FROM autonomy_log"
+                " WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+                (uid, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # ── per-user config overrides ─────────────────────────────────────
 

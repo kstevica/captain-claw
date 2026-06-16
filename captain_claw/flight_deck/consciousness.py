@@ -853,9 +853,17 @@ async def pulse(user_id: str, *, force: bool = False) -> dict[str, Any]:
     try:
         from captain_claw.flight_deck.arbiter import maybe_run_arbiter
 
-        arbiter_result = await maybe_run_arbiter(uid, reflection, author, agent_slugs)
+        arbiter_result = await maybe_run_arbiter(
+            uid, reflection, author, agent_slugs,
+            trigger=("manual" if force else "pulse"),
+        )
     except Exception as exc:
         _log.debug("arbiter pass failed (non-fatal): %s", exc)
+        try:
+            from captain_claw.flight_deck.autonomy import get_store as _autonomy_store
+            _autonomy_store().log(uid, "error: arbiter wrapper", str(exc), "error")
+        except Exception:
+            pass
 
     store.save_state(uid, cursor=delta["cursor"], pulse_inc=1,
                      thought_inc=len(entries), touched_thought=bool(entries))

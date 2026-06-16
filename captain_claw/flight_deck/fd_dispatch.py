@@ -145,6 +145,7 @@ async def _execute_and_judge(user_id: str, action: dict[str, Any], agent: dict[s
     Never raises — it's fire-and-forget off the heartbeat / approve request."""
     store = get_store()
     aid = action["id"]
+    store.log(user_id, "executing", f"{action.get('kind')} · {action.get('title')} → {agent.get('slug','?')}")
     try:
         from captain_claw.flight_deck.basna_routes import _dispatch_one
 
@@ -176,9 +177,13 @@ async def _execute_and_judge(user_id: str, action: dict[str, Any], agent: dict[s
             )
         outcome = None if success is None else ("success" if success else "fail")
         store.update_status(aid, "done", outcome=outcome, outcome_note=note)
+        store.log(user_id, f"done: {outcome or 'unjudged'}",
+                  f"{action.get('title')} — {note[:160]}",
+                  "warn" if outcome == "fail" else "info")
         _log.info("dispatch: action %s done (outcome=%s)", aid, outcome)
     except Exception as exc:
         _log.warning("dispatch execute/judge failed for %s: %s", aid, exc)
+        store.log(user_id, "error: dispatch crashed", f"{action.get('title')}: {exc}", "error")
         store.update_status(aid, "done", outcome="fail", outcome_note=f"dispatch error: {exc}"[:500])
 
 

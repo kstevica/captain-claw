@@ -141,135 +141,154 @@ async def maybe_run_arbiter(
     reflection: dict[str, Any],
     author: dict[str, Any],
     agent_slugs: list[str],
+    *,
+    trigger: str = "pulse",
 ) -> dict[str, Any] | None:
     """One arbiter pass for ``user_id`` after a reflection. Returns a small summary
-    (or None when it didn't run). Never raises into the heartbeat — callers wrap it,
-    but we also fail soft here."""
+    (or None when the loop is off). Never raises — and it writes a trace to the
+    autonomy log so nothing is swallowed. ``trigger='manual'`` (a nudge) logs every
+    decision; routine pulses log only when something happens or errors, to stay quiet."""
     cfg = resolve_config(user_id)
     if not cfg.get("enabled") or not cfg.get("arbiter_on_pulse"):
         return None
     level = str(cfg.get("autonomy_level") or "off")
     if level == "off":
         return None
-    if _in_quiet_hours(int(cfg.get("quiet_hours_start", 22)), int(cfg.get("quiet_hours_end", 8))):
-        return {"ran": False, "reason": "quiet-hours"}
 
     store = get_store()
 
-    # Daily cap.
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-    if store.count_since(user_id, cutoff) >= int(cfg.get("max_actions_per_day", 6)):
-        return {"ran": False, "reason": "daily-cap"}
+    def emit(event: str, detail: str = "", level_: str = "info", routine: bool = False) -> None:
+        # Routine skips are noisy on the 180s pulse — only surface them on a
+        # manual nudge. Outcomes and errors always log.
+        if routine and trigger != "manual":
+            return
+        store.log(user_id, event, detail, level_)
 
-    # Concurrency cap + dedup material.
-    open_actions = store.open_actions(user_id)
-    if len(open_actions) >= int(cfg.get("max_concurrent_actions", 2)):
-        return {"ran": False, "reason": "concurrent-cap"}
-    # Dedup against what's open AND anything proposed in the lookback window —
-    # so a just-rejected proposal doesn't immediately boomerang back.
-    look_cutoff = (
-        datetime.now(timezone.utc)
-        - timedelta(hours=int(cfg.get("candidate_lookback_hours", 24)))
-    ).isoformat()
-    dedup_titles = store.recent_titles(user_id, look_cutoff)
-    dedup_titles |= {a["title"].strip().lower() for a in open_actions}
-
-    candidates = _gather_candidates(
-        reflection, include_reflections=bool(cfg.get("reflection_to_intention")),
-    )
-    if not candidates:
-        return {"ran": False, "reason": "no-candidates"}
-
-    # Learned reliability — used to bias the prompt and to suppress losers.
-    reliability = store.list_reliability(user_id)
-    rel_by_kind: dict[str, float] = {}
-    for r in reliability:
-        rel_by_kind[r["kind"]] = min(rel_by_kind.get(r["kind"], 1.0), float(r["weight"]))
-
-    rel_hint = ""
-    if reliability:
-        rel_hint = "\n\nLearned reliability of action kinds (favour higher): " + ", ".join(
-            f"{r['kind']}={r['weight']:.2f}" for r in reliability[:8]
-        )
-    dup_hint = ""
-    if dedup_titles:
-        dup_hint = "\n\nAlready proposed (do not repeat): " + "; ".join(
-            a["title"] for a in open_actions[:8]
-        )
-    user_prompt = (
-        "Candidate goals the assistant has surfaced to itself:\n"
-        + "\n".join(f"- {c}" for c in candidates)
-        + rel_hint + dup_hint
-    )
-
-    # Think through the same agent that authored the reflection.
     try:
-        from captain_claw.games.remote_provider import RemoteLLMProvider
-        from captain_claw.llm import Message
+        if _in_quiet_hours(int(cfg.get("quiet_hours_start", 22)), int(cfg.get("quiet_hours_end", 8))):
+            emit("skipped: quiet hours", f"{cfg.get('quiet_hours_start')}–{cfg.get('quiet_hours_end')} UTC", routine=True)
+            return {"ran": False, "reason": "quiet-hours"}
 
-        provider = RemoteLLMProvider(
-            host=author["host"], port=author["port"], auth=author["auth"],
-            name=author.get("name", ""),
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        if store.count_since(user_id, cutoff) >= int(cfg.get("max_actions_per_day", 6)):
+            emit("skipped: daily cap reached", f"max={cfg.get('max_actions_per_day')}", routine=True)
+            return {"ran": False, "reason": "daily-cap"}
+
+        open_actions = store.open_actions(user_id)
+        if len(open_actions) >= int(cfg.get("max_concurrent_actions", 2)):
+            emit("skipped: concurrency cap", f"{len(open_actions)} in flight, max={cfg.get('max_concurrent_actions')}", routine=True)
+            return {"ran": False, "reason": "concurrent-cap"}
+        look_cutoff = (
+            datetime.now(timezone.utc)
+            - timedelta(hours=int(cfg.get("candidate_lookback_hours", 24)))
+        ).isoformat()
+        dedup_titles = store.recent_titles(user_id, look_cutoff)
+        dedup_titles |= {a["title"].strip().lower() for a in open_actions}
+
+        candidates = _gather_candidates(
+            reflection, include_reflections=bool(cfg.get("reflection_to_intention")),
         )
-        resp = await provider.complete(
-            messages=[
-                Message(role="system", content=_SYSTEM_PROMPT),
-                Message(role="user", content=user_prompt),
-            ],
-            temperature=0.3,
-            max_tokens=600,
+        emit("arbiter pass", f"trigger={trigger}, level={level}, {len(candidates)} candidate(s)")
+        if not candidates:
+            emit("skipped: no candidates", "reflection produced no intentions/thought to act on", "warn")
+            return {"ran": False, "reason": "no-candidates"}
+
+        reliability = store.list_reliability(user_id)
+        rel_by_kind: dict[str, float] = {}
+        for r in reliability:
+            rel_by_kind[r["kind"]] = min(rel_by_kind.get(r["kind"], 1.0), float(r["weight"]))
+
+        rel_hint = ""
+        if reliability:
+            rel_hint = "\n\nLearned reliability of action kinds (favour higher): " + ", ".join(
+                f"{r['kind']}={r['weight']:.2f}" for r in reliability[:8]
+            )
+        dup_hint = ""
+        if dedup_titles:
+            dup_hint = "\n\nAlready proposed (do not repeat): " + "; ".join(
+                a["title"] for a in open_actions[:8]
+            )
+        user_prompt = (
+            "Candidate goals the assistant has surfaced to itself:\n"
+            + "\n".join(f"- {c}" for c in candidates)
+            + rel_hint + dup_hint
         )
-    except Exception as exc:
-        _log.warning("arbiter: no agent could rank: %s", exc)
-        return {"ran": False, "reason": "no-thinker"}
 
-    actions = _parse_actions(resp.content)
-    min_score = float(cfg.get("arbiter_min_score", 0.6))
-    suppress_below = float(cfg.get("suppress_below_weight", 0.25))
+        # Think through the same agent that authored the reflection.
+        try:
+            from captain_claw.games.remote_provider import RemoteLLMProvider
+            from captain_claw.llm import Message
 
-    # Filter: threshold, learned-loser suppression, dedup. Keep the best one.
-    viable = []
-    for a in actions:
-        if a["score"] < min_score:
-            continue
-        if a["title"].strip().lower() in dedup_titles:
-            continue
-        if rel_by_kind.get(a["kind"], 1.0) < suppress_below:
-            continue
-        viable.append(a)
-    viable.sort(key=lambda a: a["score"], reverse=True)
+            provider = RemoteLLMProvider(
+                host=author["host"], port=author["port"], auth=author["auth"],
+                name=author.get("name", ""),
+            )
+            resp = await provider.complete(
+                messages=[
+                    Message(role="system", content=_SYSTEM_PROMPT),
+                    Message(role="user", content=user_prompt),
+                ],
+                temperature=0.3,
+                max_tokens=600,
+            )
+        except Exception as exc:
+            _log.warning("arbiter: no agent could rank: %s", exc)
+            emit("error: ranking LLM failed", f"{author.get('name','?')}: {exc}", "error")
+            return {"ran": False, "reason": "no-thinker", "error": str(exc)}
 
-    if not viable:
-        return {"ran": True, "proposed": 0, "reason": "nothing-viable",
+        actions = _parse_actions(resp.content)
+        min_score = float(cfg.get("arbiter_min_score", 0.6))
+        suppress_below = float(cfg.get("suppress_below_weight", 0.25))
+        emit("ranked", f"{len(actions)} action(s) returned: " +
+             ("; ".join(f"{a['kind']}:{a['title']}={a['score']:.2f}" for a in actions[:5]) or "(none)"))
+
+        # Filter: threshold, learned-loser suppression, dedup. Keep the best one.
+        viable = []
+        for a in actions:
+            if a["score"] < min_score:
+                emit("dropped: below min score", f"{a['title']} ({a['score']:.2f} < {min_score})", routine=True)
+                continue
+            if a["title"].strip().lower() in dedup_titles:
+                emit("dropped: already proposed", a["title"], routine=True)
+                continue
+            if rel_by_kind.get(a["kind"], 1.0) < suppress_below:
+                emit("dropped: kind suppressed", f"{a['kind']} weight {rel_by_kind.get(a['kind']):.2f} < {suppress_below}", routine=True)
+                continue
+            viable.append(a)
+        viable.sort(key=lambda a: a["score"], reverse=True)
+
+        if not viable:
+            emit("nothing viable", f"{len(actions)} considered, all filtered out", "warn")
+            return {"ran": True, "proposed": 0, "reason": "nothing-viable",
+                    "considered": len(actions)}
+
+        chosen = viable[0]
+        row = store.add_action(
+            user_id,
+            kind=chosen["kind"], title=chosen["title"], rationale=chosen["rationale"],
+            source="reflection", risk=chosen["risk"], domain=chosen["domain"],
+            score=chosen["score"], status="awaiting_approval",
+        )
+
+        from captain_claw.flight_deck.fd_dispatch import dispatch_action, should_auto_dispatch
+
+        dispatched = False
+        if should_auto_dispatch(cfg, row):
+            disp = await dispatch_action(user_id, row)
+            dispatched = disp["ok"]
+            if not disp["ok"]:
+                emit("dispatch deferred", f"{chosen['title']}: {disp['note']}", "warn")
+
+        emit("dispatched" if dispatched else "proposed",
+             f"{chosen['kind']} · {chosen['title']} (score {chosen['score']:.2f}, risk {chosen['risk']})")
+        _log.info("arbiter: %s %r for %s",
+                  "dispatched" if dispatched else "proposed", chosen["title"], user_id)
+        return {"ran": True, "proposed": 1, "dispatched": dispatched,
+                "action_id": row.get("id"), "title": chosen["title"],
                 "considered": len(actions)}
-
-    chosen = viable[0]
-    row = store.add_action(
-        user_id,
-        kind=chosen["kind"],
-        title=chosen["title"],
-        rationale=chosen["rationale"],
-        source="reflection",
-        risk=chosen["risk"],
-        domain=chosen["domain"],
-        score=chosen["score"],
-        status="awaiting_approval",
-    )
-
-    # Topic 2: low-risk actions may fire without approval once the level allows it.
-    # Everything else stays awaiting_approval (the propose path).
-    from captain_claw.flight_deck.fd_dispatch import dispatch_action, should_auto_dispatch
-
-    # dispatch_action owns the dispatched→done transitions (and the async judge);
-    # on failure the row keeps its awaiting_approval status for the human.
-    dispatched = False
-    if should_auto_dispatch(cfg, row):
-        disp = await dispatch_action(user_id, row)
-        dispatched = disp["ok"]
-
-    _log.info("arbiter: %s %r (%s, score=%.2f) for %s",
-              "dispatched" if dispatched else "proposed",
-              chosen["title"], chosen["kind"], chosen["score"], user_id)
-    return {"ran": True, "proposed": 1, "dispatched": dispatched,
-            "action_id": row.get("id"), "title": chosen["title"],
-            "considered": len(actions)}
+    except Exception as exc:
+        import traceback
+        _log.warning("arbiter pass crashed: %s", exc)
+        store.log(user_id, "error: arbiter crashed",
+                  f"{exc}\n{traceback.format_exc()[-800:]}", "error")
+        return {"ran": False, "reason": "error", "error": str(exc)}

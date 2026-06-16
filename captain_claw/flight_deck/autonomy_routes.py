@@ -153,12 +153,31 @@ async def nudge_route(
     if not cfg.get("enabled"):
         return {"ok": True, "ran": False, "reason": "disabled",
                 "autonomy_level": cfg.get("autonomy_level", "off")}
+    store = get_store()
     try:
         from captain_claw.flight_deck.consciousness import pulse
 
         result = await pulse(uid, force=True)
     except Exception as exc:
+        store.log(uid, "error: manual nudge failed", str(exc), "error")
         raise HTTPException(status_code=500, detail=f"pulse failed: {exc}") from exc
-    return {"ok": True, "pulse": result.get("reason"),
-            "arbiter": result.get("arbiter"),
+    arb = result.get("arbiter")
+    # If the heartbeat bailed before the arbiter (no agents / nothing to think
+    # with), the arbiter logs nothing — record it here so the nudge is explained.
+    if not arb:
+        store.log(uid, f"nudge: pulse {result.get('reason', '?')}",
+                  "heartbeat returned before the arbiter ran (e.g. no running agent)", "warn")
+    return {"ok": True, "pulse": result.get("reason"), "arbiter": arb,
             "autonomy_level": cfg.get("autonomy_level", "off")}
+
+
+@router.get("/log")
+async def log_route(
+    request: Request,
+    limit: int = 100,
+    _user: dict | None = Depends(get_optional_user),
+):
+    """The live trace of what the loop did — arbiter passes, skips, dispatches,
+    judge verdicts, and errors. Newest first."""
+    uid = _user_id(request)
+    return {"log": get_store().list_log(uid, limit=limit)}

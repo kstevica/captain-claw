@@ -132,7 +132,7 @@ function ActionCard({ action, onApprove, onReject }: {
 
 export function AutonomousWorkPage() {
   const {
-    config, defaults, actions, reliability, loading, saving, error,
+    config, defaults, actions, reliability, log, loading, saving, error,
     loadAll, loadActions, setField, save, approve, reject, nudge,
   } = useAutonomyStore()
   const [tab, setTab] = useState<'control' | 'activity'>('control')
@@ -372,6 +372,29 @@ export function AutonomousWorkPage() {
                 </div>
               ) : (
                 recent.map((a) => <ActionCard key={a.id} action={a} onApprove={approve} onReject={reject} />)
+              )}
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Live log</h2>
+              {log.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-zinc-800 p-4 text-center text-xs text-zinc-500">
+                  No log entries yet. Hit "Run arbiter now" — every pass, skip reason, dispatch, and error lands here.
+                </div>
+              ) : (
+                <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed">
+                  {log.map((e) => (
+                    <div key={e.id} className="flex gap-2 border-b border-zinc-800/40 py-1 last:border-0">
+                      <span className="shrink-0 text-zinc-600">{relTime(e.ts)}</span>
+                      <span className={`shrink-0 w-10 uppercase ${
+                        e.level === 'error' ? 'text-rose-600 dark:text-rose-400'
+                          : e.level === 'warn' ? 'text-amber-600 dark:text-amber-400'
+                          : 'text-emerald-600 dark:text-emerald-400'}`}>{e.level}</span>
+                      <span className="text-zinc-300">{e.event}</span>
+                      {e.detail && <span className="text-zinc-600">— {e.detail}</span>}
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
 
