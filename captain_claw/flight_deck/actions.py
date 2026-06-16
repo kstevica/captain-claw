@@ -87,10 +87,43 @@ async def run_action(user_id: str, action_id: str, args: dict[str, Any]) -> dict
         if not agent:
             return {"ok": False, "error": "no running agent to act through", **meta}
         res = await run_tool_on_agent(agent, tool, tool_args)
-        _log.info("run_action %s via %s → ok=%s", action_id, tool, res.get("ok"))
-        return {**res, **meta}
+        # Grounded verification (#5): read the side effect back. 'absent' downgrades
+        # to fail; 'unknown' (couldn't read) leaves the tool's success intact.
+        verified = "skipped"
+        if res.get("ok"):
+            verified = await _verify_side_effect(user_id, spec, str(res.get("content") or ""), args or {}, agent)
+            if verified == "absent":
+                res["ok"] = False
+                res["content"] = f"{res.get('content') or ''} [verification: side effect NOT found]".strip()
+            elif verified == "unknown":
+                res["content"] = f"{res.get('content') or ''} [unverified]".strip()
+        _log.info("run_action %s via %s → ok=%s verify=%s", action_id, tool, res.get("ok"), verified)
+        return {**res, "verified": verified, **meta}
 
     return {"ok": False, "error": f"home '{spec.get('home')}' not supported yet", **meta}
+
+
+async def _verify_side_effect(
+    user_id: str, spec: dict[str, Any], result_content: str, in_args: dict[str, Any], agent: dict[str, Any],
+) -> str:
+    """Read the action's side effect back. Returns 'confirmed' | 'absent' |
+    'unknown' | 'skipped'. Gated by verify_enabled and the action's verify spec."""
+    try:
+        from captain_claw.flight_deck.autonomy import resolve_config
+        if not resolve_config(user_id).get("verify_enabled", True):
+            return "skipped"
+    except Exception:
+        pass
+    vc = action_catalog.build_verify(spec, result_content, in_args)
+    if not vc:
+        return "skipped"
+    res = await run_tool_on_agent(agent, vc["tool"], vc.get("args") or {})
+    if res.get("ok"):
+        return "confirmed"
+    err = str(res.get("error") or res.get("content") or "").lower()
+    if any(s in err for s in ("not found", "404", "no such", "does not exist", "no file")):
+        return "absent"
+    return "unknown"
 
 
 async def undo_action(user_id: str, action: dict[str, Any]) -> dict[str, Any]:

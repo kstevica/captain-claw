@@ -842,6 +842,12 @@ class AutonomousWorkConfig(BaseModel):
     trust_threshold: float = 0.85
     trust_min_runs: int = 3
 
+    # ── #5 Grounded verification — confirm a side effect actually landed ──
+    # After a catalog action with a verify spec runs, read it back; if it's
+    # definitively absent, the outcome is downgraded to fail so trust never builds
+    # on phantom successes. A read that can't run leaves the outcome 'unverified'.
+    verify_enabled: bool = True
+
     # ── Topic 4 — Reflections → intentions ──
     reflection_to_intention: bool = False
     max_intentions_per_reflection: int = 2

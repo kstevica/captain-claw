@@ -41,6 +41,8 @@ CATALOG: dict[str, dict[str, Any]] = {
         "risk": "low",
         "reversibility": "reversible",   # prior content is backed up before write (Phase 2)
         "reverse": None,
+        # Grounded verification (#5): read the file back to confirm it's really there.
+        "verify": {"tool": "read", "arg_from_args": {"path": "path"}},
         "grant": "notes",
     },
     "calendar.hold": {
@@ -55,6 +57,9 @@ CATALOG: dict[str, dict[str, Any]] = {
         # The created event id comes back in the ToolResult; the reverse deletes it.
         "reverse": {"tool": "google_calendar", "base_args": {"action": "delete_event"},
                     "args_from_result": {"event_id": "id"}},
+        # Read the created event back by id to confirm it actually landed.
+        "verify": {"tool": "google_calendar", "base_args": {"action": "get_event"},
+                   "arg_from_result": {"event_id": "id"}},
         "grant": "calendar",
     },
     "mail.draft": {
@@ -180,3 +185,27 @@ def build_reverse(spec: dict[str, Any], result_content: str) -> dict[str, Any] |
     for arg_name, _src in (rev.get("args_from_result") or {}).items():
         args[arg_name] = extracted_id  # only "id" is supported as the source today
     return {"tool": rev["tool"], "args": args}
+
+
+def build_verify(spec: dict[str, Any], result_content: str, in_args: dict[str, Any]) -> dict[str, Any] | None:
+    """Build the read-back call ``{tool, args}`` that confirms an action's side
+    effect — from the created id (``arg_from_result``) and/or an input arg
+    (``arg_from_args``). Returns None when the action has no verify spec or a
+    needed value is missing."""
+    v = spec.get("verify")
+    if not v:
+        return None
+    args: dict[str, Any] = dict(v.get("base_args") or {})
+    for arg_name, src in (v.get("arg_from_args") or {}).items():
+        val = (in_args or {}).get(src)
+        if val is None:
+            return None
+        args[arg_name] = val
+    if v.get("arg_from_result"):
+        m = _ID_RE.search(result_content or "")
+        if not m:
+            return None
+        ext = m.group(1).strip().rstrip(".")
+        for arg_name in v["arg_from_result"]:
+            args[arg_name] = ext
+    return {"tool": v["tool"], "args": args}
