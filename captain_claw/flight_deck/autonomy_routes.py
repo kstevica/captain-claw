@@ -181,3 +181,34 @@ async def log_route(
     judge verdicts, and errors. Newest first."""
     uid = _user_id(request)
     return {"log": get_store().list_log(uid, limit=limit)}
+
+
+@router.get("/catalog")
+async def catalog_route(
+    request: Request,
+    _user: dict | None = Depends(get_optional_user),
+):
+    """The action catalog (#1) — what the autonomous loop may do, with risk +
+    reversibility. Phase 1: full catalog; grant-filtering lands with the grants UI."""
+    from captain_claw.flight_deck.action_catalog import list_catalog
+    _ = _user_id(request)
+    return {"catalog": list_catalog()}
+
+
+@router.post("/run-action")
+async def run_action_route(
+    request: Request,
+    _user: dict | None = Depends(get_optional_user),
+):
+    """Phase-1 manual exerciser: run a catalog action directly. Body:
+    {action_id, args}. Bypasses the arbiter — used to validate the rail before
+    wiring it into autonomous dispatch."""
+    uid = _user_id(request)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be an object")
+    action_id = str(body.get("action_id") or "").strip()
+    args = body.get("args") if isinstance(body.get("args"), dict) else {}
+    from captain_claw.flight_deck.actions import run_action
+    result = await run_action(uid, action_id, args)
+    return result

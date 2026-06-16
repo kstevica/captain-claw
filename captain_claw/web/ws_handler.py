@@ -284,6 +284,30 @@ async def handle_ws_message(
                 no_broadcast=bool(data.get("no_broadcast", False)),
             )
 
+    elif msg_type == "run_tool":
+        # Deterministic, structured tool invocation (the autonomous action rail).
+        # Run ONE named tool with structured args through the guard and return the
+        # ToolResult — no LLM. Used by the action catalog / autonomous loop.
+        req_id = str(data.get("req_id", ""))
+        tool = str(data.get("tool", "")).strip()
+        args = data.get("args") if isinstance(data.get("args"), dict) else {}
+        if not tool or not server.agent:
+            await server._send(ws, {"type": "tool_result", "req_id": req_id,
+                                    "ok": False, "error": "no tool or agent"})
+            return
+        try:
+            res = await server.agent._execute_tool_with_guard(tool, args, "autonomous-action")
+            await server._send(ws, {
+                "type": "tool_result", "req_id": req_id,
+                "ok": bool(getattr(res, "success", False)),
+                "content": getattr(res, "content", "") or "",
+                "error": getattr(res, "error", None),
+            })
+        except Exception as exc:
+            log.warning("run_tool failed", tool=tool, error=str(exc))
+            await server._send(ws, {"type": "tool_result", "req_id": req_id,
+                                    "ok": False, "error": str(exc)})
+
     elif msg_type == "command":
         command = str(data.get("command", "")).strip()
         if command:
