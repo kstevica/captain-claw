@@ -261,8 +261,12 @@ async def maybe_run_arbiter(
             reflection, include_reflections=bool(cfg.get("reflection_to_intention")),
         )
         # External-world events (#2): surface new events as candidates so the loop
-        # reacts to the user's world. Mark them surfaced so they're seen once.
+        # reacts to the user's world. We do NOT mark them surfaced here — only once
+        # a pass actually produces an action (below). A pass that yields nothing
+        # leaves them reconsiderable (bounded by event_max_surface_attempts) so a
+        # single whiffed beat — or a manual "Run arbiter now" — gets another shot.
         event_ids: list[str] = []
+        evstore = None
         try:
             from captain_claw.flight_deck.events import get_store as _events_store
             evstore = _events_store()
@@ -270,10 +274,27 @@ async def maybe_run_arbiter(
             for ev in new_events:
                 candidates.append(f"(event · {ev['source']}) {ev['summary']}")
                 event_ids.append(ev["id"])
-            if event_ids:
-                evstore.mark(event_ids, "surfaced")
         except Exception as exc:
             _log.debug("event intake failed (non-fatal): %s", exc)
+
+        max_attempts = int(cfg.get("event_max_surface_attempts", 4))
+
+        def _settle_events(*, produced: bool) -> None:
+            """Resolve the events fed into this pass. produced=True → they got
+            their shot, mark surfaced. produced=False → defer for a later pass,
+            giving up only after event_max_surface_attempts."""
+            if not evstore or not event_ids:
+                return
+            try:
+                if produced:
+                    evstore.mark(event_ids, "surfaced")
+                else:
+                    spent = evstore.defer(event_ids, max_attempts=max_attempts)
+                    if spent:
+                        emit("events given up", f"{len(spent)} reconsidered "
+                             f"{max_attempts}× with no action → ignored", "warn", routine=True)
+            except Exception as exc:
+                _log.debug("event settle failed (non-fatal): %s", exc)
 
         emit("arbiter pass", f"trigger={trigger}, level={level}, {len(candidates)} candidate(s)"
              + (f", {len(event_ids)} event(s)" if event_ids else ""))
@@ -360,6 +381,7 @@ async def maybe_run_arbiter(
         except Exception as exc:
             _log.warning("arbiter: no agent could rank: %s", exc)
             emit("error: ranking LLM failed", f"{author.get('name','?')}: {exc}", "error")
+            _settle_events(produced=False)  # transient — let the next pass retry
             return {"ran": False, "reason": "no-thinker", "error": str(exc)}
 
         actions = _parse_actions(resp.content)
@@ -410,10 +432,12 @@ async def maybe_run_arbiter(
 
         if not viable:
             emit("nothing viable", f"{len(actions)} considered, all filtered out", "warn")
+            _settle_events(produced=False)  # reconsider next pass / manual run
             return {"ran": True, "proposed": 0, "reason": "nothing-viable",
                     "considered": len(actions)}
 
         chosen = viable[0]
+        _settle_events(produced=True)  # a pass produced an action — events got their shot
         _payload = None
         if chosen["kind"] == "stop_run":
             _payload = {"system": chosen.get("system") or "basna", "target": chosen.get("target")}

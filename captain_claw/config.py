@@ -867,6 +867,10 @@ class AutonomousWorkConfig(BaseModel):
     # FD-side Google adapter is connected). ──
     event_calendar_enabled: bool = False
     event_gmail_enabled: bool = False
+    # An event is reconsidered by the arbiter for this many passes (pulse OR
+    # manual) before it's given up on. Without this a single whiffed pass would
+    # drop the event forever and a manual re-run couldn't reconsider it.
+    event_max_surface_attempts: int = 4
 
     db_path: str = "~/.captain-claw/autonomy.db"
 

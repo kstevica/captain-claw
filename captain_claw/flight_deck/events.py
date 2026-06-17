@@ -70,6 +70,7 @@ class EventsStore:
                     metadata    TEXT NOT NULL DEFAULT '{}',
                     dedup_key   TEXT NOT NULL DEFAULT '', -- source id; prevents re-ingest
                     status      TEXT NOT NULL DEFAULT 'new',
+                    surface_count INTEGER NOT NULL DEFAULT 0, -- arbiter passes that saw it
                     ingested_at TEXT NOT NULL,
                     processed_at TEXT
                 );
@@ -91,6 +92,12 @@ class EventsStore:
                 );
                 """
             )
+            # Migrate pre-existing DBs that predate surface_count.
+            cols = {r["name"] for r in self._c().execute(
+                "PRAGMA table_info(external_events)").fetchall()}
+            if "surface_count" not in cols:
+                self._c().execute(
+                    "ALTER TABLE external_events ADD COLUMN surface_count INTEGER NOT NULL DEFAULT 0")
             self._c().commit()
 
     # ── poll state (for source adapters) ───────────────────────────────
@@ -199,6 +206,39 @@ class EventsStore:
                 [(status, now, eid) for eid in event_ids],
             )
             conn.commit()
+
+    def defer(self, event_ids: list[str], max_attempts: int = 4) -> list[str]:
+        """A pass saw these events but produced no action. Bump their attempt
+        counter and keep them ``new`` so the next pass (pulse OR manual) sees them
+        again — unless they've now been seen ``max_attempts`` times, in which case
+        flip them to ``ignored`` so they stop competing. Returns the ids given up
+        on (newly ignored)."""
+        if not event_ids:
+            return []
+        max_attempts = max(1, max_attempts)
+        now = _utcnow_iso()
+        with self._lock:
+            conn = self._c()
+            conn.executemany(
+                "UPDATE external_events SET surface_count = surface_count + 1"
+                " WHERE id = ? AND status = 'new'",
+                [(eid,) for eid in event_ids],
+            )
+            cur = conn.execute(
+                "SELECT id FROM external_events WHERE status = 'new'"
+                " AND surface_count >= ? AND id IN (%s)"
+                % ",".join("?" * len(event_ids)),
+                (max_attempts, *event_ids),
+            )
+            spent = [r["id"] for r in cur.fetchall()]
+            if spent:
+                conn.executemany(
+                    "UPDATE external_events SET status = 'ignored', processed_at = ?"
+                    " WHERE id = ?",
+                    [(now, eid) for eid in spent],
+                )
+            conn.commit()
+        return spent
 
     def cleanup(self, older_than_days: int = 30) -> int:
         """Drop processed (surfaced/acted/ignored) events older than N days."""
