@@ -872,6 +872,13 @@ class AutonomousWorkConfig(BaseModel):
     # drop the event forever and a manual re-run couldn't reconsider it.
     event_max_surface_attempts: int = 4
 
+    # ── Follow-ups — soft reminders/requests the arbiter TRACKs instead of
+    # acting on now (an open loop, "waiting on you"). They resurface when due
+    # and the nudge escalates with age. ──
+    followup_default_days: int = 3          # horizon when the arbiter omits one
+    followup_resurface_cooldown_hours: int = 12  # min gap between resurfacings
+    followup_max_nudges: int = 4            # after this many re-nudges → 'stale'
+
     db_path: str = "~/.captain-claw/autonomy.db"
 
 

@@ -90,6 +90,30 @@ class EventsStore:
                     cursor       TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY (user_id, source)
                 );
+
+                -- Open loops the arbiter chose to TRACK rather than act on now:
+                -- soft reminders / requests / waiting-on-you items. They resurface
+                -- to the arbiter when due and escalate with age (see arbiter.py).
+                CREATE TABLE IF NOT EXISTS follow_ups (
+                    id            TEXT PRIMARY KEY,
+                    user_id       TEXT NOT NULL,
+                    source        TEXT NOT NULL DEFAULT '',   -- gmail | calendar | manual | …
+                    summary       TEXT NOT NULL DEFAULT '',   -- the ask / headline
+                    detail        TEXT NOT NULL DEFAULT '',   -- who from + what they want
+                    origin_event_id TEXT NOT NULL DEFAULT '', -- external_events.id (dedup)
+                    status        TEXT NOT NULL DEFAULT 'open',-- open | done | dismissed | stale
+                    created_at    TEXT NOT NULL,
+                    follow_up_at  TEXT NOT NULL,              -- next time to resurface
+                    surfaced_count INTEGER NOT NULL DEFAULT 0,-- times re-fed to the arbiter
+                    nudged_count  INTEGER NOT NULL DEFAULT 0, -- nudges actually sent
+                    last_surfaced_at TEXT,
+                    updated_at    TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_followups_due
+                    ON follow_ups(user_id, status, follow_up_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_followups_origin
+                    ON follow_ups(user_id, origin_event_id)
+                    WHERE origin_event_id != '';
                 """
             )
             # Migrate pre-existing DBs that predate surface_count.
@@ -239,6 +263,118 @@ class EventsStore:
                 )
             conn.commit()
         return spent
+
+    # ── follow-ups (tracked open loops) ─────────────────────────────────
+
+    def add_follow_up(
+        self,
+        user_id: str,
+        *,
+        summary: str,
+        detail: str = "",
+        source: str = "",
+        origin_event_id: str = "",
+        follow_up_at: str,
+    ) -> dict[str, Any] | None:
+        """Track a soft reminder/request as an open loop due at ``follow_up_at``.
+        Deduped by ``origin_event_id`` (same email is never tracked twice) — a
+        repeat returns None."""
+        uid = _norm_user(user_id)
+        fid = "fu_" + secrets.token_hex(8)
+        now = _utcnow_iso()
+        with self._lock:
+            conn = self._c()
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO follow_ups"
+                " (id, user_id, source, summary, detail, origin_event_id, status,"
+                "  created_at, follow_up_at, surfaced_count, nudged_count, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, 0, 0, ?)",
+                (fid, uid, source, summary[:500], detail[:2000], origin_event_id,
+                 now, follow_up_at, now),
+            )
+            conn.commit()
+            if cur.rowcount == 0:
+                return None  # already tracked
+        return self.get_follow_up(fid)
+
+    def get_follow_up(self, follow_up_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            r = self._c().execute(
+                "SELECT * FROM follow_ups WHERE id = ?", (follow_up_id,)
+            ).fetchone()
+        return dict(r) if r else None
+
+    def list_due_follow_ups(self, user_id: str, now_iso: str, limit: int = 5) -> list[dict[str, Any]]:
+        """Open follow-ups whose time has come, soonest-due first."""
+        uid = _norm_user(user_id)
+        limit = max(1, min(50, limit))
+        with self._lock:
+            rows = self._c().execute(
+                "SELECT * FROM follow_ups WHERE user_id = ? AND status = 'open'"
+                " AND follow_up_at <= ? ORDER BY follow_up_at ASC LIMIT ?",
+                (uid, now_iso, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_follow_ups(self, user_id: str, *, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        uid = _norm_user(user_id)
+        limit = max(1, min(500, limit))
+        with self._lock:
+            if status:
+                rows = self._c().execute(
+                    "SELECT * FROM follow_ups WHERE user_id = ? AND status = ?"
+                    " ORDER BY follow_up_at ASC LIMIT ?",
+                    (uid, status, limit),
+                ).fetchall()
+            else:
+                rows = self._c().execute(
+                    "SELECT * FROM follow_ups WHERE user_id = ?"
+                    " ORDER BY (status='open') DESC, follow_up_at ASC LIMIT ?",
+                    (uid, limit),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_follow_up(self, follow_up_id: str, status: str) -> bool:
+        if status not in ("open", "done", "dismissed", "stale"):
+            return False
+        now = _utcnow_iso()
+        with self._lock:
+            conn = self._c()
+            cur = conn.execute(
+                "UPDATE follow_ups SET status = ?, updated_at = ? WHERE id = ?",
+                (status, now, follow_up_id),
+            )
+            conn.commit()
+        return cur.rowcount > 0
+
+    def touch_follow_up(
+        self,
+        follow_up_id: str,
+        *,
+        follow_up_at: str | None = None,
+        surfaced: bool = False,
+        nudged: bool = False,
+    ) -> dict[str, Any] | None:
+        """Reschedule a follow-up and/or bump its surfaced/nudged counters."""
+        now = _utcnow_iso()
+        sets = ["updated_at = ?"]
+        params: list[Any] = [now]
+        if follow_up_at is not None:
+            sets.append("follow_up_at = ?")
+            params.append(follow_up_at)
+        if surfaced:
+            sets.append("surfaced_count = surfaced_count + 1")
+            sets.append("last_surfaced_at = ?")
+            params.append(now)
+        if nudged:
+            sets.append("nudged_count = nudged_count + 1")
+        params.append(follow_up_id)
+        with self._lock:
+            conn = self._c()
+            conn.execute(
+                f"UPDATE follow_ups SET {', '.join(sets)} WHERE id = ?", params)
+            conn.commit()
+        return self.get_follow_up(follow_up_id)
 
     def cleanup(self, older_than_days: int = 30) -> int:
         """Drop processed (surfaced/acted/ignored) events older than N days."""

@@ -204,6 +204,46 @@ async def log_route(
     return {"log": get_store().list_log(uid, limit=limit)}
 
 
+@router.get("/follow-ups")
+async def list_follow_ups_route(request: Request, status_filter: str | None = None,
+                                limit: int = 100, _user: dict | None = Depends(get_optional_user)):
+    """Tracked open loops — soft reminders/requests the arbiter is holding for you
+    ('waiting on you'). Open ones first, soonest-due first."""
+    uid = _user_id(request)
+    from captain_claw.flight_deck.events import get_store as events_store
+    return {"follow_ups": events_store().list_follow_ups(uid, status=status_filter, limit=limit)}
+
+
+@router.post("/follow-ups/{follow_up_id}/done")
+async def done_follow_up_route(follow_up_id: str, request: Request,
+                               _user: dict | None = Depends(get_optional_user)):
+    """Mark a tracked follow-up resolved — it stops resurfacing."""
+    uid = _user_id(request)
+    from captain_claw.flight_deck.events import get_store as events_store
+    es = events_store()
+    fu = es.get_follow_up(follow_up_id)
+    if not fu or fu.get("user_id") not in (uid, "local"):
+        raise HTTPException(status_code=404, detail="follow-up not found")
+    es.mark_follow_up(follow_up_id, "done")
+    get_store().log(uid, "follow-up done", fu.get("summary", "")[:120])
+    return {"ok": True}
+
+
+@router.post("/follow-ups/{follow_up_id}/dismiss")
+async def dismiss_follow_up_route(follow_up_id: str, request: Request,
+                                  _user: dict | None = Depends(get_optional_user)):
+    """Dismiss a tracked follow-up — drop it without acting."""
+    uid = _user_id(request)
+    from captain_claw.flight_deck.events import get_store as events_store
+    es = events_store()
+    fu = es.get_follow_up(follow_up_id)
+    if not fu or fu.get("user_id") not in (uid, "local"):
+        raise HTTPException(status_code=404, detail="follow-up not found")
+    es.mark_follow_up(follow_up_id, "dismissed")
+    get_store().log(uid, "follow-up dismissed", fu.get("summary", "")[:120])
+    return {"ok": True}
+
+
 @router.get("/plans")
 async def list_plans_route(request: Request, status_filter: str | None = None,
                            limit: int = 50, _user: dict | None = Depends(get_optional_user)):

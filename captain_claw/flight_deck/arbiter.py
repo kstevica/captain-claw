@@ -25,7 +25,7 @@ from captain_claw.flight_deck.autonomy import get_store, resolve_config
 _log = logging.getLogger(__name__)
 
 # Action kinds the arbiter may propose (must match the ledger / later dispatch).
-_KINDS = ("nudge", "run_prompt", "basna", "materialize_schedule", "stop_run", "tool_action")
+_KINDS = ("nudge", "run_prompt", "basna", "materialize_schedule", "stop_run", "tool_action", "track")
 _RISKS = ("low", "normal", "high")
 
 _SYSTEM_PROMPT = (
@@ -35,15 +35,28 @@ _SYSTEM_PROMPT = (
     "express it as a concrete action. Lean toward proposing one action whenever a "
     "candidate suggests something genuinely helpful — a check-in or nudge to the "
     "user, a small piece of research, a draft, a reminder, a recurring task. Return "
-    "an empty array [] ONLY if every candidate is pure internal musing with no "
-    "externalizable step, or merely repeats something already proposed.\n\n"
+    "an empty array [] ONLY if every candidate is pure internal musing or automated "
+    "noise (e.g. an automated notification) with no value to the user.\n\n"
+    "THREE ways to handle a candidate — choose deliberately:\n"
+    "1. ACT NOW (kind nudge/run_prompt/tool_action/…): it's timely and warrants "
+    "doing something this moment.\n"
+    "2. TRACK (kind=\"track\"): it's a soft reminder, a soft request, or a "
+    "'waiting on you' item that should NOT be forgotten but doesn't need action "
+    "this instant (e.g. 'kindly reminding you of our offer — let us know your "
+    "comments'). Record it as an open loop to revisit. Give \"follow_up_days\" = how "
+    "many days until it should resurface (default 3). USE THIS for soft "
+    "reminders/requests instead of dropping them — they must be tracked.\n"
+    "3. DROP ([]): pure internal musing or automated noise with no user value.\n\n"
     "Reply with ONLY a JSON array of 0 or 1 objects:\n"
-    '{"kind": one of ["nudge","run_prompt","basna","materialize_schedule","stop_run","tool_action"], '
+    '{"kind": one of ["nudge","run_prompt","basna","materialize_schedule","stop_run","tool_action","track"], '
     '"title": short imperative, "rationale": one sentence on why now, '
     '"risk": "low" | "normal" | "high", "domain": short slug e.g. "ops"/"research", '
     '"score": 0.0-1.0 how valuable/timely, '
     '"target": run session id (stop_run only), "system": "basna" (stop_run only), '
-    '"action_id": catalog id (tool_action only), "args": {…} (tool_action only)}\n\n'
+    '"action_id": catalog id (tool_action only), "args": {…} (tool_action only), '
+    '"follow_up_days": int days until it resurfaces (track only), '
+    '"follow_up_id": the FU:<id> of a due follow-up this addresses (when acting on '
+    'or re-snoozing a "follow-up due" candidate — copy the id after "FU:")}\n\n'
     "Kind/risk mapping (use these exact kinds): a proactive message to the user is "
     'kind="nudge", risk="low". Running a task with the agent\'s tools is '
     'kind="run_prompt" (risk "normal", or "high" if it sends/changes external data). '
@@ -55,9 +68,14 @@ _SYSTEM_PROMPT = (
     'If a candidate shows a run is stuck, looping, or runaway AND it matches an '
     '"active run" below, propose kind="stop_run" with that run\'s session id as '
     '"target" (risk "normal"). stop_run and tool_action are held for approval.\n'
+    "Some candidates are marked '(follow-up due …)' — these are open loops you "
+    "TRACKed earlier that have come due. For one of these, either propose a "
+    'kind="nudge" reminding the user (set "follow_up_id" to its FU:<id>; make the '
+    "reminder MORE insistent the older it is / the more times it has been surfaced), "
+    'or re-snooze it with kind="track" + "follow_up_id" + a new "follow_up_days".\n'
     "Score honestly: a genuinely useful action is ~0.7-0.9; score low only if you "
-    "doubt it helps. Don't invent busywork, and never duplicate the 'already "
-    "proposed' list.\n\n"
+    "doubt it helps. A track is cheap and worth doing — score it ~0.6+. Don't invent "
+    "busywork, and never duplicate the 'already proposed' list.\n\n"
     "Output ONLY the JSON array — no preamble, no reasoning, no markdown fences. "
     "Your reply must start with '[' and end with ']'."
 )
@@ -172,8 +190,26 @@ def _parse_actions(text: str) -> list[dict[str, Any]]:
             # tool_action carries the catalog action + its args.
             "action_id": str(raw.get("action_id") or "").strip()[:64],
             "args": raw.get("args") if isinstance(raw.get("args"), dict) else {},
+            # track carries a follow-up horizon; track/nudge may reference an
+            # existing due follow-up by id.
+            "follow_up_days": _coerce_int(raw.get("follow_up_days")),
+            "follow_up_id": str(raw.get("follow_up_id") or "").strip().removeprefix("FU:")[:40],
         })
     return out
+
+
+def _coerce_int(v: Any) -> int | None:
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_iso(s: Any, default: datetime) -> datetime:
+    try:
+        return datetime.fromisoformat(str(s))
+    except (ValueError, TypeError):
+        return default
 
 
 async def _gather_active_runs(user_id: str) -> list[dict[str, Any]]:
@@ -296,8 +332,30 @@ async def maybe_run_arbiter(
             except Exception as exc:
                 _log.debug("event settle failed (non-fatal): %s", exc)
 
+        # Due follow-ups (tracked open loops whose time has come): re-feed them as
+        # candidates so the arbiter can nudge / re-snooze. Cool each one down right
+        # away so it isn't re-fed every 180s pulse; a nudge re-arms it on dispatch.
+        fu_count = 0
+        if evstore is not None:
+            try:
+                now_dt = datetime.now(timezone.utc)
+                cooldown = timedelta(hours=int(cfg.get("followup_resurface_cooldown_hours", 12)))
+                for fu in evstore.list_due_follow_ups(user_id, now_dt.isoformat(), limit=5):
+                    age_days = max(0, (now_dt - _parse_iso(fu.get("created_at"), now_dt)).days)
+                    candidates.append(
+                        f"(follow-up due · FU:{fu['id']} · {age_days}d old · "
+                        f"surfaced {fu.get('surfaced_count', 0)}×) {fu['summary']}"
+                        + (f" — {fu['detail']}" if fu.get("detail") else "")
+                    )
+                    evstore.touch_follow_up(
+                        fu["id"], follow_up_at=(now_dt + cooldown).isoformat(), surfaced=True)
+                    fu_count += 1
+            except Exception as exc:
+                _log.debug("follow-up intake failed (non-fatal): %s", exc)
+
         emit("arbiter pass", f"trigger={trigger}, level={level}, {len(candidates)} candidate(s)"
-             + (f", {len(event_ids)} event(s)" if event_ids else ""))
+             + (f", {len(event_ids)} event(s)" if event_ids else "")
+             + (f", {fu_count} follow-up(s) due" if fu_count else ""))
         if not candidates:
             emit("skipped: no candidates", "reflection produced no intentions/thought to act on", "warn")
             return {"ran": False, "reason": "no-candidates"}
@@ -398,7 +456,9 @@ async def maybe_run_arbiter(
         # Filter: threshold, learned-loser suppression, dedup. Keep the best one.
         viable = []
         for a in actions:
-            if a["score"] < min_score:
+            # 'track' is cheap bookkeeping (an open loop, no external effect) and is
+            # the whole point for low-urgency soft requests — exempt it from min_score.
+            if a["kind"] != "track" and a["score"] < min_score:
                 emit("dropped: below min score", f"{a['title']} ({a['score']:.2f} < {min_score})", routine=True)
                 continue
             if a["title"].strip().lower() in dedup_titles:
@@ -443,6 +503,19 @@ async def maybe_run_arbiter(
             _payload = {"system": chosen.get("system") or "basna", "target": chosen.get("target")}
         elif chosen["kind"] == "tool_action":
             _payload = {"action_id": chosen.get("action_id"), "args": chosen.get("args") or {}}
+        elif chosen["kind"] == "track":
+            days = chosen.get("follow_up_days")
+            if not isinstance(days, int) or days <= 0:
+                days = int(cfg.get("followup_default_days", 3))
+            _payload = {
+                "summary": chosen["title"], "detail": chosen.get("rationale") or "",
+                "source": chosen.get("domain") or "reflection",
+                "follow_up_days": days,
+                "follow_up_id": chosen.get("follow_up_id") or "",  # set ⇒ re-snooze
+            }
+        elif chosen["kind"] == "nudge" and chosen.get("follow_up_id"):
+            # A reminder nudge that addresses a due follow-up — dispatch re-arms it.
+            _payload = {"follow_up_id": chosen.get("follow_up_id")}
         row = store.add_action(
             user_id,
             kind=chosen["kind"], title=chosen["title"], rationale=chosen["rationale"],

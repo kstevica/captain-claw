@@ -79,6 +79,19 @@ function relTime(iso: string | null): string {
   return `${Math.floor(s / 86400)}d ago`
 }
 
+// Like relTime but signed — "due in 3d" / "due 2d ago" / "due now".
+function dueLabel(iso: string | null): string {
+  if (!iso) return ''
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return ''
+  const s = Math.floor((t - Date.now()) / 1000)
+  const a = Math.abs(s)
+  const span = a < 3600 ? `${Math.max(1, Math.floor(a / 60))}m`
+    : a < 86400 ? `${Math.floor(a / 3600)}h` : `${Math.floor(a / 86400)}d`
+  if (a < 60) return 'due now'
+  return s < 0 ? `due ${span} ago` : `due in ${span}`
+}
+
 const STATUS_CHIP: Record<string, string> = {
   candidate: 'bg-zinc-800 text-zinc-300',
   queued: 'bg-sky-50 text-sky-700 dark:bg-sky-950/40 dark:text-sky-400',
@@ -146,9 +159,9 @@ function ActionCard({ action, onApprove, onReject, onUndo }: {
 
 export function AutonomousWorkPage() {
   const {
-    config, defaults, actions, reliability, log, catalog, events, plans, loading, saving, error,
+    config, defaults, actions, reliability, log, catalog, events, plans, followUps, loading, saving, error,
     loadAll, loadActions, setField, save, approve, reject, undo, nudge,
-    createPlan, advancePlan, abandonPlan,
+    createPlan, advancePlan, abandonPlan, doneFollowUp, dismissFollowUp,
   } = useAutonomyStore()
   const [planGoal, setPlanGoal] = useState('')
   const [creatingPlan, setCreatingPlan] = useState(false)
@@ -485,6 +498,48 @@ export function AutonomousWorkPage() {
                 </div>
               ))}
             </div>
+
+            {(() => {
+              const openFu = followUps.filter((f) => f.status === 'open')
+              const staleFu = followUps.filter((f) => f.status === 'stale')
+              const shown = [...openFu, ...staleFu]
+              if (shown.length === 0) return null
+              return (
+                <div className="flex flex-col gap-2">
+                  <h2 className="text-xs font-semibold uppercase tracking-wider text-sky-600 dark:text-sky-400">
+                    Waiting on you ({openFu.length}{staleFu.length ? ` · ${staleFu.length} stale` : ''})
+                  </h2>
+                  <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-2">
+                    {shown.map((f) => {
+                      const overdue = new Date(f.follow_up_at).getTime() <= Date.now()
+                      return (
+                        <div key={f.id} className="flex items-start gap-2 border-b border-zinc-800/40 py-2 last:border-0">
+                          <span className="mt-0.5 shrink-0 rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-300">{f.source || 'note'}</span>
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-xs text-zinc-100">{f.summary}</div>
+                            {f.detail && <div className="truncate text-[11px] text-zinc-500">{f.detail}</div>}
+                            <div className="mt-0.5 flex items-center gap-2 text-[10px] text-zinc-600">
+                              <span className={f.status === 'stale' ? 'text-zinc-500'
+                                : overdue ? 'text-amber-600 dark:text-amber-400' : 'text-zinc-500'}>
+                                {f.status === 'stale' ? 'stale — not nudging' : dueLabel(f.follow_up_at)}
+                              </span>
+                              {f.nudged_count > 0 && <span>· nudged {f.nudged_count}×</span>}
+                              <span>· {relTime(f.created_at)}</span>
+                            </div>
+                          </div>
+                          <div className="flex shrink-0 gap-1">
+                            <button onClick={() => doneFollowUp(f.id)}
+                              className="rounded-md bg-emerald-600 px-2 py-1 text-[10px] font-medium text-white hover:bg-emerald-500">Done</button>
+                            <button onClick={() => dismissFollowUp(f.id)}
+                              className="rounded-md border border-zinc-700 px-2 py-1 text-[10px] font-medium text-zinc-300 hover:bg-zinc-800">Dismiss</button>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            })()}
 
             {pending.length > 0 && (
               <div className="flex flex-col gap-2">

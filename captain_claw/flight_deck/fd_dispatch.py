@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from captain_claw.flight_deck.autonomy import get_store, resolve_config
@@ -79,6 +80,11 @@ def should_auto_dispatch(cfg: dict[str, Any], action: dict[str, Any]) -> bool:
     # stop_run is a destructive safety action — always human-approved, never auto.
     if str(action.get("kind")) == "stop_run":
         return False
+    # track is internal bookkeeping (an open loop, no external side effect): always
+    # record it without approval, even under the 'propose' ceiling — otherwise every
+    # soft request would need a click just to be remembered, defeating the point.
+    if str(action.get("kind")) == "track":
+        return True
     # tool_action auto-fires only when the user has GRANTED that action (or its
     # grant category) AND it's reversible + low-risk + not human-only — the
     # explicit trust hook. Everything else stays propose→approve.
@@ -216,6 +222,11 @@ async def _execute_and_judge(user_id: str, action: dict[str, Any], agent: dict[s
                         store.log(user_id, "nudge → whatsapp", f"sent to {sent}/{len(waids)} recipient(s)")
                 except Exception as exc:
                     _log.debug("nudge whatsapp delivery failed: %s", exc)
+            # If this nudge was reminding about a tracked follow-up, re-arm it
+            # (escalate: sooner each time) — or retire it after enough nudges.
+            fu_id = str((action.get("payload") or {}).get("follow_up_id") or "")
+            if fu_id:
+                _escalate_follow_up(store, user_id, fu_id, cfg)
         elif learn:
             verdict = await _judge_outcome(user_id, action, output)
             success = bool(verdict["success"])
@@ -240,6 +251,71 @@ async def _execute_and_judge(user_id: str, action: dict[str, Any], agent: dict[s
         _log.warning("dispatch execute/judge failed for %s: %s", aid, exc)
         store.log(user_id, "error: dispatch crashed", f"{action.get('title')}: {exc}", "error")
         store.update_status(aid, "done", outcome="fail", outcome_note=f"dispatch error: {exc}"[:500])
+
+
+def _escalate_follow_up(store: Any, user_id: str, fu_id: str, cfg: dict[str, Any]) -> None:
+    """A reminder nudge for this follow-up just went out. Re-arm it to come due
+    again — sooner each time (escalation) — or mark it 'stale' once it has been
+    nudged ``followup_max_nudges`` times with no resolution."""
+    try:
+        from captain_claw.flight_deck.events import get_store as _events_store
+        es = _events_store()
+        fu = es.get_follow_up(fu_id)
+        if not fu or fu.get("status") != "open":
+            return
+        new_count = int(fu.get("nudged_count", 0)) + 1  # this nudge
+        max_nudges = int(cfg.get("followup_max_nudges", 4))
+        if new_count >= max_nudges:
+            es.touch_follow_up(fu_id, nudged=True)
+            es.mark_follow_up(fu_id, "stale")
+            store.log(user_id, "follow-up went stale",
+                      f"{fu.get('summary', '')[:80]} — nudged {new_count}× with no resolution", "warn")
+            return
+        base = int(cfg.get("followup_default_days", 3))
+        days = max(1, base - new_count)  # escalate: closer each time
+        next_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+        es.touch_follow_up(fu_id, follow_up_at=next_at, nudged=True)
+        store.log(user_id, "follow-up re-armed", f"{fu.get('summary', '')[:80]} — next in {days}d")
+    except Exception as exc:
+        _log.debug("escalate follow-up failed: %s", exc)
+
+
+async def _dispatch_track(user_id: str, action: dict[str, Any]) -> dict[str, Any]:
+    """Record (or re-snooze) a tracked open loop — a soft reminder/request the
+    arbiter chose to TRACK rather than act on. No agent, no external side effect:
+    it just writes to the follow-ups list, due in ``follow_up_days``."""
+    store = get_store()
+    payload = action.get("payload") or {}
+    cfg = resolve_config(user_id)
+    days = payload.get("follow_up_days")
+    if not isinstance(days, int) or days <= 0:
+        days = int(cfg.get("followup_default_days", 3))
+    next_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+    from captain_claw.flight_deck.events import get_store as _events_store
+    es = _events_store()
+    fu_id = str(payload.get("follow_up_id") or "")
+    target = fu_id
+    if fu_id:
+        fu = es.get_follow_up(fu_id)
+        if fu and fu.get("status") == "open":
+            es.touch_follow_up(fu_id, follow_up_at=next_at)
+            note = f"re-snoozed '{fu.get('summary', '')[:60]}' · due in {days}d"
+        else:
+            note = "follow-up not found or not open"
+    else:
+        fu = es.add_follow_up(
+            user_id,
+            summary=str(payload.get("summary") or action.get("title") or "follow-up"),
+            detail=str(payload.get("detail") or ""),
+            source=str(payload.get("source") or ""),
+            follow_up_at=next_at,
+        )
+        target = (fu or {}).get("id", "")
+        note = (f"tracking '{str(payload.get('summary') or '')[:60]}' · due in {days}d"
+                if fu else "already tracked")
+    store.update_status(action["id"], "done", outcome="success", outcome_note=note[:500])
+    store.log(user_id, "tracked follow-up", note)
+    return {"ok": True, "target": target, "note": note}
 
 
 async def _dispatch_stop_run(user_id: str, action: dict[str, Any]) -> dict[str, Any]:
@@ -317,6 +393,8 @@ async def dispatch_action(user_id: str, action: dict[str, Any]) -> dict[str, Any
         return await _dispatch_stop_run(user_id, action)
     if str(action.get("kind")) == "tool_action":
         return await _dispatch_tool_action(user_id, action)
+    if str(action.get("kind")) == "track":
+        return await _dispatch_track(user_id, action)
     agent = _strongest_agent(user_id)
     if not agent:
         return {"ok": False, "target": "", "note": "no running agent to dispatch to"}

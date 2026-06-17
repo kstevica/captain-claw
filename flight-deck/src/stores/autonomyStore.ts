@@ -29,7 +29,23 @@ export interface AutonomyConfig {
   granted_actions: string[]
   event_calendar_enabled: boolean
   event_gmail_enabled: boolean
+  event_max_surface_attempts: number
+  followup_default_days: number
+  followup_resurface_cooldown_hours: number
+  followup_max_nudges: number
   db_path: string
+}
+
+export interface FollowUp {
+  id: string
+  source: string
+  summary: string
+  detail: string
+  status: string   // open | done | dismissed | stale
+  created_at: string
+  follow_up_at: string
+  surfaced_count: number
+  nudged_count: number
 }
 
 export interface AutonomyAction {
@@ -143,12 +159,15 @@ interface AutonomyStore {
   catalog: CatalogItem[]
   events: EventEntry[]
   plans: Plan[]
+  followUps: FollowUp[]
   loading: boolean
   saving: boolean
   error: string | null
 
   loadAll: () => Promise<void>
   loadActions: (status?: string) => Promise<void>
+  doneFollowUp: (id: string) => Promise<void>
+  dismissFollowUp: (id: string) => Promise<void>
   setField: <K extends keyof AutonomyConfig>(key: K, value: AutonomyConfig[K]) => void
   save: () => Promise<void>
   approve: (id: string) => Promise<void>
@@ -169,6 +188,7 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
   catalog: [],
   events: [],
   plans: [],
+  followUps: [],
   loading: false,
   saving: false,
   error: null,
@@ -176,7 +196,7 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
   loadAll: async () => {
     set({ loading: true, error: null })
     try {
-      const [cfgRes, actRes, relRes, logRes, catRes, evtRes, plnRes] = await Promise.all([
+      const [cfgRes, actRes, relRes, logRes, catRes, evtRes, plnRes, fuRes] = await Promise.all([
         _authedFetch('/fd/autonomy/config'),
         _authedFetch('/fd/autonomy/actions?limit=100'),
         _authedFetch('/fd/autonomy/reliability'),
@@ -184,6 +204,7 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
         _authedFetch('/fd/autonomy/catalog'),
         _authedFetch('/fd/events?limit=50'),
         _authedFetch('/fd/autonomy/plans?limit=50'),
+        _authedFetch('/fd/autonomy/follow-ups?limit=100'),
       ])
       const cfg = cfgRes.ok ? await cfgRes.json() : {}
       const act = actRes.ok ? await actRes.json() : {}
@@ -192,6 +213,7 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
       const cat = catRes.ok ? await catRes.json() : {}
       const ev = evtRes.ok ? await evtRes.json() : {}
       const pl = plnRes.ok ? await plnRes.json() : {}
+      const fu = fuRes.ok ? await fuRes.json() : {}
       set({
         config: cfg.config ?? null,
         defaults: cfg.defaults ?? null,
@@ -201,6 +223,7 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
         catalog: cat.catalog ?? [],
         events: ev.events ?? [],
         plans: pl.plans ?? [],
+        followUps: fu.follow_ups ?? [],
       })
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) })
@@ -212,16 +235,18 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
   loadActions: async (status?: string) => {
     try {
       const qs = status ? `?status=${encodeURIComponent(status)}&limit=100` : '?limit=100'
-      const [actRes, relRes, logRes, evtRes] = await Promise.all([
+      const [actRes, relRes, logRes, evtRes, fuRes] = await Promise.all([
         _authedFetch(`/fd/autonomy/actions${qs}`),
         _authedFetch('/fd/autonomy/reliability'),
         _authedFetch('/fd/autonomy/log?limit=100'),
         _authedFetch('/fd/events?limit=50'),
+        _authedFetch('/fd/autonomy/follow-ups?limit=100'),
       ])
       if (actRes.ok) set({ actions: (await actRes.json()).actions ?? [] })
       if (relRes.ok) set({ reliability: (await relRes.json()).reliability ?? [] })
       if (logRes.ok) set({ log: (await logRes.json()).log ?? [] })
       if (evtRes.ok) set({ events: (await evtRes.json()).events ?? [] })
+      if (fuRes.ok) set({ followUps: (await fuRes.json()).follow_ups ?? [] })
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) })
     }
@@ -266,6 +291,22 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
   undo: async (id: string) => {
     const res = await _authedFetch(`/fd/autonomy/actions/${encodeURIComponent(id)}/undo`, { method: 'POST' })
     if (res.ok) await get().loadActions()
+  },
+
+  doneFollowUp: async (id: string) => {
+    const res = await _authedFetch(`/fd/autonomy/follow-ups/${encodeURIComponent(id)}/done`, { method: 'POST' })
+    if (res.ok) {
+      const fu = await _authedFetch('/fd/autonomy/follow-ups?limit=100')
+      if (fu.ok) set({ followUps: (await fu.json()).follow_ups ?? [] })
+    }
+  },
+
+  dismissFollowUp: async (id: string) => {
+    const res = await _authedFetch(`/fd/autonomy/follow-ups/${encodeURIComponent(id)}/dismiss`, { method: 'POST' })
+    if (res.ok) {
+      const fu = await _authedFetch('/fd/autonomy/follow-ups?limit=100')
+      if (fu.ok) set({ followUps: (await fu.json()).follow_ups ?? [] })
+    }
   },
 
   nudge: async () => {
