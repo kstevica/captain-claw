@@ -1483,6 +1483,22 @@ async def _send_chat_and_collect(
             ) as ws:
                 await asyncio.wait_for(ws.recv(), timeout=15)  # welcome
                 if not sent:
+                    # Drain any pre-existing session replay BEFORE sending our task,
+                    # so committed history (e.g. a prior turn's reply on a REUSED
+                    # agent — autonomous nudges run through the user's live agent)
+                    # is never mistaken for this turn's answer. The agent always
+                    # emits replay_done after the optional replay_batch, so this is
+                    # instant for a fresh Basna agent too. (On a mid-turn reconnect
+                    # `sent` is already True, so we skip this and let _handle's
+                    # replay recovery rebuild our answer — the intended path there.)
+                    try:
+                        while True:
+                            rd = json.loads(await asyncio.wait_for(ws.recv(), timeout=15))
+                            if rd.get("type") == "replay_done":
+                                break
+                    except asyncio.TimeoutError:
+                        pass
+                    answer = ""  # discard anything observed during the replay
                     if fleet_instructions:
                         # Fleet-level instructions (archetype role + SOP) into the
                         # agent's system prompt before the task turn.
