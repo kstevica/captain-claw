@@ -83,6 +83,45 @@ function JsonField({ value, onChange }: { value: Record<string, unknown>; onChan
   )
 }
 
+// How the loop uses a promoted tool — short worked walk-throughs.
+const TS_EXAMPLES: { title: string; body: string }[] = [
+  { title: 'Granola → meeting follow-ups', body: 'Add the Granola meetings source. When a new meeting is transcribed, the loop reads it BY ID (grounded) and either nudges you with the action items or drafts a follow-up email.' },
+  { title: 'FRiC follow-ups → nudges', body: 'Add the FRiC follow-up candidates source. The arbiter surfaces each candidate as an event and proposes a nudge or a drafted note — and learns from the ones you dismiss.' },
+  { title: 'Promote a tool by hand', body: 'Click any tool chip below (or “+ action”), give it a label + required args, keep it propose-only, and Save. It joins the catalog and the arbiter can propose it — auto-firing only once it earns trust.' },
+]
+
+// One-click templates. Tool names are best-guess for a typical FRiC/Granola/Google
+// stack — confirm each against your AGENT TOOLS list and tweak before saving.
+const LIB_SOURCES: (Partial<CustomSource> & { _desc: string })[] = [
+  { _desc: 'New Granola meetings → events', name: 'granola', label: 'Granola meetings', tool: 'query_granola_meetings', id_field: 'id', fetch_tool: 'get_meeting_transcript', summary_template: 'Meeting: {title}' },
+  { _desc: 'FRiC follow-up candidates', name: 'fric_followups', label: 'FRiC follow-ups', tool: 'fric_detect_follow_up_candidates', id_field: 'id', summary_template: 'Follow-up: {name}' },
+  { _desc: 'FRiC recent notes', name: 'fric_notes', label: 'FRiC notes', tool: 'fric_list_recent_notes', id_field: 'id', summary_template: 'Note: {title}' },
+  { _desc: 'FRiC IC-prep candidates', name: 'fric_ic', label: 'FRiC IC prep', tool: 'fric_list_ic_prep_candidates', id_field: 'id', summary_template: 'IC prep: {name}' },
+  { _desc: 'FRiC competitive signals', name: 'fric_signals', label: 'FRiC signals', tool: 'fric_list_competitive_signals', id_field: 'id', summary_template: 'Signal: {title}' },
+  { _desc: 'Recently changed Drive files', name: 'drive_recent', label: 'Drive recent files', tool: 'list_recent_files', id_field: 'id', fetch_tool: 'read_file_content', summary_template: 'File: {name}', requires_google: true },
+  { _desc: 'A standing web search', name: 'web_watch', label: 'Web watch', tool: 'web_search', id_field: 'url', summary_template: '{title}', args: { query: 'your query here' } },
+]
+const LIB_ACTIONS: (Partial<CustomAction> & { _desc: string })[] = [
+  { _desc: 'Create a FRiC note', id: 'custom.fric_note', label: 'Create FRiC note', tool: 'fric_create_note', required: ['content'], risk: 'low', reversibility: 'irreversible', grant: 'fric' },
+  { _desc: 'Save to project memory', id: 'custom.project_memory', label: 'Save to project memory', tool: 'project_memory', required: ['content'], risk: 'low', reversibility: 'reversible', grant: 'memory' },
+  { _desc: 'Create a Drive doc', id: 'custom.drive_create', label: 'Create Drive doc', tool: 'create_file', required: ['name', 'content'], risk: 'normal', reversibility: 'reversible', grant: 'drive' },
+  { _desc: 'Label a Gmail thread', id: 'custom.gmail_label', label: 'Label Gmail thread', tool: 'label_thread', required: ['thread_id', 'label'], risk: 'low', reversibility: 'reversible', reverse_tool: 'unlabel_thread', grant: 'mail' },
+  { _desc: 'Suggest a meeting time', id: 'custom.cal_suggest', label: 'Suggest meeting time', tool: 'suggest_time', required: ['duration'], risk: 'low', reversibility: 'read_only', grant: 'calendar' },
+  { _desc: 'Run a quick web research brief', id: 'custom.web_research', label: 'Web research brief', tool: 'web_search', required: ['query'], risk: 'low', reversibility: 'read_only', grant: 'web' },
+  { _desc: 'Summarize workspace files', id: 'custom.summarize', label: 'Summarize files', tool: 'summarize_files', required: ['paths'], risk: 'low', reversibility: 'read_only', grant: 'files' },
+]
+
+// Mirror of backend AUTONOMY_HARD_EXCLUDE — tools the loop may never drive.
+const _HARD_EXCLUDE = ['shell', 'bash', 'exec', 'subprocess', 'browser', 'playwright', 'selenium', 'tweet', 'post_to', 'social', 'pay', 'payment', 'stripe', 'checkout', 'transfer', 'wire', 'basna']
+const _isExcludedTool = (t: string) => _HARD_EXCLUDE.some((x) => t.toLowerCase().includes(x))
+
+function _blankAction(): CustomAction {
+  return { id: 'custom.', label: '', tool: '', base_args: {}, required: [], optional: [], risk: 'normal', reversibility: 'irreversible', reverse_tool: '', grant: 'custom', human_only: true, enabled: true }
+}
+function _blankSource(): CustomSource {
+  return { name: '', label: '', tool: '', args: {}, interval_seconds: 600, items_path: '', id_field: 'id', summary_template: '', fetch_tool: '', requires_google: false, enabled: false }
+}
+
 function ToolsAndSourcesPanel({ config, set }: {
   config: AutonomyConfig
   set: <K extends keyof AutonomyConfig>(k: K, v: AutonomyConfig[K]) => void
@@ -95,6 +134,14 @@ function ToolsAndSourcesPanel({ config, set }: {
   const upA = (i: number, patch: Partial<CustomAction>) => set('custom_actions', actions.map((a, idx) => idx === i ? { ...a, ...patch } : a))
   const upS = (i: number, patch: Partial<CustomSource>) => set('custom_sources', sources.map((s, idx) => idx === i ? { ...s, ...patch } : s))
   const csv = (s: string) => s.split(',').map((x) => x.trim()).filter(Boolean)
+  const addAction = (a: CustomAction) => set('custom_actions', [...actions, a])
+  const addSource = (s: CustomSource) => set('custom_sources', [...sources, s])
+  // A read/list-shaped tool is most useful as a sense; everything else as a hand.
+  const looksLikeSense = (t: string) => /(list|search|recent|watch|detect|get_|read|fetch|digest)/i.test(t)
+  const promoteTool = (t: string) => {
+    if (looksLikeSense(t)) addSource({ ..._blankSource(), name: t, label: t, tool: t })
+    else addAction({ ..._blankAction(), id: `custom.${t}`, label: t, tool: t })
+  }
 
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
@@ -106,6 +153,40 @@ function ToolsAndSourcesPanel({ config, set }: {
         </p>
       </div>
 
+      {/* How it works — worked examples */}
+      <div className="mb-4 rounded-lg border border-sky-900/40 bg-sky-950/20 p-3">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-sky-400">How it works</span>
+        <ul className="mt-1.5 flex flex-col gap-1.5">
+          {TS_EXAMPLES.map((ex) => (
+            <li key={ex.title} className="text-[11px] text-zinc-400">
+              <span className="font-medium text-zinc-200">{ex.title}.</span> {ex.body}
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      {/* Preset library */}
+      <div className="mb-4">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Library — one-click templates</span>
+        <p className="mb-1.5 mt-0.5 text-[10px] text-zinc-600">Tool names are best-guess for a FRiC / Granola / Google stack — confirm each against your Agent tools and tweak before saving.</p>
+        <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+          {LIB_SOURCES.map((p) => (
+            <button key={p.name} onClick={() => addSource({ ..._blankSource(), ...p } as CustomSource)}
+              className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-950/40 px-2 py-1.5 text-left hover:border-zinc-600">
+              <span className="flex flex-col"><span className="text-[11px] font-medium text-zinc-200">{p.label}</span><span className="text-[10px] text-zinc-600">sense · {p._desc}</span></span>
+              <span className="text-[10px] text-sky-500">+ add</span>
+            </button>
+          ))}
+          {LIB_ACTIONS.map((p) => (
+            <button key={p.id} onClick={() => addAction({ ..._blankAction(), ...p } as CustomAction)}
+              className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-950/40 px-2 py-1.5 text-left hover:border-zinc-600">
+              <span className="flex flex-col"><span className="text-[11px] font-medium text-zinc-200">{p.label}</span><span className="text-[10px] text-zinc-600">hand · {p._desc}</span></span>
+              <span className="text-[10px] text-sky-500">+ add</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Agent tool menu */}
       <div className="mb-4">
         <div className="mb-1 flex items-center gap-2">
@@ -113,10 +194,18 @@ function ToolsAndSourcesPanel({ config, set }: {
           <button onClick={() => fetchAgentTools()} className="text-[10px] text-sky-500 hover:text-sky-400">refresh</button>
           {agentTools?.error && <span className="text-[10px] text-rose-400">{agentTools.error}</span>}
         </div>
+        <p className="mb-1 text-[10px] text-zinc-600">Click a tool to promote it (read/list tools → a source, others → an action).</p>
         <div className="flex flex-wrap gap-1">
-          {(agentTools?.tools || []).map((t) => (
-            <span key={t} className="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-300">{t}</span>
-          ))}
+          {(agentTools?.tools || []).map((t) => {
+            const excluded = _isExcludedTool(t)
+            return (
+              <button key={t} onClick={() => !excluded && promoteTool(t)} disabled={excluded}
+                title={excluded ? 'excluded — the loop can never drive this' : 'promote this tool'}
+                className={excluded
+                  ? 'cursor-not-allowed rounded-full bg-zinc-900 px-2 py-0.5 text-[10px] text-zinc-600 line-through'
+                  : 'rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-300 hover:bg-sky-900/60 hover:text-sky-200'}>{t}</button>
+            )
+          })}
           {agentTools && (agentTools.tools || []).length === 0 && <span className="text-[10px] text-zinc-600">No tools (agent running?)</span>}
         </div>
       </div>
@@ -126,7 +215,7 @@ function ToolsAndSourcesPanel({ config, set }: {
         <div className="flex items-center justify-between">
           <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Custom actions ({actions.length})</span>
           <button
-            onClick={() => set('custom_actions', [...actions, { id: 'custom.', label: '', tool: '', base_args: {}, required: [], optional: [], risk: 'normal', reversibility: 'irreversible', reverse_tool: '', grant: 'custom', human_only: true, enabled: true }])}
+            onClick={() => addAction(_blankAction())}
             className="rounded-md border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-300 hover:bg-zinc-800">+ action</button>
         </div>
         {actions.map((a, i) => (
@@ -156,7 +245,7 @@ function ToolsAndSourcesPanel({ config, set }: {
         <div className="flex items-center justify-between">
           <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Custom sources ({sources.length})</span>
           <button
-            onClick={() => set('custom_sources', [...sources, { name: '', label: '', tool: '', args: {}, interval_seconds: 600, items_path: '', id_field: 'id', summary_template: '', fetch_tool: '', requires_google: false, enabled: false }])}
+            onClick={() => addSource(_blankSource())}
             className="rounded-md border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-300 hover:bg-zinc-800">+ source</button>
         </div>
         {sources.map((s, i) => (
@@ -287,7 +376,7 @@ export function AutonomousWorkPage() {
   } = useAutonomyStore()
   const [planGoal, setPlanGoal] = useState('')
   const [creatingPlan, setCreatingPlan] = useState(false)
-  const [tab, setTab] = useState<'control' | 'activity'>('control')
+  const [tab, setTab] = useState<'control' | 'tools' | 'activity'>('control')
   const [savedAt, setSavedAt] = useState(false)
   const [nudging, setNudging] = useState(false)
   const [nudgeMsg, setNudgeMsg] = useState<string | null>(null)
@@ -337,6 +426,12 @@ export function AutonomousWorkPage() {
             className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium ${tab === 'control' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'}`}
           >
             <Sliders className="h-3.5 w-3.5" /> Control
+          </button>
+          <button
+            onClick={() => setTab('tools')}
+            className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium ${tab === 'tools' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'}`}
+          >
+            <Cpu className="h-3.5 w-3.5" /> Tools &amp; Sources
           </button>
           <button
             onClick={() => setTab('activity')}
@@ -516,9 +611,10 @@ export function AutonomousWorkPage() {
                 checked={config.event_calendar_enabled} onChange={(v) => set('event_calendar_enabled', v)} />
               <Toggle label="Gmail" hint="Poll important new mail"
                 checked={config.event_gmail_enabled} onChange={(v) => set('event_gmail_enabled', v)} />
+              <p className="col-span-full text-[11px] text-zinc-500">
+                More hands &amp; senses live in the <button onClick={() => setTab('tools')} className="text-sky-500 hover:text-sky-400">Tools &amp; Sources</button> tab.
+              </p>
             </Section>
-
-            <ToolsAndSourcesPanel config={config} set={set} />
 
             {/* Save bar */}
             <div className="flex items-center gap-3">
@@ -536,6 +632,21 @@ export function AutonomousWorkPage() {
                   Reset to defaults
                 </button>
               )}
+            </div>
+          </div>
+        )}
+
+        {/* ── Tools & Sources tab ── */}
+        {tab === 'tools' && config && (
+          <div className="mx-auto flex max-w-3xl flex-col gap-4">
+            <ToolsAndSourcesPanel config={config} set={set} />
+            <div className="flex items-center gap-3">
+              <button onClick={onSave} disabled={saving}
+                className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-500 disabled:opacity-40">
+                {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                Save settings
+              </button>
+              {savedAt && <span className="text-xs text-emerald-600 dark:text-emerald-400">Saved</span>}
             </div>
           </div>
         )}
