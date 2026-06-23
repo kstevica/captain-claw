@@ -1450,6 +1450,29 @@ async def _send_whatsapp_audio(waid: str, text: str) -> None:
         pass
 
 
+# Suppress accidental duplicate deliveries of the SAME reply to the SAME number
+# within a few seconds — e.g. an autonomous nudge that reaches WhatsApp both via
+# the channel-bus pump (the agent's reply forwarded by _agent_pump) AND via an
+# explicit push_to_waid fallback. Identical text to one WAID within seconds is a
+# dup, never a deliberate re-send. In-process, single event loop → the sync check
+# is race-free between the two delivery paths.
+_RECENT_REPLY_SENDS: dict[tuple[str, int], float] = {}
+_REPLY_DEDUP_WINDOW_S = 30.0
+
+
+def _reply_is_duplicate(waid: str, text: str) -> bool:
+    now = time.monotonic()
+    for k, ts in list(_RECENT_REPLY_SENDS.items()):
+        if now - ts > _REPLY_DEDUP_WINDOW_S:
+            _RECENT_REPLY_SENDS.pop(k, None)
+    key = (waid, hash(text))
+    prev = _RECENT_REPLY_SENDS.get(key)
+    if prev is not None and now - prev <= _REPLY_DEDUP_WINDOW_S:
+        return True
+    _RECENT_REPLY_SENDS[key] = now
+    return False
+
+
 async def _send_whatsapp_reply(waid: str, text: str) -> None:
     """Send a reply: text always, optional MP3 audio if env opts in.
 
@@ -1471,6 +1494,8 @@ async def _send_whatsapp_reply(waid: str, text: str) -> None:
     Failures inside any step are silent; the user just sees the text-only
     reply in the worst case.
     """
+    if _reply_is_duplicate(waid, text):
+        return  # same reply already delivered to this number moments ago
     await _send_whatsapp_text(waid, text)
     if not _audio_reply_enabled():
         return

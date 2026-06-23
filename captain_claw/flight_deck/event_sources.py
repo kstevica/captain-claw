@@ -58,7 +58,11 @@ async def poll_user(user_id: str) -> int:
     """Run every due, enabled adapter for one user; ingest results. Returns the
     number of new events ingested."""
     store = get_store()
-    now = time.monotonic()
+    # Wall-clock, not time.monotonic(): last_poll_at is persisted across process
+    # (and machine) restarts. A monotonic value stored before a reboot would read
+    # as ~90 days in the future after the clock resets to ~0, so `now - last` goes
+    # hugely negative and polling silently stalls until monotonic catches up.
+    now = time.time()
     ingested = 0
     for ad in _ADAPTERS:
         try:
