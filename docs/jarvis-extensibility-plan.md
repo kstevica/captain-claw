@@ -82,3 +82,18 @@ Done via arbiter prompt + a couple of worked examples, so a useful action lands
 **A → B → C (interleavable quick wins) → D.** A is the foundation; B is the
 biggest user-visible payoff and needs A; C is small and improves daily feel
 immediately; D makes it sturdy. Build per-phase, verify on prod between phases.
+
+---
+
+## STATUS — all four themes shipped (on main)
+
+- **A** — `CustomAction`/`CustomSource` on the per-user config; `resolve_catalog`
+  merges built-ins + custom (never shadows a built-in, drops hard-excluded);
+  generic tool-poller source; agent-tool discovery; **table-driven grounding**
+  (built-ins + custom fetch contract); "Tools & Sources" UI panel.
+- **B** — arbiter biased to *prepare* the action (draft/hold/reminder) over a
+  nudge; `mail.draft` enriched with the event's real sender/subject.
+- **C** — no self-journaling notes; Gmail no-reply/automated filter; follow-up
+  done/dismiss feeds reliability.
+- **D** — replan-on-failure (bounded); token-gated `/fd/events/webhook` push;
+  custom-source interval floor + count cap.
