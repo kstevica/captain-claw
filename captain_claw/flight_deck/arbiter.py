@@ -56,7 +56,10 @@ _SYSTEM_PROMPT = (
     '"action_id": catalog id (tool_action only), "args": {…} (tool_action only), '
     '"follow_up_days": int days until it resurfaces (track only), '
     '"follow_up_id": the FU:<id> of a due follow-up this addresses (when acting on '
-    'or re-snoozing a "follow-up due" candidate — copy the id after "FU:")}\n\n'
+    'or re-snoozing a "follow-up due" candidate — copy the id after "FU:"), '
+    '"event_ref": the EV:<id> of the surfaced event this action is about (copy the '
+    'id after "EV:" from the candidate — set it on ANY action derived from an '
+    'event so the assistant can open the real item)}\n\n'
     "Kind/risk mapping (use these exact kinds): a proactive message to the user is "
     'kind="nudge", risk="low". Running a task with the agent\'s tools is '
     'kind="run_prompt" (risk "normal", or "high" if it sends/changes external data). '
@@ -68,6 +71,11 @@ _SYSTEM_PROMPT = (
     'If a candidate shows a run is stuck, looping, or runaway AND it matches an '
     '"active run" below, propose kind="stop_run" with that run\'s session id as '
     '"target" (risk "normal"). stop_run and tool_action are held for approval.\n'
+    "An '(event · … · EV:<id>)' candidate is a REAL item the system already "
+    "fetched from the user's world (an email, a calendar entry). Treat its "
+    "existence as a confirmed fact — set \"event_ref\" to its EV id and write the "
+    "action as if it is true (it is). Do NOT ask the assistant to re-verify or "
+    "search for it; the assistant will be handed the exact id to open.\n"
     "Some candidates are marked '(follow-up due …)' — these are open loops you "
     "TRACKed earlier that have come due. For one of these, either propose a "
     'kind="nudge" reminding the user (set "follow_up_id" to its FU:<id>; make the '
@@ -194,6 +202,9 @@ def _parse_actions(text: str) -> list[dict[str, Any]]:
             # existing due follow-up by id.
             "follow_up_days": _coerce_int(raw.get("follow_up_days")),
             "follow_up_id": str(raw.get("follow_up_id") or "").strip().removeprefix("FU:")[:40],
+            # event_ref ties an action back to the surfaced event it acts on, so
+            # dispatch can ground the agent with the real handle (see EV:<id>).
+            "event_ref": str(raw.get("event_ref") or "").strip().removeprefix("EV:")[:48],
         })
     return out
 
@@ -308,7 +319,11 @@ async def maybe_run_arbiter(
             evstore = _events_store()
             new_events = evstore.list_new(user_id, limit=5)
             for ev in new_events:
-                candidates.append(f"(event · {ev['source']}) {ev['summary']}")
+                # Tag with EV:<id> so an action ABOUT this event can reference it
+                # ("event_ref"); dispatch then resolves the real handle (gmail
+                # thread/message id, calendar event id) and hands it to the agent
+                # to fetch by id — instead of the agent re-searching and missing it.
+                candidates.append(f"(event · {ev['source']} · EV:{ev['id']}) {ev['summary']}")
                 event_ids.append(ev["id"])
         except Exception as exc:
             _log.debug("event intake failed (non-fatal): %s", exc)
@@ -516,6 +531,10 @@ async def maybe_run_arbiter(
         elif chosen["kind"] == "nudge" and chosen.get("follow_up_id"):
             # A reminder nudge that addresses a due follow-up — dispatch re-arms it.
             _payload = {"follow_up_id": chosen.get("follow_up_id")}
+        # Grounding: if this action is about a surfaced event, carry its EV ref so
+        # dispatch can hand the agent the real handle (fetch by id, never search).
+        if chosen.get("event_ref") and chosen["kind"] in ("nudge", "run_prompt", "tool_action"):
+            _payload = {**(_payload or {}), "event_ref": chosen["event_ref"]}
         row = store.add_action(
             user_id,
             kind=chosen["kind"], title=chosen["title"], rationale=chosen["rationale"],

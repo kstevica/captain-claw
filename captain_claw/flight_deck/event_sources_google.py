@@ -113,6 +113,7 @@ async def poll_gmail(user_id: str, cursor: str) -> tuple[list[dict[str, Any]], s
             mid = m.get("id")
             if not mid:
                 continue
+            tid = m.get("threadId") or mid  # for get_thread; falls back to message id
             frm, subj = "?", "(no subject)"
             try:
                 rm = await client.get(
@@ -130,7 +131,7 @@ async def poll_gmail(user_id: str, cursor: str) -> tuple[list[dict[str, Any]], s
                 "source": "gmail", "event_type": "new_email",
                 "summary": f"Email from {frm}: {subj}",
                 "dedup_key": f"gmail:{mid}",
-                "metadata": {"message_id": mid, "from": frm, "subject": subj},
+                "metadata": {"message_id": mid, "thread_id": tid, "from": frm, "subject": subj},
             })
     return out, cursor
 

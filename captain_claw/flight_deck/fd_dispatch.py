@@ -52,21 +52,61 @@ def _strongest_agent(user_id: str) -> dict[str, Any] | None:
         return None
 
 
+def _grounding_suffix(action: dict[str, Any]) -> str:
+    """If the action is about a surfaced event, hand the agent the REAL handle so
+    it fetches by id instead of re-searching (and falsely reporting the item
+    absent). Resolves ``payload.event_ref`` → the event's stored handle."""
+    ref = str((action.get("payload") or {}).get("event_ref") or "")
+    if not ref:
+        return ""
+    try:
+        from captain_claw.flight_deck.events import get_store as _events_store
+        ev = _events_store().get_event(ref)
+    except Exception:
+        ev = None
+    if not ev:
+        return ""
+    md = ev.get("metadata") or {}
+    src = str(ev.get("source") or "")
+    if src == "gmail":
+        tid = md.get("thread_id") or md.get("message_id") or ""
+        frm = md.get("from") or "?"
+        subj = md.get("subject") or ev.get("summary") or ""
+        return (
+            f"\n\nGROUNDING — this is about a REAL email already in the inbox: "
+            f"from {frm}, subject \"{subj}\" (Gmail thread_id={tid}). It exists. "
+            f"If you need its content, open it with your Gmail tool BY THREAD ID "
+            f"({tid}) — do not search by sender/subject and do not scan recent "
+            f"messages. If the tool cannot open that id, say you couldn't open it; "
+            f"never tell the user the email doesn't exist."
+        )
+    if src == "calendar":
+        eid = md.get("event_id") or ""
+        return (
+            f"\n\nGROUNDING — this is about a REAL calendar event (event_id={eid}). "
+            f"It exists. Open it with your Calendar tool BY ID ({eid}); do not "
+            f"search. If you cannot open it, say so; never claim it doesn't exist."
+        )
+    return (f"\n\nGROUNDING — this is about a real surfaced item: "
+            f"{ev.get('summary', '')}. Treat it as existing; do not deny it.")
+
+
 def _instruction_for(action: dict[str, Any]) -> str:
     """Render an action into a concrete instruction the agent can act on."""
     kind = str(action.get("kind") or "nudge")
     title = str(action.get("title") or "").strip()
     rationale = str(action.get("rationale") or "").strip()
+    ground = _grounding_suffix(action)
     if kind == "nudge":
         return (f"[Autonomous nudge] Proactively reach out to the user now: {title}. "
-                f"{rationale} Keep it brief and in their language.")
+                f"{rationale} Keep it brief and in their language.{ground}")
     if kind == "basna":
         return f"Run a Basna on: {title}"
     if kind == "materialize_schedule":
         return (f"[Autonomous task] Set up a scheduled task: {title}. {rationale} "
                 f"Use your scheduling tool.")
     # run_prompt and anything else: treat as a task prompt.
-    return f"[Autonomous task] {title}\n\n{rationale}".strip()
+    return f"[Autonomous task] {title}\n\n{rationale}{ground}".strip()
 
 
 def should_auto_dispatch(cfg: dict[str, Any], action: dict[str, Any]) -> bool:
