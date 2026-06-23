@@ -1501,7 +1501,7 @@ class BrowserTool(Tool):
 
             for cred in creds:
                 cred_domain = urlparse(cred.get("url", "")).netloc.lower()
-                # Match on domain (e.g. "fricv3.filrougecapital.com" matches)
+                # Match on domain (e.g. "app.example.com" matches)
                 if cred_domain and (
                     cred_domain == current_domain
                     or current_domain.endswith("." + cred_domain)

@@ -86,27 +86,25 @@ function JsonField({ value, onChange }: { value: Record<string, unknown>; onChan
 // How the loop uses a promoted tool — short worked walk-throughs.
 const TS_EXAMPLES: { title: string; body: string }[] = [
   { title: 'Granola → meeting follow-ups', body: 'Add the Granola meetings source. When a new meeting is transcribed, the loop reads it BY ID (grounded) and either nudges you with the action items or drafts a follow-up email.' },
-  { title: 'FRiC follow-ups → nudges', body: 'Add the FRiC follow-up candidates source. The arbiter surfaces each candidate as an event and proposes a nudge or a drafted note — and learns from the ones you dismiss.' },
+  { title: 'Gmail → drafted replies', body: 'Add the Gmail search source. Important unread threads surface as events; the arbiter reads the thread by id and prepares a draft reply (never sent) for you to review — and learns from what you dismiss.' },
   { title: 'Promote a tool by hand', body: 'Click any tool chip below (or “+ action”), give it a label + required args, keep it propose-only, and Save. It joins the catalog and the arbiter can propose it — auto-firing only once it earns trust.' },
 ]
 
-// One-click templates. Tool names are best-guess for a typical FRiC/Granola/Google
+// One-click templates. Tool names are best-guess for a typical Granola/Google
 // stack — confirm each against your AGENT TOOLS list and tweak before saving.
 const LIB_SOURCES: (Partial<CustomSource> & { _desc: string })[] = [
   { _desc: 'New Granola meetings → events', name: 'granola', label: 'Granola meetings', tool: 'query_granola_meetings', id_field: 'id', fetch_tool: 'get_meeting_transcript', summary_template: 'Meeting: {title}' },
-  { _desc: 'FRiC follow-up candidates', name: 'fric_followups', label: 'FRiC follow-ups', tool: 'fric_detect_follow_up_candidates', id_field: 'id', summary_template: 'Follow-up: {name}' },
-  { _desc: 'FRiC recent notes', name: 'fric_notes', label: 'FRiC notes', tool: 'fric_list_recent_notes', id_field: 'id', summary_template: 'Note: {title}' },
-  { _desc: 'FRiC IC-prep candidates', name: 'fric_ic', label: 'FRiC IC prep', tool: 'fric_list_ic_prep_candidates', id_field: 'id', summary_template: 'IC prep: {name}' },
-  { _desc: 'FRiC competitive signals', name: 'fric_signals', label: 'FRiC signals', tool: 'fric_list_competitive_signals', id_field: 'id', summary_template: 'Signal: {title}' },
+  { _desc: 'Important unread Gmail threads', name: 'gmail_search', label: 'Gmail search', tool: 'search_threads', id_field: 'thread_id', fetch_tool: 'get_thread', summary_template: 'Email: {subject}', args: { query: 'is:important is:unread in:inbox' }, requires_google: true },
   { _desc: 'Recently changed Drive files', name: 'drive_recent', label: 'Drive recent files', tool: 'list_recent_files', id_field: 'id', fetch_tool: 'read_file_content', summary_template: 'File: {name}', requires_google: true },
   { _desc: 'A standing web search', name: 'web_watch', label: 'Web watch', tool: 'web_search', id_field: 'url', summary_template: '{title}', args: { query: 'your query here' } },
 ]
 const LIB_ACTIONS: (Partial<CustomAction> & { _desc: string })[] = [
-  { _desc: 'Create a FRiC note', id: 'custom.fric_note', label: 'Create FRiC note', tool: 'fric_create_note', required: ['content'], risk: 'low', reversibility: 'irreversible', grant: 'fric' },
   { _desc: 'Save to project memory', id: 'custom.project_memory', label: 'Save to project memory', tool: 'project_memory', required: ['content'], risk: 'low', reversibility: 'reversible', grant: 'memory' },
+  { _desc: 'Save a key/value to the datastore', id: 'custom.datastore', label: 'Save to datastore', tool: 'datastore', required: ['key', 'value'], risk: 'low', reversibility: 'reversible', grant: 'data' },
   { _desc: 'Create a Drive doc', id: 'custom.drive_create', label: 'Create Drive doc', tool: 'create_file', required: ['name', 'content'], risk: 'normal', reversibility: 'reversible', grant: 'drive' },
   { _desc: 'Label a Gmail thread', id: 'custom.gmail_label', label: 'Label Gmail thread', tool: 'label_thread', required: ['thread_id', 'label'], risk: 'low', reversibility: 'reversible', reverse_tool: 'unlabel_thread', grant: 'mail' },
   { _desc: 'Suggest a meeting time', id: 'custom.cal_suggest', label: 'Suggest meeting time', tool: 'suggest_time', required: ['duration'], risk: 'low', reversibility: 'read_only', grant: 'calendar' },
+  { _desc: 'Fetch a web page', id: 'custom.web_fetch', label: 'Fetch a web page', tool: 'web_fetch', required: ['url'], risk: 'low', reversibility: 'read_only', grant: 'web' },
   { _desc: 'Run a quick web research brief', id: 'custom.web_research', label: 'Web research brief', tool: 'web_search', required: ['query'], risk: 'low', reversibility: 'read_only', grant: 'web' },
   { _desc: 'Summarize workspace files', id: 'custom.summarize', label: 'Summarize files', tool: 'summarize_files', required: ['paths'], risk: 'low', reversibility: 'read_only', grant: 'files' },
 ]
@@ -168,7 +166,7 @@ function ToolsAndSourcesPanel({ config, set }: {
       {/* Preset library */}
       <div className="mb-4">
         <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Library — one-click templates</span>
-        <p className="mb-1.5 mt-0.5 text-[10px] text-zinc-600">Tool names are best-guess for a FRiC / Granola / Google stack — confirm each against your Agent tools and tweak before saving.</p>
+        <p className="mb-1.5 mt-0.5 text-[10px] text-zinc-600">Tool names are best-guess for a Granola / Google stack — confirm each against your Agent tools and tweak before saving.</p>
         <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
           {LIB_SOURCES.map((p) => (
             <button key={p.name} onClick={() => addSource({ ..._blankSource(), ...p } as CustomSource)}

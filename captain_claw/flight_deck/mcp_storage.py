@@ -9,7 +9,7 @@ actually want.
 Schema (one element per configured server)::
 
     {
-        "name":          "fricmcp",                       # unique key
+        "name":          "examplemcp",                     # unique key
         "transport":     "http",                          # "http" (default) or "stdio"
         "url":           "https://example.com/mcp",       # http: streamable-http endpoint
         "command":       "uvx",                           # stdio: executable to launch

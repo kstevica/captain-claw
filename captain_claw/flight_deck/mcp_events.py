@@ -20,10 +20,10 @@ Architecture
 
 * Event payloads are tiny dicts::
 
-      {"type": "server_added",   "server": "fricmcp"}
-      {"type": "server_removed", "server": "fricmcp"}
-      {"type": "server_updated", "server": "fricmcp"}
-      {"type": "tools_changed",  "server": "fricmcp"}
+      {"type": "server_added",   "server": "examplemcp"}
+      {"type": "server_removed", "server": "examplemcp"}
+      {"type": "server_updated", "server": "examplemcp"}
+      {"type": "tools_changed",  "server": "examplemcp"}
       {"type": "ping"}
 
   ``ping`` events are emitted periodically by the SSE route to keep

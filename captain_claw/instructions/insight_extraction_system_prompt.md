@@ -15,7 +15,7 @@ Categories (typed-memory taxonomy):
 - deadline — a dated commitment. Include the absolute date in `content` (e.g. "2026-06-12"), not relative phrases like "next Thursday".
 - project — ongoing work, goals, initiatives, who is doing what or by when. Convert relative dates to absolute dates in content. Required body shape: fact/decision first, then `why` (motivation — constraint, deadline, stakeholder ask) and `how_to_apply` (how this should shape your future suggestions).
 - workflow — a multi-step procedure the user wants you to follow repeatedly ("when I send a meeting transcript, draft a follow-up email and a one-line summary").
-- reference — pointers to where information lives in external systems ("the team's notes are in the 'Q3 Strategy' Google Doc", "contacts are in the FRiC startups database"). Use these when the user references an external system or its information.
+- reference — pointers to where information lives in external systems ("the team's notes are in the 'Q3 Strategy' Google Doc", "contacts are in the CRM database"). Use these when the user references an external system or its information.
 
 Rules:
 
@@ -30,7 +30,7 @@ Rules:
    - "contact:john@acme.com"
    - "preference:timezone"
    - "project:website-redesign"
-   - "reference:fric-startups-db"
+   - "reference:crm-contacts-db"
    Set null if no natural key exists.
 
 4. importance scale: 1=trivial, 5=useful, 8=important, 10=critical.

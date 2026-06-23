@@ -18,7 +18,7 @@ open — extended by configuration, not code.
 **Goal:** add new autonomous **actions** (hands) and **event sources** (senses)
 without editing code, by *promoting the agent's already-connected tools*. The
 agent (captain-claw-web) already holds authenticated tools — Google
-Calendar/Mail/Drive, Granola, FRiC, etc. Those become the menu.
+Calendar/Mail/Drive, Granola, etc. Those become the menu.
 
 - **A1 · Tool discovery.** FD fetches an agent's live tool list (the orchestrator
   endpoint already returns `{tools}` from `server.agent.tools.list_tools()`),

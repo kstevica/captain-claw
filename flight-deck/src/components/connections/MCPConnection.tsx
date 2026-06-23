@@ -394,7 +394,7 @@ function ServerForm({ initial, onClose }: ServerFormProps) {
             value={form.name}
             onChange={(e) => update('name', e.target.value)}
             disabled={isEdit}
-            placeholder="fricmcp"
+            placeholder="mymcp"
             className="w-full rounded-md bg-zinc-900 border border-zinc-800 px-2.5 py-1.5 text-sm text-zinc-100 focus:outline-none focus:border-violet-500 disabled:opacity-60"
           />
         </label>
