@@ -225,6 +225,7 @@ async def done_follow_up_route(follow_up_id: str, request: Request,
     if not fu or fu.get("user_id") not in (uid, "local"):
         raise HTTPException(status_code=404, detail="follow-up not found")
     es.mark_follow_up(follow_up_id, "done")
+    _learn_from_follow_up(uid, fu, worthwhile=True)
     get_store().log(uid, "follow-up done", fu.get("summary", "")[:120])
     return {"ok": True}
 
@@ -240,8 +241,26 @@ async def dismiss_follow_up_route(follow_up_id: str, request: Request,
     if not fu or fu.get("user_id") not in (uid, "local"):
         raise HTTPException(status_code=404, detail="follow-up not found")
     es.mark_follow_up(follow_up_id, "dismissed")
+    _learn_from_follow_up(uid, fu, worthwhile=False)
     get_store().log(uid, "follow-up dismissed", fu.get("summary", "")[:120])
     return {"ok": True}
+
+
+def _learn_from_follow_up(uid: str, fu: dict, *, worthwhile: bool) -> None:
+    """A done/dismissed follow-up is a learning signal on the 'track' kind for
+    that source: keep tracking what the user resolves, suppress what they keep
+    dismissing. Gated by learning_enabled. Best-effort."""
+    try:
+        from captain_claw.flight_deck.autonomy import resolve_config
+        cfg = resolve_config(uid)
+        if not cfg.get("learning_enabled"):
+            return
+        get_store().record_outcome(
+            uid, "track", str(fu.get("source") or "general"), bool(worthwhile),
+            seed=float(cfg.get("reliability_seed", 0.6)),
+        )
+    except Exception:
+        pass
 
 
 @router.get("/plans")

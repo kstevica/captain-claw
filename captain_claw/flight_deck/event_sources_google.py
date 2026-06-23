@@ -88,6 +88,20 @@ async def poll_calendar(user_id: str, cursor: str) -> tuple[list[dict[str, Any]]
     return out, now.isoformat()
 
 
+# Senders that are machines, not people — their mail is notification noise, never
+# something the user needs to act on. Matched as a substring of the From header.
+_AUTOMATED_SENDER_BITS: tuple[str, ...] = (
+    "noreply", "no-reply", "no_reply", "donotreply", "do-not-reply",
+    "notifications@", "notification@", "comments-noreply", "mailer-daemon",
+    "postmaster@", "automated@", "auto-confirm", "bounce", "@docs.google.com",
+)
+
+
+def _is_automated_sender(frm: str) -> bool:
+    f = (frm or "").lower()
+    return any(bit in f for bit in _AUTOMATED_SENDER_BITS)
+
+
 async def poll_gmail(user_id: str, cursor: str) -> tuple[list[dict[str, Any]], str]:
     """Surface important + unread inbox messages. Dedup by message id (unread ones
     persist, so re-listing them is a no-op once ingested)."""
@@ -127,6 +141,8 @@ async def poll_gmail(user_id: str, cursor: str) -> tuple[list[dict[str, Any]], s
                     subj = hdrs.get("Subject", subj)
             except Exception:
                 pass
+            if _is_automated_sender(frm):
+                continue  # no-reply / notification mail — not a real person needing the user
             out.append({
                 "source": "gmail", "event_type": "new_email",
                 "summary": f"Email from {frm}: {subj}",

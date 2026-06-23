@@ -47,6 +47,12 @@ _SYSTEM_PROMPT = (
     "many days until it should resurface (default 3). USE THIS for soft "
     "reminders/requests instead of dropping them — they must be tracked.\n"
     "3. DROP ([]): pure internal musing or automated noise with no user value.\n\n"
+    "NO SELF-JOURNALING. Never propose an action — especially a note.write — that "
+    "merely records the assistant's OWN state, mood, quiet, reliability, or "
+    "behavioural patterns (e.g. 'Document stability observation', 'Log language "
+    "shift', 'Record false-claim contradiction'). Every action must produce "
+    "something the USER needs or move the user's world forward. Self-observation "
+    "with no user-facing value is DROP ([]), not a note.\n\n"
     "Reply with ONLY a JSON array of 0 or 1 objects:\n"
     '{"kind": one of ["nudge","run_prompt","basna","materialize_schedule","stop_run","tool_action","track"], '
     '"title": short imperative, "rationale": one sentence on why now, '
