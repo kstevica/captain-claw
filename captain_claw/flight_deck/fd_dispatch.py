@@ -401,6 +401,36 @@ async def _dispatch_stop_run(user_id: str, action: dict[str, Any]) -> dict[str, 
         return {"ok": False, "target": target, "note": str(exc)}
 
 
+def _enrich_args_from_event(action_id: str, args: dict[str, Any], event_ref: str) -> dict[str, Any]:
+    """Fill an action's args from the surfaced event's real handle so it acts on
+    the actual item, not the arbiter's guess (Theme B). Today: a reply draft
+    targets the email's true sender + threads under its subject."""
+    if action_id != "mail.draft" or not event_ref:
+        return args
+    try:
+        from captain_claw.flight_deck.events import get_store as _events_store
+        ev = _events_store().get_event(event_ref)
+    except Exception:
+        ev = None
+    if not ev or str(ev.get("source")) != "gmail":
+        return args
+    md = ev.get("metadata") or {}
+    out = dict(args)
+    # Recipient: the real sender (parse "Name <addr>"); never overwrite an explicit to.
+    if not str(out.get("to") or "").strip():
+        frm = str(md.get("from") or "")
+        m = re.search(r"<([^>]+)>", frm)
+        addr = (m.group(1) if m else frm).strip()
+        if addr:
+            out["to"] = addr
+    # Subject: reply form of the original, if the arbiter didn't set one.
+    if not str(out.get("subject") or "").strip():
+        subj = str(md.get("subject") or "").strip()
+        if subj:
+            out["subject"] = subj if subj.lower().startswith("re:") else f"Re: {subj}"
+    return out
+
+
 async def _dispatch_tool_action(user_id: str, action: dict[str, Any]) -> dict[str, Any]:
     """Run a catalog action via the deterministic rail and record the grounded
     outcome (the ToolResult success — no LLM judge needed). The reverse handle for
@@ -408,7 +438,10 @@ async def _dispatch_tool_action(user_id: str, action: dict[str, Any]) -> dict[st
     store = get_store()
     payload = action.get("payload") or {}
     action_id = str(payload.get("action_id") or "")
-    args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+    args = dict(payload.get("args")) if isinstance(payload.get("args"), dict) else {}
+    # Theme B: ground a reply draft on the real event so it targets the actual
+    # sender/thread instead of whatever the arbiter guessed.
+    args = _enrich_args_from_event(action_id, args, str(payload.get("event_ref") or ""))
     store.update_status(action["id"], "dispatched")
     from captain_claw.flight_deck.actions import run_action
 
