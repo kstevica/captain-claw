@@ -85,6 +85,41 @@ async def ingest_event(request: Request, _user: dict | None = Depends(get_option
     return {"ok": True, "event": evt}
 
 
+@router.post("/webhook")
+async def webhook_ingest(request: Request):
+    """Token-gated, SESSIONLESS push path for external systems (Gmail Pub/Sub,
+    Zapier, a calendar push channel…) — sub-minute latency vs the 5-min poll.
+    Disabled unless ``FD_EVENTS_WEBHOOK_TOKEN`` is set; the caller supplies it via
+    the ``X-Webhook-Token`` header (or ``?token=``) and names the target user_id
+    in the body. Body: {user_id?, source, summary, event_type?, body?, metadata?,
+    dedup_key?}."""
+    token = os.environ.get("FD_EVENTS_WEBHOOK_TOKEN", "").strip()
+    if not token:
+        raise HTTPException(status_code=404, detail="webhook ingest not enabled")
+    supplied = request.headers.get("X-Webhook-Token") or request.query_params.get("token") or ""
+    if supplied != token:
+        raise HTTPException(status_code=403, detail="bad webhook token")
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be an object")
+    uid = str(body.get("user_id") or "").strip() or "local"
+    source = str(body.get("source") or "").strip()
+    summary = str(body.get("summary") or "").strip()
+    if not source or not summary:
+        raise HTTPException(status_code=400, detail="source and summary are required")
+    evt = get_store().add_event(
+        uid, source=source,
+        event_type=str(body.get("event_type") or "").strip(),
+        summary=summary, body=str(body.get("body") or ""),
+        metadata=body.get("metadata") if isinstance(body.get("metadata"), dict) else {},
+        dedup_key=str(body.get("dedup_key") or "").strip(),
+    )
+    if evt is None:
+        return {"ok": True, "deduped": True}
+    _maybe_nudge_arbiter(uid)
+    return {"ok": True, "event_id": evt["id"]}
+
+
 @router.get("")
 async def list_events(
     request: Request,

@@ -150,7 +150,7 @@ async def _poll_custom_sources(user_id: str, now: float, store: Any) -> int:
     from captain_claw.flight_deck.fd_dispatch import _strongest_agent
     agent = None
     ingested = 0
-    for src in srcs:
+    for src in srcs[:20]:  # cap: a runaway config can't spawn unbounded pollers
         try:
             if not src.get("enabled"):
                 continue
@@ -160,7 +160,8 @@ async def _poll_custom_sources(user_id: str, now: float, store: Any) -> int:
             if src.get("requires_google") and not _google_connected():
                 continue
             st = store.get_poll_state(user_id, name)
-            if now - float(st.get("last_poll_at") or 0.0) < float(src.get("interval_seconds") or 600):
+            interval = max(60.0, float(src.get("interval_seconds") or 600))  # floor: never hammer a tool
+            if now - float(st.get("last_poll_at") or 0.0) < interval:
                 continue
             if agent is None:
                 agent = _strongest_agent(user_id)

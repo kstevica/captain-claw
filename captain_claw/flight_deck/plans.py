@@ -28,6 +28,10 @@ _log = logging.getLogger(__name__)
 PLAN_STATUSES = ("active", "paused", "done", "failed", "abandoned")
 STEP_STATUSES = ("pending", "running", "done", "failed", "skipped")
 
+# How many step failures a plan may absorb (re-decomposing the remainder each
+# time) before it gives up — bounds the replan loop on an impossible step.
+_MAX_REPLANS = 2
+
 
 def _norm_user(user_id: str | None) -> str:
     return (user_id or "").strip() or "local"
@@ -316,6 +320,29 @@ async def advance_one(user_id: str, plan_id: str, *, auto: bool = False) -> dict
         store.save_plan(plan_id, steps=steps, status="active" if remaining else "done", note="")
         return {"ok": True, "step": step["title"], "done": not remaining}
     step["status"] = "failed"
+    store.save_plan(plan_id, steps=steps)
+    # Replan-on-failure (#4 / Theme D): re-decompose what's left rather than
+    # failing the whole plan — unless we've already failed too many times (cap
+    # avoids an infinite re-plan loop on a step that can't ever succeed).
+    failed_count = sum(1 for s in steps if s["status"] == "failed")
+    if failed_count <= _MAX_REPLANS:
+        done_titles = [s["title"] for s in steps if s["status"] == "done"]
+        replan_goal = (
+            f"Original goal: {plan['goal']}\n"
+            + (f"Already completed: {'; '.join(done_titles)}\n" if done_titles else "")
+            + f"The step \"{step['title']}\" just FAILED ({step['result'][:200]}).\n"
+            "Produce the remaining steps to still achieve the goal, taking a "
+            "different approach for what failed. Omit anything already completed."
+        )
+        new_steps = await decompose_goal(user_id, replan_goal)
+        if new_steps:
+            kept = [s for s in steps if s["status"] in ("done", "failed")]
+            for ns in new_steps:
+                ns["status"] = "pending"
+            store.save_plan(plan_id, steps=kept + new_steps, status="active",
+                            note=f"replanned after failed step: {step['title']}")
+            return {"ok": True, "replanned": True, "step": step["title"],
+                    "new_steps": len(new_steps)}
     store.save_plan(plan_id, steps=steps, status="failed", note=f"step failed: {step['title']}")
     return {"ok": False, "error": f"step failed: {step['title']}", "detail": step["result"]}
 
