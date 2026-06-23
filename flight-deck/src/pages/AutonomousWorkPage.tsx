@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Cpu, Sliders, ListChecks, Loader2, AlertCircle, Check, ShieldCheck, Gauge, Play } from 'lucide-react'
-import { useAutonomyStore, type AutonomyConfig, type AutonomyAction } from '../stores/autonomyStore'
+import { useAutonomyStore, type AutonomyConfig, type AutonomyAction, type CustomAction, type CustomSource } from '../stores/autonomyStore'
 
 // Theming (see index.css): zinc is auto-remapped in light mode, so zinc classes
 // are written dark-first with NO dark: pairs. Non-zinc accents use explicit
@@ -59,6 +59,128 @@ function Toggle({ label, hint, checked, disabled, onChange }: {
         {hint && <span className="text-[10px] text-zinc-600">{hint}</span>}
       </span>
     </label>
+  )
+}
+
+const _inp = 'rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 w-full'
+
+function JsonField({ value, onChange }: { value: Record<string, unknown>; onChange: (v: Record<string, unknown>) => void }) {
+  const [text, setText] = useState(JSON.stringify(value || {}))
+  const [bad, setBad] = useState(false)
+  return (
+    <div className="flex flex-col gap-0.5">
+      <textarea
+        value={text} rows={2} spellCheck={false}
+        onChange={(e) => {
+          setText(e.target.value)
+          try { const p = JSON.parse(e.target.value || '{}'); if (p && typeof p === 'object' && !Array.isArray(p)) { onChange(p as Record<string, unknown>); setBad(false) } else setBad(true) }
+          catch { setBad(true) }
+        }}
+        className={`${_inp} font-mono`}
+      />
+      {bad && <span className="text-[10px] text-rose-400">invalid JSON — not saved</span>}
+    </div>
+  )
+}
+
+function ToolsAndSourcesPanel({ config, set }: {
+  config: AutonomyConfig
+  set: <K extends keyof AutonomyConfig>(k: K, v: AutonomyConfig[K]) => void
+}) {
+  const { agentTools, fetchAgentTools } = useAutonomyStore()
+  useEffect(() => { if (!agentTools) fetchAgentTools() }, [agentTools, fetchAgentTools])
+
+  const actions = config.custom_actions || []
+  const sources = config.custom_sources || []
+  const upA = (i: number, patch: Partial<CustomAction>) => set('custom_actions', actions.map((a, idx) => idx === i ? { ...a, ...patch } : a))
+  const upS = (i: number, patch: Partial<CustomSource>) => set('custom_sources', sources.map((s, idx) => idx === i ? { ...s, ...patch } : s))
+  const csv = (s: string) => s.split(',').map((x) => x.trim()).filter(Boolean)
+
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
+      <div className="mb-3">
+        <h3 className="text-sm font-semibold text-zinc-100">Tools &amp; Sources</h3>
+        <p className="mt-0.5 text-[11px] text-zinc-500">
+          Promote your agent's own tools into autonomous <b>actions</b> (hands) or polled <b>sources</b> (senses).
+          New actions default to propose-only; shell/browser/social/payment tools are always excluded.
+        </p>
+      </div>
+
+      {/* Agent tool menu */}
+      <div className="mb-4">
+        <div className="mb-1 flex items-center gap-2">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Agent tools</span>
+          <button onClick={() => fetchAgentTools()} className="text-[10px] text-sky-500 hover:text-sky-400">refresh</button>
+          {agentTools?.error && <span className="text-[10px] text-rose-400">{agentTools.error}</span>}
+        </div>
+        <div className="flex flex-wrap gap-1">
+          {(agentTools?.tools || []).map((t) => (
+            <span key={t} className="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-300">{t}</span>
+          ))}
+          {agentTools && (agentTools.tools || []).length === 0 && <span className="text-[10px] text-zinc-600">No tools (agent running?)</span>}
+        </div>
+      </div>
+
+      {/* Custom actions */}
+      <div className="mb-4 flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Custom actions ({actions.length})</span>
+          <button
+            onClick={() => set('custom_actions', [...actions, { id: 'custom.', label: '', tool: '', base_args: {}, required: [], optional: [], risk: 'normal', reversibility: 'irreversible', reverse_tool: '', grant: 'custom', human_only: true, enabled: true }])}
+            className="rounded-md border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-300 hover:bg-zinc-800">+ action</button>
+        </div>
+        {actions.map((a, i) => (
+          <div key={i} className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-2">
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="id"><input className={_inp} value={a.id} onChange={(e) => upA(i, { id: e.target.value })} /></Field>
+              <Field label="tool"><input className={_inp} value={a.tool} onChange={(e) => upA(i, { tool: e.target.value })} placeholder="agent tool name" /></Field>
+              <Field label="label"><input className={_inp} value={a.label} onChange={(e) => upA(i, { label: e.target.value })} /></Field>
+              <Field label="grant"><input className={_inp} value={a.grant} onChange={(e) => upA(i, { grant: e.target.value })} /></Field>
+              <Field label="risk"><select className={_inp} value={a.risk} onChange={(e) => upA(i, { risk: e.target.value })}><option>low</option><option>normal</option><option>high</option></select></Field>
+              <Field label="reversibility"><select className={_inp} value={a.reversibility} onChange={(e) => upA(i, { reversibility: e.target.value })}><option>read_only</option><option>reversible</option><option>irreversible</option></select></Field>
+              <Field label="required args (csv)"><input className={_inp} value={a.required.join(', ')} onChange={(e) => upA(i, { required: csv(e.target.value) })} /></Field>
+              <Field label="reverse tool (opt)"><input className={_inp} value={a.reverse_tool} onChange={(e) => upA(i, { reverse_tool: e.target.value })} /></Field>
+              <Field label="base args (json)"><JsonField value={a.base_args} onChange={(v) => upA(i, { base_args: v })} /></Field>
+            </div>
+            <div className="mt-2 flex items-center gap-4">
+              <Toggle label="human-only" hint="never auto-fire" checked={a.human_only} onChange={(v) => upA(i, { human_only: v })} />
+              <Toggle label="enabled" checked={a.enabled} onChange={(v) => upA(i, { enabled: v })} />
+              <button onClick={() => set('custom_actions', actions.filter((_, idx) => idx !== i))} className="ml-auto text-[10px] text-rose-400 hover:text-rose-300">remove</button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Custom sources */}
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Custom sources ({sources.length})</span>
+          <button
+            onClick={() => set('custom_sources', [...sources, { name: '', label: '', tool: '', args: {}, interval_seconds: 600, items_path: '', id_field: 'id', summary_template: '', fetch_tool: '', requires_google: false, enabled: false }])}
+            className="rounded-md border border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-300 hover:bg-zinc-800">+ source</button>
+        </div>
+        {sources.map((s, i) => (
+          <div key={i} className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-2">
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="name (source slug)"><input className={_inp} value={s.name} onChange={(e) => upS(i, { name: e.target.value })} /></Field>
+              <Field label="poll tool"><input className={_inp} value={s.tool} onChange={(e) => upS(i, { tool: e.target.value })} placeholder="list/search tool" /></Field>
+              <Field label="label"><input className={_inp} value={s.label} onChange={(e) => upS(i, { label: e.target.value })} /></Field>
+              <Field label="interval (s)"><input type="number" className={_inp} value={s.interval_seconds} onChange={(e) => upS(i, { interval_seconds: Number(e.target.value) || 600 })} /></Field>
+              <Field label="id field" hint="dedup + grounding handle"><input className={_inp} value={s.id_field} onChange={(e) => upS(i, { id_field: e.target.value })} /></Field>
+              <Field label="fetch tool" hint="opens one item by id"><input className={_inp} value={s.fetch_tool} onChange={(e) => upS(i, { fetch_tool: e.target.value })} /></Field>
+              <Field label="items path (opt)" hint="dotted path to list"><input className={_inp} value={s.items_path} onChange={(e) => upS(i, { items_path: e.target.value })} /></Field>
+              <Field label="summary template"><input className={_inp} value={s.summary_template} onChange={(e) => upS(i, { summary_template: e.target.value })} placeholder="New: {title}" /></Field>
+              <Field label="args (json)"><JsonField value={s.args} onChange={(v) => upS(i, { args: v })} /></Field>
+            </div>
+            <div className="mt-2 flex items-center gap-4">
+              <Toggle label="needs Google" checked={s.requires_google} onChange={(v) => upS(i, { requires_google: v })} />
+              <Toggle label="enabled" checked={s.enabled} onChange={(v) => upS(i, { enabled: v })} />
+              <button onClick={() => set('custom_sources', sources.filter((_, idx) => idx !== i))} className="ml-auto text-[10px] text-rose-400 hover:text-rose-300">remove</button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
   )
 }
 
@@ -395,6 +517,8 @@ export function AutonomousWorkPage() {
               <Toggle label="Gmail" hint="Poll important new mail"
                 checked={config.event_gmail_enabled} onChange={(v) => set('event_gmail_enabled', v)} />
             </Section>
+
+            <ToolsAndSourcesPanel config={config} set={set} />
 
             {/* Save bar */}
             <div className="flex items-center gap-3">

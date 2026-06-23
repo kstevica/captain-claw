@@ -295,8 +295,15 @@ async def catalog_route(
     """The action catalog (#1) — what the autonomous loop may do, with risk +
     reversibility. Phase 1: full catalog; grant-filtering lands with the grants UI."""
     from captain_claw.flight_deck.action_catalog import list_catalog
-    _ = _user_id(request)
-    return {"catalog": list_catalog()}
+    return {"catalog": list_catalog(user_id=_user_id(request))}
+
+
+@router.get("/agent-tools")
+async def agent_tools_route(request: Request, _user: dict | None = Depends(get_optional_user)):
+    """Discover the user's agent's live tools + skills — the menu the Tools &
+    Sources panel (Theme A) promotes into custom actions / sources."""
+    from captain_claw.flight_deck.actions import list_agent_tools
+    return await list_agent_tools(_user_id(request))
 
 
 @router.post("/run-action")

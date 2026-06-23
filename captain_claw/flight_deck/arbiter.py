@@ -422,7 +422,7 @@ async def maybe_run_arbiter(
         # non-human-only catalog action. Whether one auto-fires vs awaits approval
         # is decided downstream by grants + reversibility (should_auto_dispatch).
         from captain_claw.flight_deck.action_catalog import list_catalog
-        catalog = [a for a in list_catalog() if not a["human_only"]]
+        catalog = [a for a in list_catalog(user_id=user_id) if not a["human_only"]]
         cat_hint = ""
         if catalog:
             cat_hint = "\n\nAction catalog (tool_action — action_id + args filling required):\n" + "\n".join(
@@ -492,7 +492,7 @@ async def maybe_run_arbiter(
                 # Resolve against the catalog; risk/reversibility come from the
                 # catalog, never the LLM. Drop unknown/human-only/invalid-arg actions.
                 from captain_claw.flight_deck import action_catalog
-                spec = action_catalog.get_action(a.get("action_id"))
+                spec = action_catalog.get_action(a.get("action_id"), user_id)
                 if not spec or spec.get("human_only"):
                     emit("dropped: tool_action not allowed", str(a.get("action_id")), "warn")
                     continue

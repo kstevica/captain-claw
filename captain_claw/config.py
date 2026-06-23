@@ -798,6 +798,56 @@ class NervousSystemConfig(BaseModel):
     maturation_skip_importance: int = 9         # >= this importance skips maturation (fortissimo)
 
 
+# Tools the autonomous loop may NEVER drive, even via a user-defined custom
+# action — raw shell, browser form-submit, social posting, payments, and the
+# Basna fan-out (no recursion). Matched as a substring of the tool name, case-
+# insensitive. This is the one hard wall; everything else is gated by
+# risk/reversibility/grants/trust.
+AUTONOMY_HARD_EXCLUDE: tuple[str, ...] = (
+    "shell", "bash", "exec", "subprocess", "browser", "playwright", "selenium",
+    "tweet", "post_to", "social", "pay", "payment", "stripe", "checkout",
+    "transfer", "wire", "basna",
+)
+
+
+class CustomAction(BaseModel):
+    """A user-promoted agent tool the arbiter may PROPOSE (#1 / Theme A). Mirrors
+    the built-in catalog spec but is per-user and defaults to the safe corner:
+    human-only, low trust, until the user widens it. ``tool`` must clear
+    ``AUTONOMY_HARD_EXCLUDE`` (validated where the action is registered)."""
+
+    id: str                                   # e.g. "custom.granola_summary"
+    label: str = ""
+    tool: str                                 # the agent tool name to call
+    base_args: dict[str, Any] = Field(default_factory=dict)
+    required: list[str] = Field(default_factory=list)
+    optional: list[str] = Field(default_factory=list)
+    risk: str = "normal"                      # low | normal | high
+    reversibility: str = "irreversible"       # read_only | reversible | irreversible
+    reverse_tool: str = ""                    # optional one-tool undo (uses the created id)
+    grant: str = "custom"
+    human_only: bool = True                   # safe default — auto-fire only if widened
+    enabled: bool = True
+
+
+class CustomSource(BaseModel):
+    """A user-promoted read/list tool polled as a sense (#2 / Theme A). The
+    fetch contract (``fetch_tool`` + ``id_field``) lets dispatch ground the agent
+    on any future source: 'open it with <fetch_tool> by <id_field>=<value>'."""
+
+    name: str                                 # source slug == event `source`
+    label: str = ""
+    tool: str                                 # read/list tool to poll
+    args: dict[str, Any] = Field(default_factory=dict)
+    interval_seconds: int = 600
+    items_path: str = ""                      # dotted path to the list in JSON output ("" = top-level/auto)
+    id_field: str = "id"                      # per-item id (→ dedup + grounding handle)
+    summary_template: str = ""                # e.g. "New from {from}: {subject}" ("" = whole row)
+    fetch_tool: str = ""                      # tool that opens ONE item by id (grounding)
+    requires_google: bool = False
+    enabled: bool = False                     # senses default OFF
+
+
 class AutonomousWorkConfig(BaseModel):
     """Closed-loop autonomy — the Arbiter, efferent dispatch, learning, and the
     reflection→intention feed (see docs/autonomous-work-plan.md).
@@ -867,6 +917,10 @@ class AutonomousWorkConfig(BaseModel):
     # FD-side Google adapter is connected). ──
     event_calendar_enabled: bool = False
     event_gmail_enabled: bool = False
+
+    # ── Theme A — pluggable hands & senses (promote the agent's own tools) ──
+    custom_actions: list[CustomAction] = Field(default_factory=list)
+    custom_sources: list[CustomSource] = Field(default_factory=list)
     # An event is reconsidered by the arbiter for this many passes (pulse OR
     # manual) before it's given up on. Without this a single whiffed pass would
     # drop the event forever and a manual re-run couldn't reconsider it.

@@ -68,27 +68,40 @@ def _grounding_suffix(action: dict[str, Any]) -> str:
         return ""
     md = ev.get("metadata") or {}
     src = str(ev.get("source") or "")
+    # Built-in sources keep a precise, tool-named line. Each entry resolves the
+    # item's id + the tool that opens it — the same shape a custom source's fetch
+    # contract (_fetch_tool/_handle_id) provides, so the two paths converge below.
     if src == "gmail":
-        tid = md.get("thread_id") or md.get("message_id") or ""
-        frm = md.get("from") or "?"
-        subj = md.get("subject") or ev.get("summary") or ""
-        return (
-            f"\n\nGROUNDING — this is about a REAL email already in the inbox: "
-            f"from {frm}, subject \"{subj}\" (Gmail thread_id={tid}). It exists. "
-            f"If you need its content, open it with your Gmail tool BY THREAD ID "
-            f"({tid}) — do not search by sender/subject and do not scan recent "
-            f"messages. If the tool cannot open that id, say you couldn't open it; "
-            f"never tell the user the email doesn't exist."
-        )
-    if src == "calendar":
-        eid = md.get("event_id") or ""
-        return (
-            f"\n\nGROUNDING — this is about a REAL calendar event (event_id={eid}). "
-            f"It exists. Open it with your Calendar tool BY ID ({eid}); do not "
-            f"search. If you cannot open it, say so; never claim it doesn't exist."
-        )
-    return (f"\n\nGROUNDING — this is about a real surfaced item: "
-            f"{ev.get('summary', '')}. Treat it as existing; do not deny it.")
+        handle_id = md.get("thread_id") or md.get("message_id") or ""
+        fetch_tool = "your Gmail tool (get_thread)"
+        what = f"a REAL email already in the inbox: from {md.get('from') or '?'}, " \
+               f"subject \"{md.get('subject') or ev.get('summary') or ''}\""
+        id_label = "thread id"
+    elif src == "calendar":
+        handle_id = md.get("event_id") or ""
+        fetch_tool = "your Calendar tool (get_event)"
+        what = "a REAL calendar event"
+        id_label = "event id"
+    else:
+        # Custom source: use the fetch contract stamped at ingest (Theme A).
+        handle_id = md.get("_handle_id") or ""
+        ft = md.get("_fetch_tool") or ""
+        if not handle_id or not ft:
+            return (f"\n\nGROUNDING — this is about a real item the system already "
+                    f"fetched: {ev.get('summary', '')}. Treat it as existing; do not "
+                    f"deny it or claim you can't find it.")
+        fetch_tool = f"the '{ft}' tool"
+        what = f"a REAL item: {ev.get('summary', '')}"
+        id_label = "id"
+    if not handle_id:
+        return (f"\n\nGROUNDING — this is about {what}. It exists; treat it as real "
+                f"and do not deny it.")
+    return (
+        f"\n\nGROUNDING — this is about {what} ({id_label}={handle_id}). It exists. "
+        f"If you need its content, open it with {fetch_tool} BY ID ({handle_id}) — "
+        f"do not search and do not scan recent items. If the tool cannot open that "
+        f"id, say you couldn't open it; never tell the user it doesn't exist."
+    )
 
 
 def _instruction_for(action: dict[str, Any]) -> str:
@@ -136,7 +149,7 @@ def should_auto_dispatch(cfg: dict[str, Any], action: dict[str, Any]) -> bool:
         from captain_claw.flight_deck.action_catalog import get_action
         payload = action.get("payload") or {}
         action_id = str(payload.get("action_id") or "")
-        spec = get_action(action_id)
+        spec = get_action(action_id, str(action.get("user_id") or ""))
         if (not spec or spec.get("human_only")
                 or spec.get("reversibility") not in ("read_only", "reversible")
                 or spec.get("risk") != "low"):
@@ -406,7 +419,7 @@ async def _dispatch_tool_action(user_id: str, action: dict[str, Any]) -> dict[st
     # Capture the reverse handle (for one-tap undo) from the real result.
     if ok:
         from captain_claw.flight_deck import action_catalog
-        spec = action_catalog.get_action(action_id)
+        spec = action_catalog.get_action(action_id, user_id)
         reverse = action_catalog.build_reverse(spec, res.get("content", "")) if spec else None
         if reverse:
             store.update_payload(action["id"], {"reverse": reverse})

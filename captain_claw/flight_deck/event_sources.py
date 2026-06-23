@@ -14,11 +14,13 @@ the real Calendar/Gmail adapters fetch FD-side once Google is connected.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from string import Formatter
 from typing import Any
 
 from captain_claw.config import get_config
@@ -89,6 +91,113 @@ async def poll_user(user_id: str) -> int:
             store.set_poll_state(user_id, ad.name, last_poll_at=now, cursor=new_cursor)
         except Exception as exc:
             _log.warning("event adapter %s failed for %s: %s", ad.name, user_id, exc)
+    ingested += await _poll_custom_sources(user_id, now, store)
+    return ingested
+
+
+# ── Generic tool-poller sources (Theme A) ───────────────────────────────
+
+
+class _SafeDict(dict):
+    def __missing__(self, key: str) -> str:  # so a template can reference a missing field
+        return ""
+
+
+def _extract_rows(content: str, items_path: str) -> list[dict[str, Any]] | None:
+    """Parse a tool's text output into row dicts. Returns None when it isn't
+    structured JSON (caller then treats the whole output as one digest event)."""
+    try:
+        data = json.loads(content)
+    except (ValueError, TypeError):
+        return None
+    if items_path:
+        for part in items_path.split("."):
+            data = data.get(part) if isinstance(data, dict) else None
+            if data is None:
+                break
+    if isinstance(data, list):
+        return [r for r in data if isinstance(r, dict)]
+    if isinstance(data, dict):
+        for v in data.values():  # auto: first list-of-objects field
+            if isinstance(v, list) and v and isinstance(v[0], dict):
+                return v
+        return [data]
+    return None
+
+
+def _row_summary(label: str, row: dict[str, Any], template: str) -> str:
+    if template:
+        try:
+            return Formatter().vformat(template, (), _SafeDict(row))[:300]
+        except Exception:
+            pass
+    bits = ", ".join(f"{k}={row[k]}" for k in list(row)[:4] if not str(k).startswith("_"))
+    return f"{label}: {bits}"[:300]
+
+
+async def _poll_custom_sources(user_id: str, now: float, store: Any) -> int:
+    """Poll each enabled user CustomSource by calling its read tool on the agent
+    and mapping rows → events. Stamps the fetch contract (_fetch_tool/_handle_id)
+    onto metadata so dispatch can ground the agent on any source."""
+    try:
+        from captain_claw.flight_deck.autonomy import resolve_config
+        srcs = resolve_config(user_id).get("custom_sources") or []
+    except Exception:
+        return 0
+    if not srcs:
+        return 0
+    from captain_claw.flight_deck.actions import run_tool_on_agent
+    from captain_claw.flight_deck.fd_dispatch import _strongest_agent
+    agent = None
+    ingested = 0
+    for src in srcs:
+        try:
+            if not src.get("enabled"):
+                continue
+            name, tool = str(src.get("name") or "").strip(), str(src.get("tool") or "").strip()
+            if not name or not tool:
+                continue
+            if src.get("requires_google") and not _google_connected():
+                continue
+            st = store.get_poll_state(user_id, name)
+            if now - float(st.get("last_poll_at") or 0.0) < float(src.get("interval_seconds") or 600):
+                continue
+            if agent is None:
+                agent = _strongest_agent(user_id)
+            if not agent:
+                break
+            res = await run_tool_on_agent(agent, tool, dict(src.get("args") or {}))
+            store.set_poll_state(user_id, name, last_poll_at=now)
+            if not res.get("ok"):
+                _log.debug("custom source %s tool not ok: %s", name, res.get("error"))
+                continue
+            content = str(res.get("content") or "").strip()
+            label = src.get("label") or name
+            fetch_tool = str(src.get("fetch_tool") or "")
+            id_field = str(src.get("id_field") or "id")
+            template = str(src.get("summary_template") or "")
+            rows = _extract_rows(content, str(src.get("items_path") or ""))
+            if rows is None:  # unstructured → one digest event, deduped by content
+                if content and store.add_event(
+                    user_id, source=name, event_type="custom",
+                    summary=f"{label}: {content}"[:300], body=content[:8000],
+                    metadata={"_fetch_tool": fetch_tool},
+                    dedup_key=f"{name}:{hash(content)}",
+                ) is not None:
+                    ingested += 1
+                continue
+            for row in rows[:10]:
+                rid = str(row.get(id_field) or "")
+                md = dict(row)
+                md.update({"_fetch_tool": fetch_tool, "_handle_id": rid, "_id_field": id_field})
+                if store.add_event(
+                    user_id, source=name, event_type="custom",
+                    summary=_row_summary(label, row, template), body="",
+                    metadata=md, dedup_key=(f"{name}:{rid}" if rid else ""),
+                ) is not None:
+                    ingested += 1
+        except Exception as exc:
+            _log.warning("custom source %s failed for %s: %s", src.get("name"), user_id, exc)
     return ingested
 
 

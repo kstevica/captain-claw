@@ -128,15 +128,70 @@ CATALOG: dict[str, dict[str, Any]] = {
 }
 
 
-def get_action(action_id: str) -> dict[str, Any] | None:
-    return CATALOG.get(str(action_id or "").strip())
+def _is_excluded(tool: str) -> bool:
+    """A tool that the autonomous loop may NEVER drive (the one hard wall)."""
+    from captain_claw.config import AUTONOMY_HARD_EXCLUDE
+    t = (tool or "").lower()
+    return any(x in t for x in AUTONOMY_HARD_EXCLUDE)
 
 
-def list_catalog(*, granted: set[str] | None = None) -> list[dict[str, Any]]:
+def _custom_to_spec(ca: dict[str, Any]) -> dict[str, Any] | None:
+    """Convert a user CustomAction (Theme A) into a catalog spec. Returns None
+    if disabled, missing a tool, or the tool hits the hard-exclude wall."""
+    tool = str(ca.get("tool") or "").strip()
+    if not tool or not ca.get("enabled", True) or _is_excluded(tool):
+        return None
+    spec: dict[str, Any] = {
+        "label": ca.get("label") or ca.get("id"),
+        "home": "agent",
+        "tool": tool,
+        "base_args": dict(ca.get("base_args") or {}),
+        "required": list(ca.get("required") or []),
+        "optional": list(ca.get("optional") or []),
+        "risk": ca.get("risk") or "normal",
+        "reversibility": ca.get("reversibility") or "irreversible",
+        "reverse": None,
+        "grant": ca.get("grant") or "custom",
+        "human_only": bool(ca.get("human_only", True)),
+        "custom": True,
+    }
+    rt = str(ca.get("reverse_tool") or "").strip()
+    if rt and not _is_excluded(rt):
+        spec["reverse"] = {"tool": rt, "base_args": {}, "args_from_result": {"id": "id"}}
+    return spec
+
+
+def resolve_catalog(user_id: str = "") -> dict[str, dict[str, Any]]:
+    """The built-in catalog merged with ``user_id``'s enabled custom actions.
+    Custom actions can never shadow a built-in id, and any hitting the hard-
+    exclude wall are dropped. With no user_id, just the built-ins."""
+    cat = dict(CATALOG)
+    if not user_id:
+        return cat
+    try:
+        from captain_claw.flight_deck.autonomy import resolve_config
+        for ca in resolve_config(user_id).get("custom_actions") or []:
+            aid = str(ca.get("id") or "").strip()
+            if not aid or aid in cat:   # never shadow a built-in
+                continue
+            spec = _custom_to_spec(ca)
+            if spec:
+                cat[aid] = spec
+    except Exception:
+        pass
+    return cat
+
+
+def get_action(action_id: str, user_id: str = "") -> dict[str, Any] | None:
+    return resolve_catalog(user_id).get(str(action_id or "").strip())
+
+
+def list_catalog(*, granted: set[str] | None = None, user_id: str = "") -> list[dict[str, Any]]:
     """Catalog entries (id + safe metadata) for the UI / arbiter prompt. When
-    ``granted`` is given (the user's enabled grants), only those are returned."""
+    ``granted`` is given (the user's enabled grants), only those are returned.
+    Includes the user's enabled custom actions when ``user_id`` is supplied."""
     out: list[dict[str, Any]] = []
-    for aid, spec in CATALOG.items():
+    for aid, spec in resolve_catalog(user_id).items():
         if granted is not None and spec.get("grant") not in granted:
             continue
         out.append({
@@ -145,6 +200,7 @@ def list_catalog(*, granted: set[str] | None = None) -> list[dict[str, Any]]:
             "human_only": bool(spec.get("human_only", False)),
             "args": spec["required"] + spec.get("optional", []),
             "required": spec["required"],
+            "custom": bool(spec.get("custom", False)),
         })
     return out
 

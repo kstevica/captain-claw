@@ -67,10 +67,34 @@ async def run_tool_on_agent(
         return {"ok": False, "error": str(exc)}
 
 
+async def list_agent_tools(user_id: str) -> dict[str, Any]:
+    """Discover the user's strongest agent's live tools + skills (the menu the
+    Tools & Sources UI promotes from). GETs the agent's /api/orchestrator/skills."""
+    from captain_claw.flight_deck.fd_dispatch import _strongest_agent
+    agent = _strongest_agent(user_id)
+    if not agent:
+        return {"tools": [], "skills": [], "error": "no running agent"}
+    host = agent.get("host") or "localhost"
+    port = int(agent.get("port") or 0)
+    auth = str(agent.get("auth") or "")
+    url = f"http://{host}:{port}/api/orchestrator/skills" + (f"?token={auth}" if auth else "")
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(url)
+            if r.status_code != 200:
+                return {"tools": [], "skills": [], "error": f"agent returned {r.status_code}"}
+            data = r.json()
+            return {"tools": data.get("tools") or [], "skills": data.get("skills") or [],
+                    "agent": agent.get("slug", "")}
+    except Exception as exc:
+        return {"tools": [], "skills": [], "error": str(exc)}
+
+
 async def run_action(user_id: str, action_id: str, args: dict[str, Any]) -> dict[str, Any]:
     """Resolve + validate + execute a catalog action. Returns
     ``{ok, content, error, action_id, risk, reversibility}``."""
-    spec = action_catalog.get_action(action_id)
+    spec = action_catalog.get_action(action_id, user_id)
     if not spec:
         return {"ok": False, "error": f"unknown action: {action_id}"}
     ok, err = action_catalog.validate_args(spec, args or {})

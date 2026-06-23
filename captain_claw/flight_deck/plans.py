@@ -188,7 +188,7 @@ async def decompose_goal(user_id: str, goal: str) -> list[dict[str, Any]]:
     if not agent:
         return []
     from captain_claw.flight_deck.action_catalog import list_catalog, get_action, validate_args
-    catalog = [a for a in list_catalog() if not a["human_only"]]
+    catalog = [a for a in list_catalog(user_id=user_id) if not a["human_only"]]
     cat_text = "\n".join(f"- {a['id']}: {a['label']} · required {a['required']}" for a in catalog)
     try:
         from captain_claw.games.remote_provider import RemoteLLMProvider
@@ -232,7 +232,7 @@ async def decompose_goal(user_id: str, goal: str) -> list[dict[str, Any]]:
         if kind not in ("tool_action", "nudge", "run_prompt") or not title:
             continue
         if kind == "tool_action":
-            spec = get_action(raw.get("action_id"))
+            spec = get_action(raw.get("action_id"), user_id)
             args = raw.get("args") if isinstance(raw.get("args"), dict) else {}
             if not spec or spec.get("human_only"):
                 continue
@@ -257,7 +257,7 @@ async def _run_step(user_id: str, step: dict[str, Any]) -> dict[str, Any]:
         reverse = None
         if res.get("ok"):
             from captain_claw.flight_deck import action_catalog
-            spec = action_catalog.get_action(step.get("action_id"))
+            spec = action_catalog.get_action(step.get("action_id"), user_id)
             reverse = action_catalog.build_reverse(spec, res.get("content", "")) if spec else None
         return {"ok": bool(res.get("ok")), "content": res.get("content") or res.get("error") or "", "reverse": reverse}
     # nudge / run_prompt: deliver an instruction to the strongest agent.

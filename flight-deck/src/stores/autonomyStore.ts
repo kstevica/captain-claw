@@ -33,7 +33,44 @@ export interface AutonomyConfig {
   followup_default_days: number
   followup_resurface_cooldown_hours: number
   followup_max_nudges: number
+  custom_actions: CustomAction[]
+  custom_sources: CustomSource[]
   db_path: string
+}
+
+export interface CustomAction {
+  id: string
+  label: string
+  tool: string
+  base_args: Record<string, unknown>
+  required: string[]
+  optional: string[]
+  risk: string            // low | normal | high
+  reversibility: string   // read_only | reversible | irreversible
+  reverse_tool: string
+  grant: string
+  human_only: boolean
+  enabled: boolean
+}
+
+export interface CustomSource {
+  name: string
+  label: string
+  tool: string
+  args: Record<string, unknown>
+  interval_seconds: number
+  items_path: string
+  id_field: string
+  summary_template: string
+  fetch_tool: string
+  requires_google: boolean
+  enabled: boolean
+}
+
+export interface AgentTools {
+  tools: string[]
+  skills: { name: string; description: string }[]
+  error?: string
 }
 
 export interface FollowUp {
@@ -160,11 +197,13 @@ interface AutonomyStore {
   events: EventEntry[]
   plans: Plan[]
   followUps: FollowUp[]
+  agentTools: AgentTools | null
   loading: boolean
   saving: boolean
   error: string | null
 
   loadAll: () => Promise<void>
+  fetchAgentTools: () => Promise<void>
   loadActions: (status?: string) => Promise<void>
   doneFollowUp: (id: string) => Promise<void>
   dismissFollowUp: (id: string) => Promise<void>
@@ -189,6 +228,7 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
   events: [],
   plans: [],
   followUps: [],
+  agentTools: null,
   loading: false,
   saving: false,
   error: null,
@@ -291,6 +331,15 @@ export const useAutonomyStore = create<AutonomyStore>((set, get) => ({
   undo: async (id: string) => {
     const res = await _authedFetch(`/fd/autonomy/actions/${encodeURIComponent(id)}/undo`, { method: 'POST' })
     if (res.ok) await get().loadActions()
+  },
+
+  fetchAgentTools: async () => {
+    try {
+      const res = await _authedFetch('/fd/autonomy/agent-tools')
+      if (res.ok) set({ agentTools: await res.json() })
+    } catch (e) {
+      set({ agentTools: { tools: [], skills: [], error: e instanceof Error ? e.message : String(e) } })
+    }
   },
 
   doneFollowUp: async (id: string) => {
